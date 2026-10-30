@@ -57,7 +57,7 @@ Préparation centrale : [DTO et helper policy](evidence/2026-10-30/supervision-c
 
 Sous-lot suivant [API et horloge native](evidence/2026-10-30/supervision-api-clock/README.md) : neuf routes v1 uniquement, guards avant corps, parent helper retrouvé dans le Store authentifié ; producteur d'horloge continue Rust avec boot retenu et arithmétique vérifiée. Le journal immuable, l'IPC, l'ordonnanceur et les consommateurs de cette horloge restent à intégrer. Aucun cutover avant batch/helpers/TTY qualifiés, aucune réactivation implicite du schéma3 ; les résultats et limites de validation restent dans le dossier du lot.
 
-### Lot actif — intention d'exécution immuable
+### Lot livré — intention d'exécution immuable
 
 Spécification : [intention/checkpoint du design approuvé](BROKER_SUPERVISION.md#intention-immuable-checkpoints-et-secrets). Base `11eb871db40ca9893a4492547561ec604247257c`, worktree `codex/broker-supervision`. Besoin : le hash d'une exécution ne peut porter sur `RunPlan.managed`, modifié après chaque transition ; il doit conserver le choix fournisseur et la demande initiaux. Aucun nouveau service ni changement structurel hors de la direction déjà approuvée.
 
@@ -80,6 +80,26 @@ Portée précise du hash : identité de l'invocation et des références présen
 - [x] Root : preuves, limites et lot relu préparés pour commit/push ; intégration suivie par Git. Le [complément clock Linux ARM64](evidence/2026-10-30/broker-clock-linux/README.md) concerne le gel précédent et conserve sa portée distincte.
 
 Prochaine priorité : journal privé réellement durable, avec bindings des handoffs manuel/fournisseur et rejet de toute acceptation incomplète ; puis IPC/service/ordonnanceur/gardien. Aucun ACK accepté, effet runtime, migration ou réactivation n'est délivré par le seul format d'intention.
+
+### Lot validé pour intégration — journal privé durable et bindings
+
+Base `3372150fdb99d8bc71700a33dd1d49c0e75c45b5`. Le [contrat du journal](BROKER_JOURNAL.md) précise la persistance requise avant ACK : scope, Submit exact, intention immuable, checkpoint typé et bindings des credentials retenus. Ce composant ne choisit pas l'identité authentifiée et n'accorde aucun lancement ; IPC, ordonnanceur, gardien et qualification du crash restent les étapes obligatoires suivantes.
+
+Propriétaires : core pour `src/broker/journal.rs`, ses types, la couture checkpoint dans `src/runner.rs` et l'extraction pure des parseurs existants ; agent filesystem pour `src/control_fs/persistent.rs` ; Luna pour `tests/broker_journal.rs`, les hooks `cfg(test)` et la preuve SQLite séparée `tests/journal_sqlite.rs`. Root conserve contrat, dépendance, preuves et intégration ; revue indépendante sur sources gelées.
+
+- [x] Implémenter création exclusive, fsync fichier/parents, verrou conservé, marqueur accepté final, révisions immuables et CAS du pointeur ; toute erreur conserve un état relisible ou explicitement interrompu.
+- [x] Vérifier None/manuel/fournisseur, rejeu sans relecture de source, rotation/conflit, secrets littéraux décodés, plafonds logiques et diagnostics opaques.
+- [x] Reproduire puis corriger le rejet d'un champ connu nullable dans le nouveau constructeur de checkpoint ; conserver les lecteurs historiques et refuser champs inconnus et JSON surnuméraire.
+- [x] Exercer les vraies opérations filesystem sous erreurs injectées et neuf interruptions SIGKILL ; distinguer hooks du harnais, tests produit et intervalle rename/fsync non testé.
+- [x] Fermer les écarts de versions imbriquées trouvés en revue, avec RED/GREEN sur un vrai checkpoint managed valide ; préserver les versions historiques connues.
+- [x] Vérifier dans le même processus que Store le refus d'un hardlink SQLite avant ouverture, avec observation des locks par un enfant indépendant ; corriger et conserver les échecs du harnais.
+- [x] Reproduire la course de première création du verrou avec deux vrais processus, puis rendre Busy sur AlreadyExists après une unique relecture contrôlée ; aucun retry des refus de sûreté.
+- [x] Exécuter les26canaris pertinents des parseurs partagés, fmt/Clippy strict et release ; macOS et Linux ARM64 en VM ont leurs preuves distinctes, sans qualification de worker.
+- [x] Traiter la revue finale, publier preuves et limites, préparer le lot cohérent pour commit/push suivi par Git, sans modifier le déploiement QA ni activer le schéma3.
+
+Les plafonds d'admission du journal ne sont pas des quotas physiques bytes/inodes. SIGKILL ne prouve pas la résistance à la panne électrique ; aucun de ces tests ne clôture G09 ou la recette A1/A2/B1.
+
+Suite obligatoire : tests complets du contexte managed au niveau Journal et du plancher mémoire sur rollback, puis raccord IPC/service/ordonnanceur dans la verticale batch/helpers. Le simple composant de stockage ne ferme pas ces critères d'activation et ne justifie pas un cutover du CLI.
 
 ### Choix complémentaires du mainteneur — 30 octobre
 

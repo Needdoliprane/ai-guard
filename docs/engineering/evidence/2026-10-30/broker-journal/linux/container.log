@@ -1,0 +1,47 @@
+Linux dfa958c76755 7.0.14-linuxkit #1 SMP PREEMPT Fri Oct 16 11:55:50 UTC 2026 aarch64 GNU/Linux
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s
+     Running unittests src/lib.rs (/build/target/debug/deps/agentsandbox-181c0ecfbb6edff8)
+
+running 6 tests
+test broker::journal::tests::crash_child_at_stage ... ignored, spawned only by the parent SIGKILL test
+test broker::journal::tests::fault_hook_dispatch_is_one_shot_and_thread_local ... ok
+test broker::journal::tests::injected_journal_io_error_never_returns_ack_and_recovery_is_conservative ... ok
+
+running 1 test
+test broker::journal::tests::writer_lock_race_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 0.02s
+
+test broker::journal::tests::simultaneous_first_writer_creation_returns_busy ... ok
+test broker::journal::tests::writer_lock_race_child ... ignored, spawned by simultaneous_first_writer_creation_returns_busy
+test broker::journal::tests::sigkill_at_durable_boundaries_never_returns_a_fresh_ticket ... ok
+
+test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 83 filtered out; finished in 0.26s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/broker_journal.rs (/build/target/debug/deps/broker_journal-f85214188fe0c9ea)
+
+running 10 tests
+test checkpoint_cas_accepts_only_the_confirmed_chain_and_replays_original_receipt ... ok
+test journal_refuses_symlink_and_hardlink_replacements_without_repair ... ok
+test managed_checkpoint_rejects_unknown_runtime_schema_versions ... ok
+test manual_binding_canonicalizes_source_and_reloads_without_the_source_path ... ok
+test none_binding_acceptance_reopens_with_same_intent_submit_and_checkpoint ... ok
+test plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls ... ok
+test provider_binding_preserves_exact_record_and_reports_actual_handoff_digest ... ok
+test reservation_ticket_is_live_once_then_interrupted_after_drop_or_reopen ... ok
+test submit_literals_and_caps_are_rejected_before_job_creation ... ok
+test configured_job_entry_revision_and_byte_limits_prevent_publication ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/journal_sqlite.rs (/build/target/debug/deps/journal_sqlite-291c2844b7463504)
+
+running 1 test
+test hardlink_alias_is_refused_without_releasing_sqlite_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

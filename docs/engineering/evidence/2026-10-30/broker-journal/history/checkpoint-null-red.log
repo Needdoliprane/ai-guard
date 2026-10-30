@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running tests/broker_journal.rs (target/debug/deps/broker_journal-1a12a696224c53bd)
+
+running 1 test
+test plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls ... FAILED
+
+failures:
+
+---- plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls stdout ----
+
+thread 'plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls' (4527210) panicked at tests/broker_journal.rs:115:73:
+called `Result::unwrap()` on an `Err` value: InvalidInput
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test broker_journal`

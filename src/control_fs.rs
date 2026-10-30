@@ -7,6 +7,8 @@
 //! process-local capabilities and must never be serialized.
 #![cfg(unix)]
 
+pub(crate) mod persistent;
+
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use std::{

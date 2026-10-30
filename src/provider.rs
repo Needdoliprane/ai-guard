@@ -192,6 +192,62 @@ pub(crate) fn validate_frozen_prompt(argv: &[String], prompt: Option<&str>) -> R
     Ok(())
 }
 
+/// Validate a frozen handoff purely, returning decoded strings for the journal guard.
+pub(crate) fn validate_frozen_credential(argv: &[String], env_bytes: &[u8]) -> Result<Vec<String>> {
+    fn strings(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(value) => output.push(value.clone()),
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    output.push(key.clone());
+                    strings(value, output);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    strings(value, output);
+                }
+            }
+            _ => {}
+        }
+    }
+    let validated = (|| -> Result<Vec<String>> {
+        let selected = selection::parse_bootstrap_argv(argv)?;
+        ensure!(
+            env_bytes.len() <= 64 * 1024,
+            "invalid private bootstrap size"
+        );
+        let text = std::str::from_utf8(env_bytes)?;
+        let prefix = format!("{BOOTSTRAP_ENV}=");
+        let payload = text
+            .strip_prefix(&prefix)
+            .and_then(|value| value.strip_suffix('\n'))
+            .ok_or_else(|| anyhow::anyhow!("invalid private bootstrap framing"))?;
+        ensure!(
+            !payload.contains(['\n', '\r']),
+            "invalid private bootstrap framing"
+        );
+        let typed: credentials::BootstrapPayload = serde_json::from_str(payload)?;
+        ensure!(
+            typed.version == 1
+                && typed.client == selected.client
+                && typed.auth_mode == selected.auth_mode,
+            "private bootstrap conflicts with the frozen client or authentication mode"
+        );
+        let mut output = Vec::new();
+        strings(&serde_json::from_str(payload)?, &mut output);
+        if selected.client == ClientKind::Codex && selected.auth_mode == AuthMode::Subscription {
+            let (_, secrets) = credentials::codex_auth(&typed.secret)?;
+            output.extend(secrets);
+            strings(&serde_json::from_str(&typed.secret)?, &mut output);
+        } else {
+            credentials::validate_secret(&typed.secret)?;
+        }
+        Ok(output)
+    })();
+    validated.map_err(|_| anyhow::anyhow!("invalid private frozen provider handoff"))
+}
+
 pub struct ProviderCredential {
     source: PrivateFile,
     bootstrap: String,

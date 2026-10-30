@@ -1,0 +1,49 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 753B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/agentsandbox-broker-clock-linux:base-8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 61B done
+#3 DONE 0.0s
+
+#4 [1/6] FROM docker.io/library/agentsandbox-broker-clock-linux:base-8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 2.08MB 0.0s done
+#5 DONE 0.0s
+
+#6 [2/6] COPY --chown=1000:1000 cargo-registry/ /home/fsqa/.cargo/registry/
+#6 DONE 0.0s
+
+#7 [3/6] RUN mkdir -p /build/journal-source && chown 1000:1000 /build/journal-source
+#7 DONE 0.1s
+
+#8 [4/6] COPY --chown=1000:1000 source/ /build/journal-source/
+#8 DONE 0.1s
+
+#9 [5/6] WORKDIR /build/journal-source
+#9 DONE 0.0s
+
+#10 [6/6] RUN cargo test --locked --offline --no-run --lib --test broker_journal --test journal_sqlite
+#10 0.366    Compiling serde_ignored v0.1.14
+#10 0.452    Compiling agentsandbox v0.1.0 (/build/journal-source)
+#10 19.90     Finished `test` profile [unoptimized + debuginfo] target(s) in 19.83s
+#10 19.92   Executable unittests src/lib.rs (/build/target/debug/deps/agentsandbox-181c0ecfbb6edff8)
+#10 19.92   Executable tests/broker_journal.rs (/build/target/debug/deps/broker_journal-f85214188fe0c9ea)
+#10 19.92   Executable tests/journal_sqlite.rs (/build/target/debug/deps/journal_sqlite-291c2844b7463504)
+#10 DONE 20.2s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 1.2s done
+#11 writing image sha256:bd409e1b1126ec4a0c5313b63f5829fc2d96037789b4481fc8e4e5ab61df4821 done
+#11 naming to docker.io/library/ai-guard-broker-journal-linux:qa-20261030 done
+#11 DONE 1.2s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/xqtlc6dnokw0cltc3zwt9iwv5

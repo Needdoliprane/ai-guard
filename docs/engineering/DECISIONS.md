@@ -1,6 +1,16 @@
 # Décisions d'industrialisation
 
+## 30 octobre — persistance privée du broker et codec strict
+
+Le [journal v1](BROKER_JOURNAL.md) conserve des enregistrements immuables et un pointeur publié sous verrou, dans un namespace privé distinct des bases SQLite. L'acceptation engage le Submit exact, le scope fourni par le contrôle, l'intention, les bindings durables et la révision initiale ; elle n'accorde aucune autorisation runtime. Rejouer l'opération utilise cet engagement et les sources retenues, sans résoudre à nouveau Auto ni rouvrir le credential utilisateur. Une réservation partielle reste explicitement interrompue après perte de son propriétaire.
+
+La validation d'un checkpoint utilise les vrais types privés existants. Une comparaison entre les clés du JSON d'entrée et sa resérialisation rejetait à tort un champ connu nullable omis par `skip_serializing_if` ; ce défaut a été reproduit. L'adaptateur [serde_ignored](https://docs.rs/serde_ignored/0.1.14/serde_ignored/) signale les champs ignorés pendant cette désérialisation, sans dupliquer tous les types ni conserver les chemins dans les erreurs. Version verrouillée0.1.14, sans mise à jour des autres paquets ; les lecteurs historiques restent inchangés. Les cas nullable connu, inconnu nul, approbation et document JSON surnuméraire gardent des régressions distinctes.
+
+Les plafonds bytes/entrées/jobs/révisions protègent l'admission au journal ; ils ne remplacent pas des quotas physiques de stockage. Les erreurs et SIGKILL sur filesystem réel vérifient les frontières effectivement instrumentées, pas une panne électrique ni une résistance à root/même UID. Le contrôle des hardlinks précède toute ouverture pour préserver les locks POSIX SQLite du même processus. Les limites de plateforme, l'absence d'anti-restauration après redémarrage et la qualification du futur ordonnanceur restent explicites ; aucune activation de service ou migration n'est induite par ce lot.
+
 ## 30 octobre — identité immuable et acceptation durable distinctes
+
+Cette décision décrit le lot d'intention antérieur. Le composant journal a depuis été implémenté avec les preuves et limites de la décision ci-dessus ; son raccord au service demeure ouvert.
 
 `ExecutionIntentV1` porte l'invocation et les références initiales du vrai RunPlan, sans ses états managed. Format1 distinct des plans1/2/3 ; JSON canonique aux clés ordonnées et domaine SHA256 `ai-guard.execution-intent.v1` suivi de NUL. La lecture historique reste inchangée ; une identité initiale absente ou déjà approuvée n'est pas réparée lors de la projection. Snapshots publics à champs privés et diagnostics opaques, pas de source de credential relue ou d'Auto résolu à nouveau. [Validation et revue](evidence/2026-10-30/broker-intent/README.md).
 

@@ -111,7 +111,7 @@ impl ContainerHandle {
     pub fn authority_fingerprint(&self) -> &str {
         &self.authority_fingerprint
     }
-    fn fingerprint_version(&self) -> u32 {
+    pub(crate) fn fingerprint_version(&self) -> u32 {
         self.configuration_fingerprint_version.unwrap_or(1)
     }
 }

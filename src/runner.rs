@@ -347,6 +347,341 @@ fn legacy_plan_version() -> u32 {
     1
 }
 
+/// Private recovery data. Storing it never grants permission to start a worker.
+#[derive(Clone, Serialize)]
+#[serde(transparent)]
+pub struct CheckpointPayloadV1(CheckpointDataV1);
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointDataV1 {
+    version: u32,
+    current_request: DecisionRequest,
+    managed: Option<managed::ManagedCheckpoint>,
+}
+impl std::fmt::Debug for CheckpointPayloadV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CheckpointPayloadV1(<private>)")
+    }
+}
+impl<'de> Deserialize<'de> for CheckpointPayloadV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let mut ignored = false;
+        let data: CheckpointDataV1 = serde_ignored::deserialize(deserializer, |_| ignored = true)
+            .map_err(|_| D::Error::custom("invalid private checkpoint"))?;
+        if ignored {
+            return Err(D::Error::custom("invalid private checkpoint"));
+        }
+        let checkpoint = Self(data);
+        checkpoint
+            .canonical_bytes()
+            .map_err(|_| D::Error::custom("invalid private checkpoint"))?;
+        Ok(checkpoint)
+    }
+}
+impl CheckpointPayloadV1 {
+    pub fn initial(
+        intent: &crate::broker::intent::ExecutionIntentV1,
+    ) -> crate::broker::journal::JournalResult<Self> {
+        use crate::broker::journal::JournalError;
+        intent.validate().map_err(|_| JournalError::InvalidInput)?;
+        Ok(Self(CheckpointDataV1 {
+            version: 1,
+            current_request: intent.request_data().clone(),
+            managed: None,
+        }))
+    }
+    pub fn from_plan_bytes(
+        intent: &crate::broker::intent::ExecutionIntentV1,
+        bytes: &[u8],
+    ) -> crate::broker::journal::JournalResult<Self> {
+        use crate::broker::{intent::InitialOptionsV1, journal::JournalError};
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(JournalError::TooLarge);
+        }
+        intent.validate().map_err(|_| JournalError::InvalidInput)?;
+        let mut decoder = serde_json::Deserializer::from_slice(bytes);
+        let mut ignored = false;
+        let plan: RunPlan = serde_ignored::deserialize(&mut decoder, |_| ignored = true)
+            .map_err(|_| JournalError::InvalidInput)?;
+        decoder.end().map_err(|_| JournalError::InvalidInput)?;
+        if ignored {
+            return Err(JournalError::InvalidInput);
+        }
+        let options = InitialOptionsV1::from(plan.options.clone());
+        let provider_input = plan.provider_input.clone().map(InitialOptionsV1::from);
+        let credential = plan.provider_credential.as_ref().map(|value| {
+            (
+                value.binding_id,
+                value.file_name.as_str(),
+                value.digest.as_str(),
+            )
+        });
+        let expected_credential = intent
+            .provider_credential()
+            .map(|value| (value.binding_id(), value.file_name(), value.digest()));
+        if plan.version != intent.plan_version()
+            || plan.operation_id != intent.operation_id()
+            || plan.session != intent.session()
+            || &options != intent.initial_options()
+            || provider_input.as_ref() != intent.provider_input()
+            || credential != expected_credential
+        {
+            return Err(JournalError::Conflict);
+        }
+        let result = Self(CheckpointDataV1 {
+            version: 1,
+            current_request: plan.request,
+            managed: plan.managed,
+        });
+        result.validate_request(intent)?;
+        result.canonical_bytes()?;
+        Ok(result)
+    }
+    pub fn from_bytes(bytes: &[u8]) -> crate::broker::journal::JournalResult<Self> {
+        use crate::broker::journal::JournalError;
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(JournalError::TooLarge);
+        }
+        let result: Self = serde_json::from_slice(bytes).map_err(|_| JournalError::Corrupt)?;
+        result.canonical_bytes()?;
+        Ok(result)
+    }
+    pub fn canonical_bytes(&self) -> crate::broker::journal::JournalResult<Vec<u8>> {
+        use crate::broker::journal::JournalError;
+        if self.0.version != 1 {
+            return Err(JournalError::UnsupportedVersion);
+        }
+        self.validate_versions()?;
+        let request = &self.0.current_request;
+        if (request.human_approved
+            && !request.approval_hash.as_deref().is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            }))
+            || (!request.human_approved && request.approval_hash.is_some())
+        {
+            return Err(JournalError::Conflict);
+        }
+        let bytes = crate::broker::journal::canonical(self)?;
+        if bytes.len() > 32 * 1024 * 1024 {
+            return Err(JournalError::TooLarge);
+        }
+        Ok(bytes)
+    }
+    fn validate_versions(&self) -> crate::broker::journal::JournalResult<()> {
+        use crate::broker::journal::JournalError;
+        let Some(checkpoint) = &self.0.managed else {
+            return Ok(());
+        };
+        if checkpoint
+            .pending
+            .iter()
+            .chain(&checkpoint.uncertain)
+            .any(|mutation| mutation.version != 1)
+            || checkpoint
+                .workspace_control_exclusion_version
+                .is_some_and(|version| version != 1)
+            || checkpoint
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.invocation.as_ref())
+                .is_some_and(|invocation| !matches!(invocation.policy_version, 1 | 2))
+        {
+            return Err(JournalError::UnsupportedVersion);
+        }
+        for owned in checkpoint.owned.iter().chain(
+            checkpoint
+                .import
+                .iter()
+                .filter_map(|import| import.owned.as_ref()),
+        ) {
+            if !matches!(owned.handle.fingerprint_version(), 1..=3)
+                || !matches!(
+                    owned
+                        .observation
+                        .configuration_fingerprint_version
+                        .unwrap_or(1),
+                    1..=3
+                )
+            {
+                return Err(JournalError::UnsupportedVersion);
+            }
+        }
+        Ok(())
+    }
+    fn validate_request(
+        &self,
+        intent: &crate::broker::intent::ExecutionIntentV1,
+    ) -> crate::broker::journal::JournalResult<()> {
+        use crate::broker::journal::JournalError;
+        let request = &self.0.current_request;
+        let expected = crate::policy::request_hash(intent.request_data());
+        if (request.human_approved && request.approval_hash.as_deref() != Some(expected.as_str()))
+            || (!request.human_approved && request.approval_hash.is_some())
+        {
+            return Err(JournalError::Conflict);
+        }
+        let mut initial = request.clone();
+        initial.human_approved = false;
+        initial.approval_hash = None;
+        if serde_json::to_value(initial).map_err(|_| JournalError::Corrupt)?
+            != serde_json::to_value(intent.request_data()).map_err(|_| JournalError::Corrupt)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_journal_context(
+        &self,
+        intent: &crate::broker::intent::ExecutionIntentV1,
+        tenant: &str,
+        origin: &str,
+        binding_id: Option<Uuid>,
+        names: &[String],
+        handoff_sha: Option<&str>,
+    ) -> crate::broker::journal::JournalResult<()> {
+        use crate::{broker::journal::JournalError, control::*};
+        self.canonical_bytes()?;
+        self.validate_request(intent)?;
+        let Some(checkpoint) = &self.0.managed else {
+            return Ok(());
+        };
+        let options = intent.initial_options().run_options();
+        let launch = &checkpoint.admission.launch;
+        let kind = match options.runtime {
+            RuntimeKind::Docker => RuntimeKindV1::Docker,
+            RuntimeKind::Podman => RuntimeKindV1::Podman,
+        };
+        let network = match options.network {
+            NetworkMode::None => NetworkV1::None,
+            NetworkMode::Bridge => NetworkV1::Bridge,
+        };
+        checkpoint
+            .admission
+            .validate()
+            .map_err(|_| JournalError::Conflict)?;
+        let same_origin = reqwest::Url::parse(origin)
+            .ok()
+            .zip(reqwest::Url::parse(&checkpoint.gateway_origin).ok())
+            .is_some_and(|(left, right)| left == right);
+        if checkpoint.tenant_id != tenant
+            || !same_origin
+            || checkpoint.config_root != options.config_dir
+            || checkpoint.admission.operation_id != intent.operation_id().to_string()
+            || launch.session_id != intent.session().to_string()
+            || launch.command.argv != options.argv
+            || launch.command.cwd != "/workspace"
+            || launch.profile != options.profile
+            || launch.runtime_kind != kind
+            || launch.network != network
+            || u64::from(launch.timeout_seconds) != options.timeout
+            || launch.image_ref != options.image
+            || launch.provider != options.provider
+            || launch.capture_output != options.capture_output
+            || launch.security_preset.is_interactive() != options.interactive
+            || launch.credential_binding_id != binding_id.map(|id| id.to_string())
+            || launch.credential_names != names
+            || checkpoint.credential_digest.as_deref() != handoff_sha
+            || content_hash("ai-guard:workspace-manifest:v1", &checkpoint.before)
+                .map_err(|_| JournalError::Corrupt)?
+                != launch.workspace_manifest_digest
+            || serde_json::to_value(&checkpoint.admission.decision_request)
+                .map_err(|_| JournalError::Corrupt)?
+                != serde_json::to_value(&self.0.current_request)
+                    .map_err(|_| JournalError::Corrupt)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(binding) = &checkpoint.binding
+            && (binding.authority_id.to_string() != launch.authority_id
+                || binding.kind != options.runtime)
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(worker) = &checkpoint.worker {
+            if worker.admission_operation_id != checkpoint.admission.operation_id
+                || worker.request_id != checkpoint.admission.decision_request.request_id
+                || serde_json::to_value(&worker.receipt).map_err(|_| JournalError::Corrupt)?
+                    != serde_json::to_value(&checkpoint.admission.receipt)
+                        .map_err(|_| JournalError::Corrupt)?
+                || worker.spec_hash != launch.spec_hash().map_err(|_| JournalError::Corrupt)?
+                || worker
+                    .launch
+                    .spec_hash()
+                    .map_err(|_| JournalError::Corrupt)?
+                    != worker.spec_hash
+            {
+                return Err(JournalError::Conflict);
+            }
+            let worker_id =
+                Uuid::parse_str(&worker.worker_id).map_err(|_| JournalError::Conflict)?;
+            let attempt_id =
+                Uuid::parse_str(&worker.attempt.attempt_id).map_err(|_| JournalError::Conflict)?;
+            if worker_id.is_nil()
+                || attempt_id.is_nil()
+                || !worker.attempt.stable_name.starts_with("aig-")
+                || !worker
+                    .attempt
+                    .stable_name
+                    .ends_with(&format!("-{}", worker_id.simple()))
+                || worker.attempt.volume_name != format!("{}-work", worker.attempt.stable_name)
+            {
+                return Err(JournalError::Conflict);
+            }
+            for mutation in checkpoint.pending.iter().chain(checkpoint.uncertain.iter()) {
+                if mutation.worker_id != worker.worker_id
+                    || mutation.attempt_id != worker.attempt.attempt_id
+                {
+                    return Err(JournalError::Conflict);
+                }
+            }
+            if let Some(owned) = &checkpoint.owned
+                && (owned.handle.operation_id() != attempt_id
+                    || owned.handle.session_id() != intent.session()
+                    || owned.handle.name() != worker.attempt.stable_name
+                    || owned.observation.name != owned.handle.name()
+                    || owned.observation.id.as_deref() != Some(owned.handle.id())
+                    || worker
+                        .attempt
+                        .container_id
+                        .as_deref()
+                        .is_some_and(|id| id != owned.handle.id())
+                    || checkpoint.binding.as_ref().is_none_or(|binding| {
+                        owned.handle.authority_fingerprint() != binding.fingerprint()
+                    }))
+            {
+                return Err(JournalError::Conflict);
+            }
+        } else if checkpoint.owned.is_some()
+            || checkpoint.pending.is_some()
+            || !checkpoint.uncertain.is_empty()
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(import) = &checkpoint.import {
+            if import.operation_id.is_nil() || (import.completed && !import.start_issued) {
+                return Err(JournalError::Conflict);
+            }
+            if let Some(owned) = &import.owned
+                && (owned.handle.operation_id() != import.operation_id
+                    || owned.handle.session_id() != intent.session()
+                    || owned.observation.name != owned.handle.name()
+                    || owned.observation.id.as_deref() != Some(owned.handle.id())
+                    || checkpoint.binding.as_ref().is_none_or(|binding| {
+                        owned.handle.authority_fingerprint() != binding.fingerprint()
+                    }))
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        Ok(())
+    }
+}
 pub(crate) fn execution_intent_from_plan_bytes(
     bytes: &[u8],
 ) -> crate::broker::intent::IntentResult<crate::broker::intent::ExecutionIntentV1> {
@@ -826,6 +1161,42 @@ struct CredentialFile {
     names: Vec<String>,
 }
 
+pub(crate) struct PreparedCredentialMaterial {
+    pub bytes: Vec<u8>,
+    pub names: Vec<String>,
+    pub secrets: Vec<String>,
+}
+
+pub(crate) fn prepare_provider_credentials(
+    bytes: &[u8],
+    binding_id: Uuid,
+) -> Result<PreparedCredentialMaterial> {
+    anyhow::ensure!(
+        bytes.len() <= 512 * 1024,
+        "private provider record exceeds its bound"
+    );
+    let record: StoredProviderCredentialV1 =
+        serde_json::from_slice(bytes).context("invalid private provider credential binding")?;
+    let text = std::str::from_utf8(&record.env_bytes)
+        .context("invalid private provider bootstrap encoding")?;
+    let prefix = format!("{}=", crate::provider::BOOTSTRAP_ENV);
+    anyhow::ensure!(
+        record.version == 1
+            && record.binding_id == binding_id
+            && record.env_bytes.len() <= 64 * 1024
+            && text.starts_with(&prefix)
+            && text.ends_with('\n')
+            && text.lines().count() == 1
+            && !record.secrets.is_empty(),
+        "private provider credential binding conflicts with the authorized handoff"
+    );
+    Ok(PreparedCredentialMaterial {
+        bytes: record.env_bytes,
+        secrets: record.secrets,
+        names: vec![crate::provider::BOOTSTRAP_ENV.into()],
+    })
+}
+
 fn freeze_provider_credential(
     config: &crate::control_fs::Directory,
     prepared: &crate::provider::PreparedProvider,
@@ -915,24 +1286,10 @@ fn frozen_provider_credentials(
         source.digest() == frozen.digest,
         "frozen provider credential changed; a new authorization is required"
     );
-    let record: StoredProviderCredentialV1 = serde_json::from_slice(source.bytes())
-        .context("invalid private provider credential binding")?;
-    let text = std::str::from_utf8(&record.env_bytes)
-        .context("invalid private provider bootstrap encoding")?;
-    let prefix = format!("{}=", crate::provider::BOOTSTRAP_ENV);
-    anyhow::ensure!(
-        record.version == 1
-            && record.binding_id == frozen.binding_id
-            && record.env_bytes.len() <= 64 * 1024
-            && text.starts_with(&prefix)
-            && text.ends_with('\n')
-            && text.lines().count() == 1
-            && !record.secrets.is_empty(),
-        "private provider credential binding conflicts with the authorized handoff"
-    );
+    let record = prepare_provider_credentials(source.bytes(), frozen.binding_id)?;
     let file = config
         .child("credential-snapshots")?
-        .snapshot(&record.env_bytes)?;
+        .snapshot(&record.bytes)?;
     Ok(Some(CredentialFile {
         file,
         _source: source,
@@ -949,7 +1306,20 @@ fn credentials_from_source(
     source: crate::control_fs::PrivateFile,
     config: &crate::control_fs::Directory,
 ) -> Result<CredentialFile> {
-    let text = std::str::from_utf8(source.bytes()).context("credential source must be UTF-8")?;
+    let material = prepare_manual_credentials(source.bytes())?;
+    let file = config
+        .child("credential-snapshots")?
+        .snapshot(&material.bytes)?;
+    Ok(CredentialFile {
+        file,
+        _source: source,
+        secrets: material.secrets,
+        names: material.names,
+    })
+}
+
+pub(crate) fn prepare_manual_credentials(source: &[u8]) -> Result<PreparedCredentialMaterial> {
+    let text = std::str::from_utf8(source).context("credential source must be UTF-8")?;
     let mut secrets = Vec::new();
     let mut names = Vec::new();
     for line in text.lines() {
@@ -1002,10 +1372,8 @@ fn credentials_from_source(
         bytes.len() <= 64 * 1024,
         "canonical credential env file exceeds 64 KiB; no admission was requested"
     );
-    let file = config.child("credential-snapshots")?.snapshot(&bytes)?;
-    Ok(CredentialFile {
-        file,
-        _source: source,
+    Ok(PreparedCredentialMaterial {
+        bytes,
         secrets,
         names,
     })

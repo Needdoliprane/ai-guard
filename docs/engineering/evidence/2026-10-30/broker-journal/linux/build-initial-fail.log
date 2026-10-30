@@ -1,0 +1,26 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 723B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa
+#2 ...
+
+#3 [auth] library/sha256:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa
+#2 ERROR: pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+------
+ > [internal] load metadata for docker.io/library/sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa:
+------
+Dockerfile:1
+--------------------
+   1 | >>> FROM sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa
+   2 |     USER 0:0
+   3 |     COPY --chown=1000:1000 cargo-registry/ /home/fsqa/.cargo/registry/
+--------------------
+ERROR: failed to build: failed to solve: sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa: failed to resolve source metadata for docker.io/library/sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa: pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/78qtzqk9ybe69io9a1mjwbk6u

@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.04s
+     Running tests/broker_journal.rs (target/debug/deps/broker_journal-b36c0a76d0e7000e)
+
+running 1 test
+test plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s
+
