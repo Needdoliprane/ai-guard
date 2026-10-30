@@ -1,0 +1,31 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.59s
+     Running tests/broker_submission.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_submission-2d92589cd3064760)
+
+running 5 tests
+test nil_operation_and_approval_hash_fail_before_filesystem_access ... ok
+test excessive_control_literals_fail_before_filesystem_access ... ok
+
+thread 'preparation_uses_imposed_operation_and_real_none_binding_journal' (4992863) panicked at tests/broker_submission.rs:80:61:
+called `Result::unwrap()` on an `Err` value: control directory must exist without symbolic links: Not a directory (os error 20)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'manual_binding_credentials_come_from_accepted_bytes_after_source_rotation' (4992861) panicked at tests/broker_submission.rs:264:61:
+called `Result::unwrap()` on an `Err` value: control directory must exist without symbolic links: Not a directory (os error 20)
+test preparation_uses_imposed_operation_and_real_none_binding_journal ... FAILED
+test manual_binding_credentials_come_from_accepted_bytes_after_source_rotation ... FAILED
+
+thread 'provider_binding_is_frozen_and_reconstructed_without_source_reread' (4992864) panicked at tests/broker_submission.rs:380:61:
+called `Result::unwrap()` on an `Err` value: control directory must exist without symbolic links: Not a directory (os error 20)
+test provider_binding_is_frozen_and_reconstructed_without_source_reread ... FAILED
+
+failures:
+
+failures:
+    manual_binding_credentials_come_from_accepted_bytes_after_source_rotation
+    preparation_uses_imposed_operation_and_real_none_binding_journal
+    provider_binding_is_frozen_and_reconstructed_without_source_reread
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--test broker_submission`

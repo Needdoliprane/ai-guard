@@ -1,0 +1,35 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/runtime_prearmed.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/runtime_prearmed-e13b35325cb0edd4)
+
+running 1 test
+
+thread 'pending_started_callback_is_not_reinvoked_when_attach_reaches_eof' (4990259) panicked at tests/runtime_prearmed.rs:635:5:
+
+running 1 test
+test pending_started_callback_is_not_reinvoked_when_attach_reaches_eof ... FAILED
+
+failures:
+
+failures:
+    pending_started_callback_is_not_reinvoked_when_attach_reaches_eof
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.99s
+
+ 
+thread 'pending_started_callback_is_not_reinvoked_when_attach_reaches_eof' (4990303) panicked at tests/runtime_prearmed.rs:569:9:
+assertion `left == right` failed: one started observation was recorded
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test pending_started_callback_is_not_reinvoked_when_attach_reaches_eof ... FAILED
+
+failures:
+
+failures:
+    pending_started_callback_is_not_reinvoked_when_attach_reaches_eof
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.17s
+
+error: test failed, to rerun pass `--test runtime_prearmed`

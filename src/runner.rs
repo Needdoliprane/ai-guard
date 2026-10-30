@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 use uuid::Uuid;
+pub mod broker;
 mod managed;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
@@ -859,7 +860,28 @@ fn approval_path(config: &Path, hash: &str) -> Result<PathBuf> {
     }
     Ok(config.join("pending").join(format!("{hash}.json")))
 }
-fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
+struct ChosenPlan {
+    plan: RunPlan,
+    config: crate::control_fs::Directory,
+    provider_record: Option<crate::control_fs::PrivateFile>,
+}
+
+enum PlanPreparation<'a> {
+    Legacy,
+    Broker {
+        operation_id: Uuid,
+        control_literals: &'a [String],
+    },
+}
+
+fn choose_plan(options: RunOptions) -> Result<RunPlan> {
+    Ok(choose_plan_prepared(options, PlanPreparation::Legacy)?.plan)
+}
+
+fn choose_plan_prepared(
+    mut options: RunOptions,
+    preparation: PlanPreparation<'_>,
+) -> Result<ChosenPlan> {
     let managed_selection = options.client.is_some()
         || options.auth_mode.is_some()
         || options.client_profile.is_some()
@@ -886,12 +908,11 @@ fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
         bail!("project root must not be a symlink");
     }
     options.project = options.project.canonicalize()?;
-    options.config_dir = crate::control_fs::Directory::open_existing(
-        &crate::control_fs::absolute_path(&options.config_dir)?,
-    )
-    .context("configuration is missing or unsafe; run agentsandbox init in a private location")?
-    .path()
-    .to_path_buf();
+    let config = crate::control_fs::Directory::open_existing(&crate::control_fs::absolute_path(
+        &options.config_dir,
+    )?)
+    .context("configuration is missing or unsafe; run agentsandbox init in a private location")?;
+    options.config_dir = config.path().to_path_buf();
     if let Some(file) = &options.providers_file {
         options.providers_file = Some(crate::control_fs::absolute_path(file)?);
     }
@@ -925,13 +946,17 @@ fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
             "pending approval does not match these managed client, project, network, image, or runtime options"
         );
         validate_provider_plan(&pending)?;
-        return Ok(pending);
+        return Ok(ChosenPlan {
+            plan: pending,
+            config,
+            provider_record: None,
+        });
     }
     let provider_input = managed_selection.then(|| options.clone());
     let mut provider_resolution = None;
     let mut provider_credential = None;
+    let mut provider_record = None;
     if managed_selection {
-        let config = crate::control_fs::Directory::open_existing(&options.config_dir)?;
         let providers_file = options
             .providers_file
             .clone()
@@ -980,7 +1005,22 @@ fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
                 || source.path() == options.project.join(".env"),
             "a credential source inside the project must be the explicitly configured root .env, which the import policy excludes"
         );
-        provider_credential = Some(freeze_provider_credential(&config, &prepared)?);
+        match &preparation {
+            PlanPreparation::Legacy => {
+                provider_credential = Some(freeze_provider_credential(&config, &prepared)?);
+            }
+            PlanPreparation::Broker {
+                control_literals, ..
+            } => {
+                let (reference, record) = freeze_provider_credential_retained(
+                    &config,
+                    &prepared,
+                    Some(control_literals),
+                )?;
+                provider_credential = Some(reference);
+                provider_record = Some(record);
+            }
+        }
         options.argv = prepared.argv;
         options.provider = prepared.resolution.provider_name().into();
         provider_resolution = Some(prepared.resolution);
@@ -1027,7 +1067,11 @@ fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
             );
         }
         pending.credential_source = credential_source;
-        Ok(pending)
+        Ok(ChosenPlan {
+            plan: pending,
+            config,
+            provider_record,
+        })
     } else {
         let session = Uuid::new_v4();
         let request = DecisionRequest {
@@ -1053,16 +1097,24 @@ fn choose_plan(mut options: RunOptions) -> Result<RunPlan> {
                 .then_some(crate::model::ExecutionModeV1::InteractiveTtyV1),
             provider_resolution,
         };
-        Ok(RunPlan {
-            version: if managed_selection { 3 } else { 2 },
-            operation_id: Uuid::new_v4(),
-            options,
-            request,
-            session,
-            managed: None,
-            provider_input,
-            provider_credential,
-            credential_source,
+        let operation_id = match preparation {
+            PlanPreparation::Legacy => Uuid::new_v4(),
+            PlanPreparation::Broker { operation_id, .. } => operation_id,
+        };
+        Ok(ChosenPlan {
+            plan: RunPlan {
+                version: if managed_selection { 3 } else { 2 },
+                operation_id,
+                options,
+                request,
+                session,
+                managed: None,
+                provider_input,
+                provider_credential,
+                credential_source,
+            },
+            config,
+            provider_record,
         })
     }
 }
@@ -1226,11 +1278,26 @@ fn freeze_provider_credential(
     config: &crate::control_fs::Directory,
     prepared: &crate::provider::PreparedProvider,
 ) -> Result<FrozenProviderCredentialV1> {
+    Ok(freeze_provider_credential_retained(config, prepared, None)?.0)
+}
+
+fn freeze_provider_credential_retained(
+    config: &crate::control_fs::Directory,
+    prepared: &crate::provider::PreparedProvider,
+    control: Option<&[String]>,
+) -> Result<(FrozenProviderCredentialV1, crate::control_fs::PrivateFile)> {
     prepared.resolution.validate()?;
     prepared.resolution.validate_argv(&prepared.argv)?;
     prepared.credential.validate_source()?;
     let secrets = prepared.credential.secrets();
-    let control = control_secrets(config.path())?;
+    let legacy_control;
+    let control = match control {
+        Some(values) => values,
+        None => {
+            legacy_control = control_secrets(config.path())?;
+            &legacy_control
+        }
+    };
     anyhow::ensure!(
         !secrets
             .iter()
@@ -1253,11 +1320,14 @@ fn freeze_provider_credential(
     write_json_new(&bindings.path().join(&file_name), &record)?;
     bindings.sync()?;
     let file = bindings.read_private_file(&file_name, 512 * 1024)?;
-    Ok(FrozenProviderCredentialV1 {
-        binding_id,
-        file_name,
-        digest: file.digest().into(),
-    })
+    Ok((
+        FrozenProviderCredentialV1 {
+            binding_id,
+            file_name,
+            digest: file.digest().into(),
+        },
+        file,
+    ))
 }
 
 fn validate_provider_plan(plan: &RunPlan) -> Result<()> {

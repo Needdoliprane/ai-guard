@@ -1,0 +1,47 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+warning: unused imports: `ContainerPurpose`, `ContainerSpec`, and `NetworkMode`
+ --> tests/runtime_prearmed.rs:6:23
+  |
+6 |     BeforeSpawnGuard, ContainerPurpose, ContainerSpec, ManagedPrearmedExecution, NetworkMode,
+  |                       ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^                            ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> tests/runtime_prearmed.rs:429:9
+    |
+429 |     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `root`
+   --> tests/runtime_prearmed.rs:328:26
+    |
+108 |         let root = PathBuf::from(std::env::var_os("AI_GUARD_PREARMED_ROOT").unwrap());
+    |             ---- move occurs because `root` has type `PathBuf`, which does not implement the `Copy` trait
+...
+211 |                 move |_| {
+    |                 -------- value moved into closure here
+...
+220 |                             root: Some(root.clone()),
+    |                                        ---- variable moved due to use in closure
+...
+328 |         let guard_root = root.clone();
+    |                          ^^^^ value borrowed here after move
+    |
+help: consider cloning the value before moving it into the closure
+    |
+205 ~         let value = root.clone();
+206 ~         let recovered = managed
+207 |             .start_owned_prearmed_retained(
+...
+220 |                             fail: false,
+221 ~                             root: Some(value.clone()),
+    |
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `agentsandbox` (test "runtime_prearmed") generated 2 warnings
+error: could not compile `agentsandbox` (test "runtime_prearmed") due to 1 previous error; 2 warnings emitted

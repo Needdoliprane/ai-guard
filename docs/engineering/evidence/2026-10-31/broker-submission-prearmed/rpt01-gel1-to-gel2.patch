@@ -1,0 +1,66 @@
+--- a/src/runtime.rs
++++ b/src/runtime.rs
+@@ -1141,7 +1141,7 @@
+         };
+         let start = Instant::now();
+         let mut observed_start = false;
+-        let status = {
++        let (status, state) = {
+             // Poll inspection AND its callback as a select branch. A pending
+             // writer/HTTP callback must not hide the independent stop signal.
+             let started = async {
+@@ -1158,7 +1158,7 @@
+                 }
+             };
+             tokio::pin!(started);
+-            loop {
++            let status = loop {
+                 tokio::select! {
+                     // A known stop/closed notifier wins over simultaneous EOF.
+                     biased;
+@@ -1173,20 +1173,36 @@
+                         observed_start = true;
+                     }
+                 }
+-            }
+-        };
+-        let finish = async {
+-            let state = self
+-                .execution_inspect(&instance.target, Some(managed))
+-                .await?;
+-            if !observed_start && state.has_started() {
+-                on_started(state.clone()).await?;
+-            }
++            };
++            let state = tokio::select! {
++                biased;
++                stopped = wait_prearmed_stop(&mut stop) => {
++                    stopped?;
++                    bail!("independent stop signalled during observation; terminal reconciliation required");
++                }
++                state = self.execution_inspect(&instance.target, Some(managed)) => state?,
++            };
+             ensure!(
+                 state.has_started(),
+                 "runtime never reported a StartedAt value; command start cannot be confirmed"
+             );
+             state.validate_terminal(self.kind)?;
++            if !observed_start {
++                // EOF may race a callback that has already sent its RPC. Keep
++                // that exact future alive: invoking the callback again could
++                // create a different operation instead of replaying the first.
++                tokio::select! {
++                    biased;
++                    stopped = wait_prearmed_stop(&mut stop) => {
++                        stopped?;
++                        bail!("independent stop signalled during started acknowledgement; terminal reconciliation required");
++                    }
++                    result = &mut started => result?,
++                }
++            }
++            (status, state)
++        };
++        let finish = async {
+             if let Some(writer) = writer {
+                 match timeout(Duration::from_secs(5), writer).await {
+                     Ok(Ok(Ok(_))) => {}

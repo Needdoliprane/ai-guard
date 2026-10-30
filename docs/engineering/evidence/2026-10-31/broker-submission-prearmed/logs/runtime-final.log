@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.62s
+     Running tests/runtime_prearmed.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/runtime_prearmed-e13b35325cb0edd4)
+
+running 4 tests
+test pending_started_callback_is_not_reinvoked_when_attach_reaches_eof ... ok
+test prearmed_guard_is_consumed_and_control_debug_is_opaque ... ok
+test prearmed_stop_interrupts_pending_started_callback_without_global_ctrl_c ... ok
+test prearmed_types_are_available_without_legacy_duration_or_timeout_fields ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.94s
+
+RC=0

@@ -1,0 +1,25 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: this `if` statement can be collapsed
+   --> tests/runtime_prearmed.rs:539:29
+    |
+539 | / ...                   if call == 1 {
+540 | | ...                       if let Some(sender) = entered_tx.take() {
+541 | | ...                           let _ = sender.send(());
+542 | | ...                       }
+543 | | ...                   }
+    | |_______________________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+539 ~                             if call == 1
+540 ~                                 && let Some(sender) = entered_tx.take() {
+541 |                                     let _ = sender.send(());
+542 ~                                 }
+    |
+
+error: could not compile `agentsandbox` (test "runtime_prearmed") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+RC=101

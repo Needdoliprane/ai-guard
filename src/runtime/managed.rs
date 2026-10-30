@@ -147,6 +147,70 @@ impl ManagedRetainedExecution {
         &self.created.handle
     }
 }
+
+/// Retained daemon transport facts and independently inspectable ownership.
+/// Dropping this value neither removes the instance nor disarms its enforcer.
+pub struct ManagedPrearmedExecution {
+    result: PrearmedExecutionResult,
+    created: OwnedContainerSnapshot,
+    terminal: ContainerObservation,
+}
+impl std::fmt::Debug for ManagedPrearmedExecution {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ManagedPrearmedExecution([private retained execution])")
+    }
+}
+impl ManagedPrearmedExecution {
+    pub fn result(&self) -> &PrearmedExecutionResult {
+        &self.result
+    }
+    pub fn created(&self) -> &OwnedContainerSnapshot {
+        &self.created
+    }
+    pub fn terminal(&self) -> &ContainerObservation {
+        &self.terminal
+    }
+    pub fn handle(&self) -> &ContainerHandle {
+        &self.created.handle
+    }
+}
+impl ManagedPrearmedExecution {
+    fn from_retained(retained: ManagedRetainedExecution) -> Self {
+        let result = retained.execution.result;
+        Self {
+            result: PrearmedExecutionResult {
+                stdout: result.stdout,
+                stderr: result.stderr,
+                transport_exit_code: result.exit_code,
+                duration_ms: result.duration_ms,
+            },
+            created: retained.created,
+            terminal: retained.terminal,
+        }
+    }
+}
+
+enum OwnedStartDirective {
+    ObserveOnly,
+    Legacy,
+    Prearmed(PrearmedStartControl),
+}
+impl From<StartDirective> for OwnedStartDirective {
+    fn from(value: StartDirective) -> Self {
+        match value {
+            StartDirective::ObserveOnly => Self::ObserveOnly,
+            StartDirective::EmitOnce => Self::Legacy,
+        }
+    }
+}
+impl From<PrearmedStartDirective> for OwnedStartDirective {
+    fn from(value: PrearmedStartDirective) -> Self {
+        match value {
+            PrearmedStartDirective::ObserveOnly => Self::ObserveOnly,
+            PrearmedStartDirective::EmitOnce(control) => Self::Prearmed(control),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct ManagedRuntime {
     runtime: Runtime,
@@ -847,6 +911,21 @@ impl ManagedRuntime {
             !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
             "runtime timeout must be between 1 second and 24 hours"
         );
+        let handle = self.create_owned_handle(spec).await?;
+        self.execute_owned(
+            spec,
+            handle,
+            None,
+            input,
+            Some(duration),
+            stdout_limit,
+            |created| async move { on_created(created).await.map(Into::into) },
+            on_started,
+        )
+        .await
+    }
+    async fn create_owned_handle(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
+        spec.require_current_creation_policy()?;
         ensure!(
             spec.managed_names.is_some(),
             "managed creation requires control-assigned names"
@@ -864,25 +943,14 @@ impl ManagedRuntime {
             .filter(|id| !output.truncated && valid_immutable_id(id))
             .context("runtime create response is ambiguous; ownership unknown, no adoption, stop or cleanup attempted")?
             .to_owned();
-        let handle = ContainerHandle {
+        Ok(ContainerHandle {
             authority_fingerprint: self.binding.fingerprint(),
             session: spec.session,
             operation: spec.operation_id(),
             id: id.clone(),
             name: spec.name(),
             configuration_fingerprint_version: Some(spec.fingerprint_version()),
-        };
-        self.execute_owned(
-            spec,
-            handle,
-            None,
-            input,
-            duration,
-            stdout_limit,
-            on_created,
-            on_started,
-        )
-        .await
+        })
     }
     /// Start an already owned, strictly recovered Created instance. The durable
     /// control callback must return a fresh permit; replay never creates or starts.
@@ -909,12 +977,81 @@ impl ManagedRuntime {
             owned.handle.clone(),
             Some(&owned.observation),
             input,
-            duration,
+            Some(duration),
             stdout_limit,
-            on_ready,
+            |created| async move { on_ready(created).await.map(Into::into) },
             on_started,
         )
         .await
+    }
+    /// Create a batch instance, then consume only a fresh, independently armed
+    /// claim. This port never subscribes a session to process-wide signals.
+    pub async fn execute_prearmed_retained<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        input: Option<std::fs::File>,
+        stdout_limit: usize,
+        on_created: C,
+        on_started: F,
+    ) -> Result<ManagedPrearmedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        ensure!(
+            !spec.security_preset.is_interactive(),
+            "prearmed batch transport refuses interactive sessions"
+        );
+        let handle = self.create_owned_handle(spec).await?;
+        self.execute_owned(
+            spec,
+            handle,
+            None,
+            input,
+            None,
+            stdout_limit,
+            |created| async move { on_created(created).await.map(Into::into) },
+            on_started,
+        )
+        .await
+        .map(ManagedPrearmedExecution::from_retained)
+    }
+    /// Recovered Created instances require a newly returned EmitOnce control.
+    /// Stored/replayed claims produce ObserveOnly and can never re-emit start.
+    pub async fn start_owned_prearmed_retained<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: &OwnedContainerSnapshot,
+        input: Option<std::fs::File>,
+        stdout_limit: usize,
+        on_ready: C,
+        on_started: F,
+    ) -> Result<ManagedPrearmedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<PrearmedStartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        spec.require_current_creation_policy()?;
+        ensure!(
+            !spec.security_preset.is_interactive(),
+            "prearmed batch transport refuses interactive sessions"
+        );
+        self.execute_owned(
+            spec,
+            owned.handle.clone(),
+            Some(&owned.observation),
+            input,
+            None,
+            stdout_limit,
+            |created| async move { on_ready(created).await.map(Into::into) },
+            on_started,
+        )
+        .await
+        .map(ManagedPrearmedExecution::from_retained)
     }
     #[allow(clippy::too_many_arguments)]
     async fn execute_owned<C, CFut, F, Fut>(
@@ -923,14 +1060,14 @@ impl ManagedRuntime {
         handle: ContainerHandle,
         baseline: Option<&ContainerObservation>,
         input: Option<std::fs::File>,
-        duration: Duration,
+        duration: Option<Duration>,
         stdout_limit: usize,
         on_created: C,
         on_started: F,
     ) -> Result<ManagedRetainedExecution>
     where
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
-        CFut: Future<Output = Result<StartDirective>>,
+        CFut: Future<Output = Result<OwnedStartDirective>>,
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
@@ -942,10 +1079,12 @@ impl ManagedRuntime {
                 && handle.fingerprint_version() == spec.fingerprint_version(),
             "owned instance does not belong to this exact operation"
         );
-        ensure!(
-            !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
-            "runtime timeout must be bounded"
-        );
+        if let Some(duration) = duration {
+            ensure!(
+                !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
+                "runtime timeout must be bounded"
+            );
+        }
         let id = handle.id.clone();
         let mut stop_snapshot = baseline.map(|observation| OwnedContainerSnapshot {
             handle: handle.clone(),
@@ -974,34 +1113,45 @@ impl ManagedRuntime {
                 observation,
             };
             stop_snapshot = Some(created.clone());
-            match on_created(created.clone()).await? {
-                StartDirective::ObserveOnly => {
+            let control = match on_created(created.clone()).await? {
+                OwnedStartDirective::ObserveOnly => {
                     bail!("start claim already consumed; owned instance retained without emitting start; reconciliation required");
                 }
-                StartDirective::EmitOnce => {}
-            }
+                OwnedStartDirective::Legacy => {
+                    ensure!(duration.is_some(), "legacy start cannot authorize prearmed transport");
+                    None
+                }
+                OwnedStartDirective::Prearmed(control) => {
+                    ensure!(duration.is_none(), "prearmed start cannot authorize legacy transport");
+                    Some(control)
+                }
+            };
             let instance = CreatedInstance {
                 kind: self.binding.kind,
                 name: handle.name.clone(),
                 target: id.clone(),
             };
             let on_started = tokio::sync::Mutex::new(on_started);
-            let result = self.runtime.execute_created(
-                &instance,
-                input,
-                duration,
-                stdout_limit,
-                Some((self, &created.observation)),
-                spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
-                |_| async {
+            let callback = |_| async {
                     // RuntimeState cannot represent every unknown fact. Inspect
                     // again instead of promoting its compatibility bool defaults.
                     let observation = self.observe(&handle).await?;
                     observation.validate_identity_allocation(&created.observation)?;
                     let mut callback = on_started.lock().await;
                     callback(observation).await
-                },
-            ).await?;
+                };
+            let result = if let Some(control) = control {
+                self.runtime.execute_created_prearmed(
+                    &instance, input, stdout_limit, (self, &created.observation), control, callback,
+                ).await?
+            } else {
+                self.runtime.execute_created(
+                    &instance, input, duration.context("missing legacy runtime duration")?, stdout_limit,
+                    Some((self, &created.observation)),
+                    spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
+                    callback,
+                ).await?
+            };
             let terminal = self.observe(&handle).await?;
             terminal.validate_terminal(self.binding.kind, &created.observation)?;
             Ok(ManagedRetainedExecution {
@@ -1013,6 +1163,13 @@ impl ManagedRuntime {
         match result {
             Ok(result) => Ok(result),
             Err(error) => {
+                if duration.is_none() {
+                    // The independent enforcer stays armed. Do not block this
+                    // transport's stop drainage on another engine/HTTP operation.
+                    return Err(error.context(format!(
+                        "owned instance {} retained; independent enforcement and terminal reconciliation remain required", handle.id
+                    )));
+                }
                 let stopped = match stop_snapshot.as_ref() {
                     Some(snapshot) => self.stop_snapshot_owned(snapshot).await.is_ok(),
                     None => false,

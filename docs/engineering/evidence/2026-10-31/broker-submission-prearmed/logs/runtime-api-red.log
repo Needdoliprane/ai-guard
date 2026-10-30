@@ -1,0 +1,21 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0432]: unresolved imports `agentsandbox::runtime::BeforeSpawnGuard`, `agentsandbox::runtime::ManagedPrearmedExecution`, `agentsandbox::runtime::PrearmedExecutionResult`, `agentsandbox::runtime::PrearmedStartControl`, `agentsandbox::runtime::PrearmedStartDirective`
+ --> tests/runtime_prearmed.rs:4:5
+  |
+4 |     BeforeSpawnGuard, ManagedPrearmedExecution, PrearmedExecutionResult, PrearmedStartControl,
+  |     ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^ no `PrearmedStartControl` in `runtime`
+  |     |                 |                         |
+  |     |                 |                         no `PrearmedExecutionResult` in `runtime`
+  |     |                 no `ManagedPrearmedExecution` in `runtime`
+  |     no `BeforeSpawnGuard` in `runtime`
+5 |     PrearmedStartDirective,
+  |     ^^^^^^^^^^^^^^^^^^^^^^ no `PrearmedStartDirective` in `runtime`
+  |
+help: a similar name exists in the module
+  |
+4 -     BeforeSpawnGuard, ManagedPrearmedExecution, PrearmedExecutionResult, PrearmedStartControl,
+4 +     BeforeSpawnGuard, ManagedRetainedExecution, PrearmedExecutionResult, PrearmedStartControl,
+  |
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `agentsandbox` (test "runtime_prearmed") due to 1 previous error

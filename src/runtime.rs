@@ -12,9 +12,51 @@ mod managed;
 pub mod terminal;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
 pub use managed::{
-    ContainerHandle, ManagedRetainedExecution, ManagedRuntime, ManagedRuntimeError,
-    OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
+    ContainerHandle, ManagedPrearmedExecution, ManagedRetainedExecution, ManagedRuntime,
+    ManagedRuntimeError, OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
 };
+
+/// Last synchronous check by the trusted broker, after all awaited preparation.
+/// This consumes the permit; it does not make process spawn atomic with the engine.
+pub trait BeforeSpawnGuard: Send {
+    fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()>;
+}
+
+/// A fresh start claim and the stop notification of an independently armed enforcer.
+/// Neither this notification nor the transport establishes a worker's terminal state.
+pub struct PrearmedStartControl {
+    guard: Box<dyn BeforeSpawnGuard>,
+    stop: tokio::sync::watch::Receiver<bool>,
+}
+impl PrearmedStartControl {
+    pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
+        Self { guard, stop }
+    }
+}
+impl std::fmt::Debug for PrearmedStartControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrearmedStartControl([private consumed permit])")
+    }
+}
+#[derive(Debug)]
+pub enum PrearmedStartDirective {
+    ObserveOnly,
+    EmitOnce(PrearmedStartControl),
+}
+
+/// Captured transport facts. A daemon transport has no locally reset business
+/// deadline, so it cannot manufacture a `timed_out` worker result.
+pub struct PrearmedExecutionResult {
+    pub stdout: Capture,
+    pub stderr: Capture,
+    pub transport_exit_code: Option<i32>,
+    pub duration_ms: u128,
+}
+impl std::fmt::Debug for PrearmedExecutionResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PrearmedExecutionResult([private transport capture])")
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeKind {
@@ -479,6 +521,51 @@ struct CreatedInstance {
     kind: RuntimeKind,
     name: String,
     target: String,
+}
+
+#[derive(Default)]
+struct TransportTasks(Vec<tokio::task::AbortHandle>);
+impl Drop for TransportTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+fn ensure_prearmed_live(stop: &tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    ensure!(
+        stop.has_changed().is_ok() && !*stop.borrow(),
+        "prearmed stop is already signalled or its enforcer disconnected"
+    );
+    Ok(())
+}
+
+async fn wait_prearmed_stop(stop: &mut tokio::sync::watch::Receiver<bool>) -> Result<()> {
+    loop {
+        if *stop.borrow_and_update() {
+            return Ok(());
+        }
+        stop.changed()
+            .await
+            .context("prearmed enforcer notification disconnected; reconciliation required")?;
+    }
+}
+
+async fn drain_prearmed_transport(child: &mut tokio::process::Child) -> Result<()> {
+    match timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(status) => {
+            status.context("prearmed runtime attach wait failed")?;
+            Ok(())
+        }
+        Err(_) => {
+            // This is only the engine CLI transport, never the worker process.
+            let _ = child.start_kill();
+            bail!(
+                "prearmed runtime attach did not exit within its stop drainage bound; worker state unknown"
+            )
+        }
+    }
 }
 
 /// Cancellation cannot run async finalization. Request a snapshot-verified target stop,
@@ -993,6 +1080,164 @@ impl Runtime {
             duration_ms: start.elapsed().as_millis(),
             transport_stop_reason: None,
         })
+    }
+    /// Batch transport for a service whose enforcer was armed before the claim.
+    /// There is deliberately no Ctrl-C subscription or business duration here.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_created_prearmed<F, Fut>(
+        &self,
+        instance: &CreatedInstance,
+        input: Option<std::fs::File>,
+        stdout_limit: usize,
+        managed: (&ManagedRuntime, &ContainerObservation),
+        control: PrearmedStartControl,
+        mut on_started: F,
+    ) -> Result<ExecutionResult>
+    where
+        F: FnMut(RuntimeState) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        let (authority, _) = managed;
+        authority.verify_authority().await?;
+        let mut command = authority.command()?;
+        command.arg("start").arg("--attach");
+        if input.is_some() {
+            command.arg("--interactive").stdin(Stdio::piped());
+        }
+        command
+            .arg(&instance.target)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let PrearmedStartControl { guard, mut stop } = control;
+        ensure_prearmed_live(&stop)?;
+        // Keep the final trusted check adjacent to spawn: no await, command
+        // preparation, filesystem access or callback is permitted between them.
+        guard.check_before_spawn(&instance.target)?;
+        let mut child = command
+            .spawn()
+            .context("cannot attach to the prearmed session container")?;
+        let mut tasks = TransportTasks::default();
+        let stdout = tokio::spawn(capture_stream(
+            child.stdout.take().context("missing stdout")?,
+            stdout_limit,
+        ));
+        tasks.0.push(stdout.abort_handle());
+        let stderr = tokio::spawn(capture_stream(
+            child.stderr.take().context("missing stderr")?,
+            256 * 1024,
+        ));
+        tasks.0.push(stderr.abort_handle());
+        let writer = if let Some(file) = input {
+            let mut sink = child.stdin.take().context("missing archive stdin")?;
+            let task = tokio::spawn(async move {
+                let mut source = tokio::fs::File::from_std(file);
+                tokio::io::copy(&mut source, &mut sink).await
+            });
+            tasks.0.push(task.abort_handle());
+            Some(task)
+        } else {
+            None
+        };
+        let start = Instant::now();
+        let mut observed_start = false;
+        let (status, state) = {
+            // Poll inspection AND its callback as a select branch. A pending
+            // writer/HTTP callback must not hide the independent stop signal.
+            let started = async {
+                let mut interval = tokio::time::interval(Duration::from_millis(200));
+                loop {
+                    interval.tick().await;
+                    let state = self
+                        .execution_inspect(&instance.target, Some(managed))
+                        .await?;
+                    if state.has_started() {
+                        on_started(state).await?;
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+            };
+            tokio::pin!(started);
+            let status = loop {
+                tokio::select! {
+                    // A known stop/closed notifier wins over simultaneous EOF.
+                    biased;
+                    stopped = wait_prearmed_stop(&mut stop) => {
+                        drain_prearmed_transport(&mut child).await?;
+                        stopped?;
+                        bail!("independent stop signalled; owned instance retained for terminal reconciliation");
+                    }
+                    status = child.wait() => break status?,
+                    result = &mut started, if !observed_start => {
+                        result?;
+                        observed_start = true;
+                    }
+                }
+            };
+            let state = tokio::select! {
+                biased;
+                stopped = wait_prearmed_stop(&mut stop) => {
+                    stopped?;
+                    bail!("independent stop signalled during observation; terminal reconciliation required");
+                }
+                state = self.execution_inspect(&instance.target, Some(managed)) => state?,
+            };
+            ensure!(
+                state.has_started(),
+                "runtime never reported a StartedAt value; command start cannot be confirmed"
+            );
+            state.validate_terminal(self.kind)?;
+            if !observed_start {
+                // EOF may race a callback that has already sent its RPC. Keep
+                // that exact future alive: invoking the callback again could
+                // create a different operation instead of replaying the first.
+                tokio::select! {
+                    biased;
+                    stopped = wait_prearmed_stop(&mut stop) => {
+                        stopped?;
+                        bail!("independent stop signalled during started acknowledgement; terminal reconciliation required");
+                    }
+                    result = &mut started => result?,
+                }
+            }
+            (status, state)
+        };
+        let finish = async {
+            if let Some(writer) = writer {
+                match timeout(Duration::from_secs(5), writer).await {
+                    Ok(Ok(Ok(_))) => {}
+                    other if status.success() => {
+                        bail!("workspace archive transfer failed: {other:?}")
+                    }
+                    _ => {}
+                }
+            }
+            let stdout = timeout(Duration::from_secs(10), stdout)
+                .await
+                .context("stdout pipe did not close")???;
+            let stderr = timeout(Duration::from_secs(10), stderr)
+                .await
+                .context("stderr pipe did not close")???;
+            Ok(ExecutionResult {
+                stdout,
+                stderr,
+                state,
+                exit_code: status.code(),
+                // Internal compatibility value only. The public prearmed result
+                // discards this field; only the enforcer records deadline facts.
+                timed_out: false,
+                duration_ms: start.elapsed().as_millis(),
+                transport_stop_reason: None,
+            })
+        };
+        tokio::select! {
+            biased;
+            stopped = wait_prearmed_stop(&mut stop) => {
+                stopped?;
+                bail!("independent stop signalled during observation; terminal reconciliation required");
+            }
+            result = finish => result,
+        }
     }
     async fn execute_interactive<F, Fut>(
         &self,

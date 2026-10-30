@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running tests/credential_handoff.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/credential_handoff-4694c45f49beffda)
+
+running 1 test
+test shared_snapshot_survives_handoff_and_native_cli_reads_its_exact_prepared_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.38s
+
+RC=0
