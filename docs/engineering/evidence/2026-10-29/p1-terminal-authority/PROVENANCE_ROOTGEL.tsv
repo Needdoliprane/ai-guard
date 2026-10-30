@@ -1,0 +1,17 @@
+source	copie_relative
+/tmp/ai-guard-p1-security-fmt.log	software-rootgel-147/rust-fmt.log
+/tmp/ai-guard-p1-security-clippy.log	software-rootgel-147/rust-clippy.log
+/tmp/ai-guard-p1-security-tests.log	software-rootgel-147/rust-tests-147.log
+/tmp/ai-guard-p1-security-release.log	software-rootgel-147/rust-release.log
+/tmp/ai-guard-p1-security-source-sha.txt	software-rootgel-147/SOURCE_SHA256SUMS.txt
+/tmp/ai-guard-terminal-postprocessing-secret-red.log	software-rootgel-147/postprocessing-result-secret-red.log
+/tmp/ai-guard-terminal-output-secret-red.log	software-rootgel-147/terminal-output-boundary-red.log
+/tmp/ai-guard-adapter-secret-boundary-red.log	software-rootgel-147/adapter-decoded-secret-boundary-red.log
+/tmp/ai-guard-redaction-json-keys-red.log	software-rootgel-147/json-key-secret-red.log
+/tmp/ai-guard-terminal-secrets-all-green.log	software-rootgel-147/runner-nine-scenarios-green-before-json-key-fix.log
+/tmp/ai-guard-runtime-retention-report.md	software-rootgel-147/runtime-retention-report-rootgel.md
+/tmp/ai-guard-runtime-retention-invalid-reference-green.log	software-rootgel-147/runtime-invalid-reference-14-green.log
+/tmp/ai-guard-runtime-retention-review-targeted.log	software-rootgel-147/runtime-retention-targeted-22-green.log
+/tmp/ai-guard-runtime-retention-review-clippy.log	software-rootgel-147/runtime-retention-clippy.log
+/tmp/ai-guard-decision-event-authority-report.md	software-rootgel-147/decision-event-authority-report.md
+/tmp/ai-guard-review-decision-event-authority.md	software-rootgel-147/review-decision-event-authority.md

@@ -1,0 +1,13 @@
+{
+  "integrity": {
+    "error": null,
+    "event_count": 668,
+    "head_hash": "971b8923455befad82af3c0d1bad24c8d3b6a4d033e613ad1c2082c0d17fa021",
+    "valid": true
+  },
+  "heldWorkers": 0,
+  "workerCount": 19,
+  "states": [
+    "terminal"
+  ]
+}

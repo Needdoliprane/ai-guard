@@ -1,0 +1,844 @@
+use anyhow::{Context, Result, anyhow, ensure};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    net::SocketAddr,
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::ExitStatusExt,
+    },
+    path::Path,
+    process::{ExitStatus, Stdio},
+    time::{Duration, Instant},
+};
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    process::{Child, Command},
+};
+
+const BIN: &str = "/Users/louis/Documents/ai-guard/target/release/agentsandbox";
+const DOCKER: &str = "/opt/homebrew/bin/docker";
+const ENDPOINT: &str = "unix:///Users/louis/.docker/run/docker.sock";
+const IMAGE: &str = "agentsandbox-worker:qa-managed-providers-20261030-ccgpe3";
+const EXPECTED_BIN_SHA: &str = "91f0cc10b0e66c0b5633f4ca87ba22e5e527c6a5bb5cb3ffd0905abd6b2ae5a9";
+const EXPECTED_IMAGE_ID: &str =
+    "sha256:069ba7b703077238f22edbefc9295a11cc07e71e8dd490b8de7ab81da51ffa38";
+const PATH_VALUE: &str = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+
+#[derive(Clone, Debug)]
+struct WorkerSnapshot {
+    session_id: String,
+    worker_id: String,
+    state: String,
+    quota_held: Option<bool>,
+    container_id: Option<String>,
+    volume_name: Option<String>,
+    stable_name: Option<String>,
+    image_id: Option<String>,
+    network: Option<String>,
+    command_argv: Option<Vec<String>>,
+    runtime_inspection: Option<DockerFacts>,
+}
+#[derive(Clone, Debug)]
+struct DockerFacts {
+    id: String,
+    name: String,
+    image: String,
+    network: String,
+    status: String,
+    running: bool,
+}
+#[derive(Clone, Debug)]
+struct ControlSummary {
+    integrity_valid: Option<bool>,
+    event_count: Option<u64>,
+    head_hash: Option<String>,
+    held_workers: Option<u64>,
+    usage_count: Option<usize>,
+    usage_billable_all_false: Option<bool>,
+}
+
+fn create_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    Ok(hex_lower(&Sha256::digest(bytes)))
+}
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+fn write_json_private(path: &Path, value: &Value) -> Result<()> {
+    create_private_file(path, serde_json::to_string_pretty(value)?.as_bytes())
+}
+fn sanitized_env(command: &mut Command) -> &mut Command {
+    command.env_clear().env("PATH", PATH_VALUE)
+}
+async fn start_gateway(root: &Path, config: &Path, policy: &Path) -> Result<(Child, SocketAddr)> {
+    let data = root.join("audit.sqlite");
+    let runner_file = config.join("secrets/runner");
+    let viewer_file = config.join("secrets/viewer");
+    let log_path = root.join("gateway.stderr.log");
+    let mut command = Command::new(BIN);
+    sanitized_env(&mut command)
+        .args(["gateway", "--listen", "127.0.0.1:0", "--data"])
+        .arg(&data)
+        .arg("--runner-token-file")
+        .arg(&runner_file)
+        .arg("--viewer-token-file")
+        .arg(&viewer_file)
+        .arg("--policy")
+        .arg(policy)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().context("spawn local gateway child")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("gateway child stderr unavailable")?;
+    let mut reader = BufReader::new(stderr);
+    let mut readiness_line = String::new();
+    let read_count = tokio::time::timeout(
+        Duration::from_secs(10),
+        reader.read_line(&mut readiness_line),
+    )
+    .await
+    .context("gateway readiness timed out")??;
+    ensure!(read_count > 0, "gateway exited before readiness");
+    let address = readiness_line
+        .strip_prefix("Gateway ")
+        .and_then(|line| line.split_whitespace().next())
+        .context("gateway did not report a listen address")?
+        .parse::<SocketAddr>()?;
+    ensure!(
+        address.ip().is_loopback(),
+        "gateway is not bound to loopback"
+    );
+    create_private_file(&log_path, readiness_line.as_bytes())?;
+    let mut rest = reader;
+    let mut log = tokio::fs::OpenOptions::new()
+        .append(true)
+        .open(log_path)
+        .await?;
+    tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut rest, &mut log).await;
+    });
+    Ok((child, address))
+}
+async fn wait_health(http: &reqwest::Client, address: SocketAddr) -> Result<()> {
+    let response = tokio::time::timeout(
+        Duration::from_secs(3),
+        http.get(format!("http://{address}/healthz")).send(),
+    )
+    .await
+    .context("gateway health request timed out")??;
+    ensure!(
+        response.status().is_success(),
+        "gateway health returned {}",
+        response.status()
+    );
+    Ok(())
+}
+fn read_session_snapshot(config: &Path) -> Result<Option<WorkerSnapshot>> {
+    let dir = config.join("sessions");
+    let mut paths = fs::read_dir(&dir)?
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        paths.len() == 1,
+        "expected one private session checkpoint, found {}",
+        paths.len()
+    );
+    let bytes = fs::read(&paths[0])?;
+    let plan: Value = match serde_json::from_slice(&bytes) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let session_id = paths[0]
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .context("session checkpoint name is not UTF-8")?
+        .to_owned();
+    let Some(worker) = plan
+        .get("managed")
+        .and_then(|managed| managed.get("worker"))
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(Some(WorkerSnapshot {
+            session_id,
+            worker_id: String::new(),
+            state: "unavailable_before_worker_ack".into(),
+            quota_held: None,
+            container_id: None,
+            volume_name: None,
+            stable_name: None,
+            image_id: plan
+                .pointer("/managed/admission/launch/image_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            network: plan
+                .pointer("/managed/admission/launch/network")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            command_argv: plan
+                .pointer("/managed/admission/launch/command/argv")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                }),
+            runtime_inspection: None,
+        }));
+    };
+    Ok(Some(WorkerSnapshot {
+        session_id,
+        worker_id: worker
+            .get("worker_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        state: worker
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned(),
+        quota_held: worker.get("quota_held").and_then(Value::as_bool),
+        container_id: worker
+            .pointer("/attempt/container_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        volume_name: worker
+            .pointer("/attempt/volume_name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        stable_name: worker
+            .pointer("/attempt/stable_name")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        image_id: plan
+            .pointer("/managed/admission/launch/image_id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        network: plan
+            .pointer("/managed/admission/launch/network")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        command_argv: plan
+            .pointer("/managed/admission/launch/command/argv")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            }),
+        runtime_inspection: None,
+    }))
+}
+async fn docker_inspect(id: &str) -> Result<Option<DockerFacts>> {
+    let mut command = Command::new(DOCKER);
+    sanitized_env(&mut command)
+        .args(["--host", ENDPOINT, "inspect", "--format"])
+        .arg("{{.Id}}\t{{.Name}}\t{{.Config.Image}}\t{{.HostConfig.NetworkMode}}\t{{.State.Status}}\t{{.State.Running}}")
+        .arg(id)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .context("container inspect timed out")??;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let text = String::from_utf8(output.stdout)?;
+    let fields = text.trim().split('\t').collect::<Vec<_>>();
+    ensure!(
+        fields.len() == 6,
+        "container inspect returned an unexpected field count"
+    );
+    Ok(Some(DockerFacts {
+        id: fields[0].to_owned(),
+        name: fields[1].trim_start_matches('/').to_owned(),
+        image: fields[2].to_owned(),
+        network: fields[3].to_owned(),
+        status: fields[4].to_owned(),
+        running: fields[5].parse::<bool>()?,
+    }))
+}
+async fn wait_for_running(
+    child: &mut Child,
+    config: &Path,
+    latest: &mut Option<WorkerSnapshot>,
+) -> Result<(WorkerSnapshot, DockerFacts)> {
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait()? {
+            return Err(anyhow!(
+                "CLI exited before inspected Running state; exit={status}"
+            ));
+        }
+        if let Some(mut snapshot) = read_session_snapshot(config)? {
+            *latest = Some(snapshot.clone());
+            if snapshot.state == "running" {
+                if let Some(container_id) = snapshot.container_id.as_deref() {
+                    if let Some(facts) = docker_inspect(container_id).await? {
+                        if facts.running && facts.status == "running" {
+                            snapshot.runtime_inspection = Some(facts.clone());
+                            *latest = Some(snapshot.clone());
+                            ensure!(
+                                facts.id == container_id,
+                                "inspected container ID differs from admitted ID"
+                            );
+                            ensure!(
+                                snapshot.image_id.as_deref() == Some(facts.image.as_str()),
+                                "inspected image config differs from admitted immutable image ID"
+                            );
+                            ensure!(
+                                snapshot.stable_name.as_deref() == Some(facts.name.as_str()),
+                                "inspected name differs from admitted managed name"
+                            );
+                            ensure!(
+                                snapshot.network.as_deref() == Some(facts.network.as_str()),
+                                "inspected network mode differs from admitted network"
+                            );
+                            ensure!(
+                                snapshot.command_argv.as_deref()
+                                    == Some(&["/usr/bin/sleep".to_owned(), "20".to_owned()][..]),
+                                "admitted command differs from requested synthetic sleep probe"
+                            );
+                            return Ok((snapshot, facts));
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(anyhow!(
+        "no worker reached durable running state and matching Docker inspection within 120s"
+    ))
+}
+async fn kill_only_cli(child: &mut Child) -> Result<ExitStatus> {
+    let pid = child.id().context("run CLI process had no PID")?;
+    let pid = i32::try_from(pid)?;
+    // SAFETY: this PID is taken from the owned, unreaped CLI child; only that process is signaled.
+    let result = unsafe { libc::kill(pid, libc::SIGKILL) };
+    ensure!(
+        result == 0,
+        "SIGKILL to owned CLI PID failed: {}",
+        std::io::Error::last_os_error()
+    );
+    let status = tokio::time::timeout(Duration::from_secs(3), child.wait())
+        .await
+        .context("owned CLI did not reap within 3s after SIGKILL")??;
+    ensure!(
+        status.signal() == Some(libc::SIGKILL),
+        "run CLI did not report SIGKILL termination"
+    );
+    Ok(status)
+}
+fn snapshot_json(snapshot: &WorkerSnapshot) -> Value {
+    json!({
+        "session_id": snapshot.session_id,
+        "worker_id": snapshot.worker_id,
+        "state": snapshot.state,
+        "quota_held": snapshot.quota_held,
+        "container_id": snapshot.container_id,
+        "volume_name": snapshot.volume_name,
+        "stable_name": snapshot.stable_name,
+        "image_id": snapshot.image_id,
+        "network": snapshot.network,
+        "command_argv": snapshot.command_argv
+        ,"runtime_inspection": snapshot.runtime_inspection.as_ref().map(private_runtime_facts)
+    })
+}
+async fn control_get(
+    http: &reqwest::Client,
+    base: &str,
+    viewer: &str,
+    route: &str,
+) -> Result<Value> {
+    let response = tokio::time::timeout(
+        Duration::from_secs(4),
+        http.get(format!("{base}/api/v1/{route}"))
+            .bearer_auth(viewer)
+            .send(),
+    )
+    .await
+    .context("local control API request timed out")??;
+    ensure!(
+        response.status().is_success(),
+        "local control API returned {}",
+        response.status()
+    );
+    Ok(response.json().await?)
+}
+async fn control_summary(
+    http: &reqwest::Client,
+    base: &str,
+    viewer: &str,
+) -> Result<ControlSummary> {
+    let integrity = control_get(http, base, viewer, "integrity").await?;
+    let quota = control_get(http, base, viewer, "quota").await?;
+    let usage = control_get(http, base, viewer, "usage?limit=100").await?;
+    let usage_items = usage.get("items").and_then(Value::as_array);
+    let billable_all_false = usage_items.map(|items| {
+        items
+            .iter()
+            .all(|item| item.get("billable").and_then(Value::as_bool) == Some(false))
+    });
+    Ok(ControlSummary {
+        integrity_valid: integrity.get("valid").and_then(Value::as_bool),
+        event_count: integrity.get("event_count").and_then(Value::as_u64),
+        head_hash: integrity
+            .get("head_hash")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        held_workers: quota.get("held_workers").and_then(Value::as_u64),
+        usage_count: usage_items.map(Vec::len),
+        usage_billable_all_false: billable_all_false,
+    })
+}
+fn control_summary_json(summary: &ControlSummary) -> Value {
+    json!({
+        "integrity_valid": summary.integrity_valid,
+        "event_count": summary.event_count,
+        "head_hash": summary.head_hash,
+        "held_workers": summary.held_workers,
+        "usage_count": summary.usage_count,
+        "usage_billable_all_false": summary.usage_billable_all_false,
+    })
+}
+async fn invoke_cli(args: &[String], timeout: Duration) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
+    let mut command = Command::new(BIN);
+    sanitized_env(&mut command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .context("control CLI action timed out")??;
+    Ok((output.status, output.stdout, output.stderr))
+}
+fn parse_worker_status(bytes: &[u8]) -> Result<Value> {
+    Ok(serde_json::from_slice(bytes)?)
+}
+fn private_runtime_facts(facts: &DockerFacts) -> Value {
+    json!({
+        "container_id": facts.id,
+        "name": facts.name,
+        "image": facts.image,
+        "network_mode": facts.network,
+        "status": facts.status,
+        "running": facts.running
+    })
+}
+async fn stop_gateway(child: &mut Child) -> Result<()> {
+    let pid = child.id().context("gateway child had no PID")?;
+    let pid = i32::try_from(pid)?;
+    // SAFETY: this PID belongs to the harness-owned gateway child and is not reaped yet.
+    let result = unsafe { libc::kill(pid, libc::SIGTERM) };
+    ensure!(
+        result == 0,
+        "SIGTERM to owned gateway failed: {}",
+        std::io::Error::last_os_error()
+    );
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) => ensure!(status.success(), "gateway exited with {status}"),
+        Ok(Err(error)) => return Err(error.into()),
+        Err(_) => {
+            child.start_kill()?;
+            let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+            return Err(anyhow!(
+                "owned gateway did not stop within 5s; targeted cleanup kill sent"
+            ));
+        }
+    }
+    Ok(())
+}
+fn write_session_args(
+    root: &Path,
+    action: &str,
+    session: &str,
+    config: &Path,
+    gateway: &str,
+) -> Result<Vec<String>> {
+    let mut args = vec![
+        action.to_owned(),
+        "--session".into(),
+        session.into(),
+        "--config-dir".into(),
+        config.display().to_string(),
+        "--gateway".into(),
+        gateway.to_owned(),
+    ];
+    if action == "worker-stop" {
+        args.extend(["--runtime-program".into(), DOCKER.into()]);
+    }
+    let path = root.join(format!("{action}-argv.json"));
+    if path.exists() {
+        let existing: Value = serde_json::from_slice(&fs::read(&path)?)?;
+        ensure!(
+            existing == json!(args),
+            "repeat operator argv differs from its preserved exact arguments"
+        );
+    } else {
+        write_json_private(&path, &json!(args))?;
+    }
+    Ok(args)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let bin_sha = sha256_file(Path::new(BIN))?;
+    ensure!(
+        bin_sha == EXPECTED_BIN_SHA,
+        "release CLI binary hash mismatch; refusing to run"
+    );
+    let root = tempfile::Builder::new()
+        .prefix("ai-guard-cli-crash-baseline-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()?
+        .keep();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
+    let project = root.join("project");
+    fs::create_dir(&project)?;
+    fs::set_permissions(&project, fs::Permissions::from_mode(0o700))?;
+    fs::write(
+        project.join("README.txt"),
+        b"synthetic private CLI-crash baseline fixture\n",
+    )?;
+    let config = root.join("config");
+    agentsandbox::operations::initialize_config(&config)
+        .context("initialize new private QA config")?;
+    let policy = root.join("policy.json");
+    fs::copy(
+        "/Users/louis/Documents/ai-guard/policies/default.json",
+        &policy,
+    )?;
+    fs::set_permissions(&policy, fs::Permissions::from_mode(0o600))?;
+    let viewer = agentsandbox::runner::read_token(&config.join("secrets/viewer"))?;
+
+    let (mut gateway_child, gateway_addr) = start_gateway(&root, &config, &policy).await?;
+    let gateway = format!("http://{gateway_addr}");
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    wait_health(&http, gateway_addr).await?;
+
+    let run_args = vec![
+        "run".into(),
+        "--project".into(),
+        project.display().to_string(),
+        "--config-dir".into(),
+        config.display().to_string(),
+        "--gateway".into(),
+        gateway.clone(),
+        "--runtime".into(),
+        "docker".into(),
+        "--runtime-program".into(),
+        DOCKER.into(),
+        "--runtime-endpoint".into(),
+        ENDPOINT.into(),
+        "--allow-rootful-runtime".into(),
+        "--image".into(),
+        IMAGE.into(),
+        "--profile".into(),
+        "observe".into(),
+        "--network".into(),
+        "none".into(),
+        "--timeout".into(),
+        "5".into(),
+        "--".into(),
+        "/usr/bin/sleep".into(),
+        "20".into(),
+    ];
+    write_json_private(&root.join("run-argv.json"), &json!(run_args))?;
+    create_private_file(
+        &root.join("run-binary.sha256"),
+        format!("{bin_sha}\n").as_bytes(),
+    )?;
+    let stdout_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("run.stdout.log"))?;
+    let stderr_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(root.join("run.stderr.log"))?;
+    let mut command = Command::new(BIN);
+    sanitized_env(&mut command)
+        .args(&run_args)
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true);
+    let mut run_child = command
+        .spawn()
+        .context("spawn exact release CLI run child")?;
+    let mut last_snapshot = None;
+    let observed = wait_for_running(&mut run_child, &config, &mut last_snapshot).await;
+    let mut baseline = json!({
+        "outcome": "setup_failed_or_not_reproduced",
+        "cli_binary_sha256": bin_sha,
+        "image_ref": IMAGE,
+        "image_id": EXPECTED_IMAGE_ID,
+        "docker_program": DOCKER,
+        "docker_server_version": "29.9.2",
+        "runtime_endpoint": ENDPOINT,
+        "host_os": std::env::consts::OS,
+        "host_arch": std::env::consts::ARCH,
+        "worker_timeout_seconds": 5,
+        "process_command": ["/usr/bin/sleep", "20"],
+        "profile": "observe",
+        "network_mode": "none",
+        "allow_rootful_runtime": true,
+        "gateway_listen": gateway,
+    });
+    let mut session_id: Option<String> = last_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.session_id.clone());
+    let mut run_error: Option<String> = None;
+    if let Ok((snapshot, before_inspect)) = observed {
+        let running_observed = Instant::now();
+        baseline["worker"] = snapshot_json(&snapshot);
+        baseline["runtime_before_sigkill"] = private_runtime_facts(&before_inspect);
+        let child_status = kill_only_cli(&mut run_child).await;
+        match child_status {
+            Ok(status) => {
+                baseline["cli_exit_signal"] = json!(status.signal());
+                baseline["duration_from_running_to_sigkill_ms"] =
+                    json!(running_observed.elapsed().as_millis());
+                tokio::time::sleep_until(tokio::time::Instant::from_std(
+                    running_observed + Duration::from_secs(7),
+                ))
+                .await;
+                baseline["seconds_from_running_observation_before_inspect"] =
+                    json!(running_observed.elapsed().as_secs_f64());
+                if let Some(container_id) = snapshot.container_id.as_deref() {
+                    match docker_inspect(container_id).await {
+                        Ok(Some(after)) => {
+                            baseline["runtime_after_deadline"] = private_runtime_facts(&after);
+                            if after.running && after.status == "running" {
+                                baseline["outcome"] = json!(
+                                    "FAIL_BASELINE_worker_survived_cli_SIGKILL_past_5s_deadline"
+                                );
+                            } else {
+                                baseline["outcome"] = json!("baseline_worker_not_running_after_7s");
+                            }
+                        }
+                        Ok(None) => {
+                            baseline["outcome"] = json!("baseline_container_absent_after_7s")
+                        }
+                        Err(error) => {
+                            run_error =
+                                Some(format!("post-deadline Docker inspection failed: {error:#}"))
+                        }
+                    }
+                } else {
+                    run_error =
+                        Some("checkpoint lacked immutable container ID after Running".into());
+                }
+            }
+            Err(error) => run_error = Some(format!("owned CLI termination failed: {error:#}")),
+        }
+    } else if let Err(error) = observed {
+        run_error = Some(format!("worker did not reach inspected Running: {error:#}"));
+        if run_child.try_wait()?.is_none() {
+            if let Some(pid) = run_child.id() {
+                let pid = i32::try_from(pid)?;
+                // SAFETY: this is only the harness-owned run CLI child; any observed session is reconciled below.
+                let sent = unsafe { libc::kill(pid, libc::SIGKILL) } == 0;
+                baseline["cli_sigkill_sent"] = json!(sent);
+            }
+            if let Ok(Ok(status)) =
+                tokio::time::timeout(Duration::from_secs(3), run_child.wait()).await
+            {
+                baseline["cli_exit_signal"] = json!(status.signal());
+                baseline["cli_sigkill_confirmed"] = json!(status.signal() == Some(libc::SIGKILL));
+            }
+        }
+    }
+    if let Some(snapshot) = read_session_snapshot(&config)? {
+        if !snapshot.session_id.is_empty() {
+            session_id = Some(snapshot.session_id.clone());
+            baseline["latest_checkpoint_worker"] = snapshot_json(&snapshot);
+        }
+    }
+
+    let mut cleanup = json!({"attempted": false});
+    if let Some(session) = session_id.as_deref() {
+        let status_args = write_session_args(&root, "worker-status", session, &config, &gateway)?;
+        match invoke_cli(&status_args, Duration::from_secs(15)).await {
+            Ok((status, stdout, _stderr)) if status.success() => {
+                if let Ok(value) = parse_worker_status(&stdout) {
+                    baseline["worker_status_before_cleanup"] = summarize_worker_status(&value);
+                }
+            }
+            Ok((status, _, _)) => cleanup["worker_status_before_exit"] = json!(status.code()),
+            Err(error) => cleanup["worker_status_before_error"] = json!(format!("{error:#}")),
+        }
+        if let Ok(summary) = control_summary(&http, &gateway, &viewer).await {
+            baseline["control_before_cleanup"] = control_summary_json(&summary);
+        }
+        let stop_args = write_session_args(&root, "worker-stop", session, &config, &gateway)?;
+        match invoke_cli(&stop_args, Duration::from_secs(30)).await {
+            Ok((status, stdout, _stderr)) => {
+                cleanup["attempted"] = json!(true);
+                cleanup["worker_stop_exit_code"] = json!(status.code());
+                cleanup["worker_stop_signal"] = json!(status.signal());
+                if let Ok(value) = serde_json::from_slice::<Value>(&stdout) {
+                    cleanup["worker_stop_result"] = summarize_worker_status(&value);
+                }
+            }
+            Err(error) => {
+                cleanup["attempted"] = json!(true);
+                cleanup["worker_stop_error"] = json!(format!("{error:#}"));
+            }
+        }
+        match invoke_cli(
+            &write_session_args(&root, "worker-status", session, &config, &gateway)?,
+            Duration::from_secs(15),
+        )
+        .await
+        {
+            Ok((status, stdout, _stderr)) if status.success() => {
+                if let Ok(value) = parse_worker_status(&stdout) {
+                    cleanup["worker_status_after"] = summarize_worker_status(&value);
+                }
+            }
+            Ok((status, _, _)) => cleanup["worker_status_after_exit_code"] = json!(status.code()),
+            Err(error) => cleanup["worker_status_after_error"] = json!(format!("{error:#}")),
+        }
+        match control_summary(&http, &gateway, &viewer).await {
+            Ok(summary) => cleanup["control_after"] = control_summary_json(&summary),
+            Err(error) => cleanup["control_after_error"] = json!(format!("{error:#}")),
+        }
+        if let Some(snapshot) = last_snapshot.as_ref() {
+            if let Some(volume) = snapshot.volume_name.as_deref() {
+                cleanup["volume_retained"] =
+                    json!(docker_volume_exists(volume).await.unwrap_or(false));
+                cleanup["volume_name"] = json!(volume);
+            }
+            if let Some(cid) = snapshot.container_id.as_deref() {
+                match docker_inspect(cid).await {
+                    Ok(Some(facts)) => {
+                        cleanup["container_after_cleanup"] = private_runtime_facts(&facts)
+                    }
+                    Ok(None) => cleanup["container_after_cleanup"] = json!({"present": false}),
+                    Err(error) => {
+                        cleanup["container_inspection_error"] = json!(format!("{error:#}"))
+                    }
+                }
+            }
+        }
+    }
+    if let Some(error) = run_error {
+        baseline["setup_or_observation_error"] = json!(error);
+    }
+    baseline["cleanup"] = cleanup;
+    baseline["evidence_dir"] = json!(root.display().to_string());
+    write_json_private(&root.join("baseline-summary.json"), &baseline)?;
+    stop_gateway(&mut gateway_child).await?;
+    println!("evidence_dir={}", root.display());
+    println!(
+        "outcome={}",
+        baseline["outcome"].as_str().unwrap_or("unknown")
+    );
+    println!(
+        "worker_state_before_cleanup={}",
+        baseline
+            .pointer("/worker_status_before_cleanup/state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    println!(
+        "worker_state_after_cleanup={}",
+        baseline
+            .pointer("/cleanup/worker_status_after/state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    );
+    println!(
+        "quota_held_after_cleanup={}",
+        baseline
+            .pointer("/cleanup/control_after/held_workers")
+            .map(Value::to_string)
+            .unwrap_or_else(|| "unknown".into())
+    );
+    println!(
+        "audit_valid_after_cleanup={}",
+        baseline
+            .pointer("/cleanup/control_after/integrity_valid")
+            .map(Value::to_string)
+            .unwrap_or_else(|| "unknown".into())
+    );
+    if baseline["outcome"] == "FAIL_BASELINE_worker_survived_cli_SIGKILL_past_5s_deadline" {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "baseline outcome was not reproduced as expected; inspect the private summary"
+        ))
+    }
+}
+async fn docker_volume_exists(volume: &str) -> Result<bool> {
+    let mut command = Command::new(DOCKER);
+    sanitized_env(&mut command)
+        .args([
+            "--host",
+            ENDPOINT,
+            "volume",
+            "inspect",
+            "--format",
+            "{{.Name}}",
+        ])
+        .arg(volume)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await??;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == volume)
+}
+fn summarize_worker_status(value: &Value) -> Value {
+    let worker = &value["worker"];
+    json!({
+        "session_id": value.get("session_id"),
+        "state": worker.get("state"),
+        "quota_held": worker.get("quota_held"),
+        "worker_id": worker.get("worker_id"),
+        "container_id": worker.pointer("/attempt/container_id"),
+        "volume_name": worker.pointer("/attempt/volume_name"),
+        "outputs": value.get("outputs"),
+        "registry_observation_scope": value.get("registry_observation_scope"),
+    })
+}

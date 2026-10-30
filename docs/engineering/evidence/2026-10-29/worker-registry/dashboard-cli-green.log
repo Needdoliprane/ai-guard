@@ -1,0 +1,29 @@
+    Blocking waiting for file lock on build directory
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.52s
+     Running unittests src/main.rs (target/debug/deps/agentsandbox-31c1d34a39fd574c)
+
+running 9 tests
+test tests::gateway_accepts_an_explicit_tenant_registry ... ok
+test tests::healthcheck_requires_urls_and_accepts_both_ingress_destinations ... ok
+test tests::shared_dashboard_is_explicit_and_excludes_a_fixed_identity ... ok
+test tests::ingress_accepts_two_fixed_upstreams ... ok
+test gateway_config::tests::symlinked_credential_and_registry_are_refused ... ok
+test gateway_config::tests::resolves_file_references_relative_to_registry_and_does_not_create_database ... ok
+test gateway_config::tests::reads_validated_worker_quota_from_trusted_tenant_configuration ... ok
+test gateway_config::tests::unknown_version_fields_empty_registry_and_duplicate_identities_are_refused ... ok
+test tests::tenant_registry_cannot_be_mixed_with_legacy_identity_options ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/workers_api.rs (target/debug/deps/workers_api-302c708087d1b777)
+
+running 5 tests
+test nested_command_contract_rejects_unknown_fields ... ok
+test dashboard_refuses_a_control_token_even_if_its_file_was_misconfigured ... ok
+test decision_response_supplies_the_exact_receipt_required_by_admission ... ok
+test shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_only ... ok
+test worker_api_enforces_tenant_roles_and_reservation_quota ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+

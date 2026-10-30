@@ -1,0 +1,19 @@
+{
+  "status": "PASS",
+  "origin": "http://127.0.0.1:48400",
+  "source": "real QA gateway/dashboard, existing durable audit and worker records",
+  "initialLogin": {
+    "scrollY": 0,
+    "brand": 30,
+    "action": 535.78125,
+    "width": 320,
+    "height": 568,
+    "overflow": false
+  },
+  "captures": [
+    "login-mobile-real.png",
+    "overview-desktop-real.png",
+    "workers-desktop-real.png",
+    "workers-mobile-real.png"
+  ]
+}

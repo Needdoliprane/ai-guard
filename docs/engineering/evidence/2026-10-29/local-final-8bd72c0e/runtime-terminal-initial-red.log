@@ -1,0 +1,173 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.09s
+     Running tests/runtime_terminal.rs (target/debug/deps/runtime_terminal-b3842d75fc3aad6a)
+
+running 1 test
+case missing_exit_code: FAIL
+case still_running: FAIL
+case inconsistent_running: FAIL
+case inconsistent_status: FAIL
+case missing_running: FAIL
+case missing_finish: FAIL
+case invalid_finish: FAIL
+case reversed_finish: FAIL
+case fast_success: PASS
+case fast_failure: PASS
+case lowercase_aliases: PASS
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066740) panicked at tests/runtime_terminal.rs:204:5:
+missing_exit_code:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066799) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 9 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+still_running:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066827) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "running", running: true, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 6 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+inconsistent_running:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066836) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: true, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 5 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+inconsistent_status:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066845) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "running", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 5 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+missing_running:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066854) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 4 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+missing_finish:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066861) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 4 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+invalid_finish:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066868) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "not-a-timestamp", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 4 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+reversed_finish:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1066877) panicked at tests/runtime_terminal.rs:127:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:41:59Z", exit_code: 0, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 4 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+error: test failed, to rerun pass `--test runtime_terminal`

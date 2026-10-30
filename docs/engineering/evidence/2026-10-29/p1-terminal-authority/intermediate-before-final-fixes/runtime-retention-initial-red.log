@@ -1,0 +1,118 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.13s
+     Running tests/runtime_retention.rs (target/debug/deps/runtime_retention-7e26d41fc7c1025e)
+
+running 1 test
+case terminal_before_ack: FAIL
+case audit_failure: FAIL
+case rm_failure: FAIL
+case create_conflict: PASS
+case callback_stop: FAIL
+case callback_engine_unavailable: FAIL
+case legacy_cleanup: PASS
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229177) panicked at tests/runtime_retention.rs:223:5:
+terminal_before_ack:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229220) panicked at tests/runtime_retention.rs:130:9:
+no rm before the caller commits its terminal result
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+audit_failure:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229275) panicked at tests/runtime_retention.rs:130:9:
+no rm before the caller commits its terminal result
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+rm_failure:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229291) panicked at tests/runtime_retention.rs:121:30:
+known terminal result must remain accessible: session container cleanup failed; its volume is retained
+
+Caused by:
+    docker command failed (exit status: 125): 
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+callback_stop:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229306) panicked at tests/runtime_retention.rs:104:13:
+failed execution must retain its created instance
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+callback_engine_unavailable:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1229313) panicked at tests/runtime_retention.rs:109:17:
+assertion failed: format!("{error:#}").contains("stop unknown")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s
+
+error: test failed, to rerun pass `--test runtime_retention`

@@ -1,0 +1,3 @@
+source=input.txt
+result=result.txt
+status=created

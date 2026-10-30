@@ -1,0 +1,121 @@
+# Broker supervision — control contract proposal
+
+2026-10-30. **Proposal, no product code or endpoint added.** Structural direction is already approved. Root owns final contracts/integration; no further user permission is requested here. Based on current control/audit/runner code, not an assumption that the approved architecture is implemented.
+
+## 1. Source constraints that determine this proposal
+
+- `control.rs`: `AdmissionV1`, `LaunchSpecV1`, `WorkerV1`, `WorkerMutationV1`, `WorkerTransitionV1`, `RuntimeInspectionV1`, `MutationReceiptV1`, `AllocationV1` are existing strict DTOs. Preserve their JSON and current hash domains.
+- `audit/control.rs:607,1086`: admission/mutation use `begin_checked`, an IMMEDIATE transaction, receipt/replay checks, audited projection and `commit_checked`. Start replay returns `AlreadyConsumed`; first start currently needs only `Created`/quota/CID/unconsumed claim.
+- `audit/control.rs:234,1419`: validation reconstructs every table column and mutation input/result from events; merely adding a table or bypassing `require_v2` is insufficient.
+- `audit.rs:95,123`: exact DDL, permitted automatic indexes and schema versions are allowlisted. `tenant_binding.schema_version=1` is the identity-binding format, **not** `PRAGMA user_version` and must not be renamed to 3.
+- `migrate_control_v2`: only v1→v2, new private backup destination, backing/name/lock checks, head equality, backup integrity/fsync, then DDL/genesis in a checked transaction. Preserve those safeguards for v2→v3.
+- `RunPlan` v1/2/3 is private and strict; `PlanState::update` mutates managed state. Plan3/provider input/resolution/binding and current request/admission/spec hashes are unchanged. New intent/checkpoint types live alongside it.
+- `RunPlan`/`ManagedCheckpoint` visibility is internal to runner. Expose a narrow `runner::supervised` freeze/resume adapter returning new validated owned records, rather than publishing raw plan/private-file internals or rebuilding private JSON in the broker module.
+- `launch_worker.on_created` already durably records Created before `StartClaim`; insert arm/stop-target registration there. Import has only a local helper emission flag; scan/export also lack central claims. All three require new central helper contracts before cutover.
+
+## 2. Explicit protocol and cutover gate
+
+Proposed authenticated `GET /api/v1/control/protocol` returns `{version:1, schema_version, control_namespace_uuid, tenant_id, role, protocols:["broker_supervision_v1"], active}`. Tenant/role come from the identity guard. A new broker requires runner + matching trusted origin/tenant/namespace + schema3 + active protocol; an old control or inactive v2 is a hard refusal before any helper. Never fall back to direct execution.
+
+IPC first authenticates the presented credential to an allowed tenant/origin; only then may a profile ID select among that identity's private roots. Viewer/worker credentials are never exchanged for a profile's runner key. UID/profile/body assertions alone do not authenticate a tenant. Bind the canonical origin and namespace privately; no client-supplied tenant/origin field selects the Store.
+
+Do not activate this mode or change current defaults while batch/TTY/helper paths are incomplete. Once cut over, schema3 rejects **fresh legacy admission and fresh `WorkerMutationV1::StartClaim`**, even if an arm happens to exist. Replay of a previously consumed legacy start is allowed only as `AlreadyConsumed`; read/observe/stop/cleanup retain maintenance compatibility. The new service cannot start against that maintenance protocol.
+
+## 3. Proposed strict DTOs (new names, not existing API)
+
+All use `deny_unknown_fields`; enum variants are closed. UUIDs/hashes reuse `control::uuid/hash`. Decimal counters are canonical unsigned u128 strings (no sign/leading zeros except `0`, checked parse/arithmetic); UTC is diagnostic, never the expiry authority.
+
+```rust
+HostClockSampleV1 { version:u32 /*1*/, method:HostClockMethodV1,
+  boot_id:String /*canonical UUID*/, continuous_ns_decimal:String,
+  observed_utc:Option<String> /*bounded RFC3339, diagnostic only*/ }
+HostClockMethodV1 = LinuxBoottimeV1 | DarwinMachContinuousV1;
+SupervisedAdmissionV1 { version:u32 /*1*/, protocol:SupervisionProtocolV1,
+  intent_hash:String, admission:AdmissionV1 }
+SupervisionProtocolV1 = BrokerSupervisionV1;
+BindLegacyIntentV1 { version:u32 /*1*/, operation_id:String, worker_id:String,
+  attempt_id:String, expected_revision:u64, intent_hash:String }
+ArmSubjectV1 = Worker | Helper { helper_id:String, purpose:HelperPurposeV1,
+  policy_version:u32 /*1*/, permission:MutationReceiptV1 };
+HelperPurposeV1 = Import | Scan | Export;
+ArmV1 { version:u32 /*1*/, operation_id:String, worker_id:String,
+  attempt_id:String, expected_revision:u64, intent_hash:String,
+  subject:ArmSubjectV1, inspection:RuntimeInspectionV1,
+  authority_binding_hash:String, configuration_fingerprint_version:u32,
+  configuration_fingerprint:String, clock:HostClockSampleV1,
+  timeout_seconds:u32, deadline_ns_decimal:String }
+ArmReceiptV1 { version:u32 /*1*/, arm_id:String /*arm operation_id*/,
+  worker_id:String, attempt_id:String, input_hash:String,
+  control_namespace_uuid:String, audit_seq:i64, audit_hash:String }
+ArmResultV1 { replayed:bool, arm:ArmV1, receipt:ArmReceiptV1 }
+ArmedStartClaimV1 { version:u32 /*1*/, operation_id:String, worker_id:String,
+  attempt_id:String, expected_revision:u64, emitter_id:String,
+  arm_receipt:ArmReceiptV1, clock_check:HostClockSampleV1 }
+HelperStartClaimV1 { version:u32 /*1*/, operation_id:String, helper_id:String,
+  emitter_id:String, arm_receipt:ArmReceiptV1, clock_check:HostClockSampleV1 }
+HelperClaimResultV1 { receipt:MutationReceiptV1, disposition:ClaimDispositionV1 }
+HelperObservationV1 { version:u32 /*1*/, operation_id:String, helper_id:String,
+  arm_receipt:ArmReceiptV1, observation:RuntimeObservationV1 }
+HelperCleanupV1 { version:u32 /*1*/, operation_id:String, helper_id:String,
+  arm_receipt:ArmReceiptV1, removed:bool, error:Option<String> }
+ExportRequestV1 { version:u32 /*1*/, operation_id:String, worker_id:String,
+  attempt_id:String, destination_ref:String /*opaque private export-intent UUID*/ }
+```
+
+Use new domains `ai-guard:supervised-admission:v1`, `ai-guard:execution-arm:v1`, `ai-guard:armed-start:v1`, `ai-guard:helper-start:v1`, `ai-guard:helper-observation:v1`, `ai-guard:helper-cleanup:v1`, `ai-guard:export-request:v1` and `ai-guard:bind-legacy-intent:v1` with the explicitly frozen typed serialization order; arrays retain order and no text normalization occurs at replay. Do not alter `policy::request_hash`, `AdmissionV1::input_hash`, `LaunchSpecV1::spec_hash`, provider context or legacy mutation/snapshot hashes. Intent canonicalization/domain is a separate private contract.
+
+`ArmV1.inspection` binds complete CID, authority UUID/runtime, immutable image, volume/name, admitted spec/resources/network/preset/restart policy. Its worker variant must equal the stored Created inspection. Fingerprint version/digest and authority-binding digest are taken from the broker-private verified `OwnedContainerSnapshot`/`RuntimeAuthority`; the gateway validates structure/pinned consistency, **not an independent runtime or host-clock attestation**. Private endpoints/invocation paths/Env/secrets are absent.
+
+## 4. Arm/claim transaction and irreversible gates
+
+1. Freeze submission/binding/intent/checkpoint durably before IPC accepted ACK. Obtain decision/admission using existing `AdmissionV1` nested in the new wrapper; central state binds the intent hash without changing the inner request/spec hash.
+2. Worker arm: require same authenticated Store, known worker/attempt/intent, current expected revision, quota held, Created inspection/CID exact and no start claim. Persist the **original** host sample and deadline privately, then POST its exact bytes. Validate `deadline=sample+timeout*1_000_000_000` with checked u128 arithmetic and timeout equal to admitted `launch.timeout_seconds`.
+3. Under `begin_checked`, append `control.execution.arm` and its projection/operation identity atomically. No worker revision/state/claim/quota/usage changes merely because an arm exists. Same operation+bytes returns the original receipt even after worker progress; changed bytes or a second identity for the same subject conflicts. A lost ACK never permits recomputing the deadline.
+4. Before claim, register the already-authorized immutable stop target in the independent scheduler; fail closed if registration/capacity is unavailable. This local readiness cannot be proved by a public boolean asserted to the gateway.
+5. `claim_armed_start` verifies exact arm receipt, tenant namespace, worker/attempt/spec/CID/intent, current worker revision and `Created`/quota/unconsumed claim. `clock_check` must have same boot/method, `armed<=check<deadline`; broker rechecks its real clock immediately before engine emission. Central validation only checks that reported clock algebra.
+6. First claim appends a new typed supervised control record, updates the existing worker start-operation/emitter/state projection and returns `MutationResultV1` with `EmitOnce` in one checked transaction. Exact replay always returns `AlreadyConsumed`, even if the original response was lost. Replay uses the exact clock-check bytes, not a newly sampled request under the same operation ID.
+7. After deadline, clock regression/method change/boot change, no new start. Already armed CIDs remain under targeted enforcement. No UTC fallback, deadline refresh, claim erasure or “exactly once runtime effect” promise.
+8. Stop/observation/terminal use existing transitions and credible runtime data. Existing terminal transaction remains sole producer of the worker's `AllocationV1`, quota release and audit; clock elapsed time must never replace missing runtime timestamps. Cleanup waits for its terminal ACK. Unknown terminal/usage keeps reconciliation/quota rules, not zero allocation.
+
+## 5. Helpers are distinct subjects, not worker mutations
+
+Helper arm permission is a durable parent admission receipt for Import/Scan, or an audited `ExportRequestV1` receipt for Export. Root should make the helper policy explicit and shared in Rust: exact existing tar commands, image equal to admitted immutable image, parent volume, network none, no credentials and fixed bounded resources/preset. No arbitrary helper argv from the API. Worker timeout is not reused: existing helpers have a separate 120-second policy.
+
+Import requires parent Preparing/quota held and no worker start claim; only one import subject per attempt. Scan/Export require a credible terminal parent; Export additionally requires the new authorized destination intent, whose concrete root/path validation stays private to the broker. Current `ContainerPurpose::Export` covers both scan and archive, so the control-purpose distinction must be added explicitly, not inferred from a name.
+
+`claim_helper_start` consumes its own arm/claim identity and returns `EmitOnce` once, without changing the parent's worker state, CID or start fields. Record helper observations/cleanup separately with their arm/CID: the observation operation ID also identifies that observation, as current worker observations do. Replay derives a sticky helper terminal state; running-after-terminal or cleanup-before-credible-terminal is rejected, except a separately proved D5 fence. Do not insert helper terminal data into the parent's allocation row or release/re-reserve its worker quota. Import, scan and export must all use these gates before supervised mode can be activated.
+
+## 6. Proposed schema3 and replay integration
+
+Keep existing v2 tables/rows byte-compatible; add exact allowlisted DDL for:
+```sql
+CREATE TABLE supervision_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),protocol TEXT NOT NULL CHECK(protocol='broker_supervision_v1'),genesis_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq),genesis_hash TEXT NOT NULL);
+CREATE TABLE worker_supervision(worker_id TEXT NOT NULL PRIMARY KEY REFERENCES workers(worker_id),intent_hash TEXT NOT NULL UNIQUE,payload_json TEXT NOT NULL,event_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq));
+CREATE TABLE execution_arms(arm_id TEXT NOT NULL PRIMARY KEY REFERENCES worker_mutations(operation_id),worker_id TEXT NOT NULL REFERENCES workers(worker_id),attempt_id TEXT NOT NULL REFERENCES worker_attempts(attempt_id),subject_key TEXT NOT NULL UNIQUE,input_hash TEXT NOT NULL,payload_json TEXT NOT NULL,event_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq));
+CREATE TABLE helper_claims(helper_id TEXT NOT NULL PRIMARY KEY,arm_id TEXT NOT NULL UNIQUE REFERENCES execution_arms(arm_id),operation_id TEXT NOT NULL UNIQUE REFERENCES worker_mutations(operation_id),emitter_id TEXT NOT NULL,payload_json TEXT NOT NULL,event_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq));
+CREATE TABLE helper_observations(operation_id TEXT NOT NULL PRIMARY KEY REFERENCES worker_mutations(operation_id),helper_id TEXT NOT NULL REFERENCES helper_claims(helper_id),payload_json TEXT NOT NULL,event_seq INTEGER NOT NULL UNIQUE REFERENCES events(seq));
+CREATE INDEX helper_observations_target ON helper_observations(helper_id,event_seq);
+```
+Proposed automatic-index counts are respectively 1,3,3,4,2; verify against actual SQLite in Luna's migration/schema tests before freezing them. `subject_key` is derived: `worker:<attempt>`, `import:<attempt>`, or `<scan|export>:<helper UUID>`. No caller-chosen key. Reuse `worker_mutations` as the global control-operation index for new arm/bind/export/helper actions, inserting its row before dependent FK rows in the same transaction. This prevents an operation UUID from changing purpose across tables. Helper cleanup needs an operation/event row, not another worker snapshot.
+
+Do not deserialize new data as the old strict `ControlRecord`. Add an explicit version2 supervised admission/start record carrying its full new request plus the existing resulting worker/snapshot/policy evidence; keep old version1 records untouched. Separate strict arm/helper/bind/export event records feed their new projections. Generalize `load_operation`, receipt dispatch and replay by event kind/version with closed matches. For version2 claims, reconstruct both the arm link and the resulting existing worker transition; do not trust a rehashed result snapshot alone.
+
+Extend `validate_schema`, `AUTO_INDEX_COUNTS`, `control::SCHEMA`, `TABLE_QUERIES`, `control::validate`, genesis checks and row reconstruction together. New v3 genesis marks the boundary: historic v1 admission/claim records before it remain valid; new legacy admission/fresh claim records after it are forbidden. Unknown versions/actions/tables/triggers and altered arm/claim projections latch failure; never repair silently.
+
+## 7. Proposed Store/API surface and migration
+
+New Store signatures: `supervision_protocol() -> Result<ControlProtocolV1>`; `admit_supervised(&SupervisedAdmissionV1,&Policy,Decision,Value,&QuotaPolicyV1)->Result<AdmissionResultV1>`; `bind_legacy_intent(&BindLegacyIntentV1)->Result<MutationReceiptV1>`; `arm_execution(&ArmV1)->Result<ArmResultV1>`; `execution_arm(&str)->Result<Option<ArmResultV1>>`; `claim_armed_start(&ArmedStartClaimV1)->Result<MutationResultV1>`; `claim_helper_start(&HelperStartClaimV1)->Result<HelperClaimResultV1>`; `observe_helper(&HelperObservationV1)->Result<MutationReceiptV1>`; `record_helper_cleanup(&HelperCleanupV1)->Result<MutationReceiptV1>`; `request_export(&ExportRequestV1)->Result<MutationReceiptV1>`; `migrate_control_v3(&Path)->Result<MigrationReportV1>`. All are proposals returning `anyhow::Result` with typed `ControlFailure` causes as today.
+
+Proposed v1 HTTP subresources: `POST workers/supervised-reservations`, `POST workers/{id}/supervision/bind`, `POST workers/{id}/arms`, `GET workers/{id}/arms/{arm_id}`, `POST workers/{id}/armed-start-claims`, `POST workers/{id}/helper-start-claims`, `POST workers/{id}/helper-observations`, `POST workers/{id}/helper-cleanup`, `POST workers/{id}/export-requests`, plus protocol GET. Identity guards run first; path IDs must match body IDs and lookup is only in that identity's Store. No free tenant field, token, Env, local path or secret binding content is accepted. Keep legacy read/stop/observe/cleanup routes and JSON contracts; schema3 fresh legacy start/admission is refused.
+
+Factor existing checked transaction logic rather than call a public Store mutator and then add supervision in a second transaction. Preserve 400 invalid, 401/403 identity, 404 scoped absence, 409 divergent identity/state/expired claim, 503 migration/audit unavailable. No accepted arm/claim without durable audit; on failure there is no emission permission.
+
+Two explicit migration paths: **maintenance** opens v1/v2 for existing permitted diagnosis/stop/export, labels missing supervision, and grants no new supervised start; **supervised activation** quiesces old writers, verifies backups/private plans/bindings, performs explicit v2→v3 migration and negotiation, then requires the new protocol. v1 requires its existing separate explicit v1→v2 step first. New empty databases/defaults do not silently change during this incomplete chantier.
+
+Migration3 must keep namespace and all existing worker/attempt/claim/receipt/allocation values, append audited v3 genesis, fsync/verify a fresh private backup and recheck the exact head before DDL using existing `StoreStorage` guards. No overwrite of original plans or automatic credentials conversion. A verified unconsumed legacy Created attempt may bind a new immutable intent and receive its first arm only after quiescence/inspection and absence of pending/uncertain starts. A consumed/ambiguous old attempt never gets a fresh window: targeted conservative stop/reconcile, or retained quota until D5 fencing is proved. Restore/rollback never creates permission to replay a claim; old backups require controlled authority fencing before fresh admissions.
+
+## 8. Minimum proof for the complete vertical
+
+Luna/root need atomic/idempotent/concurrent arm/claim tests; forged receipt/tenant/spec/CID/clock/revision and audit-failure refusals; strict schema/replay tamper/backup/restore/migration tests; old consumed replay and provider plan3 binding preservation. Then real owned broker/IPC and runtime batch: kill CLI after ACK, kill broker/restart with original deadline, gateway down, blocked journal writer, late start/Created ambiguity, helper deadlines and export after restart, unique observed allocation/quota release. Finish TTY guardian/lease restoration and A1/A2/B1 before activation. A Store-only PASS is not that vertical or production qualification.
+
+Root decision points remaining are technical integration choices, not new user approvals: confirm clock DTO name/enum with runtime agent; freeze the compiled helper policy/observation DTO; choose exact supervised record2 envelope and D5 evidence. None may be replaced by a TODO path that emits a start.

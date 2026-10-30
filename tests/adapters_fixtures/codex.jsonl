@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"cargo test","aggregated_output":"","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"cargo test","aggregated_output":"test result: ok","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"src/main.rs","kind":"update"}],"status":"completed"}}
+{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":30,"cache_write_input_tokens":0,"output_tokens":42}}

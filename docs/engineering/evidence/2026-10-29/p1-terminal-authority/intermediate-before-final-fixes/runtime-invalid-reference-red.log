@@ -1,0 +1,179 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.70s
+     Running tests/runtime_retention.rs (target/debug/deps/runtime_retention-7e26d41fc7c1025e)
+
+running 1 test
+case terminal_before_ack: PASS
+case audit_failure: PASS
+case rm_failure: PASS
+case create_conflict: PASS
+case callback_stop: PASS
+case callback_engine_unavailable: PASS
+case legacy_cleanup: PASS
+case name_substitution: PASS
+case unusable_retained_empty: FAIL
+case unusable_retained_malformed: FAIL
+case unusable_retained_truncated: FAIL
+case unusable_legacy_empty: FAIL
+case unusable_legacy_malformed: FAIL
+case unusable_legacy_truncated: FAIL
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282137) panicked at tests/runtime_retention.rs:369:5:
+unusable_retained_empty:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282255) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-aa9cf4de-5994-4b12-b362-4999ee986e1f-run-2b435260eb274ee0a0dd52f2b04c40cb
+kill agentsandbox-aa9cf4de-5994-4b12-b362-4999ee986e1f-run-2b435260eb274ee0a0dd52f2b04c40cb
+inspect agentsandbox-aa9cf4de-5994-4b12-b362-4999ee986e1f-run-2b435260eb274ee0a0dd52f2b04c40cb
+
+  left: 4
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+unusable_retained_malformed:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282261) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-138445d4-4712-401c-a554-bc3f6810f8e0-run-c045be1f920f48f580f13e6308d3cdb4
+kill agentsandbox-138445d4-4712-401c-a554-bc3f6810f8e0-run-c045be1f920f48f580f13e6308d3cdb4
+inspect agentsandbox-138445d4-4712-401c-a554-bc3f6810f8e0-run-c045be1f920f48f580f13e6308d3cdb4
+
+  left: 4
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+unusable_retained_truncated:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282267) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-33b42f96-30b0-42e3-8bec-e1eb02b270b6-run-3d5745fb835b4a5bb2707d9b85f1ed1b
+kill agentsandbox-33b42f96-30b0-42e3-8bec-e1eb02b270b6-run-3d5745fb835b4a5bb2707d9b85f1ed1b
+inspect agentsandbox-33b42f96-30b0-42e3-8bec-e1eb02b270b6-run-3d5745fb835b4a5bb2707d9b85f1ed1b
+
+  left: 4
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+unusable_legacy_empty:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282273) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-341fcbaa-55b6-478f-8dcd-af609c82957f-run-f1a5afe190be496089ea8a918ff5fb64
+kill agentsandbox-341fcbaa-55b6-478f-8dcd-af609c82957f-run-f1a5afe190be496089ea8a918ff5fb64
+inspect agentsandbox-341fcbaa-55b6-478f-8dcd-af609c82957f-run-f1a5afe190be496089ea8a918ff5fb64
+rm agentsandbox-341fcbaa-55b6-478f-8dcd-af609c82957f-run-f1a5afe190be496089ea8a918ff5fb64
+
+  left: 5
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+unusable_legacy_malformed:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282280) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-fc9cfbae-d1ab-4508-a67b-a7645097c895-run-7433a2a21e3a456c9648845dd5a7cea5
+kill agentsandbox-fc9cfbae-d1ab-4508-a67b-a7645097c895-run-7433a2a21e3a456c9648845dd5a7cea5
+inspect agentsandbox-fc9cfbae-d1ab-4508-a67b-a7645097c895-run-7433a2a21e3a456c9648845dd5a7cea5
+rm agentsandbox-fc9cfbae-d1ab-4508-a67b-a7645097c895-run-7433a2a21e3a456c9648845dd5a7cea5
+
+  left: 5
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+unusable_legacy_truncated:
+
+running 1 test
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped' (1282288) panicked at tests/runtime_retention.rs:115:13:
+assertion `left == right` failed: unknown ownership must not inspect, start, kill or remove a successor by name: create worker:fixture
+inspect agentsandbox-c5fb4a91-f68c-4216-b32f-273bc211fdc8-run-e4d51eae00b745d4953a48a842139860
+kill agentsandbox-c5fb4a91-f68c-4216-b32f-273bc211fdc8-run-e4d51eae00b745d4953a48a842139860
+inspect agentsandbox-c5fb4a91-f68c-4216-b32f-273bc211fdc8-run-e4d51eae00b745d4953a48a842139860
+rm agentsandbox-c5fb4a91-f68c-4216-b32f-273bc211fdc8-run-e4d51eae00b745d4953a48a842139860
+
+  left: 5
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... FAILED
+
+failures:
+
+failures:
+    terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+error: test failed, to rerun pass `--test runtime_retention`

@@ -1,0 +1,50 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+     Running tests/runtime_managed.rs (target/debug/deps/runtime_managed-6de05ff75e1b8320)
+
+running 14 tests
+test managed_volume_names_are_validated_and_shared_by_helpers_without_session_collision ... ok
+test native_snapshots_keep_observed_dates_limits_and_ignore_environment ... ok
+test persisted_operation_keeps_the_same_name_and_create_identity ... ok
+test incomplete_or_inconsistent_observation_never_becomes_terminal_usage ... ok
+test non_regular_runtime_program_is_rejected_without_blocking_on_open ... ok
+test trusted_anchor_refuses_extended_acl_on_program_or_leaf_directory ... ok
+test trusted_anchor_refuses_oversized_program_before_reading_its_content ... ok
+test approved_program_changes_and_unapproved_permissions_fail_before_execution ... ok
+test trusted_anchor_executes_approved_leaf_after_parent_is_replaced ... ok
+test approved_invocation_clears_ambient_environment_and_uses_control_cwd ... ok
+test old_authority_requires_read_only_adoption_and_keeps_handle_fingerprint ... ok
+test podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown ... ok
+test default_invocation_never_executes_a_project_path_candidate ... ok
+test managed_launch_requires_created_ack_and_keeps_owned_evidence ... FAILED
+
+failures:
+
+---- managed_launch_requires_created_ack_and_keeps_owned_evidence stdout ----
+
+thread 'managed_launch_requires_created_ack_and_keeps_owned_evidence' (2754519) panicked at tests/runtime_managed.rs:513:9:
+case legacy_observe: 
+running 1 test
+test managed_launch_requires_created_ack_and_keeps_owned_evidence ... FAILED
+
+failures:
+
+failures:
+    managed_launch_requires_created_ack_and_keeps_owned_evidence
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.77s
+
+ 
+thread 'managed_launch_requires_created_ack_and_keeps_owned_evidence' (2756031) panicked at tests/runtime_managed.rs:280:22:
+called `Result::unwrap()` on an `Err` value: runtime did not prove a terminal process
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    managed_launch_requires_created_ack_and_keeps_owned_evidence
+
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.73s
+
+error: test failed, to rerun pass `--test runtime_managed`

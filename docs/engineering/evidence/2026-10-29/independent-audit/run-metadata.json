@@ -1,0 +1,63 @@
+{
+  "run_id": "ai-guard-20261029-run1",
+  "repo": "ai-guard",
+  "target": "/private/tmp/ai-guard-audit-20261029.n8ZxPB",
+  "source_ref": {
+    "git": "no HEAD; main has no commits; all source files are untracked",
+    "manifest_sha256": "77876e6de40964096f90f458b07b872b7848f1a05257e2f763e5f57679641d34",
+    "file_count": 169,
+    "excluded_generated_directories": [
+      ".git",
+      "target",
+      "node_modules"
+    ]
+  },
+  "profile": "standard",
+  "scope_paths": [
+    "."
+  ],
+  "budget": null,
+  "execution_policy": "sandboxed-source-and-local-only",
+  "selected_companion_files": [
+    "WEB-PROTOCOL-AND-AUTH.md",
+    "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md",
+    "DATA-ISOLATION-AND-LIFECYCLE.md",
+    "CLOUD-AND-DEPLOYMENT.md",
+    "PROTOCOLS-RPC-AND-MESSAGING.md",
+    "AI-AND-LLM.md",
+    "CLIENT-SIDE.md",
+    "SUPPLY-CHAIN-AND-RELEASE.md"
+  ],
+  "prior_run_paths": [],
+  "shared_file_owners": {
+    "run-metadata.json": "parent",
+    "architecture.md": "parent",
+    "coverage-ledger.json": "parent",
+    "findings.json": "parent",
+    "REPORT.md": "parent",
+    "FINDINGS-DETAIL.md": "parent",
+    "NEEDS-VALIDATION.md": "parent"
+  },
+  "execution": {
+    "status": "blocked",
+    "reason": "required OS-enforced sandbox controls and race-safe artifact promotion could not all be established",
+    "target_code_executed": false,
+    "tests_run": false,
+    "network_used": false
+  },
+  "result_counts": {
+    "coverage_units": 18,
+    "confirmed": 0,
+    "needs_validation": 19,
+    "rejected": 0,
+    "phase5_verified": 19
+  },
+  "final_verification": {
+    "snapshot_file_count": 169,
+    "sorted_shasum_listing_sha256": "d8bf039461bc38651340540899c5273edd16934485715095386cc1aeb5c9e388",
+    "findings_validator": "PASS",
+    "coverage_validator": "PASS",
+    "development_checkout_diverged_after_snapshot": true
+  },
+  "run_status": "complete"
+}

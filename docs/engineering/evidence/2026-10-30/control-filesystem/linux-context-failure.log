@@ -1,0 +1,54 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 709B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#2 ...
+
+#3 [auth] library/rust:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#2 DONE 2.0s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 517B done
+#4 DONE 0.0s
+
+#5 [1/8] FROM docker.io/library/rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b
+#5 CACHED
+
+#6 [internal] load build context
+#6 transferring context: 319.91kB 0.0s done
+#6 DONE 0.0s
+
+#7 [3/8] WORKDIR /build
+#7 CACHED
+
+#8 [4/8] COPY --chown=1000:1000 Cargo.toml Cargo.lock rust-toolchain.toml ./
+#8 CACHED
+
+#9 [5/8] COPY --chown=1000:1000 src/ ./src/
+#9 CACHED
+
+#10 [6/8] COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs
+#10 ERROR: failed to calculate checksum of ref 311179c5-f7e1-4130-bba1-50e8d3d7f537::uz2nwbse82uyk641qvo4bypcb: "/tests/control_fs.rs": not found
+
+#11 [2/8] RUN groupadd --gid 1000 fsqa && useradd --uid 1000 --gid 1000 --create-home fsqa && mkdir /build && chown 1000:1000 /build
+#11 CANCELED
+------
+ > [6/8] COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs:
+------
+Dockerfile:7
+--------------------
+   5 |     COPY --chown=1000:1000 Cargo.toml Cargo.lock rust-toolchain.toml ./
+   6 |     COPY --chown=1000:1000 src/ ./src/
+   7 | >>> COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs
+   8 |     USER 1000:1000
+   9 |     RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked
+--------------------
+ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref 311179c5-f7e1-4130-bba1-50e8d3d7f537::uz2nwbse82uyk641qvo4bypcb: "/tests/control_fs.rs": not found
+
+View build details: docker-desktop://dashboard/build/default/default/k0m8fuw0qaa9yu9c2g9wjlvxw

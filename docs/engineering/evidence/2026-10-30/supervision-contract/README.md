@@ -1,0 +1,9 @@
+# Contrats de supervision — préparation logicielle vérifiée
+
+DTO Rust stricts et politique helper partagée, sans activation du service. Les types séparent intention, armement, reçu, claim et helpers Import/ImportVerification/FinalScan/Export. La politique helper fixe tar, réseau coupé, ressources, image/volume/noms liés au parent, preset2 même pour un parent TTYv3, zéro credential et durée120s ; son hash possède son domaine propre. [Source](supervision.after.rs.txt), [tests et chronologie](tests.md), [revue finale](review.md).
+
+Deux défauts ont été reproduits puis corrigés : UUID de boot nul et révision du claim différente de celle de l'armement. RED : trois tests PASS/deux FAIL ; GREEN : cinq PASS. Le canari `worker_registry` passe ses 36 tests, dont les octets/hashes historiques FixedSandboxV1. Clippy a ensuite signalé la taille de la variante helper ; `Box<HelperPermissionV1>` corrige sa représentation mémoire avec JSON inchangé, puis les cinq tests, fmt, Clippy strict et release passent. Dans le rapport brut, « changed only Box » décrit le delta après le premier GREEN ; les deux validateurs avaient été corrigés avant ce premier GREEN.
+
+Source finale `src/control/supervision.rs` : `9658a67cc8b030beb9418ec76eb71df4316dd0c8b77f938f6bf8f4737002d10a`. Le [même artefact validé](../runtime-stop-snapshot/artifacts.md) inclut ces contrats et le correctif d'arrêt. Les 36 tests legacy ne sont pas répétés après le seul changement de Box ; le code legacy et ses tests sont inchangés.
+
+Ce lot est une préparation, pas une fonctionnalité de supervision livrée. Il ne qualifie ni transactions/migration/replay Storev3, ni routes HTTP, ni IPC, ni scheduler, ni helper réel ou gardien TTY. Le Store en développement après ce gel dispose de sa propre validation ; aucun résultat de cette page ne lui est transféré. Le schéma par défaut reste2, les plans1/2/3 et leurs hashes sont conservés.

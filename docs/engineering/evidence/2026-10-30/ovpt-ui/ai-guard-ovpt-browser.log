@@ -1,0 +1,8 @@
+
+> agent-sandbox-front@0.1.0 test:browser
+> node tests/browser.mjs
+
+Focus après détail + SSE : {"tag":"BUTTON","key":"worker-00000000-0000-4000-8000-000000000001"}
+Focus après disparition du worker : {"tag":"SPAN","key":"page-summary-workers"}
+Contrôle navigateur réussi : connexion, XSS, SSE et curseur, filtres, hiérarchie, export, mémoire seule, thèmes, mobile, vide, workers paginés/focus/100 lignes, quota, allocations exactes, états périmés/invalides, rafale 200 événements et refus 403.
+Contrôle identité réussi : identité viewer validée avant données, indisponibilité/invalide/runner refusés, A→B avec B500, 12 réponses/flux A tardifs ignorés, pagination/détail/export, refus A403 tardif, péremption limitée au même client.

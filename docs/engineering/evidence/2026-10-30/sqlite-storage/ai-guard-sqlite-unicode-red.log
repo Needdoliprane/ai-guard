@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running tests/storage_security.rs (target/debug/deps/storage_security-d61944835463a132)
+
+running 1 test
+
+thread 'unicode_casefold_aliases_of_reserved_names_are_refused_before_creation' (2557610) panicked at tests/storage_security.rs:463:9:
+Unicode SQLite basename must be refused before resolving aliases: audit-ſhm
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test unicode_casefold_aliases_of_reserved_names_are_refused_before_creation ... FAILED
+
+failures:
+
+failures:
+    unicode_casefold_aliases_of_reserved_names_are_refused_before_creation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--test storage_security`

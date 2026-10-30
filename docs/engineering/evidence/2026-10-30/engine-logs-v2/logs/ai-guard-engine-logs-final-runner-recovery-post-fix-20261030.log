@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running tests/runner_recovery.rs (target/debug/deps/runner_recovery-a5033bc40d988990)
+
+running 16 tests
+test legacy_prestart_workspace_without_exclusion_proof_refuses_without_runtime_or_new_claim ... ok
+test lost_start_claim_ack_keeps_unknown_quota_and_never_starts ... ok
+test broker_crash_recovery_observes_then_stops_the_same_running_instance ... ok
+test live_owner_blocks_resume_and_processes_a_durable_stop_intent ... ok
+test legacy_terminal_status_stop_and_resume_work_and_export_requires_adoption ... ok
+test legacy_invocation_requires_explicit_adoption_and_durable_audit_before_start ... ok
+test recovery_refuses_another_origin_tenant_binding_manifest_or_archive_before_runtime_effects ... ok
+test pending_program_change_cannot_fall_back_to_the_old_valid_program_after_audit_failure ... ok
+test preparation_without_any_helper_emission_can_resume_from_unknown ... ok
+test custom_control_directory_is_physically_excluded_from_manifest_and_worker_archive ... ok
+test recovered_first_start_reports_a_failed_command_as_cli_failure ... ok
+test replaced_approved_program_is_rejected_before_any_recovery_engine_call ... ok
+test recovery_with_another_explicit_program_refuses_without_a_second_start ... ok
+test old_policy_and_replaced_client_require_audited_explicit_adoption_without_restarting ... ok
+test resumed_provider_credentials_remain_bound_after_original_moves_and_reject_changed_bytes ... ok
+test recovered_create_and_import_keep_the_same_instance_and_first_start ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 25.11s
+

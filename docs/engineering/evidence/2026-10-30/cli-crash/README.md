@@ -1,0 +1,9 @@
+# Échéance perdue après SIGKILL du CLI — référence réelle
+
+**FAIL reproduit sur Docker Desktop/macOS ARM64.** Binaire `91f0cc10b0e66c0b5633f4ca87ba22e5e527c6a5bb5cb3ffd0905abd6b2ae5a9`, worker `sleep 20`, limite5s, réseau coupé. Après observation Running, seul le CLI possédé par le harnais est tué (signal9 confirmé). Après7,0019s, le même CID/nom/image/réseau est encore Running. [Rapport et résultats](baseline-report.md), [harnais Rust](harness.rs.txt), [manifest Cargo](harness.Cargo.toml.txt).
+
+Deux essais distincts ont été effectués : le [premier](first-harness-failure.md) a échoué sur une comparaison erronée tag/image immuable et ne produit aucun verdict après échéance ; un unique nouvel essai corrigé reproduit le défaut. L'en-tête historique du rapport est suivi de cet addendum et ne décrit pas le verdict final. Les deux workers ont été arrêtés/réconciliés individuellement : audit18 valide pour chaque base privée, quota0, une mesure `billable=false` chacun, conteneurs retirés après commit et volumes conservés. Aucun modèle, API fournisseur ou secret réel utilisé ; les API locales de contrôle sont réelles.
+
+Le gel pré-correction est conservé dans `/tmp/ai-guard-supervision-prechange-artifact.9hQJ80` : binaire au hash ci-dessus, archive source Rust/Cargo `40e26ae30bb9b30b939ebd3295eec38f28d571df87995ff27cb81bf994f099f8`. Les configurations, bases, journaux privés et credentials QA restent dans les dossiers privés cités par le rapport ; ils ne sont pas recopiés ici.
+
+Cette preuve justifie le [chantier de supervision](../../../BROKER_SUPERVISION.md). Le durcissement de l'arrêt sur snapshot est un correctif distinct, sans survie autonome après mort du CLI. Aucun verdict de l'audit figé du29octobre n'est réécrit. Podman, Linux hôte, Kubernetes, reprise du broker permanent, gardien TTY et gel du service restent à qualifier.

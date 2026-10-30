@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-b25178852687768c)
+
+running 1 test
+Retained runtime QA source: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpaznkzv
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+Retained runtime QA export: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpQq4atq
+Validated real sessions 821a663d-8697-4fd7-b339-e35ac3778999 and 668dd09a-58de-4e06-8476-fbcdcc7b8266, policy denial ced2d44b-0c00-4e32-a77f-5d5759cb9305 without container/volume. Named volumes retained; source proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpaznkzv; export proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpQq4atq.
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.62s
+

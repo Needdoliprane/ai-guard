@@ -1,0 +1,28 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+warning: field `read_budget` is never read
+   --> tests/runtime_interactive.rs:237:5
+    |
+233 | struct PtySession {
+    |        ---------- field in this struct
+...
+237 |     read_budget: usize,
+    |     ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agentsandbox` (test "runtime_interactive") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.21s
+     Running tests/runtime_interactive.rs (target/debug/deps/runtime_interactive-5b5bcb6c7c4f92ae)
+
+running 1 test
+Error: one pump call exceeded its fixed PTY read budget
+test pty_pump_services_control_during_flood_and_caps_capture ... FAILED
+
+failures:
+
+failures:
+    pty_pump_services_control_during_flood_and_caps_capture
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test runtime_interactive`

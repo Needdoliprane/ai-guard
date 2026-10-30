@@ -1,0 +1,65 @@
+
+> agent-sandbox-front@0.1.0 test:browser:live
+> node tests/browser_live.mjs
+
+{
+  "status": "PASS",
+  "node": "v24.22.2",
+  "browser": "156.0.8078.48",
+  "gateway": "http://127.0.0.1:48787",
+  "dashboard": "http://127.0.0.1:48400",
+  "checks": [
+    {
+      "name": "services HTTP réels",
+      "status": "PASS"
+    },
+    {
+      "name": "refus serveur anonyme, invalide, runner et écritures viewer",
+      "status": "PASS"
+    },
+    {
+      "name": "bundle compilé servi par le dashboard",
+      "status": "PASS"
+    },
+    {
+      "name": "connexion UI, mémoire seule et proxy authentifié",
+      "status": "PASS"
+    },
+    {
+      "name": "SSE réel et XSS rendu comme texte déclaré",
+      "status": "PASS"
+    },
+    {
+      "name": "reconnexion SSE avec Last-Event-ID et rattrapage réel",
+      "status": "PASS"
+    },
+    {
+      "name": "téléchargement export cohérent avec la gateway",
+      "status": "PASS"
+    },
+    {
+      "name": "déconnexion, actualisation et absence de persistance du jeton",
+      "status": "PASS"
+    },
+    {
+      "name": "fermeture contexte et navigateur",
+      "status": "PASS"
+    }
+  ],
+  "artifacts": "/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-browser-live-b78KI4",
+  "qa": {
+    "project": "qa-browser-774215b6-1fcd-475d-bf28-b3a07503ab06",
+    "eventIds": [
+      "0805f54f-60f0-4ab7-b65e-88ddac291d53",
+      "2f719071-d41d-4215-939a-43a88c0e42f7"
+    ],
+    "sequences": [
+      35,
+      36
+    ],
+    "provenance": "declared",
+    "source": "qa.browser.live",
+    "exportSha256": "6d0e425c7676cce477aaa23c2f93a6444283c106da97122e96674e2fb1ccde6a"
+  },
+  "scope": "Dashboard Rust et gateway réels ; injection QA déclarée ; aucun effet runtime/fournisseur attesté."
+}

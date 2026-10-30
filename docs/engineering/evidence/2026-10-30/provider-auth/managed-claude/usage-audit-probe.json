@@ -1,0 +1,341 @@
+{
+  "admission_audit_seq": 4,
+  "admission_precedes_start": true,
+  "allocation": {
+    "attempt_id": "0229fc23-9035-4254-8e87-da6cf92e9d21",
+    "billable": false,
+    "cpu_millicore_nanoseconds": "11846365756000",
+    "duration_ns": "5923182878",
+    "finished_at": "2026-10-30T12:44:45.846132346Z",
+    "memory_byte_nanoseconds": "6359969187309289472",
+    "method_version": 1,
+    "source": {
+      "authority_id": "8d336792-4991-4a62-b173-192e6ab744c0",
+      "container_id": "ee487a75b1e1dd0fa757ea9a02944b344a6e18741024fbb38baa0c5b293d41e4",
+      "provenance": "observed",
+      "runtime_kind": "docker",
+      "spec_hash": "5f95fca4d165f651db42fced861e9b15cab72c33260d07dc031205398c6e923e"
+    },
+    "started_at": "2026-10-30T12:44:39.922949468Z",
+    "terminal_observation_id": "2ce38ae8-808a-4568-ba40-2b63c0346e7c",
+    "worker_id": "2bbd017d-2413-4304-9384-6736eb26b243"
+  },
+  "session_events": [
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "command.requested",
+      "quota_held": null,
+      "seq": 2,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": "allow",
+      "decision_rule": "observation_only",
+      "kind": "security.decision",
+      "quota_held": null,
+      "seq": 3,
+      "worker_state": null
+    },
+    {
+      "control_action": "admit",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 4,
+      "worker_state": "reserved"
+    },
+    {
+      "control_action": "prepare",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 5,
+      "worker_state": "preparing"
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.import.requested",
+      "quota_held": null,
+      "seq": 6,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.import.created",
+      "quota_held": null,
+      "seq": 7,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.import.started",
+      "quota_held": null,
+      "seq": 8,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.import.completed",
+      "quota_held": null,
+      "seq": 9,
+      "worker_state": null
+    },
+    {
+      "control_action": "create_issued",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 10,
+      "worker_state": "preparing"
+    },
+    {
+      "control_action": null,
+      "decision_outcome": "allow",
+      "decision_rule": "observation_only",
+      "kind": "runtime.submitted",
+      "quota_held": null,
+      "seq": 11,
+      "worker_state": null
+    },
+    {
+      "control_action": "created",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 12,
+      "worker_state": "created"
+    },
+    {
+      "control_action": "start_claim",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 13,
+      "worker_state": "start_issued"
+    },
+    {
+      "control_action": "observe",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": true,
+      "seq": 14,
+      "worker_state": "running"
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "command.started",
+      "quota_held": null,
+      "seq": 15,
+      "worker_state": null
+    },
+    {
+      "control_action": "observe",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": false,
+      "seq": 16,
+      "worker_state": "terminal"
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "command.completed",
+      "quota_held": null,
+      "seq": 17,
+      "worker_state": null
+    },
+    {
+      "control_action": "cleanup_result",
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "control.worker.transition",
+      "quota_held": false,
+      "seq": 18,
+      "worker_state": "terminal"
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "session.declared",
+      "quota_held": null,
+      "seq": 19,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "tool.requested",
+      "quota_held": null,
+      "seq": 20,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "tool.result",
+      "quota_held": null,
+      "seq": 21,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "session.declared",
+      "quota_held": null,
+      "seq": 22,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "usage.reported",
+      "quota_held": null,
+      "seq": 23,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "observer.coverage",
+      "quota_held": null,
+      "seq": 24,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.requested",
+      "quota_held": null,
+      "seq": 25,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.created",
+      "quota_held": null,
+      "seq": 26,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.started",
+      "quota_held": null,
+      "seq": 27,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.completed",
+      "quota_held": null,
+      "seq": 28,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "file.created",
+      "quota_held": null,
+      "seq": 29,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.diff.completed",
+      "quota_held": null,
+      "seq": 30,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.export.requested",
+      "quota_held": null,
+      "seq": 31,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.requested",
+      "quota_held": null,
+      "seq": 32,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.created",
+      "quota_held": null,
+      "seq": 33,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.started",
+      "quota_held": null,
+      "seq": 34,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.scan.completed",
+      "quota_held": null,
+      "seq": 35,
+      "worker_state": null
+    },
+    {
+      "control_action": null,
+      "decision_outcome": null,
+      "decision_rule": null,
+      "kind": "workspace.export.completed",
+      "quota_held": null,
+      "seq": 36,
+      "worker_state": null
+    }
+  ],
+  "start_claim_audit_seq": 13
+}

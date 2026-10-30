@@ -1,0 +1,46 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.65s
+     Running tests/runtime_authorization.rs (target/debug/deps/runtime_authorization-7700b69bfa951b66)
+
+running 4 tests
+test bearer_token_is_never_sent_over_non_loopback_plain_http ... ok
+test denied_command_cannot_be_promoted_by_human_approval ... ok
+test unavailable_or_unacknowledged_audit_never_yields_allow ... ok
+test review_requires_the_exact_request_hash_and_resubmits_unchanged_identity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/runtime_races.rs (target/debug/deps/runtime_races-648b5fb5ab435e1e)
+
+running 3 tests
+test unix::helpers_for_the_same_session_have_distinct_operation_names ... ok
+test unix::substituted_export_parent_cannot_redirect_writes_or_cleanup_into_original ... ok
+test unix::failed_create_never_removes_a_preexisting_container ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/runtime_security.rs (target/debug/deps/runtime_security-13ca614d7fe034f3)
+
+running 12 tests
+test container_start_requires_runtime_started_at_evidence ... ok
+test output_is_drained_but_retained_bytes_are_bounded ... ok
+test runtime_rejects_option_injection_and_invalid_program_paths ... ok
+test project_copy_rejects_a_fifo_without_blocking_on_open ... ok
+test worker_arguments_confine_a_named_volume_and_preserve_literal_arguments ... ok
+test project_copy_rejects_symlinks_instead_of_following_them ... ok
+test custom_config_location_does_not_copy_mounted_secret_projections ... ok
+test project_copy_rejects_size_and_file_count_overflow ... ok
+test valid_export_is_atomic_and_only_writes_the_new_destination ... ok
+test project_copy_excludes_credentials_and_git_and_preserves_safe_files ... ok
+test archive_paths_reject_traversal_absolute_and_windows_variants ... ok
+test export_rejects_links_special_files_and_original_destination ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/runtime_terminal.rs (target/debug/deps/runtime_terminal-5fa25405fd54ed41)
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+

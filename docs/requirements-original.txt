@@ -1,0 +1,398 @@
+Oui. J'ajoute une IHM Web locale de supervision des agents et sous-agents, directement intégrée à la sandbox. L'objectif est d'avoir un mini tableau de bord, pas de recréer Grafana avec 47 menus dont personne ne se sert.
+
+## Proposition d'interface
+
+Agent Sandbox
+
+3 agents actifs
+
+Overview
+
+Agents
+
+Executions
+
+Security
+
+Logs
+
+Agents
+
+# 3
+
+2 sous-agents
+
+Commandes
+
+# 148
+
+Session courante
+
+Bloquées
+
+# 7
+
+Par les politiques
+
+Agents et sous-agents
+
+Codex · Agent principal
+
+Projet Rust · Sandbox podman-01
+
+Actif
+
+Sous-agent : Tests
+
+En cours
+
+Sous-agent : Audit sécurité
+
+Terminé
+
+Claude Code
+
+En attente
+
+Dernières décisions de sécurité
+
+Exemple illustratif
+
+10:42:15
+
+cargo test
+
+Autorisé
+
+10:42:09
+
+rm -rf /workspace
+
+Bloqué
+
+10:41:51
+
+cargo build
+
+Autorisé
+
+Maquette conceptuelle avec données fictives. L'affichage des sous-agents dépendra des capacités réelles de chaque connecteur.
+
+## Bloc à ajouter au prompt destiné à GPT-6 Pro
+
+# Exigence supplémentaire : interface Web de supervision des agents IA
+
+Intègre au projet de sandbox universelle une interface Web locale permettant de superviser les agents IA, leurs sous-agents, leurs environnements d'exécution et leurs actions.
+
+Cette interface est une exigence fonctionnelle du produit, pas une fonctionnalité optionnelle secondaire.
+
+## 1. Objectifs
+
+Construire une interface minimaliste, moderne, légère et réactive, permettant à un développeur de comprendre rapidement :
+
+- Quels agents IA sont lancés.
+- Quels sous-agents ont été créés.
+- Quel agent a créé quel sous-agent.
+- Quels projets et sandboxes sont utilisés.
+- Quelles commandes sont exécutées.
+- Quelles modifications de fichiers ont été réalisées.
+- Quelles décisions Jev ou le moteur de politiques a prises.
+- Quels événements de sécurité ont été détectés.
+- Quelles ressources CPU, RAM, réseau et disque sont consommées.
+- Quels agents sont actifs, bloqués, terminés ou en erreur.
+
+L'interface doit rester simple et utilisable sans infrastructure de monitoring externe.
+
+## 2. Compatibilité multi-agents
+
+Prévoir une architecture d'adaptateurs permettant de superviser :
+
+- OpenAI Codex CLI et ses sous-agents.
+- Anthropic Claude Code et ses sous-agents.
+- Google Gemini CLI.
+- OpenCode.
+- Aider.
+- Continue.
+- Agents personnalisés.
+- Frameworks multi-agents, notamment lorsque leurs interfaces permettent une instrumentation fiable.
+
+Étudier les événements, hooks, fichiers de session, journaux, API et mécanismes d'intégration réellement disponibles pour chaque agent.
+
+Ne pas supposer que tous les providers exposent les mêmes informations.
+
+Prévoir trois niveaux de compatibilité :
+
+1. **Native** : intégration explicite permettant une supervision détaillée.
+2. **Observed** : visibilité partielle à travers les commandes, processus et événements de la sandbox.
+3. **Generic** : supervision du conteneur sans introspection avancée de l'agent.
+
+L'interface doit distinguer clairement les événements directement observés, les informations déclarées par l'agent et les informations inférées.
+
+Ne jamais inventer un sous-agent, une relation parent-enfant ou une métrique indisponible.
+
+## 3. Tableau de bord principal
+
+Afficher :
+
+- Nombre d'agents actifs.
+- Nombre de sous-agents actifs.
+- Nombre de sandboxes.
+- Nombre de commandes exécutées.
+- Nombre de commandes autorisées, refusées et nécessitant une confirmation.
+- Nombre d'événements de sécurité.
+- Consommation CPU et RAM.
+- Durée des sessions.
+- État des moteurs Docker et Podman.
+- État du moteur Jev local ou distant.
+- Mode de sécurité sélectionné.
+
+Permettre un filtrage par projet, agent, sandbox et période.
+
+Actualiser les informations en temps réel via un mécanisme adapté, par exemple SSE ou WebSocket.
+
+## 4. Vue hiérarchique des agents
+
+Créer une représentation arborescente :
+
+Projet\
+└── Sandbox\
+└── Agent principal\
+├── Sous-agent A\
+├── Sous-agent B\
+│    └── Sous-agent B.1\
+└── Sous-agent C
+
+Pour chaque agent, afficher les informations disponibles :
+
+- Identifiant unique.
+- Provider.
+- Modèle utilisé, si observable.
+- ID de session.
+- ID parent, si connu.
+- Projet et répertoire autorisé.
+- Runtime Docker ou Podman.
+- Heure de démarrage.
+- Durée d'exécution.
+- Statut courant.
+- Tâche ou objectif déclaré.
+- Dernière activité.
+- Commandes exécutées.
+- Consommation de ressources.
+- Erreurs éventuelles.
+- Tokens et coûts, uniquement lorsque ces métriques sont réellement accessibles.
+
+Un clic sur un agent ouvre son détail et son historique.
+
+## 5. Vue des commandes et actions
+
+Créer une timeline centralisée retraçant les actions des agents.
+
+Chaque événement doit idéalement contenir :
+
+- Timestamp UTC.
+- Event ID.
+- Correlation ID.
+- Trace ID.
+- Project ID.
+- Sandbox ID.
+- Agent ID.
+- Parent Agent ID si disponible.
+- Type d'action.
+- Commande demandée et arguments.
+- Répertoire de travail.
+- Décision du moteur de sécurité.
+- Règle ou politique appliquée.
+- Décision Jev, lorsqu'il est invoqué.
+- Statut d'exécution.
+- Code de sortie.
+- Durée d'exécution.
+- Fichiers modifiés.
+- Informations réseau autorisées à être journalisées.
+- Erreurs.
+- État de couverture de l'observation.
+
+Différencier obligatoirement une commande demandée, une commande autorisée, une commande effectivement lancée et son résultat.
+
+Les sorties stdout/stderr doivent être configurables, avec masquage des secrets, limites de taille et politique de rétention.
+
+Permettre la recherche, le filtrage, le tri et l'export JSON/JSONL.
+
+## 6. Vue Security / Jev
+
+Afficher :
+
+- Commandes acceptées.
+- Commandes bloquées.
+- Commandes nécessitant une approbation humaine.
+- Actions interdites par les politiques déterministes.
+- Actions signalées par Jev.
+- Tentatives d'accès à des fichiers interdits.
+- Tentatives de communications réseau refusées.
+- Violations d'isolation détectées.
+- Erreurs des contrôles de sécurité.
+
+Pour chaque décision, expliquer dans la mesure du possible :
+
+- L'action analysée.
+- Le contexte observable.
+- La politique applicable.
+- Le moteur consulté.
+- La décision obtenue.
+- Le motif disponible.
+- L'action réellement effectuée par l'Execution Broker.
+
+Attention : Jev est un composant décisionnel. La garantie de blocage doit reposer sur un mécanisme d'exécution contrôlé et des restrictions techniques indépendantes.
+
+En cas d'indisponibilité du moteur intelligent, appliquer le comportement de repli défini par le profil de sécurité. Pour les actions protégées en mode strict, privilégier le refus par défaut.
+
+## 7. Vue Filesystem / Git
+
+Afficher les modifications attribuables à une session :
+
+- Fichiers créés.
+- Fichiers modifiés.
+- Fichiers supprimés.
+- Diffs Git.
+- Commits effectués.
+- Tentatives de modification hors périmètre.
+
+Lorsque possible, relier chaque modification à l'agent et à l'action qui l'ont produite.
+
+Ne pas déduire abusivement une attribution individuelle lorsqu'un processus enfant ou plusieurs agents partagent le même espace de travail.
+
+Prévoir une comparaison avant/après grâce à des mécanismes de snapshot, de diff ou de journalisation adaptés.
+
+## 8. Gestion des sandboxes
+
+Permettre de visualiser :
+
+- Runtime sélectionné.
+- Image et version.
+- Langages et outils installés.
+- Profil de sécurité actif.
+- Volumes montés.
+- Restrictions réseau.
+- Consommation de ressources.
+- État et santé du conteneur.
+
+Prévoir éventuellement des commandes de démarrage, d'arrêt et de redémarrage depuis l'interface, uniquement avec les permissions appropriées et une confirmation pour les actions destructrices.
+
+**L'interface ne doit jamais être un moyen de contourner les contrôles de sécurité de la sandbox.**
+
+## 9. Architecture technique de l'IHM
+
+Étudier une architecture légère :
+
+- Backend en Go ou Rust, à comparer.
+- Frontend React, Vue, Svelte ou technologie plus légère, à justifier.
+- API locale documentée.
+- Événements via SSE ou WebSocket.
+- SQLite en mode standalone pour le stockage des journaux et des métadonnées.
+- OpenTelemetry lorsque pertinent.
+- Export JSONL.
+- Possibilité future d'intégration Prometheus/Grafana, sans dépendance obligatoire.
+
+Séparer :
+
+1. Le collecteur d'événements.
+2. Le stockage des événements.
+3. L'API de consultation.
+4. Le frontend.
+5. Les adaptateurs des agents.
+
+L'IHM ne doit pas être exécutée dans le même domaine de confiance qu'un agent potentiellement hostile lorsque cela compromettrait le contrôle ou l'intégrité des journaux.
+
+La défaillance ou l'arrêt de l'IHM ne doit pas interrompre les contrôles de sécurité.
+
+## 10. Sécurité de l'interface et des journaux
+
+Exigences :
+
+- Écoute sur localhost par défaut.
+- Aucun accès public sans configuration explicite.
+- Authentification et TLS adaptés lorsqu'une exposition réseau est activée.
+- Protection des API et des actions administratives.
+- Aucun secret affiché en clair.
+- Masquage des tokens, clés API et credentials dans les événements.
+- Contrôle d'accès aux journaux.
+- Protection contre les injections et XSS dans les sorties d'agents.
+- Rétention et rotation configurables.
+- Limitation de la volumétrie.
+- Protection contre la saturation des journaux.
+- Contrôles d'intégrité et horodatage cohérent.
+- Évaluation d'une journalisation append-only, de chaînes de hachage et d'exports signés.
+
+L'agent surveillé ne doit pas pouvoir modifier ou supprimer ses traces d'audit par défaut.
+
+Étudier la possibilité de conserver les journaux sur l'hôte, hors de l'espace accessible en écriture à l'agent.
+
+## 11. Expérience utilisateur
+
+L'interface doit pouvoir être lancée simplement, par exemple :
+
+`agentsandbox dashboard`
+
+La syntaxe définitive appartient à la conception.
+
+Privilégier :
+
+- Installation simple.
+- Démarrage rapide.
+- Aucun compte cloud obligatoire.
+- Fonctionnement hors ligne.
+- Thème clair et sombre.
+- Navigation simple.
+- Recherche et filtres.
+- Vue compacte pour plusieurs dizaines d'agents.
+- Performance correcte avec des milliers d'événements.
+- Consommation mémoire limitée.
+
+Le projet doit rester utilisable entièrement en CLI sans IHM.
+
+## 12. Tests de validation
+
+Prévoir au minimum :
+
+1. Lancement d'une sandbox contenant Codex.
+2. Lancement d'une sandbox contenant Claude Code.
+3. Exécution d'une tâche simple avec chacun.
+4. Création de sous-agents lorsque le provider prend réellement cette fonctionnalité en charge.
+5. Vérification de l'arborescence des agents.
+6. Exécution d'une commande autorisée.
+7. Tentative d'exécution d'une commande interdite.
+8. Vérification de la décision Jev.
+9. Vérification de l'absence d'exécution après refus.
+10. Vérification de la présence de chaque étape dans l'audit.
+11. Vérification des modifications de fichiers.
+12. Arrêt brutal d'un agent.
+13. Redémarrage du dashboard.
+14. Vérification de la persistance des événements.
+15. Vérification de la protection des secrets dans les journaux.
+16. Tests de charge avec plusieurs agents et sous-agents.
+17. Tests de compatibilité Docker/Podman.
+18. Tests de sécurité du frontend et de son API.
+
+Pour chaque test, fournir les prérequis, commandes, résultats attendus, résultats constatés et limitations.
+
+## 13. Livrables demandés
+
+Produire :
+
+- Une proposition d'architecture de l'IHM.
+- Une comparaison des stacks techniques.
+- Un modèle de données des agents et sous-agents.
+- Un modèle d'événements d'audit.
+- Une matrice de compatibilité des agents.
+- Des maquettes des pages principales.
+- Une liste des fonctionnalités MVP.
+- Une liste des améliorations V2.
+- Une stratégie de tests.
+- Les risques, limitations et mesures de sécurité.
+- Les critères d'acceptation.
+- Une intégration complète au cahier des charges général de la sandbox.
+
+Ne pas concevoir l'IHM indépendamment du projet. Elle doit être intégrée à la supervision, à la sécurité et à la traçabilité du système entier.
+
+Ma recommandation architecturale : faire de ce dashboard un composant indépendant de la sandbox, avec un collecteur d'événements commun à tous les agents. Ainsi, même si Codex se plante, qu'un sous-agent boucle ou qu'un conteneur est détruit, l'historique reste disponible.
+
+Et surtout, le point essentiel pour GPT-6 Pro : l'IHM ne doit pas seulement afficher ce que Codex ou Claude déclarent faire. Elle doit aussi afficher ce que l'infrastructure a réellement observé, en signalant les trous de visibilité. C'est la différence entre un joli tableau de bord et un outil de supervision qui sert réellement.

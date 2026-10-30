@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running tests/runner_terminal_audit.rs (target/debug/deps/runner_terminal_audit-785fc79fbf50b214)
+
+running 1 test
+test terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 37.10s
+

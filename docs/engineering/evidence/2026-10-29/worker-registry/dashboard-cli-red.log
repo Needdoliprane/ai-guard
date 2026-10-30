@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.98s
+     Running unittests src/main.rs (target/debug/deps/agentsandbox-31c1d34a39fd574c)
+
+running 1 test
+test tests::shared_dashboard_is_explicit_and_excludes_a_fixed_identity ... FAILED
+
+failures:
+
+---- tests::shared_dashboard_is_explicit_and_excludes_a_fixed_identity stdout ----
+
+thread 'tests::shared_dashboard_is_explicit_and_excludes_a_fixed_identity' (1672365) panicked at src/main.rs:422:9:
+assertion failed: Cli::try_parse_from(["agentsandbox", "dashboard", "--shared-tenants"]).is_ok()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::shared_dashboard_is_explicit_and_excludes_a_fixed_identity
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--bin agentsandbox`

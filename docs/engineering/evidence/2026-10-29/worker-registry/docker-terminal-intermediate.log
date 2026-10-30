@@ -1,0 +1,11 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.29s
+     Running tests/runtime_terminal_persistence.rs (target/debug/deps/runtime_terminal_persistence-98d3d4286ef9b994)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-AmESNP
+PASS terminal control HTTP503; same stopped instance retained: b45665fb4a39a088458fa34f5b638b9ebc4f3600055ea5e815fea84f3b2d0a88; audit valid; allocation absent; unknown quota retained
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.68s
+

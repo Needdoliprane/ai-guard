@@ -1,0 +1,27 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.97s
+     Running tests/runtime_program.rs (target/debug/deps/runtime_program-997e40b6e3fb5706)
+
+running 2 tests
+
+thread 'operators_keep_the_original_docker_endpoint_when_context_changes_after_preflight' (2115043) panicked at tests/runtime_program.rs:27:9:
+doctor: context changed destination: ["info", "--format", "{{json .}}"]
+["version"]
+effect unix:///second-fixture.sock version
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test operators_keep_the_original_docker_endpoint_when_context_changes_after_preflight ... FAILED
+
+thread 'operators_refuse_an_engine_id_change_before_build_or_compose_effects' (2115044) panicked at tests/runtime_program.rs:49:9:
+build: changed engine accepted
+test operators_refuse_an_engine_id_change_before_build_or_compose_effects ... FAILED
+
+failures:
+
+failures:
+    operators_keep_the_original_docker_endpoint_when_context_changes_after_preflight
+    operators_refuse_an_engine_id_change_before_build_or_compose_effects
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.13s
+
+error: test failed, to rerun pass `--test runtime_program`

@@ -1,0 +1,29 @@
+
+> agent-sandbox-front@0.1.0 test
+> node --test --test-isolation=none tests/*.test.mjs
+
+✔ l’export reprend tous les filtres actifs sans reprendre la pagination (13.198584ms)
+✔ la période RFC3339 reste identique dans la pagination et l’export (0.477417ms)
+✔ fetch conserve son appel libre, requis par la fonction native du navigateur (0.296291ms)
+✔ la lecture transmet le jeton en en-tête seulement et interdit les redirections (0.406542ms)
+✔ les routes de lecture sont bornées à cette origine et l’export est authentifié (1.052833ms)
+✔ les périodes fixent le début au moment du choix sans borner les événements futurs (0.920208ms)
+✔ le filtre temporel des événements live utilise received_at avant timestamp (0.179417ms)
+✔ une réponse historique ne supprime pas les événements arrivés pendant sa lecture (0.133292ms)
+✔ construit les liens parent uniquement à partir des identifiants explicites (0.127375ms)
+✔ un cycle de parents reste visible et ne provoque pas de récursion infinie (0.099625ms)
+✔ une métrique absente reste inconnue tandis que zéro est une valeur réelle (36.680542ms)
+✔ les filtres conservent les identifiants exacts et traitent une commande comme du texte (0.1425ms)
+✔ les vues sécurité et fichiers reposent sur les événements présents (0.193417ms)
+✔ reconstitue un événement coupé au milieu des champs et de CRLF (0.137792ms)
+✔ ignore les commentaires, les événements incomplets et les identifiants NUL (0.094458ms)
+✔ le flux UTF-8 saute les répétitions et les messages invalides sans perdre le curseur (5.053458ms)
+✔ refuse un message dont la taille dépasse la limite pour borner la mémoire (0.083791ms)
+ℹ tests 17
+ℹ suites 0
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 111.000125

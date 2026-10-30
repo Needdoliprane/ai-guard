@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "origin": "http://127.0.0.1:48400",
+  "source": "real QA gateway/dashboard, existing durable audit and worker records",
+  "favicon": "HTTP200 and exact build bytes",
+  "initialLogin": [
+    {
+      "theme": "light",
+      "scrollY": 0,
+      "action": 535.78125,
+      "brand": 30.5,
+      "width": 320,
+      "height": 568
+    },
+    {
+      "theme": "dark",
+      "scrollY": 0,
+      "action": 535.78125,
+      "brand": 30.5,
+      "width": 320,
+      "height": 568
+    }
+  ],
+  "captures": [
+    "login-320-light-real.png",
+    "overview-desktop-light-real.png",
+    "workers-desktop-light-real.png",
+    "workers-mobile-light-real.png",
+    "workers-landscape-light-real.png",
+    "login-320-dark-real.png",
+    "overview-desktop-dark-real.png",
+    "workers-desktop-dark-real.png",
+    "workers-mobile-dark-real.png",
+    "workers-landscape-dark-real.png"
+  ]
+}

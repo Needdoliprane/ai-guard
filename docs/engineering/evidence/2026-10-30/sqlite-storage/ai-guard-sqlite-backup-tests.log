@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.51s
+     Running tests/control_migration.rs (target/debug/deps/control_migration-b8abfb1630b0634e)
+
+running 11 tests
+test future_and_partial_schemas_are_refused_without_repair ... ok
+test backup_private_directory_under_mutable_ancestor_is_refused ... ok
+test backup_directory_alias_is_refused_without_writing_through_it ... ok
+test backup_parent_with_extended_acl_is_refused_without_removing_acl ... ok
+test source_cannot_be_selected_as_its_own_backup ... ok
+test missing_v2_projection_is_not_repaired_and_backup_sidecars_are_preserved ... ok
+test migration_never_overwrites_backup_and_audit_full_rolls_back_ddl ... ok
+test explicit_migration_preserves_prior_events_and_verified_backup ... ok
+test backup_parent_must_be_private_before_any_destination_or_ddl_is_created ... ok
+test existing_backup_entries_are_refused_without_repair_or_replacement ... ok
+test every_preexisting_backup_sidecar_is_preserved_before_main_creation ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+

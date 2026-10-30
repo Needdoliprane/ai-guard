@@ -1,0 +1,109 @@
+{
+  "phase5_status": "complete",
+  "records": [
+    {
+      "verifier": "r_api_preauth",
+      "decision": "verified",
+      "fingerprint": "api/preauth-linear-tenant-credential-hash-amplification"
+    },
+    {
+      "verifier": "r_api_sse",
+      "decision": "verified",
+      "fingerprint": "api/sse-graceful-shutdown-without-drain-deadline"
+    },
+    {
+      "verifier": "r_api_viewer",
+      "decision": "verified",
+      "fingerprint": "api/viewer-synchronous-reads-control-store-contention"
+    },
+    {
+      "verifier": "r_audit_perms",
+      "decision": "verified",
+      "fingerprint": "audit/preexisting-database-permissions-not-enforced"
+    },
+    {
+      "verifier": "r_audit_race",
+      "decision": "verified",
+      "fingerprint": "audit/sqlite-connection-path-reopen-identity-race"
+    },
+    {
+      "verifier": "r_dashboard",
+      "decision": "verified",
+      "fingerprint": "dashboard/static-root-symlink-follow-disclosure"
+    },
+    {
+      "verifier": "r_ingress",
+      "decision": "verified",
+      "fingerprint": "ingress:forward:shared-preauth-exchange-pool"
+    },
+    {
+      "verifier": "r_ops_config",
+      "decision": "verified",
+      "fingerprint": "operations/config-path-reopen-secret-substitution"
+    },
+    {
+      "verifier": "r_ops_acl",
+      "decision": "verified",
+      "fingerprint": "operations/extended-acl-secret-projection-disclosure"
+    },
+    {
+      "verifier": "r_ops_jev",
+      "decision": "verified",
+      "fingerprint": "operations/jev-control-credential-reuse"
+    },
+    {
+      "verifier": "r_redact_keys",
+      "decision": "verified",
+      "fingerprint": "redaction/json-object-keys-preserved"
+    },
+    {
+      "verifier": "r_redact_truncate",
+      "decision": "verified",
+      "fingerprint": "redaction/truncation-before-secret-masking"
+    },
+    {
+      "verifier": "r_runner_cred",
+      "decision": "verified",
+      "fingerprint": "runner/credential-env-path-reopen-substitution"
+    },
+    {
+      "verifier": "r_runner_decision",
+      "decision": "verified",
+      "fingerprint": "runner/decision-omits-known-worker-secret-redaction"
+    },
+    {
+      "verifier": "r_runtime_abrupt",
+      "decision": "verified",
+      "fingerprint": "runtime/abrupt-broker-stop-leaves-worker-unfenced"
+    },
+    {
+      "verifier": "r_runtime_doctor",
+      "decision": "verified",
+      "fingerprint": "runtime/doctor-effect-engine-identity-unbound"
+    },
+    {
+      "verifier": "r_runtime_path",
+      "decision": "verified",
+      "fingerprint": "runtime/path-resolves-project-executable"
+    },
+    {
+      "verifier": "r_runtime_logs",
+      "decision": "verified",
+      "fingerprint": "runtime/worker-output-engine-log-retention-unbounded"
+    },
+    {
+      "verifier": "r_runtime_volume",
+      "decision": "replace",
+      "fingerprint": "runtime/workspace-volume-no-byte-quota",
+      "reason": "La cause, les bloqueurs et le plan sont étayés, mais la trace initiale plaçait Runtime::create_volume après le lancement du worker alors que ce volume est créé avant. La trace corrigée suit l'effet réel runner::run → Runtime::execute/create_args → montage RW non borné; create_volume reste une preuve de l'absence d'options de capacité."
+    }
+  ],
+  "replacement_verifications": [
+    {
+      "fingerprint": "runtime/workspace-volume-no-byte-quota",
+      "replacement_proposer": "r_runtime_volume_retry",
+      "independent_verifier": "r_runtime_volume_replacement_check",
+      "decision": "verified"
+    }
+  ]
+}

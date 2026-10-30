@@ -1,0 +1,67 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 709B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#2 DONE 0.7s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [1/8] FROM docker.io/library/rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b
+#4 CACHED
+
+#5 [internal] load build context
+#5 transferring context: 720.04kB 0.1s done
+#5 DONE 0.1s
+
+#6 [2/8] RUN groupadd --gid 1000 fsqa && useradd --uid 1000 --gid 1000 --create-home fsqa && mkdir /build && chown 1000:1000 /build
+#6 DONE 0.2s
+
+#7 [3/8] WORKDIR /build
+#7 DONE 0.0s
+
+#8 [4/8] COPY --chown=1000:1000 Cargo.toml Cargo.lock rust-toolchain.toml ./
+#8 DONE 0.0s
+
+#9 [5/8] COPY --chown=1000:1000 src/ ./src/
+#9 DONE 0.0s
+
+#10 [6/8] COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs
+#10 DONE 0.0s
+
+#11 [7/8] RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked
+#11 0.096 info: syncing channel updates for 1.99.1-aarch64-unknown-linux-gnu
+#11 2.070 info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+#11 2.070 info: downloading 3 components
+#11 16.47 
+#11 16.51   1.99.1-aarch64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+#11 16.51 
+#11 16.51 info: default toolchain set to 1.99.1-aarch64-unknown-linux-gnu
+#11 16.51 error: rustup is not installed at '/home/fsqa/.cargo'
+#11 ERROR: process "/bin/sh -c rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked" did not complete successfully: exit code: 1
+------
+ > [7/8] RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked:
+0.096 info: syncing channel updates for 1.99.1-aarch64-unknown-linux-gnu
+2.070 info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+2.070 info: downloading 3 components
+16.47 
+16.51   1.99.1-aarch64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+16.51 
+16.51 info: default toolchain set to 1.99.1-aarch64-unknown-linux-gnu
+16.51 error: rustup is not installed at '/home/fsqa/.cargo'
+------
+Dockerfile:9
+--------------------
+   7 |     COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs
+   8 |     USER 1000:1000
+   9 | >>> RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked
+  10 |     RUN --network=none cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture
+  11 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked" did not complete successfully: exit code: 1
+
+View build details: docker-desktop://dashboard/build/default/default/pwj6xijmi4tu6q2zdbgpgj3rg

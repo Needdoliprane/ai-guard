@@ -1,0 +1,8 @@
+tenant-a REFUSED audit database identity changed or has multiple hardlinks
+
+tenant-b REFUSED audit database identity changed or has multiple hardlinks
+
+dir=/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-hardlink-probe-1793280111573861000
+tenant-a REOPEN REFUSED audit database identity changed or has multiple hardlinks
+tenant-b REOPEN REFUSED audit database identity changed or has multiple hardlinks
+tenant-a REOPEN REFUSED audit database identity changed or has multiple hardlinks

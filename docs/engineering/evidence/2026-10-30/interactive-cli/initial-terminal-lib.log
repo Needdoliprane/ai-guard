@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.56s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-4558e96bd0376d78)
+
+running 5 tests
+test runtime::terminal::tests::known_literals_are_masked_across_chunks_and_safe_controls_without_prefix_flush ... ok
+test runtime::terminal::tests::utf8_and_allowed_cursor_sequences_survive_all_partitions ... ok
+test runtime::terminal::tests::dangerous_families_are_removed_at_every_partition ... ok
+test runtime::terminal::tests::real_local_pty_transports_bytes_and_resizes ... ok
+test runtime::terminal::tests::sequences_and_pending_mask_window_have_strict_bounds ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 64 filtered out; finished in 0.03s
+

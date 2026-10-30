@@ -1,0 +1,17 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.03s
+     Running tests/runtime_confinement.rs (target/debug/deps/runtime_confinement-ac5a302630b38f20)
+
+running 1 test
+runtime=docker rootless=false server=Some("29.9.2")
+retained evidence=/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-runtime-confinement-Zj5oqJ session=a6d6e5e7-fb4d-4ba9-96fb-74562295029e volume=agentsandbox-work-a6d6e5e7-fb4d-4ba9-96fb-74562295029e
+PASS inspected restrictions and process UID/GID/capabilities/NNP/seccomp
+PASS rejected on_started check returns an error and removes only its container
+PASS cgroup v2 memory/pid/cpu allocation limits
+PASS readonly root, /run/secrets ENOENT, absent egress routes and failed connection
+PASS broker timeout stops its worker; volume retained
+PASS filtered copy, isolated mutation and fresh export; audit E2E NOT_RUN
+test real_worker_confinement_copy_export_and_timeout ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 4.58s
+

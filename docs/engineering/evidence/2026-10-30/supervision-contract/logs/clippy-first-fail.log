@@ -1,0 +1,29 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+error: large size difference between variants
+   --> src/control/supervision.rs:111:1
+    |
+111 | /  pub enum ArmSubjectV1 {
+112 | |      Worker,
+    | |      ------ the second-largest variant carries no data at all
+113 | |/     Helper {
+114 | ||         helper_id: String,
+115 | ||         purpose: HelperPurposeV1,
+116 | ||         policy_version: u32,
+117 | ||         permission: HelperPermissionV1,
+118 | ||     },
+    | ||_____- the largest variant contains at least 357 bytes
+119 | |  }
+    | |__^ the entire enum is at least 360 bytes
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#large_enum_variant
+    = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+    |
+117 -         permission: HelperPermissionV1,
+117 +         permission: Box<HelperPermissionV1>,
+    |
+
+error: could not compile `agentsandbox` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agentsandbox` (lib) due to 1 previous error

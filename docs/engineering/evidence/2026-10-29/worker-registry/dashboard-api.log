@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.40s
+     Running tests/workers_api.rs (target/debug/deps/workers_api-302c708087d1b777)
+
+running 5 tests
+test nested_command_contract_rejects_unknown_fields ... ok
+test dashboard_refuses_a_control_token_even_if_its_file_was_misconfigured ... ok
+test decision_response_supplies_the_exact_receipt_required_by_admission ... ok
+test shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_only ... ok
+test worker_api_enforces_tenant_roles_and_reservation_quota ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

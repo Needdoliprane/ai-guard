@@ -1,0 +1,26 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `release` profile [optimized] target(s) in 25.60s
+     Running tests/runtime_confinement.rs (target/release/deps/runtime_confinement-ee13fbe91dc1389f)
+
+running 1 test
+runtime=docker rootless=false server=Some("29.9.2")
+retained evidence=/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-runtime-confinement-UafenE session=768cec64-b153-417a-96ee-78f0fcae602d volume=agentsandbox-work-768cec64-b153-417a-96ee-78f0fcae602d
+PASS inspected restrictions and process UID/GID/capabilities/NNP/seccomp
+PASS rejected on_started check returns an error and removes only its container
+PASS cgroup v2 memory/pid/cpu allocation limits
+PASS readonly root, /run/secrets ENOENT, absent egress routes and failed connection
+PASS broker timeout stops its worker; volume retained
+PASS filtered copy, isolated mutation and fresh export; audit E2E NOT_RUN
+test real_worker_confinement_copy_export_and_timeout ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 15.37s
+
+     Running tests/runtime_terminal_persistence.rs (target/release/deps/runtime_terminal_persistence-cf1993ee7b230f9e)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-ZBxOGX
+PASS terminal control HTTP503; same stopped instance retained: b37ea5ddd5dfecf0a49cdbe2a0583376152b64f780315c1fc3182ef2566f3ba7; audit valid; allocation absent; unknown quota retained
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.34s
+

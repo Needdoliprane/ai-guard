@@ -1,0 +1,49 @@
+{
+  "status": "PASS",
+  "node": "v24.22.2",
+  "playwright": "1.64.0-alpha-1790635538000",
+  "artifactNames": [
+    "declared-qa-export.jsonl"
+  ],
+  "exportBytes": 1689,
+  "exportRecords": 2,
+  "exportSha256": "6d0e425c7676cce477aaa23c2f93a6444283c106da97122e96674e2fb1ccde6a",
+  "credentialsFound": false,
+  "qaDeclaredEvents": [
+    {
+      "id": "f785d14c-5279-461b-a1d9-e9b001ed38ba",
+      "project": "qa-browser-971d72cb-b814-4074-8640-953930f39d86",
+      "seq": 32,
+      "source": "qa.browser.live",
+      "provenance": "declared"
+    },
+    {
+      "id": "f696dd8f-9ab1-4a7f-8508-104ed71faced",
+      "project": "qa-browser-58831a01-b2c7-4dcd-ad7c-7c58b6e2a78c",
+      "seq": 33,
+      "source": "qa.browser.live",
+      "provenance": "declared"
+    },
+    {
+      "id": "db5a0b90-7b05-4be1-8ace-e6541c833a88",
+      "project": "qa-browser-58831a01-b2c7-4dcd-ad7c-7c58b6e2a78c",
+      "seq": 34,
+      "source": "qa.browser.live",
+      "provenance": "declared"
+    },
+    {
+      "id": "0805f54f-60f0-4ab7-b65e-88ddac291d53",
+      "project": "qa-browser-774215b6-1fcd-475d-bf28-b3a07503ab06",
+      "seq": 35,
+      "source": "qa.browser.live",
+      "provenance": "declared"
+    },
+    {
+      "id": "2f719071-d41d-4215-939a-43a88c0e42f7",
+      "project": "qa-browser-774215b6-1fcd-475d-bf28-b3a07503ab06",
+      "seq": 36,
+      "source": "qa.browser.live",
+      "provenance": "declared"
+    }
+  ]
+}

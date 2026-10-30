@@ -1,0 +1,17 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.55s
+     Running tests/runtime_retention.rs (target/debug/deps/runtime_retention-7e26d41fc7c1025e)
+
+running 1 test
+case terminal_before_ack: PASS
+case audit_failure: PASS
+case rm_failure: PASS
+case create_conflict: PASS
+case callback_stop: PASS
+case callback_engine_unavailable: PASS
+case legacy_cleanup: PASS
+case name_substitution: PASS
+test terminal_instances_survive_until_explicit_cleanup_and_failed_start_is_stopped ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+

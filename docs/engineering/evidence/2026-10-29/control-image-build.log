@@ -1,0 +1,540 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from control.Dockerfile
+#1 transferring dockerfile: 1.07kB done
+#1 DONE 0.0s
+
+#2 [auth] library/rust:pull token for registry-1.docker.io
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#4 ...
+
+#5 [auth] library/debian:pull token for registry-1.docker.io
+#5 DONE 0.0s
+
+#6 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#6 DONE 1.3s
+
+#7 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#7 ...
+
+#4 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#4 DONE 1.3s
+
+#7 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#7 DONE 2.0s
+
+#8 [internal] load .dockerignore
+#8 transferring context: 517B done
+#8 DONE 0.0s
+
+#9 [front-build 1/6] FROM docker.io/library/node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
+#9 CACHED
+
+#10 [rust-build 1/5] FROM docker.io/library/rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b
+#10 CACHED
+
+#11 [front-build 2/6] WORKDIR /build/front
+#11 DONE 0.0s
+
+#12 [rust-build 2/5] WORKDIR /build
+#12 DONE 0.0s
+
+#13 [internal] load build context
+#13 transferring context: 38.34kB 0.0s done
+#13 DONE 0.0s
+
+#14 [stage-2 1/7] FROM docker.io/library/debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+#14 resolve docker.io/library/debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 0.0s done
+#14 sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3 5.65kB / 5.65kB done
+#14 sha256:7ccb8b5b60c7654f5b795d94ee7d751cd0811500803f0b09cefcd555e755a55a 1.04kB / 1.04kB done
+#14 sha256:6c51fdfbb33b6cf6dc1d727bd44cb92b7a51299ec66e54d3e7b0f844989adde0 468B / 468B done
+#14 DONE 0.0s
+
+#15 [rust-build 3/5] COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+#15 DONE 0.0s
+
+#16 [front-build 3/6] COPY front/package.json front/package-lock.json ./
+#16 DONE 0.0s
+
+#17 [rust-build 4/5] COPY src/ ./src/
+#17 DONE 0.0s
+
+#18 [rust-build 5/5] RUN cargo build --release --locked --bin agentsandbox
+#18 0.203 info: syncing channel updates for 1.99.1-aarch64-unknown-linux-gnu
+#18 2.039 info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+#18 2.050 info: downloading 2 components
+#18 ...
+
+#19 [front-build 4/6] RUN npm ci
+#19 3.246 
+#19 3.246 added 15 packages, and audited 16 packages in 3s
+#19 3.247 
+#19 3.247 5 packages are looking for funding
+#19 3.247   run `npm fund` for details
+#19 3.247 
+#19 3.247 found 0 vulnerabilities
+#19 3.247 npm warn install-scripts 1 package has install scripts not yet covered by allowScripts:
+#19 3.247 npm warn install-scripts   esbuild@0.28.2 (postinstall: node install.js)
+#19 3.247 npm warn install-scripts
+#19 3.247 npm warn install-scripts Run `npm install-scripts ls` to review, or `npm install-scripts approve <pkg>` to allow.
+#19 3.248 npm notice
+#19 3.248 npm notice New major version of npm available! 11.19.1 -> 12.2.1
+#19 3.248 npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.1
+#19 3.248 npm notice To update run: npm install -g npm@12.2.1
+#19 3.248 npm notice
+#19 DONE 3.3s
+
+#20 [front-build 5/6] COPY front/ ./
+#20 DONE 0.0s
+
+#21 [front-build 6/6] RUN npm run build
+#21 0.134 
+#21 0.134 > agent-sandbox-front@0.1.0 build
+#21 0.134 > tsc --noEmit && vite build
+#21 0.134 
+#21 1.470 vite v7.3.7 building client environment for production...
+#21 1.602 transforming...
+#21 1.946 ✓ 8 modules transformed.
+#21 2.029 rendering chunks...
+#21 2.060 computing gzip size...
+#21 2.070 dist/index.html                  1.09 kB │ gzip:  0.55 kB
+#21 2.070 dist/assets/index-Ao2Ztf6c.css  28.79 kB │ gzip:  6.49 kB
+#21 2.070 dist/assets/index-fwxS17By.js   38.20 kB │ gzip: 14.24 kB
+#21 2.070 ✓ built in 581ms
+#21 DONE 2.1s
+
+#22 [stage-2 2/7] RUN apt-get update     && apt-get install --yes --no-install-recommends ca-certificates libgcc-s1     && rm -rf /var/lib/apt/lists/*     && groupadd --gid 1000 agent     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin agent     && mkdir -p /app/front /app/policies /data     && chown 1000:1000 /data
+#22 0.491 Get:1 http://deb.debian.org/debian bookworm InRelease [151 kB]
+#22 1.054 Get:2 http://deb.debian.org/debian bookworm-updates InRelease [55.4 kB]
+#22 1.268 Get:3 http://deb.debian.org/debian-security bookworm-security InRelease [34.8 kB]
+#22 1.492 Get:4 http://deb.debian.org/debian bookworm/main arm64 Packages [8689 kB]
+#22 2.293 Get:5 http://deb.debian.org/debian bookworm-updates/main arm64 Packages [6936 B]
+#22 2.415 Get:6 http://deb.debian.org/debian-security bookworm-security/main arm64 Packages [356 kB]
+#22 3.267 Fetched 9294 kB in 3s (2950 kB/s)
+#22 3.267 Reading package lists...
+#22 3.663 Reading package lists...
+#22 4.281 Building dependency tree...
+#22 4.439 Reading state information...
+#22 4.703 libgcc-s1 is already the newest version (12.2.0-14+deb12u1).
+#22 4.703 libgcc-s1 set to manually installed.
+#22 4.703 The following additional packages will be installed:
+#22 4.703   libssl3 openssl
+#22 4.715 The following NEW packages will be installed:
+#22 4.715   ca-certificates libssl3 openssl
+#22 5.005 0 upgraded, 3 newly installed, 0 to remove and 0 not upgraded.
+#22 5.005 Need to get 3400 kB of archives.
+#22 5.005 After this operation, 8942 kB of additional disk space will be used.
+#22 5.005 Get:1 http://deb.debian.org/debian-security bookworm-security/main arm64 libssl3 arm64 3.0.22-1~deb12u2 [1829 kB]
+#22 6.000 Get:2 http://deb.debian.org/debian-security bookworm-security/main arm64 openssl arm64 3.0.22-1~deb12u2 [1410 kB]
+#22 6.067 Get:3 http://deb.debian.org/debian-security bookworm-security/main arm64 ca-certificates all 20250419~deb12u2 [161 kB]
+#22 6.245 debconf: delaying package configuration, since apt-utils is not installed
+#22 6.271 Fetched 3400 kB in 1s (2383 kB/s)
+#22 6.322 Selecting previously unselected package libssl3:arm64.
+#22 6.322 (Reading database ... (Reading database ... 5%(Reading database ... 10%(Reading database ... 15%(Reading database ... 20%(Reading database ... 25%(Reading database ... 30%(Reading database ... 35%(Reading database ... 40%(Reading database ... 45%(Reading database ... 50%(Reading database ... 55%(Reading database ... 60%(Reading database ... 65%(Reading database ... 70%(Reading database ... 75%(Reading database ... 80%(Reading database ... 85%(Reading database ... 90%(Reading database ... 95%(Reading database ... 100%(Reading database ... 6090 files and directories currently installed.)
+#22 6.323 Preparing to unpack .../libssl3_3.0.22-1~deb12u2_arm64.deb ...
+#22 6.327 Unpacking libssl3:arm64 (3.0.22-1~deb12u2) ...
+#22 6.560 Selecting previously unselected package openssl.
+#22 6.560 Preparing to unpack .../openssl_3.0.22-1~deb12u2_arm64.deb ...
+#22 6.570 Unpacking openssl (3.0.22-1~deb12u2) ...
+#22 6.852 Selecting previously unselected package ca-certificates.
+#22 6.852 Preparing to unpack .../ca-certificates_20250419~deb12u2_all.deb ...
+#22 6.897 Unpacking ca-certificates (20250419~deb12u2) ...
+#22 6.957 Setting up libssl3:arm64 (3.0.22-1~deb12u2) ...
+#22 6.961 Setting up openssl (3.0.22-1~deb12u2) ...
+#22 6.983 Setting up ca-certificates (20250419~deb12u2) ...
+#22 7.031 debconf: unable to initialize frontend: Dialog
+#22 7.031 debconf: (TERM is not set, so the dialog frontend is not usable.)
+#22 7.031 debconf: falling back to frontend: Readline
+#22 7.031 debconf: unable to initialize frontend: Readline
+#22 7.031 debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC contains: /etc/perl /usr/local/lib/aarch64-linux-gnu/perl/5.36.0 /usr/local/share/perl/5.36.0 /usr/lib/aarch64-linux-gnu/perl5/5.36 /usr/share/perl5 /usr/lib/aarch64-linux-gnu/perl-base /usr/lib/aarch64-linux-gnu/perl/5.36 /usr/share/perl/5.36 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 7.)
+#22 7.031 debconf: falling back to frontend: Teletype
+#22 8.159 Updating certificates in /etc/ssl/certs...
+#22 ...
+
+#18 [rust-build 5/5] RUN cargo build --release --locked --bin agentsandbox
+#18 4.104     Updating crates.io index
+#18 8.358  Downloading crates ...
+#18 9.082   Downloaded icu_provider v2.4.0
+#18 9.263   Downloaded atomic-waker v1.1.2
+#18 9.293   Downloaded async-stream v0.3.6
+#18 9.316   Downloaded async-stream-impl v0.3.6
+#18 9.326   Downloaded autocfg v1.5.1
+#18 9.326   Downloaded bytes v1.12.1
+#18 9.333   Downloaded block-buffer v0.10.4
+#18 9.420   Downloaded axum-core v0.5.6
+#18 9.459   Downloaded chacha20 v0.10.2
+#18 9.469   Downloaded rand_pcg v0.10.2
+#18 9.513   Downloaded bitflags v2.13.2
+#18 9.513   Downloaded rand_core v0.10.1
+#18 9.551   Downloaded cfg-if v1.0.5
+#18 9.551   Downloaded cfg_aliases v0.2.2
+#18 9.555   Downloaded httpdate v1.0.3
+#18 9.565   Downloaded base64 v0.22.1
+#18 9.572   Downloaded displaydoc v0.2.7
+#18 9.590   Downloaded clap v4.6.7
+#18 9.610   Downloaded base64 v0.23.1
+#18 9.622   Downloaded futures-macro v0.3.34
+#18 9.622   Downloaded clap_derive v4.6.7
+#18 9.622   Downloaded http-body v1.1.0
+#18 9.633   Downloaded fallible-iterator v0.3.0
+#18 9.633   Downloaded scopeguard v1.2.0
+#18 9.662   Downloaded heck v0.5.0
+#18 9.692   Downloaded fallible-streaming-iterator v0.1.9
+#18 9.692   Downloaded filetime v0.2.29
+#18 9.692   Downloaded generic-array v0.14.7
+#18 9.692   Downloaded itoa v1.0.18
+#18 9.696   Downloaded colorchoice v1.0.5
+#18 9.696   Downloaded cpufeatures v0.2.17
+#18 9.698   Downloaded crypto-common v0.1.7
+#18 9.698   Downloaded errno v0.3.14
+#18 9.701   Downloaded find-msvc-tools v0.1.15
+#18 9.702   Downloaded http-range-header v0.4.2
+#18 9.702   Downloaded pkg-config v0.3.34
+#18 9.704   Downloaded potential_utf v0.1.6
+#18 9.705   Downloaded rustc-hash v2.1.3
+#18 9.710   Downloaded anstyle-query v1.1.5
+#18 9.710   Downloaded form_urlencoded v1.2.2
+#18 9.711   Downloaded futures-task v0.3.34
+#18 9.712   Downloaded hex v0.4.3
+#18 9.715   Downloaded mime v0.3.17
+#18 9.716   Downloaded same-file v1.0.6
+#18 9.743   Downloaded futures-core v0.3.34
+#18 9.743   Downloaded idna_adapter v1.2.2
+#18 9.743   Downloaded is_terminal_polyfill v1.70.2
+#18 9.745   Downloaded lru-slab v0.1.3
+#18 9.745   Downloaded percent-encoding v2.3.2
+#18 9.745   Downloaded clap_lex v1.1.1
+#18 9.765   Downloaded digest v0.10.7
+#18 9.765   Downloaded futures-io v0.3.34
+#18 9.765   Downloaded futures-sink v0.3.34
+#18 9.773   Downloaded anstyle v1.0.14
+#18 9.774   Downloaded anstyle-parse v1.0.0
+#18 9.774   Downloaded fastrand v2.5.0
+#18 9.776   Downloaded http-body-util v0.1.5
+#18 9.780   Downloaded matchit v0.8.4
+#18 9.780   Downloaded foldhash v0.2.0
+#18 9.780   Downloaded ipnet v2.12.2
+#18 9.789   Downloaded mime_guess v2.0.5
+#18 9.800   Downloaded pin-project-lite v0.2.17
+#18 9.815   Downloaded hyper-rustls v0.27.10
+#18 9.823   Downloaded lock_api v0.4.14
+#18 9.829   Downloaded anstream v1.0.0
+#18 9.839   Downloaded futures-channel v0.3.34
+#18 9.839   Downloaded getrandom v0.2.17
+#18 9.843   Downloaded hashlink v0.12.2
+#18 9.846   Downloaded once_cell v1.21.4
+#18 9.851   Downloaded parking_lot v0.12.5
+#18 9.855   Downloaded parking_lot_core v0.9.12
+#18 9.855   Downloaded quote v1.0.47
+#18 9.861   Downloaded tinystr v0.8.5
+#18 9.861   Downloaded litemap v0.8.3
+#18 9.866   Downloaded quinn-udp v0.5.16
+#18 9.866   Downloaded rustls-pki-types v1.15.1
+#18 9.872   Downloaded getrandom v0.4.3
+#18 9.872   Downloaded log v0.4.34
+#18 9.878   Downloaded num-traits v0.2.19
+#18 9.883   Downloaded rand v0.10.3
+#18 9.903   Downloaded zerofrom-derive v0.1.8
+#18 9.903   Downloaded icu_locale_core v2.4.0
+#18 9.903   Downloaded serde_urlencoded v0.7.1
+#18 9.903   Downloaded sync_wrapper v1.0.2
+#18 9.903   Downloaded anyhow v1.0.104
+#18 9.903   Downloaded iana-time-zone v0.1.65
+#18 9.905   Downloaded tower-layer v0.3.3
+#18 9.905   Downloaded httparse v1.10.1
+#18 9.907   Downloaded proc-macro2 v1.0.107
+#18 9.908   Downloaded synstructure v0.14.0
+#18 9.908   Downloaded tokio-rustls v0.26.6
+#18 9.909   Downloaded axum v0.8.9
+#18 9.920   Downloaded icu_normalizer_data v2.4.0
+#18 9.924   Downloaded aho-corasick v1.1.5
+#18 9.935   Downloaded memchr v2.8.3
+#18 9.936   Downloaded quinn v0.11.12
+#18 9.938   Downloaded cc v1.10.0
+#18 9.940   Downloaded clap_builder v4.6.7
+#18 9.944   Downloaded icu_collections v2.4.0
+#18 9.946   Downloaded mio v1.2.4
+#18 9.949   Downloaded hashbrown v0.17.1
+#18 9.971   Downloaded http v1.5.0
+#18 10.01   Downloaded signal-hook-registry v1.4.8
+#18 10.01   Downloaded strsim v0.11.1
+#18 10.01   Downloaded subtle v2.6.1
+#18 10.01   Downloaded hyper-util v0.1.21
+#18 10.01   Downloaded icu_properties v2.4.0
+#18 10.01   Downloaded serde_path_to_error v0.1.20
+#18 10.01   Downloaded slab v0.4.12
+#18 10.01   Downloaded zeroize v1.9.1
+#18 10.01   Downloaded icu_properties_data v2.4.0
+#18 10.01   Downloaded idna v1.1.0
+#18 10.01   Downloaded hyper v1.12.0
+#18 10.03   Downloaded ryu v1.0.23
+#18 10.15   Downloaded tinyvec v1.13.3
+#18 10.15   Downloaded futures-util v0.3.34
+#18 10.15   Downloaded quinn-proto v0.11.19
+#18 10.15   Downloaded utf8parse v0.2.2
+#18 10.15   Downloaded chrono v0.4.45
+#18 10.17   Downloaded version_check v0.9.5
+#18 10.17   Downloaded socket2 v0.6.5
+#18 10.18   Downloaded utf8_iter v1.0.4
+#18 10.18   Downloaded try-lock v0.2.5
+#18 10.19   Downloaded yoke-derive v0.8.4
+#18 10.20   Downloaded tower-service v0.3.3
+#18 10.20   Downloaded untrusted v0.9.0
+#18 10.21   Downloaded want v0.3.2
+#18 10.21   Downloaded icu_normalizer v2.4.0
+#18 10.22   Downloaded thiserror-impl v2.0.21
+#18 10.22   Downloaded thiserror v2.0.21
+#18 10.23   Downloaded zerofrom v0.1.8
+#18 10.23   Downloaded stable_deref_trait v1.2.1
+#18 10.23   Downloaded tokio-macros v2.7.2
+#18 10.23   Downloaded shlex v2.0.1
+#18 10.23   Downloaded smallvec v1.16.4
+#18 10.23   Downloaded zerovec-derive v0.11.7
+#18 10.25   Downloaded libc v0.2.191
+#18 10.31   Downloaded tempfile v3.27.0
+#18 10.31   Downloaded xattr v1.7.0
+#18 10.31   Downloaded zmij v1.0.23
+#18 10.31   Downloaded sha2 v0.10.9
+#18 10.32   Downloaded walkdir v2.5.0
+#18 10.32   Downloaded writeable v0.6.4
+#18 10.32   Downloaded serde_derive v1.0.229
+#18 10.32   Downloaded tar v0.4.46
+#18 10.32   Downloaded unicode-ident v1.0.27
+#18 10.33   Downloaded unicase v2.10.0
+#18 10.33   Downloaded yoke v0.8.4
+#18 10.33   Downloaded rustls-webpki v0.103.16
+#18 10.34   Downloaded serde v1.0.229
+#18 10.34   Downloaded serde_core v1.0.229
+#18 10.34   Downloaded regex v1.13.1
+#18 10.35   Downloaded tracing-core v0.1.36
+#18 10.35   Downloaded url v2.5.8
+#18 10.35   Downloaded uuid v1.29.0
+#18 10.36   Downloaded zerotrie v0.2.5
+#18 10.36   Downloaded reqwest v0.12.28
+#18 10.36   Downloaded tower v0.5.3
+#18 10.36   Downloaded typenum v1.20.1
+#18 10.37   Downloaded rusqlite v0.41.1
+#18 10.37   Downloaded libsqlite3-sys v0.39.1
+#18 10.53   Downloaded tower-http v0.6.11
+#18 10.54   Downloaded zerovec v0.11.9
+#18 10.55   Downloaded serde_json v1.0.154
+#18 10.56   Downloaded tokio-util v0.7.20
+#18 10.56   Downloaded webpki-roots v1.0.11
+#18 10.57   Downloaded vcpkg v0.2.15
+#18 10.60   Downloaded syn v2.0.119
+#18 10.61   Downloaded rustls v0.23.46
+#18 10.61   Downloaded regex-syntax v0.8.11
+#18 10.62   Downloaded syn v3.0.9
+#18 10.63   Downloaded linux-raw-sys v0.12.1
+#18 10.79   Downloaded rustix v1.1.6
+#18 10.81   Downloaded tracing v0.1.44
+#18 10.84   Downloaded regex-automata v0.4.18
+#18 10.86   Downloaded tokio v1.54.1
+#18 10.89   Downloaded ring v0.17.14
+#18 10.99    Compiling proc-macro2 v1.0.107
+#18 11.00    Compiling quote v1.0.47
+#18 11.00    Compiling unicode-ident v1.0.27
+#18 11.00    Compiling libc v0.2.191
+#18 11.00    Compiling cfg-if v1.0.5
+#18 11.00    Compiling smallvec v1.16.4
+#18 11.00    Compiling stable_deref_trait v1.2.1
+#18 11.00    Compiling pin-project-lite v0.2.17
+#18 11.10    Compiling find-msvc-tools v0.1.15
+#18 11.17    Compiling futures-core v0.3.34
+#18 11.20    Compiling bytes v1.12.1
+#18 11.23    Compiling shlex v2.0.1
+#18 11.27    Compiling parking_lot_core v0.9.12
+#18 11.28    Compiling cc v1.10.0
+#18 11.32    Compiling itoa v1.0.18
+#18 11.32    Compiling once_cell v1.21.4
+#18 11.40    Compiling scopeguard v1.2.0
+#18 11.55    Compiling lock_api v0.4.14
+#18 11.56    Compiling serde_core v1.0.229
+#18 11.56    Compiling litemap v0.8.3
+#18 11.58    Compiling writeable v0.6.4
+#18 11.83    Compiling tracing-core v0.1.36
+#18 11.89    Compiling http v1.5.0
+#18 11.91    Compiling percent-encoding v2.3.2
+#18 12.12    Compiling icu_normalizer_data v2.4.0
+#18 12.41    Compiling utf8_iter v1.0.4
+#18 12.46    Compiling log v0.4.34
+#18 12.54    Compiling syn v3.0.9
+#18 12.67    Compiling icu_properties_data v2.4.0
+#18 12.68    Compiling tracing v0.1.44
+#18 12.77    Compiling slab v0.4.12
+#18 13.02    Compiling version_check v0.9.5
+#18 13.04    Compiling tower-service v0.3.3
+#18 13.19    Compiling errno v0.3.14
+#18 13.42    Compiling socket2 v0.6.5
+#18 13.49    Compiling signal-hook-registry v1.4.8
+#18 13.51    Compiling mio v1.2.4
+#18 13.59    Compiling ring v0.17.14
+#18 13.80    Compiling#18 ...
+
+#22 [stage-2 2/7] RUN apt-get update     && apt-get install --yes --no-install-recommends ca-certificates libgcc-s1     && rm -rf /var/lib/apt/lists/*     && groupadd --gid 1000 agent     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin agent     && mkdir -p /app/front /app/policies /data     && chown 1000:1000 /data
+#22 9.846 148 added, 0 removed; done.
+#22 10.08 Processing triggers for libc-bin (2.36-9+deb12u14) ...
+#22 10.22 Processing triggers for ca-certificates (20250419~deb12u2) ...
+#22 10.25 Updating certificates in /etc/ssl/certs...
+#22 12.26 0 added, 0 removed; done.
+#22 12.26 Running hooks in /etc/ca-certificates/update.d...
+#22 12.26 done.
+#22 DONE 13.9s
+
+#18 [rust-build 5/5] RUN cargo build --release --locked --bin agentsandbox
+#18 13.80    Compiling parking_lot v0.12.5
+#18 13.87    Compiling http-body v1.1.0
+#18 13.99    Compiling bitflags v2.13.2
+#18 14.06    Compiling zeroize v1.9.1
+#18 14.07    Compiling httparse v1.10.1
+#18 14.08    Compiling futures-task v0.3.34
+#18 14.27    Compiling rustls-pki-types v1.15.1
+#18 14.31    Compiling generic-array v0.14.7
+#18 14.37    Compiling getrandom v0.2.17
+#18 14.86    Compiling serde v1.0.229
+#18 14.87    Compiling untrusted v0.9.0
+#18 14.88    Compiling memchr v2.8.3
+#18 14.91    Compiling httpdate v1.0.3
+#18 14.95    Compiling try-lock v0.2.5
+#18 15.08    Compiling want v0.3.2
+#18 15.26    Compiling form_urlencoded v1.2.2
+#18 15.27    Compiling sync_wrapper v1.0.2
+#18 15.27    Compiling rustls v0.23.46
+#18 15.28    Compiling tower-layer v0.3.3
+#18 15.32    Compiling zmij v1.0.23
+#18 15.46    Compiling typenum v1.20.1
+#18 15.49    Compiling mime v0.3.17
+#18 15.52    Compiling atomic-waker v1.1.2
+#18 15.66    Compiling unicase v2.10.0
+#18 15.67    Compiling rustix v1.1.6
+#18 15.68    Compiling http-body-util v0.1.5
+#18 15.76    Compiling futures-channel v0.3.34
+#18 15.82    Compiling mime_guess v2.0.5
+#18 16.00    Compiling pkg-config v0.3.34
+#18 16.06    Compiling subtle v2.6.1
+#18 16.10    Compiling linux-raw-sys v0.12.1
+#18 16.27    Compiling vcpkg v0.2.15
+#18 16.28    Compiling autocfg v1.5.1
+#18 16.36    Compiling utf8parse v0.2.2
+#18 16.48    Compiling getrandom v0.4.3
+#18 16.78    Compiling ipnet v2.12.2
+#18 16.79    Compiling serde_json v1.0.154
+#18 16.91    Compiling base64 v0.23.1
+#18 16.93    Compiling num-traits v0.2.19
+#18 17.09    Compiling libsqlite3-sys v0.39.1
+#18 17.33    Compiling anstyle-parse v1.0.0
+#18 17.56    Compiling is_terminal_polyfill v1.70.2
+#18 17.59    Compiling colorchoice v1.0.5
+#18 17.60    Compiling synstructure v0.14.0
+#18 17.72    Compiling anstyle-query v1.1.5
+#18 17.73    Compiling futures-sink v0.3.34
+#18 17.75    Compiling foldhash v0.2.0
+#18 17.81    Compiling anstyle v1.0.14
+#18 17.89    Compiling ryu v1.0.23
+#18 17.91    Compiling hashbrown v0.17.1
+#18 18.13    Compiling anstream v1.0.0
+#18 18.39    Compiling crypto-common v0.1.7
+#18 18.45    Compiling block-buffer v0.10.4
+#18 18.58    Compiling aho-corasick v1.1.5
+#18 18.65    Compiling webpki-roots v1.0.11
+#18 18.68    Compiling syn v2.0.119
+#18 18.72    Compiling strsim v0.11.1
+#18 19.19    Compiling zerofrom-derive v0.1.8
+#18 19.22    Compiling yoke-derive v0.8.4
+#18 19.48    Compiling zerovec-derive v0.11.7
+#18 19.82    Compiling displaydoc v0.2.7
+#18 19.87    Compiling tokio-macros v2.7.2
+#18 20.01    Compiling zerofrom v0.1.8
+#18 20.06    Compiling yoke v0.8.4
+#18 20.12    Compiling zerovec v0.11.9
+#18 20.13    Compiling futures-macro v0.3.34
+#18 20.28    Compiling tokio v1.54.1
+#18 20.29    Compiling zerotrie v0.2.5
+#18 20.35    Compiling serde_derive v1.0.229
+#18 20.44    Compiling tinystr v0.8.5
+#18 20.46    Compiling potential_utf v0.1.6
+#18 20.51    Compiling icu_locale_core v2.4.0
+#18 20.51    Compiling icu_collections v2.4.0
+#18 20.60    Compiling futures-util v0.3.34
+#18 20.82    Compiling clap_lex v1.1.1
+#18 20.88    Compiling http-range-header v0.4.2
+#18 20.95    Compiling regex-syntax v0.8.11
+#18 21.09    Compiling icu_provider v2.4.0
+#18 21.38    Compiling icu_properties v2.4.0
+#18 21.55    Compiling icu_normalizer v2.4.0
+#18 21.90    Compiling heck v0.5.0
+#18 22.02    Compiling anyhow v1.0.104
+#18 22.08    Compiling clap_derive v4.6.7
+#18 22.19    Compiling idna_adapter v1.2.2
+#18 22.26    Compiling idna v1.1.0
+#18 22.43    Compiling regex-automata v0.4.18
+#18 22.73    Compiling rustls-webpki v0.103.16
+#18 23.33    Compiling serde_urlencoded v0.7.1
+#18 23.47    Compiling url v2.5.8
+#18 23.53    Compiling clap_builder v4.6.7
+#18 23.62    Compiling async-stream-impl v0.3.6
+#18 23.80    Compiling hyper v1.12.0
+#18 23.96    Compiling tower v0.5.3
+#18 24.25    Compiling tokio-util v0.7.20
+#18 24.46    Compiling hyper-util v0.1.21
+#18 24.61    Compiling tower-http v0.6.11
+#18 25.47    Compiling xattr v1.7.0
+#18 25.63    Compiling hashlink v0.12.2
+#18 25.90    Compiling digest v0.10.7
+#18 25.92    Compiling axum-core v0.5.6
+#18 26.02    Compiling serde_path_to_error v0.1.20
+#18 26.36    Compiling tokio-rustls v0.26.6
+#18 26.39    Compiling cpufeatures v0.2.17
+#18 26.42    Compiling filetime v0.2.29
+#18 26.45    Compiling fastrand v2.5.0
+#18 26.51    Compiling base64 v0.22.1
+#18 26.57    Compiling hyper-rustls v0.27.10
+#18 26.57    Compiling matchit v0.8.4
+#18 26.70    Compiling fallible-iterator v0.3.0
+#18 26.83    Compiling fallible-streaming-iterator v0.1.9
+#18 26.85    Compiling iana-time-zone v0.1.65
+#18 26.90    Compiling same-file v1.0.6
+#18 26.93    Compiling chrono v0.4.45
+#18 26.97    Compiling walkdir v2.5.0
+#18 27.06    Compiling reqwest v0.12.28
+#18 27.09    Compiling axum v0.8.9
+#18 27.24    Compiling tempfile v3.27.0
+#18 27.35    Compiling tar v0.4.46
+#18 27.55    Compiling sha2 v0.10.9
+#18 27.75    Compiling clap v4.6.7
+#18 27.81    Compiling regex v1.13.1
+#18 27.92    Compiling async-stream v0.3.6
+#18 28.26    Compiling uuid v1.29.0
+#18 28.34    Compiling hex v0.4.3
+#18 50.02    Compiling rusqlite v0.41.1
+#18 50.38    Compiling agentsandbox v0.1.0 (/build)
+#18 63.40     Finished `release` profile [optimized] target(s) in 59.36s
+#18 DONE 63.5s
+
+#23 [stage-2 3/7] COPY --from=rust-build /build/target/release/agentsandbox /usr/local/bin/agentsandbox
+#23 DONE 0.0s
+
+#24 [stage-2 4/7] COPY --from=front-build /build/front/dist/ /app/front/
+#24 DONE 0.0s
+
+#25 [stage-2 5/7] COPY policies/ /app/policies/
+#25 DONE 0.0s
+
+#26 [stage-2 6/7] COPY LICENSE /usr/share/licenses/ai-guard/LICENSE
+#26 DONE 0.0s
+
+#27 [stage-2 7/7] WORKDIR /app
+#27 DONE 0.0s
+
+#28 exporting to image
+#28 exporting layers 0.1s done
+#28 writing image sha256:438d72a72d308e1b5a242cf5bb5d351563d6620d5e47addcda4aa86f88327ffb done
+#28 naming to docker.io/library/agentsandbox-control:qualification-20261029-control-7dce8f12 done
+#28 DONE 0.1s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/hfrtsxryv5rlku1ldfeq9jv26

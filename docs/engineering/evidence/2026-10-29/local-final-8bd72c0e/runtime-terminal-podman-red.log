@@ -1,0 +1,126 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s
+     Running tests/runtime_terminal.rs (target/debug/deps/runtime_terminal-b3842d75fc3aad6a)
+
+running 1 test
+case docker/stopped_success: PASS
+case docker/stopped_failure: PASS
+case docker/negative_exit: FAIL
+case docker/stopped_negative_exit: PASS
+case docker/stopped_running: PASS
+case docker/stopped_missing_finish: PASS
+case docker/stopped_reversed_finish: PASS
+case docker/missing_exit_code: PASS
+case docker/still_running: PASS
+case docker/inconsistent_running: PASS
+case docker/inconsistent_status: PASS
+case docker/missing_running: PASS
+case docker/missing_finish: PASS
+case docker/invalid_finish: PASS
+case docker/reversed_finish: PASS
+case docker/fast_success: PASS
+case docker/fast_failure: PASS
+case docker/lowercase_aliases: PASS
+case podman/stopped_success: FAIL
+case podman/stopped_failure: FAIL
+case podman/negative_exit: FAIL
+case podman/stopped_negative_exit: PASS
+case podman/stopped_running: PASS
+case podman/stopped_missing_finish: PASS
+case podman/stopped_reversed_finish: PASS
+case podman/missing_exit_code: PASS
+case podman/still_running: PASS
+case podman/inconsistent_running: PASS
+case podman/inconsistent_status: PASS
+case podman/missing_running: PASS
+case podman/missing_finish: PASS
+case podman/invalid_finish: PASS
+case podman/reversed_finish: PASS
+case podman/fast_success: PASS
+case podman/fast_failure: PASS
+case podman/lowercase_aliases: PASS
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1090184) panicked at tests/runtime_terminal.rs:260:5:
+docker/negative_exit:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1090245) panicked at tests/runtime_terminal.rs:168:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: -1, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 5 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+podman/stopped_success:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1090355) panicked at tests/runtime_terminal.rs:158:34:
+observed fast terminal result must remain supported: runtime did not prove a terminal exited state
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+podman/stopped_failure:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1090379) panicked at tests/runtime_terminal.rs:158:34:
+observed fast terminal result must remain supported: runtime did not prove a terminal exited state
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+podman/negative_exit:
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+
+thread 'only_observed_terminal_results_are_returned_and_fast_exits_remain_valid' (1090386) panicked at tests/runtime_terminal.rs:168:13:
+unproven terminal result was accepted: Ok(ExecutionResult { stdout: Capture { bytes: [], total_bytes: 0, truncated: false }, stderr: Capture { bytes: [], total_bytes: 0, truncated: false }, state: RuntimeState { status: "exited", running: false, started_at: "2026-10-29T10:42:00Z", finished_at: "2026-10-29T10:42:01Z", exit_code: -1, oom_killed: false }, exit_code: Some(0), timed_out: false, duration_ms: 5 })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... FAILED
+
+failures:
+
+failures:
+    only_observed_terminal_results_are_returned_and_fast_exits_remain_valid
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.90s
+
+error: test failed, to rerun pass `--test runtime_terminal`

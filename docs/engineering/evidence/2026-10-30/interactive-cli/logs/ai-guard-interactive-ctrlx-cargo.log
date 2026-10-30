@@ -1,0 +1,14 @@
+Interactive CLI real Docker qualification: double Ctrl-X
+Command:
+PATH=/opt/homebrew/bin:/Users/louis/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin AGENTSANDBOX_TEST_RUNTIME_ENDPOINT=unix:///Users/louis/.docker/run/docker.sock AGENTSANDBOX_TEST_INTERACTIVE_IMAGE=agentsandbox-worker:interactive-qa-20261030 CARGO_INCREMENTAL=0 cargo test --locked --release --test runtime_interactive docker_interactive_double_ctrl_x_stops_only_the_owned_worker -- --ignored --exact --nocapture
+
+Observed scalar output:
+Finished release profile in 0.27s
+running 1 test
+driver PID 95560
+retained QA directory /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-interactive-hvjuJb
+broker status: code 1, no signal
+PTY drain bytes: 815 (payload not logged)
+termios check before ACK: PASS
+driver wait after ACK: exited
+test: PASS, 1 passed, 0 failed, 0 ignored, 13.90s

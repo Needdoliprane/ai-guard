@@ -1,0 +1,158 @@
+# Contrat d'intégration runtime du broker — proposition v2 après revue
+
+30 octobre 2026. **Plan v2, pas implémentation du broker.** Révision après lecture intégrale de `/tmp/ai-guard-broker-protocol-review.md` ; ancienne proposition conservée. Direction approuvée dans AGENTS.md et `docs/engineering/BROKER_SUPERVISION.md`, aucune nouvelle permission de code demandée. Aucun service OS installé, compte distant utilisé ou secret lu par cette tâche. Les signatures ci-dessous sont proposées ; root a séparément autorisé le premier correctif runtime strict décrit en fin de document.
+
+## Référence et séparation des responsabilités
+
+Le parcours existant est `operations::Run` → `runner::run` → `choose_plan` → `managed::execute_plan` → `launch_worker` → `ManagedRuntime::{execute_retained,start_owned_retained}` → `Runtime::execute_created`. `finish_execution`, `cleanup_committed`, `finalize_recovered`, `recover_owned` et `export_workspace` portent déjà les contrôles de terminal, ledger, ACK et export. Les garder comme noyau commun ; ne pas recopier ce parcours dans `broker`.
+
+Deux défauts précis motivent les ports : `runner::run`/`authorize_plan` écrivent/lisent les stdio globaux, et `Runtime::execute_created` attend des callbacks HTTP à l'intérieur de son select contenant la deadline locale. `PlanState::update` tient un mutex pendant une écriture privée. Le superviseur ne peut dépendre de ces chemins pour arrêter un worker.
+
+Le contrôle central reste propriétaire des DTO d'armement, migration et claims. L'orientation transmise par `auth_boundary_core` est : `ArmTargetV1` worker/helper, `ClockSampleV1` avec compteur décimal u128, identité boot et méthode, deadline/timeout vérifiés algébriquement, reçu arm_id/input_hash/audit_seq/hash. Les noms définitifs doivent être validés par root ; ne pas définir une copie concurrente de ces types dans le runtime. Le gateway valide structure/algèbre et identité, il n'atteste pas l'horloge d'un hôte distant.
+
+## Périmètres proposés
+
+| Fichier | Responsabilité limitée |
+|---|---|
+| `src/broker/mod.rs` | Assemble configuration validée, listener, journal, worker tasks et superviseur ; pas de règles métier runtime dupliquées. |
+| `src/broker/clock.rs` | `HostClock` natif, méthode/boot/compteur et erreurs typées ; aucune persistance ni UTC de secours. |
+| `src/broker/intent.rs` | DTO IPC de soumission, projection immuable, hash de domaine et liaison principal/profil/job ; pas de lecture de clés fournisseur. |
+| `src/broker/journal.rs` | Writer unique des réservations/intents/checkpoints/outbox privés, révisions/ACK fsync ; queue bornée et mode dégradé. |
+| `src/broker/ipc.rs` | Framing Unix, pair UID, authentification, limites, dispatch et réponses tenant ; pas d'appel moteur direct. |
+| `src/broker/supervisor.rs` | Échéances, slots de stop préalloués, StopTarget immuable, retries/états inconnus ; ne lit aucun plan mutable au moment du stop. |
+| `src/runner/supervised.rs` (nouveau pont) | Accède aux internals privés du runner et expose des poignées opaques crate-only ; partage `choose_plan`, validation, admission et finalisation. Élargir seulement les visibilités nécessaires dans `runner/managed.rs`. |
+| `src/runner.rs`, `runner/managed.rs` | Retirer les stdio métier via ports injectés ; point d'armement avant claim ; reprises sans refaire Auto, source ou start. |
+| `src/runtime.rs`, `runtime/managed.rs` | Garder unique create/start/attach/inspect/stop ; enrichir le contrôle d'exécution et l'observation non bloquante, sans dépendance vers `broker`. |
+| `src/operations.rs`, `main.rs`, `lib.rs` | Commandes/config broker et choix explicite du mode pendant qualification ; formatage CLI reste au bord client. |
+
+Guardian et unités OS restent les phases obligatoires suivantes de ce même chantier ; leurs interfaces sont préparées ci-dessous. Aucun nouveau stockage métier, serveur réseau partagé, dépendance Python/JS ou lib runtime n'est requis.
+
+## Autorité IPC et profils — invariant P0
+
+La configuration privée référence des identités de contrôle et leurs profils hôte. L'index `digest(token) → BackendOrigin approuvé` sert uniquement au routage, **pas de preuve d'autorisation mise en cache**. Deux identités/origins distinctes réutilisant le même opaque token sont ambiguës et refusées au startup ; plusieurs profils de racines affiliés à la même identité confirmée peuvent partager ce credential. Aucun token dans jobs, réponses, logs ou Debug.
+
+Avant **chaque nouvelle requête**, y compris status/export/approve, prouver l'UID pair puis confirmer fraîchement **le credential effectivement présenté** auprès de l'origin configuré (rôle runner, tenant et namespace courants). Créer un `RequestAuthContext` opaque contenant cette identité et un `AuditClient` construit avec ce même credential ; il est non sérialisable, Debug opaque, borné à cette requête et ne contient aucun droit de substitution. Ensuite seulement ouvrir profil, job, binding ou source, et rechercher `profile_id` parmi les profils de cette Principal. Une ancienne connexion/index positif ne suffit pas après révocation. Si T devient viewer/révoqué et que le profil tourne vers T2, T est refusé avant données privées et aucun RPC n'est signé T2 à sa place.
+
+Ne jamais réutiliser sans adaptation `runner::run` (`runner.rs:1011`) ou `load_session` (`managed.rs:2105–2130`), qui relisent un runner depuis configRoot. Les nouveaux ports reçoivent explicitement `RequestAuthContext` et le transmettent aux RPC de cette requête. Rotation invalide les contextes de requête ; nouvelle requête avec T2 se confirme normalement. Indisponibilité/échec backend = refus, pas de cache permissif ni autre origin. L'autorité autonome d'un job déjà accepté, liée à son admission/origin/tenant/namespace, est séparée : elle peut réconcilier via son credential de service validé, sans autoriser un nouveau demandeur. Le stop préarmé n'attend pas ce credential.
+
+`ValidatedBrokerProfile` fixe configRoot, BackendOrigin, référence runner, runtime/programme/endpoint approuvés, images autorisées et racines source/export. Le RPC `SubmitRunV1` ne porte ni tenant arbitraire, ni gateway, configRoot ou programme moteur à ouvrir. Le serveur construit les `RunOptions` effectifs à partir du profil et des seuls champs de travail admis (projet sous une racine autorisée, commande/sélection fournisseur, prompt, limites choisies). Toute option CLI incompatible est refusée, pas silencieusement utilisée. Chemins résolus sous des descripteurs retenus, pas seulement `canonicalize().starts_with` ; export toujours neuf.
+
+Le framing proposé est longueur u32 big-endian puis JSON strict versionné, frame≤262144 octets, credential≤4096 octets, un nombre borné de requêtes en vol et timeout de handshake/lecture. Aucun dump de frame sur erreur. Requête stable par `(Principal, installation_id, operation_id)` ; `status/stop/export/approve` retrouvent le job dans cette même Principal avant de toucher un chemin. Pas de lookup global suivi d'un test tardif. L'état local non sensible du service peut rester diagnostiquable ; aucune panne backend n'élargit une lecture de job à un rôle inconnu.
+
+## Ports Rust proposés et ownership
+
+```rust
+// crate-only ; constructeurs qui valident, Debug opaque pour matière privée.
+struct RequestAuthContext { principal: Principal, client: AuditClient, profile: Arc<ValidatedBrokerProfile> }
+struct PreparedRun { /* RunPlan privé + credential minimal + client + config retenue */ }
+struct PreparedJob { /* state/admission + Arc<AttemptGuard> + runtime lié */ }
+struct ExecutionContext { reporter: Arc<dyn JobReporter>, control: ExecutionControl }
+trait JobReporter: Send + Sync {
+    fn try_notice(&self, notice: RedactedJobNotice) -> Result<(), ReportQueueFull>;
+}
+// Dans runner/supervised.rs : point d'entrée unique, pas sérialisation RunPlan publique.
+fn prepare_once(caller: &RequestAuthContext, input: SubmitRunV1) -> Result<PreparedRun>;
+async fn admit_prepared(run: PreparedRun, review: ReviewPolicy,
+    context: ExecutionContext) -> Result<AdmissionProgress>; // ReviewRequired | Admitted(PreparedJob)
+async fn drive_job(job: PreparedJob, supervision: SupervisionPort) -> Result<JobOutcome>;
+async fn recover_job(job: RecoveredJob, supervision: SupervisionPort) -> Result<JobOutcome>;
+```
+
+`ReviewPolicy::ReturnHash` remplace le prompt stdin de `authorize_plan` dans le service ; `ApproveExact` utilise le même hash et la même intention. Le CLI existant peut garder son reporter/interaction locale tant qu'il reste dans le mode legacy explicitement choisi. `runner::run` et `operations::Run` continuent à formater au bord client ; aucune session A/B ne partage stdout/stderr du daemon. Les erreurs publiques passent par le redactor du job avant `JobReporter` et aucune réponse ne perd son étiquette Principal/job.
+
+Les captures natives restent les `Capture` bornés de `capture_stream`, jamais du `println!` service. Le parsing fournisseur et les événements post-exécution réutilisent `finish_execution`; ils restent `declared`. Une queue de report pleine ne bloque pas le stop ; elle ferme le flux client et marque la livraison incomplète. Cela ne convertit pas un ACK de transport en ACK d'audit obligatoire.
+
+## Freeze et persistance avant ACK accepté
+
+Le dispatcher authentifie puis réserve/charge l'identité de job **avant** d'appeler `choose_plan` ou de lire une source fournisseur. Un replay identique charge l'intention/binding existants ; divergence = conflit, préparation partielle sans intention complète = erreur reprise/nouvelle opération requise, jamais nouvelle résolution Auto sous le même ID.
+
+`ExecutionIntentV1` projette les champs initiaux stables du plan : version1/2/3, opération/session, options initiales effectives, demande initiale, provider_input et référence du binding figé ; exclure managed et tout FD. Hash canonique de domaine distinct, sans modifier les hashes existants d'autorisation/provider. `ExecutionCheckpointV1` référence ce hash et porte révision, précédente révision, état mutable et outbox. Ne pas hash-lock le JSON mutable de `RunPlan.managed`.
+
+Writer : binding durable → intention durable → checkpoint0 durable → marqueur accepté + parent fsync → ACK client. Tant que cette séquence n'est pas acquittée, aucun job accepté n'est annoncé et aucun claim n'est demandé. Après perte d'ACK, relire ces enregistrements exacts. Le `JobTask` appartient au service, pas au futur socket client ; sa déconnexion ne l'annule pas. Au restart, vérifier records/hashes/révisions puis reprendre depuis le contrôle central, jamais à partir d'une révision mémoire présumée.
+
+Pour v3, réutiliser `frozen_provider_credentials`, sa PrivateFile et ses validations. Ne jamais réouvrir le `.env` ni sélectionner une nouvelle clé lors d'une approbation/reprise. Plans1/2 et source credential historique gardent leurs règles ; leur adoption quiescente n'ajoute pas des champs à leurs JSON stricts. Les archives et binds restent privés et sauvegardés, sans suppression automatique.
+
+## Admission, helpers, armement et premier start
+
+Extraire de `managed::execute_plan` une phase de préparation/admission partageable : `authorize_plan`, `check_identity`, `prepare_authority`, archive/manifeste, construction `AdmissionV1` ou nouveau DTO central négocié, `PlanState::new`, réponse durable d'admission et verrou de tentative. Le broker n'écrit pas lui-même SQLite. Une autorité/profil fixés serveur remplacent seulement la résolution ambiante, sans contourner leurs vérifications existantes.
+
+`import_workspace`, `managed_archive` et `managed_scan` ont aujourd'hui des checkpoints/claims locaux. Leur callback Created doit aussi créer un armement central lié au parent worker/attempt, finalité fermée Import/ImportVerification/FinalScan/Export, opération helper et CID, puis consommer le **claim helper central** avant tout start. Ne pas livrer une verticale où seul le worker a un armement. Un export ajoute autorisation runner explicite et terminal parent déjà durable ; aucun helper argv libre.
+
+**ImportVerification est distinct de FinalScan.** `recover_import` appelle aujourd'hui `managed_scan` si tar est terminal sans ACK prouvant le transfert complet : parent encore Preparing, quota retenu, aucun claim métier, import exact terminal et manifeste admis `checkpoint.before`. La permission de vérification doit référencer cet import, son arm/reçu terminal et le digest de manifeste ; charger les opérations durables, ne pas accepter un JSON ressemblant à un reçu. Revalider ces préconditions au claim de vérification. Comparer réellement le volume au manifeste avant toute poursuite ; divergence retient preuves/quota et refuse le start. Ne pas supprimer le scan ou transformer exit0 tar en preuve de copie. FinalScan/Export gardent leur parent terminal.
+
+Les routes helper `{worker_id}` vérifient ce path contre le parent de l'arm/helper chargé dans le Store authentifié, même sans champ parent direct dans le corps. ExportRequest référence une destination privée immuable liée à `(Principal, export_operation_id)` et son digest, figée avant ACK ; modifier le chemin sous le même UUID est un conflit, pas une nouvelle résolution de root.
+
+Le point de couture précis est `launch_worker::on_created` : Created validé/persisté → mutation Created centrale → `HostClock::sample()` → calcul deadline contrôlé → journal arm privé fsync → POST arm central/reçu exact → installation du StopTarget dans le superviseur avec ACK de registration en mémoire → claim central nouveau protocole → relire horloge → permit `StartDirective::EmitArmed` seulement si reçu fresh et non expiré. Sans slot de stop ou ACK d'enregistrement, pas de claim/start. Les mêmes étapes encadrent les helpers.
+
+Pour reprendre un Created non consommé, réutiliser l'armement exact s'il existe ; ne pas recalculer `now+timeout`. Pour un claim consommé, `StartDirective::ObserveOnly` reste sans start et le broker reprend observation/enforcement, pas `execute_created` comme nouvelle session. Un ancien StartClaimV1 ne peut émettre en schéma3 : le contrat central doit préserver seulement son replay `AlreadyConsumed`. `on_started` fournit l'observation réelle, jamais une déclaration de succès.
+
+## Clock natif concret — aucune lecture disque dans le tick
+
+```rust
+trait HostClock: Send + Sync { fn sample(&self) -> Result<HostClockSample, ClockError>; }
+struct HostClockSample { method: ClockMethodV1, boot_id: Uuid, continuous_ns: u128 }
+enum ClockError { Unsupported, System(i32), InvalidBootId, InvalidReading, Overflow, Regressed }
+fn deadline(sample: &HostClockSample, timeout_s: u32) -> Result<u128, ClockError>;
+```
+
+À la création de `NativeHostClock`, capturer un boot UUID strict, borné et non nul ; même processus = identité cache stable, nouveau processus = nouvelle lecture à comparer aux armements. Linux : lire `/proc/sys/kernel/random/boot_id` borné et `clock_gettime(CLOCK_BOOTTIME)` ; vérifier retour, secondes≥0 et 0≤nsec<1e9, puis multiplication/addition u128 checked. Darwin : `sysctlbyname("kern.bootsessionuuid")` avec buffer borné et `mach_timebase_info` (retour succès, ratio non nul), puis `mach_continuous_time * numer / denom` en u128 checked. Pas `CLOCK_MONOTONIC_RAW` Linux, pas `kern.boottime`, pas Utc::now comme repli. UTC est diagnostic séparé, jamais entrée du calcul.
+
+Le tick n'ouvre ni fichier de plan ni credential : compteur natif + boot/méthode capturés. Deadline = sample + timeout*1e9, pas un Instant sérialisé. Le superviseur conserve sa dernière lecture sans mutex partagé avec les jobs et détecte régression contre celle-ci/l'armement ; erreur/méthode différente/nouveau boot = aucun start et armements antérieurs conservativement expirés. Au réveil, traiter expirés avant nouveaux starts. Le contrôle central encode les entiers en décimal canonique ; les `u128` restent internes au broker.
+
+Sources primaires déjà recoupées : [Linux timekeeping](https://www.kernel.org/doc/html/latest/core-api/timekeeping.html), [boot_id](https://www.kernel.org/doc/html/latest/admin-guide/sysctl/kernel.html#random), [header Mach/timebase](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/mach/mach_time.h), [sysctl XNU](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sysctl.c). Lecture et tests de l'OS cible restent obligatoires ; aucune qualification déclarée par ces références.
+
+## StopTarget et scheduler autonomes
+
+```rust
+struct StopTarget { // privé, pas Serialize/Debug publics, construit après ArmReceipt valide
+    runtime: Arc<ManagedRuntime>, owned: OwnedContainerSnapshot,
+    attempt_guard: Arc<AttemptGuard>, principal: Principal, arm: AcknowledgedArm,
+    intent_hash: IntentHash, // intention figée avant arm ; arm lie ce hash à clock/deadline/reçu
+}
+fn register_armed(target: Arc<StopTarget>) -> Result<ArmedLease, SupervisorUnavailable>;
+fn request_stop(lease: &ArmedLease, reason: StopReason) -> Result<(), SupervisorUnavailable>;
+```
+
+La cible contient l'autorité/fingerprint privés (`RuntimeAuthority`, programme approuvé, endpoint/EngineID ou marqueur Podman), le `ContainerHandle` avec CID **complet**, snapshot Created et spec/config/image/ressources attendus. Aucun nom seul, recherche large ou tenant JSON ne construit StopTarget. L'AttemptGuard est acquis une fois puis partagé sans relock concurrent ; ne pas essayer de le reprendre pendant que le driver attach le détient. Le scheduler ne verrouille ni ne sérialise `PlanState`.
+
+Un thread OS/runtime Tokio dédié au contrôle des échéances ne partage pas le pool où tournent captures, préparations ou écritures FS. Il lit la clock≤250ms, marque les slots expirés et dispatch les stops vers une capacité réservée, bornée et préallouée pour les jobs/helpers admis. Le writer/outbox reçoit `try_send`, jamais await ; file pleine/fsync bloqué empêche de nouveaux armements mais pas le stop déjà autorisé. Un armement garde un résultat borné en mémoire ; absence de confirmation disque n'est jamais appelée durabilité.
+
+**Port strict proposé et autorisé pour le premier correctif :** `ManagedRuntime::stop_snapshot_owned(&OwnedContainerSnapshot) -> Result<ContainerObservation>`. Ne pas déléguer aveuglément à `stop_owned(handle)`, qui compare trop peu avant kill. Valider handle/baseline complète (CID, nom, image, ressources, restart0, version/digest de fingerprint), inspecter via la même autorité, puis comparer tous ces faits **avant effet**. Absence, inspect error, baseline incomplète ou divergence = Err/Unknown **sans kill**. Si exact et running, revalider l'autorité et émettre le kill du seul CID ; comparer l'observation après effet à la même baseline. Created non-running ne devient pas un terminal allouable ; le caller exige encore `validate_terminal` et preuve de start/D5. L'administrateur pouvant muter entre inspect et kill reste une limite explicite : pas d'attestation atomique moteur.
+
+Extraire une primitive privée snapshot+CID commune à ce port, `Runtime::execution_kill` (qui détient déjà Created) et au Drop d'`InteractiveCancellation` (y retenir une copie de cette baseline). `execute_owned` conserve sa dernière baseline vérifiée pour l'erreur de callback/capture ; sans baseline crédible, pas de fallback handle-only destiné à contourner le refus strict. Les rares API legacy n'ayant réellement aucun snapshot restent identifiées non supervisées jusqu'au cutover ; leur compatibilité n'est pas étendue aux arms. Root raccorde les appels runner qui détiennent `owned/found/helper`.
+
+Le tick n'exécute pas les vérifications FS de `Runtime::command`/`InvocationAnchor::verify`, qui ouvrent/relisent/hashent le binaire avant le timeout CLI. Préparer Command, inspection et effet dans des **slots d'effet isolés**, pas sur le thread du tick. Nombre de slots/queues borné, capacité réservée avant claim et aucun verrou global partagé : un slot A bloqué ne doit pas empêcher le slot de B ni la lecture des deadlines. Un timeout de futur n'annule pas un syscall synchrone/RPC accepté ; un slot bloqué n'est pas réutilisé ni un nouveau thread créé sans borne. Marquer saturation/autorité dégradée, refuser nouvelles admissions sur cette capacité et conserver les expirés à traiter. Aucune fausse garantie de stop≤15s par un simple `timeout` ; les limites OS/moteur restent mesurées et visibles.
+
+`Runtime::execute_created` garde son unique transport start/attach/capture et peut conserver une borne locale de secours. Pour le mode supervisé, lui injecter `ExecutionControl` (cancel/stop watch, deadline **absolue** et observateur non bloquant). Ne pas calculer une Duration restante avant `on_created` : audit/arm/claim peuvent déjà l'avoir consommée. Couture proposée : `StartDirective::EmitArmed(ArmedStartPermit)` opaque et non clonable, construit crate-only après reçu fresh+registration du superviseur ; `EmitOnce` reste le wrapper legacy. Après callback/claim, préparer entièrement autorité, `Command` (dont vérification FS), pipes/capture et transport TTY/guardian. Séparer `spawn_transport` en préparation sans spawn puis émission. **Dernière lecture de clock après toutes ces préparations**, puis consommation du permit et `spawn` sans nouvel await/IO de préparation intermédiaire. Expiré/erreur/boot différent = aucun start, mais claim reste consommé et enforcement actif ; retry ne fabrique pas un permit. La borne locale se dérive alors du temps restant, jamais d'un timeout neuf ; la vraie autorité reste le superviseur externe. Pas de booléen IPC désactivant simplement le timer. Les wrappers legacy restent compatibles avant cutover.
+
+L'observateur runtime du mode supervisé enfile des observations brutes typées dans un sink borné puis rend la main ; un worker de contrôle les redige/persiste/transmet. Ne pas await `record_observation`/HTTP à l'intérieur de la pompe pour prétendre sa borne indépendante. Une erreur critique de sink déclenche le stop de sûreté et un état audit pending ; elle ne crée aucun événement durable fictif. `finish_execution` reste le seul chemin de terminal/ledger/cleanup, et la réconciliation utilise les mêmes mutations idempotentes.
+
+## Crash, reprise, export et TTY
+
+Au restart normal non restauré : verrou unique d'autorité → inventaire privé → clock/boot → réacquisition des verrous de tentative → restauration des StopTargets à partir d'armements acquittés/CID vérifiés → enforcement des expirés → reprise de l'outbox et des RPC. Aucune nouvelle admission avant que les jobs actifs aient leurs slots d'enforcement ; gateway indisponible n'empêche pas l'arrêt déjà armé mais bloque les nouvelles autorisations. Un journal illisible sans preuve de CID ne donne pas de kill par nom.
+
+**Restore/rollback/clonage restent désactivés pour reprise d'exécution.** Un backup pris avant claim peut ignorer un start réellement émis après lui : `AlreadyConsumed`, hash valide et flock ne protègent pas ce rollback. L'état restauré est maintenance, sans nouvelle admission/arm/claim, jusqu'à fencing conservateur des anciennes autorités/CID, fermeture des anciens émetteurs/RPC en vol et preuve permettant explicitement l'activation. La capacité D5 non prouvée interdit cette activation ; aucun UUID de namespace neuf ou nouvel epoch ne réarme une sauvegarde. Même règle pour racine clonée sur un autre hôte.
+
+Après terminal inspecté, attendre commit atomique terminal/ledger/audit/quota avant cleanup. `finalize_recovered`, `post_saved_terminal`, `cleanup_committed` et export sont réutilisés ; chaque reprise retrouve l'opération exacte et vérifie le même reçu. Export RPC = identité runner, job de cette identité terminal, parent cible sous root export autorisée, destination neuve ; helper export aussi armé/claim central. Aucun CPU consommé ou prix inféré d'une allocation ; `billable=false`.
+
+Préparer `ExecutionTransport::{Batch, Interactive(TerminalLease)}` et un port `TerminalLeaseProvider` retournant une poignée opaque. La première verticale implémente Batch ; Interactive indisponible est refusé **avant freeze/claim**, jamais transformé en batch ou en exécution directe. Les interfaces guardian portent FD/état initial/lease/génération, pas frappes ni clés ; gardien seul writer physique, CLI lecteur clavier, stopwrites→restore/readback→ACK. Aucun succès TTY ou réattachement n'est annoncé par une verticale batch.
+
+Pendant implémentation, l'ancienne pile explicitement en schéma2 peut garder son CLI/TTY existant. Aucun changement de gateway/config par défaut avant cutover coordonné et qualification batch puis TTY/guardian. La migration3 refuse les premiers starts anciens ; un nouveau client ne retombe jamais sur le direct si service/protocole manque. Les routes de lecture/arrêt/historique et les plans restent compatibles selon leur contrat testé. Le chemin direct ne peut rester une échappatoire d'une release revendiquant supervision obligatoire.
+
+## Preuves requises et points à résoudre
+
+Luna exécute les régressions ciblées, zéro appel modèle payant. Tester clock déterministe (ratio/overflow/régression/boot/suspend injectés), intent/replay avant résolution, chaque coupure entre fsync/marqueur/ACK, checkpoint évoluant sans changement intent, API arm/claims, authentification A/B/viewer et chemins/FD. Pas besoin de centaines de tests miroirs de code.
+
+Puis vrai moteur, vrai broker process foreground appartenant au harness Rust (pas background shell orphelin) et trois workers Rust probes A1/A2/B1 : tuer seulement PID client après ACK et vérifier stop à échéance ; tuer broker, le relancer explicitement via harness sans prétendre à un restart OS installé, retrouver même clock/deadline/CID et aucun second start ; gateway/audit refusés et writer FS suspendu avec stop autonome ; concurrence/témoin B inchangé ; quota/ledger/audit réouvert/export exact. Docker/Podman, OS, gestionnaire OS et charge100 gardent leurs preuves séparées. Une fois install OS autorisée, vraie qualification systemd/launchd, logout/reboot/gel requise ; le harness ne la remplace pas.
+
+Prérequis de qualification, pas nouvelles permissions de code : D5 doit prouver la clôture d'un start ambigu face à moteur réel, pas `NotFound`/rm heureux ; sinon quota/enforcement restent actifs. macOS nécessite une stratégie effective contre broker vivant figé, KeepAlive seul non prouvé ; code/watchdog supplémentaire doit être conçu et relu dans ce chantier avant qualification. Aucun reset d'horloge, prise d'autorité entre racines clonées ni terminal à mesure inconnue n'est implicitement accepté.
+
+Décisions de routine root : noms finaux/visibilité des ports, DTO partagés avec core, valeurs exactes de limites IPC et capacité de stop par installation, activation de développement explicite avant cutover. Vrais points d'intégration à fermer avant code transversal : schéma/API et gating central uniques, propriété des nouveaux checkpoints face aux anciens writers, et couture ArmReceipt→StopTarget→claim commune aux helpers/worker. Les marges chrono/stop/restart restent des cibles à mesurer, pas résultats acquis.
+
+## Premier lot autonome utile autorisé par root
+
+Lot immédiat : port `stop_snapshot_owned` et intégration des branches runtime qui possèdent déjà une baseline, sans attendre le daemon. Périmètre exclusif de l'agent runtime : **`src/runtime.rs` et `src/runtime/managed.rs`** ; sauvegarde préalable privée réalisée. Root possède séparément les six remplacements `runner/managed.rs` vers les snapshots complets. Luna possède `tests/runtime_stop_snapshot.rs`, reproduit le défaut par l'ancien chemin avant patch puis teste le port strict. Critères : fp/image/nom/ressources divergents ou inspect error → zéro kill ; exact → arrêt ciblé ; callback error exact toujours stoppé ; pas de terminal/usage inventé. Les attentes de fixtures qui demandaient un kill après divergence sont corrigées seulement pour cette nouvelle règle de sûreté.
+
+Ce lot extrait la primitive commune et améliore un parcours réel existant ; il ne livre ni arm central ni scheduler/clock persistée. Les lots suivants, après gel root des DTO partagés : HostClock natif+tests réels lecture locale, ArmReceipt→StopTarget→ArmedStartPermit, puis IPC/journal et première verticale batch complète. Ne pas écrire les nouveaux modules ou modifier contrôle/lib/main/clock avant ce gel. Aucun provider/E2E pour le correctif strict ; une qualification moteur ciblée sera distincte si nécessaire.
+
+Statut final : v2 de contrat pour relecture coordonnée ; seul le correctif snapshot séparé est autorisé à démarrer après RED Luna, sans prétendre déjà livré. Ne pas éditer plusieurs copies des DTO centraux ou créer des stubs déclarés fonctionnels pour accélérer l'intégration.

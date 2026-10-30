@@ -1,0 +1,14 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.62s
+     Running tests/api_auth_boundary.rs (target/debug/deps/api_auth_boundary-adb2f1af0cc06492)
+
+running 6 tests
+test duplicate_authorization_and_oversized_bearer_are_rejected_before_body_polling ... ok
+test malformed_event_queries_authenticate_first_on_both_api_aliases ... ok
+test missing_invalid_and_viewer_write_auth_reject_before_polling_any_write_body ... ok
+test health_stays_public_and_authenticated_identity_selects_tenant_and_role_on_both_aliases ... ok
+test runner_malformed_write_bodies_keep_client_errors_without_audit_mutation ... ok
+test real_tcp_missing_bearer_gets_401_before_client_sends_declared_body ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.67s
+

@@ -1,0 +1,1820 @@
+use super::*;
+use sha2::{Digest, Sha256};
+use std::path::Path;
+
+/// This binding belongs in the broker's private checkpoint, never in an API DTO.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeAuthority {
+    pub authority_id: Uuid,
+    pub kind: RuntimeKind,
+    pub endpoint: String,
+    pub engine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<InvocationBindingV1>,
+    podman: Option<PodmanBinding>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct PodmanBinding {
+    graph_root: String,
+    run_root: String,
+    marker_volume: String,
+    nonce: Uuid,
+    effective_uid: u32,
+    selection_env: std::collections::BTreeMap<String, Option<String>>,
+}
+impl std::fmt::Debug for RuntimeAuthority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RuntimeAuthority")
+            .field("authority_id", &self.authority_id)
+            .field("kind", &self.kind)
+            .field("endpoint", &self.endpoint)
+            .field("engine_id", &self.engine_id)
+            .field("podman_marker", &self.podman.as_ref().map(|_| "[private]"))
+            .finish()
+    }
+}
+impl RuntimeAuthority {
+    pub fn invocation_fingerprint(&self) -> Option<String> {
+        self.invocation
+            .as_ref()
+            .map(InvocationBindingV1::fingerprint)
+    }
+    pub fn fingerprint(&self) -> String {
+        // Hash each length-prefixed component to avoid ambiguous concatenation.
+        let mut digest = Sha256::new();
+        let mut add = |value: &[u8]| {
+            digest.update((value.len() as u64).to_be_bytes());
+            digest.update(value);
+        };
+        add(self.authority_id.as_bytes());
+        add(self.kind.program().as_bytes());
+        add(self.endpoint.as_bytes());
+        add(self.engine_id.as_deref().unwrap_or_default().as_bytes());
+        if let Some(podman) = &self.podman {
+            add(podman.graph_root.as_bytes());
+            add(podman.run_root.as_bytes());
+            add(podman.marker_volume.as_bytes());
+            add(podman.nonce.as_bytes());
+            add(&podman.effective_uid.to_be_bytes());
+            for (key, value) in &podman.selection_env {
+                add(key.as_bytes());
+                add(&[u8::from(value.is_some())]);
+                add(value.as_deref().unwrap_or_default().as_bytes());
+            }
+        }
+        hex::encode(digest.finalize())
+    }
+}
+#[derive(Debug)]
+pub enum ManagedRuntimeError {
+    BootstrapRequired,
+    InvocationMigrationRequired,
+}
+impl std::fmt::Display for ManagedRuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BootstrapRequired => f.write_str("Podman authority requires explicit control-marker bootstrap and a private persisted binding"),
+            Self::InvocationMigrationRequired => f.write_str("runtime invocation migration required: explicitly adopt an approved runtime after read-only authority verification and persist its audit/checkpoint before effects"),
+        }
+    }
+}
+impl std::error::Error for ManagedRuntimeError {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerHandle {
+    authority_fingerprint: String,
+    session: Uuid,
+    operation: Uuid,
+    id: String,
+    name: String,
+    /// Private digest selection for this immutable instance. Absence means v1;
+    /// legacy handles remain byte-for-byte serializable without a new field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    configuration_fingerprint_version: Option<u32>,
+}
+impl ContainerHandle {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn session_id(&self) -> Uuid {
+        self.session
+    }
+    pub fn operation_id(&self) -> Uuid {
+        self.operation
+    }
+    pub fn authority_fingerprint(&self) -> &str {
+        &self.authority_fingerprint
+    }
+    fn fingerprint_version(&self) -> u32 {
+        self.configuration_fingerprint_version.unwrap_or(1)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OwnedContainerSnapshot {
+    pub handle: ContainerHandle,
+    pub observation: ContainerObservation,
+}
+/// Only the first durable control claim may produce EmitOnce. A replay must
+/// return ObserveOnly; this directive is consumed and the callback is FnOnce.
+#[derive(Debug)]
+pub enum StartDirective {
+    EmitOnce,
+    ObserveOnly,
+}
+#[derive(Debug)]
+pub struct ManagedRetainedExecution {
+    execution: RetainedExecution,
+    created: OwnedContainerSnapshot,
+    terminal: ContainerObservation,
+}
+impl ManagedRetainedExecution {
+    pub fn result(&self) -> &ExecutionResult {
+        self.execution.result()
+    }
+    pub fn created(&self) -> &OwnedContainerSnapshot {
+        &self.created
+    }
+    pub fn terminal(&self) -> &ContainerObservation {
+        &self.terminal
+    }
+    pub fn handle(&self) -> &ContainerHandle {
+        &self.created.handle
+    }
+}
+#[derive(Clone, Debug)]
+pub struct ManagedRuntime {
+    runtime: Runtime,
+    binding: RuntimeAuthority,
+}
+impl ManagedRuntime {
+    pub async fn connect_docker(authority_id: Uuid, endpoint: &str) -> Result<Self> {
+        Self::connect_docker_with_runtime(
+            authority_id,
+            endpoint,
+            Runtime::new(RuntimeKind::Docker)?,
+        )
+        .await
+    }
+    pub async fn connect_docker_with_runtime(
+        authority_id: Uuid,
+        endpoint: &str,
+        runtime: Runtime,
+    ) -> Result<Self> {
+        validate_endpoint(RuntimeKind::Docker, endpoint)?;
+        ensure!(
+            runtime.kind == RuntimeKind::Docker,
+            "runtime kind conflicts with Docker authority"
+        );
+        ensure!(
+            !authority_id.is_nil(),
+            "runtime authority identity must not be nil"
+        );
+        let mut managed = Self {
+            binding: RuntimeAuthority {
+                authority_id,
+                kind: RuntimeKind::Docker,
+                endpoint: endpoint.into(),
+                engine_id: None,
+                invocation: Some(runtime.invocation().clone()),
+                podman: None,
+            },
+            runtime,
+        };
+        managed.binding.engine_id = Some(managed.docker_engine_id().await?);
+        Ok(managed)
+    }
+    /// No marker is created by connecting. Call bootstrap_podman explicitly
+    /// after durable control authorization, then persist binding privately.
+    pub async fn connect_podman(_authority_id: Uuid, endpoint: &str) -> Result<Self> {
+        validate_endpoint(RuntimeKind::Podman, endpoint)?;
+        Err(ManagedRuntimeError::BootstrapRequired.into())
+    }
+    pub async fn bootstrap_podman(authority_id: Uuid, endpoint: &str) -> Result<Self> {
+        Self::bootstrap_podman_with_runtime(
+            authority_id,
+            endpoint,
+            Runtime::new(RuntimeKind::Podman)?,
+        )
+        .await
+    }
+    pub async fn bootstrap_podman_with_runtime(
+        authority_id: Uuid,
+        endpoint: &str,
+        runtime: Runtime,
+    ) -> Result<Self> {
+        validate_endpoint(RuntimeKind::Podman, endpoint)?;
+        ensure!(
+            runtime.kind == RuntimeKind::Podman,
+            "runtime kind conflicts with Podman authority"
+        );
+        ensure!(
+            !authority_id.is_nil(),
+            "runtime authority identity must not be nil"
+        );
+        let mut managed = Self {
+            binding: RuntimeAuthority {
+                authority_id,
+                kind: RuntimeKind::Podman,
+                endpoint: endpoint.into(),
+                engine_id: None,
+                invocation: Some(runtime.invocation().clone()),
+                podman: None,
+            },
+            runtime,
+        };
+        let info = managed.podman_info().await?;
+        let marker = PodmanBinding {
+            graph_root: info.store.graph_root,
+            run_root: info.store.run_root,
+            marker_volume: format!(
+                "aig-authority-{}-{}",
+                authority_id.simple(),
+                Uuid::new_v4().simple()
+            ),
+            nonce: Uuid::new_v4(),
+            effective_uid: effective_uid(),
+            selection_env: podman_selection_env(managed.runtime.invocation()),
+        };
+        let output = managed
+            .cli_sensitive(
+                &[
+                    "volume".into(),
+                    "create".into(),
+                    "--label".into(),
+                    format!("agentsandbox.authority={authority_id}"),
+                    "--label".into(),
+                    format!("agentsandbox.binding={}", marker.nonce),
+                    marker.marker_volume.clone(),
+                ],
+                Duration::from_secs(20),
+                &[marker.marker_volume.clone(), marker.nonce.to_string()],
+            )
+            .await?;
+        ensure!(
+            !output.truncated
+                && std::str::from_utf8(&output.bytes).ok().map(str::trim)
+                    == Some(marker.marker_volume.as_str()),
+            "Podman marker creation response is ambiguous; no marker adopted or removed"
+        );
+        managed.binding.podman = Some(marker);
+        managed.verify_authority().await?;
+        Ok(managed)
+    }
+    pub async fn reopen(binding: RuntimeAuthority) -> Result<Self> {
+        let invocation = binding
+            .invocation
+            .clone()
+            .ok_or(ManagedRuntimeError::InvocationMigrationRequired)?;
+        let runtime = Runtime::from_invocation(binding.kind, invocation)?;
+        Self::reopen_with_runtime(binding, runtime).await
+    }
+    pub async fn reopen_with_runtime(binding: RuntimeAuthority, runtime: Runtime) -> Result<Self> {
+        let invocation = binding
+            .invocation
+            .as_ref()
+            .ok_or(ManagedRuntimeError::InvocationMigrationRequired)?;
+        ensure!(
+            runtime.kind == binding.kind && invocation == runtime.invocation(),
+            "approved runtime invocation differs from the persisted authority"
+        );
+        Self::validated_reopen(binding, runtime).await
+    }
+    /// Verify the same engine and Podman marker using only info/inspect. The
+    /// caller must audit and persist the resulting binding before any effect.
+    pub async fn adopt_invocation(mut binding: RuntimeAuthority, runtime: Runtime) -> Result<Self> {
+        ensure!(
+            runtime.kind == binding.kind,
+            "runtime kind conflicts with historical authority"
+        );
+        binding.invocation = Some(runtime.invocation().clone());
+        Self::validated_reopen(binding, runtime).await
+    }
+    async fn validated_reopen(binding: RuntimeAuthority, runtime: Runtime) -> Result<Self> {
+        validate_endpoint(binding.kind, &binding.endpoint)?;
+        ensure!(
+            !binding.authority_id.is_nil(),
+            "runtime authority identity must not be nil"
+        );
+        match binding.kind {
+            RuntimeKind::Docker => ensure!(
+                binding.engine_id.is_some() && binding.podman.is_none(),
+                "Docker binding is incomplete"
+            ),
+            RuntimeKind::Podman => ensure!(
+                binding.engine_id.is_none() && binding.podman.is_some(),
+                "Podman binding is incomplete; explicit bootstrap required"
+            ),
+        }
+        let managed = Self { runtime, binding };
+        // Legacy Podman environment remains part of the engine fingerprint. It
+        // is never replayed; adoption verifies storage roots and the private
+        // marker under the newly approved environment instead.
+        managed.verify_authority().await?;
+        Ok(managed)
+    }
+    pub fn binding(&self) -> &RuntimeAuthority {
+        &self.binding
+    }
+    pub async fn doctor(&self, allow_rootful: bool) -> Result<RuntimeInfo> {
+        self.verify_authority().await?;
+        let format = if self.binding.kind == RuntimeKind::Docker {
+            "{{json .}}"
+        } else {
+            "json"
+        };
+        let output = self
+            .cli(
+                &["info".into(), "--format".into(), format.into()],
+                Duration::from_secs(15),
+            )
+            .await?;
+        ensure!(!output.truncated, "runtime info exceeds its response bound");
+        if self.binding.kind == RuntimeKind::Docker {
+            #[derive(Deserialize)]
+            struct Engine {
+                #[serde(rename = "ID")]
+                id: String,
+            }
+            let info: Engine = serde_json::from_slice(&output.bytes)
+                .map_err(|_| anyhow::anyhow!("Docker authority inspection is invalid"))?;
+            ensure!(
+                self.binding.engine_id.as_deref() == Some(info.id.as_str()),
+                "Docker authority changed during diagnostics"
+            );
+        }
+        parse_runtime_info(self.binding.kind, &output.bytes, allow_rootful)
+    }
+    pub async fn resolve_image(&self, image_ref: &str) -> Result<String> {
+        validate_image(image_ref)?;
+        self.verify_authority().await?;
+        let output = self
+            .cli(
+                &[
+                    "image".into(),
+                    "inspect".into(),
+                    "--format".into(),
+                    "{{.Id}}".into(),
+                    image_ref.into(),
+                ],
+                Duration::from_secs(15),
+            )
+            .await?;
+        let id = std::str::from_utf8(&output.bytes)
+            .ok()
+            .map(str::trim)
+            .filter(|_| !output.truncated)
+            .context("runtime image inspection is invalid")?;
+        let raw = id.strip_prefix("sha256:").unwrap_or(id);
+        ensure!(
+            valid_immutable_id(raw),
+            "runtime did not expose an immutable image ID"
+        );
+        Ok(format!("sha256:{raw}"))
+    }
+    pub async fn create_named_volume(
+        &self,
+        volume: &str,
+        labels: &[(String, String)],
+    ) -> Result<()> {
+        ensure!(
+            !labels.is_empty(),
+            "managed workspace volume requires control ownership labels"
+        );
+        self.verify_authority().await?;
+        let output = self
+            .cli(&named_volume_args(volume, labels)?, Duration::from_secs(30))
+            .await?;
+        ensure!(
+            !output.truncated
+                && std::str::from_utf8(&output.bytes).ok().map(str::trim) == Some(volume),
+            "workspace volume creation response is ambiguous; no volume adopted or removed"
+        );
+        self.verify_authority().await?;
+        let output = self
+            .cli(
+                &[
+                    "volume".into(),
+                    "inspect".into(),
+                    "--format".into(),
+                    "{{json .}}".into(),
+                    volume.into(),
+                ],
+                Duration::from_secs(10),
+            )
+            .await?;
+        ensure!(
+            !output.truncated,
+            "workspace volume inspection exceeds its bound"
+        );
+        let facts: WorkspaceVolume = serde_json::from_slice(&output.bytes).map_err(|_| {
+            anyhow::anyhow!("workspace volume ownership inspection is invalid; no volume adopted")
+        })?;
+        ensure!(
+            facts.name == volume
+                && facts.driver == "local"
+                && facts.scope == "local"
+                && facts
+                    .options
+                    .as_ref()
+                    .is_none_or(std::collections::BTreeMap::is_empty)
+                && labels
+                    .iter()
+                    .all(|(key, value)| facts.labels.get(key) == Some(value)),
+            "workspace volume ownership, driver or host mount options conflict; no volume adopted or removed"
+        );
+        Ok(())
+    }
+    pub(super) fn command(&self) -> Result<Command> {
+        ensure!(
+            self.binding.invocation.as_ref() == Some(self.runtime.invocation()),
+            "runtime invocation differs from the persisted authority"
+        );
+        let mut command = self.runtime.command()?;
+        // A frozen explicit target wins over mutable CLI context selections.
+        for name in [
+            "DOCKER_HOST",
+            "DOCKER_CONTEXT",
+            "DOCKER_TLS_VERIFY",
+            "DOCKER_CERT_PATH",
+            "DOCKER_API_VERSION",
+            "CONTAINER_HOST",
+            "CONTAINER_CONNECTION",
+        ] {
+            command.env_remove(name);
+        }
+        match self.binding.kind {
+            RuntimeKind::Docker => {
+                command.arg("--host").arg(&self.binding.endpoint);
+            }
+            RuntimeKind::Podman if self.binding.endpoint == "local" => {
+                command.arg("--remote=false");
+            }
+            RuntimeKind::Podman => {
+                command
+                    .arg("--remote")
+                    .arg("--url")
+                    .arg(&self.binding.endpoint);
+            }
+        }
+        Ok(command)
+    }
+    async fn cli(&self, args: &[String], duration: Duration) -> Result<Capture> {
+        self.cli_sensitive(args, duration, &[]).await
+    }
+    async fn cli_sensitive(
+        &self,
+        args: &[String],
+        duration: Duration,
+        extra: &[String],
+    ) -> Result<Capture> {
+        let mut private_redactions = extra.to_vec();
+        if let Some(binding) = &self.binding.podman {
+            private_redactions.extend([binding.marker_volume.clone(), binding.nonce.to_string()]);
+        }
+        self.runtime
+            .capture_cli(self.command()?, args, duration, &[])
+            .await
+            .map_err(|mut error| {
+                // Keep original bytes and capture metadata until the caller can
+                // mask its credentials and these private markers together.
+                if let Some(failure) = error.downcast_mut::<RuntimeCommandFailure>() {
+                    failure.add_private_redactions(private_redactions);
+                }
+                error.context(
+                    "runtime control command failed or unavailable; observation is unknown",
+                )
+            })
+    }
+    async fn docker_engine_id(&self) -> Result<String> {
+        #[derive(Deserialize)]
+        struct Engine {
+            #[serde(rename = "ID")]
+            id: String,
+        }
+        let output = self
+            .cli(
+                &["info".into(), "--format".into(), "{{json .}}".into()],
+                Duration::from_secs(15),
+            )
+            .await?;
+        ensure!(
+            !output.truncated,
+            "Docker authority inspection exceeds its bound"
+        );
+        let info: Engine = serde_json::from_slice(&output.bytes)
+            .map_err(|_| anyhow::anyhow!("Docker authority inspection is invalid"))?;
+        ensure!(
+            !info.id.is_empty()
+                && info.id.len() <= 256
+                && info
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_:".contains(&b)),
+            "Docker did not expose a valid engine ID"
+        );
+        Ok(info.id)
+    }
+    async fn podman_info(&self) -> Result<PodmanInfo> {
+        let output = self
+            .cli(
+                &["info".into(), "--format".into(), "json".into()],
+                Duration::from_secs(15),
+            )
+            .await?;
+        ensure!(
+            !output.truncated,
+            "Podman authority inspection exceeds its bound"
+        );
+        let info: PodmanInfo = serde_json::from_slice(&output.bytes)
+            .map_err(|_| anyhow::anyhow!("Podman authority inspection is invalid"))?;
+        ensure!(
+            Path::new(&info.store.graph_root).is_absolute()
+                && Path::new(&info.store.run_root).is_absolute(),
+            "Podman storage authority paths must be absolute"
+        );
+        Ok(info)
+    }
+    pub(super) async fn verify_authority(&self) -> Result<()> {
+        match self.binding.kind {
+            RuntimeKind::Docker => ensure!(
+                self.binding.engine_id.as_deref() == Some(self.docker_engine_id().await?.as_str()),
+                "Docker engine authority changed; runtime state is unknown"
+            ),
+            RuntimeKind::Podman => {
+                let binding = self
+                    .binding
+                    .podman
+                    .as_ref()
+                    .ok_or(ManagedRuntimeError::BootstrapRequired)?;
+                ensure!(
+                    binding.effective_uid == effective_uid(),
+                    "Podman control account changed; runtime state is unknown"
+                );
+                let info = self.podman_info().await?;
+                ensure!(
+                    info.store.graph_root == binding.graph_root
+                        && info.store.run_root == binding.run_root,
+                    "Podman storage authority changed; runtime state is unknown"
+                );
+                #[derive(Deserialize)]
+                #[serde(rename_all = "PascalCase")]
+                struct Marker {
+                    name: String,
+                    labels: std::collections::BTreeMap<String, String>,
+                }
+                let output = self
+                    .cli(
+                        &[
+                            "volume".into(),
+                            "inspect".into(),
+                            "--format".into(),
+                            "{{json .}}".into(),
+                            binding.marker_volume.clone(),
+                        ],
+                        Duration::from_secs(10),
+                    )
+                    .await?;
+                ensure!(
+                    !output.truncated,
+                    "Podman control marker inspection exceeds its bound"
+                );
+                let marker: Marker = serde_json::from_slice(&output.bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Podman control marker is missing or invalid; runtime state is unknown"
+                    )
+                })?;
+                ensure!(
+                    marker.name == binding.marker_volume
+                        && marker.labels.get("agentsandbox.authority")
+                            == Some(&self.binding.authority_id.to_string())
+                        && marker.labels.get("agentsandbox.binding")
+                            == Some(&binding.nonce.to_string()),
+                    "Podman control marker changed; runtime state is unknown"
+                );
+            }
+        }
+        Ok(())
+    }
+    fn validate_handle(&self, handle: &ContainerHandle) -> Result<()> {
+        ensure!(
+            handle.authority_fingerprint == self.binding.fingerprint()
+                && valid_immutable_id(&handle.id)
+                && !handle.operation.is_nil()
+                && matches!(handle.fingerprint_version(), 1..=3),
+            "owned container handle does not match the runtime authority"
+        );
+        Ok(())
+    }
+    async fn observe_id(&self, id: &str, fingerprint_version: u32) -> Result<ContainerObservation> {
+        let output = self.inspect_facts(id).await?;
+        let observation = parse_container_observation_version(
+            &output.bytes,
+            self.binding.kind,
+            fingerprint_version,
+        )?;
+        ensure!(
+            observation.id.as_deref() == Some(id),
+            "runtime inspected a different immutable instance"
+        );
+        Ok(observation)
+    }
+    async fn inspect_facts(&self, id: &str) -> Result<Capture> {
+        ensure!(
+            valid_immutable_id(id),
+            "runtime target must be a complete immutable container ID"
+        );
+        self.verify_authority().await?;
+        let output = self
+            .cli(
+                &[
+                    "inspect".into(),
+                    "--format".into(),
+                    "{{json .}}".into(),
+                    id.into(),
+                ],
+                Duration::from_secs(10),
+            )
+            .await?;
+        ensure!(!output.truncated, "runtime inspection exceeds its bound");
+        Ok(output)
+    }
+    pub async fn observe(&self, handle: &ContainerHandle) -> Result<ContainerObservation> {
+        self.validate_handle(handle)?;
+        let observed = self
+            .observe_id(&handle.id, handle.fingerprint_version())
+            .await?;
+        ensure!(
+            observed.name == handle.name,
+            "runtime owned instance name changed"
+        );
+        Ok(observed)
+    }
+    /// A missing result means only an empty, successful targeted inventory.
+    /// It never authorizes another start or frees a reservation.
+    pub async fn lookup_created(
+        &self,
+        spec: &ContainerSpec,
+    ) -> Result<Option<OwnedContainerSnapshot>> {
+        ensure!(
+            spec.managed_names.is_some(),
+            "managed lookup requires control-assigned names"
+        );
+        self.verify_authority().await?;
+        let output = self
+            .cli(
+                &[
+                    "ps".into(),
+                    "--all".into(),
+                    "--no-trunc".into(),
+                    "--filter".into(),
+                    format!("name=^{}$", spec.name()),
+                    "--format".into(),
+                    "{{.ID}}".into(),
+                ],
+                Duration::from_secs(10),
+            )
+            .await?;
+        ensure!(
+            !output.truncated,
+            "runtime targeted inventory exceeds its bound"
+        );
+        let text = std::str::from_utf8(&output.bytes)
+            .map_err(|_| anyhow::anyhow!("runtime targeted inventory is invalid"))?;
+        let ids: Vec<_> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        ensure!(
+            ids.len() <= 1 && ids.iter().all(|id| valid_immutable_id(id)),
+            "runtime targeted inventory is ambiguous or invalid; no instance adopted"
+        );
+        let Some(id) = ids.first() else {
+            return Ok(None);
+        };
+        let facts = self.inspect_facts(id).await?;
+        let observed = parse_container_observation_version(
+            &facts.bytes,
+            self.binding.kind,
+            spec.fingerprint_version(),
+        )?;
+        ensure!(
+            observed.id.as_deref() == Some(*id) && observed.name == spec.name(),
+            "runtime lookup identity conflicts with the reserved attempt"
+        );
+        validate_authorized_identity(spec, &observed)?;
+        validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+        let handle = ContainerHandle {
+            authority_fingerprint: self.binding.fingerprint(),
+            session: spec.session,
+            operation: spec.operation_id(),
+            id: (*id).into(),
+            name: spec.name(),
+            configuration_fingerprint_version: (spec.fingerprint_version() != 1)
+                .then_some(spec.fingerprint_version()),
+        };
+        Ok(Some(OwnedContainerSnapshot {
+            handle,
+            observation: observed,
+        }))
+    }
+    pub(super) async fn inspect_process(
+        &self,
+        id: &str,
+        created: &ContainerObservation,
+    ) -> Result<RuntimeState> {
+        let observation = self.observe_id(id, created.fingerprint_version()).await?;
+        observation.validate_identity_allocation(created)?;
+        process_state(&observation)
+    }
+    pub(super) async fn kill_target(&self, id: &str) -> Result<()> {
+        ensure!(
+            valid_immutable_id(id),
+            "runtime stop target must be an immutable ID"
+        );
+        self.verify_authority().await?;
+        self.cli(&["kill".into(), id.into()], Duration::from_secs(15))
+            .await?;
+        Ok(())
+    }
+    /// Stop only the exact instance and sandbox configuration captured by the
+    /// caller. An unavailable or divergent inspection never authorizes a kill.
+    /// This proves a stopped process, not a terminal allocation or usage record.
+    pub async fn stop_snapshot_owned(
+        &self,
+        owned: &OwnedContainerSnapshot,
+    ) -> Result<ContainerObservation> {
+        self.validate_handle(&owned.handle)?;
+        ensure!(
+            owned.observation.id.as_deref() == Some(owned.handle.id.as_str())
+                && owned.observation.name == owned.handle.name
+                && owned.observation.fingerprint_version() == owned.handle.fingerprint_version(),
+            "owned stop snapshot does not match its handle"
+        );
+        self.stop_snapshot_target(&owned.handle.id, &owned.observation)
+            .await
+    }
+    pub(super) async fn stop_snapshot_target(
+        &self,
+        id: &str,
+        baseline: &ContainerObservation,
+    ) -> Result<ContainerObservation> {
+        ensure!(
+            valid_immutable_id(id)
+                && baseline.id.as_deref() == Some(id)
+                && matches!(baseline.fingerprint_version(), 1..=3)
+                && baseline
+                    .configuration_fingerprint
+                    .as_deref()
+                    .is_some_and(valid_immutable_id)
+                && baseline.image_id.as_deref().is_some_and(|image| {
+                    valid_immutable_id(image.strip_prefix("sha256:").unwrap_or(image))
+                }),
+            "owned stop snapshot lacks complete immutable configuration proof"
+        );
+        baseline.validate_identity_allocation(baseline)?;
+        let observed = self.observe_id(id, baseline.fingerprint_version()).await?;
+        observed.validate_identity_allocation(baseline)?;
+        if stopped_process(&observed) {
+            return Ok(observed);
+        }
+        ensure!(
+            observed.process.running == Some(true)
+                && matches!(
+                    observed.process.status.as_deref(),
+                    Some("running" | "paused" | "restarting")
+                ),
+            "runtime stop process state is unknown or inconsistent"
+        );
+        // kill_target revalidates engine authority immediately before the effect.
+        // A failed command can race a natural exit; only the next exact inspection
+        // can establish the result. Inspect and kill are not an atomic engine API.
+        let _ = self.kill_target(id).await;
+        let observed = self.observe_id(id, baseline.fingerprint_version()).await?;
+        observed.validate_identity_allocation(baseline)?;
+        ensure!(
+            stopped_process(&observed),
+            "runtime did not prove the exact owned snapshot stopped"
+        );
+        Ok(observed)
+    }
+    /// Legacy handle-only stop for callers without a captured sandbox baseline.
+    /// Managed supervision must use stop_snapshot_owned instead.
+    pub async fn stop_owned(&self, handle: &ContainerHandle) -> Result<ContainerObservation> {
+        self.validate_handle(handle)?;
+        if let Ok(observed) = self.observe(handle).await
+            && observed.process.running == Some(false)
+            && matches!(
+                observed.process.status.as_deref(),
+                Some("created" | "configured" | "initialized" | "exited" | "stopped" | "dead")
+            )
+        {
+            return Ok(observed);
+        }
+        let _ = self.kill_target(&handle.id).await;
+        let observed = self.observe(handle).await?;
+        ensure!(
+            observed.process.running == Some(false),
+            "runtime did not prove the owned instance stopped"
+        );
+        Ok(observed)
+    }
+    /// A callback failure retains the created instance. ObserveOnly never emits
+    /// start, even if the current process appears never to have started.
+    pub async fn execute_retained<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        input: Option<std::fs::File>,
+        duration: Duration,
+        stdout_limit: usize,
+        on_created: C,
+        on_started: F,
+    ) -> Result<ManagedRetainedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<StartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        spec.require_current_creation_policy()?;
+        ensure!(
+            !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
+            "runtime timeout must be between 1 second and 24 hours"
+        );
+        ensure!(
+            spec.managed_names.is_some(),
+            "managed creation requires control-assigned names"
+        );
+        self.verify_authority().await?;
+        let output = self
+            .cli(
+                &spec.create_args(self.binding.kind)?,
+                Duration::from_secs(30),
+            )
+            .await?;
+        let id = std::str::from_utf8(&output.bytes)
+            .ok()
+            .map(str::trim)
+            .filter(|id| !output.truncated && valid_immutable_id(id))
+            .context("runtime create response is ambiguous; ownership unknown, no adoption, stop or cleanup attempted")?
+            .to_owned();
+        let handle = ContainerHandle {
+            authority_fingerprint: self.binding.fingerprint(),
+            session: spec.session,
+            operation: spec.operation_id(),
+            id: id.clone(),
+            name: spec.name(),
+            configuration_fingerprint_version: Some(spec.fingerprint_version()),
+        };
+        self.execute_owned(
+            spec,
+            handle,
+            None,
+            input,
+            duration,
+            stdout_limit,
+            on_created,
+            on_started,
+        )
+        .await
+    }
+    /// Start an already owned, strictly recovered Created instance. The durable
+    /// control callback must return a fresh permit; replay never creates or starts.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_owned_retained<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        owned: &OwnedContainerSnapshot,
+        input: Option<std::fs::File>,
+        duration: Duration,
+        stdout_limit: usize,
+        on_ready: C,
+        on_started: F,
+    ) -> Result<ManagedRetainedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<StartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        spec.require_current_creation_policy()?;
+        self.execute_owned(
+            spec,
+            owned.handle.clone(),
+            Some(&owned.observation),
+            input,
+            duration,
+            stdout_limit,
+            on_ready,
+            on_started,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_owned<C, CFut, F, Fut>(
+        &self,
+        spec: &ContainerSpec,
+        handle: ContainerHandle,
+        baseline: Option<&ContainerObservation>,
+        input: Option<std::fs::File>,
+        duration: Duration,
+        stdout_limit: usize,
+        on_created: C,
+        on_started: F,
+    ) -> Result<ManagedRetainedExecution>
+    where
+        C: FnOnce(OwnedContainerSnapshot) -> CFut,
+        CFut: Future<Output = Result<StartDirective>>,
+        F: FnMut(ContainerObservation) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        self.validate_handle(&handle)?;
+        ensure!(
+            handle.session == spec.session
+                && handle.operation == spec.operation_id()
+                && handle.name == spec.name()
+                && handle.fingerprint_version() == spec.fingerprint_version(),
+            "owned instance does not belong to this exact operation"
+        );
+        ensure!(
+            !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
+            "runtime timeout must be bounded"
+        );
+        let id = handle.id.clone();
+        let mut stop_snapshot = baseline.map(|observation| OwnedContainerSnapshot {
+            handle: handle.clone(),
+            observation: observation.clone(),
+        });
+        let result: Result<ManagedRetainedExecution> = async {
+            let facts = self.inspect_facts(&id).await?;
+            let observation = parse_container_observation_version(
+                &facts.bytes,
+                self.binding.kind,
+                spec.fingerprint_version(),
+            )?;
+            ensure!(
+                observation.id.as_deref() == Some(&id),
+                "runtime inspected a different immutable instance"
+            );
+            validate_created(spec, &observation)?;
+            if let Some(baseline)=baseline {
+                ensure!(baseline.configuration_fingerprint.is_some(),"recovered instance lacks its created configuration proof");
+                validate_created(spec,baseline)?;
+                observation.validate_identity_allocation(baseline)?;
+            }
+            validate_configuration(spec, &facts.bytes, self.binding.kind)?;
+            let created = OwnedContainerSnapshot {
+                handle: handle.clone(),
+                observation,
+            };
+            stop_snapshot = Some(created.clone());
+            match on_created(created.clone()).await? {
+                StartDirective::ObserveOnly => {
+                    bail!("start claim already consumed; owned instance retained without emitting start; reconciliation required");
+                }
+                StartDirective::EmitOnce => {}
+            }
+            let instance = CreatedInstance {
+                kind: self.binding.kind,
+                name: handle.name.clone(),
+                target: id.clone(),
+            };
+            let on_started = tokio::sync::Mutex::new(on_started);
+            let result = self.runtime.execute_created(
+                &instance,
+                input,
+                duration,
+                stdout_limit,
+                Some((self, &created.observation)),
+                spec.security_preset.is_interactive().then_some(spec.terminal_secrets.0.as_slice()),
+                |_| async {
+                    // RuntimeState cannot represent every unknown fact. Inspect
+                    // again instead of promoting its compatibility bool defaults.
+                    let observation = self.observe(&handle).await?;
+                    observation.validate_identity_allocation(&created.observation)?;
+                    let mut callback = on_started.lock().await;
+                    callback(observation).await
+                },
+            ).await?;
+            let terminal = self.observe(&handle).await?;
+            terminal.validate_terminal(self.binding.kind, &created.observation)?;
+            Ok(ManagedRetainedExecution {
+                execution: RetainedExecution { result, instance },
+                created,
+                terminal,
+            })
+        }.await;
+        match result {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                let stopped = match stop_snapshot.as_ref() {
+                    Some(snapshot) => self.stop_snapshot_owned(snapshot).await.is_ok(),
+                    None => false,
+                };
+                let diagnosis = if stopped {
+                    "runtime observed it not running"
+                } else {
+                    "stop unknown: authority unavailable or changed; instance may still be running"
+                };
+                Err(error.context(format!(
+                    "owned instance {} retained for diagnosis; {diagnosis}",
+                    handle.id
+                )))
+            }
+        }
+    }
+    /// Reconciliation observes only; it can never emit start or infer disappearance.
+    pub async fn resume_terminal(&self, handle: &ContainerHandle) -> Result<ContainerObservation> {
+        let observed = self.observe(handle).await?;
+        observed.validate_terminal(self.binding.kind, &observed)?;
+        Ok(observed)
+    }
+    pub async fn cleanup(&self, retained: &ManagedRetainedExecution) -> Result<()> {
+        self.cleanup_terminal(retained.handle(), &retained.terminal)
+            .await
+    }
+    /// Caller must first commit terminal observation and its mandatory audit.
+    /// This operation never destroys the retained result on cleanup failure.
+    pub async fn cleanup_terminal(
+        &self,
+        handle: &ContainerHandle,
+        committed: &ContainerObservation,
+    ) -> Result<()> {
+        self.validate_handle(handle)?;
+        let now = self.observe(handle).await?;
+        now.validate_terminal(self.binding.kind, committed)?;
+        ensure!(
+            now.process.started_at == committed.process.started_at
+                && now.process.finished_at == committed.process.finished_at
+                && now.process.exit_code == committed.process.exit_code,
+            "runtime terminal process changed after acknowledgement"
+        );
+        self.verify_authority().await?;
+        self.cli(&["rm".into(), handle.id.clone()], Duration::from_secs(20))
+            .await?;
+        Ok(())
+    }
+}
+fn stopped_process(observed: &ContainerObservation) -> bool {
+    observed.process.running == Some(false)
+        && matches!(
+            observed.process.status.as_deref(),
+            Some("created" | "configured" | "initialized" | "exited" | "stopped" | "dead")
+        )
+}
+fn process_state(observed: &ContainerObservation) -> Result<RuntimeState> {
+    Ok(RuntimeState {
+        status: observed
+            .process
+            .status
+            .clone()
+            .context("runtime status is unknown")?,
+        running: observed
+            .process
+            .running
+            .context("runtime running state is unknown")?,
+        started_at: observed
+            .process
+            .started_at
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default(),
+        finished_at: observed
+            .process
+            .finished_at
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default(),
+        exit_code: observed.process.exit_code.map(i64::from).unwrap_or(-1),
+        oom_killed: observed.process.oom_killed.unwrap_or(false),
+    })
+}
+fn validate_created(spec: &ContainerSpec, observed: &ContainerObservation) -> Result<()> {
+    validate_authorized_identity(spec, observed)?;
+    ensure!(
+        observed.process.running == Some(false)
+            && matches!(
+                observed.process.status.as_deref(),
+                Some("created" | "configured" | "initialized")
+            ),
+        "runtime did not prove a fresh never-started instance"
+    );
+    ensure!(
+        observed.process.started_at.is_none(),
+        "created instance already has a process start"
+    );
+    Ok(())
+}
+fn validate_authorized_identity(
+    spec: &ContainerSpec,
+    observed: &ContainerObservation,
+) -> Result<()> {
+    ensure!(
+        observed.name == spec.name() && observed.image_id.is_some(),
+        "runtime did not prove the created name and immutable image"
+    );
+    let requested = spec
+        .image
+        .strip_prefix("sha256:")
+        .filter(|id| valid_immutable_id(id))
+        .context("managed creation requires a pre-authorized immutable sha256 image ID")?;
+    ensure!(
+        observed
+            .image_id
+            .as_deref()
+            .and_then(|id| id.strip_prefix("sha256:").or(Some(id)))
+            == Some(requested),
+        "runtime immutable image differs from the authorized image"
+    );
+    ensure!(
+        observed.restart_count == Some(0),
+        "runtime restart history is unknown or nonzero"
+    );
+    ensure!(
+        observed.allocation.cpu
+            == Some(CpuQuota {
+                quota: 2,
+                period: 1
+            })
+            && observed.allocation.memory_bytes == Some(1024 * 1024 * 1024)
+            && observed.allocation.pids_limit == Some(256),
+        "runtime created allocation differs from the requested bounded limits"
+    );
+    Ok(())
+}
+#[derive(Deserialize)]
+struct PodmanInfo {
+    store: PodmanStore,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PodmanStore {
+    graph_root: String,
+    run_root: String,
+}
+fn validate_endpoint(kind: RuntimeKind, endpoint: &str) -> Result<()> {
+    if kind == RuntimeKind::Podman && endpoint == "local" {
+        return Ok(());
+    }
+    ensure!(
+        endpoint.starts_with("unix://")
+            && endpoint.len() <= 4096
+            && !endpoint.chars().any(char::is_control)
+            && !endpoint.contains(['?', '#', '@']),
+        "managed runtime requires an explicit local Unix endpoint (or Podman local)"
+    );
+    let path = Path::new(&endpoint[7..]);
+    ensure!(
+        path.is_absolute()
+            && !path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir)),
+        "runtime endpoint must be an absolute Unix socket path"
+    );
+    Ok(())
+}
+
+// Configuration is checked while private inspect bytes are in scope, but is not
+// copied into an observation or error. Config.Env is never deserialized.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ConfigurationFacts {
+    config: CheckedConfig,
+    host_config: CheckedHost,
+    mounts: Vec<CheckedMount>,
+    network_settings: Option<CheckedNetworks>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedConfig {
+    labels: std::collections::BTreeMap<String, String>,
+    user: String,
+    working_dir: String,
+    entrypoint: Vec<String>,
+    cmd: Option<Vec<String>>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedHost {
+    privileged: bool,
+    #[serde(rename = "ReadonlyRootfs")]
+    readonly_rootfs: bool,
+    network_mode: String,
+    cap_drop: Vec<String>,
+    cap_add: Option<Vec<String>>,
+    security_opt: Vec<String>,
+    restart_policy: CheckedRestart,
+    auto_remove: bool,
+    tmpfs: std::collections::BTreeMap<String, String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedRestart {
+    name: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedMount {
+    #[serde(rename = "Type")]
+    kind: String,
+    name: Option<String>,
+    destination: String,
+    #[serde(rename = "RW")]
+    rw: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedNetworks {
+    networks: Option<std::collections::BTreeMap<String, IgnoredNetworkDetails>>,
+}
+#[derive(Serialize, Deserialize)]
+struct IgnoredNetworkDetails {}
+
+// Keep ConfigurationFacts and its serialization unchanged: v1 checkpoints bind
+// exactly that historical JSON. Stream facts are a separate v2 digest input.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct StreamConfigurationFacts {
+    config: CheckedStreams,
+    host_config: CheckedLogging,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedStreams {
+    tty: bool,
+    open_stdin: bool,
+    stdin_once: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct InteractiveEnvironment {
+    config: InteractiveTerm,
+}
+#[derive(Serialize)]
+struct InteractiveTerm {
+    term: String,
+}
+impl<'de> Deserialize<'de> for InteractiveTerm {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct Environment {
+            env: Vec<String>,
+        }
+        let environment = Environment::deserialize(deserializer)?;
+        let terms: Vec<_> = environment
+            .env
+            .iter()
+            .filter_map(|value| value.strip_prefix("TERM="))
+            .collect();
+        if terms.len() != 1 || terms[0] != super::terminal::TERM {
+            return Err(serde::de::Error::custom(
+                "interactive TERM differs from the fixed preset",
+            ));
+        }
+        Ok(Self {
+            term: terms[0].into(),
+        })
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct CheckedLogging {
+    log_config: CheckedLog,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", deny_unknown_fields)]
+struct CheckedLog {
+    #[serde(rename = "Type")]
+    kind: String,
+    config: Option<std::collections::BTreeMap<String, String>>,
+    // Podman exposes these separately from Config. Default empty metadata is
+    // compatible with none; a path, tag or nonzero bound is not an authorized
+    // logging option. Docker normally omits all three fields.
+    path: Option<String>,
+    tag: Option<String>,
+    size: Option<String>,
+}
+pub(super) fn configuration_fingerprint(bytes: &[u8], version: u32) -> Option<String> {
+    let mut facts: ConfigurationFacts = serde_json::from_slice(bytes).ok()?;
+    facts.host_config.cap_drop.sort();
+    facts.host_config.security_opt.sort();
+    if let Some(add) = facts.host_config.cap_add.as_mut() {
+        add.sort();
+    }
+    facts.mounts.sort_by(|a, b| {
+        (&a.kind, &a.destination, &a.name, a.rw).cmp(&(&b.kind, &b.destination, &b.name, b.rw))
+    });
+    let mut hash = Sha256::new();
+    match version {
+        1 => {
+            hash.update(b"ai-guard:runtime-config:v1\0");
+            hash.update(serde_json::to_vec(&facts).ok()?);
+        }
+        2 => {
+            let streams: StreamConfigurationFacts = serde_json::from_slice(bytes).ok()?;
+            hash.update(b"ai-guard:runtime-config:v2\0");
+            hash.update(serde_json::to_vec(&(facts, streams)).ok()?);
+        }
+        3 => {
+            let streams: StreamConfigurationFacts = serde_json::from_slice(bytes).ok()?;
+            // Config.Env is transient private input; only the allowlisted fixed TERM enters the digest.
+            let environment: InteractiveEnvironment = serde_json::from_slice(bytes).ok()?;
+            hash.update(b"ai-guard:runtime-config:v3\0");
+            hash.update(serde_json::to_vec(&(facts, streams, environment)).ok()?);
+        }
+        _ => return None,
+    }
+    Some(hex::encode(hash.finalize()))
+}
+pub(super) fn validate_stream_configuration(
+    spec: &ContainerSpec,
+    bytes: &[u8],
+    kind: RuntimeKind,
+) -> Result<()> {
+    if !spec.security_preset.requires_no_engine_logs() {
+        return Ok(());
+    }
+    let streams: StreamConfigurationFacts = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow::anyhow!("runtime inspection lacks required logging or stream configuration facts")
+    })?;
+    let log = streams.host_config.log_config;
+    ensure!(
+        log.kind == "none"
+            && log
+                .config
+                .as_ref()
+                .is_none_or(std::collections::BTreeMap::is_empty)
+            && log.path.as_deref().is_none_or(str::is_empty)
+            && log.tag.as_deref().is_none_or(str::is_empty)
+            && log
+                .size
+                .as_deref()
+                .is_none_or(|size| matches!(size, "" | "0B")),
+        "runtime logging differs from the required none driver without options"
+    );
+    let import = matches!(spec.purpose, ContainerPurpose::Import);
+    if spec.security_preset.is_interactive() {
+        ensure!(
+            matches!(spec.purpose, ContainerPurpose::Run),
+            "interactive preset cannot be used by a helper"
+        );
+        let _: InteractiveEnvironment = serde_json::from_slice(bytes).map_err(|_| {
+            anyhow::anyhow!("runtime interactive TERM differs from the fixed preset")
+        })?;
+        // Docker 29.2.1 create -i sets StdinOnce=true. Transport loss therefore requests stop;
+        // this profile does not claim reattach support. Podman's distinct profile requires false.
+        ensure!(
+            streams.config.tty
+                && streams.config.open_stdin
+                && streams.config.stdin_once == (kind == RuntimeKind::Docker),
+            "runtime TTY or stdin flags differ from the authorized interactive profile"
+        );
+        return Ok(());
+    }
+    // Docker create --interactive sets both AttachStdin and StdinOnce; Podman
+    // reports StdinOnce=false because that flag is not implemented there.
+    ensure!(
+        !streams.config.tty
+            && streams.config.stdin_once == (import && kind == RuntimeKind::Docker)
+            && streams.config.open_stdin == import,
+        "runtime TTY or stdin flags differ from the authorized batch or import profile"
+    );
+    Ok(())
+}
+fn validate_configuration(spec: &ContainerSpec, bytes: &[u8], kind: RuntimeKind) -> Result<()> {
+    validate_stream_configuration(spec, bytes, kind)?;
+    let facts: ConfigurationFacts = serde_json::from_slice(bytes).map_err(|_| {
+        anyhow::anyhow!("runtime inspection lacks required sandbox configuration facts")
+    })?;
+    let config = facts.config;
+    let purpose = match spec.purpose {
+        ContainerPurpose::Import => "import",
+        ContainerPurpose::Run => "run",
+        ContainerPurpose::Export => "export",
+    };
+    ensure!(
+        config.labels.get("agentsandbox.session") == Some(&spec.session.to_string())
+            && config.labels.get("agentsandbox.operation")
+                == Some(&spec.operation_id().to_string())
+            && config
+                .labels
+                .get("agentsandbox.purpose")
+                .map(String::as_str)
+                == Some(purpose),
+        "runtime instance labels conflict with the reserved control attempt; no instance adopted"
+    );
+    ensure!(
+        config.user == "1000:1000"
+            && config.working_dir == "/workspace"
+            && config.entrypoint == spec.argv[..1]
+            && config.cmd.unwrap_or_default() == spec.argv[1..],
+        "runtime command or execution identity differs from the authorized specification"
+    );
+    let host = facts.host_config;
+    if let Some(networks) = facts
+        .network_settings
+        .and_then(|settings| settings.networks)
+    {
+        ensure!(
+            match spec.network {
+                NetworkMode::None =>
+                    networks.is_empty() || networks.len() == 1 && networks.contains_key("none"),
+                NetworkMode::Bridge =>
+                    networks.len() == 1
+                        && (kind == RuntimeKind::Podman || networks.contains_key("bridge")),
+            },
+            "runtime attached networks differ from the authorized network mode"
+        );
+    }
+    ensure!(
+        host.tmpfs.len() == 2
+            && host.tmpfs.get("/tmp").is_some_and(|options| valid_tmpfs(
+                options,
+                256 * 1024 * 1024,
+                0o1777,
+                None,
+                true
+            ))
+            && host
+                .tmpfs
+                .get("/home/agent")
+                .is_some_and(|options| valid_tmpfs(
+                    options,
+                    64 * 1024 * 1024,
+                    0o700,
+                    Some((1000, 1000)),
+                    false
+                )),
+        "runtime temporary filesystem limits or restrictions differ from the sandbox preset"
+    );
+    ensure!(
+        !host.privileged
+            && host.readonly_rootfs
+            && !host.auto_remove
+            && host.network_mode == spec.network.to_string(),
+        "runtime isolation or network differs from the authorized specification"
+    );
+    ensure!(
+        host.cap_drop
+            .iter()
+            .any(|cap| cap.eq_ignore_ascii_case("ALL"))
+            && host.cap_add.as_ref().is_none_or(Vec::is_empty)
+            && host
+                .security_opt
+                .iter()
+                .any(|opt| opt == "no-new-privileges" || opt == "no-new-privileges=true")
+            && matches!(host.restart_policy.name.as_str(), "no" | ""),
+        "runtime capability, privilege or restart policy differs from the sandbox preset"
+    );
+    let mut workspaces = 0;
+    for mount in facts.mounts {
+        match (mount.kind.as_str(), mount.destination.as_str()) {
+            ("volume", "/workspace")
+                if mount.name.as_deref() == Some(spec.volume().as_str()) && mount.rw =>
+            {
+                workspaces += 1
+            }
+            ("tmpfs", "/tmp" | "/home/agent") => {}
+            _ => bail!(
+                "runtime mounts differ from the authorized workspace and temporary filesystems"
+            ),
+        }
+    }
+    ensure!(
+        workspaces == 1,
+        "runtime did not prove the exclusive named workspace volume"
+    );
+    Ok(())
+}
+
+fn effective_uid() -> u32 {
+    #[cfg(unix)]
+    // SAFETY: geteuid has no arguments or memory preconditions.
+    {
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
+#[cfg(test)]
+mod log_policy_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn facts() -> Value {
+        json!({
+            "Id":"a".repeat(64), "Name":"/fixture", "Image":format!("sha256:{}", "b".repeat(64)), "RestartCount":0,
+            "State":{"Status":"created", "Running":false},
+            "Config": {"Labels":{}, "User":"1000:1000", "WorkingDir":"/workspace",
+                "Entrypoint":["/usr/bin/id"], "Cmd":[], "Tty":false,
+                "OpenStdin":false, "StdinOnce":false, "Env":["PRIVATE=excluded"]},
+            "HostConfig": {"Privileged":false, "ReadonlyRootfs":true, "NetworkMode":"none",
+                "NanoCpus":2000000000_u64, "Memory":1073741824_u64, "PidsLimit":256,
+                "CapDrop":["ALL"], "SecurityOpt":["no-new-privileges"],
+                "RestartPolicy":{"Name":"no"}, "AutoRemove":false, "Tmpfs":{},
+                "LogConfig":{"Type":"none", "Config":{}}},
+            "Mounts":[]
+        })
+    }
+    fn spec(purpose: ContainerPurpose) -> ContainerSpec {
+        ContainerSpec::new(
+            Uuid::new_v4(),
+            purpose,
+            "worker:fixture",
+            vec!["/usr/bin/id".into()],
+            NetworkMode::None,
+        )
+        .unwrap()
+    }
+    fn bytes(value: &Value) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap()
+    }
+
+    #[test]
+    fn interactive_v3_inspection_binds_tty_and_fixed_term_without_secret_environment() {
+        let worker = spec(ContainerPurpose::Run)
+            .with_security_preset(crate::control::SecurityPresetV1::FixedSandboxInteractiveV3);
+        let mut observed = facts();
+        observed["Config"]["Tty"] = json!(true);
+        observed["Config"]["OpenStdin"] = json!(true);
+        observed["Config"]["StdinOnce"] = json!(true);
+        observed["Config"]["Env"] = json!(["TERM=xterm-256color", "PRIVATE=first-private-value"]);
+        validate_stream_configuration(&worker, &bytes(&observed), RuntimeKind::Docker).unwrap();
+        assert!(
+            validate_stream_configuration(&worker, &bytes(&observed), RuntimeKind::Podman).is_err()
+        );
+        let fingerprint = configuration_fingerprint(&bytes(&observed), 3).unwrap();
+        observed["Config"]["Env"] = json!(["PRIVATE=second-private-value", "TERM=xterm-256color"]);
+        assert_eq!(
+            configuration_fingerprint(&bytes(&observed), 3).unwrap(),
+            fingerprint
+        );
+        for (field, value) in [
+            ("Tty", json!(false)),
+            ("OpenStdin", json!(false)),
+            ("StdinOnce", json!(false)),
+        ] {
+            let mut invalid = observed.clone();
+            invalid["Config"][field] = value;
+            assert!(
+                validate_stream_configuration(&worker, &bytes(&invalid), RuntimeKind::Docker)
+                    .is_err()
+            );
+        }
+        for environment in [
+            json!([]),
+            json!(["TERM=dumb"]),
+            json!(["TERM=xterm-256color", "TERM=xterm-256color"]),
+        ] {
+            let mut invalid = observed.clone();
+            invalid["Config"]["Env"] = environment;
+            assert!(
+                validate_stream_configuration(&worker, &bytes(&invalid), RuntimeKind::Docker)
+                    .is_err()
+            );
+            assert!(configuration_fingerprint(&bytes(&invalid), 3).is_none());
+        }
+        observed["Config"]["StdinOnce"] = json!(false);
+        validate_stream_configuration(&worker, &bytes(&observed), RuntimeKind::Podman).unwrap();
+        let args = worker.create_args(RuntimeKind::Docker).unwrap();
+        assert!(args.iter().any(|arg| arg == "--tty"));
+        assert!(args.iter().any(|arg| arg == "--interactive"));
+        assert!(
+            args.windows(2)
+                .any(|args| args == ["--env", "TERM=xterm-256color"])
+        );
+        assert!(args.windows(2).any(|args| args == ["--log-driver", "none"]));
+    }
+
+    #[test]
+    fn historical_fingerprint_is_unchanged_and_v2_binds_streams_without_environment() {
+        let original = facts();
+        let old = configuration_fingerprint(&bytes(&original), 1).unwrap();
+        assert_eq!(
+            old,
+            "694ac612677265f6f82c2f02c30d3ff752bfea82541bdd082e65c210639cdf3f"
+        );
+        let current = configuration_fingerprint(&bytes(&original), 2).unwrap();
+        assert_ne!(old, current);
+        for (section, field, changed) in [
+            ("Config", "Tty", json!(true)),
+            ("Config", "OpenStdin", json!(true)),
+            ("Config", "StdinOnce", json!(true)),
+            (
+                "HostConfig",
+                "LogConfig",
+                json!({"Type":"local","Config":{}}),
+            ),
+        ] {
+            let mut value = original.clone();
+            value[section][field] = changed;
+            assert_eq!(configuration_fingerprint(&bytes(&value), 1).unwrap(), old);
+            assert_ne!(
+                configuration_fingerprint(&bytes(&value), 2).unwrap(),
+                current
+            );
+        }
+        let mut secret = original.clone();
+        secret["Config"]["Env"] = json!(["PRIVATE=different-secret"]);
+        assert_eq!(configuration_fingerprint(&bytes(&secret), 1).unwrap(), old);
+        assert_eq!(
+            configuration_fingerprint(&bytes(&secret), 2).unwrap(),
+            current
+        );
+        let mut historical = original.clone();
+        for field in ["Tty", "OpenStdin", "StdinOnce"] {
+            historical["Config"].as_object_mut().unwrap().remove(field);
+        }
+        historical["HostConfig"]
+            .as_object_mut()
+            .unwrap()
+            .remove("LogConfig");
+        assert_eq!(
+            configuration_fingerprint(&bytes(&historical), 1).unwrap(),
+            old
+        );
+        assert!(configuration_fingerprint(&bytes(&historical), 2).is_none());
+    }
+
+    #[test]
+    fn logging_and_stream_profile_fail_closed_before_start() {
+        let worker = spec(ContainerPurpose::Run);
+        let import = spec(ContainerPurpose::Import);
+        validate_stream_configuration(&worker, &bytes(&facts()), RuntimeKind::Docker).unwrap();
+        let mut input = facts();
+        input["Config"]["OpenStdin"] = json!(true);
+        validate_stream_configuration(&import, &bytes(&input), RuntimeKind::Podman).unwrap();
+        assert!(
+            validate_stream_configuration(&import, &bytes(&input), RuntimeKind::Docker).is_err()
+        );
+        input["Config"]["StdinOnce"] = json!(true);
+        validate_stream_configuration(&import, &bytes(&input), RuntimeKind::Docker).unwrap();
+        assert!(
+            validate_stream_configuration(&import, &bytes(&input), RuntimeKind::Podman).is_err()
+        );
+        assert!(
+            validate_stream_configuration(&worker, &bytes(&input), RuntimeKind::Docker).is_err()
+        );
+        for value in [
+            json!(null),
+            json!({}),
+            json!({"Type":"local","Config":{}}),
+            json!({"Type":"none","Config":{"max-size":"1m"}}),
+            json!({"Type":"none","Path":"/tmp/engine.log"}),
+            json!({"Type":"none","Tag":"secret"}),
+            json!({"Type":"none","Size":"1MB"}),
+            json!({"Type":"none","Unexpected":"value"}),
+        ] {
+            let mut input = facts();
+            input["HostConfig"]["LogConfig"] = value;
+            assert!(
+                validate_stream_configuration(&worker, &bytes(&input), RuntimeKind::Docker)
+                    .is_err()
+            );
+        }
+        for field in ["Tty", "OpenStdin", "StdinOnce"] {
+            let mut changed = facts();
+            changed["Config"][field] = json!(true);
+            assert!(
+                validate_stream_configuration(&worker, &bytes(&changed), RuntimeKind::Docker)
+                    .is_err()
+            );
+            changed["Config"].as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_stream_configuration(&worker, &bytes(&changed), RuntimeKind::Docker)
+                    .is_err()
+            );
+        }
+        // Podman's documented inspect shape carries empty auxiliary values.
+        let mut podman = facts();
+        podman["HostConfig"]["LogConfig"] =
+            json!({"Type":"none","Config":null,"Path":"","Tag":"","Size":"0B"});
+        validate_stream_configuration(&worker, &bytes(&podman), RuntimeKind::Podman).unwrap();
+    }
+
+    #[test]
+    fn historical_handles_and_observations_keep_their_digest_version() {
+        let handle_json = json!({"authority_fingerprint":"old-authority", "session":Uuid::new_v4(),
+            "operation":Uuid::new_v4(), "id":"a".repeat(64), "name":"old-worker"});
+        let handle: ContainerHandle = serde_json::from_value(handle_json.clone()).unwrap();
+        assert_eq!(handle.fingerprint_version(), 1);
+        assert_eq!(serde_json::to_value(handle).unwrap(), handle_json);
+        let legacy =
+            parse_container_observation_version(&bytes(&facts()), RuntimeKind::Docker, 1).unwrap();
+        let serialized = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            serialized
+                .get("configuration_fingerprint_version")
+                .is_none()
+        );
+        assert!(!serialized.to_string().contains("PRIVATE"));
+        let recovered: ContainerObservation = serde_json::from_value(serialized.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&recovered).unwrap(), serialized);
+        let current =
+            parse_container_observation_version(&bytes(&facts()), RuntimeKind::Docker, 2).unwrap();
+        assert_eq!(current.configuration_fingerprint_version, Some(2));
+        current.validate_identity_allocation(&current).unwrap();
+        recovered.validate_identity_allocation(&recovered).unwrap();
+        assert!(current.validate_identity_allocation(&recovered).is_err());
+    }
+}
+fn podman_selection_env(
+    invocation: &InvocationBindingV1,
+) -> std::collections::BTreeMap<String, Option<String>> {
+    let mut selection = std::collections::BTreeMap::new();
+    for key in [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "CONTAINERS_CONF",
+        "CONTAINERS_CONF_OVERRIDE",
+        "CONTAINERS_STORAGE_CONF",
+        "STORAGE_DRIVER",
+        "STORAGE_OPTS",
+        "PODMAN_CONNECTIONS_CONF",
+    ] {
+        let value = invocation.environment.get(key).cloned();
+        selection.insert(key.into(), value);
+    }
+    selection
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct WorkspaceVolume {
+    name: String,
+    driver: String,
+    scope: String,
+    labels: std::collections::BTreeMap<String, String>,
+    options: Option<std::collections::BTreeMap<String, String>>,
+}
+
+fn valid_tmpfs(
+    options: &str,
+    size: u64,
+    mode: u32,
+    owner: Option<(u32, u32)>,
+    noexec: bool,
+) -> bool {
+    let mut parsed = std::collections::BTreeMap::new();
+    for option in options.split(',') {
+        let (key, value) = option
+            .split_once('=')
+            .map_or((option, None), |(key, value)| (key, Some(value)));
+        if parsed.insert(key, value).is_some() {
+            return false;
+        }
+    }
+    if !["rw", "nosuid", "nodev"]
+        .iter()
+        .all(|flag| parsed.contains_key(flag))
+        || ["ro", "suid", "dev"]
+            .iter()
+            .any(|flag| parsed.contains_key(flag))
+        || noexec && parsed.contains_key("exec")
+        || noexec && !parsed.contains_key("noexec")
+    {
+        return false;
+    }
+    let measured_size = parsed
+        .get("size")
+        .and_then(|value| *value)
+        .and_then(parse_memory_size);
+    let measured_mode = parsed
+        .get("mode")
+        .and_then(|value| *value)
+        .and_then(|value| u32::from_str_radix(value, 8).ok());
+    let owner_matches = owner.is_none_or(|(uid, gid)| {
+        parsed
+            .get("uid")
+            .and_then(|value| *value)
+            .and_then(|value| value.parse::<u32>().ok())
+            == Some(uid)
+            && parsed
+                .get("gid")
+                .and_then(|value| *value)
+                .and_then(|value| value.parse::<u32>().ok())
+                == Some(gid)
+    });
+    measured_size == Some(size) && measured_mode == Some(mode) && owner_matches
+}
+fn parse_memory_size(value: &str) -> Option<u64> {
+    let (digits, multiplier) = match value.as_bytes().last().copied() {
+        Some(b'k' | b'K') => (&value[..value.len() - 1], 1024),
+        Some(b'm' | b'M') => (&value[..value.len() - 1], 1024 * 1024),
+        Some(b'g' | b'G') => (&value[..value.len() - 1], 1024 * 1024 * 1024),
+        _ => (value, 1),
+    };
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
+}

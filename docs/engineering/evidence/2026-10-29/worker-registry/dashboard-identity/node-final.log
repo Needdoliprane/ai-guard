@@ -1,0 +1,39 @@
+
+> agent-sandbox-front@0.1.0 test
+> node --test --test-isolation=none tests/*.test.mjs
+
+✔ l’export reprend tous les filtres actifs sans reprendre la pagination (12.59525ms)
+✔ la période RFC3339 reste identique dans la pagination et l’export (0.448875ms)
+✔ fetch conserve son appel libre, requis par la fonction native du navigateur (0.283208ms)
+✔ la lecture transmet le jeton en en-tête seulement et interdit les redirections (0.365709ms)
+✔ les routes de lecture sont bornées à cette origine et l’export est authentifié (0.737917ms)
+✔ les vues workers lisent les contrats v1 sans ouvrir les mutations ou un autre tenant (0.719791ms)
+✔ l’identité de lecture vient de la route authentifiée sans sélecteur de client (0.173ms)
+✔ une session de lecture exige une identité viewer complète et conserve seulement son périmètre (0.594625ms)
+✔ une page worker incomplète n’est pas transformée en liste vide (0.230583ms)
+✔ le modèle de lecture worker ne conserve pas les commandes ou métadonnées de credentials (0.091833ms)
+✔ les unités entières de l’allocation restent exactes au-delà de Number.MAX_SAFE_INTEGER (0.28575ms)
+✔ une allocation runtime incohérente conserve son signal au lieu de déduire une durée (0.046625ms)
+✔ un quota absent reste inconnu et un quota nul reste une vraie limite (0.059375ms)
+✔ le lien agent-worker utilise uniquement la session ou l’identité runtime exacte (0.72825ms)
+✔ la pagination ne transporte qu’un curseur UUID et une taille bornée (0.13325ms)
+✔ les périodes fixent le début au moment du choix sans borner les événements futurs (0.981292ms)
+✔ le filtre temporel des événements live utilise received_at avant timestamp (0.081334ms)
+✔ une réponse historique ne supprime pas les événements arrivés pendant sa lecture (0.082792ms)
+✔ construit les liens parent uniquement à partir des identifiants explicites (0.083958ms)
+✔ un cycle de parents reste visible et ne provoque pas de récursion infinie (0.047875ms)
+✔ une métrique absente reste inconnue tandis que zéro est une valeur réelle (8.041042ms)
+✔ les filtres conservent les identifiants exacts et traitent une commande comme du texte (0.1135ms)
+✔ les vues sécurité et fichiers reposent sur les événements présents (0.201208ms)
+✔ reconstitue un événement coupé au milieu des champs et de CRLF (0.1425ms)
+✔ ignore les commentaires, les événements incomplets et les identifiants NUL (0.086417ms)
+✔ le flux UTF-8 saute les répétitions et les messages invalides sans perdre le curseur (2.788208ms)
+✔ refuse un message dont la taille dépasse la limite pour borner la mémoire (0.066042ms)
+ℹ tests 27
+ℹ suites 0
+ℹ pass 27
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 66.631167

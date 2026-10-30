@@ -1,0 +1,2 @@
+{"type":"agentsandbox.telemetry","version":1,"kind":"tool.requested","command":{"argv":["printf","café ☕"],"cwd":"/workspace"},"data":{"tool_name":"example"}}
+{"type":"agentsandbox.telemetry","version":1,"kind":"agent.declared","agent_id":"worker-test","parent_agent_id":"root-test","data":{"state":"started","task":"fixture seulement"}}

@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.88s
+     Running tests/runner_terminal_audit.rs (target/debug/deps/runner_terminal_audit-cf0a54cbd76b7805)
+
+running 1 test
+test terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result ... FAILED
+
+failures:
+
+---- terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result stdout ----
+
+thread 'terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result' (1273105) panicked at tests/runner_terminal_audit.rs:197:5:
+cleanup-report-rejected: observed exit/cleanup result was lost
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s
+
+error: test failed, to rerun pass `--test runner_terminal_audit`

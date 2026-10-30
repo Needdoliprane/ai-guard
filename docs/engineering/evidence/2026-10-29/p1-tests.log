@@ -1,0 +1,245 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.52s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-b10a028b81f6591b)
+
+running 31 tests
+test adapters::tests::a_requested_write_is_not_a_confirmed_file_modification ... ok
+test adapters::tests::command_text_is_not_split_into_an_executable_command ... ok
+test adapters::tests::each_normalized_record_gets_a_fresh_uuid_and_utc_reception_time ... ok
+test adapters::tests::generic_telemetry_requires_the_explicit_contract ... ok
+test adapters::tests::generic_wrong_version_and_invalid_argv_are_rejected ... ok
+test adapters::tests::escaped_control_characters_cannot_exceed_the_json_payload_budget ... ok
+test adapters::tests::claude_fixture_is_not_promoted_to_independent_observation ... ok
+test adapters::tests::codex_fixture_preserves_declared_lifecycle_and_usage ... ok
+test adapters::tests::parent_tool_id_is_not_mistaken_for_a_parent_agent ... ok
+test adapters::tests::malformed_unknown_and_partial_records_produce_no_fake_events ... ok
+test adapters::tests::partial_assistant_usage_is_not_counted_as_final_usage ... ok
+test adapters::tests::unknown_file_change_kinds_are_not_normalized_as_real_changes ... ok
+test adapters::tests::untrusted_records_cannot_spoof_source_identity_or_provenance ... ok
+test adapters::tests::usage_accepts_only_reported_nonnegative_integer_counts ... ok
+test adapters::tests::every_fixture_event_conforms_to_the_gateway_event_model ... ok
+test jev::tests::official_answer_schema_is_parsed ... ok
+test jev::tests::missing_invalid_or_uncertain_answers_fail_closed ... ok
+test jev::tests::no_remote_http_or_credentials_in_url ... ok
+test policy::tests::cwd_escape_and_unknown_profile_fail_closed ... ok
+test policy::tests::known_exact_command_allowed_no_added_args ... ok
+test policy::tests::strict_denies_unknown_and_shell ... ok
+test adapters::tests::provider_text_is_bounded_without_breaking_utf8 ... ok
+test adapters::tests::one_line_cannot_amplify_into_unbounded_events ... ok
+test adapters::tests::lines_over_64_kib_are_rejected_by_utf8_byte_size ... ok
+test runner::tests::credential_snapshot_matches_the_exact_values_used_for_masking ... ok
+test policy::tests::review_requires_exact_bound_hash ... ok
+test workspace::tests::publication_never_replaces_a_destination_created_after_validation ... ok
+test runner::tests::ipv6_loopback_is_an_allowed_local_gateway ... ok
+test redaction::tests::masks_known_secret_and_bearer_before_storage ... ok
+test redaction::tests::leaves_readable_safe_text_and_utf8 ... ok
+test redaction::tests::masks_nested_sensitive_keys_and_argv_flags ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/main.rs (target/debug/deps/agentsandbox-43746c17508f3485)
+
+running 5 tests
+test tests::gateway_accepts_an_explicit_tenant_registry ... ok
+test gateway_config::tests::symlinked_credential_and_registry_are_refused ... ok
+test tests::tenant_registry_cannot_be_mixed_with_legacy_identity_options ... ok
+test gateway_config::tests::resolves_file_references_relative_to_registry_and_does_not_create_database ... ok
+test gateway_config::tests::unknown_version_fields_empty_registry_and_duplicate_identities_are_refused ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/api_security.rs (target/debug/deps/api_security-dcdbe7bbca60769a)
+
+running 4 tests
+test json_limits_and_cross_origin_requests_are_rejected ... ok
+test viewer_cannot_ingest_and_unknown_tokens_cannot_read ... ok
+test denied_command_is_audited_but_never_executed_by_api ... ok
+test export_preserves_requested_sequence_window ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/audit_integrity.rs (target/debug/deps/audit_integrity-c7d20436889c96ac)
+
+running 12 tests
+test hardlinked_database_is_rejected_in_distinct_processes ... ok
+test missing_versioned_schema_objects_are_refused_without_repair ... ok
+test external_schema_change_is_detected_before_append ... ok
+test external_corruption_is_detected_before_append_without_integrity_endpoint ... ok
+test external_quota_corruption_blocks_append_instead_of_granting_capacity ... ok
+test corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event ... ok
+test final_symlink_is_refused_and_parent_alias_uses_the_same_database_name ... ok
+test unknown_schema_version_is_rejected_before_creating_application_tables ... ok
+test database_path_substitution_or_new_hardlink_blocks_append ... ok
+test another_valid_store_can_append_without_false_corruption ... ok
+test startup_rejects_trigger_that_discards_audit_before_acknowledgement ... ok
+test token_concatenation_cannot_disguise_missing_primary_key_constraint ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/audit_load.rs (target/debug/deps/audit_load-2194a1bbf2a11bd9)
+
+running 1 test
+test eight_concurrent_sources_keep_order_integrity_and_filters ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+     Running tests/audit_security.rs (target/debug/deps/audit_security-702650b745ade4f4)
+
+running 3 tests
+test source_time_is_normalized_to_utc_before_hashing ... ok
+test durable_idempotent_redacted_audit_survives_restart ... ok
+test audit_capacity_fail_closed_and_tampering_detected ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/decision_idempotence.rs (target/debug/deps/decision_idempotence-603992fb86d745a8)
+
+running 9 tests
+test same_request_identity_with_different_content_is_a_conflict ... ok
+test legacy_approval_preceding_its_review_is_rejected_as_ambiguous ... ok
+test identical_request_ids_remain_independent_between_authenticated_tenants ... ok
+test replay_refuses_a_new_trigger_and_new_decisions_fail_when_audit_is_full ... ok
+test concurrent_connections_commit_one_decision_and_replays_recheck_integrity ... ok
+test repeated_http_decision_is_identical_across_restart_and_full_capacity ... ok
+test ambiguous_legacy_history_is_a_conflict_without_silent_merge ... ok
+test secret_request_identity_is_refused_before_audit_without_disabling_redaction ... ok
+test approved_phase_requires_durable_review_and_exact_hash_even_after_cache ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/declared_agents.rs (target/debug/deps/declared_agents-ecf648de3f9e26cd)
+
+running 12 tests
+test invalid_or_conflicting_identifiers_do_not_get_normalized_into_valid_ids ... ok
+test missing_parent_never_creates_a_phantom_agent ... ok
+test only_explicit_known_states_set_status_and_repeated_records_update ... ok
+test cycle_and_self_parent_links_are_removed_and_reported ... ok
+test namespaces_include_sandbox_and_source_and_do_not_guess_a_context_parent ... ok
+test parents_cannot_resolve_across_sessions_or_context_agents ... ok
+test generic_parser_aliases_form_a_usable_tree_without_identity_replacement ... ok
+test explicit_children_resolve_after_parent_and_remain_declared ... ok
+test removing_cycle_edges_preserves_noncyclic_descendants ... ok
+test spoofed_provenance_coverage_or_output_ids_are_never_accepted ... ok
+test stable_ids_do_not_depend_on_observation_order_or_metadata ... ok
+test partial_updates_preserve_parent_but_explicit_null_and_conflict_clear_it ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/gateway_tenancy.rs (target/debug/deps/gateway_tenancy-debad3223348ab45)
+
+running 1 test
+test configured_tenants_remain_isolated_over_http_and_after_control_plane_crash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+     Running tests/jev_contract.rs (target/debug/deps/jev_contract-6bbc816a36bee5e0)
+
+running 2 tests
+test unreachable_jev_cannot_turn_local_allow_into_execution_permission ... ok
+test official_http_contract_and_jev_veto_are_enforced ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/review_regressions.rs (target/debug/deps/review_regressions-282c0967fbdb4958)
+
+running 5 tests
+test declared_agent_data_cannot_promote_observation_coverage ... ok
+test freeform_command_secrets_are_redacted_too ... ok
+test detected_corruption_latches_audit_closed ... ok
+test pending_counter_tracks_latest_decision_for_same_request ... ok
+test declared_hierarchy_is_projected_without_inflating_observed_counts ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/runtime_authorization.rs (target/debug/deps/runtime_authorization-7700b69bfa951b66)
+
+running 4 tests
+test bearer_token_is_never_sent_over_non_loopback_plain_http ... ok
+test denied_command_cannot_be_promoted_by_human_approval ... ok
+test unavailable_or_unacknowledged_audit_never_yields_allow ... ok
+test review_requires_the_exact_request_hash_and_resubmits_unchanged_identity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/runtime_confinement.rs (target/debug/deps/runtime_confinement-e9909fbf5a26d5dc)
+
+running 4 tests
+test real_worker_confinement_copy_export_and_timeout ... ignored, requires an explicitly selected real engine and built worker image; retains session volume and evidence
+test enoent_diagnostic_must_be_complete ... ok
+test permission_and_io_errors_do_not_prove_control_path_absence ... ok
+test configuration_rejection_does_not_unwind ... ok
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/runtime_operations.rs (target/debug/deps/runtime_operations-8d9806878e010ba1)
+
+running 8 tests
+test optional_provider_build_rejects_latest_ranges_and_shell_arguments ... ok
+test init_refuses_existing_public_secret_directory_and_symlink ... ok
+test mount_projections_are_separate_readable_files_inside_a_private_directory ... ok
+test public_projection_directory_and_linked_projection_are_rejected ... ok
+test init_generates_distinct_32_byte_keys_and_never_replaces_them ... ok
+test legacy_readable_sources_are_hardened_without_rotation ... ok
+test secret_projection_refresh_is_atomic_and_never_replaces_source_values ... ok
+test optional_jev_is_projected_only_when_a_private_source_exists ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+     Running tests/runtime_races.rs (target/debug/deps/runtime_races-648b5fb5ab435e1e)
+
+running 3 tests
+test unix::helpers_for_the_same_session_have_distinct_operation_names ... ok
+test unix::substituted_export_parent_cannot_redirect_writes_or_cleanup_into_original ... ok
+test unix::failed_create_never_removes_a_preexisting_container ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/runtime_security.rs (target/debug/deps/runtime_security-13ca614d7fe034f3)
+
+running 12 tests
+test container_start_requires_runtime_started_at_evidence ... ok
+test project_copy_rejects_a_fifo_without_blocking_on_open ... ok
+test output_is_drained_but_retained_bytes_are_bounded ... ok
+test runtime_rejects_option_injection_and_invalid_program_paths ... ok
+test project_copy_rejects_symlinks_instead_of_following_them ... ok
+test worker_arguments_confine_a_named_volume_and_preserve_literal_arguments ... ok
+test custom_config_location_does_not_copy_mounted_secret_projections ... ok
+test project_copy_rejects_size_and_file_count_overflow ... ok
+test project_copy_excludes_credentials_and_git_and_preserves_safe_files ... ok
+test valid_export_is_atomic_and_only_writes_the_new_destination ... ok
+test archive_paths_reject_traversal_absolute_and_windows_variants ... ok
+test export_rejects_links_special_files_and_original_destination ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-b25178852687768c)
+
+running 1 test
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ignored, requires built images, an explicitly selected real Docker/Podman engine, and a running gateway; not executed in the authoring environment
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tenant_api.rs (target/debug/deps/tenant_api-d1969c6d500b465c)
+
+running 3 tests
+test ambiguous_credentials_and_wrong_database_binding_are_rejected ... ok
+test authenticated_identity_scopes_ingestion_history_export_and_derived_views ... ok
+test decision_and_live_stream_are_isolated_and_audit_failure_denies_only_affected_tenant ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running tests/tenant_storage.rs (target/debug/deps/tenant_storage-a7b049cf38af68a5)
+
+running 3 tests
+test invalid_tenant_identity_does_not_create_database ... ok
+test database_cannot_be_reassigned_to_another_tenant_after_restart ... ok
+test legacy_nonempty_database_requires_explicit_local_identity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+   Doc-tests agentsandbox
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

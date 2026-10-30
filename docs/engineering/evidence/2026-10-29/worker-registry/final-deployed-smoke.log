@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-a520d245b0b0346f)
+
+running 1 test
+Retained runtime QA source: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmp3fx4Nz
+Retained runtime QA export: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpgEoAGH
+Validated real sessions 8d3a3fd8-5254-4e54-9932-33789cf9f894 and b7376d8f-0d26-4212-a08d-647a02e3a2fb, policy denial ebec4c0e-2b4c-4c70-b6ac-2dd5112d8980 without container/volume. Named volumes retained; source proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmp3fx4Nz; export proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpgEoAGH.
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 10.23s
+

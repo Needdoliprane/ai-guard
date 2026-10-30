@@ -1,0 +1,16 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/runtime_confinement.rs (target/debug/deps/runtime_confinement-ac5a302630b38f20)
+
+running 1 test
+runtime=docker rootless=false server=Some("29.9.2")
+retained evidence=/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-runtime-confinement-FumSvO session=1dd5b077-61cb-42c9-a74d-df5ea04e6179 volume=agentsandbox-work-1dd5b077-61cb-42c9-a74d-df5ea04e6179
+PASS inspected restrictions and process UID/GID/capabilities/NNP/seccomp
+PASS rejected on_started check returns an error and removes only its container
+PASS cgroup v2 memory/pid/cpu allocation limits
+PASS readonly root, /run/secrets ENOENT, absent egress routes and failed connection
+PASS broker timeout stops its worker; volume retained
+PASS filtered copy, isolated mutation and fresh export; audit E2E NOT_RUN
+test real_worker_confinement_copy_export_and_timeout ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.74s
+

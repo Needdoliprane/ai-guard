@@ -1,0 +1,140 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.95s
+     Running tests/api_security.rs (target/debug/deps/api_security-d959c1f70622a153)
+
+running 4 tests
+test json_limits_and_cross_origin_requests_are_rejected ... ok
+test viewer_cannot_ingest_and_unknown_tokens_cannot_read ... ok
+test export_preserves_requested_sequence_window ... ok
+test denied_command_is_audited_but_never_executed_by_api ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/jev_credentials.rs (target/debug/deps/jev_credentials-4f60a097f7fd6d00)
+
+running 13 tests
+test library_gateway_refuses_padded_viewer_key_reuse ... ok
+test library_gateway_refuses_padded_runner_key_reuse ... ok
+test library_gateway_refuses_viewer_reuse_before_authorization ... ok
+test library_gateway_refuses_runner_reuse_before_authorization ... ok
+test library_registry_refuses_second_tenant_runner_key_reuse ... ok
+test library_registry_refuses_second_tenant_padded_runner_key_reuse ... ok
+test library_registry_refuses_second_tenant_padded_viewer_key_reuse ... ok
+test library_registry_refuses_second_tenant_viewer_key_reuse ... ok
+test standalone_gateway_refuses_jev_viewer_reuse_before_serving ... ok
+test standalone_gateway_refuses_jev_runner_reuse_before_serving ... ok
+test registry_gateway_refuses_jev_runner_reuse_from_the_second_tenant ... ok
+test registry_gateway_refuses_jev_viewer_reuse_from_the_second_tenant ... ok
+test distinct_jev_key_allows_gateway_startup_without_contacting_the_provider ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running tests/runtime_operations.rs (target/debug/deps/runtime_operations-5edc397b1673e863)
+
+running 9 tests
+test init_refuses_existing_public_secret_directory_and_symlink ... ok
+test optional_provider_build_rejects_latest_ranges_and_shell_arguments ... ok
+test public_projection_directory_and_linked_projection_are_rejected ... ok
+test mount_projections_are_separate_readable_files_inside_a_private_directory ... ok
+test init_generates_distinct_32_byte_keys_and_never_replaces_them ... ok
+test legacy_readable_sources_are_hardened_without_rotation ... ok
+test secret_projection_refresh_is_atomic_and_never_replaces_source_values ... ok
+test optional_jev_is_projected_only_when_a_private_source_exists ... ok
+test init_refuses_jev_control_key_reuse_without_refreshing_any_projection ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/tenant_api.rs (target/debug/deps/tenant_api-ddf340dfebe9c4ae)
+
+running 3 tests
+test authenticated_identity_scopes_ingestion_history_export_and_derived_views ... ok
+test ambiguous_credentials_and_wrong_database_binding_are_rejected ... ok
+test decision_and_live_stream_are_isolated_and_audit_failure_denies_only_affected_tenant ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.34s
+     Running tests/api_security.rs (target/debug/deps/api_security-d959c1f70622a153)
+
+running 4 tests
+test viewer_cannot_ingest_and_unknown_tokens_cannot_read ... ok
+test json_limits_and_cross_origin_requests_are_rejected ... ok
+test denied_command_is_audited_but_never_executed_by_api ... ok
+test export_preserves_requested_sequence_window ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/gateway_tenancy.rs (target/debug/deps/gateway_tenancy-4b7e7d80c5df76e4)
+
+running 1 test
+test configured_tenants_remain_isolated_over_http_and_after_control_plane_crash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running tests/jev_credentials.rs (target/debug/deps/jev_credentials-4f60a097f7fd6d00)
+
+running 14 tests
+test library_distinct_jev_key_keeps_local_control_authorization ... ok
+test library_gateway_refuses_viewer_reuse_before_authorization ... ok
+test library_gateway_refuses_padded_runner_key_reuse ... ok
+test library_gateway_refuses_padded_viewer_key_reuse ... ok
+test library_gateway_refuses_runner_reuse_before_authorization ... ok
+test library_registry_refuses_second_tenant_padded_viewer_key_reuse ... ok
+test library_registry_refuses_second_tenant_padded_runner_key_reuse ... ok
+test standalone_gateway_refuses_jev_runner_reuse_before_serving ... ok
+test library_registry_refuses_second_tenant_runner_key_reuse ... ok
+test registry_gateway_refuses_jev_runner_reuse_from_the_second_tenant ... ok
+test registry_gateway_refuses_jev_viewer_reuse_from_the_second_tenant ... ok
+test distinct_jev_key_allows_gateway_startup_without_contacting_the_provider ... ok
+test library_registry_refuses_second_tenant_viewer_key_reuse ... ok
+test standalone_gateway_refuses_jev_viewer_reuse_before_serving ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/runtime_operations.rs (target/debug/deps/runtime_operations-5edc397b1673e863)
+
+running 9 tests
+test optional_provider_build_rejects_latest_ranges_and_shell_arguments ... ok
+test init_refuses_existing_public_secret_directory_and_symlink ... ok
+test mount_projections_are_separate_readable_files_inside_a_private_directory ... ok
+test public_projection_directory_and_linked_projection_are_rejected ... ok
+test init_generates_distinct_32_byte_keys_and_never_replaces_them ... ok
+test legacy_readable_sources_are_hardened_without_rotation ... ok
+test secret_projection_refresh_is_atomic_and_never_replaces_source_values ... ok
+test optional_jev_is_projected_only_when_a_private_source_exists ... ok
+test init_refuses_jev_control_key_reuse_without_refreshing_any_projection ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+     Running tests/tenant_api.rs (target/debug/deps/tenant_api-ddf340dfebe9c4ae)
+
+running 3 tests
+test authenticated_identity_scopes_ingestion_history_export_and_derived_views ... ok
+test ambiguous_credentials_and_wrong_database_binding_are_rejected ... ok
+test decision_and_live_stream_are_isolated_and_audit_failure_denies_only_affected_tenant ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-2465d0f45260b1b3)
+
+running 3 tests
+test jev::tests::missing_invalid_or_uncertain_answers_fail_closed ... ok
+test jev::tests::official_answer_schema_is_parsed ... ok
+test jev::tests::no_remote_http_or_credentials_in_url ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 36 filtered out; finished in 0.00s
+
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.08s
+     Running unittests src/main.rs (target/debug/deps/agentsandbox-31c1d34a39fd574c)
+
+running 4 tests
+test gateway_config::tests::symlinked_credential_and_registry_are_refused ... ok
+test gateway_config::tests::resolves_file_references_relative_to_registry_and_does_not_create_database ... ok
+test gateway_config::tests::reads_validated_worker_quota_from_trusted_tenant_configuration ... ok
+test gateway_config::tests::unknown_version_fields_empty_registry_and_duplicate_identities_are_refused ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s
+

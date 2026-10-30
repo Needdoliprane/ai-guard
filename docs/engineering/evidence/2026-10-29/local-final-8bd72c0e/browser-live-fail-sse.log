@@ -1,0 +1,37 @@
+
+> agent-sandbox-front@0.1.0 test:browser:live
+> node tests/browser_live.mjs
+
+{
+  "status": "FAIL",
+  "stage": "reconnexion SSE avec Last-Event-ID et rattrapage réel",
+  "message": "locator.waitFor: Timeout 20000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('[data-stream=\"retrying\"]') to be visible\u001b[22m\n",
+  "checks": [
+    {
+      "name": "services HTTP réels",
+      "status": "PASS"
+    },
+    {
+      "name": "refus serveur anonyme, invalide, runner et écritures viewer",
+      "status": "PASS"
+    },
+    {
+      "name": "bundle compilé servi par le dashboard",
+      "status": "PASS"
+    },
+    {
+      "name": "connexion UI, mémoire seule et proxy authentifié",
+      "status": "PASS"
+    },
+    {
+      "name": "SSE réel et XSS rendu comme texte déclaré",
+      "status": "PASS"
+    },
+    {
+      "name": "fermeture contexte et navigateur",
+      "status": "PASS"
+    }
+  ],
+  "artifacts": "/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-browser-live-ejZr5l",
+  "networkViolations": []
+}

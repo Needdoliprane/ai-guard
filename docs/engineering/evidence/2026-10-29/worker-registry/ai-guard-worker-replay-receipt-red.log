@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+     Running tests/worker_registry.rs (target/debug/deps/worker_registry-5061533a4ea227b6)
+
+running 1 test
+test rehashed_database_admission_requires_its_exact_prior_allow_and_input ... FAILED
+
+failures:
+
+---- rehashed_database_admission_requires_its_exact_prior_allow_and_input stdout ----
+
+thread 'rehashed_database_admission_requires_its_exact_prior_allow_and_input' (1745041) panicked at tests/worker_registry.rs:796:9:
+admission accepted receipt_hash
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    rehashed_database_admission_requires_its_exact_prior_allow_and_input
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.04s
+
+error: test failed, to rerun pass `--test worker_registry`

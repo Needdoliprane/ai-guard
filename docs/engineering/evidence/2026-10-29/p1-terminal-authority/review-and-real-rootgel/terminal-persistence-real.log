@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running tests/runtime_terminal_persistence.rs (target/debug/deps/runtime_terminal_persistence-747469244cf969f0)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-oViYdH
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+PASS terminal audit HTTP503; same stopped instance retained: agentsandbox-b720781b-2be6-4804-97a8-1aafb173a8e7-run-07bea7ebd6274e6e9d84ed7ceb16a16e; audit valid; no false terminal persisted
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.25s
+

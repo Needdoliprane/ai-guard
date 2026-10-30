@@ -1,0 +1,1649 @@
+[
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "api/preauth-linear-tenant-credential-hash-amplification",
+    "title": "Un Bearer invalide est rehaché pour chaque credential tenant avant tout quota",
+    "description": "Toute requête API portant un Bearer syntaxiquement valide mais inconnu déclenche un balayage séquentiel des deux credentials de chaque tenant. Pour chaque comparaison, token_matches recalcule SHA-256 sur l'intégralité du Bearer reçu ainsi que sur le secret attendu. Sur POST /events et /decide, Axum désérialise en plus le JSON avant l'entrée dans le handler et donc avant authorize. Un client non authentifié qui atteint un gateway partagé peut ainsi imposer un travail synchrone croissant avec le nombre de tenants et la longueur de son Bearer avant tout quota tenant. Ce travail est fini : le corps vaut au plus 262144 octets, le registre au plus 1 MiB et la pile HTTP applique nécessairement une borne d'en-têtes. Aucune latence significative ni famine d'une décision autorisée n'a toutefois été observée.",
+    "claimed_root_cause": "GatewayState recherche l'identité par balayage d'un Vec et token_matches recalcule le digest de l'entrée non fiable pour chaque credential, au lieu de borner puis hacher le Bearer une fois et d'utiliser un index de digests; sur les routes POST, l'authentification applicative intervient aussi après l'extracteur Json.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/api.rs",
+        "line": 274,
+        "scope": "gateway_router routes",
+        "description": "Les routes API sont accessibles avant authentification; DefaultBodyLimit borne les corps mais aucun middleware n'authentifie le Bearer avant le choix du handler."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 300,
+        "scope": "ingest Json extractor",
+        "description": "Axum doit extraire et désérialiser Event avant d'appeler ingest; decide possède le même ordre avec Json<DecisionRequest> à la ligne 313."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 195,
+        "scope": "GatewayState::authorize",
+        "description": "Pour un token inconnu, authorize parcourt chaque TenantState et effectue successivement une comparaison runner puis viewer."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 64,
+        "scope": "token_matches",
+        "description": "Chaque comparaison synchrone recalcule SHA-256 sur tous les octets du Bearer reçu et du secret attendu, consommant le CPU partagé avant refus et avant write_quota."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/api.rs",
+        "line": 72,
+        "description": "bearer retire seulement le préfixe exact Bearer ; aucune longueur ou forme équivalente aux secrets configurés n'est vérifiée avant le hachage."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 213,
+        "description": "Le quota de 200 écritures par seconde appartient au TenantState et n'est consulté qu'après une authentification réussie."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 292,
+        "description": "DefaultBodyLimit borne le parsing JSON à 262144 octets, contrôle réel qui empêche de qualifier ce travail d'illimité."
+      },
+      {
+        "file": "src/gateway_config.rs",
+        "line": 48,
+        "description": "Le registre est limité à 1 MiB mais aucune cardinalité maximale explicite de tenants n'est imposée avant leur chargement."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 104,
+        "description": "Les secrets configurés doivent avoir 32 à 512 caractères, alors que le Bearer entrant n'est pas soumis à cette borne applicative."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 197,
+        "description": "Tous les tenants configurés sont réunis dans un même GatewayState et servis par le même processus."
+      },
+      {
+        "file": "src/ingress.rs",
+        "line": 288,
+        "description": "L'ingress borne la concurrence à 64 échanges globaux mais ne réserve pas de capacité aux demandes authentifiées et transmet Authorization."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 10,
+        "description": "Le Compose standard déclare un CPU pour le gateway et publie l'ingress sur loopback; ces contrôles contiennent l'hôte mais ne qualifient ni une topologie partagée ni sa latence."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ou benchmark n'a été exécuté : l'environnement ne fournit pas simultanément tous les contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut établir une cardinalité de tenants supportée et réaliste ainsi que la taille maximale de l'en-tête Authorization effectivement admise par Hyper et les proxies déployés; avec peu de tenants et un petit Bearer, le coût peut rester négligeable.",
+      "La portée non authentifiée dépend du bind et de l'admission externes effectifs : les Compose livrés exposent seulement loopback et ne prouvent pas une topologie multi-tenant distante.",
+      "Aucun retard d'une décision ou écriture autorisée, épuisement de thread ou dépassement de budget de contrôle n'a été observé; la complexité source seule ne suffit pas à confirmer une vulnérabilité de disponibilité."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, construire des GatewayState factices de 8, 16 et 32 tenants avec des tokens factices. Instrumenter le nombre d'octets remis à SHA-256 pour une seule requête invalide avec des Bearer de 64 puis 4096 octets et vérifier la croissance tenants × longueur sans charge répétée. Avec un runtime Tokio mono-thread et un watchdog court, soumettre ensuite une seule requête invalide puis une décision autorisée et mesurer si celle-ci dépasse un budget défini. Vérifier séparément qu'un JSON maximal est extrait avant le 401. Arrêter au premier résultat déterministe.",
+      "deployment": "Faire relever en lecture seule le nombre courant et maximal de tenants par processus, les limites d'en-tête du proxy et de la pile HTTP, le nombre de threads, les quotas CPU réellement appliqués, l'exposition réseau et l'admission pré-authentification. Ne générer aucun trafic de charge sur un service partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "api/sse-graceful-shutdown-without-drain-deadline",
+    "title": "Un flux SSE viewer peut prolonger sans deadline produit le drainage du gateway ou du dashboard",
+    "description": "Un viewer autorisé peut conserver un flux SSE actif en consommant ses heartbeats. Le générateur du gateway boucle sans token d'annulation et le proxy dashboard relaie le body amont sans timeout total. Lors d'un arrêt, gateway et dashboard utilisent le drainage gracieux d'Axum mais ne l'entourent d'aucune deadline, contrairement à l'ingress limité à cinq secondes. Une connexion existante peut donc retarder la fin du processus jusqu'à ce que le client, un relais ou le superviseur la ferme. Le quota de 32 flux par tenant borne la cardinalité, pas la durée d'un flux. Le chemin peut retarder un redémarrage isolé ou conduire le superviseur à forcer l'arrêt; aucune attente effectivement bloquée ni perte d'audit n'a été observée.",
+    "claimed_root_cause": "Le cycle d'arrêt des serveurs gateway et dashboard n'est lié ni à une annulation des générateurs SSE et des bodies proxy, ni à une deadline globale de drainage; l'arrêt gracieux attend les connexions existantes selon leur progression externe.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/api.rs",
+        "line": 426,
+        "scope": "stream",
+        "description": "Un bearer viewer ou runner autorisé ouvre un flux SSE et obtient un permis du sémaphore propre au tenant."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 446,
+        "scope": "SSE event stream",
+        "description": "Le body boucle sans consulter de signal d'arrêt; en l'absence d'événement il se réveille toutes les 500 ms et le wrapper émet un heartbeat toutes les 10 secondes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 600,
+        "scope": "dashboard_proxy response body",
+        "description": "Le dashboard relaie directement bytes_stream du gateway; son client ne possède qu'un connect_timeout et aucune borne totale du body."
+      },
+      {
+        "kind": "sink",
+        "file": "src/main.rs",
+        "line": 231,
+        "scope": "Gateway graceful shutdown",
+        "description": "Le gateway attend with_graceful_shutdown sans timeout externe; le dashboard emploie le même schéma aux lignes 248 à 250."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/api.rs",
+        "line": 104,
+        "description": "Le sémaphore limite les SSE à 32 par tenant, contrôle réel de cardinalité qui ne limite pas leur durée."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 458,
+        "description": "La boucle SSE attend 500 ms puis recommence sans branche d'annulation ou état de shutdown."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 464,
+        "description": "Le heartbeat toutes les 10 secondes maintient une progression réseau normale et ne constitue pas une inactivité pour les délais de chunk de l'ingress."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 545,
+        "description": "Le client du dashboard configure seulement un délai de connexion de trois secondes, sans timeout total pour le flux relayé."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 283,
+        "description": "La branche ingress entoure explicitement son drainage d'une deadline de cinq secondes et abandonne ensuite les serveurs; aucun mécanisme analogue n'entoure gateway ou dashboard."
+      },
+      {
+        "file": "Cargo.lock",
+        "line": 142,
+        "description": "Le dépôt verrouille Axum 0.8.9; la qualification doit observer le comportement exact de son drainage sur un body SSE existant."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 3,
+        "description": "Les services gateway et dashboard n'énoncent pas de délai de terminaison produit dans le manifeste; une borne éventuelle du superviseur reste un fait de déploiement."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible, serveur ou réseau loopback n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut observer sur la version Axum compilée qu'un SSE consommé reste une connexion en vol après le signal et retarde effectivement la résolution de with_graceful_shutdown.",
+      "L'ordre d'arrêt de la pile peut fermer le flux via l'ingress limité à cinq secondes, tandis qu'un redémarrage isolé du gateway ou du dashboard ne bénéficie pas nécessairement de ce relais; ces deux topologies n'ont pas été observées.",
+      "Le superviseur réel peut imposer une terminaison forcée ou une deadline externe; sa politique Docker, Podman ou hôte n'est pas établie par le dépôt.",
+      "Aucun effet sur l'intégrité ou la durabilité de l'audit n'est revendiqué tant qu'un arrêt forcé et ses conséquences ne sont pas reproduits."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme à loopback isolé, lancer un gateway de fixture avec une base et des tokens factices, ouvrir un unique SSE authentifié et consommer ses heartbeats. Envoyer ensuite le signal d'arrêt au seul gateway et observer avec un watchdog strict si le processus termine avant une petite deadline; fermer le client pour vérifier que le drainage dépend bien de ce body. Répéter séparément avec le dashboard relayant le même SSE, puis avec l'ingress également arrêté afin de mesurer l'effet de sa deadline de cinq secondes. N'utiliser aucun service ni credential existant.",
+      "deployment": "Faire relever par l'opérateur, sans générer de trafic, l'ordre d'arrêt des trois services, le signal, le délai de terminaison forcée et la politique de remplacement pour Docker, Podman et le mode hôte. Distinguer un redémarrage isolé du gateway ou dashboard d'un arrêt simultané de toute la pile; ne pas inférer une attente infinie si le superviseur impose une borne."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "api/viewer-synchronous-reads-control-store-contention",
+    "title": "Des lectures viewer synchrones peuvent retarder les décisions et écritures du contrôle",
+    "description": "Un viewer authentifié peut appeler overview, integrity, agents, sandboxes ou une recherche sur l'historique existant de son tenant. Ces handlers async exécutent directement des opérations SQLite synchrones. Chaque Store possède une seule connexion protégée par std::sync::Mutex, également utilisée par append et decision. Les projections et le contrôle d'intégrité parcourent l'historique, et overview exécute en plus un NOT EXISTS corrélé sur des request_id extraits du JSON sans index dédié. Une lecture coûteuse peut donc retenir la connexion du tenant et un thread Tokio pendant qu'une décision ou une trace obligatoire attend. Les bases et mutex sont séparés par tenant; un effet sur un autre tenant ne pourrait venir que des threads ou du CPU communs. L'historique est borné et le viewer ne peut pas le créer lui-même, de sorte que la latence et le blast radius doivent être mesurés avant de conclure à une indisponibilité.",
+    "claimed_root_cause": "Les routes de lecture autorisées au rôle viewer exécutent des requêtes et reconstructions dont le coût dépend de l'historique directement dans les futures HTTP, sans admission dédiée, timeout SQLite ou pool bloquant, sur la connexion mutexée également requise par les écritures et décisions du contrôle.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/api.rs",
+        "line": 391,
+        "scope": "overview",
+        "description": "Un bearer viewer accepté par authorize(false) peut déclencher tenant.store.overview() depuis un handler async."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 858,
+        "scope": "Store::overview",
+        "description": "overview reconstruit deux projections complètes puis reprend le mutex de la connexion pour ses compteurs."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 872,
+        "scope": "Store::overview pending query",
+        "description": "Le compteur pending utilise un NOT EXISTS corrélé par request_id extrait de deux payloads JSON, sans index correspondant dans le schéma."
+      },
+      {
+        "kind": "sink",
+        "file": "src/audit.rs",
+        "line": 511,
+        "scope": "Store::decision",
+        "description": "Le chemin de décision runner doit acquérir le même mutex du Store avant sa transaction; append utilise ce même mutex à la ligne 360."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/audit.rs",
+        "line": 48,
+        "description": "Store contient une unique Connection protégée par std::sync::Mutex pour ce tenant."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 115,
+        "description": "Les seuls index déclarés portent sur agent_id, sandbox_id, project_id et kind/seq; aucun index ne matérialise request_id dans le JSON."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 606,
+        "description": "integrity conserve le mutex pendant la validation des métadonnées et le parcours, parsing et hachage de toute la chaîne d'événements."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 744,
+        "description": "Une recherche sans résultat peut examiner tous les payloads avec instr(lower(payload), lower(?)); la requête est limitée à 256 octets et les résultats à 1000, pas le nombre de lignes inspectées."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 764,
+        "description": "entities parcourt et désérialise tous les événements portant un agent_id ou sandbox_id pour reconstruire les projections sous le mutex."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 438,
+        "description": "max_events et le quota de 256 MiB bornent l'historique; ce contrôle rend le travail fini et limite la revendication à un coût potentiellement élevé, non illimité."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 193,
+        "description": "La CLI impose max_events entre 1 et 1 000 000, avec tous les Stores servis par le même processus gateway."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 213,
+        "description": "Le quota de 200/s protège les écritures après sélection du tenant; aucune admission analogue n'est appliquée à overview, integrity, entities ou search."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ou benchmark n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Le plan SQLite effectif, le nombre d'étapes de la sous-requête corrélée et la croissance de overview doivent être observés sur de petites fixtures; aucune durée de verrou ni indisponibilité n'est démontrée.",
+      "Le volume et la distribution de l'historique sont créés par le runner de confiance, pas par le viewer; il faut établir qu'un état réaliste contient assez de reviews distinctes ou d'événements pour rendre le coût significatif.",
+      "L'effet direct est limité au Store du même tenant; un impact inter-tenant dépend du nombre de threads Tokio, des quotas CPU et de l'admission externe réellement appliqués, qui ne sont pas observés."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, créer des Stores factices contenant 32, 64 puis 128 reviews à request_id distincts et comparer EXPLAIN QUERY PLAN ainsi qu'un compteur d'étapes SQLite de overview avec une fixture où les reviews sont résolues. Avec un ordonnanceur de test déterministe, démarrer une seule lecture puis une écriture decision du même tenant et vérifier son temps d'attente; en parallèle, vérifier qu'une requête d'un second tenant progresse. Tester aussi l'abandon client et arrêter au premier résultat de contention, sans historique maximal ni test de saturation.",
+      "deployment": "Faire relever par l'opérateur, sans générer de charge, le nombre de threads Tokio, les limites CPU réellement appliquées, le nombre et la taille des historiques, les timeouts de proxy et l'existence d'une admission de lecture. Confirmer si un contrôle externe interrompt réellement le travail backend, et pas seulement l'attente du client."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "audit/preexisting-database-permissions-not-enforced",
+    "title": "Une base SQLite préexistante permissive peut être acceptée comme audit tenant",
+    "description": "Si un utilisateur local moins fiable peut précréer le fichier configuré dans un parent partagé, il peut fournir un fichier régulier à lien unique que le gateway est autorisé à ouvrir tout en conservant lui-même un accès de lecture ou d'écriture. Le mode 0600 passé à OpenOptions ne modifie pas un fichier existant et AuditFile::verify ne contrôle ni propriétaire, ni bits de permission, ni ACL. Le gateway peut alors initialiser ou accepter cette base, la lier au tenant et y persister son audit. Le Compose standard réduit fortement cette précondition en utilisant un volume monté seulement dans le gateway et /data attribué à UID 1000; une personne qui administre réellement le stockage reste hors de la garantie déclarée. Le candidat concerne donc uniquement un principal distinct, non censé administrer le stockage, dans un mode hôte ou dérivé dont les permissions effectives restent à établir.",
+    "claimed_root_cause": "AuditFile::open vérifie la forme et l'identité du fichier mais pas son autorité filesystem: le mode privé ne s'applique qu'à la création et verify omet uid, gid, mode, ACL et les permissions des parents pour un fichier préexistant.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/audit.rs",
+        "line": 68,
+        "scope": "AuditFile::open parent",
+        "description": "Le parent du chemin configuré est créé ou réutilisé sans vérifier qu'un principal local moins fiable ne peut y précréer l'entrée de base."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 75,
+        "scope": "AuditFile::open OpenOptions",
+        "description": "OpenOptions ouvre aussi un fichier préexistant; mode(0600) ne s'applique qu'à une création et ne resserre pas ses permissions."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 89,
+        "scope": "AuditFile::verify",
+        "description": "La vérification impose fichier régulier, absence de lien final, nlink=1 et identité dev/inode, sans vérifier uid, gid, mode ni ACL."
+      },
+      {
+        "kind": "sink",
+        "file": "src/audit.rs",
+        "line": 456,
+        "scope": "Store append transaction",
+        "description": "Les événements du tenant sont insérés dans la connexion attachée à ce fichier; un autre principal conservant un accès filesystem peut potentiellement lire ou modifier cette copie."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/audit.rs",
+        "line": 81,
+        "description": "Le mode 0600 est fourni comme mode de création, sans chmod ni refus d'un fichier existant plus permissif."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 99,
+        "description": "Le bloc Unix compare seulement nlink, dev et inode; aucun contrôle d'appartenance ou de confidentialité n'est présent."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 275,
+        "description": "La première ouverture transactionnelle initialise le schéma et le tenant_binding sur la connexion ainsi acceptée."
+      },
+      {
+        "file": "docs/engineering/CLOUD_TENANCY.md",
+        "line": 39,
+        "description": "Le contrat exige que SQLite et ses WAL restent sur un stockage local fiable au contrôle, condition que le code ne déduit pas des permissions du fichier préexistant."
+      },
+      {
+        "file": "images/control.Dockerfile",
+        "line": 20,
+        "description": "L'image standard attribue /data à UID 1000, contrôle favorable à vérifier sur le volume réellement monté."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 14,
+        "description": "Le Compose standard monte audit_data uniquement dans le gateway; Podman déclare la même topologie, sans que la configuration déclarative prouve les permissions runtime."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut établir qu'un mode de déploiement supporté permet à un principal local moins fiable, distinct de l'administrateur du stockage de confiance, de précréer le fichier ou d'agir sur son parent; le volume privé du Compose standard peut fermer cette précondition.",
+      "Les uid/gid, modes, ACL, mappings utilisateur et permissions effectifs de la base, de WAL/SHM et de chaque parent ne sont pas observés pour Docker, Podman ou le mode hôte.",
+      "Aucune base factice n'a été ouverte puis relue par une seconde identité OS; l'accès d'un administrateur volontaire du stockage ne constituerait pas le franchissement revendiqué."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices et sans réseau externe, créer un parent partagé borné puis faire précréer par l'UID moins fiable une base vide régulière à lien unique dont les permissions permettent l'ouverture par l'UID gateway et la relecture par le créateur. Ouvrir un Store pour un tenant factice, écrire un unique événement non sensible, puis vérifier seulement si le créateur peut relire cet événement. Répéter avec fichier et parents privés au gateway et vérifier le refus ou l'impossibilité de précréation. N'utiliser aucune base ni volume existant.",
+      "deployment": "Faire relever par l'opérateur, sans lire ni afficher de contenu, le chemin canonique, uid/gid/mode/ACL de chaque base, de WAL/SHM et de chaque parent, ainsi que le mapping utilisateur et le partage du volume Docker/Podman. Confirmer qu'aucun principal hors contrôle ne peut créer, renommer, lire ou écrire ces entrées; distinguer explicitement l'administrateur de stockage de confiance d'un utilisateur local non autorisé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "audit/sqlite-connection-path-reopen-identity-race",
+    "title": "La connexion SQLite n’est pas liée au descripteur de base validé",
+    "description": "AuditFile ouvre et conserve un descripteur vers la base A, puis rusqlite ouvre séparément le même pathname. Dans un parent renommable par un utilisateur local moins fiable, cet utilisateur peut tenter de présenter une base factice B au second open puis de restaurer A avant la vérification suivante. Les contrôles d’identité continuent alors de porter sur A et son nom, tandis que la connexion pourrait rester attachée à B. B doit encore satisfaire le schéma exact, le tenant_binding et l’intégrité de chaîne; le candidat ne suppose donc pas l’acceptation d’un fichier arbitraire. Si le VFS et la création WAL/SHM tolèrent cette séquence, les lectures ou écritures d’audit du tenant peuvent atteindre un inode contrôlé par l’utilisateur local. Aucun tel résultat n’a été observé dans ce run.",
+    "claimed_root_cause": "Le code valide un descripteur AuditFile et le pathname associé, mais Connection::open_with_flags rouvre ce pathname indépendamment et aucune vérification ne compare l’identité du fichier réellement détenu par SQLite à celle du descripteur validé.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/audit.rs",
+        "line": 63,
+        "scope": "AuditFile::open",
+        "description": "Le chemin configuré est ouvert dans un parent canonique, mais l’entrée finale peut encore être renommée par un autre principal disposant des droits sur ce parent."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 84,
+        "scope": "AuditFile::open",
+        "description": "Le premier open retient un descripteur vers A et verify compare A au nom courant avant de retourner."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 261,
+        "scope": "Store::open_for_tenant",
+        "description": "rusqlite effectue un second open du pathname; après une substitution de l’entrée, cette connexion peut viser B malgré SQLITE_OPEN_NOFOLLOW."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 265,
+        "scope": "Store::open_for_tenant",
+        "description": "La vérification postérieure compare encore le descripteur A au pathname restauré, sans interroger l’inode principal détenu par SQLite."
+      },
+      {
+        "kind": "sink",
+        "file": "src/audit.rs",
+        "line": 275,
+        "scope": "Store::open_for_tenant transaction",
+        "description": "Schéma, binding, intégrité et transactions sont ensuite appliqués à la connexion potentiellement attachée à B, qui devient le support des lectures et écritures d’audit."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/audit.rs",
+        "line": 58,
+        "description": "AuditFile ne conserve que son propre File et le pathname; aucune identité de fichier SQLite n’est stockée."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 99,
+        "description": "verify impose nlink=1 et l’égalité dev/inode entre le descripteur A et le nom, mais ne compare jamais A à la connexion rusqlite."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 263,
+        "description": "SQLITE_OPEN_NOFOLLOW refuse un lien final lors du second open, mais ne lie pas cet open au premier descripteur et ne prévient pas un remplacement par rename d’un fichier régulier."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 276,
+        "description": "La vérification répétée dans la transaction initiale porte toujours sur AuditFile et son pathname, pas sur l’inode ouvert par la connexion."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 374,
+        "description": "Les contrôles avant append continuent de détecter un remplacement durable du nom de A, sans attester l’inode de la connexion déjà ouverte."
+      },
+      {
+        "file": "tests/audit_integrity.rs",
+        "line": 228,
+        "description": "La régression existante couvre un hardlink et un remplacement permanent après ouverture; elle ne couvre pas une substitution aller-retour entre les deux opens initiaux."
+      },
+      {
+        "file": "docs/engineering/DECISIONS.md",
+        "line": 19,
+        "description": "Le contrat exige de détecter les altérations externes avant acquittement, tout en excluant la réécriture complète par l’administrateur du stockage; le principal à valider doit donc être distinct de cet administrateur de confiance."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n’a été exécuté: l’environnement ne fournit pas simultanément le confinement réseau, l’environnement vide allowlisté, les cibles et outils en lecture seule, les écritures scratch seules, les limites de ressources pour tous les descendants et la promotion sûre exigés par le workflow.",
+      "L’exploitation exige un parent de base renommable par un utilisateur local moins fiable, distinct de l’administrateur de stockage explicitement hors garantie; le volume privé du Compose standard peut fermer cette précondition.",
+      "Le comportement exact du VFS SQLite lors des deux renames, puis l’ouverture et l’association des fichiers WAL/SHM, peut faire échouer l’initialisation plutôt que maintenir la connexion sur B et n’a pas été observé.",
+      "La base B doit présenter le schéma, le tenant_binding et une chaîne d’intégrité valides; aucun effet de lecture ou d’écriture sur B n’a été démontré avec des données factices."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices, deux bases A et B jetables et un hook déterministe entre AuditFile::open et Connection::open_with_flags, faire effectuer par le second UID A→A_hold puis B→pathname avant le second open, puis B→B_hold et A_hold→pathname avant backing.verify. Arrêter au premier résultat montrant que Store::head lit B tandis que verify(A) réussit; dans une variante séparée, effectuer un unique append factice et observer uniquement l’inode et le WAL de destination. Répéter sous un parent privé et vérifier que les renames échouent.",
+      "deployment": "Faire relever en lecture seule le chemin canonique, uid/gid/mode/ACL de chaque parent de base et les mounts associés pour Docker, Podman et le mode hôte. Confirmer qu’aucun principal hors contrôle ne peut créer ou renommer l’entrée et que le stockage n’est partagé avec aucun autre workload; ne provoquer aucune course sur une base existante."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "dashboard/static-root-symlink-follow-disclosure",
+    "title": "Le serveur statique public peut suivre un lien symbolique hors de sa racine",
+    "description": "Le fallback du dashboard sert les fichiers de front_dir sans bearer. tower-http 0.6.11 décode le chemin et refuse les composants ParentDir, RootDir et Prefix, ce qui ferme les traversées lexicales ordinaires et encodées, mais ouvre ensuite le pathname construit avec File::open, qui suit les liens symboliques. Dans un mode hôte ou dérivé où un principal moins fiable peut écrire sous front_dir alors que le processus dashboard peut lire une cible plus sensible, ce principal peut placer un lien au nom inoffensif et un client non authentifié peut en demander le contenu. L'arbre front/dist de l'instantané ne contient aucun lien et les Compose livrés copient les assets dans une image à rootfs read-only; ces contrôles réduisent fortement la précondition sans qualifier les déploiements effectifs ni le front_dir configurable du mode hôte.",
+    "claimed_root_cause": "Le dashboard confie son fallback HTTP public à ServeDir sur un pathname configurable sans ancrage par descripteur, contrôle de propriétaire ou permissions, refus des symlinks ni vérification que l'inode effectivement ouvert reste sous la racine statique approuvée.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/api.rs",
+        "line": 551,
+        "scope": "dashboard_router",
+        "description": "Une requête HTTP publique entre dans le routeur; seules les routes /api sont dirigées vers le proxy qui exige le bearer viewer."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 557,
+        "scope": "dashboard_router fallback_service",
+        "description": "Tout autre chemin est transmis à ServeDir avec le front_dir fourni, sans authentification ni validation applicative de l'entrée filesystem visée."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 557,
+        "scope": "tower_http::services::ServeDir",
+        "description": "La version verrouillée construit un pathname lexicalement contenu puis l'ouvre avec les primitives filesystem normales; un lien présent sous la racine peut donc rediriger l'ouverture hors de celle-ci."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/main.rs",
+        "line": 87,
+        "description": "Le mode hôte utilise front/dist par défaut mais accepte un --front-dir arbitraire choisi par l'opérateur."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 237,
+        "description": "Le démarrage vérifie seulement que front_dir/index.html est un fichier; is_file suit les liens et aucun contrôle de l'arbre ou de ses permissions n'est effectué."
+      },
+      {
+        "file": "Cargo.lock",
+        "line": 1611,
+        "description": "Le dépôt verrouille tower-http 0.6.11; son implémentation refuse les composants sortants après percent-decoding mais utilise File::open sur le pathname construit."
+      },
+      {
+        "file": "images/control.Dockerfile",
+        "line": 23,
+        "description": "L'image standard copie le dist construit dans /app/front, contrôle favorable qui ne s'applique pas automatiquement au mode hôte ou à une image dérivée."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 29,
+        "description": "Le Compose Docker sert /app/front et demande un rootfs read-only à la ligne 31; le manifeste Podman déclare le même modèle."
+      },
+      {
+        "file": "tests/api_security.rs",
+        "line": 16,
+        "description": "Les tests de sécurité HTTP construisent uniquement gateway_router et ne couvrent pas le fallback statique ni les symlinks."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ou serveur local n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut établir qu'un mode de déploiement supporté permet à un principal moins fiable d'écrire sous front_dir tandis que le processus dashboard possède une autorité de lecture supérieure; l'image standard en lecture seule peut fermer cette précondition.",
+      "L'image, les mounts et l'immuabilité effectifs des déploiements Docker et Podman n'ont pas été observés; la configuration déclarative et l'arbre régulier du snapshot ne constituent pas une preuve runtime.",
+      "Aucun fichier sensible réel ne doit être utilisé pour valider cette hypothèse."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices et des données non sensibles, créer une racine statique contenant index.html et un lien probe.txt vers un fichier factice lisible par l'UID dashboard mais non par l'UID qui crée le lien. Construire uniquement dashboard_router, effectuer une unique requête GET /probe.txt sans bearer et arrêter dès que la réponse contient le contenu factice ou refuse l'ouverture. Répéter avec un asset régulier et avec ../, %2e%2e et un chemin absolu pour conserver les contrôles de traversal.",
+      "deployment": "Faire relever par l'opérateur, sans lire les contenus servis, le chemin canonique, le propriétaire, le mode, les ACL, les mounts et la présence de liens sous la racine statique des modes Docker, Podman et hôte. Confirmer que l'arbre est immuable pour toute identité moins fiable et qu'aucune image dérivée ou bind mount ne remplace /app/front."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "ingress:forward:shared-preauth-exchange-pool",
+    "title": "Le pool global de l’ingress est réservé avant lecture du corps et authentification",
+    "description": "Un client qui atteint l’ingress peut envoyer des en-têtes valides puis laisser le corps incomplet. Le handler réserve d’abord l’un des 64 permis globaux, puis attend jusqu’à 30 secondes la fin du corps avant tout contact avec le gateway authentifiant. En maintenant 64 échanges de ce type, un principal non authentifié peut faire répondre 429 à une requête runner ou viewer légitime. Une réponse longue, notamment un SSE authentifié, conserve aussi le permis jusqu’à consommation ou abandon du body. Les délais, limites de taille et gardes de drop bornent chaque occupation, mais aucune capacité n’est réservée par tenant, identité ou classe de contrôle. Le Compose standard n’expose que loopback; la portée distante et la topologie multi-tenant restent donc à établir.",
+    "claimed_root_cause": "L’ingress utilise un sémaphore unique pour toutes les routes et identités et acquiert son permis avant la lecture complète du corps et avant l’authentification upstream; le permis reste ensuite attaché au body de réponse sans partition ni réserve pour le trafic autorisé.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/ingress.rs",
+        "line": 241,
+        "scope": "forward",
+        "description": "Toute requête atteignant l’ingress entre dans le relay sans identité préalablement authentifiée; les contrôles initiaux portent sur URI, méthode, framing et taille déclarée."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/ingress.rs",
+        "line": 288,
+        "scope": "forward concurrency admission",
+        "description": "Le handler acquiert immédiatement un permis du sémaphore global de 64; si tous sont occupés, il retourne 429 sans distinguer identité, tenant ou route."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/ingress.rs",
+        "line": 305,
+        "scope": "forward request body",
+        "description": "Après acquisition, le handler attend la totalité du corps avec une deadline globale de 30 secondes et un timeout par chunk, toujours avant l’appel upstream qui appliquerait l’authentification."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/ingress.rs",
+        "line": 352,
+        "scope": "ExchangeLease",
+        "description": "Après réception des headers upstream, le permis est transféré à une lease conservée pendant le streaming de la réponse et libérée seulement à la fin, au drop ou sur erreur du pump."
+      },
+      {
+        "kind": "sink",
+        "file": "src/ingress.rs",
+        "line": 291,
+        "scope": "forward rejection",
+        "description": "Une requête légitime concurrente reçoit 429 lorsque les 64 permis globaux sont occupés par les échanges précédents."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/ingress.rs",
+        "line": 23,
+        "description": "MAX_CONCURRENT vaut 64 pour l’ensemble d’un routeur ingress, sans subdivision par identité ou route."
+      },
+      {
+        "file": "src/ingress.rs",
+        "line": 74,
+        "description": "Les valeurs par défaut bornent connexion à 3 s, headers à 15 s, corps total et chunks à 30 s; elles limitent la durée d’une occupation mais permettent son renouvellement."
+      },
+      {
+        "file": "src/ingress.rs",
+        "line": 131,
+        "description": "Le client upstream désactive redirects, retries et proxies; ces contrôles ferment des amplifications annexes sans avancer l’authentification avant l’admission."
+      },
+      {
+        "file": "src/ingress.rs",
+        "line": 220,
+        "description": "read_request bufferise au plus 262144 octets et refuse erreur ou dépassement; un corps incomplet de petite taille peut néanmoins conserver le permis jusqu’au timeout."
+      },
+      {
+        "file": "src/ingress.rs",
+        "line": 44,
+        "description": "BodyLease et PumpLease libèrent le permis au drop, à l’erreur ou à la fin, empêchant une fuite permanente de slot mais pas l’occupation volontaire pendant les délais normaux."
+      },
+      {
+        "file": "tests/ingress.rs",
+        "line": 254,
+        "description": "La régression source existante ouvre 64 SSE, observe 429 sur le 65e et vérifie la libération au drop; elle a été lue mais pas exécutée dans cette revue."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 64,
+        "description": "Le Compose Docker standard publie l’ingress uniquement sur 127.0.0.1; Podman déclare la même borne, contrôle de portée favorable qui ne qualifie pas les topologies dérivées ou cloud."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ni réseau loopback n’a été exécuté: l’environnement ne fournit pas ensemble le sandbox OS, l’environnement vide, les ressources bornées, les descendants confinés et la promotion sûre exigés par le workflow.",
+      "Il faut observer qu’un corps incomplet occupant les permis produit effectivement 429 pour une requête autorisée sur les versions Axum/Hyper compilées; la source établit l’ordre mais pas la progression concurrente mesurée.",
+      "La portée attaquante dépend du bind et des contrôles externes effectifs: le Compose standard est loopback et mono-client, tandis qu’un ingress partagé ou distant n’est pas qualifié.",
+      "Les réponses SSE longues exigent un bearer viewer valide et sont déjà limitées à 32 par tenant dans le gateway; le chemin non authentifié revendiqué repose sur les corps incomplets avant upstream, pas sur un accès SSE sans credential."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme à loopback isolé, utiliser une fixture de l’ingress avec un sémaphore de test de taille 1 et des délais inférieurs à une seconde. Envoyer une seule requête factice dont les en-têtes sont complets mais le corps reste ouvert, puis une unique requête autorisée de fixture et vérifier si elle reçoit 429 avant que l’upstream soit contacté. Après le timeout, vérifier que le slot est libéré et que la même requête progresse. N’utiliser aucun service existant et arrêter au premier résultat déterministe.",
+      "deployment": "Faire relever par l’opérateur, sans générer de charge, les adresses de bind, proxies ou admissions placés devant l’ingress, le nombre d’instances, la portée multi-tenant et l’existence d’une réserve de capacité pour les décisions et arrêts. Confirmer séparément Docker, Podman et toute topologie cloud; ne pas ouvrir de connexions de saturation sur un service partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "operations/config-path-reopen-secret-substitution",
+    "title": "Le répertoire de configuration est rouvert par pathname après sa validation",
+    "description": "Up valide et met à jour le répertoire de configuration par descripteurs, puis attend la commande doctor avant d'appeler compose. Compose canonicalise de nouveau le PathBuf d'origine sans comparer son identité au descripteur précédemment validé. Un utilisateur local moins fiable qui peut renommer l'entrée depuis son répertoire parent peut donc déplacer l'arbre 0700 validé et installer au même nom un autre arbre, ou un lien vers celui-ci, contenant des projections runner et viewer choisies. Si Docker ou Podman résout ensuite les secrets depuis ce nouvel arbre, le gateway recréé charge ces valeurs comme Bearer de contrôle; leur détenteur peut lire l'audit avec viewer ou atteindre les mutations et décisions avec runner. Le mode 0700 interdit de traverser l'ancien arbre, mais ne protège pas son nom lorsque le parent est modifiable par l'attaquant.",
+    "claimed_root_cause": "L'identité filesystem établie par initialize_config est abandonnée avant le handoff moteur: Up conserve seulement un pathname, exécute une opération asynchrone, puis compose suit de nouveau ce pathname sans vérification dev/inode, sans contrôle des parents et sans exiger que l'arbre recanonicalisé satisfasse encore les invariants de propriétaire et de mode.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/operations.rs",
+        "line": 165,
+        "scope": "OperatorCommand::Up",
+        "description": "Up reçoit un config_dir configurable et appelle initialize_config sur ce pathname."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 171,
+        "scope": "OperatorCommand::Up initialize_config",
+        "description": "L'arbre courant est validé et manipulé avec des descripteurs, mais l'identité de son descripteur racine n'est pas conservée par Up."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 173,
+        "scope": "OperatorCommand::Up doctor",
+        "description": "L'attente de runtime.doctor crée une fenêtre entre la validation et la seconde résolution du pathname."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 549,
+        "scope": "compose configuration resolution",
+        "description": "Compose canonicalise de nouveau config_dir, en suivant son état courant, sans répéter private_directory ni comparer dev/inode."
+      },
+      {
+        "kind": "propagation",
+        "file": "deploy/docker/compose.yaml",
+        "line": 88,
+        "scope": "Compose secret sources",
+        "description": "AGENTSANDBOX_CONFIG_DIR sélectionne les fichiers mounted-secrets/runner et viewer remis aux services; le manifeste Podman utilise la même convention."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/main.rs",
+        "line": 159,
+        "scope": "gateway credential loading",
+        "description": "Le gateway charge les fichiers montés comme credentials runner et viewer du tenant local."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 193,
+        "scope": "GatewayState::authorize",
+        "description": "Les valeurs chargées deviennent des Bearer acceptés; runner atteint les routes d'écriture et viewer les lectures du Store existant."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/operations.rs",
+        "line": 266,
+        "description": "private_directory contrôle l'entrée finale, son UID et son mode 0700, mais pas la capacité d'un tiers à renommer cette entrée via son parent."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 357,
+        "description": "open_root utilise O_DIRECTORY et O_NOFOLLOW et vérifie le descripteur, contrôle fort limité à initialize_config."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 570,
+        "description": "Le seul lien conservé avec le moteur est le nouveau pathname canonique fourni par AGENTSANDBOX_CONFIG_DIR."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 181,
+        "description": "Le lancement utilise --force-recreate, de sorte que les services doivent recharger les sources de secrets sélectionnées au nouveau démarrage."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 188,
+        "description": "Après compose, Up vérifie uniquement les healthz; il ne vérifie pas l'identité des credentials effectivement chargés."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 44,
+        "description": "Le défaut .agentsandbox est relatif au répertoire courant; la source permet aussi un config_dir arbitraire sans exiger des parents privés."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté: l'environnement ne fournit pas l'ensemble du confinement OS, réseau, environnement, descendants, ressources et promotion exigé par le workflow.",
+      "Il faut établir qu'un déploiement supporté place config_dir dans un parent renommable par un principal local moins fiable; un home et tous ses parents non modifiables par ce principal ferment la précondition.",
+      "Le moment où Docker et Podman ouvrent les sources Compose et les fichiers de secrets, ainsi que le chargement effectif des Bearer substitués par le gateway, n'ont pas été observés avec des données factices.",
+      "Le principal pertinent est un utilisateur local distinct de l'opérateur et de l'administrateur moteur de confiance; une substitution volontaire par l'opérateur ne constitue pas l'exploitation revendiquée."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices, placer config_dir sous un parent partagé non sticky et utiliser uniquement des tokens factices. Ajouter un hook déterministe ou une CLI doctor factice bornée pour suspendre Up après initialize_config; depuis le second UID, renommer l'entrée et installer un arbre mounted-secrets contenant les tokens choisis. Avec une CLI compose factice, vérifier d'abord le pathname et les fichiers qui seraient ouverts; avec un moteur jetable isolé, arrêter dès qu'une unique requête viewer factice est acceptée. Répéter sous un parent non modifiable et vérifier que le rename échoue.",
+      "deployment": "Faire relever sans afficher aucun secret le chemin canonique de config_dir, l'UID, le mode et les ACL de chacun de ses parents, l'absence de bind mount inattendu et l'identité des sources de secrets effectivement résolues par Docker et Podman. Confirmer qu'aucun principal hors contrôle ne peut renommer l'entrée; ne provoquer aucune course sur un service existant."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "operations/extended-acl-secret-projection-disclosure",
+    "title": "Des ACL étendues peuvent contredire les seuls bits de mode contrôlés pour les projections de secrets",
+    "description": "L'initialisation accepte la racine et ses sous-répertoires à partir de leur type, de leur UID et de bits de mode exactement égaux à 0700. Elle n'interroge pas les ACL effectives. Sur une plateforme ou un filesystem où une entrée ACL nommée peut conserver un droit traverse/read sans rendre ces bits différents de 0700, un utilisateur local moins fiable bénéficiaire de cette ACL peut traverser mounted-secrets et lire une projection runner ou viewer créée en 0444. Cette valeur est ensuite un Bearer de contrôle accepté par le gateway. Le chemin source est réel, mais il n'est pas établi qu'une ACL effective satisfaisant simultanément ces conditions existe sur chaque plateforme annoncée : les ACL POSIX et de type NFSv4/Darwin ne se reflètent pas nécessairement de la même manière dans st_mode.",
+    "claimed_root_cause": "Les invariants de confidentialité du répertoire sont décidés uniquement à partir de l'UID et de metadata.permissions().mode(); aucune vérification ou neutralisation des ACL étendues effectives n'est effectuée avant la publication de fichiers de credentials lisibles par tous les comptes capables de traverser le parent.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/operations.rs",
+        "line": 266,
+        "scope": "private_directory",
+        "description": "Un répertoire de configuration existant, éventuellement porteur d'ACL explicites ou héritées, est l'entrée filesystem fournie à init/up."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 278,
+        "scope": "private_directory mode check",
+        "description": "La racine est acceptée lorsque l'UID correspond et que les seuls bits de mode valent 0700; les ACL effectives ne sont pas examinées."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 347,
+        "scope": "secret_projections::check_directory",
+        "description": "Les sous-répertoires secrets et mounted-secrets répètent le contrôle UID/mode sans contrôle ACL."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 496,
+        "scope": "secret_projections::publish",
+        "description": "La projection contenant le Bearer est rendue 0444; sa confidentialité dépend donc entièrement de l'interdiction effective de traverser les parents."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 193,
+        "scope": "GatewayState::authorize",
+        "description": "Une valeur runner ou viewer ainsi lue peut être présentée comme Bearer et sélectionne directement le rôle et le TenantState correspondants."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/operations.rs",
+        "line": 334,
+        "description": "Le chemin sécurisé est annoncé pour Linux, macOS et WSL via le cfg(unix), alors que ces plateformes peuvent exposer des modèles d'ACL différents."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 405,
+        "description": "Les fichiers existants sont contrôlés pour type, nlink, UID et taille, mais aucune ACL effective n'est inspectée."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 485,
+        "description": "Les temporaires de projection sont créés 0600 puis deviennent 0444; aucun appel n'enlève ou vérifie des ACL héritées sur le répertoire ou le fichier."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 89,
+        "description": "La projection runner publiée est la source du secret remis au gateway; viewer suit le même schéma à la ligne 91."
+      },
+      {
+        "file": "docs/operations.md",
+        "line": 43,
+        "description": "La documentation affirme que les autres utilisateurs ne peuvent pas traverser le parent 0700, garantie plus forte que les seules métadonnées effectivement vérifiées par le code."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ni test multi-identité n'a été exécuté : l'environnement ne fournit pas l'ensemble du confinement OS, réseau, environnement, descendants, ressources et promotion exigé par le workflow.",
+      "Il faut démontrer sur chaque plateforme et filesystem pris en charge qu'une ACL effective peut accorder traverse/read à un autre UID tout en laissant l'UID propriétaire et les bits st_mode exactement acceptés; si le masque ACL est reflété dans les bits de groupe, le contrôle 0700 ferme ce chemin sur cette combinaison.",
+      "Aucune ACL explicite ou héritée d'un déploiement réel n'a été observée; l'absence d'entrée ACL donnant un droit effectif à un autre principal ferme la précondition.",
+      "L'utilisation du Bearer dépend de la joignabilité du gateway pour cet utilisateur; la lecture d'un token strictement factice suffit toutefois à valider la divulgation locale sans tester un service partagé."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices et uniquement des tokens factices, tester séparément Linux/ACL POSIX et macOS ou chaque filesystem annoncé. Créer une racine victime avec mode observé 0700 et une ACL explicite ou héritée censée accorder traverse/read au second UID, exécuter une seule initialisation, puis vérifier d'abord les métadonnées mode/ACL et tenter depuis le second UID de lire uniquement mounted-secrets/viewer. Arrêter dès que la lecture réussit, échoue ou que st_mode cesse d'être 0700. Répéter sans ACL pour le contrôle négatif; ne démarrer aucun gateway ni moteur.",
+      "deployment": "Faire relever par l'opérateur uniquement propriétaire, mode et ACL effectives de la racine de configuration, secrets et mounted-secrets sur chaque hôte supporté, sans lire ni afficher leur contenu. Confirmer l'absence de toute entrée nommée, héritée ou ACE donnant traverse/read à une identité hors contrôle et consigner le modèle d'ACL du filesystem."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "operations/jev-control-credential-reuse",
+    "title": "Une clé Jev réutilisant un credential de contrôle est envoyée au service externe",
+    "description": "L'initialisation exige seulement que runner et viewer soient distincts. Une source Jev existante peut donc contenir exactement l'un de ces Bearer et être publiée. Au démarrage, le gateway charge cette valeur sans la comparer aux credentials runner/viewer, puis JevClient l'emploie comme Authorization Bearer vers l'endpoint Jev lors de la première décision localement autorisée. Un service Jev, moins fiable que le contrôle, peut ainsi recevoir un credential donnant des droits runner ou viewer si cette valeur a été réutilisée. La précondition est une configuration erronée par l'opérateur; le service externe ne peut pas provoquer seul la collision. L'exploitation ultérieure dépend en plus de la joignabilité du gateway pour le détenteur du credential.",
+    "claimed_root_cause": "Les contrôles d'unicité couvrent runner versus viewer, y compris entre tenants, mais omettent la clé Jev au dernier point où ces valeurs sont simultanément disponibles avant publication et avant construction du client HTTP.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/operations.rs",
+        "line": 315,
+        "scope": "initialize_config",
+        "description": "L'initialisation lit la source Jev facultative fournie par l'opérateur en même temps que les sources runner et viewer."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 316,
+        "scope": "initialize_config uniqueness check",
+        "description": "Seule l'égalité runner/viewer est refusée; la valeur Jev n'est comparée à aucun credential de contrôle."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 324,
+        "scope": "initialize_config projection",
+        "description": "Une valeur Jev présente est publiée dans mounted-secrets/jev même lorsqu'elle égale runner ou viewer."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/main.rs",
+        "line": 163,
+        "scope": "gateway startup secrets",
+        "description": "Le gateway collecte d'abord les credentials runner/viewer, puis lit et ajoute la clé Jev sans contrôle d'unicité avec cette collection."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/main.rs",
+        "line": 174,
+        "scope": "JevClient construction",
+        "description": "La clé réutilisée est remise telle quelle au client Jev."
+      },
+      {
+        "kind": "sink",
+        "file": "src/jev.rs",
+        "line": 109,
+        "scope": "JevClient::decide",
+        "description": "Chaque requête de décision envoyée au service Jev utilise cette valeur comme Authorization Bearer."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/operations.rs",
+        "line": 311,
+        "description": "Runner, viewer et Jev sont tous disponibles avant publication, de sorte que le refus de collision peut être appliqué sans dépendance externe."
+      },
+      {
+        "file": "src/gateway_config.rs",
+        "line": 90,
+        "description": "Le mode multi-tenant impose l'unicité de tous les credentials runner/viewer, mais la clé Jev chargée ensuite n'entre pas dans cet index."
+      },
+      {
+        "file": "src/jev.rs",
+        "line": 42,
+        "description": "Le client exige HTTPS hors loopback explicite, désactive redirections et proxy et borne ses délais; ces contrôles réduisent le transport mais ne corrigent pas la confusion d'autorité."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 332,
+        "description": "Jev n'est appelé qu'après une autorisation locale, contrôle favorable qui retarde le sink mais ne change pas le credential transmis."
+      },
+      {
+        "file": "docs/operations.md",
+        "line": 171,
+        "description": "La procédure exige explicitement une clé Jev distincte, exigence qui n'est pas appliquée par le code."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut observer avec des valeurs strictement factices que initialize_config accepte puis publie Jev=runner ou Jev=viewer et qu'une fixture Jev loopback reçoit cette valeur dans Authorization.",
+      "Le sink réseau exige Jev activé, une décision localement autorisée et un endpoint atteignable; aucune topologie déployée n'a été observée.",
+      "La réutilisation ultérieure du credential dépend de la joignabilité du gateway par le service ou par un acteur qui obtient ses logs; seule la divulgation au service Jev est revendiquée."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, créer des sources factices avec Jev égal au runner, exécuter une seule initialisation et vérifier que la projection est acceptée. Démarrer ensuite un gateway et une fixture Jev uniquement sur loopback isolé, soumettre une décision factice localement autorisée et arrêter dès que la fixture observe ou n'observe pas le Bearer runner factice. Répéter Jev=viewer. Ajouter des régressions qui refusent les deux collisions avant toute publication et au démarrage gateway direct ou multi-tenant, sans envoyer de requête.",
+      "deployment": "Faire vérifier par l'opérateur, sans afficher ni comparer les valeurs en clair hors du processus de contrôle, que l'identité de secret Jev et les identités runner/viewer proviennent de références distinctes et que la rotation ne peut pas les faire converger. Ne générer aucun trafic de test vers un service Jev partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "redaction/json-object-keys-preserved",
+    "title": "Les clés d'objet JSON contournent le masquage des secrets",
+    "description": "Un worker auquel un credential a été volontairement injecté peut émettre une ligne de télémétrie générique dont une clé d'objet est exactement ce credential. Le normalisateur borne la clé mais la recopie telle quelle. Les deux passages de Redactor masquent les valeurs et les valeurs associées aux noms sensibles, mais ne transforment jamais le texte des clés. Si l'événement est accepté, la clé apparaît donc dans le payload SQLite puis dans les lectures viewer et l'export du même tenant. Ce chemin peut étendre la connaissance du credential du worker vers les viewers autorisés à consulter l'audit; aucune fuite inter-tenant n'est revendiquée.",
+    "claimed_root_cause": "La récursion de redaction traite uniquement les valeurs JSON: bounded_value et Redactor::value conservent les clés d'objet sans leur appliquer le dictionnaire de secrets, puis le Store sérialise ces clés inchangées.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 714,
+        "scope": "run normalized stdout",
+        "description": "Le stdout contrôlé par le worker est découpé en lignes et remis à l'adaptateur du provider sélectionné."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/adapters.rs",
+        "line": 449,
+        "scope": "generic telemetry data",
+        "description": "Pour une télémétrie générique admise, l'objet data non fiable est projeté par bounded_value."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/adapters.rs",
+        "line": 106,
+        "scope": "bounded_value object projection",
+        "description": "Les clés d'au plus 128 octets sont insérées par key.clone sans masquage de leur contenu."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/redaction.rs",
+        "line": 84,
+        "scope": "Redactor::value",
+        "description": "La redaction récursive conserve chaque clé avec k.clone; sensitive_key ne masque que la valeur associée."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 349,
+        "scope": "Store::prepare_event",
+        "description": "Le Store applique de nouveau le même Redactor puis sérialise l'Event, sans traitement distinct des clés."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 378,
+        "scope": "list_events",
+        "description": "Un viewer authentifié reçoit les événements sérialisés du Store; export parcourt les mêmes payloads à partir de la ligne 496."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runner.rs",
+        "line": 472,
+        "description": "AuditClient reçoit le dictionnaire des valeurs de credentials injectées, donc le secret utilisé comme clé est connu du premier Redactor."
+      },
+      {
+        "file": "src/adapters.rs",
+        "line": 431,
+        "description": "L'adaptateur generic accepte plusieurs kinds de télémétrie et permet un objet data arbitraire sous ses bornes."
+      },
+      {
+        "file": "src/redaction.rs",
+        "line": 72,
+        "description": "Le remplacement exact de chaque secret existe pour les chaînes de valeur, ce qui met en évidence son absence sur les clés."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 456,
+        "description": "Le payload JSON produit après redaction est inséré durablement dans events."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 486,
+        "description": "L'export fixe une tête puis sérialise les StoredEvent du même Store; il ne procède à aucune nouvelle redaction."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté: l'environnement ne fournit pas tous les contrôles de sandbox OS, réseau, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut observer avec un credential strictement factice que la chaîne adaptateur, double redaction, stockage et lecture conserve effectivement la clé dans les sérialisations produites par les versions compilées.",
+      "La portée concrète dépend de l'existence d'un rôle viewer distinct autorisé à lire l'audit du tenant pendant qu'un worker connaît ce credential; aucune topologie déployée n'a été observée."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, construire un AuditClient/Store et un événement de fixture avec un secret factice d'au moins quatre caractères injecté dans le Redactor. Faire parser une seule ligne generic de type agentsandbox.telemetry dont data possède ce secret comme clé, poster l'événement dans une base SQLite jetable, puis lire une page et un export locaux. Arrêter dès que la sérialisation contient ou ne contient pas la clé factice. Ajouter ensuite une régression qui exige l'absence du secret dans toutes les clés et valeurs après chaque étape, avec une stratégie explicite de collision entre clés redacted."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "redaction/truncation-before-secret-masking",
+    "title": "La troncature précédant le masquage peut conserver un préfixe de secret dans l’audit",
+    "description": "Lors d’un run autorisé avec credentials injectés, le worker connaît ces valeurs et peut les écrire sur stdout. Si la capture brute est activée et qu’une valeur opaque chevauche exactement la limite de 8192 octets, runner::run tronque d’abord la chaîne : le secret complet disparaît, mais presque tout son préfixe reste. AuditClient applique ensuite un remplacement exact du secret complet, qui ne peut plus correspondre. Le Store du gateway effectue un second masquage, mais son dictionnaire ne contient que les credentials de contrôle et Jev, pas le secret worker. Un viewer du même tenant peut donc potentiellement lire ce préfixe dans command.completed/failed. Le normaliseur des événements fournisseur présente la même cause avec sa borne de 4096 octets. L’effet est fini et limité à un préfixe ; il ne prouve ni récupération du secret complet ni fuite inter-tenant.",
+    "claimed_root_cause": "Les sorties worker et certains champs provider sont tronqués avant l’appel au Redactor qui connaît les credentials injectés. Le Redactor remplace les secrets par correspondance exacte et ne conserve pas de chevauchement permettant de masquer une occurrence coupée à la frontière de troncature.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runtime.rs",
+        "line": 455,
+        "scope": "Runtime::execute stdout capture",
+        "description": "Les octets stdout contrôlés par le worker sont capturés jusqu’à la borne de 256 KiB choisie par le runner."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 693,
+        "scope": "runner::run completion result",
+        "description": "Lorsque capture_output est vrai, stdout est converti puis tronqué à 8192 octets avant d’être remis à AuditClient."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/redaction.rs",
+        "line": 70,
+        "scope": "Redactor::text",
+        "description": "Le masquage ultérieur remplace chaque secret complet par correspondance exacte ; un préfixe restant après troncature ne correspond plus."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/audit.rs",
+        "line": 350,
+        "scope": "Store::prepare_event",
+        "description": "Le gateway redige une seconde fois avant sérialisation, avec un dictionnaire construit à partir des secrets runner, viewer et Jev, sans les credentials worker injectés."
+      },
+      {
+        "kind": "sink",
+        "file": "src/api.rs",
+        "line": 377,
+        "scope": "list_events",
+        "description": "Un viewer autorisé du tenant peut lire l’événement durable contenant le préfixe qui a survécu."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runner.rs",
+        "line": 439,
+        "description": "Une valeur de credential opaque d’au moins huit octets est acceptée ; elle n’a pas besoin de correspondre aux formats de tokens détectés par regex."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 472,
+        "description": "AuditClient reçoit bien les valeurs des credentials worker dans son Redactor avant l’exécution."
+      },
+      {
+        "file": "src/redaction.rs",
+        "line": 49,
+        "description": "clip conserve le préfixe jusqu’à la limite puis ajoute un marqueur, de sorte qu’une occurrence chevauchant la limite est coupée."
+      },
+      {
+        "file": "src/redaction.rs",
+        "line": 72,
+        "description": "La liste de secrets est appliquée avec String::replace sur la valeur entière, sans recherche de préfixe ni traitement streaming de la frontière."
+      },
+      {
+        "file": "src/adapters.rs",
+        "line": 64,
+        "description": "bounded_text reproduit l’ordre troncature puis masquage pour des champs provider, avec une limite de 4096 octets."
+      },
+      {
+        "file": "src/adapters.rs",
+        "line": 263,
+        "description": "Le champ aggregated_output est borné par l’adapter avant que l’événement normalisé soit envoyé via AuditClient."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 163,
+        "description": "Le Redactor du Store connaît les credentials de contrôle de chaque tenant et éventuellement Jev, mais aucun credential worker propre au processus runner."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ne pouvait être exécuté : le run ne dispose pas du sandbox OS complet exigé (réseau externe interdit et loopback isolé, environnement vide allowlisté, cible et outils en lecture seule, écritures scratch seulement, limites CPU/mémoire/PID/fichiers/disque/temps appliquées à tous les descendants).",
+      "Le résultat minimal doit être observé avec un secret entièrement factice afin de confirmer la sérialisation exacte après clip puis Redactor, sans exposer de credential réel.",
+      "La source établit la conservation possible d’un préfixe mais pas que ce préfixe suffit à réutiliser ou reconstruire le secret complet ; l’impact doit rester limité au fragment effectivement observé."
+    ],
+    "validation_plan": {
+      "local": "Dans le sandbox conforme, créer un Redactor avec un secret factice opaque de 32 octets ne correspondant à aucun motif intégré. Construire un événement command.completed dont stdout vaut 8161 octets neutres suivis du secret, appliquer exactement clip(..., 8192) puis Redactor::value, et vérifier que le résultat sérialisé contient les 31 premiers octets du secret mais jamais le secret complet. Répéter à la borne 4096 avec un unique événement adapter factice. Dans une fixture Store/API locale facultative utilisant uniquement des bearers factices, vérifier une seule lecture viewer du fragment puis arrêter. Ajouter ensuite une régression exigeant qu’aucun préfixe de quatre octets ou plus du secret n’apparaisse après chaque frontière de troncature."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runner/credential-env-path-reopen-substitution",
+    "title": "Le fichier de credentials est rouvert par pathname après ses contrôles",
+    "description": "Pour un run observe+bridge explicitement autorisé, le runner canonicalise le chemin du fichier de credentials puis, plus tard, contrôle une résolution avec symlink_metadata avant de relire séparément le même pathname avec read_to_string. Un principal local moins fiable capable de renommer l'entrée du parent peut tenter de substituer entre ces deux opérations un lien vers un autre fichier NAME=value lisible par le broker. Le contenu substitué est alors copié dans un NamedTempFile et remis comme environnement au worker, qui peut être contrôlé par ce principal ou un complice. Une seconde réouverture existe entre le contrôle du tempfile et l'ouverture de --env-file par le CLI, mais elle exige en plus un namespace temporaire où l'attaquant peut supprimer ou remplacer le nom malgré les protections usuelles de tempfile. Le projet exécuté dans le conteneur ne possède à lui seul aucun accès à ces pathnames hôte.",
+    "claimed_root_cause": "Les validations portent sur des résolutions de pathname différentes de celles qui consomment les fichiers: aucun descripteur O_NOFOLLOW avec fstat ne lie symlink_metadata à read_to_string, et seul le pathname du tempfile est conservé jusqu'à l'ouverture ultérieure par le CLI moteur.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 321,
+        "scope": "choose_plan secret_env_file",
+        "description": "Le chemin fourni pour les credentials est canonicalisé, mais seule sa représentation PathBuf est conservée pendant les étapes suivantes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 401,
+        "scope": "credentials metadata validation",
+        "description": "symlink_metadata vérifie type, taille et permissions d'une résolution du nom sans ouvrir ni retenir le fichier validé."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 412,
+        "scope": "credentials content read",
+        "description": "read_to_string rouvre ensuite le pathname et suit l'état courant de son entrée, sans comparer l'inode lu aux métadonnées précédentes."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 450,
+        "scope": "credential snapshot",
+        "description": "Les valeurs obtenues sont recopiées dans un NamedTempFile maintenu ouvert, mais seul son pathname est remis au runtime."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 58,
+        "scope": "ContainerSpec::with_secret_env_file",
+        "description": "Le runtime contrôle de nouveau le pathname du tempfile comme fichier régulier puis stocke seulement ce pathname."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runtime.rs",
+        "line": 135,
+        "scope": "ContainerSpec::create_args",
+        "description": "Le pathname est transmis à la CLI via --env-file; cette CLI l'ouvre ultérieurement pour injecter les valeurs dans l'environnement du worker."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runner.rs",
+        "line": 408,
+        "description": "Le contrôle Unix refuse les bits groupe/autres, mais ne vérifie ni propriétaire, ni nlink, ni identité dev/inode après ouverture."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 412,
+        "description": "La limite de 64 KiB est vérifiée sur les métadonnées de la première résolution et n'est pas réappliquée au descripteur effectivement lu."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 450,
+        "description": "NamedTempFile apporte création exclusive et fichier privé, contrôle favorable qui ne lie toutefois pas son nom à l'ouverture ultérieure du processus CLI."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 642,
+        "description": "Seul le conteneur Run autorisé reçoit l'env-file; les helpers import/export ne le reçoivent pas."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 61,
+        "description": "with_secret_env_file exige un chemin absolu et un fichier régulier, mais effectue encore une vérification par pathname sans retenir de descripteur."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 449,
+        "description": "create_args est envoyé au moteur après les opérations asynchrones précédentes, laissant l'ouverture effective de --env-file au processus CLI."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté: le sandbox OS complet exigé pour isoler réseau, environnement, descendants, ressources et promotion d'artefacts n'est pas disponible.",
+      "Il faut établir qu'un principal hors contrôle peut renommer l'entrée du fichier source ou un de ses parents; un chemin dont tous les parents sont privés ou non modifiables ferme le premier chemin.",
+      "Le second chemin exige que le même principal puisse découvrir puis supprimer ou remplacer le nom du NamedTempFile; un répertoire temporaire privé ou sticky protégeant le fichier du broker ferme cette précondition.",
+      "Le moment et la méthode d'ouverture de --env-file par les versions Docker et Podman qualifiées n'ont pas été observés, et aucun secret réel ne doit être utilisé pour les établir."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec deux UID factices, deux fichiers NAME=value factices et un hook déterministe entre symlink_metadata et read_to_string, placer la source dans un parent partagé non sticky. Faire remplacer son entrée par le second UID et arrêter dès que le snapshot contient ou non la seconde valeur. Tester séparément le handoff au moteur avec une CLI factice bornée et un TMPDIR jetable: substituer le nom après with_secret_env_file puis observer uniquement le fichier factice ouvert pour --env-file. Répéter avec parents privés ou sticky et vérifier que les substitutions échouent.",
+      "deployment": "Faire relever sans lire aucun secret le chemin canonique, l'uid, le mode, les ACL et la capacité de rename de chaque parent du fichier source, ainsi que TMPDIR, son propriétaire, son mode, son sticky bit et sa politique de nettoyage. Vérifier séparément sur Docker et Podman quand la CLI ouvre --env-file; ne modifier aucun namespace ou moteur partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runner/decision-omits-known-worker-secret-redaction",
+    "title": "La demande de décision contourne le dictionnaire des secrets worker connu du runner",
+    "description": "Lorsqu'une exécution observe+bridge charge un fichier de credentials, le runner connaît chaque valeur et les masque dans ses événements ordinaires. Si la même valeur opaque apparaît comme argument positionnel d'une commande autorisée, la méthode decide envoie pourtant la DecisionRequest brute au gateway. Le redactor du gateway ne contient que les credentials runner/viewer et la clé Jev ; il ne connaît donc pas ce secret worker, sauf si la valeur correspond fortuitement à un motif générique ou suit un nom de flag sensible. Une décision nouvelle peut alors transmettre cette valeur au service Jev configuré et la persister dans l'événement security.decision, ensuite lisible par le viewer du tenant et exportable. Ce chemin exige qu'une commande du contrôle contienne déjà le secret worker : il ne donne pas au worker un moyen autonome de choisir la commande.",
+    "claimed_root_cause": "AuditClient applique son redactor enrichi aux événements post_event, mais pas à la DecisionRequest sérialisée par decide ; le gateway ne reçoit ni le dictionnaire des secrets worker ni une attestation que la commande a été expurgée avant la décision.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 465,
+        "scope": "run / credentials",
+        "description": "Le runner charge un fichier de credentials explicitement autorisé et conserve ses valeurs dans CredentialFile.secrets avant de construire la demande de décision."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 472,
+        "scope": "AuditClient::with_secrets",
+        "description": "Ces valeurs enrichissent le Redactor du client, ce qui protège post_event, mais la commande brute reste dans plan.request."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 156,
+        "scope": "AuditClient::decide",
+        "description": "decide sérialise request directement avec json(request), sans appeler self.redactor.value."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/api.rs",
+        "line": 335,
+        "scope": "decide / Jev",
+        "description": "Pour une autorisation locale et Jev activé, le gateway remet la demande au client Jev avec son propre redactor."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/jev.rs",
+        "line": 104,
+        "scope": "JevClient::decide",
+        "description": "L'état Jev contient request.command après masquage uniquement par le dictionnaire du gateway, qui omet les secrets worker."
+      },
+      {
+        "kind": "sink",
+        "file": "src/audit.rs",
+        "line": 531,
+        "scope": "Store::decision",
+        "description": "La commande de la requête est copiée dans l'événement security.decision puis préparée avec le redactor du Store, également dépourvu du secret worker."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runner.rs",
+        "line": 136,
+        "description": "post_event applique explicitement self.redactor.value avant envoi, contraste absent de decide."
+      },
+      {
+        "file": "src/main.rs",
+        "line": 163,
+        "description": "Le dictionnaire du gateway est construit depuis les tokens runner/viewer des tenants, puis éventuellement la clé Jev, sans secret_env_file du runner."
+      },
+      {
+        "file": "src/redaction.rs",
+        "line": 101,
+        "description": "Dans argv, seul l'élément suivant un flag dont le nom est jugé sensible est masqué ; un argument positionnel opaque reste soumis aux seuls motifs génériques."
+      },
+      {
+        "file": "src/policy.rs",
+        "line": 58,
+        "description": "La politique borne taille, NUL, exécutable et profil mais n'interdit pas qu'un argument positionnel soit égal à une valeur du fichier de credentials."
+      },
+      {
+        "file": "src/audit.rs",
+        "line": 340,
+        "description": "prepare_event applique le Redactor du Store avant persistance ; ce second passage ne peut remplacer une valeur absente de son dictionnaire."
+      },
+      {
+        "file": "src/api.rs",
+        "line": 372,
+        "description": "Un viewer authentifié peut relire les événements du Store de son tenant ; l'export aux lignes 470 et suivantes sérialise les mêmes événements."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté : l'environnement ne fournit pas le sandbox OS complet exigé pour isoler réseau, descendants, ressources et promotions d'artefacts.",
+      "Il faut observer avec une valeur strictement factice qu'un argument positionnel ne correspondant à aucun motif générique reste identique après les deux redactors et dans l'événement stocké.",
+      "Le sink Jev ne s'applique que lorsque Jev est configuré et que la politique locale autorise initialement la commande ; sans Jev, le sink durable local reste néanmoins à vérifier séparément.",
+      "La précondition est une commande fournie ou approuvée par le contrôle contenant déjà le secret worker ; aucun chemin où le worker modifie lui-même DecisionRequest n'est établi."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, créer un Store et un gateway de fixture avec des tokens de contrôle factices, puis un runner avec un secret worker factice opaque qui ne correspond à aucun motif générique. Soumettre une unique commande autorisée dont un argument positionnel vaut exactement ce secret. Vérifier d'abord que command.requested est masqué, puis arrêter dès que security.decision contient ou ne contient pas la valeur. Dans une variante loopback isolée avec Jev factice, capturer un seul body et vérifier la présence ou l'absence de la même valeur. Ajouter ensuite une régression exigeant le refus ou le masquage avant /decide, sans secret réel ni service partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runtime/abrupt-broker-stop-leaves-worker-unfenced",
+    "title": "Un arrêt brutal du broker peut laisser le worker actif sans borne ni audit terminal",
+    "description": "Après un lancement autorisé, la deadline, le kill ciblé, l’inspection terminale, le cleanup et l’événement final sont tous pilotés par la future en mémoire du broker. Le parcours Operator::Run attend runner::run directement et ne branche pas le handler SIGTERM utilisé par les serveurs. Si le broker disparaît et que Docker ou Podman conserve le conteneur lorsque le client start --attach est tué ou déconnecté, le worker peut continuer après la demande d’arrêt, sans deadline restante ni observation terminale durable. Le kill_on_drop ne vise que le processus CLI et aucune identité runtime persistée ne permet au redémarrage de retrouver le conteneur. Le comportement réel du moteur et la portée du superviseur restent toutefois décisifs et n’ont pas été observés.",
+    "claimed_root_cause": "Le fencing et le cycle terminal du worker reposent exclusivement sur l’état volatile du processus broker : Operator::Run n’intègre pas SIGTERM, l’UUID d’opération du conteneur n’est pas durable et aucun registre ou réconciliateur ne reprend les états submitted ou started après interruption.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 653,
+        "scope": "runner::run worker execution",
+        "description": "Le broker soumet au moteur un worker autorisé dont la commande peut rester active jusqu’à la deadline en mémoire."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 461,
+        "scope": "Runtime::execute deadline",
+        "description": "La deadline et le kill au timeout existent uniquement dans la future Runtime::execute du processus broker."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 472,
+        "scope": "Runtime::execute signal select",
+        "description": "Le select traite Ctrl+C, mais aucun SIGTERM ni token d’annulation externe du processus opérateur."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/operations.rs",
+        "line": 228,
+        "scope": "OperatorCommand::Run",
+        "description": "La commande opérateur attend runner::run directement, sans la combiner avec le shutdown_signal qui connaît SIGTERM."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 488,
+        "scope": "Runtime::execute cleanup",
+        "description": "remove_container n’est atteint qu’après un retour ordinaire du bloc d’exécution ; une terminaison du broker contourne ce cleanup et le résultat."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runner.rs",
+        "line": 683,
+        "scope": "command terminal audit",
+        "description": "L’événement command.completed ou command.failed portant l’état terminal n’est créé qu’après le retour réussi de Runtime::execute."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/main.rs",
+        "line": 136,
+        "description": "shutdown_signal sait traiter SIGTERM sous Unix, mais il n’est attaché qu’aux branches serveur et pas au parcours Operator::Run dispatché à la ligne 348."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 54,
+        "description": "L’UUID d’opération qui rend le nom du conteneur unique est généré seulement en mémoire dans ContainerSpec."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 306,
+        "description": "kill_on_drop s’applique au processus CLI enfant ; le code ne démontre ni une lease moteur ni la suppression du conteneur après disparition brutale du broker."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 545,
+        "description": "Le fichier durable de session conserve le plan avant lancement, mais pas l’identité d’opération runtime ni un état récupérable du worker."
+      },
+      {
+        "file": "tests/runtime_confinement.rs",
+        "line": 417,
+        "description": "Le scénario existant couvre un timeout exécuté par un broker vivant, pas SIGTERM ou la disparition du broker."
+      },
+      {
+        "file": "docs/engineering/CURRENT_STATE.md",
+        "line": 46,
+        "description": "L’état courant reconnaît que la persistance de l’observation terminale avant cleanup reste ouverte."
+      },
+      {
+        "file": "docs/engineering/PRODUCTION_READINESS.md",
+        "line": 15,
+        "description": "G09 reste bloqué notamment sur le crash worker ou contrôle en activité et la réconciliation durable."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible, signal ou moteur n’a été exécuté : l’environnement ne fournit pas l’ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Il faut observer séparément si les versions Docker et Podman retenues maintiennent le conteneur lorsque le broker ou son client start --attach disparaît ; kill_on_drop du CLI peut ne pas impliquer le moteur.",
+      "Le superviseur réel peut envoyer le signal à tout un groupe ou cgroup, appliquer un délai puis un kill forcé, ou effectuer un nettoyage externe ; sa configuration n’est pas établie par le dépôt.",
+      "Aucun redémarrage n’a démontré que le conteneur actif reste introuvable et non audité ; aucune commande, image, credential ou infrastructure existante ne doit être utilisée pour cette validation."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme avec data-root moteur jetable, réseau externe coupé et un seul worker factice sans secret, lancer une commande d’attente courte via le broker. Après command.started, envoyer SIGTERM uniquement au PID broker et, avec un watchdog strict, inspecter immédiatement si le conteneur de cette session reste Running. Arrêter au premier état observé puis stopper et supprimer uniquement ce conteneur factice. Répéter Docker et Podman et vérifier qu’une correction arrête le worker ou persiste un état unknown réconcilié au redémarrage avec une identité runtime stable.",
+      "deployment": "Faire relever par l’opérateur, sans lancer de job réel, la définition du superviseur du broker : signal, portée PID/groupe/cgroup, KillMode, délai forcé et éventuel cleanup externe. Dans une qualification dédiée et isolée, vérifier qu’un conteneur de fixture actif est retrouvé, stoppé et audité au redémarrage ; ne pas tester sur un service partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runtime/doctor-effect-engine-identity-unbound",
+    "title": "L’attestation doctor n’est pas liée à l’identité du moteur qui exécute ensuite les effets",
+    "description": "Chaque opération Docker ou Podman crée un nouveau processus CLI qui hérite à nouveau de l’environnement et du répertoire courant. doctor vérifie le caractère rootless de l’endpoint résolu à cet instant, mais Runtime ne conserve ensuite que le type de CLI et RuntimeInfo seulement le type, le booléen rootless et une version éventuelle. Si un principal local moins fiable peut modifier entre deux appels la configuration de contexte ou le namespace de socket sélectionné par cet environnement, il peut tenter de faire attester un moteur A puis d’orienter volume/create vers un moteur B. B recevrait alors le projet copié et, dans un run observe+bridge explicitement autorisé, le chemin de l’env-file worker. Le choix volontaire d’un moteur par l’opérateur et l’administrateur du daemon restent dans le périmètre de confiance; seul un sélecteur modifiable par un autre principal est concerné.",
+    "claimed_root_cause": "L’attestation est une vérification ponctuelle sans identité de connexion durable: l’environnement, le contexte, l’endpoint et le daemon ne sont ni résolus et figés une fois, ni liés au plan autorisé, ni comparés entre doctor et les commandes d’effet ultérieures.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runtime.rs",
+        "line": 302,
+        "scope": "Runtime::command",
+        "description": "Chaque invocation construit une nouvelle CLI docker/podman sans env_clear ni current_dir; les sélecteurs ambiants et leurs fichiers externes sont donc relus par le nouveau processus."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 351,
+        "scope": "Runtime::doctor",
+        "description": "doctor interroge l’endpoint actuellement sélectionné et accepte sa déclaration rootless après parsing de la réponse info."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 383,
+        "scope": "RuntimeInfo construction",
+        "description": "Le résultat conservé contient le type, rootless et une version éventuelle, sans contexte, endpoint, socket ni identité du daemon attesté."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runner.rs",
+        "line": 582,
+        "scope": "runner::run après doctor",
+        "description": "create_volume lance une nouvelle CLI après la vérification doctor; les opérations suivantes font de même."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runtime.rs",
+        "line": 449,
+        "scope": "Runtime::execute create",
+        "description": "La création du worker est envoyée à l’endpoint résolu lors de ce nouvel appel, qui peut recevoir le projet importé et les paramètres du conteneur."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runtime.rs",
+        "line": 278,
+        "description": "Runtime ne conserve que RuntimeKind et ne mémorise aucune identité d’exécutable ou de connexion."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 318,
+        "description": "cli_env ajoute les variables explicites avec envs mais ne vide pas l’environnement hérité avant spawn."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 135,
+        "description": "Pour un run bridge autorisé, create_args peut remettre au moteur le pathname de l’env-file contenant les credentials worker."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 27,
+        "description": "RunOptions et donc le plan approuvé lient Docker versus Podman, mais aucun contexte, endpoint ou identifiant de daemon."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 123,
+        "description": "Build exécute doctor puis deux commandes build séparées sans comparaison d’identité du moteur entre les appels."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 173,
+        "description": "Up exécute doctor puis compose via une nouvelle CLI utilisant le même environnement ambiant."
+      },
+      {
+        "file": "docs/operations.md",
+        "line": 109,
+        "description": "Le dépôt reconnaît que le daemon et son administrateur sont des autorités capables de lire l’environnement du conteneur, donnant un impact concret à une substitution d’endpoint hors de cette autorité attendue."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n’a été exécuté: l’environnement ne fournit pas le sandbox OS complet exigé pour isoler réseau, environnement, descendants, ressources et promotion d’artefacts.",
+      "Il faut établir qu’un principal hors contrôle peut modifier le fichier de contexte, un parent ou le namespace de socket réellement sélectionné par le processus opérateur; des chemins privés appartenant à l’opérateur ferment cette précondition.",
+      "La précédence et le moment de relecture des contextes et variables Docker/Podman dépendent des versions qualifiées et ne sont pas établis par le dépôt.",
+      "Le choix volontaire d’un endpoint par l’opérateur ou l’administrateur du moteur reste une autorité de confiance et ne valide pas ce candidat."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme sans réseau externe, utiliser deux fixtures CLI/endpoint factices et une configuration factice située sous un répertoire modifiable par un second UID. Faire répondre A à info avec rootless=true, suspendre avant create_volume, basculer uniquement la référence de contexte vers B, puis arrêter dès que B observe une unique commande volume create. Répéter sous un parent privé et vérifier que la bascule échoue. N’utiliser ni moteur, projet, socket ni credential existant.",
+      "deployment": "Faire relever par l’opérateur, sans afficher de contenu secret, le chemin absolu de la CLI, le cwd, les variables de sélection présentes, le contexte et endpoint résolus, puis uid/gid/mode/ACL de chaque fichier et parent de configuration. Comparer l’identité du daemon avant doctor et avant le premier effet dans une qualification dédiée, sans basculer d’endpoint partagé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runtime/path-resolves-project-executable",
+    "title": "Le CLI moteur est résolu par le PATH ambiant depuis le répertoire courant",
+    "description": "Le broker construit chaque commande Docker ou Podman avec un simple nom de programme. Si l'opérateur lance ai-guard depuis un projet moins fiable et que son PATH contient ce répertoire, un segment relatif ou un segment vide avant le vrai moteur, un fichier exécutable nommé docker ou podman placé par le projet devient le programme exécuté sur l'hôte. Le premier appel doctor intervient avant la copie filtrée du projet et exécuterait ce fichier avec l'autorité OS du broker. Le projet ne peut toutefois pas modifier à lui seul le PATH du processus : l'effet exige une configuration ambiante dangereuse ou un lanceur qui introduit le répertoire du projet dans PATH.",
+    "claimed_root_cause": "RuntimeKind ne représente que le basename docker ou podman et Runtime::command le remet directement à Command::new sans résolution absolue, allowlist d'emplacements, environnement nettoyé ni répertoire courant fixé hors du projet.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runtime.rs",
+        "line": 303,
+        "scope": "Runtime::command",
+        "description": "Le programme moteur est fourni à Command::new sous forme de basename; la résolution dépend donc du PATH et du répertoire courant hérités du processus."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 318,
+        "scope": "Runtime::cli_env",
+        "description": "spawn lance le programme ainsi résolu sans env_clear ni current_dir; les variables ajoutées sont superposées à l'environnement ambiant."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runtime.rs",
+        "line": 351,
+        "scope": "Runtime::doctor",
+        "description": "doctor est le premier appel moteur et exécute le binaire résolu pour traiter info avant que ses propriétés ne puissent être vérifiées."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runtime.rs",
+        "line": 184,
+        "description": "RuntimeKind::program retourne littéralement docker ou podman, sans chemin absolu ni identité de fichier."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 304,
+        "description": "Le commentaire affirme que seul le CLI de confiance s'exécute, mais aucun contrôle source ne lie ce nom à un exécutable de confiance."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 552,
+        "description": "Le parcours Run construit Runtime puis appelle doctor avant les effets moteur; aucune résolution préalable d'un chemin moteur n'existe."
+      },
+      {
+        "file": "src/operations.rs",
+        "line": 121,
+        "description": "Le parcours Build canonicalise le projet, mais appelle encore doctor avec le basename sans déplacer le cwd vers une racine de confiance."
+      },
+      {
+        "file": "tests/runtime_terminal.rs",
+        "line": 230,
+        "description": "Le harnais source sélectionne volontairement les faux moteurs en plaçant leur répertoire seul dans PATH, ce qui confirme que l'adaptateur dépend de cette résolution ambiante; le test n'a pas été exécuté dans cette revue."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible n'a été exécuté : l'environnement disponible ne fournit pas ensemble le réseau externe interdit et loopback isolé, l'environnement vide allowlisté, les cibles et outils en lecture seule, les écritures limitées au scratch, les limites CPU/mémoire/PID/fichiers/disque/temps pour tous les descendants et la promotion race-safe exigés par le workflow.",
+      "Le PATH, le répertoire courant et le mode réel de lancement de l'opérateur ne sont pas établis pour un déploiement accepté; un PATH composé uniquement de répertoires absolus privés et un cwd hors de tout arbre moins fiable ferment cette précondition.",
+      "Il faut observer avec un exécutable strictement factice que le système résout effectivement le basename vers le fichier du projet avant le vrai moteur; aucun exécutable, moteur, projet ou marqueur réel ne doit être utilisé.",
+      "Le choix volontaire par l'opérateur d'un binaire moteur ou d'un PATH contrôlé par un administrateur de confiance n'est pas une élévation; le principal pertinent est le fournisseur du projet moins fiable, distinct du principal qui configure PATH."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox OS conforme, avec environnement vide et données factices, créer sous scratch un faux projet contenant un petit exécutable natif nommé docker qui écrit un marqueur borné puis termine. Lancer une seule commande doctor depuis ce projet avec PATH=.:/chemin/absolu/de/confiance, sans moteur réel ni réseau, et arrêter dès que le marqueur apparaît ou que le faux exécutable n'est pas choisi. Répéter avec PATH ne contenant que des répertoires absolus privés et vérifier que le fichier projet n'est jamais exécuté. La régression produit doit résoudre/configurer un chemin absolu approuvé et refuser les PATH relatifs ou vides.",
+      "deployment": "Faire relever par l'opérateur, sans exécuter de moteur, le chemin absolu du binaire effectivement résolu, le cwd de lancement et uniquement la structure non secrète de PATH. Confirmer qu'aucun segment vide, relatif, modifiable par le projet ou modifiable par un autre utilisateur ne précède le binaire approuvé."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runtime/worker-output-engine-log-retention-unbounded",
+    "title": "Les sorties worker peuvent échapper aux bornes du broker dans les journaux du moteur",
+    "description": "Un worker autorisé contrôle stdout et stderr pendant sa session. Le broker ne conserve en mémoire qu'un préfixe borné tout en drainant les flux, mais le conteneur dynamique est créé sans imposer de driver, rotation ou quota de logs au moteur. Si Docker ou Podman persiste parallèlement ces sorties sur un stockage partagé sans borne suffisante, un worker peut consommer ce stockage et affecter le contrôle ou d'autres tenants. La source établit l'absence de politique produit et une exécution pouvant durer jusqu'à 24 heures; elle n'établit ni que le moteur choisi persiste ces flux, ni ses quotas ou le partage du filesystem.",
+    "claimed_root_cause": "ContainerSpec::create_args délègue entièrement la rétention stdout/stderr à la politique ambiante du moteur, tandis que capture_stream borne uniquement la copie détenue par le broker; aucune option ou vérification produit ne lie le conteneur worker à une politique de logs bornée.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 654,
+        "scope": "runner::run Runtime::execute",
+        "description": "Le broker lance la commande du worker autorisé; le processus worker moins fiable contrôle ensuite les octets produits sur stdout et stderr."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 86,
+        "scope": "ContainerSpec::create_args",
+        "description": "Les arguments create définissent plusieurs limites de confinement, mais aucune politique de logs, rotation ou quota de stockage."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 452,
+        "scope": "Runtime::execute attach",
+        "description": "Le conteneur est démarré avec start --attach et le moteur traite les flux selon sa configuration effective pendant que la CLI les relaie."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runtime.rs",
+        "line": 455,
+        "scope": "Runtime::execute capture_stream",
+        "description": "La borne stdout limite uniquement le préfixe conservé par le broker; elle n'est pas transmise à une éventuelle copie persistante du moteur."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runtime.rs",
+        "line": 89,
+        "description": "La liste des arguments create contient des limites CPU, mémoire, PID et tmpfs, mais aucune option de driver ou de rotation des logs."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 211,
+        "description": "capture_stream continue de lire jusqu'à EOF après avoir atteint la taille conservée et compte tous les octets; sa limite ne borne donc pas la production totale."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 444,
+        "description": "Une exécution est bornée dans le temps, mais peut durer jusqu'à 24 heures sans plafond d'octets produits."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 488,
+        "description": "La suppression du conteneur n'est tentée qu'après la fin du bloc d'exécution; un échec de cleanup peut en outre laisser le conteneur présent."
+      },
+      {
+        "file": "deploy/docker/compose.yaml",
+        "line": 24,
+        "description": "La rotation 10 MiB par 3 est attachée aux services de contrôle Compose, pas aux conteneurs worker créés dynamiquement par Runtime."
+      },
+      {
+        "file": "deploy/podman/compose.yaml",
+        "line": 1,
+        "description": "Le manifeste Podman ne déclare aucune politique de logs et ne configure pas directement les conteneurs worker dynamiques."
+      },
+      {
+        "file": "tests/runtime_confinement.rs",
+        "line": 50,
+        "description": "La qualification de HostConfig vérifie utilisateur, privilèges, réseau, ressources, capacités et mounts, mais pas LogConfig ni une borne de stockage des logs."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ou moteur n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Le driver de logs réellement appliqué aux conteneurs dynamiques Docker et Podman, ainsi que son comportement avec start --attach, ne sont pas déterminés par le dépôt.",
+      "Les options de rotation, quotas bytes/inodes, garbage collection et capacité du filesystem hébergeant les logs moteur restent des faits externes non observés.",
+      "Le partage de ce stockage avec le plan de contrôle ou plusieurs tenants n'est pas établi; sans stockage partagé ou avec une borne effective, l'impact revendiqué est fermé."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme, utiliser un moteur jetable à data-root dédié et sans réseau externe. Lancer un unique worker factice qui émet une petite chaîne fixe, puis inspecter uniquement la configuration de logs effectivement appliquée et la taille créée après cette sortie bornée. Vérifier l'existence d'un plafond bytes/inodes ou d'un driver non persistant sans tenter de remplir le disque, puis supprimer seulement le conteneur factice. Répéter Docker et Podman séparément.",
+      "deployment": "Faire relever par l'opérateur, sans générer de trafic ni afficher de contenu, le driver et les options effectifs d'un conteneur worker, la configuration daemon/storage correspondante, les quotas bytes/inodes, la rotation, le partage du filesystem et le comportement de cleanup. Vérifier Docker et Podman séparément."
+    }
+  },
+  {
+    "verdict": "needs_validation",
+    "fingerprint": "runtime/workspace-volume-no-byte-quota",
+    "title": "Le volume de travail du worker n'a aucune borne produit en octets ou inodes",
+    "description": "Chaque session crée un volume nommé puis le monte en écriture sur /workspace dans le conteneur worker. Le produit impose mémoire, CPU, PID et tailles de tmpfs, mais ne demande aucune capacité, aucun quota d'inodes et aucune option de stockage lors de la création du volume. Un worker autorisé mais moins fiable peut donc écrire pendant une session pouvant durer jusqu'à 24 heures, et le volume est volontairement conservé après le nettoyage du conteneur. Si le driver place ces volumes sur un filesystem partagé sans quota externe suffisant, un worker peut consommer le stockage du moteur et affecter le plan de contrôle ou d'autres tenants. Les limites d'import et d'export bornent seulement les copies examinées par le broker après les écritures; elles ne bornent pas le volume pendant l'exécution.",
+    "claimed_root_cause": "Le lifecycle runtime crée et conserve un volume de session sans capacité ni quota bytes/inodes, puis le monte en lecture-écriture dans le worker; aucune admission, mesure ou arrêt n'est lié à la croissance de ce stockage.",
+    "trace": [
+      {
+        "kind": "entrypoint",
+        "file": "src/runner.rs",
+        "line": 653,
+        "scope": "runner::run worker execution",
+        "description": "Le broker remet l'exécution au conteneur Run dont le code projet et l'image constituent le principal worker moins fiable capable de produire des écritures dans son espace de travail."
+      },
+      {
+        "kind": "propagation",
+        "file": "src/runtime.rs",
+        "line": 449,
+        "scope": "Runtime::execute create",
+        "description": "Runtime::execute construit puis transmet au moteur les arguments de création de ce conteneur avant de le démarrer avec la commande worker."
+      },
+      {
+        "kind": "sink",
+        "file": "src/runtime.rs",
+        "line": 124,
+        "scope": "ContainerSpec::create_args workspace mount",
+        "description": "Le volume de session est exposé au worker par un montage /workspace en lecture-écriture sans option de taille, quota d'octets ou quota d'inodes."
+      }
+    ],
+    "evidence": [
+      {
+        "file": "src/runtime.rs",
+        "line": 108,
+        "description": "Les limites PID, mémoire et CPU sont appliquées au conteneur, mais aucune d'elles ne limite les octets ou inodes du volume nommé."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 116,
+        "description": "Les tmpfs /tmp et /home/agent ont des tailles explicites, ce qui contraste avec le volume /workspace non borné."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 389,
+        "description": "volume create reçoit seulement un label et un nom; aucune option de driver, capacité ou quota d'inodes n'est imposée ou vérifiée par le produit."
+      },
+      {
+        "file": "src/runtime.rs",
+        "line": 444,
+        "description": "La durée d'une commande est bornée mais peut atteindre 24 heures, laissant une fenêtre importante pour produire des fichiers."
+      },
+      {
+        "file": "src/workspace.rs",
+        "line": 18,
+        "description": "Les limites par défaut de 20 000 fichiers et 128 MiB s'appliquent à la préparation et à l'extraction contrôlées par workspace, pas aux écritures effectuées directement dans le volume pendant le run."
+      },
+      {
+        "file": "src/runner.rs",
+        "line": 626,
+        "description": "Après un échec d'import, le volume est explicitement retenu pour diagnostic; le produit ne libère pas automatiquement sa capacité."
+      },
+      {
+        "file": "docs/operations.md",
+        "line": 163,
+        "description": "La procédure confirme que les volumes de session sont conservés et qu'aucun down ne les supprime."
+      },
+      {
+        "file": "docs/engineering/PRODUCTION_READINESS.md",
+        "line": 16,
+        "description": "La qualification de capacité et de ressources G10 reste NOT_RUN; aucun essai 100 workers ou quota de stockage ne ferme ce chemin."
+      }
+    ],
+    "blockers": [
+      "Aucun code cible ou moteur n'a été exécuté: l'environnement ne fournit pas l'ensemble des contrôles de sandbox OS, réseau, environnement, descendants, ressources et promotion exigés par le workflow.",
+      "Le driver de volume réellement sélectionné, ses options et l'existence éventuelle de quotas bytes/inodes imposés par le daemon, le filesystem ou l'orchestrateur ne sont pas établis par le dépôt.",
+      "Le partage du data-root avec le plan de contrôle ou plusieurs tenants, sa capacité et ses réserves ne sont pas observés; un stockage dédié et correctement quoté peut fermer l'impact transversal.",
+      "Aucune écriture factice bornée n'a démontré qu'un worker peut dépasser une politique de capacité attendue sans être arrêté, et aucun disque partagé ne doit être rempli pour cette validation."
+    ],
+    "validation_plan": {
+      "local": "Dans un sandbox conforme, utiliser un moteur jetable avec data-root dédié placé sur un filesystem de fixture à capacité strictement faible et préallouée. Créer une seule session factice sans réseau ni secret et faire écrire un fichier fixe de quelques mégaoctets, très inférieur à la capacité du filesystem mais supérieur à un petit quota de test attendu. Inspecter les options du volume et arrêter dès que l'écriture réussit, est refusée ou qu'une limite explicite est observée; supprimer uniquement la fixture. Répéter Docker et Podman sans jamais utiliser ni remplir le data-root habituel.",
+      "deployment": "Faire relever par l'opérateur, en lecture seule, le driver et les options d'un volume worker, les quotas bytes/inodes du filesystem ou du backend, la capacité et les réserves du data-root, son partage entre tenants et services, ainsi que la rétention et l'alerte associées. Vérifier Docker et Podman séparément et ne générer aucune charge sur un stockage partagé."
+    }
+  }
+]

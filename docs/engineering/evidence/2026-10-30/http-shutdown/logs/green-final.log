@@ -1,0 +1,14 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.11s
+     Running tests/http_shutdown.rs (target/debug/deps/http_shutdown-75b09ee1c6657056)
+
+running 2 tests
+dashboard signal-to-exit: 1 ms
+gateway signal-to-exit: 1 ms
+test gateway_and_dashboard_without_streams_exit_promptly_after_sigterm ... ok
+dashboard signal-to-exit: 5007 ms
+gateway signal-to-exit: 5010 ms
+test gateway_and_dashboard_drain_open_sse_then_exit_within_eight_seconds ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.13s
+

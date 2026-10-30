@@ -1,0 +1,14 @@
+    Blocking waiting for file lock on build directory
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.75s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-a520d245b0b0346f)
+
+running 1 test
+Retained runtime QA source: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpXusCQP
+Retained runtime QA export: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpWCe9US
+Validated real bounded secret capture session 5a31257b-6135-44a3-8010-9303a9ce3750; synthetic credentials retained privately at /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpiWxK4u. No provider request was performed.
+Validated real sessions c3798969-293e-4c21-a8c0-e3cc2d09c606 and 4bc30e30-d41b-4d27-adec-1ac765610849, policy denial 885b9e12-eddc-41bc-ba31-f6287c4e3df6 without container/volume. Named volumes retained; source proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpXusCQP; export proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpWCe9US.
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 18.99s
+

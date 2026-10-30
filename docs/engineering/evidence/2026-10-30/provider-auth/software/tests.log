@@ -1,0 +1,52 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.26s
+     Running tests/provider_authorization.rs (target/debug/deps/provider_authorization-ef8236e8b994bff2)
+
+running 6 tests
+test explicit_null_or_unknown_provider_metadata_never_becomes_a_legacy_request ... ok
+test historical_request_and_admission_keep_exact_serialization_and_hashes ... ok
+test managed_provider_context_roundtrips_and_changes_approval_hash ... ok
+test every_provider_identity_choice_is_bound_to_the_request_hash ... ok
+test contradictory_provider_invocation_cannot_create_an_allow_even_through_store ... ok
+test managed_decision_and_worker_reopen_with_exact_provider_identity ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/provider_bootstrap.rs (target/debug/deps/provider_bootstrap-522e6f15413cf86f)
+
+running 7 tests
+test bootstrap_environment_error_fixture ... ignored, internal isolated process fixture, invoked by the bootstrap environment regression
+test malformed_or_mismatched_payload_cannot_select_another_provider ... ok
+test unsafe_home_is_rejected_without_following_a_symlink_or_traversal ... ok
+test regression_codex_pins_official_provider_routes_in_its_cli_layer ... ok
+test bootstrap_error_preserves_the_callers_environment_in_an_isolated_process ... ok
+test all_eight_bootstrap_plans_create_private_homes_and_exclusive_authentication ... ok
+test bootstrap_binary_errors_are_bounded_and_never_echo_payload_or_injected_args ... ok
+
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/provider_config.rs (target/debug/deps/provider_config-bc11acf63a6aa784)
+
+running 9 tests
+test configured_subscription_failure_never_falls_back_to_api ... ok
+test private_configuration_is_strict_and_errors_do_not_echo_invalid_values ... ok
+test codex_subscription_rejects_secret_material_disguised_as_refresh_metadata ... ok
+test auto_prefers_configured_subscription_and_explicit_client_wins ... ok
+test ambiguous_aliases_and_candidates_fail_without_secret_errors ... ok
+test only_explicit_excluded_dotenv_inside_project_is_accepted_and_source_is_anchored ... ok
+test regression_relative_credentials_are_anchored_to_the_private_configuration_parent ... ok
+test resolution_rejects_mutated_bootstrap_shape_but_allows_a_bounded_prompt ... ok
+test all_eight_combinations_prepare_one_private_handoff_without_other_keys ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/provider_runner.rs (target/debug/deps/provider_runner-825f36d0206d4f8b)
+
+running 4 tests
+test manual_run_still_requires_an_explicit_command ... ok
+test managed_selection_cannot_be_combined_with_manual_provider_argv ... ok
+test managed_client_without_private_configuration_has_an_actionable_diagnostic ... ok
+test provider_initialization_writes_only_explicit_references_and_status_hides_paths ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+

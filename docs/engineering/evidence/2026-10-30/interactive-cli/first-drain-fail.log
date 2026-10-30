@@ -1,0 +1,40 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.56s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-4558e96bd0376d78)
+
+running 11 tests
+test runtime::terminal::tests::presentation_reset_restores_authorized_scroll_region ... ok
+test runtime::terminal::tests::known_literals_are_masked_across_chunks_and_safe_controls_without_prefix_flush ... ok
+test runtime::terminal::tests::terminal_worker_proof_only_neutralizes_normal_transport_eof ... ok
+test runtime::terminal::tests::dangerous_families_are_removed_at_every_partition ... ok
+test runtime::terminal::tests::utf8_and_allowed_cursor_sequences_survive_all_partitions ... ok
+test runtime::terminal::tests::guard_explicit_restore_and_drop_restore_presentation_and_attributes ... ok
+test runtime::terminal::tests::real_local_pty_transports_bytes_and_resizes ... ok
+test runtime::terminal::tests::task_cancellation_restores_real_pty_attributes ... ok
+test runtime::terminal::tests::sequences_and_pending_mask_window_have_strict_bounds ... ok
+test runtime::terminal::tests::reaped_transport_drains_actual_pty_tail_until_real_eof_and_masks_private_suffix ... FAILED
+test runtime::terminal::tests::reaped_transport_cannot_hide_a_filter_failure_or_incomplete_control_in_its_tail ... FAILED
+
+failures:
+
+---- runtime::terminal::tests::reaped_transport_drains_actual_pty_tail_until_real_eof_and_masks_private_suffix stdout ----
+
+thread 'runtime::terminal::tests::reaped_transport_drains_actual_pty_tail_until_real_eof_and_masks_private_suffix' (3054794) panicked at src/runtime/terminal.rs:1083:9:
+assertion `left == right` failed
+  left: []
+ right: [113, 117, 101, 117, 101, 100, 32, 116, 97, 105, 108, 32, 27, 91, 51, 49, 109, 91, 82, 69, 68, 65, 67, 84, 69, 68, 93]
+
+---- runtime::terminal::tests::reaped_transport_cannot_hide_a_filter_failure_or_incomplete_control_in_its_tail stdout ----
+
+thread 'runtime::terminal::tests::reaped_transport_cannot_hide_a_filter_failure_or_incomplete_control_in_its_tail' (3054793) panicked at src/runtime/terminal.rs:1093:28:
+called `Result::unwrap_err()` on an `Ok` value: RuntimeStreamEnded
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    runtime::terminal::tests::reaped_transport_cannot_hide_a_filter_failure_or_incomplete_control_in_its_tail
+    runtime::terminal::tests::reaped_transport_drains_actual_pty_tail_until_real_eof_and_masks_private_suffix
+
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 65 filtered out; finished in 0.64s
+
+error: test failed, to rerun pass `--lib`

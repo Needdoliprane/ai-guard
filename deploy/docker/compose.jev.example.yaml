@@ -1,0 +1,16 @@
+# Explicit opt-in only. Apply alongside the base compose.yaml.
+# This adds unrestricted outbound connectivity to the gateway, not the workers.
+services:
+  gateway:
+    environment:
+      JEV_URL: ${JEV_URL:?Set an explicit HTTPS Jev endpoint}
+      JEV_MODEL: ${JEV_MODEL:?Set an explicit supported model}
+      JEV_API_KEY_FILE: /run/secrets/jev
+    secrets: [runner, viewer, jev]
+    networks: [control, jev_egress]
+networks:
+  jev_egress:
+    internal: false
+secrets:
+  jev:
+    file: ${AGENTSANDBOX_CONFIG_DIR:?Run init after providing the private Jev source}/mounted-secrets/jev

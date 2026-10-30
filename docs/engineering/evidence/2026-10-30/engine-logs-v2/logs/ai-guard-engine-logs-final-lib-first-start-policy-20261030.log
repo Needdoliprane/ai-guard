@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-4558e96bd0376d78)
+
+running 1 test
+test runner::managed::first_start_policy_tests::legacy_first_start_is_refused_but_consumed_and_terminal_work_can_be_observed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out; finished in 0.00s
+

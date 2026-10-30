@@ -1,0 +1,21 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.76s
+     Running tests/http_shutdown.rs (target/debug/deps/http_shutdown-75b09ee1c6657056)
+
+running 2 tests
+test gateway_and_dashboard_without_streams_exit_promptly_after_sigterm ... ok
+
+thread 'gateway_and_dashboard_drain_open_sse_then_exit_within_eight_seconds' (3846621) panicked at tests/http_shutdown.rs:308:5:
+dashboard did not exit within 8s; targeted kill cleanup: Ok(())
+gateway did not exit within 8s; targeted kill cleanup: Ok(())
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test gateway_and_dashboard_drain_open_sse_then_exit_within_eight_seconds ... FAILED
+
+failures:
+
+failures:
+    gateway_and_dashboard_drain_open_sse_then_exit_within_eight_seconds
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.14s
+
+error: test failed, to rerun pass `--test http_shutdown`

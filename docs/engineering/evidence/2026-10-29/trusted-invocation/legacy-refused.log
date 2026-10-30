@@ -1,0 +1,1 @@
+Error: legacy runtime invocation is unbound; use --adopt-runtime-program to verify and durably bind the control program before effects

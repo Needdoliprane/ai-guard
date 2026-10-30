@@ -1,0 +1,17 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `release` profile [optimized] target(s) in 38.08s
+     Running tests/runtime_terminal_persistence.rs (target/release/deps/runtime_terminal_persistence-cf1993ee7b230f9e)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-YxzDb3
+Error: captured stdout was not masked before local persistence
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... FAILED
+
+failures:
+
+failures:
+    rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.17s
+
+error: test failed, to rerun pass `--test runtime_terminal_persistence`

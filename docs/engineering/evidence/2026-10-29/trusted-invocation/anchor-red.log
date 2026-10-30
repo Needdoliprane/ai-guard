@@ -1,0 +1,30 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.08s
+     Running tests/runtime_managed.rs (target/debug/deps/runtime_managed-24b8f304bdf1c4e6)
+
+running 3 tests
+
+thread 'trusted_anchor_refuses_extended_acl_on_program_or_leaf_directory' (2127301) panicked at tests/runtime_managed.rs:1017:5:
+mode bits alone must not approve an extended ACL
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test trusted_anchor_refuses_extended_acl_on_program_or_leaf_directory ... FAILED
+
+thread 'trusted_anchor_executes_approved_leaf_after_parent_is_replaced' (2127300) panicked at tests/runtime_managed.rs:1003:5:
+a replaced parent selected an unapproved executable: SUBSTITUTED
+
+test trusted_anchor_executes_approved_leaf_after_parent_is_replaced ... FAILED
+
+thread 'trusted_anchor_refuses_oversized_program_before_reading_its_content' (2127302) panicked at tests/runtime_managed.rs:1044:98:
+oversized executable was read instead of being rejected by its size
+test trusted_anchor_refuses_oversized_program_before_reading_its_content ... FAILED
+
+failures:
+
+failures:
+    trusted_anchor_executes_approved_leaf_after_parent_is_replaced
+    trusted_anchor_refuses_extended_acl_on_program_or_leaf_directory
+    trusted_anchor_refuses_oversized_program_before_reading_its_content
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 11 filtered out; finished in 2.01s
+
+error: test failed, to rerun pass `--test runtime_managed`

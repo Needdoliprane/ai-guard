@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running tests/runtime_terminal_persistence.rs (target/debug/deps/runtime_terminal_persistence-98d3d4286ef9b994)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-D2KyyC
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable has been running for over 60 seconds
+PASS terminal control HTTP503; same stopped instance retained: 9af6aae27ac97728bf69ad3bacab52863ed845e41462862c16300728403516f5; audit valid; allocation absent; unknown quota retained
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 86.95s
+

@@ -1,0 +1,95 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.96s
+     Running tests/api_security.rs (target/debug/deps/api_security-21288cdec8dac2cd)
+
+running 4 tests
+test json_limits_and_cross_origin_requests_are_rejected ... ok
+test viewer_cannot_ingest_and_unknown_tokens_cannot_read ... ok
+test denied_command_is_audited_but_never_executed_by_api ... ok
+test export_preserves_requested_sequence_window ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/decision_idempotence.rs (target/debug/deps/decision_idempotence-d8b97794ba466d39)
+
+running 9 tests
+test same_request_identity_with_different_content_is_a_conflict ... ok
+test legacy_approval_preceding_its_review_is_rejected_as_ambiguous ... ok
+test replay_refuses_a_new_trigger_and_new_decisions_fail_when_audit_is_full ... ok
+test concurrent_connections_commit_one_decision_and_replays_recheck_integrity ... ok
+test identical_request_ids_remain_independent_between_authenticated_tenants ... ok
+test ambiguous_legacy_history_is_a_conflict_without_silent_merge ... ok
+test repeated_http_decision_is_identical_across_restart_and_full_capacity ... ok
+test secret_request_identity_is_refused_before_audit_without_disabling_redaction ... ok
+test approved_phase_requires_durable_review_and_exact_hash_even_after_cache ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/gateway_tenancy.rs (target/debug/deps/gateway_tenancy-571582bf9b4b62c7)
+
+running 1 test
+test configured_tenants_remain_isolated_over_http_and_after_control_plane_crash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
+
+     Running tests/jev_contract.rs (target/debug/deps/jev_contract-d03f3b82f1604ad5)
+
+running 2 tests
+test unreachable_jev_cannot_turn_local_allow_into_execution_permission ... ok
+test official_http_contract_and_jev_veto_are_enforced ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/jev_credentials.rs (target/debug/deps/jev_credentials-e40387d2f0b644f1)
+
+running 14 tests
+test library_gateway_refuses_padded_runner_key_reuse ... ok
+test library_gateway_refuses_runner_reuse_before_authorization ... ok
+test library_distinct_jev_key_keeps_local_control_authorization ... ok
+test library_gateway_refuses_padded_viewer_key_reuse ... ok
+test library_gateway_refuses_viewer_reuse_before_authorization ... ok
+test registry_gateway_refuses_jev_viewer_reuse_from_the_second_tenant ... ok
+test registry_gateway_refuses_jev_runner_reuse_from_the_second_tenant ... ok
+test distinct_jev_key_allows_gateway_startup_without_contacting_the_provider ... ok
+test library_registry_refuses_second_tenant_padded_runner_key_reuse ... ok
+test standalone_gateway_refuses_jev_runner_reuse_before_serving ... ok
+test library_registry_refuses_second_tenant_padded_viewer_key_reuse ... ok
+test standalone_gateway_refuses_jev_viewer_reuse_before_serving ... ok
+test library_registry_refuses_second_tenant_runner_key_reuse ... ok
+test library_registry_refuses_second_tenant_viewer_key_reuse ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/provider_authorization.rs (target/debug/deps/provider_authorization-ef8236e8b994bff2)
+
+running 6 tests
+test explicit_null_or_unknown_provider_metadata_never_becomes_a_legacy_request ... ok
+test historical_request_and_admission_keep_exact_serialization_and_hashes ... ok
+test managed_provider_context_roundtrips_and_changes_approval_hash ... ok
+test every_provider_identity_choice_is_bound_to_the_request_hash ... ok
+test contradictory_provider_invocation_cannot_create_an_allow_even_through_store ... ok
+test managed_decision_and_worker_reopen_with_exact_provider_identity ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/tenant_api.rs (target/debug/deps/tenant_api-b0a9b18ca974c1d5)
+
+running 3 tests
+test authenticated_identity_scopes_ingestion_history_export_and_derived_views ... ok
+test ambiguous_credentials_and_wrong_database_binding_are_rejected ... ok
+test decision_and_live_stream_are_isolated_and_audit_failure_denies_only_affected_tenant ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/workers_api.rs (target/debug/deps/workers_api-e1d53ed19ae33003)
+
+running 6 tests
+test nested_command_contract_rejects_unknown_fields ... ok
+test dashboard_refuses_a_control_token_even_if_its_file_was_misconfigured ... ok
+test decision_response_supplies_the_exact_receipt_required_by_admission ... ok
+test shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_only ... ok
+test security_presets_are_bound_to_admissions_and_created_inspections ... ok
+test worker_api_enforces_tenant_roles_and_reservation_quota ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+

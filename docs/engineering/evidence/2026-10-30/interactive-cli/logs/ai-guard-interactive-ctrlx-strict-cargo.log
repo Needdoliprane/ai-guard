@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running tests/runtime_interactive.rs (target/release/deps/runtime_interactive-42ebfff7c42912ea)
+
+running 1 test
+retained interactive QA evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-interactive-uMFdeZ
+interactive_qa phase=driver_started driver_pid=11237
+interactive_qa phase=broker_status driver_pid=11237 code=Some(1),signal=None
+interactive_qa phase=drain_complete captured_bytes=815
+interactive_qa phase=termios_checked result=pass
+interactive_qa phase=ack_sent driver_pid=11237
+interactive_qa phase=driver_wait_complete driver_pid=11237 exited=true
+PASS double Ctrl-X: one claimed worker stopped promptly; durable Ctrl-X reason and timed_out=false; Docker confirms terminal state; one observed allocation; quota released; no second start authorization; audit reopened valid; source unchanged
+test docker_interactive_double_ctrl_x_stops_only_the_owned_worker ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 13.57s
+

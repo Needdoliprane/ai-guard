@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running tests/runtime_security.rs (target/debug/deps/runtime_security-2732f69928db9a66)
+
+running 12 tests
+test container_start_requires_runtime_started_at_evidence ... ok
+test output_is_drained_but_retained_bytes_are_bounded ... ok
+test project_copy_rejects_a_fifo_without_blocking_on_open ... ok
+test runtime_rejects_option_injection_and_invalid_program_paths ... ok
+test project_copy_rejects_symlinks_instead_of_following_them ... ok
+test worker_arguments_confine_a_named_volume_and_preserve_literal_arguments ... ok
+test custom_config_location_does_not_copy_mounted_secret_projections ... ok
+test project_copy_rejects_size_and_file_count_overflow ... ok
+test valid_export_is_atomic_and_only_writes_the_new_destination ... ok
+test project_copy_excludes_credentials_and_git_and_preserves_safe_files ... ok
+test archive_paths_reject_traversal_absolute_and_windows_variants ... ok
+test export_rejects_links_special_files_and_original_destination ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

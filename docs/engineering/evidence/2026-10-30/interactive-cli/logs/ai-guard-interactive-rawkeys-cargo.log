@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running tests/runtime_interactive.rs (target/release/deps/runtime_interactive-42ebfff7c42912ea)
+
+running 1 test
+retained interactive QA evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-interactive-IulpqN
+interactive_qa phase=driver_started driver_pid=8924
+interactive_qa phase=broker_status driver_pid=8924 code=Some(0),signal=None
+interactive_qa phase=drain_complete captured_bytes=681
+interactive_qa phase=termios_checked result=pass
+interactive_qa phase=ack_sent driver_pid=8924
+interactive_qa phase=driver_wait_complete driver_pid=8924 exited=true
+PASS raw-key Docker run: CR/LF/Ctrl-C/UTF-8/arrow bytes preserved exactly; worker exited cleanly; quota released; audit reopened valid; source unchanged
+test docker_interactive_raw_keys_preserve_control_and_utf8_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 12.29s
+

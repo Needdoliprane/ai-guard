@@ -1,0 +1,971 @@
+use crate::{
+    audit::{DecisionFailure, EventQuery, Store},
+    control::{
+        AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
+        QuotaPolicyV1, WorkerMutationV1,
+    },
+    jev::JevClient,
+    model::*,
+    policy::{self, Policy},
+    redaction::Redactor,
+    tenancy::validate_tenant_id,
+};
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{
+        DefaultBodyLimit, Path, Query, Request, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::{
+        IntoResponse, Response,
+        sse::{Event as SseEvent, KeepAlive, Sse},
+    },
+    routing::{get, post},
+};
+use futures_util::StreamExt;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::HashSet,
+    convert::Infallible,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+
+mod auth;
+use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
+
+type ApiResult<T> = Result<T, (StatusCode, Json<Value>)>;
+fn error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({"error":message})))
+}
+fn unavailable(_: anyhow::Error) -> (StatusCode, Json<Value>) {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Audit indisponible, incohérent ou plein : opération refusée.",
+    )
+}
+fn decision_error(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    match failure.downcast_ref::<DecisionFailure>() {
+        Some(DecisionFailure::Conflict | DecisionFailure::AmbiguousHistory) => error(
+            StatusCode::CONFLICT,
+            "Identité de demande déjà utilisée ou historique ambigu.",
+        ),
+        Some(DecisionFailure::ApprovalRequired) => error(
+            StatusCode::FORBIDDEN,
+            "Revue initiale durable et hash exact requis.",
+        ),
+        Some(DecisionFailure::InvalidRequest) => error(
+            StatusCode::BAD_REQUEST,
+            "Identité ou phase de demande invalide.",
+        ),
+        None => unavailable(failure),
+    }
+}
+fn decision_response(stored: StoredEvent) -> Json<Value> {
+    let receipt = stored.event.data["request_id"]
+        .as_str()
+        .zip(stored.event.data["request_hash"].as_str())
+        .zip(stored.event.data["human_approved"].as_bool())
+        .map(|((request_id, request_hash), approved)| DecisionReceiptV1 {
+            version: 1,
+            request_id: request_id.into(),
+            request_hash: request_hash.into(),
+            phase: if approved {
+                DecisionPhaseV1::Approved
+            } else {
+                DecisionPhaseV1::Initial
+            },
+            audit_seq: stored.seq,
+            audit_hash: stored.hash.clone(),
+        });
+    Json(
+        json!({"decision":stored.event.decision,"request_hash":stored.event.data["request_hash"],"jev":stored.event.data["jev"],"audit_seq":stored.seq,"audit_hash":stored.hash,"receipt":receipt}),
+    )
+}
+pub fn token_matches(received: &str, expected: &str) -> bool {
+    let a = Sha256::digest(received.as_bytes());
+    let b = Sha256::digest(expected.as_bytes());
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
+}
+#[derive(Clone)]
+pub struct TenantGateway {
+    pub tenant_id: String,
+    pub store: Arc<Store>,
+    pub runner_token: String,
+    pub viewer_token: String,
+}
+
+#[derive(Clone)]
+struct TenantState {
+    tenant_id: String,
+    store: Arc<Store>,
+    streams: Arc<tokio::sync::Semaphore>,
+    rate: Arc<Mutex<(Instant, u32)>>,
+    worker_quota: QuotaPolicyV1,
+}
+impl From<TenantGateway> for TenantState {
+    fn from(tenant: TenantGateway) -> Self {
+        Self {
+            tenant_id: tenant.tenant_id,
+            store: tenant.store,
+            streams: Arc::new(tokio::sync::Semaphore::new(32)),
+            rate: Arc::new(Mutex::new((Instant::now(), 0))),
+            worker_quota: QuotaPolicyV1::default(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GatewayState {
+    tenants: Arc<Vec<TenantState>>,
+    credential_index: Arc<CredentialIndex>,
+    valid_credentials: bool,
+    policy: Arc<Policy>,
+    jev: Option<Arc<JevClient>>,
+    redactor: Arc<Redactor>,
+}
+impl GatewayState {
+    /// Quotas come only from trusted server configuration, never request data.
+    pub fn with_worker_quotas(
+        mut self,
+        quotas: Vec<(String, QuotaPolicyV1)>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, quota) in quotas {
+            quota.validate()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate quota identity"
+            );
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| anyhow::anyhow!("quota identity is not registered"))?;
+            tenant.worker_quota = quota;
+        }
+        Ok(self)
+    }
+    /// Invalid identity configuration denies every authenticated route.
+    pub fn new(
+        store: Arc<Store>,
+        runner_token: String,
+        viewer_token: String,
+        policy: Policy,
+        jev: Option<JevClient>,
+        redactor: Redactor,
+    ) -> Self {
+        let jev_separation = jev.as_ref().is_none_or(|client| {
+            client
+                .validate_control_credentials([runner_token.as_str(), viewer_token.as_str()])
+                .is_ok()
+        });
+        let tenants = vec![TenantGateway {
+            tenant_id: store.tenant_id().into(),
+            store,
+            runner_token,
+            viewer_token,
+        }];
+        let (credential_index, valid_credentials) = match CredentialIndex::for_tenants(&tenants) {
+            Ok(index) => (index, jev_separation),
+            Err(_) => (CredentialIndex::default(), false),
+        };
+        Self {
+            tenants: Arc::new(tenants.into_iter().map(TenantState::from).collect()),
+            credential_index: Arc::new(credential_index),
+            valid_credentials,
+            policy: Arc::new(policy),
+            jev: jev.map(Arc::new),
+            redactor: Arc::new(redactor),
+        }
+    }
+    pub fn for_tenants(
+        tenants: Vec<TenantGateway>,
+        policy: Policy,
+        jev: Option<JevClient>,
+        redactor: Redactor,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(!tenants.is_empty(), "at least one tenant is required");
+        if let Some(client) = &jev {
+            client.validate_control_credentials(
+                tenants.iter().flat_map(|tenant| {
+                    [tenant.runner_token.as_str(), tenant.viewer_token.as_str()]
+                }),
+            )?;
+        }
+        let mut identities = HashSet::new();
+        for tenant in &tenants {
+            validate_tenant_id(&tenant.tenant_id)?;
+            anyhow::ensure!(
+                identities.insert(tenant.tenant_id.clone()),
+                "duplicate tenant identity"
+            );
+            anyhow::ensure!(
+                tenant.store.tenant_id() == tenant.tenant_id,
+                "database tenant binding mismatch"
+            );
+            anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
+        }
+        let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        Ok(Self {
+            tenants: Arc::new(tenants.into_iter().map(TenantState::from).collect()),
+            credential_index: Arc::new(credential_index),
+            valid_credentials: true,
+            policy: Arc::new(policy),
+            jev: jev.map(Arc::new),
+            redactor: Arc::new(redactor),
+        })
+    }
+    fn authorize(
+        &self,
+        headers: &HeaderMap,
+        write: bool,
+    ) -> ApiResult<(TenantState, &'static str)> {
+        if !self.valid_credentials {
+            return Err(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Configuration d'identité invalide.",
+            ));
+        }
+        let token = bearer(headers)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton Bearer requis."))?;
+        let binding = self
+            .credential_index
+            .lookup(token)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton invalide."))?;
+        let tenant = self.tenants.get(binding.tenant_index).ok_or_else(|| {
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Configuration d'identité invalide.",
+            )
+        })?;
+        if write && binding.role != CredentialRole::Runner {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "Cette identité est en lecture seule.",
+            ));
+        }
+        Ok((tenant.clone(), binding.role.as_str()))
+    }
+}
+impl TenantState {
+    fn write_quota(&self) -> ApiResult<()> {
+        let mut state = self
+            .rate
+            .lock()
+            .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Limiteur indisponible."))?;
+        if state.0.elapsed() >= Duration::from_secs(1) {
+            *state = (Instant::now(), 0);
+        }
+        if state.1 >= 200 {
+            return Err(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Maximum 200 écritures par seconde.",
+            ));
+        }
+        state.1 += 1;
+        Ok(())
+    }
+}
+
+pub async fn security_headers(request: Request, next: Next) -> Response {
+    if request.uri().to_string().len() > 4096 {
+        return error(StatusCode::URI_TOO_LONG, "URI trop longue.").into_response();
+    }
+    if let Some(origin) = request.headers().get(header::ORIGIN) {
+        let safe = origin
+            .to_str()
+            .ok()
+            .and_then(|s| reqwest::Url::parse(s).ok())
+            .is_some_and(|u| {
+                ["http", "https"].contains(&u.scheme())
+                    && u.host_str().is_some_and(|h| {
+                        h == "localhost"
+                            || h.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
+                    })
+            });
+        if !safe {
+            return error(StatusCode::FORBIDDEN, "Origine non autorisée.").into_response();
+        }
+    }
+    if request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|h| h == "cross-site")
+    {
+        return error(StatusCode::FORBIDDEN, "Requête cross-site refusée.").into_response();
+    }
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert("content-security-policy",HeaderValue::from_static("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"));
+    response
+}
+
+pub fn gateway_router(state: GatewayState) -> Router {
+    let routes = Router::new()
+        .route("/events", get(list_events).post(ingest))
+        .route("/decide", post(decide))
+        .route("/identity", get(identity))
+        .route("/overview", get(overview))
+        .route("/agents", get(agents))
+        .route("/sandboxes", get(sandboxes))
+        .route("/stream", get(stream))
+        .route("/export", get(export))
+        .route("/integrity", get(integrity))
+        .route("/workers", get(workers))
+        .route("/workers/reservations", post(reserve_worker))
+        .route("/workers/operations/{id}", get(worker_operation))
+        .route("/workers/{id}", get(worker))
+        .route("/workers/{id}/transitions", post(transition_worker))
+        .route("/quota", get(worker_quota))
+        .route("/usage", get(worker_usage));
+    Router::new()
+        .route(
+            "/healthz",
+            get(|| async {
+                Json(json!({"status":"ok","service":"gateway","version":env!("CARGO_PKG_VERSION")}))
+            }),
+        )
+        .nest("/api/v1", routes.clone())
+        .nest("/api", routes)
+        .layer(DefaultBodyLimit::max(262_144))
+        .layer(middleware::from_fn(security_headers))
+        .with_state(state)
+}
+
+async fn ingest(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(event): Json<Event>,
+) -> ApiResult<Json<StoredEvent>> {
+    tenant.write_quota()?;
+    event
+        .validate()
+        .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+    if ["security.decision", "control", "worker", "usage.allocation"]
+        .iter()
+        .any(|namespace| {
+            event.kind == *namespace
+                || event
+                    .kind
+                    .strip_prefix(namespace)
+                    .is_some_and(|suffix| suffix.starts_with('.'))
+        })
+    {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Ce namespace est réservé aux opérations du contrôle.",
+        ));
+    }
+    Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+}
+
+async fn decide(
+    RunnerIdentity(tenant): RunnerIdentity,
+    State(s): State<GatewayState>,
+    Json(request): Json<DecisionRequest>,
+) -> ApiResult<Json<Value>> {
+    tenant.write_quota()?;
+    if !tenant.store.healthy() {
+        return Err(error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Intégrité de l'audit défaillante : exécution refusée.",
+        ));
+    }
+    if let Some(stored) = tenant
+        .store
+        .decision(&request, None)
+        .map_err(decision_error)?
+    {
+        return Ok(decision_response(stored));
+    }
+    let (decision, jev) = fresh_policy(&s, &request).await;
+    let stored = tenant
+        .store
+        .decision(&request, Some((decision, jev)))
+        .map_err(decision_error)?
+        .ok_or_else(|| error(StatusCode::SERVICE_UNAVAILABLE, "Décision durable absente."))?;
+    Ok(decision_response(stored))
+}
+
+async fn fresh_policy(s: &GatewayState, request: &DecisionRequest) -> (Decision, Value) {
+    let mut decision = policy::evaluate(&s.policy, request);
+    let mut jev = Value::Null;
+    if decision.outcome == Outcome::Allow
+        && let Some(client) = &s.jev
+    {
+        match client.decide(request, &s.redactor).await {
+            Ok(answer) => {
+                if answer.outcome != Outcome::Allow {
+                    decision = Decision {
+                        outcome: Outcome::Deny,
+                        engine: "jev".into(),
+                        rule: if answer.outcome == Outcome::Deny {
+                            "jev_deny"
+                        } else {
+                            "jev_review_fail_closed"
+                        }
+                        .into(),
+                        reason: "Jev ne confirme pas l'autorisation ; refus sans exécution.".into(),
+                    };
+                }
+                jev = serde_json::to_value(answer).unwrap_or(Value::Null);
+            }
+            Err(_) => {
+                decision = Decision {
+                    outcome: Outcome::Deny,
+                    engine: "jev".into(),
+                    rule: "jev_unavailable_or_invalid".into(),
+                    reason: "Réponse Jev indisponible, invalide ou incertaine ; refus par défaut."
+                        .into(),
+                };
+                jev = json!({"status":"unavailable_or_invalid"});
+            }
+        }
+    }
+    (decision, jev)
+}
+
+fn control_error(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    let (status, code, message) = match failure.downcast_ref::<ControlFailure>() {
+        Some(ControlFailure::InvalidRequest) => (
+            StatusCode::BAD_REQUEST,
+            "invalid_worker_request",
+            "Requête de contrôle invalide.",
+        ),
+        Some(ControlFailure::Conflict) => (
+            StatusCode::CONFLICT,
+            "worker_conflict",
+            "L'opération ou la révision ne correspond plus à l'état durable.",
+        ),
+        Some(ControlFailure::NotFound) => (
+            StatusCode::NOT_FOUND,
+            "worker_not_found",
+            "Worker ou opération introuvable.",
+        ),
+        Some(ControlFailure::MigrationRequired) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "migration_required",
+            "Migration du registre requise avant les opérations workers.",
+        ),
+        Some(ControlFailure::SupervisionInactive) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "supervision_inactive",
+            "Supervision en maintenance : les nouveaux lancements restent bloqués jusqu'à une réactivation sûre du contrôle.",
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control_unavailable",
+            "Contrôle ou audit indisponible : opération refusée.",
+        ),
+    };
+    (status, Json(json!({"error":message,"code":code})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkerPageQuery {
+    cursor: Option<String>,
+    limit: Option<u32>,
+}
+impl WorkerPageQuery {
+    fn parse(value: Result<Query<Self>, QueryRejection>) -> ApiResult<Self> {
+        let Query(page) =
+            value.map_err(|_| control_error(ControlFailure::InvalidRequest.into()))?;
+        if !(1..=100).contains(&page.limit.unwrap_or(50)) {
+            return Err(control_error(ControlFailure::InvalidRequest.into()));
+        }
+        Ok(page)
+    }
+}
+
+async fn reserve_worker(
+    RunnerIdentity(tenant): RunnerIdentity,
+    State(s): State<GatewayState>,
+    body: Result<Json<AdmissionV1>, JsonRejection>,
+) -> ApiResult<(StatusCode, Json<crate::control::AdmissionResultV1>)> {
+    tenant.write_quota()?;
+    let Json(admission) = body.map_err(|_| control_error(ControlFailure::InvalidRequest.into()))?;
+    admission.validate().map_err(control_error)?;
+    // Replays are checked inside the same durable operation. They do not make
+    // another external policy call or grant a new start permission.
+    let replay = tenant
+        .store
+        .worker_operation(&admission.operation_id)
+        .map_err(control_error)?
+        .is_some();
+    let (decision, jev) = if replay {
+        (
+            policy::evaluate(&s.policy, &admission.decision_request),
+            Value::Null,
+        )
+    } else {
+        fresh_policy(&s, &admission.decision_request).await
+    };
+    let result = tenant
+        .store
+        .admit_worker(&admission, &s.policy, decision, jev, &tenant.worker_quota)
+        .map_err(control_error)?;
+    let status = match result.refusal {
+        Some(AdmissionRefusalV1::Policy) => StatusCode::FORBIDDEN,
+        Some(AdmissionRefusalV1::Quota) => StatusCode::TOO_MANY_REQUESTS,
+        None if result.replayed => StatusCode::OK,
+        None => StatusCode::CREATED,
+    };
+    Ok((status, Json(result)))
+}
+
+async fn transition_worker(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Path(id): Path<String>,
+    body: Result<Json<WorkerMutationV1>, JsonRejection>,
+) -> ApiResult<Json<crate::control::MutationResultV1>> {
+    tenant.write_quota()?;
+    let Json(mutation) = body.map_err(|_| control_error(ControlFailure::InvalidRequest.into()))?;
+    if mutation.worker_id != id {
+        return Err(control_error(ControlFailure::InvalidRequest.into()));
+    }
+    Ok(Json(
+        tenant
+            .store
+            .mutate_worker(&mutation)
+            .map_err(control_error)?,
+    ))
+}
+
+async fn workers(
+    ReadIdentity(tenant, _): ReadIdentity,
+    query: Result<Query<WorkerPageQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    let page = WorkerPageQuery::parse(query)?;
+    let limit = page.limit.unwrap_or(50);
+    let items = tenant
+        .store
+        .workers_page(page.cursor.as_deref(), limit)
+        .map_err(control_error)?;
+    let next_cursor = if items.len() == limit as usize {
+        let last = items.last().map(|worker| worker.worker_id.clone());
+        if !tenant
+            .store
+            .workers_page(last.as_deref(), 1)
+            .map_err(control_error)?
+            .is_empty()
+        {
+            last
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+}
+
+async fn worker(
+    ReadIdentity(tenant, _): ReadIdentity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::control::WorkerV1>> {
+    let worker = tenant
+        .store
+        .worker(&id)
+        .map_err(control_error)?
+        .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?;
+    Ok(Json(worker))
+}
+
+async fn worker_operation(
+    ReadIdentity(tenant, _): ReadIdentity,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::control::MutationReceiptV1>> {
+    Ok(Json(
+        tenant
+            .store
+            .worker_operation(&id)
+            .map_err(control_error)?
+            .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?,
+    ))
+}
+
+async fn worker_quota(
+    ReadIdentity(tenant, _): ReadIdentity,
+) -> ApiResult<Json<crate::control::QuotaUsageV1>> {
+    Ok(Json(
+        tenant
+            .store
+            .worker_quota(&tenant.worker_quota)
+            .map_err(control_error)?,
+    ))
+}
+
+async fn worker_usage(
+    ReadIdentity(tenant, _): ReadIdentity,
+    query: Result<Query<WorkerPageQuery>, QueryRejection>,
+) -> ApiResult<Json<Value>> {
+    let page = WorkerPageQuery::parse(query)?;
+    let limit = page.limit.unwrap_or(50);
+    let items = tenant
+        .store
+        .worker_usage_page(page.cursor.as_deref(), limit)
+        .map_err(control_error)?;
+    let next_cursor = if items.len() == limit as usize {
+        let last = items.last().map(|allocation| allocation.attempt_id.clone());
+        if !tenant
+            .store
+            .worker_usage_page(last.as_deref(), 1)
+            .map_err(control_error)?
+            .is_empty()
+        {
+            last
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+}
+
+async fn list_events(
+    ReadIdentity(tenant, _): ReadIdentity,
+    Query(q): Query<EventQuery>,
+) -> ApiResult<Json<Value>> {
+    let items = tenant.store.events(&q).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "Filtre invalide ou lecture indisponible.",
+        )
+    })?;
+    let next = if items.len() == q.limit.unwrap_or(100).clamp(1, 1000) {
+        items.last().map(|e| e.seq)
+    } else {
+        None
+    };
+    Ok(Json(json!({"items":items,"next_cursor":next})))
+}
+async fn overview(
+    ReadIdentity(tenant, _): ReadIdentity,
+    State(s): State<GatewayState>,
+) -> ApiResult<Json<Value>> {
+    let mut value = tenant.store.overview().map_err(unavailable)?;
+    value["health"]["jev"] = json!(if s.jev.is_some() {
+        "configured"
+    } else {
+        "disabled"
+    });
+    Ok(Json(value))
+}
+async fn agents(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"items":tenant.store.entities(false).map_err(unavailable)?}),
+    ))
+}
+async fn sandboxes(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        json!({"items":tenant.store.entities(true).map_err(unavailable)?}),
+    ))
+}
+async fn integrity(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
+    Ok(Json(
+        serde_json::to_value(tenant.store.integrity().map_err(unavailable)?)
+            .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible."))?,
+    ))
+}
+
+async fn identity(ReadIdentity(tenant, role): ReadIdentity) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({"tenant_id":tenant.tenant_id,"role":role})))
+}
+
+async fn stream(
+    ReadIdentity(tenant, _): ReadIdentity,
+    headers: HeaderMap,
+    Query(q): Query<EventQuery>,
+) -> ApiResult<Response> {
+    let permit = tenant
+        .streams
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| error(StatusCode::TOO_MANY_REQUESTS, "Trop de flux simultanés."))?;
+    let header_cursor = headers
+        .get("last-event-id")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok());
+    let mut cursor = q
+        .after
+        .or(header_cursor)
+        .unwrap_or(tenant.store.head().map_err(unavailable)?)
+        .max(0);
+    let events = async_stream::stream! {
+        let _permit=permit;
+        loop {
+            let query=EventQuery{after:Some(cursor),limit:Some(200),order:Some("asc".into()),..Default::default()};
+            match tenant.store.events(&query) {
+                Ok(batch)=>{
+                    let full=batch.len()==200;
+                    for event in batch {cursor=event.seq;yield Ok::<_,Infallible>(SseEvent::default().id(event.seq.to_string()).event("audit").json_data(&event).expect("serializable event"));}
+                    if full {continue;}
+                },
+                Err(_)=>{yield Ok(SseEvent::default().event("error").data("audit unavailable"));break;}
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    Ok(Sse::new(events)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(10))
+                .text("heartbeat"),
+        )
+        .into_response())
+}
+
+async fn export(
+    ReadIdentity(tenant, _): ReadIdentity,
+    Query(query): Query<EventQuery>,
+) -> ApiResult<Response> {
+    let json_format = match query.format.as_deref().unwrap_or("jsonl") {
+        "json" => true,
+        "jsonl" => false,
+        _ => {
+            return Err(error(
+                StatusCode::BAD_REQUEST,
+                "Format attendu : json ou jsonl.",
+            ));
+        }
+    };
+    let head = tenant.store.head().map_err(unavailable)?;
+    let mut filter = query;
+    filter.order = Some("asc".into());
+    filter.limit = Some(200);
+    filter.after = Some(filter.after.unwrap_or(0).max(0));
+    filter.before = Some(filter.before.unwrap_or(head + 1).min(head + 1));
+    let body = async_stream::stream! {
+        let mut first=true;
+        if json_format{yield Ok::<_,std::io::Error>("[".to_string());}
+        loop {
+            match tenant.store.events(&filter) {
+                Ok(items)=>{if items.is_empty(){break;}for item in items {filter.after=Some(item.seq);let prefix=if json_format{if first{""}else{","}}else{""};let suffix=if json_format{""}else{"\n"};first=false;yield Ok(format!("{prefix}{}{suffix}",serde_json::to_string(&item).expect("serializable event")));}},
+                Err(_)=>{yield Err(std::io::Error::other("audit export interrupted"));return;}
+            }
+        }
+        if json_format{yield Ok("]".to_string());}
+    };
+    let mut response = Response::new(Body::from_stream(body));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(if json_format {
+            "application/json"
+        } else {
+            "application/x-ndjson"
+        }),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(if json_format {
+            "attachment; filename=agentsandbox-audit.json"
+        } else {
+            "attachment; filename=agentsandbox-audit.jsonl"
+        }),
+    );
+    Ok(response)
+}
+
+#[derive(Clone)]
+struct DashboardState {
+    upstream: reqwest::Url,
+    viewer_token: Option<String>,
+    client: reqwest::Client,
+}
+pub fn dashboard_router(
+    upstream: &str,
+    viewer_token: String,
+    front: PathBuf,
+) -> anyhow::Result<Router> {
+    dashboard_router_with_auth(upstream, Some(viewer_token), front)
+}
+
+/// Shared presentation accepts only viewer identities verified by the gateway.
+/// The authenticated credential, rather than request data, chooses its tenant.
+pub fn dashboard_shared_router(upstream: &str, front: PathBuf) -> anyhow::Result<Router> {
+    dashboard_router_with_auth(upstream, None, front)
+}
+
+fn dashboard_router_with_auth(
+    upstream: &str,
+    viewer_token: Option<String>,
+    front: PathBuf,
+) -> anyhow::Result<Router> {
+    let upstream = reqwest::Url::parse(upstream)?;
+    anyhow::ensure!(
+        ["http", "https"].contains(&upstream.scheme())
+            && upstream.username().is_empty()
+            && upstream.password().is_none()
+            && upstream.query().is_none()
+            && upstream.fragment().is_none()
+            && upstream.path() == "/",
+        "invalid gateway upstream"
+    );
+    let s = DashboardState {
+        upstream,
+        viewer_token,
+        client: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()?,
+    };
+    Ok(Router::new()
+        .route(
+            "/healthz",
+            get(|| async { Json(json!({"status":"ok","service":"dashboard"})) }),
+        )
+        .route("/api/{*path}", get(dashboard_proxy))
+        .fallback_service(tower_http::services::ServeDir::new(front))
+        .layer(middleware::from_fn(security_headers))
+        .with_state(s))
+}
+async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
+    let token = bearer(request.headers())
+        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton de lecture requis."))?
+        .to_owned();
+    if s.viewer_token
+        .as_ref()
+        .is_some_and(|expected| !token_matches(&token, expected))
+    {
+        return Err(error(StatusCode::UNAUTHORIZED, "Jeton invalide."));
+    }
+    let canonical_path = request
+        .uri()
+        .path()
+        .strip_prefix("/api/v1/")
+        .map(|suffix| format!("/api/{suffix}"))
+        .unwrap_or_else(|| request.uri().path().to_owned());
+    if ![
+        "/api/events",
+        "/api/overview",
+        "/api/agents",
+        "/api/sandboxes",
+        "/api/stream",
+        "/api/export",
+        "/api/integrity",
+        "/api/identity",
+        "/api/workers",
+        "/api/quota",
+        "/api/usage",
+    ]
+    .contains(&canonical_path.as_str())
+        && !canonical_path
+            .strip_prefix("/api/workers/")
+            .is_some_and(|id| {
+                uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+            })
+    {
+        return Err(error(StatusCode::NOT_FOUND, "Route de lecture inconnue."));
+    }
+    verify_dashboard_viewer(&s, &token).await?;
+    let mut url = s.upstream.clone();
+    url.set_path(request.uri().path());
+    url.set_query(request.uri().query());
+    let mut call = s.client.get(url).bearer_auth(&token);
+    if let Some(cursor) = request.headers().get("last-event-id") {
+        call = call.header("last-event-id", cursor);
+    }
+    let upstream = call
+        .send()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "Collecteur indisponible."))?;
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut response = Response::new(Body::from_stream(
+        upstream
+            .bytes_stream()
+            .map(|r| r.map_err(std::io::Error::other)),
+    ));
+    *response.status_mut() = status;
+    for key in [
+        header::CONTENT_TYPE,
+        header::CONTENT_DISPOSITION,
+        header::CACHE_CONTROL,
+    ] {
+        if let Some(v) = headers.get(&key) {
+            response.headers_mut().insert(key, v.clone());
+        }
+    }
+    Ok(response)
+}
+
+async fn verify_dashboard_viewer(s: &DashboardState, token: &str) -> ApiResult<()> {
+    let mut url = s.upstream.clone();
+    url.set_path("/api/v1/identity");
+    let mut response = s
+        .client
+        .get(url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                "Vérification d'identité indisponible.",
+            )
+        })?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "Identité de lecture invalide.",
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "Vérification d'identité refusée.",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "Réponse d'identité incomplète."))?
+    {
+        if bytes.len() + chunk.len() > 4096 {
+            return Err(error(
+                StatusCode::BAD_GATEWAY,
+                "Réponse d'identité trop volumineuse.",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let identity: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| error(StatusCode::BAD_GATEWAY, "Réponse d'identité invalide."))?;
+    if identity["role"] != "viewer" {
+        return Err(error(
+            StatusCode::FORBIDDEN,
+            "Le dashboard accepte uniquement le rôle viewer.",
+        ));
+    }
+    if !identity["tenant_id"]
+        .as_str()
+        .is_some_and(|id| validate_tenant_id(id).is_ok())
+    {
+        return Err(error(
+            StatusCode::BAD_GATEWAY,
+            "Périmètre d'identité invalide.",
+        ));
+    }
+    Ok(())
+}

@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.31s
+     Running tests/runtime_terminal_persistence.rs (target/release/deps/runtime_terminal_persistence-cf1993ee7b230f9e)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-sP3sFc
+PASS terminal control HTTP503; retained instance 7acd3db951f90935c0466e22a06c4b711c3ecbfa34beda26c2977cbe6ed5a0d6; session 0c19293e-1c34-4358-8f62-6eaf7341249c; audit valid; allocation absent; unknown quota retained; capture masked; log stdout bytes 0; log stderr bytes 79; log command success false
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.51s
+

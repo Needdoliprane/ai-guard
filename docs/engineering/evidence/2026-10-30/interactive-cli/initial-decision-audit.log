@@ -1,0 +1,11 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.35s
+     Running tests/decision_execution_mode.rs (target/debug/deps/decision_execution_mode-7340456fd03580bf)
+
+running 3 tests
+test approval_for_batch_cannot_authorize_interactive_mode ... ok
+test a_mode_that_would_be_masked_cannot_become_a_durable_decision ... ok
+test interactive_decision_mode_is_durable_and_replayed_without_another_event ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agentsandbox:event:v1",
+  "title": "Agent Sandbox event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "timestamp", "kind", "source", "provenance", "coverage"],
+  "properties": {
+    "id": {"type": "string", "format": "uuid"},
+    "timestamp": {"type": "string", "format": "date-time"},
+    "kind": {"type": "string", "maxLength": 80, "pattern": "^[A-Za-z0-9_.-]+$"},
+    "source": {"type": "string", "maxLength": 80},
+    "provenance": {"enum": ["observed", "declared", "inferred"]},
+    "coverage": {"enum": ["native", "observed", "generic", "partial"]},
+    "session_id": {"type": ["string", "null"], "maxLength": 256},
+    "project_id": {"type": ["string", "null"], "maxLength": 256},
+    "sandbox_id": {"type": ["string", "null"], "maxLength": 256},
+    "agent_id": {"type": ["string", "null"], "maxLength": 256},
+    "parent_agent_id": {"type": ["string", "null"], "maxLength": 256},
+    "correlation_id": {"type": ["string", "null"], "maxLength": 256},
+    "trace_id": {"type": ["string", "null"], "maxLength": 256},
+    "command": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["argv", "cwd"], "properties": {"argv": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}}}
+      ]
+    },
+    "decision": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "required": ["outcome", "engine", "rule", "reason"], "properties": {"outcome": {"enum": ["allow", "deny", "review"]}, "engine": {"type": "string"}, "rule": {"type": "string"}, "reason": {"type": "string"}}}
+      ]
+    },
+    "result": {},
+    "data": {}
+  }
+}

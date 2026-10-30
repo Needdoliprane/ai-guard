@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-4558e96bd0376d78)
+
+running 3 tests
+test runtime::managed::log_policy_tests::historical_handles_and_observations_keep_their_digest_version ... ok
+test runtime::managed::log_policy_tests::logging_and_stream_profile_fail_closed_before_start ... ok
+test runtime::managed::log_policy_tests::historical_fingerprint_is_unchanged_and_v2_binds_streams_without_environment ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 61 filtered out; finished in 0.01s
+

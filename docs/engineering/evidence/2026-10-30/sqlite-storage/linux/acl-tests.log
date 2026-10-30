@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/sqlite-qualification)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.17s
+     Running tests/control_fs.rs (/build/target/debug/deps/control_fs-315565777632591c)
+
+running 1 test
+test linux_named_posix_acl_is_bounded_by_the_mode_mask ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+

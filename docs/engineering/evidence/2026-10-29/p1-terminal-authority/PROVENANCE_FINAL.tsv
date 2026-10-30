@@ -1,0 +1,17 @@
+source	copie_relative
+/tmp/ai-guard-p1-security-real-terminal.log	review-and-real-rootgel/terminal-persistence-real.log
+/tmp/ai-guard-review-runtime-retention.md	review-and-real-rootgel/review-runtime-retention-final.md
+/tmp/ai-guard-p1-security-control-build.log	deployment-security-09c7b861/control-build.log
+/tmp/ai-guard-p1-security-compose-up.log	deployment-security-09c7b861/compose-up.log
+/tmp/ai-guard-p1-security-deployed-health.log	deployment-security-09c7b861/deployed-health.log
+/tmp/ai-guard-p1-security-audit-before-deploy.json	deployment-security-09c7b861/audit-before-deploy.json
+/tmp/ai-guard-p1-security-audit-after-deploy.json	deployment-security-09c7b861/audit-after-deploy.json
+/tmp/ai-guard-p1-security-deployed-smoke.log	deployment-security-09c7b861/deployed-smoke.log
+/tmp/ai-guard-p1-security-deployed-browser.log	deployment-security-09c7b861/deployed-browser.log
+/tmp/ai-guard-p1-security-audit-after-tests.json	deployment-security-09c7b861/audit-after-tests.json
+/tmp/ai-guard-p1-security-runtime-version.log	deployment-security-09c7b861/runtime-version.log
+/tmp/ai-guard-worker-core-contract.md	design-next-not-implemented/worker-core-contract.md
+/tmp/ai-guard-worker-core-contract-detail.md	design-next-not-implemented/worker-core-contract-detail.md
+/tmp/ai-guard-runtime-contract-next.md	design-next-not-implemented/runtime-contract-next.md
+/tmp/ai-guard-p1-security-real-confinement.log	final-candidate-coverage/runtime-confinement.log
+/tmp/ai-guard-p1-security-complete-source-sha.txt	final-candidate-coverage/COMPLETE_SOURCE_SHA256SUMS.txt

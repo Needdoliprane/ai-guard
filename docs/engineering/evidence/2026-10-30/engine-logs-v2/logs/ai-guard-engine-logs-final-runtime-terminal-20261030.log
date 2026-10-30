@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running tests/runtime_terminal.rs (target/debug/deps/runtime_terminal-ae7fb03b4a334e5a)
+
+running 1 test
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.29s
+

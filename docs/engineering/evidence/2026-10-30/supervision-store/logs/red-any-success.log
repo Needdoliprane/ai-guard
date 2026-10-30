@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.43s
+     Running tests/supervision_store.rs (target/debug/deps/supervision_store-464e3236fb4a9588)
+
+running 1 test
+
+thread 'import_verification_success_mismatch_and_unknown_terminal_gate_create' (4101184) panicked at tests/supervision_store.rs:820:9:
+a failed import verification must block worker create even after an earlier success
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test import_verification_success_mismatch_and_unknown_terminal_gate_create ... FAILED
+
+failures:
+
+failures:
+    import_verification_success_mismatch_and_unknown_terminal_gate_create
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.66s
+
+error: test failed, to rerun pass `--test supervision_store`

@@ -1,0 +1,24 @@
+# Revue ciblée du refus des variables Jev dans le handoff legacy
+
+Date : 30 octobre 2026. Périmètre : delta `src/runner.rs` comparé au gel `/tmp/ai-guard-provider-prv-fixed.vWMHOh`. SHA-256 courant vérifié avant et après lecture : `d8ee798b3df2a942e514b79b17eb1937cf812c7dbad01a478eae08b123082ea4`.
+
+**Verdict source : accepté dans le périmètre des deux noms réservés ; aucun contournement évident ni nouveau défaut confirmé.** Ce constat ne vaut pas qualification générale de la confidentialité de toute valeur Jev renommée, des moteurs de décision ou des fournisseurs.
+
+AGENTS.md, RTK, contrat d'architecture et règles de code relus. Aucune source ou documentation du dépôt éditée, aucun test/API/modèle/moteur exécuté, aucun secret réel ouvert. Le delta du fichier depuis le gel précédent contient uniquement le refus et sa régression ; les corrections fournisseur précédentes sont préservées.
+
+## Code et ordre des effets
+
+- `src/runner.rs:923` refuse exactement `JEV_API_KEY` et `JEV_API_KEY_FILE` immédiatement après séparation du nom et de la valeur. Le diagnostic est constant ; il n'interpole ni valeur ni chemin. La référence `_FILE` n'est pas déréférencée par ce parseur.
+- Toutes les lignes sont validées avant la création du répertoire/snapshot à `:965`. Une ligne Jev précédée de variables métier valides échoue donc sans snapshot partiel. La valeur peut être courte, vide ou longue : le refus du nom intervient avant les autres validations.
+- Les espaces en début/fin de ligne sont retirés avant la comparaison. Un espace dans le nom, une minuscule, un caractère Unicode, une citation ou une syntaxe `export` échoue ensuite à la grammaire ASCII majuscule/chiffre/underscore. Il n'y a ni expansion shell ni normalisation ultérieure qui convertirait une variante acceptée en l'un des deux noms réservés. Les commentaires sont ignorés et jamais transmis.
+- Le `run` legacy passe par `credentials_from_source` (`:999–1009`) avant création du client HTTP et avant `managed::execute_plan`. Le refus est donc antérieur au snapshot credential et au premier HTTP de ce lancement.
+- Une reprise avant premier start repasse également par `private_credentials` puis `credentials`, avant les effets runtime (`src/runner/managed.rs:2162–2181`, `:2389–2403`). La reprise peut déjà avoir consulté l'état durable par HTTP : l'affirmation « avant tout HTTP » concerne le nouveau `run`, pas toutes les opérations de reprise/consultation. Les consultations/arrêts existants restent possibles ; aucun claim consommé n'est réarmé.
+- La voie fournisseur gérée sélectionne déjà son sous-ensemble privé par des noms fermés ; ce delta concerne la voie manuelle. Le refus par collision avec les valeurs connues du contrôle reste inchangé. Il ne permet pas de promettre la reconnaissance d'un secret Jev inconnu fourni intentionnellement sous un autre nom : cette limite ne constitue pas un contournement de l'interdiction des deux noms examinés.
+
+## Régression et preuve
+
+Le test `runner::tests::manual_credential_handoff_refuses_jev_names_before_snapshot` (`src/runner.rs:1378`) est pertinent : deux noms testés séparément, chacun après deux variables métier valides ; diagnostic exact, absence du canari dans ce diagnostic, absence de `credential-snapshots`. Son cas positif conserve OpenAI et Anthropic ; son assertion de collision vérifie le refus de la valeur de contrôle. Ce dernier contrôle garde son ordre existant après préparation du snapshot, sans prétendre être déplacé avant snapshot par le nouveau correctif.
+
+Le rapport `/tmp/ai-guard-jev-credential-handoff-guard.md` consigne la même commande en RED (1 FAIL attendu), puis GREEN (1 PASS, 0 ignoré), et rustfmt PASS. Root et le propriétaire `/root/provider_runner` ont confirmé que les sorties originales existent uniquement dans son historique outil : RED `exec_command` session 3664, `write_stdin` chunk `0d664c`, exit 101, 1 FAIL avec « a Jev control credential variable was accepted » ; GREEN session 10270, chunk `0de37c`, exit 0, 1 PASS / 0 ignoré / 85 filtrés. Même commande exacte dans les deux cas. Ces références et résultats sont transmis par les agents ; le relecteur n'a pas directement accès à ces sorties brutes dans son propre historique. **Aucun fichier log brut n'a été archivé pour ce delta**, et aucun log n'est reconstruit après coup. Les fichiers `/tmp/ai-guard-jev-credential-red.log` et `...-green.log` concernent d'autres tests historiques gateway/Jev ; ils ne constituent pas une preuve de cette régression et ne lui sont pas attribués.
+
+Statut final : **lecture source PASS ; RED/GREEN rapportés avec provenance outil, sans logs bruts indépendamment vérifiables par cette revue**. Cette limite de preuve est conservée ; elle ne devient ni un faux FAIL du code ni un PASS d'exécution propre au relecteur. Aucun rerun demandé. Les campagnes runtime/fournisseur restent NOT_RUN pour ce delta et aucune ancienne limite ou qualification n'est modifiée.

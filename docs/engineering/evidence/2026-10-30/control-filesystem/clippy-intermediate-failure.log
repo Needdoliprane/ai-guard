@@ -1,0 +1,16 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+error: items after a test module
+   --> src/control_fs.rs:630:1
+    |
+630 | mod descriptor_tests {
+    | ^^^^^^^^^^^^^^^^^^^^
+...
+747 | fn check_acl(file: &File, private: bool) -> Result<()> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: could not compile `agentsandbox` (lib test) due to 1 previous error

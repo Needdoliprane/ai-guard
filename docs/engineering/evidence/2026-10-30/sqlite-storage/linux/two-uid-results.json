@@ -1,0 +1,122 @@
+[
+  {
+    "label": "owner_metadata",
+    "user": "1000:1000",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx stat -c '%u:%g %a %h %n' /tmp/ai-guard-sqlite-two-uid-8qmtsx /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm",
+    "result": {
+      "chunk_id": "424755",
+      "wall_time_seconds": 0.000011084,
+      "exit_code": 0,
+      "original_token_count": 64,
+      "output": "1000:1000 700 2 /tmp/ai-guard-sqlite-two-uid-8qmtsx\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm\n"
+    }
+  },
+  {
+    "label": "owner_main_read",
+    "user": "1000:1000",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx dd if=/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite of=/dev/null bs=1 count=1",
+    "result": {
+      "chunk_id": "79828e",
+      "wall_time_seconds": 0.000010333,
+      "exit_code": 0,
+      "original_token_count": 18,
+      "output": "1+0 records in\n1+0 records out\n1 byte copied, 2.2667e-05 s, 44.1 kB/s\n"
+    }
+  },
+  {
+    "label": "other_identity",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx id",
+    "result": {
+      "chunk_id": "d3d8e4",
+      "wall_time_seconds": 0.000009792,
+      "exit_code": 0,
+      "original_token_count": 8,
+      "output": "uid=1001 gid=1001 groups=1001\n"
+    }
+  },
+  {
+    "label": "other_public_control",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx dd if=/tmp/ai-guard-sqlite-readable-8qmtsx of=/dev/null bs=1 count=1",
+    "result": {
+      "chunk_id": "661568",
+      "wall_time_seconds": 0.000014459,
+      "exit_code": 0,
+      "original_token_count": 18,
+      "output": "1+0 records in\n1+0 records out\n1 byte copied, 3.7084e-05 s, 27.0 kB/s\n"
+    }
+  },
+  {
+    "label": "other_read_main",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx dd if=/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite of=/dev/null bs=1 count=1",
+    "result": {
+      "chunk_id": "ec5474",
+      "wall_time_seconds": 0.0000095,
+      "exit_code": 1,
+      "original_token_count": 23,
+      "output": "dd: failed to open '/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite': Permission denied\n"
+    }
+  },
+  {
+    "label": "other_read-wal",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx dd if=/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal of=/dev/null bs=1 count=1",
+    "result": {
+      "chunk_id": "50d7b9",
+      "wall_time_seconds": 0.000009792,
+      "exit_code": 1,
+      "original_token_count": 24,
+      "output": "dd: failed to open '/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal': Permission denied\n"
+    }
+  },
+  {
+    "label": "other_read-shm",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx dd if=/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm of=/dev/null bs=1 count=1",
+    "result": {
+      "chunk_id": "38f0b6",
+      "wall_time_seconds": 0.000015625,
+      "exit_code": 1,
+      "original_token_count": 24,
+      "output": "dd: failed to open '/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm': Permission denied\n"
+    }
+  },
+  {
+    "label": "other_rename_private_parent",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx mv -T /tmp/ai-guard-sqlite-two-uid-8qmtsx /tmp/ai-guard-sqlite-two-uid-stolen-8qmtsx",
+    "result": {
+      "chunk_id": "0d54ad",
+      "wall_time_seconds": 0.000014917,
+      "exit_code": 1,
+      "original_token_count": 32,
+      "output": "mv: cannot move '/tmp/ai-guard-sqlite-two-uid-8qmtsx' to '/tmp/ai-guard-sqlite-two-uid-stolen-8qmtsx': Operation not permitted\n"
+    }
+  },
+  {
+    "label": "other_precreate_journal",
+    "user": "1001:1001",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx touch /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-journal",
+    "result": {
+      "chunk_id": "f0af50",
+      "wall_time_seconds": 0.000017125,
+      "exit_code": 1,
+      "original_token_count": 25,
+      "output": "touch: cannot touch '/tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-journal': Permission denied\n"
+    }
+  },
+  {
+    "label": "owner_metadata_after",
+    "user": "1000:1000",
+    "args": "ai-guard-sqlite-linux-two-uid-8qmtsx stat -c '%u:%g %a %h %n' /tmp/ai-guard-sqlite-two-uid-8qmtsx /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm",
+    "result": {
+      "chunk_id": "d01714",
+      "wall_time_seconds": 0.000014584,
+      "exit_code": 0,
+      "original_token_count": 64,
+      "output": "1000:1000 700 2 /tmp/ai-guard-sqlite-two-uid-8qmtsx\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-wal\n1000:1000 600 1 /tmp/ai-guard-sqlite-two-uid-8qmtsx/audit.sqlite-shm\n"
+    }
+  }
+]

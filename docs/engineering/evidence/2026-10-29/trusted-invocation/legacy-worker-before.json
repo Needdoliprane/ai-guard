@@ -1,0 +1,29 @@
+{
+  "attempt": {
+    "attempt_id": "38795f85-65d4-464b-8f98-58ceff582816",
+    "container_id": "c98cee813b0e13a300a2753ca89574e2614b3a89335eec6a7a11e3261cbc651f",
+    "create_operation_id": "7f873105-642d-4e2a-bd0a-feece0664abe",
+    "created_inspection": {
+      "authority_id": "f44cff7a-4710-455a-8f3e-8e89dcedea2e",
+      "container_id": "c98cee813b0e13a300a2753ca89574e2614b3a89335eec6a7a11e3261cbc651f",
+      "cpu_millis": 2000,
+      "image_id": "sha256:7c64760cc4a5f29a40685cae2451afed914ce81671601166792cd087beab9db6",
+      "memory_bytes": 1073741824,
+      "network": "none",
+      "pids_limit": 256,
+      "restart_policy": "no",
+      "runtime_kind": "docker",
+      "security_preset": "fixed_sandbox_v1",
+      "spec_hash": "0faa6253bf646caa88b98d8d3fbdb6a0450749e477a7eb7614f72ebdbb49568b",
+      "stable_name": "aig-7ac7a5eb0ffb4fee8bf3544cd82b6ca5-4fc4ffea0c8143efbf43cede3a826574",
+      "volume_name": "aig-7ac7a5eb0ffb4fee8bf3544cd82b6ca5-4fc4ffea0c8143efbf43cede3a826574-work"
+    },
+    "stable_name": "aig-7ac7a5eb0ffb4fee8bf3544cd82b6ca5-4fc4ffea0c8143efbf43cede3a826574",
+    "start_emitter_id": "aa68cae6-7ab9-4c27-ba3b-8e73be55468d",
+    "start_operation_id": "4a909a2e-a466-4dd4-ab65-661684b2f812",
+    "volume_name": "aig-7ac7a5eb0ffb4fee8bf3544cd82b6ca5-4fc4ffea0c8143efbf43cede3a826574-work"
+  },
+  "cleanup_removed": true,
+  "state": "terminal",
+  "worker_id": "4fc4ffea-0c81-43ef-bf43-cede3a826574"
+}

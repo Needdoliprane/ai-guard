@@ -1,0 +1,23 @@
+    Blocking waiting for file lock on build directory
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.54s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-2465d0f45260b1b3)
+
+running 1 test
+test runtime::capture_error_tests::failed_control_capture_never_formats_raw_stderr ... FAILED
+
+failures:
+
+---- runtime::capture_error_tests::failed_control_capture_never_formats_raw_stderr stdout ----
+
+thread 'runtime::capture_error_tests::failed_control_capture_never_formats_raw_stderr' (1865407) panicked at src/runtime.rs:1237:9:
+raw captured stderr must not enter the generic error chain
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    runtime::capture_error_tests::failed_control_capture_never_formats_raw_stderr
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 38 filtered out; finished in 0.13s
+
+error: test failed, to rerun pass `--lib`

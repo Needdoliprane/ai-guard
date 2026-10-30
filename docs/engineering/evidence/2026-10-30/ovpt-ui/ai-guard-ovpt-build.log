@@ -1,0 +1,13 @@
+
+> agent-sandbox-front@0.1.0 build
+> tsc --noEmit && vite build
+
+vite v7.3.7 building client environment for production...
+transforming...
+✓ 10 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  1.11 kB │ gzip:  0.58 kB
+dist/assets/index-CeMZdRmd.css  30.73 kB │ gzip:  6.82 kB
+dist/assets/index-BtGEDMoP.js   57.92 kB │ gzip: 20.25 kB
+✓ built in 130ms

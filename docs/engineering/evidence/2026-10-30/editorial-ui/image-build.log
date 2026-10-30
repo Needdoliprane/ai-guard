@@ -1,0 +1,100 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from control.Dockerfile
+#1 transferring dockerfile: 1.07kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/debian:bookworm-slim
+#2 DONE 0.9s
+
+#3 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#3 ...
+
+#4 [internal] load metadata for docker.io/library/node:24-bookworm-slim
+#4 DONE 0.9s
+
+#3 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#3 DONE 1.1s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 517B done
+#5 DONE 0.0s
+
+#6 [stage-2 1/7] FROM docker.io/library/debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+#6 DONE 0.0s
+
+#7 [rust-build 1/5] FROM docker.io/library/rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b
+#7 DONE 0.0s
+
+#8 [front-build 1/6] FROM docker.io/library/node:24-bookworm-slim@sha256:c86ecead9e55a5210ac1727de38a4ca840bf03dcaf34dc9749addbf383b1920c
+#8 DONE 0.0s
+
+#9 [internal] load build context
+#9 transferring context: 91.19kB 0.0s done
+#9 DONE 0.0s
+
+#10 [front-build 3/6] COPY front/package.json front/package-lock.json ./
+#10 CACHED
+
+#11 [front-build 2/6] WORKDIR /build/front
+#11 CACHED
+
+#12 [front-build 4/6] RUN npm ci
+#12 CACHED
+
+#13 [front-build 5/6] COPY front/ ./
+#13 DONE 0.0s
+
+#14 [front-build 6/6] RUN npm run build
+#14 0.228 
+#14 0.228 > agent-sandbox-front@0.1.0 build
+#14 0.228 > tsc --noEmit && vite build
+#14 0.228 
+#14 1.106 vite v7.3.7 building client environment for production...
+#14 1.143 transforming...
+#14 1.261 ✓ 10 modules transformed.
+#14 1.283 rendering chunks...
+#14 1.286 computing gzip size...
+#14 1.288 dist/index.html                  1.08 kB │ gzip:  0.55 kB
+#14 1.288 dist/assets/index-De0rVJnH.css  29.49 kB │ gzip:  6.63 kB
+#14 1.288 dist/assets/index-g65sqHFT.js   57.47 kB │ gzip: 20.13 kB
+#14 1.289 ✓ built in 166ms
+#14 DONE 1.3s
+
+#15 [rust-build 2/5] WORKDIR /build
+#15 CACHED
+
+#16 [rust-build 3/5] COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+#16 CACHED
+
+#17 [rust-build 4/5] COPY src/ ./src/
+#17 CACHED
+
+#18 [rust-build 5/5] RUN cargo build --release --locked --bin agentsandbox
+#18 CACHED
+
+#19 [stage-2 2/7] RUN apt-get update     && apt-get install --yes --no-install-recommends ca-certificates libgcc-s1     && rm -rf /var/lib/apt/lists/*     && groupadd --gid 1000 agent     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin agent     && mkdir -p /app/front /app/policies /data     && chown 1000:1000 /data
+#19 CACHED
+
+#20 [stage-2 3/7] COPY --from=rust-build /build/target/release/agentsandbox /usr/local/bin/agentsandbox
+#20 CACHED
+
+#21 [stage-2 4/7] COPY --from=front-build /build/front/dist/ /app/front/
+#21 DONE 0.0s
+
+#22 [stage-2 5/7] COPY policies/ /app/policies/
+#22 DONE 0.0s
+
+#23 [stage-2 6/7] COPY LICENSE /usr/share/licenses/ai-guard/LICENSE
+#23 DONE 0.0s
+
+#24 [stage-2 7/7] WORKDIR /app
+#24 DONE 0.0s
+
+#25 exporting to image
+#25 exporting layers 0.0s done
+#25 writing image sha256:d8179e589f7104072f2b237860d809a254acaf474a7593b380f0a91cdf52ca7f done
+#25 naming to docker.io/library/agentsandbox-control:qa-20261030-editorial-fs-6f4d8b02 done
+#25 DONE 0.0s
+
+View build details: docker-desktop://dashboard/build/default/default/n76hq0mmq3g4t4gpg1m3xzt9j

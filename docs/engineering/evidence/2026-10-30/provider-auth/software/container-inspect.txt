@@ -1,0 +1,1 @@
+container=/qa-managed-providers-20261030-ccgpe3-probe status=exited exit=0 readonly=true network=none user=1000:1000 memory=1073741824 cpus=500000000 pids=64 logdriver=none security=["no-new-privileges"] tmpfs={"/home/agent":"rw,noexec,nosuid,nodev,size=16m,uid=1000,gid=1000,mode=0700","/tmp":"rw,noexec,nosuid,nodev,size=32m,uid=1000,gid=1000,mode=0700"}

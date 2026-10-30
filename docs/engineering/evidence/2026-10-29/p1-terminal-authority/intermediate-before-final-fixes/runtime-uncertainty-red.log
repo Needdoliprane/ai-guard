@@ -1,0 +1,24 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.82s
+     Running tests/runtime_uncertainty.rs (target/debug/deps/runtime_uncertainty-b86511a4199878ed)
+
+running 1 test
+test runtime_failure_does_not_present_a_missing_terminal_observation_as_known ... FAILED
+
+failures:
+
+---- runtime_failure_does_not_present_a_missing_terminal_observation_as_known stdout ----
+
+thread 'runtime_failure_does_not_present_a_missing_terminal_observation_as_known' (1218099) panicked at tests/runtime_uncertainty.rs:16:9:
+assertion `left == right` failed
+  left: String("running")
+ right: "unknown"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    runtime_failure_does_not_present_a_missing_terminal_observation_as_known
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test runtime_uncertainty`

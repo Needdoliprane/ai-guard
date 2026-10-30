@@ -1,0 +1,34 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.26s
+     Running tests/runtime_managed.rs (target/debug/deps/runtime_managed-24b8f304bdf1c4e6)
+
+running 1 test
+
+thread 'default_invocation_never_executes_a_project_path_candidate' (2071823) panicked at tests/runtime_managed.rs:626:5:
+
+running 1 test
+test default_invocation_never_executes_a_project_path_candidate ... FAILED
+
+failures:
+
+failures:
+    default_invocation_never_executes_a_project_path_candidate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.17s
+
+ 
+thread 'default_invocation_never_executes_a_project_path_candidate' (2071865) panicked at tests/runtime_managed.rs:613:9:
+the default factory executed a program supplied by the project PATH
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test default_invocation_never_executes_a_project_path_candidate ... FAILED
+
+failures:
+
+failures:
+    default_invocation_never_executes_a_project_path_candidate
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.27s
+
+error: test failed, to rerun pass `--test runtime_managed`

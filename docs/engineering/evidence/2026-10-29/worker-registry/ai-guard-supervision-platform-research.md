@@ -1,0 +1,43 @@
+# Supervision hôte — sources officielles vérifiées le 29 octobre 2026
+
+Recherche documentaire uniquement. Aucune commande de service, installation, mesure d'horloge, inspection moteur, qualification de plateforme ou opération privilégiée n'a été exécutée. Les versions réellement installées restent NOT_RUN. Les liens `latest` et les branches `main` sont des sources de conception, à figer lors des preuves d'implémentation ; ils ne qualifient pas la version de l'opérateur.
+
+## systemd
+
+Une unité service supervise son processus principal. `Type=notify` permet au programme Rust d'acquitter sa disponibilité ; `Restart=on-failure` ou `always` permet la relance après une sortie éligible, mais reste soumis au délai de restart et à la limitation de fréquence. Un arrêt opérateur ne déclenche pas automatiquement ce restart. `WatchdogSec` exige des notifications régulières du service et traite leur absence comme un échec. `RuntimeMaxSec` borne la durée du service, avec règles particulières pour `oneshot` et extensions de timeout. Ce sont des garanties sur le service supervisé, pas un protocole de deadline par worker. [systemd.service officiel](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+
+`KillMode=control-group` termine les processus appartenant au cgroup de l'unité ; `mixed` distingue le processus principal et les autres. Les signaux et délais de terminaison restent configurables. **Inférence d'architecture** : un conteneur géré par une autorité moteur externe au cgroup du superviseur n'est pas arrêté uniquement parce que l'unité Rust est morte ; il faut l'action Rust ciblée sur son CID, ou une fonctionnalité runtime qualifiée. [systemd.kill officiel](https://www.freedesktop.org/software/systemd/man/latest/systemd.kill.html)
+
+Une unité utilisateur n'est pas automatiquement un service indépendant des sessions : le mécanisme `enable-linger` documenté fait démarrer le gestionnaire utilisateur au boot et le garde après logout. Cela demande une décision d'exploitation explicite ; ne jamais l'activer implicitement. [loginctl officiel](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html#enable-linger%20%5BUSER%E2%80%A6%5D)
+
+Les timers systemd ont une précision configurée, par défaut une fenêtre d'une minute. Les timers monotones usuels s'arrêtent avec la suspension ; `WakeSystem` sélectionne une horloge qui continue et exige normalement des privilèges. `Persistent` concerne les événements calendaires et permet un rattrapage, pas une exécution pendant l'arrêt de l'hôte. **Inférence** : une unité timer périodique n'offre pas seule la borne fine d'un worker. [systemd.timer officiel](https://www.freedesktop.org/software/systemd/man/latest/systemd.timer.html)
+
+## launchd
+
+Apple décrit `ProgramArguments` comme un tableau de programme/arguments et `KeepAlive` comme le moyen de garder un job actif ; le superviseur doit rester au premier plan, sans auto-daemonisation. `LaunchDaemon` et `LaunchAgent` ont des contextes différents : le choix doit être déclaré et testé selon l'identité qui peut joindre le moteur. [Guide Apple, documentation archivée](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+
+Le manuel Apple publié en source décrit les relances KeepAlive, leur throttling, `ExitTimeOut` avant SIGKILL, et des événements StartInterval rattrapés au réveil. Ce manuel est ancien (2009) ; ne pas extrapoler une borne chiffrée de restart à toutes les versions macOS. La présence d'un plist ne prouve pas que son job est réellement chargé. **Inférence** : utiliser launchd pour assurer la présence du même superviseur Rust, puis une deadline persistante propre au produit ; ne pas remplacer cette logique par un intervalle launchd. [launchd.plist, source Apple officielle](https://raw.githubusercontent.com/apple-oss-distributions/launchd/main/man/launchd.plist.5)
+
+## Horloges et identité de boot
+
+Linux distingue CLOCK_MONOTONIC, qui ne compte pas la suspension, et CLOCK_BOOTTIME, qui la compte. CLOCK_REALTIME peut être corrigé, y compris vers l'arrière : il sert à l'affichage et à des faits UTC, pas seul au délai d'exécution restant. [Documentation officielle du noyau Linux, timekeeping](https://docs.kernel.org/core-api/timekeeping.html)
+
+`/proc/sys/kernel/random/boot_id` est documenté comme un UUID créé lors de sa première lecture et constant ensuite. Associer explicitement ce boot ID à la valeur CLOCK_BOOTTIME ; ne jamais soustraire deux valeurs de boots différents. [Documentation officielle Linux, random/boot_id](https://www.kernel.org/doc/html/v6.9/admin-guide/sysctl/kernel.html#random)
+
+Apple documente `mach_continuous_time` comme monotone, incluant le sommeil ; il recommande l'équivalent `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)` en nanosecondes. `mach_absolute_time` ne compte pas le sommeil. Le nom `CLOCK_MONOTONIC_RAW` n'a donc pas une sémantique interplateforme à supposer : le checkpoint doit identifier OS, méthode et unités. [Apple Developer : mach_continuous_time](https://developer.apple.com/documentation/kernel/1646199-mach_continuous_time)
+
+Le code officiel Libc Darwin confirme le dispatch CLOCK_MONOTONIC_RAW → mach_continuous_time et CLOCK_UPTIME_RAW → mach_absolute_time. Ce constat de source ne vaut pas un test de la version macOS installée. [Libc Apple, clock_gettime.c](https://raw.githubusercontent.com/apple-oss-distributions/Libc/main/gen/clock_gettime.c)
+
+Le noyau Apple expose `kern.bootsessionuuid` comme chaîne read-only et `kern.boottime` comme timeval. Le premier est un candidat d'identité de session de boot à lire via sysctlbyname et à qualifier sur chaque cible ; une absence, un format invalide ou un refus de lecture doit produire un diagnostic/prérequis absent. [XNU Apple, kern_sysctl.c, définitions près de 2735](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sysctl.c)
+
+**Attention vérifiée dans la source : kern.boottime n'est pas un boot ID stable.** `clock_set_calendar_microtime` ajuste explicitement le boottime quand l'heure calendrier est changée, en avant ou en arrière. Il ne faut donc pas employer le couple timeval du boot comme identité permanente ni reconstituer silencieusement une deadline par soustraction d'UTC. [XNU Apple, clock.c, près de 675–749](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/kern/clock.c)
+
+Le commentaire Apple de `BootSessionUUID` indique que la propriété identifie un cycle de boot et reste identique à travers sommeil/réveil/hibernation. Cela étaye la sémantique à rechercher ; il faut encore tester la lecture `kern.bootsessionuuid`, son lien à cette session et les cas de reboot de l'espace utilisateur sur les macOS pris en charge. [IOPM.h officiel Apple, près de 222–229](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/iokit/IOKit/pwr_mgt/IOPM.h)
+
+Rust `Instant` est opaque et la prise en compte de la suspension n'est pas garantie par son contrat. La documentation Rust 1.99.1 consultée indique CLOCK_MONOTONIC sous Unix et CLOCK_UPTIME_RAW sous Darwin, et prévient que cela peut évoluer. Une deadline durable ne doit pas sérialiser un Instant opaque ; employer un wrapper Rust versionné autour de l'horloge système qualifiée, avec calculs contrôlés et détection de régression. [Documentation officielle Rust : Instant](https://doc.rust-lang.org/std/time/struct.Instant.html)
+
+## Conséquences proposées pour la conception du parent
+
+Choix recommandé, par inférence des garanties ci-dessus : superviseur Rust du même binaire au premier plan, géré par systemd/launchd, actif avant tout claim de premier start. Il conserve boot ID, type d'horloge, instant d'armement et deadline dans l'état privé durable, puis réconcilie immédiatement au restart. L'unité OS assure sa présence ; le code Rust conserve l'autorisation, le CID, les quotas et la preuve terminale. Un service arrêté, un moteur inaccessible, un hôte endormi/éteint ou un processus bloqué au-delà des garanties de l'OS empêchent de promettre une échéance temps réel absolue. La qualification doit mesurer la borne observée et le diagnostic disponible dans chaque panne.
+
+Les tests réels doivent inclure SIGKILL du client puis du superviseur, restart limité/throttlé, session logout, crashloop et service désactivé ; sleep/wake plus long que le timeout ; horloge UTC déplacée en avant/arrière ; reboot hôte ou moteur avec autorité inchangée/changée ; boot ID absent/refusé/substitué. Les trois workers de la recette restent des instances métier distinctes ; aucun test de l'OS seul ne prouve le terminal runtime ou une allocation ledger.

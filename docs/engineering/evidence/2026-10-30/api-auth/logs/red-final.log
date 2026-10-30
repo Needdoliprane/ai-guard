@@ -1,0 +1,88 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running tests/api_auth_boundary.rs (target/debug/deps/api_auth_boundary-adb2f1af0cc06492)
+
+running 6 tests
+
+thread 'duplicate_authorization_and_oversized_bearer_are_rejected_before_body_polling' (3761113) panicked at tests/api_auth_boundary.rs:311:5:
+duplicate Authorization: expected 401, got 200 OK
+oversized bearer: expected 401, got 400 Bad Request
+oversized bearer polled body 2 time(s)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'malformed_event_queries_authenticate_first_on_both_api_aliases' (3761115) panicked at tests/api_auth_boundary.rs:266:5:
+/api/v1/events missing: expected 401 Unauthorized, got 400 Bad Request
+/api/v1/events invalid: expected 401 Unauthorized, got 400 Bad Request
+/api/events missing: expected 401 Unauthorized, got 400 Bad Request
+/api/events invalid: expected 401 Unauthorized, got 400 Bad Request
+test health_stays_public_and_authenticated_identity_selects_tenant_and_role_on_both_aliases ... ok
+test duplicate_authorization_and_oversized_bearer_are_rejected_before_body_polling ... FAILED
+test malformed_event_queries_authenticate_first_on_both_api_aliases ... FAILED
+
+thread 'missing_invalid_and_viewer_write_auth_reject_before_polling_any_write_body' (3761116) panicked at tests/api_auth_boundary.rs:199:5:
+/api/v1/events missing: expected 401 Unauthorized, got 400 Bad Request
+/api/v1/events missing: request body polled 2 time(s)
+/api/v1/events invalid: expected 401 Unauthorized, got 400 Bad Request
+/api/v1/events invalid: request body polled 2 time(s)
+/api/v1/events viewer-a: expected 403 Forbidden, got 400 Bad Request
+/api/v1/events viewer-a: request body polled 2 time(s)
+/api/v1/events viewer-b: expected 403 Forbidden, got 400 Bad Request
+/api/v1/events viewer-b: request body polled 2 time(s)
+/api/v1/decide missing: expected 401 Unauthorized, got 400 Bad Request
+/api/v1/decide missing: request body polled 2 time(s)
+/api/v1/decide invalid: expected 401 Unauthorized, got 400 Bad Request
+/api/v1/decide invalid: request body polled 2 time(s)
+/api/v1/decide viewer-a: expected 403 Forbidden, got 400 Bad Request
+/api/v1/decide viewer-a: request body polled 2 time(s)
+/api/v1/decide viewer-b: expected 403 Forbidden, got 400 Bad Request
+/api/v1/decide viewer-b: request body polled 2 time(s)
+/api/v1/workers/reservations missing: request body polled 2 time(s)
+/api/v1/workers/reservations invalid: request body polled 2 time(s)
+/api/v1/workers/reservations viewer-a: request body polled 2 time(s)
+/api/v1/workers/reservations viewer-b: request body polled 2 time(s)
+/api/v1/workers/00000000-0000-4000-8000-000000000001/transitions missing: request body polled 2 time(s)
+/api/v1/workers/00000000-0000-4000-8000-000000000001/transitions invalid: request body polled 2 time(s)
+/api/v1/workers/00000000-0000-4000-8000-000000000001/transitions viewer-a: request body polled 2 time(s)
+/api/v1/workers/00000000-0000-4000-8000-000000000001/transitions viewer-b: request body polled 2 time(s)
+/api/events missing: expected 401 Unauthorized, got 400 Bad Request
+/api/events missing: request body polled 2 time(s)
+/api/events invalid: expected 401 Unauthorized, got 400 Bad Request
+/api/events invalid: request body polled 2 time(s)
+/api/events viewer-a: expected 403 Forbidden, got 400 Bad Request
+/api/events viewer-a: request body polled 2 time(s)
+/api/events viewer-b: expected 403 Forbidden, got 400 Bad Request
+/api/events viewer-b: request body polled 2 time(s)
+/api/decide missing: expected 401 Unauthorized, got 400 Bad Request
+/api/decide missing: request body polled 2 time(s)
+/api/decide invalid: expected 401 Unauthorized, got 400 Bad Request
+/api/decide invalid: request body polled 2 time(s)
+/api/decide viewer-a: expected 403 Forbidden, got 400 Bad Request
+/api/decide viewer-a: request body polled 2 time(s)
+/api/decide viewer-b: expected 403 Forbidden, got 400 Bad Request
+/api/decide viewer-b: request body polled 2 time(s)
+/api/workers/reservations missing: request body polled 2 time(s)
+/api/workers/reservations invalid: request body polled 2 time(s)
+/api/workers/reservations viewer-a: request body polled 2 time(s)
+/api/workers/reservations viewer-b: request body polled 2 time(s)
+/api/workers/00000000-0000-4000-8000-000000000001/transitions missing: request body polled 2 time(s)
+/api/workers/00000000-0000-4000-8000-000000000001/transitions invalid: request body polled 2 time(s)
+/api/workers/00000000-0000-4000-8000-000000000001/transitions viewer-a: request body polled 2 time(s)
+/api/workers/00000000-0000-4000-8000-000000000001/transitions viewer-b: request body polled 2 time(s)
+test missing_invalid_and_viewer_write_auth_reject_before_polling_any_write_body ... FAILED
+test runner_malformed_write_bodies_keep_client_errors_without_audit_mutation ... ok
+
+thread 'real_tcp_missing_bearer_gets_401_before_client_sends_declared_body' (3761117) panicked at tests/api_auth_boundary.rs:440:10:
+gateway waited for the request body before returning its authorization status: Elapsed(())
+test real_tcp_missing_bearer_gets_401_before_client_sends_declared_body ... FAILED
+
+failures:
+
+failures:
+    duplicate_authorization_and_oversized_bearer_are_rejected_before_body_polling
+    malformed_event_queries_authenticate_first_on_both_api_aliases
+    missing_invalid_and_viewer_write_auth_reject_before_polling_any_write_body
+    real_tcp_missing_bearer_gets_401_before_client_sends_declared_body
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.67s
+
+error: test failed, to rerun pass `--test api_auth_boundary`

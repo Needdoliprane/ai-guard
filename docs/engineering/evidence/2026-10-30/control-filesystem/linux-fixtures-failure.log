@@ -1,0 +1,497 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 891B done
+#1 DONE 0.0s
+
+#2 [auth] library/rust:pull token for registry-1.docker.io
+#2 DONE 0.0s
+
+#3 [internal] load metadata for docker.io/library/rust:1.99.1-bookworm
+#3 DONE 1.7s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [1/8] FROM docker.io/library/rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b
+#5 CACHED
+
+#6 [internal] load build context
+#6 transferring context: 1.11kB done
+#6 DONE 0.0s
+
+#7 [2/8] RUN groupadd --gid 1000 fsqa && useradd --uid 1000 --gid 1000 --create-home fsqa && mkdir -p /build /home/fsqa/.cargo && cp -a /usr/local/cargo/bin /home/fsqa/.cargo/bin && chown -R 1000:1000 /build /home/fsqa/.cargo
+#7 DONE 0.3s
+
+#8 [3/8] WORKDIR /build
+#8 DONE 0.0s
+
+#9 [4/8] COPY --chown=1000:1000 Cargo.toml Cargo.lock rust-toolchain.toml ./
+#9 DONE 0.0s
+
+#10 [5/8] COPY --chown=1000:1000 src/ ./src/
+#10 DONE 0.0s
+
+#11 [6/8] COPY --chown=1000:1000 tests/control_fs.rs ./tests/control_fs.rs
+#11 DONE 0.0s
+
+#12 [7/8] RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked
+#12 0.156 info: syncing channel updates for 1.99.1-aarch64-unknown-linux-gnu
+#12 2.115 info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+#12 2.115 info: downloading 3 components
+#12 14.26 
+#12 14.28   1.99.1-aarch64-unknown-linux-gnu installed - rustc 1.99.1 (58cf8f9c3 2026-10-13)
+#12 14.28 
+#12 14.28 info: default toolchain set to 1.99.1-aarch64-unknown-linux-gnu
+#12 14.28 info: checking for self-update (current version: 1.29.2)
+#12 14.82 info: syncing channel updates for 1.99.1-aarch64-unknown-linux-gnu
+#12 16.60 info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+#12 16.62 info: downloading 2 components
+#12 18.41     Updating crates.io index
+#12 22.70  Downloading crates ...
+#12 23.52   Downloaded wasm-bindgen-shared v0.2.129
+#12 23.57   Downloaded same-file v1.0.6
+#12 23.60   Downloaded walkdir v2.5.0
+#12 23.62   Downloaded windows-link v0.2.1
+#12 23.69   Downloaded xattr v1.7.0
+#12 23.70   Downloaded winapi-util v0.1.11
+#12 23.72   Downloaded windows-interface v0.59.3
+#12 23.76   Downloaded windows-result v0.4.1
+#12 23.77   Downloaded wasm-bindgen-macro v0.2.129
+#12 23.78   Downloaded potential_utf v0.1.6
+#12 23.85   Downloaded httpdate v1.0.3
+#12 23.85   Downloaded form_urlencoded v1.2.2
+#12 23.85   Downloaded windows-implement v0.60.2
+#12 23.88   Downloaded yoke-derive v0.8.4
+#12 23.88   Downloaded scopeguard v1.2.0
+#12 23.89   Downloaded iana-time-zone-haiku v0.1.2
+#12 23.90   Downloaded futures-macro v0.3.34
+#12 23.91   Downloaded proc-macro2 v1.0.107
+#12 23.92   Downloaded cfg-if v1.0.5
+#12 23.95   Downloaded http-body v1.1.0
+#12 23.97   Downloaded errno v0.3.14
+#12 24.01   Downloaded async-stream-impl v0.3.6
+#12 24.01   Downloaded percent-encoding v2.3.2
+#12 24.02   Downloaded uuid v1.29.0
+#12 24.02   Downloaded smallvec v1.16.4
+#12 24.02   Downloaded redox_syscall v0.5.18
+#12 24.03   Downloaded mime_guess v2.0.5
+#12 24.03   Downloaded quote v1.0.47
+#12 24.03   Downloaded rustversion v1.0.23
+#12 24.03   Downloaded litemap v0.8.3
+#12 24.04   Downloaded once_cell v1.21.4
+#12 24.05   Downloaded displaydoc v0.2.7
+#12 24.05   Downloaded core-foundation-sys v0.8.7
+#12 24.05   Downloaded serde_core v1.0.229
+#12 24.06   Downloaded r-efi v6.0.0
+#12 24.07   Downloaded tower-service v0.3.3
+#12 24.08   Downloaded zerofrom-derive v0.1.8
+#12 24.09   Downloaded log v0.4.34
+#12 24.09   Downloaded socket2 v0.6.5
+#12 24.10   Downloaded tokio-macros v2.7.2
+#12 24.11   Downloaded version_check v0.9.5
+#12 24.11   Downloaded futures-task v0.3.34
+#12 24.12   Downloaded futures-core v0.3.34
+#12 24.12   Downloaded zerofrom v0.1.8
+#12 24.12   Downloaded unicode-ident v1.0.27
+#12 24.13   Downloaded bytes v1.12.1
+#12 24.13   Downloaded android_system_properties v0.1.6
+#12 24.14   Downloaded futures-io v0.3.34
+#12 24.15   Downloaded wasi v0.11.1+wasi-snapshot-preview1
+#12 24.15   Downloaded async-stream v0.3.6
+#12 24.15   Downloaded tinystr v0.8.5
+#12 24.15   Downloaded sync_wrapper v1.0.2
+#12 24.15   Downloaded http-range-header v0.4.2
+#12 24.15   Downloaded utf8_iter v1.0.4
+#12 24.16   Downloaded foldhash v0.2.0
+#12 24.16   Downloaded wasm-bindgen v0.2.129
+#12 24.17   Downloaded itoa v1.0.18
+#12 24.17   Downloaded crypto-common v0.1.7
+#12 24.18   Downloaded generic-array v0.14.7
+#12 24.19   Downloaded cpufeatures v0.2.17
+#12 24.20   Downloaded signal-hook-registry v1.4.8
+#12 24.20   Downloaded serde_path_to_error v0.1.20
+#12 24.20   Downloaded axum-core v0.5.6
+#12 24.21   Downloaded stable_deref_trait v1.2.1
+#12 24.22   Downloaded anyhow v1.0.104
+#12 24.23   Downloaded matchit v0.8.4
+#12 24.23   Downloaded digest v0.10.7
+#12 24.24   Downloaded tower v0.5.3
+#12 24.25   Downloaded idna_adapter v1.2.2
+#12 24.25   Downloaded futures-sink v0.3.34
+#12 24.25   Downloaded tower-layer v0.3.3
+#12 24.25   Downloaded chacha20 v0.10.2
+#12 24.25   Downloaded pin-project-lite v0.2.17
+#12 24.26   Downloaded zerovec-derive v0.11.7
+#12 24.26   Downloaded parking_lot v0.12.5
+#12 24.26   Downloaded synstructure v0.14.0
+#12 24.26   Downloaded bumpalo v3.20.3
+#12 24.27   Downloaded http-body-util v0.1.5
+#12 24.27   Downloaded wasm-bindgen-macro-support v0.2.129
+#12 24.27   Downloaded tracing-core v0.1.36
+#12 24.27   Downloaded parking_lot_core v0.9.12
+#12 24.27   Downloaded icu_normalizer_data v2.4.0
+#12 24.28   Downloaded slab v0.4.12
+#12 24.28   Downloaded lock_api v0.4.14
+#12 24.28   Downloaded tempfile v3.27.0
+#12 24.28   Downloaded getrandom v0.4.3
+#12 24.28   Downloaded zerovec v0.11.9
+#12 24.29   Downloaded fastrand v2.5.0
+#12 24.29   Downloaded serde_derive v1.0.229
+#12 24.29   Downloaded filetime v0.2.29
+#12 24.29   Downloaded writeable v0.6.4
+#12 24.29   Downloaded yoke v0.8.4
+#12 24.30   Downloaded bitflags v2.13.2
+#12 24.30   Downloaded memchr v2.8.3
+#12 24.30   Downloaded url v2.5.8
+#12 24.31   Downloaded zerotrie v0.2.5
+#12 24.31   Downloaded icu_provider v2.4.0
+#12 24.31   Downloaded icu_locale_core v2.4.0
+#12 24.32   Downloaded block-buffer v0.10.4
+#12 24.32   Downloaded serde v1.0.229
+#12 24.32   Downloaded tar v0.4.46
+#12 24.32   Downloaded tower-http v0.6.11
+#12 24.33   Downloaded icu_collections v2.4.0
+#12 24.34   Downloaded mio v1.2.4
+#12 24.34   Downloaded http v1.5.0
+#12 24.35   Downloaded rand_core v0.10.1
+#12 24.35   Downloaded icu_properties v2.4.0
+#12 24.35   Downloaded idna v1.1.0
+#12 24.35   Downloaded futures-util v0.3.34
+#12 24.37   Downloaded typenum v1.20.1
+#12 24.37   Downloaded syn v2.0.119
+#12 24.38   Downloaded syn v3.0.9
+#12 24.39   Downloaded sha2 v0.10.9
+#12 24.39   Downloaded axum v0.8.9
+#12 24.40   Downloaded js-sys v0.3.106
+#12 24.40   Downloaded thiserror-impl v2.0.21
+#12 24.40   Downloaded mime v0.3.17
+#12 24.41   Downloaded windows-targets v0.52.6
+#12 24.42   Downloaded unicase v2.10.0
+#12 24.43   Downloaded tokio-util v0.7.20
+#12 24.43   Downloaded shlex v2.0.1
+#12 24.43   Downloaded quinn-proto v0.11.19
+#12 24.44   Downloaded icu_properties_data v2.4.0
+#12 24.45   Downloaded untrusted v0.9.0
+#12 24.45   Downloaded fallible-streaming-iterator v0.1.9
+#12 24.45   Downloaded thiserror v2.0.21
+#12 24.46   Downloaded pkg-config v0.3.34
+#12 24.46   Downloaded zmij v1.0.23
+#12 24.48   Downloaded tracing v0.1.44
+#12 24.52   Downloaded serde_urlencoded v0.7.1
+#12 24.53   Downloaded icu_normalizer v2.4.0
+#12 24.53   Downloaded rustix v1.1.6
+#12 24.56   Downloaded try-lock v0.2.5
+#12 24.56   Downloaded rustc-hash v2.1.3
+#12 24.56   Downloaded find-msvc-tools v0.1.15
+#12 24.56   Downloaded web-time v1.1.0
+#12 24.57   Downloaded wasm-streams v0.4.2
+#12 24.57   Downloaded fallible-iterator v0.3.0
+#12 24.57   Downloaded zeroize v1.9.1
+#12 24.57   Downloaded quinn-udp v0.5.16
+#12 24.57   Downloaded hashlink v0.12.2
+#12 24.57   Downloaded rustls-pki-types v1.15.1
+#12 24.58   Downloaded getrandom v0.2.17
+#12 24.58   Downloaded subtle v2.6.1
+#12 24.58   Downloaded libc v0.2.191
+#12 24.63   Downloaded tokio v1.54.1
+#12 24.67   Downloaded ipnet v2.12.2
+#12 24.67   Downloaded ryu v1.0.23
+#12 24.68   Downloaded rsqlite-vfs v0.2.0
+#12 24.68   Downloaded hyper-rustls v0.27.10
+#12 24.68   Downloaded cfg_aliases v0.2.2
+#12 24.68   Downloaded want v0.3.2
+#12 24.68   Downloaded tinyvec v1.13.3
+#12 24.69   Downloaded rand_pcg v0.10.2
+#12 24.69   Downloaded heck v0.5.0
+#12 24.69   Downloaded atomic-waker v1.1.2
+#12 24.70   Downloaded windows-sys v0.61.2
+#12 24.77   Downloaded httparse v1.10.1
+#12 24.77   Downloaded tokio-rustls v0.26.6
+#12 24.77   Downloaded quinn v0.11.12
+#12 24.78   Downloaded cpufeatures v0.3.1
+#12 24.78   Downloaded hex v0.4.3
+#12 24.78   Downloaded clap_derive v4.6.7
+#12 24.78   Downloaded wasm-bindgen-futures v0.4.79
+#12 24.78   Downloaded rustls-webpki v0.103.16
+#12 24.78   Downloaded futures-channel v0.3.34
+#12 24.78   Downloaded linux-raw-sys v0.12.1
+#12 24.94   Downloaded strsim v0.11.1
+#12 24.97   Downloaded utf8parse v0.2.2
+#12 24.97   Downloaded is_terminal_polyfill v1.70.2
+#12 24.97   Downloaded colorchoice v1.0.5
+#12 24.97   Downloaded once_cell_polyfill v1.70.2
+#12 24.98   Downloaded num-traits v0.2.19
+#12 24.99   Downloaded autocfg v1.5.1
+#12 24.99   Downloaded anstream v1.0.0
+#12 24.99   Downloaded anstyle-query v1.1.5
+#12 24.99   Downloaded iana-time-zone v0.1.65
+#12 24.99   Downloaded anstyle-wincon v3.0.11
+#12 25.00   Downloaded lru-slab v0.1.3
+#12 25.00   Downloaded chrono v0.4.45
+#12 25.00   Downloaded hyper-util v0.1.21
+#12 25.01   Downloaded clap v4.6.7
+#12 25.02   Downloaded serde_json v1.0.154
+#12 25.03   Downloaded reqwest v0.12.28
+#12 25.03   Downloaded hashbrown v0.17.1
+#12 25.04   Downloaded cc v1.10.0
+#12 25.04   Downloaded rand v0.10.3
+#12 25.05   Downloaded base64 v0.22.1
+#12 25.05   Downloaded base64 v0.23.1
+#12 25.05   Downloaded rusqlite v0.41.1
+#12 25.06   Downloaded regex v1.13.1
+#12 25.06   Downloaded aho-corasick v1.1.5
+#12 25.07   Downloaded clap_builder v4.6.7
+#12 25.08   Downloaded hyper v1.12.0
+#12 25.09   Downloaded vcpkg v0.2.15
+#12 25.12   Downloaded webpki-roots v1.0.11
+#12 25.13   Downloaded rustls v0.23.46
+#12 25.14   Downloaded regex-syntax v0.8.11
+#12 25.14   Downloaded windows_i686_gnullvm v0.52.6
+#12 25.17   Downloaded windows_x86_64_gnullvm v0.52.6
+#12 25.21   Downloaded windows_aarch64_gnullvm v0.52.6
+#12 25.22   Downloaded regex-automata v0.4.18
+#12 25.24   Downloaded web-sys v0.3.106
+#12 25.34   Downloaded windows_aarch64_msvc v0.52.6
+#12 25.36   Downloaded windows_i686_gnu v0.52.6
+#12 25.38   Downloaded windows_x86_64_gnu v0.52.6
+#12 25.40   Downloaded windows_i686_msvc v0.52.6
+#12 25.41   Downloaded windows_x86_64_msvc v0.52.6
+#12 25.43   Downloaded ring v0.17.14
+#12 25.46   Downloaded windows-strings v0.5.1
+#12 25.47   Downloaded clap_lex v1.1.1
+#12 25.47   Downloaded anstyle v1.0.14
+#12 25.47   Downloaded anstyle-parse v1.0.0
+#12 25.47   Downloaded windows-core v0.62.2
+#12 25.48   Downloaded windows-sys v0.52.0
+#12 25.56   Downloaded sqlite-wasm-rs v0.6.2
+#12 25.61   Downloaded libsqlite3-sys v0.39.1
+#12 DONE 27.4s
+
+#13 [8/8] RUN --network=none cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture
+#13 0.382    Compiling proc-macro2 v1.0.107
+#13 0.382    Compiling quote v1.0.47
+#13 0.382    Compiling unicode-ident v1.0.27
+#13 0.382    Compiling libc v0.2.191
+#13 0.382    Compiling cfg-if v1.0.5
+#13 0.382    Compiling smallvec v1.16.4
+#13 0.384    Compiling pin-project-lite v0.2.17
+#13 0.388    Compiling stable_deref_trait v1.2.1
+#13 0.550    Compiling bytes v1.12.1
+#13 0.555    Compiling futures-core v0.3.34
+#13 0.555    Compiling shlex v2.0.1
+#13 0.584    Compiling find-msvc-tools v0.1.15
+#13 0.734    Compiling cc v1.10.0
+#13 0.752    Compiling parking_lot_core v0.9.12
+#13 0.798    Compiling itoa v1.0.18
+#13 0.834    Compiling once_cell v1.21.4
+#13 0.915    Compiling scopeguard v1.2.0
+#13 0.921    Compiling serde_core v1.0.229
+#13 0.967    Compiling lock_api v0.4.14
+#13 0.984    Compiling writeable v0.6.4
+#13 1.019    Compiling litemap v0.8.3
+#13 1.067    Compiling tracing-core v0.1.36
+#13 1.231    Compiling http v1.5.0
+#13 1.252    Compiling utf8_iter v1.0.4
+#13 1.329    Compiling icu_properties_data v2.4.0
+#13 1.644    Compiling log v0.4.34
+#13 1.767    Compiling syn v3.0.9
+#13 1.813    Compiling percent-encoding v2.3.2
+#13 1.822    Compiling icu_normalizer_data v2.4.0
+#13 1.921    Compiling tracing v0.1.44
+#13 1.981    Compiling slab v0.4.12
+#13 2.105    Compiling zeroize v1.9.1
+#13 2.111    Compiling tower-service v0.3.3
+#13 2.191    Compiling httparse v1.10.1
+#13 2.309    Compiling errno v0.3.14
+#13 2.439    Compiling mio v1.2.4
+#13 2.525    Compiling signal-hook-registry v1.4.8
+#13 2.722    Compiling parking_lot v0.12.5
+#13 2.755    Compiling socket2 v0.6.5
+#13 2.808    Compiling http-body v1.1.0
+#13 2.880    Compiling bitflags v2.13.2
+#13 2.888    Compiling ring v0.17.14
+#13 2.935    Compiling futures-task v0.3.34
+#13 3.030    Compiling version_check v0.9.5
+#13 3.036    Compiling rustls-pki-types v1.15.1
+#13 3.043    Compiling getrandom v0.2.17
+#13 3.155    Compiling serde v1.0.229
+#13 3.180    Compiling untrusted v0.9.0
+#13 3.186    Compiling memchr v2.8.3
+#13 3.202    Compiling generic-array v0.14.7
+#13 3.215    Compiling httpdate v1.0.3
+#13 3.438    Compiling try-lock v0.2.5
+#13 3.475    Compiling want v0.3.2
+#13 3.506    Compiling form_urlencoded v1.2.2
+#13 3.516    Compiling sync_wrapper v1.0.2
+#13 3.560    Compiling rustls v0.23.46
+#13 3.575    Compiling typenum v1.20.1
+#13 3.624    Compiling mime v0.3.17
+#13 3.628    Compiling tower-layer v0.3.3
+#13 3.708    Compiling zmij v1.0.23
+#13 3.724    Compiling rustix v1.1.6
+#13 3.742    Compiling unicase v2.10.0
+#13 3.743    Compiling atomic-waker v1.1.2
+#13 3.827    Compiling http-body-util v0.1.5
+#13 3.853    Compiling futures-channel v0.3.34
+#13 3.918    Compiling mime_guess v2.0.5
+#13 4.007    Compiling linux-raw-sys v0.12.1
+#13 4.024    Compiling serde_json v1.0.154
+#13 4.034    Compiling base64 v0.23.1
+#13 4.148    Compiling pkg-config v0.3.34
+#13 4.225    Compiling getrandom v0.4.3
+#13 4.238    Compiling subtle v2.6.1
+#13 4.314    Compiling vcpkg v0.2.15
+#13 4.339    Compiling autocfg v1.5.1
+#13 4.387    Compiling ipnet v2.12.2
+#13 4.426    Compiling utf8parse v0.2.2
+#13 4.463    Compiling anstyle-parse v1.0.0
+#13 4.627    Compiling num-traits v0.2.19
+#13 4.659    Compiling anstyle v1.0.14
+#13 4.829    Compiling foldhash v0.2.0
+#13 4.879    Compiling is_terminal_polyfill v1.70.2
+#13 4.883    Compiling colorchoice v1.0.5
+#13 4.912    Compiling anstyle-query v1.1.5
+#13 4.919    Compiling futures-sink v0.3.34
+#13 4.934    Compiling libsqlite3-sys v0.39.1
+#13 4.951    Compiling ryu v1.0.23
+#13 4.956    Compiling anstream v1.0.0
+#13 4.997    Compiling hashbrown v0.17.1
+#13 5.141    Compiling block-buffer v0.10.4
+#13 5.161    Compiling crypto-common v0.1.7
+#13 5.206    Compiling synstructure v0.14.0
+#13 5.496    Compiling aho-corasick v1.1.5
+#13 5.567    Compiling webpki-roots v1.0.11
+#13 5.669    Compiling syn v2.0.119
+#13 5.680    Compiling regex-syntax v0.8.11
+#13 6.709    Compiling strsim v0.11.1
+#13 6.710    Compiling clap_lex v1.1.1
+#13 6.852    Compiling rustls-webpki v0.103.16
+#13 6.969    Compiling zerofrom-derive v0.1.8
+#13 7.059    Compiling yoke-derive v0.8.4
+#13 7.668    Compiling zerovec-derive v0.11.7
+#13 7.740    Compiling displaydoc v0.2.7
+#13 7.773    Compiling tokio-macros v2.7.2
+#13 8.057    Compiling futures-macro v0.3.34
+#13 8.087    Compiling zerofrom v0.1.8
+#13 8.135    Compiling yoke v0.8.4
+#13 8.235    Compiling serde_derive v1.0.229
+#13 8.370    Compiling zerotrie v0.2.5
+#13 8.444    Compiling tokio v1.54.1
+#13 8.647    Compiling anyhow v1.0.104
+#13 8.721    Compiling zerovec v0.11.9
+#13 8.728    Compiling futures-util v0.3.34
+#13 8.831    Compiling heck v0.5.0
+#13 8.914    Compiling http-range-header v0.4.2
+#13 8.936    Compiling clap_derive v4.6.7
+#13 9.038    Compiling async-stream-impl v0.3.6
+#13 9.127    Compiling tinystr v0.8.5
+#13 9.222    Compiling icu_locale_core v2.4.0
+#13 9.681    Compiling potential_utf v0.1.6
+#13 9.764    Compiling icu_collections v2.4.0
+#13 10.19    Compiling icu_provider v2.4.0
+#13 10.25    Compiling regex-automata v0.4.18
+#13 10.37    Compiling clap_builder v4.6.7
+#13 10.49    Compiling icu_normalizer v2.4.0
+#13 10.77    Compiling icu_properties v2.4.0
+#13 11.14    Compiling xattr v1.7.0
+#13 11.35    Compiling serde_urlencoded v0.7.1
+#13 11.40    Compiling hashlink v0.12.2
+#13 11.61    Compiling digest v0.10.7
+#13 11.83    Compiling axum-core v0.5.6
+#13 12.86    Compiling idna_adapter v1.2.2
+#13 12.98    Compiling idna v1.1.0
+#13 12.99    Compiling serde_path_to_error v0.1.20
+#13 13.30    Compiling url v2.5.8
+#13 13.94    Compiling hyper v1.12.0
+#13 13.97    Compiling tower v0.5.3
+#13 14.20    Compiling tokio-rustls v0.26.6
+#13 14.26    Compiling tokio-util v0.7.20
+#13 14.57    Compiling filetime v0.2.29
+#13 14.68    Compiling cpufeatures v0.2.17
+#13 14.72    Compiling fastrand v2.5.0
+#13 14.73    Compiling same-file v1.0.6
+#13 14.87    Compiling tower-http v0.6.11
+#13 14.89    Compiling fallible-streaming-iterator v0.1.9
+#13 14.95    Compiling fallible-iterator v0.3.0
+#13 15.00    Compiling matchit v0.8.4
+#13 15.24    Compiling hyper-util v0.1.21
+#13 15.33    Compiling iana-time-zone v0.1.65
+#13 15.75    Compiling base64 v0.22.1
+#13 16.02    Compiling chrono v0.4.45
+#13 16.05    Compiling rusqlite v0.41.1
+#13 16.12    Compiling tempfile v3.27.0
+#13 16.14    Compiling walkdir v2.5.0
+#13 16.20    Compiling sha2 v0.10.9
+#13 16.46    Compiling tar v0.4.46
+#13 16.49    Compiling clap v4.6.7
+#13 16.53    Compiling regex v1.13.1
+#13 16.78    Compiling async-stream v0.3.6
+#13 16.92    Compiling uuid v1.29.0
+#13 17.21    Compiling hex v0.4.3
+#13 17.47    Compiling hyper-rustls v0.27.10
+#13 17.61    Compiling axum v0.8.9
+#13 17.78    Compiling reqwest v0.12.28
+#13 19.37    Compiling agentsandbox v0.1.0 (/build)
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/codex.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:576:30
+#13 19.41     |
+#13 19.41 576 |         let events: Vec<_> = include_str!("../tests/adapters_fixtures/codex.jsonl")
+#13 19.41     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/claude.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:616:30
+#13 19.41     |
+#13 19.41 616 |         let events: Vec<_> = include_str!("../tests/adapters_fixtures/claude.jsonl")
+#13 19.41     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/generic.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:664:30
+#13 19.41     |
+#13 19.41 664 |         let events: Vec<_> = include_str!("../tests/adapters_fixtures/generic.jsonl")
+#13 19.41     |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/codex.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:749:17
+#13 19.41     |
+#13 19.41 749 |                 include_str!("../tests/adapters_fixtures/codex.jsonl"),
+#13 19.41     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/claude.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:753:17
+#13 19.41     |
+#13 19.41 753 |                 include_str!("../tests/adapters_fixtures/claude.jsonl"),
+#13 19.41     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 19.41 error: couldn't read `src/../tests/adapters_fixtures/generic.jsonl`: No such file or directory (os error 2)
+#13 19.41    --> src/adapters.rs:757:17
+#13 19.41     |
+#13 19.41 757 |                 include_str!("../tests/adapters_fixtures/generic.jsonl"),
+#13 19.41     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+#13 19.41 
+#13 22.78 error: could not compile `agentsandbox` (lib test) due to 6 previous errors
+#13 ERROR: process "/bin/sh -c cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture" did not complete successfully: exit code: 101
+------
+ > [8/8] RUN --network=none cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture:
+19.41 753 |                 include_str!("../tests/adapters_fixtures/claude.jsonl"),
+19.41     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19.41 
+19.41 error: couldn't read `src/../tests/adapters_fixtures/generic.jsonl`: No such file or directory (os error 2)
+19.41    --> src/adapters.rs:757:17
+19.41     |
+19.41 757 |                 include_str!("../tests/adapters_fixtures/generic.jsonl"),
+19.41     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19.41 
+22.78 error: could not compile `agentsandbox` (lib test) due to 6 previous errors
+------
+Dockerfile:10
+--------------------
+   8 |     USER 1000:1000
+   9 |     RUN rustup toolchain install 1.99.1 --profile minimal && cargo fetch --locked
+  10 | >>> RUN --network=none cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture
+  11 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c cargo test --locked --offline --lib control_fs::descriptor_tests -- --nocapture && cargo test --locked --offline --test control_fs -- --nocapture" did not complete successfully: exit code: 101
+
+View build details: docker-desktop://dashboard/build/default/default/iz2bzhp906ountpz9epz066lj

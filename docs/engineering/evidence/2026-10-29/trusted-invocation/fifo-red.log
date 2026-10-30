@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.16s
+     Running tests/runtime_managed.rs (target/debug/deps/runtime_managed-24b8f304bdf1c4e6)
+
+running 1 test
+test non_regular_runtime_program_is_rejected_without_blocking_on_open ... FAILED
+
+failures:
+
+---- non_regular_runtime_program_is_rejected_without_blocking_on_open stdout ----
+
+thread 'non_regular_runtime_program_is_rejected_without_blocking_on_open' (2099340) panicked at tests/runtime_managed.rs:878:13:
+validating a non-regular program blocked before the CLI timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    non_regular_runtime_program_is_rejected_without_blocking_on_open
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 2.02s
+
+error: test failed, to rerun pass `--test runtime_managed`

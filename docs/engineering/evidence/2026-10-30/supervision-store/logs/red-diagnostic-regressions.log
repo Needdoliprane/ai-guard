@@ -1,0 +1,42 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.99s
+     Running tests/audit_integrity.rs (target/debug/deps/audit_integrity-4c39901ac94870ac)
+
+running 12 tests
+test hardlinked_database_is_rejected_in_distinct_processes ... ok
+
+thread 'external_schema_change_is_detected_before_append' (4145921) panicked at tests/audit_integrity.rs:46:29:
+called `Result::unwrap()` on an `Err` value: supervision origin is invalidated or backing identity diverged
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'external_quota_corruption_blocks_append_instead_of_granting_capacity' (4145920) panicked at tests/audit_integrity.rs:151:29:
+called `Result::unwrap()` on an `Err` value: supervision origin is invalidated or backing identity diverged
+
+thread 'external_corruption_is_detected_before_append_without_integrity_endpoint' (4145919) panicked at tests/audit_integrity.rs:34:29:
+called `Result::unwrap()` on an `Err` value: supervision origin is invalidated or backing identity diverged
+test external_quota_corruption_blocks_append_instead_of_granting_capacity ... FAILED
+test external_schema_change_is_detected_before_append ... FAILED
+test final_symlink_and_parent_symlink_alias_are_refused ... ok
+test external_corruption_is_detected_before_append_without_integrity_endpoint ... FAILED
+
+thread 'corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event' (4145917) panicked at tests/audit_integrity.rs:62:32:
+called `Result::unwrap()` on an `Err` value: supervision origin is invalidated or backing identity diverged
+test unknown_schema_version_is_rejected_before_creating_application_tables ... ok
+test another_valid_store_can_append_without_false_corruption ... ok
+test corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event ... FAILED
+test database_path_substitution_or_new_hardlink_blocks_append ... ok
+test startup_rejects_trigger_that_discards_audit_before_acknowledgement ... ok
+test token_concatenation_cannot_disguise_missing_primary_key_constraint ... ok
+test missing_versioned_schema_objects_are_refused_without_repair ... ok
+
+failures:
+
+failures:
+    corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event
+    external_corruption_is_detected_before_append_without_integrity_endpoint
+    external_quota_corruption_blocks_append_instead_of_granting_capacity
+    external_schema_change_is_detected_before_append
+
+test result: FAILED. 8 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `--test audit_integrity`

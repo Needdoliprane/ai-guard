@@ -1,0 +1,14 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.69s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-c6ccb4992f1c775f)
+
+running 1 test
+Retained runtime QA source: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmploHnqA
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+Retained runtime QA export: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpPe38RH
+Validated real sessions ab79d25c-946a-465c-a4df-8fe7a7bef099 and b3c54091-1b1e-4e43-ac23-27e53737b034, policy denial 1c7c3dcf-1eb2-4398-9232-45f8c438c6f0 without container/volume. Named volumes retained; source proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmploHnqA; export proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpPe38RH.
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.25s
+

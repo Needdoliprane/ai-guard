@@ -1,0 +1,8 @@
+{
+  "allowed_argv": [
+    ["/usr/bin/id"], ["id"], ["/bin/pwd"], ["pwd"],
+    ["/bin/echo", "sandbox-ok"], ["echo", "sandbox-ok"],
+    ["/usr/bin/printf", "sandbox-ok\\n"]
+  ],
+  "denied_executables": ["rm", "dd", "mkfs", "mount", "umount", "sudo", "su", "docker", "podman", "nsenter", "unshare", "reboot", "shutdown"]
+}

@@ -1,0 +1,45 @@
+import { createRequire } from 'node:module';
+import { readFile, mkdir, writeFile } from 'node:fs/promises';
+const require = createRequire('/Users/louis/.npm/_npx/9833c18b2d85bc59/node_modules/');
+const { chromium } = require('playwright');
+const origin = 'http://127.0.0.1:48400';
+const output = '/Users/louis/Documents/ai-guard/docs/engineering/evidence/2026-10-30/editorial-ui';
+let token = '', browser;
+try {
+  await mkdir(output, { recursive: true });
+  browser = await chromium.launch({ executablePath: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', headless: true });
+  const context = await browser.newContext({ viewport: { width: 320, height: 568 }, colorScheme: 'light', reducedMotion: 'reduce', serviceWorkers: 'block' });
+  await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
+  const page = await context.newPage();
+  await page.goto(origin, { waitUntil: 'domcontentloaded' });
+  await page.getByRole('button', { name: 'Ouvrir la supervision', exact: true }).waitFor();
+  const first = await page.evaluate(() => ({ scrollY, brand: document.querySelector('.brand')?.getBoundingClientRect().top, action: document.querySelector('.login-submit')?.getBoundingClientRect().bottom, width: innerWidth, height: innerHeight, overflow: document.documentElement.scrollWidth > innerWidth }));
+  if (first.scrollY !== 0 || first.action > first.height || first.brand < 0 || first.overflow) throw new Error('Login initial geometry failed');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: `${output}/login-mobile-real.png` });
+  token = (await readFile('/tmp/ai-guard-control-qa.mF6i7C/config/secrets/viewer', 'utf8')).trim();
+  await page.setViewportSize({ width: 1440, height: 1050 });
+  await page.locator('#viewer-token').fill(token);
+  await page.getByRole('button', { name: 'Ouvrir la supervision', exact: true }).click();
+  await page.getByRole('heading', { level: 1, name: 'Vue d’ensemble', exact: true }).waitFor();
+  await page.locator('.table-scroll tbody tr').first().waitFor();
+  if ((await page.content()).includes(token)) throw new Error('A credential entered the rendered document');
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: `${output}/overview-desktop-real.png` });
+  await page.locator('.nav-link[data-view="workers"]').click();
+  await page.getByRole('heading', { level: 1, name: 'Workers', exact: true }).waitFor();
+  await page.locator('.control-panel tbody tr').first().waitFor();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: `${output}/workers-desktop-real.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate(() => scrollTo(0, 0));
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.screenshot({ path: `${output}/workers-mobile-real.png` });
+  await writeFile(`${output}/live-capture-result.json`, JSON.stringify({ status: 'PASS', origin, source: 'real QA gateway/dashboard, existing durable audit and worker records', initialLogin: first, captures: ['login-mobile-real.png', 'overview-desktop-real.png', 'workers-desktop-real.png', 'workers-mobile-real.png'] }, null, 2));
+  console.log('PASS real QA screenshots and initial login geometry');
+} catch (error) {
+  let message = String(error?.stack ?? error);
+  if (token) message = message.replaceAll(token, '[MASKED]');
+  console.error(message);
+  process.exitCode = 1;
+} finally { await browser?.close(); }

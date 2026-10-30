@@ -1,0 +1,57 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+     Running tests/control_migration.rs (target/debug/deps/control_migration-b8abfb1630b0634e)
+
+running 4 tests
+test future_and_partial_schemas_are_refused_without_repair ... ok
+test migration_never_overwrites_backup_and_audit_full_rolls_back_ddl ... ok
+test explicit_migration_preserves_prior_events_and_verified_backup ... ok
+test missing_v2_projection_is_not_repaired_and_backup_sidecars_are_preserved ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/usage_ledger.rs (target/debug/deps/usage_ledger-de918f92c327c68e)
+
+running 2 tests
+test deleting_a_durable_observation_is_detected_after_restart ... ok
+test observed_zero_interval_and_missing_interval_have_distinct_results ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/worker_registry.rs (target/debug/deps/worker_registry-5061533a4ea227b6)
+
+running 31 tests
+test historical_allow_is_only_a_link_and_does_not_bypass_current_policy ... ok
+test approved_admission_reconstructs_its_bound_request_metadata_after_reopen ... ok
+test claim_replay_never_returns_permission_and_unknown_retains_quota ... ok
+test a_changed_runtime_start_cannot_be_laundered_through_unknown_observations ... ok
+test concurrent_claims_allow_one_fresh_emitter_and_cancel_closes_future_claims ... ok
+test new_database_has_versioned_control_genesis ... ok
+test quota_process_helper ... ok
+test indoubt_after_create_claim_records_the_found_container_and_preserves_claims ... ok
+test a_restart_or_changed_limit_cannot_be_erased_by_a_later_zero_snapshot ... ok
+test receipt_from_another_tenant_and_secret_spec_are_rejected_without_worker ... ok
+test indoubt_recovery_cannot_rewind_an_existing_container_or_start_claim ... ok
+test indoubt_before_create_resumes_preparation_without_a_new_attempt_or_reservation ... ok
+test quota_replay_conflict_and_exact_receipt_survive_restart ... ok
+test projection_replay_rejects_prepare_and_created_records_without_their_exact_transition ... ok
+test rehashed_database_unknown_cannot_release_quota_without_terminal_evidence ... ok
+test reserved_sqlite_trigger_cannot_admit_over_quota ... ok
+test incomplete_terminal_restart_and_identity_mismatch_retain_quota ... ok
+test reserved_sqlite_tables_views_and_explicit_indexes_are_also_refused ... ok
+test reserved_sqlite_trigger_cannot_reissue_start_permission ... ok
+test reserved_sqlite_trigger_names_cannot_bypass_schema_validation_or_quota ... ok
+test rehashed_database_admission_requires_its_exact_prior_allow_and_input ... ok
+test reserved_sqlite_triggers_are_refused_at_startup ... ok
+test rehashed_database_admission_cannot_begin_with_execution_or_cleanup_evidence ... ok
+test separate_processes_cannot_oversubscribe_one_slot ... ok
+test two_connections_serialize_quota_one_and_projection_tampering_latches ... ok
+test rehashed_database_terminal_requires_its_exact_allocation_and_mutation_input ... ok
+test terminal_is_atomic_idempotent_and_uses_exact_allocation_products ... ok
+test terminal_audit_full_retains_capacity_and_retry_commits_once ... ok
+test rehashed_database_actions_cannot_invent_or_discard_claims ... ok
+test live_transition_history_reopens_with_the_same_claims_allocations_and_cleanup ... ok
+test zero_and_hundred_slot_boundaries_and_pages_are_real_reservations ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.60s
+

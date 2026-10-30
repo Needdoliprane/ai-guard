@@ -1,0 +1,25 @@
+   Compiling agentsandbox v0.1.0 (/private/tmp/ai-guard-engine-logs-red.CImJ4W)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.40s
+     Running tests/worker_registry.rs (/Users/louis/Documents/ai-guard/target/debug/deps/worker_registry-5061533a4ea227b6)
+
+running 3 tests
+
+thread 'fixed_sandbox_v2_is_a_distinct_closed_contract' (2736585) panicked at tests/worker_registry.rs:15:82:
+called `Result::unwrap()` on an `Err` value: Error("unknown variant `fixed_sandbox_v2`, expected `fixed_sandbox_v1`", line: 1, column: 18)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'fixed_sandbox_v2_changes_only_the_preset_in_the_version_one_admission' (2736584) panicked at tests/worker_registry.rs:47:65:
+called `Result::unwrap()` on an `Err` value: Error("unknown variant `fixed_sandbox_v2`, expected `fixed_sandbox_v1`", line: 1, column: 1116)
+test fixed_sandbox_v2_is_a_distinct_closed_contract ... FAILED
+test fixed_sandbox_v2_changes_only_the_preset_in_the_version_one_admission ... FAILED
+test fixed_sandbox_v1_admission_bytes_and_hashes_are_historical_goldens ... ok
+
+failures:
+
+failures:
+    fixed_sandbox_v2_changes_only_the_preset_in_the_version_one_admission
+    fixed_sandbox_v2_is_a_distinct_closed_contract
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test worker_registry`

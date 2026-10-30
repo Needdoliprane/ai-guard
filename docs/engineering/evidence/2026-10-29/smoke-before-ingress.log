@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-b25178852687768c)
+
+running 1 test
+
+thread 'real_worker_copy_uid_and_export_preserve_the_original_project' (911693) panicked at tests/runtime_smoke.rs:49:49:
+called `Result::unwrap()` on an `Err` value: empty host
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test real_worker_copy_uid_and_export_preserve_the_original_project ... FAILED
+
+failures:
+
+failures:
+    real_worker_copy_uid_and_export_preserve_the_original_project
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test runtime_smoke`

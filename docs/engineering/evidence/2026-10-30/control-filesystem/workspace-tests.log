@@ -1,0 +1,16 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.35s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-2465d0f45260b1b3)
+
+running 8 tests
+test workspace::tests::publication_never_replaces_a_destination_created_after_validation ... ok
+test workspace::tests::control_exclusion_tracks_the_retained_directory_not_its_former_name ... ok
+test workspace::tests::external_control_root_does_not_change_the_project_manifest ... ok
+test workspace::tests::orphaned_credential_snapshots_are_excluded_with_another_control_root ... ok
+test workspace::tests::scan_matches_export_and_does_not_need_or_write_the_original ... ok
+test workspace::tests::retained_control_directory_is_excluded_from_manifest_and_archive ... ok
+test workspace::tests::scan_rejects_directory_file_collisions_with_export_parity ... ok
+test workspace::tests::scan_and_export_share_unsafe_archive_and_limit_refusals ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.02s
+

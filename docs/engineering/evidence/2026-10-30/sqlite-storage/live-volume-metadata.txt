@@ -1,0 +1,6 @@
+700 1000 1000 2 d data
+600 1000 1000 1 f audit-before-control-v2-31d2c5af.sqlite
+600 1000 1000 1 f .ai-guard-sqlite-open.lock
+600 1000 1000 1 f audit.sqlite-wal
+600 1000 1000 1 f audit.sqlite
+600 1000 1000 1 f audit.sqlite-shm

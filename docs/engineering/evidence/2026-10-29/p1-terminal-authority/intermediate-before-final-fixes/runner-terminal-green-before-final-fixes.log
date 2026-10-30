@@ -1,0 +1,16 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.75s
+     Running tests/runner_terminal_audit.rs (target/debug/deps/runner_terminal_audit-cf0a54cbd76b7805)
+
+running 1 test
+test terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.18s
+
+     Running tests/runtime_uncertainty.rs (target/debug/deps/runtime_uncertainty-b86511a4199878ed)
+
+running 1 test
+test runtime_failure_does_not_present_a_missing_terminal_observation_as_known ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

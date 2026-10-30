@@ -1,0 +1,24 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.29s
+     Running tests/supervision_store.rs (target/debug/deps/supervision_store-464e3236fb4a9588)
+
+running 6 tests
+test projection_corruption_latches_v3_store_unhealthy ... ok
+test audit_capacity_failure_does_not_persist_an_arm_or_permission ... ok
+
+thread 'supervised_admission_requires_uuid_authority_while_legacy_v2_keeps_opaque_ids' (4091997) panicked at tests/supervision_store.rs:586:5:
+new supervised admission must reject non-UUID runtime authority before quota
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test supervised_admission_requires_uuid_authority_while_legacy_v2_keeps_opaque_ids ... FAILED
+test schema2_keeps_legacy_api_and_schema3_supervised_admission_is_atomic_and_idempotent ... ok
+test schema2_default_and_explicit_migration_preserve_history_and_legacy_replay ... ok
+test import_verification_success_mismatch_and_unknown_terminal_gate_create ... ok
+
+failures:
+
+failures:
+    supervised_admission_requires_uuid_authority_while_legacy_v2_keeps_opaque_ids
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+error: test failed, to rerun pass `--test supervision_store`

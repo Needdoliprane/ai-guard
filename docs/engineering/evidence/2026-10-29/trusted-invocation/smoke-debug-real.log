@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/runtime_smoke.rs (target/debug/deps/runtime_smoke-a520d245b0b0346f)
+
+running 1 test
+Retained runtime QA source: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpbJX3ow
+test real_worker_copy_uid_and_export_preserve_the_original_project has been running for over 60 seconds
+Retained runtime QA export: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpI7pgfH
+Validated real bounded secret capture session 379d6a69-f3b6-4143-9d83-f823581b896e; synthetic credentials retained privately at /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmp7yrgdF. No provider request was performed.
+Validated real sessions 4c837afd-dad0-4898-adcb-1c2f62ccdd15 and d8076ee5-f791-402f-a4f6-dcf5e1c1afe1, policy denial 46afb1ed-ec80-450c-90ea-d2f2006cd082 without container/volume. Named volumes retained; source proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpbJX3ow; export proof /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/.tmpI7pgfH.
+test real_worker_copy_uid_and_export_preserve_the_original_project ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 449.00s
+

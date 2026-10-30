@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.34s
+     Running unittests src/lib.rs (target/debug/deps/agentsandbox-2465d0f45260b1b3)
+
+running 1 test
+test runtime::capture_error_tests::failed_control_capture_never_formats_raw_stderr ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.30s
+

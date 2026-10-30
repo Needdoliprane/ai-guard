@@ -1,0 +1,2 @@
+error while interpolating secrets.runner.file: required variable AGENTSANDBOX_CONFIG_DIR is missing a value: Run agentsandbox init first
+error while interpolating secrets.viewer.file: required variable AGENTSANDBOX_CONFIG_DIR is missing a value: Run agentsandbox init first

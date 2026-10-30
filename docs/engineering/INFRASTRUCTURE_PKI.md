@@ -1,0 +1,9 @@
+# Infrastructure et PKI — point d'entrée
+
+Lire le [guide d'infrastructure et PKI à la racine](../../INFRASTRUCTURE_PKI.md) avant tout travail TLS, mTLS, certificat, transport distant ou NAS. Il conserve les fiches de paramètres, menaces, scénarios de certificat/révocation et conditions d'intervention. Ses descriptions d'implémentation historiques doivent être confrontées à [CURRENT_STATE.md](CURRENT_STATE.md) et [VALIDATION.md](VALIDATION.md) ; elles ne prouvent ni accès existant, ni intégration, ni qualification.
+
+Avant une opération réelle, établir endpoint exact, propriétaire, identité/rôle minimal, fonction demandée, chaîne publique et méthode de vérification, SAN/usages/TTL, révocation, fenêtre et rollback. Préparer une action concrète et vérifiable puis obtenir le mandat précis du mainteneur selon ce guide ; un mandat antérieur couvrant exactement l'action reste valable. Cette documentation n'autorise aucune connexion, découverte réseau, émission, installation de confiance ou rotation.
+
+Ne jamais deviner un compte, endpoint, service de CA ou accès NAS. Ne jamais exporter une clé privée de CA, incorporer de clé aux images ou joindre de secret aux preuves. La vérification TLS, de chaîne et de nom reste active ; un échec ne se contourne pas par une option insecure. Une identité mTLS ne remplace pas les autorisations tenant, rôle et grant.
+
+La PKI peut être indépendante d'un NAS. Un profil exclusivement loopback peut justifier `NOT_APPLICABLE` pour sa PKI locale, tout en conservant ses contrôles d'authentification et de confidentialité. Le cloud exige ses transports chiffrés, identités, politiques réseau appliquées et preuves de reprise ; une dépendance manquante reste `BLOCKED` ou `NOT_RUN`, sans interrompre les travaux locaux indépendants. Voir les [gates](PRODUCTION_READINESS.md), la [stratégie de tests](TEST_STRATEGY.md) et la [checklist de release](RELEASE_CHECKLIST.md).

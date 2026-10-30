@@ -1,0 +1,9 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.02s
+     Running tests/runtime_managed.rs (target/debug/deps/runtime_managed-24b8f304bdf1c4e6)
+
+running 1 test
+test podman_authority_bootstrap_is_explicit_and_marker_loss_remains_unknown ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.46s
+

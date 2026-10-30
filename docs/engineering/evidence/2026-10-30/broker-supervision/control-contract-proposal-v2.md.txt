@@ -1,0 +1,115 @@
+# Broker/control contract v2 — corrected candidate
+
+2026-10-30. **Proposal only, no product code or test executed.** Supersedes the erroneous passages of `/tmp/ai-guard-broker-control-contract.md`, whose original SHA `48428b22390ffbe42bb36abfd51a586ca54bd8eccd482c6bdc55bd4d1ef4b220` is preserved. The approved architecture needs no further user permission. Coordinated with runtime v2 `/tmp/ai-guard-broker-runtime-contract-v2.md` (SHA `8e4fb65b5042edfcf79b2c6a6a7b49ab3d6f0cb161a87a5b13ff1451304e437a`).
+
+## BPR-01: a routing hint is never an authorization
+
+The startup digest index only selects one configured backend origin. Before **every new IPC action**, including status/approve/stop/export, authenticate the **presented** credential freshly against that backend and require the current runner role, expected tenant and control namespace. Do this before profile/job lookup, source/binding access or RPC dispatch. Gateway failure/revocation/role change refuses the new action; no stale positive cache, alternate origin/profile or runner-file substitution is tried.
+
+The resulting opaque action context owns that exact credential and immutable principal; RPC construction uses it, never `configRoot/secrets/runner`. It is not serializable or stored in jobs and is not reused for a later frame. Each mutation RPC still authenticates that same credential at the gateway. This is freshness at the authenticated action boundary, not an atomic promise against revocation between two machines' instructions.
+
+Autonomous recovery has a **different** authority: an already durably admitted job binds origin/tenant/namespace/installation/intent and its immutable profile. Recovery may refresh a current runner reference only after reauthenticating it to that same identity, and never to serve a new caller, authorize a new submission/destination or replace a missing approval. A merely accepted pre-admission submission cannot borrow this recovery grant. The prearmed stop needs no credential; revocation does not suspend it.
+
+Illustrative concrete ownership declarations for the future IPC module (private constructors must enforce the flow above):
+```rust
+use std::sync::Arc;
+pub(crate) struct ActionPrincipal { origin:reqwest::Url, tenant_id:String, namespace:String }
+pub(crate) struct FreshActionAuth { principal:ActionPrincipal, presented:Arc<str> }
+pub(crate) struct AcceptedJobIdentity { origin:reqwest::Url, tenant_id:String,
+    namespace:String, installation_id:String, intent_hash:String, admission_operation_id:String }
+pub(crate) struct RecoveryAuthority { job:AcceptedJobIdentity, profile_id:String }
+```
+
+## Concrete central DTO declarations
+
+These declarations are ordinary Rust, not omitted-field pseudostructs. They are proposed new types; no endpoint is advertised as present. UUID/hash/decimal/version validation is mandatory, separate from Serde. Existing inner request/admission/spec/provider hashes and RunPlan1/2/3 remain unchanged.
+```rust
+use serde::{Deserialize, Serialize};
+use crate::control::{AdmissionV1, ClaimDispositionV1, MutationReceiptV1,
+    RuntimeInspectionV1, RuntimeObservationV1};
+macro_rules! dto { ($n:ident { $($f:ident : $t:ty),* $(,)? }) => {
+    #[derive(Clone, Debug, Serialize, Deserialize)] #[serde(deny_unknown_fields)]
+    pub struct $n { $(pub $f:$t),* }
+}; }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")] pub enum HostClockMethodV1 { LinuxBoottimeV1, DarwinMachContinuousV1 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")] pub enum SupervisionProtocolV1 { BrokerSupervisionV1 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all="snake_case")] pub enum HelperPurposeV1 { Import, ImportVerification, FinalScan, Export }
+dto!(HostClockSampleV1 { version:u32, method:HostClockMethodV1, boot_id:String,
+    continuous_ns_decimal:String, observed_utc:Option<String> });
+dto!(ControlProtocolV1 { version:u32, schema_version:u32, control_namespace_uuid:Option<String>,
+    tenant_id:String, role:String, protocols:Vec<SupervisionProtocolV1>, active:bool });
+dto!(SupervisedAdmissionV1 { version:u32, protocol:SupervisionProtocolV1,
+    intent_hash:String, admission:AdmissionV1 });
+dto!(BindLegacyIntentV1 { version:u32, operation_id:String, worker_id:String,
+    attempt_id:String, expected_revision:u64, intent_hash:String });
+dto!(ArmReceiptV1 { version:u32, arm_id:String, worker_id:String, attempt_id:String,
+    input_hash:String, control_namespace_uuid:String, audit_seq:i64, audit_hash:String });
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag="kind",rename_all="snake_case",deny_unknown_fields)]
+pub enum HelperPermissionV1 {
+    Admission { receipt:MutationReceiptV1 },
+    ImportVerification { import_helper_id:String, import_arm:ArmReceiptV1,
+        import_terminal:MutationReceiptV1, manifest_digest:String },
+    Export { receipt:MutationReceiptV1, destination_ref:String, destination_intent_hash:String },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag="kind",rename_all="snake_case",deny_unknown_fields)]
+pub enum ArmSubjectV1 { Worker, Helper { helper_id:String, purpose:HelperPurposeV1,
+    policy_version:u32, permission:HelperPermissionV1 } }
+dto!(ArmV1 { version:u32, operation_id:String, worker_id:String, attempt_id:String,
+    expected_revision:u64, intent_hash:String, subject:ArmSubjectV1,
+    inspection:RuntimeInspectionV1, authority_binding_hash:String,
+    configuration_fingerprint_version:u32, configuration_fingerprint:String,
+    clock:HostClockSampleV1, timeout_seconds:u32, deadline_ns_decimal:String });
+dto!(ArmResultV1 { replayed:bool, arm:ArmV1, receipt:ArmReceiptV1 });
+dto!(ArmedStartClaimV1 { version:u32, operation_id:String, worker_id:String,
+    attempt_id:String, expected_revision:u64, emitter_id:String,
+    arm_receipt:ArmReceiptV1, clock_check:HostClockSampleV1 });
+dto!(HelperStartClaimV1 { version:u32, operation_id:String, helper_id:String,
+    emitter_id:String, arm_receipt:ArmReceiptV1, clock_check:HostClockSampleV1 });
+dto!(HelperClaimResultV1 { receipt:MutationReceiptV1, disposition:ClaimDispositionV1 });
+dto!(ImportVerificationReportV1 { import_helper_id:String,
+    expected_manifest_digest:String, observed_manifest_digest:String });
+dto!(HelperObservationV1 { version:u32, operation_id:String, helper_id:String,
+    arm_receipt:ArmReceiptV1, observation:RuntimeObservationV1,
+    verification:Option<ImportVerificationReportV1> });
+dto!(HelperCleanupV1 { version:u32, operation_id:String, helper_id:String,
+    arm_receipt:ArmReceiptV1, removed:bool, error:Option<String> });
+dto!(ExportRequestV1 { version:u32, operation_id:String, worker_id:String,
+    attempt_id:String, destination_ref:String, destination_intent_hash:String });
+```
+
+All `version` fields above equal 1; policy version is 1; fingerprints accept only the applicable existing version. Counters are canonical checked u128 decimal strings and deadlines retain their original bytes. The protocol enum serializes as `broker_supervision_v1`. Keep the distinct v1 hash domains from the original proposal; new purpose/permission fields participate in those new typed hashes, never a legacy hash. The code must validate every full receipt against its durable operation/event/hash, not merely its shape.
+
+## BPR-02: closed import verification, separate from final scan
+
+Purpose/policy1 commands are fixed in shared Rust: Import uses the current tar extract argv (`--no-same-owner`, `--no-same-permissions`); ImportVerification/FinalScan/Export use current tar-create argv. Same immutable image/parent volume, network none, no credentials, preset2 and existing bounded helper resources; deadline120s independent of the worker's timeout. No arbitrary API helper argv.
+
+Import permission resolves an accepted parent admission and requires Preparing/quota held/no worker start. **ImportVerification** resolves the precise import helper/arm and a centrally recorded credible successful terminal observation for that helper; parent must still be Preparing, quota held, no worker create/start claim, and permission manifest must equal the admitted workspace manifest. Revalidate these facts at **claim**, not just arm. Parent/source/CID/purpose/permission divergence refuses; no repeated import start is granted.
+
+The verification helper has its own arm, claim, clock, observations and cleanup. Preserve `recover_import`'s safe archive parsing and exact `checkpoint.before` comparison before proceeding. An exit0 alone is not import completion. A report with a well-formed but different observed manifest is recorded as mismatch and blocks continuation; no report leaves verification unknown. Gateway validates reported bindings/digests, not the filesystem independently. FinalScan and Export continue to require a credible terminal parent. Export also resolves the actual durable ExportRequest, whose opaque destination UUID and hash bind a private immutable destination intent **persisted before ACK**; a rotated path under that UUID conflicts.
+
+Every helper route compares `{worker_id}` from the URL with the loaded arm/permission/job in the authenticated Store, even when the DTO contains only `helper_id`. Helper record IDs, parent attempt, namespace and all receipt fields must agree. Reuse of an unrelated same-tenant receipt is not authorization. Subject keys remain derived: worker/import per attempt; import_verification/final_scan/export per helper UUID. A replay never changes an arm deadline or re-emits a claim.
+
+## BPR-03 and shared runtime boundaries
+
+Use the coordinated snapshot-first stop port: inspect and compare full Created snapshot/fingerprint/image/resources/name/CID, then revalidate authority **before** kill. Divergence/missing inspection gives Unknown without kill; post-effect observation is validated again. The remaining administrative race is a trust-boundary limit, not an atomic engine attestation. A stopped Created is not an allocation or a proof against an old start RPC.
+
+Before the one non-clonable emission permit is consumed, perform the last real host-clock read **after** Command construction/FS checks and TTY preparation; no subsequent await/preparation I/O may restart or consume the deadline unnoticed. Potentially blocking executable verification/inspect/stop run in isolated bounded effect capacity, not the scheduler tick. A stuck A must not consume B's reserved stop capacity; cancellation/timeout does not prove an underlying syscall ended.
+
+## Store, schema and first code perimeter
+
+Keep the original proposal's exact five-table schema3 overlay plus helper observation index, global operation IDs via `worker_mutations`, strict new-record dispatch/reconstruction and unchanged legacy DTO/hash rules. Extend the derived subject-key list for the two new purpose names. No default cutover, auto-migration, new library or second database. `tenant_binding.schema_version=1` remains distinct from SQLite schema3.
+
+Proposed **central implementation lot**: exclusive `src/control.rs`, new `src/control/supervision.rs`, `src/audit.rs`, `src/audit/control.rs`, new `src/audit/supervision.rs` (split only if materially useful). Implement strict DTO validation and real checked Store transactions for supervised admission, immutable binding, arms, worker/helper claims, helper observation/cleanup and export permission; keep API integration in root's separate `src/api.rs` scope after Store GREEN. Store signatures remain those in proposal1 with corrected DTOs above; no successful stub or local-only helper exemption.
+
+To limit replay risk, keep old `ControlRecord` and v2 replay path unchanged. Add closed version2 supervised admission/start records with complete new input, and strict arm/helper/bind/export records, sharing existing transition/row derivation rather than copying it. Evolve schema allowlists, auto-index counts, `TABLE_QUERIES`, loaders, genesis and replay together. Validate schema2 and schema3 explicitly; never leave `if version !=2 { Ok(()) }` as a v3 bypass. v3 blocks fresh legacy admissions/claims, including when an arm exists; consumed replay only returns AlreadyConsumed. Other legacy maintenance operations retain their exact inputs/receipts.
+
+If subdivision is needed: first freeze DTOs + shared replay projection helpers with unchanged schema2 regressions; then implement **all** new Store/schema3 transactions and migration as the functional central lot before exposing APIs. The first subdivision is preparation, not a delivered supervision feature. New databases/defaults remain v2 during this work. Activation awaits complete batch, helpers and TTY/guardian qualification; explicit development mode may reject Interactive before freeze but is not release cutover.
+
+Migration remains explicit v2→v3 with new verified private backup/fsync/quiescence/head equality; v1 uses its separate existing upgrade first. Retain existing namespace, snapshots/claims/allocations and provider plan3 binding. Restored/cloned/rolled-back state is **maintenance-only**, with no new admission/claim until old authorities/CIDs/emitters and in-flight RPCs are conservatively fenced and activation is explicitly authorized. Flock, audit integrity or a restored missing claim row is insufficient; without proved D5, resumption of execution remains blocked while diagnosis/targeted stop/reconciliation continue.
+
+Root/Luna acceptance remains real SQLite atomicity/idempotence/replay/tamper/migration tests, plus the three review regressions: revoked T/profileT2 never borrows T2 or opens jobs, import terminal/ACK-loss verifies the exact manifest without redoing import start, divergent stop snapshot emits no kill. Compilation/tests and full supervision runtime qualification are NOT_RUN for this proposal; previous hashes/results are not transferred.

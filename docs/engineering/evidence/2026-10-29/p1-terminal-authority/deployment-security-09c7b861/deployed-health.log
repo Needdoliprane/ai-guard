@@ -1,0 +1,3 @@
+/ai-guard-qa-7dce8f12-gateway-1 running=true health=healthy image=sha256:b4239720250bd8a0e05c478d5bd289726041ea753dd701fa4780e795ae9150f2
+/ai-guard-qa-7dce8f12-dashboard-1 running=true health=healthy image=sha256:b4239720250bd8a0e05c478d5bd289726041ea753dd701fa4780e795ae9150f2
+/ai-guard-qa-7dce8f12-ingress-1 running=true health=healthy image=sha256:b4239720250bd8a0e05c478d5bd289726041ea753dd701fa4780e795ae9150f2

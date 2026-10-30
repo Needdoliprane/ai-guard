@@ -1,0 +1,2092 @@
+[
+  {
+    "coverage_id": "front%2Fsrc%2Fmain.ts%23dashboard::src%2Fapi.rs%23dashboard_router::front%2Fsrc::ATTACK-CLASSES.md%23Feature%20abuse%20and%20data%20leakage",
+    "canonical_refs": {
+      "surface": "front/src/main.ts#dashboard",
+      "boundary": "src/api.rs#dashboard_router",
+      "subsystem": "front/src",
+      "attack_class": "ATTACK-CLASSES.md#Feature abuse and data leakage"
+    },
+    "surface": "Dashboard navigateur et proxy de lecture",
+    "boundary": "Bearer viewer, DOM et proxy dashboard vers gateway",
+    "subsystem": "Frontend TypeScript",
+    "attack_class": "Fuite de données et abus de fonctionnalité",
+    "starting_paths": [
+      "front/src/main.ts",
+      "front/src/api.ts",
+      "front/src/model.ts",
+      "front/src/sse.ts",
+      "front/src/dom.ts",
+      "src/api.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Feature abuse and data leakage",
+    "selected_companion_blocks": [
+      "CLIENT-SIDE.md#Core discipline",
+      "CLIENT-SIDE.md#DOM-based XSS",
+      "CLIENT-SIDE.md#Browser-storage disclosure and stale authorization",
+      "CLIENT-SIDE.md#Clickjacking",
+      "CLIENT-SIDE.md#Universal moves",
+      "CLIENT-SIDE.md#Validation rules",
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key exposure and unsafe transport",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "CLIENT-SIDE.md#Service-worker registration and scope takeover",
+        "reason": "Aucun service worker n'est enregistré dans front/src."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_web",
+    "reviewed_paths": [
+      "front/src/main.ts",
+      "front/src/api.ts",
+      "front/src/model.ts",
+      "front/src/sse.ts",
+      "front/src/dom.ts",
+      "src/api.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_web",
+        "reviewed_paths": [
+          "front/src/main.ts",
+          "front/src/api.ts",
+          "front/src/model.ts",
+          "front/src/sse.ts",
+          "front/src/dom.ts",
+          "src/api.rs"
+        ],
+        "invariant": "Les données d'audit ne deviennent pas du code navigateur et le bearer reste limité aux routes de lecture.",
+        "method": "source",
+        "result": "Rendu par textContent/createTextNode, token en mémoire, cookies omis, redirects refusés, proxy GET allowlisté et headers CSP/no-store/frame deny ; aucun sink XSS ou stockage persistant du token trouvé.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "images%2Fcontrol.Dockerfile%23build::deploy%2Fdocker%2Fcompose.yaml%23runtime-deployment::images%2Bdeploy::ATTACK-CLASSES.md%23Chained%20vulnerabilities%20and%20trust%20boundaries",
+    "canonical_refs": {
+      "surface": "images/control.Dockerfile#build",
+      "boundary": "deploy/docker/compose.yaml#runtime-deployment",
+      "subsystem": "images+deploy",
+      "attack_class": "ATTACK-CLASSES.md#Chained vulnerabilities and trust boundaries"
+    },
+    "surface": "Construction d'images et déploiements Compose",
+    "boundary": "Entrées supply-chain et configuration déclarative vers workloads effectifs",
+    "subsystem": "Images et déploiement",
+    "attack_class": "Chaînes et frontières de confiance",
+    "starting_paths": [
+      "images/control.Dockerfile",
+      "images/worker.Dockerfile",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "deploy/docker/compose.jev.example.yaml",
+      "Cargo.lock",
+      "front/package-lock.json",
+      ".dockerignore"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Chained vulnerabilities and trust boundaries",
+    "selected_companion_blocks": [
+      "SUPPLY-CHAIN-AND-RELEASE.md#Core discipline",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Mutable and unbound build inputs",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Build-context inclusion",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Build-to-promotion substitution",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Universal moves",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Validation rules",
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Security-control precedence drift",
+      "CLOUD-AND-DEPLOYMENT.md#Unexpected service or management-plane reachability",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "SUPPLY-CHAIN-AND-RELEASE.md#Untrusted code in a privileged workflow",
+        "reason": "Aucune définition CI n'existe dans le snapshot."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "blocked",
+    "agent_id": "hunter_runtime",
+    "reviewed_paths": [
+      "images/control.Dockerfile",
+      "images/worker.Dockerfile",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "deploy/docker/compose.jev.example.yaml",
+      ".dockerignore",
+      "Cargo.lock",
+      "front/package-lock.json",
+      "src/operations.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_runtime",
+        "reviewed_paths": [
+          "images/control.Dockerfile",
+          "images/worker.Dockerfile",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "deploy/docker/compose.jev.example.yaml",
+          ".dockerignore",
+          "Cargo.lock",
+          "front/package-lock.json",
+          "src/operations.rs"
+        ],
+        "invariant": "Les entrées de build et contrôles Compose ne doivent pas étendre l'autorité d'un projet worker.",
+        "method": "source",
+        "result": "Le contexte build est allowlisté, Cargo/npm sont verrouillés et les Compose demandent non-root/RO/caps/limites/réseaux séparés. Les tags/base images restent mutables et l'application effective n'est pas observable sans moteur isolé.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": [
+      "Rendu Compose, politiques moteur et identités d'images non observés ; exécution interdite faute de sandbox complet."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fapi.rs%23dashboard_router-fallback::tower_http%3A%3Aservices%3A%3AServeDir%23static-filesystem-root::src%2Fapi.rs%2Bsrc%2Fmain.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/api.rs#dashboard_router-fallback",
+      "boundary": "tower_http::services::ServeDir#static-filesystem-root",
+      "subsystem": "src/api.rs+src/main.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "Fallback HTTP des assets dashboard",
+    "boundary": "Requête non authentifiée vers racine filesystem statique",
+    "subsystem": "Dashboard Rust",
+    "attack_class": "Ressources et fichiers",
+    "starting_paths": [
+      "src/api.rs",
+      "src/main.rs",
+      "images/control.Dockerfile",
+      ".dockerignore",
+      "front/vite.config.ts",
+      "tests/api_security.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Unexpected service or management-plane reachability",
+      "CLOUD-AND-DEPLOYMENT.md#Secret exposure across workload boundaries",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "CLIENT-SIDE.md#DOM-based XSS",
+        "reason": "Le rendu DOM et les données frontend sont couverts séparément ; cette unité porte sur la lecture filesystem publique."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter_static_fallback",
+    "reviewed_paths": [
+      ".dockerignore",
+      "Cargo.lock",
+      "Cargo.toml",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/api.md",
+      "docs/operations.md",
+      "front/.gitignore",
+      "front/dist",
+      "front/public",
+      "front/vite.config.ts",
+      "images/control.Dockerfile",
+      "src/api.rs",
+      "src/main.rs",
+      "tests/api_security.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_static_fallback",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/main.rs",
+          "Cargo.toml",
+          "Cargo.lock",
+          "images/control.Dockerfile",
+          ".dockerignore",
+          "front/.gitignore",
+          "front/vite.config.ts",
+          "front/dist",
+          "front/public",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "tests/api_security.rs",
+          "docs/api.md",
+          "docs/operations.md"
+        ],
+        "invariant": "Le fallback statique public ne doit ouvrir aucun inode hors d'une racine approuvée et immuable.",
+        "method": "source",
+        "result": "tower-http 0.6.11 refuse les traversées lexicales mais suit les symlinks lors de l'ouverture. Le front_dir est configurable et seul index.html est testé. L'arbre snapshot est régulier et le Compose standard le sert depuis une image RO, contrôles qui réduisent sans qualifier les modes hôte/dérivés.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_dashboard_symlink",
+        "reviewed_paths": [
+          "Cargo.lock",
+          "deploy/docker/compose.yaml",
+          "images/control.Dockerfile",
+          "src/api.rs",
+          "src/main.rs",
+          "tests/api_security.rs"
+        ],
+        "invariant": "Le candidat dashboard/static-root-symlink-follow-disclosure doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour dashboard/static-root-symlink-follow-disclosure.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "dashboard/static-root-symlink-follow-disclosure"
+    ],
+    "unresolved": [
+      "Principal capable d'écrire front_dir, image/mounts effectifs et lecture par symlink non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fapi.rs%23gateway_router::src%2Fapi.rs%23GatewayState%3A%3Aauthorize::src%2Fapi.rs::ATTACK-CLASSES.md%23Access%20control",
+    "canonical_refs": {
+      "surface": "src/api.rs#gateway_router",
+      "boundary": "src/api.rs#GatewayState::authorize",
+      "subsystem": "src/api.rs",
+      "attack_class": "ATTACK-CLASSES.md#Access control"
+    },
+    "surface": "API gateway /api et /api/v1",
+    "boundary": "Bearer vers rôle, tenant et Store",
+    "subsystem": "Gateway multi-tenant",
+    "attack_class": "Contrôle d'accès",
+    "starting_paths": [
+      "src/api.rs",
+      "src/gateway_config.rs",
+      "src/main.rs",
+      "src/tenancy.rs",
+      "src/audit.rs",
+      "tests/tenant_api.rs",
+      "tests/gateway_tenancy.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Access control",
+    "selected_companion_blocks": [
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key scope and resource binding",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key exposure and unsafe transport",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Missing tenant or owner enforcement",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Composite-key and namespace collision",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Policy and query disagreement",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#JWT verification and claim binding",
+        "reason": "L'implémentation utilise des tokens opaques et aucun JWT."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_web",
+    "reviewed_paths": [
+      "src/api.rs",
+      "src/gateway_config.rs",
+      "src/main.rs",
+      "src/tenancy.rs",
+      "src/audit.rs",
+      "src/model.rs",
+      "tests/tenant_api.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_web",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/gateway_config.rs",
+          "src/main.rs",
+          "src/tenancy.rs",
+          "src/audit.rs",
+          "src/model.rs",
+          "tests/tenant_api.rs"
+        ],
+        "invariant": "Le bearer sélectionne exactement le rôle, le tenant et la base ; le viewer ne mute pas.",
+        "method": "source",
+        "result": "TenantState vient uniquement du credential, les credentials sont uniques, le Store est lié au tenant et /api comme /api/v1 utilisent les mêmes handlers ; aucun sélecteur tenant libre ni alias d'écriture viewer trouvé.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "src%2Fapi.rs%23implemented-roles::docs%2Fengineering%2FCLOUD_TENANCY.md%23worker-grants-contract::control-plane-contract::ATTACK-CLASSES.md%23Access%20control",
+    "canonical_refs": {
+      "surface": "src/api.rs#implemented-roles",
+      "boundary": "docs/engineering/CLOUD_TENANCY.md#worker-grants-contract",
+      "subsystem": "control-plane-contract",
+      "attack_class": "ATTACK-CLASSES.md#Access control"
+    },
+    "surface": "Rôles et contrats cloud annoncés",
+    "boundary": "Rôles runner/viewer implémentés versus identité worker et grants obligatoires",
+    "subsystem": "Contrat du plan de contrôle",
+    "attack_class": "Contrôle d'accès",
+    "starting_paths": [
+      "src/api.rs",
+      "src/model.rs",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CLOUD_TENANCY.md",
+      "docs/engineering/CURRENT_STATE.md",
+      "docs/engineering/PRODUCTION_READINESS.md"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Access control",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Workload identity overreach",
+      "CLOUD-AND-DEPLOYMENT.md#Cross-account or cross-tenant role confusion",
+      "CLOUD-AND-DEPLOYMENT.md#Namespace and label trust confusion",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Peer identity to application-principal confusion",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Topic, routing-key, and subscription scope gaps",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#mTLS peer and application-identity confusion",
+        "reason": "Aucun mTLS ni adaptateur Kubernetes n'est implémenté."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_web",
+    "reviewed_paths": [
+      "src/api.rs",
+      "src/model.rs",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CLOUD_TENANCY.md",
+      "docs/engineering/CURRENT_STATE.md",
+      "docs/engineering/PRODUCTION_READINESS.md"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_web",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/model.rs",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CLOUD_TENANCY.md",
+          "docs/engineering/CURRENT_STATE.md",
+          "docs/engineering/PRODUCTION_READINESS.md"
+        ],
+        "invariant": "Les rôles absents ne doivent pas être présentés comme une barrière existante.",
+        "method": "source",
+        "result": "Seuls runner et viewer existent. Identité worker, registre, grants, relais et Kubernetes sont des exigences absentes, non des contrôles runtime actuels ni une usurpation démontrée.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "src%2Fapi.rs%23ingest-decide-preauth::src%2Fapi.rs%23Json-extraction-and-GatewayState%3A%3Aauthorize::src%2Fapi.rs%2Bsrc%2Fgateway_config.rs::RESOURCE-EXHAUSTION-AND-AVAILABILITY.md%23Pre-authentication%20work%20imbalance",
+    "canonical_refs": {
+      "surface": "src/api.rs#ingest-decide-preauth",
+      "boundary": "src/api.rs#Json-extraction-and-GatewayState::authorize",
+      "subsystem": "src/api.rs+src/gateway_config.rs",
+      "attack_class": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Pre-authentication work imbalance"
+    },
+    "surface": "Ingest et décision avant authentification",
+    "boundary": "Corps JSON et bearer non fiables vers recherche séquentielle de tenant",
+    "subsystem": "Gateway API",
+    "attack_class": "Déséquilibre de travail pré-authentification",
+    "starting_paths": [
+      "src/api.rs",
+      "src/gateway_config.rs",
+      "src/main.rs",
+      "src/ingress.rs",
+      "tests/tenant_api.rs",
+      "tests/api_security.rs",
+      "tests/gateway_tenancy.rs"
+    ],
+    "ordinary_attack_class_block": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Pre-authentication work imbalance",
+    "selected_companion_blocks": [
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Pre-authentication work imbalance",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Worker, pool, and priority starvation",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules",
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#API-key scope and resource binding",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Unbounded buffering and cardinality",
+        "reason": "Le corps gateway est borné à 262144 octets ; il faut mesurer le travail, pas revendiquer un buffer illimité."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter_preauth_cost",
+    "reviewed_paths": [
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/engineering/CLOUD_TENANCY.md",
+      "docs/engineering/PRODUCTION_READINESS.md",
+      "src/api.rs",
+      "src/gateway_config.rs",
+      "src/ingress.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "tests/api_security.rs",
+      "tests/gateway_tenancy.rs",
+      "tests/tenant_api.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_preauth_cost",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/model.rs",
+          "src/gateway_config.rs",
+          "src/main.rs",
+          "src/ingress.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "tests/tenant_api.rs",
+          "tests/api_security.rs",
+          "tests/gateway_tenancy.rs",
+          "docs/engineering/CLOUD_TENANCY.md",
+          "docs/engineering/PRODUCTION_READINESS.md"
+        ],
+        "invariant": "Le travail avant authentification doit être borné indépendamment de la longueur du bearer et du nombre de tenants.",
+        "method": "source",
+        "result": "Json est extrait avant authorize. Un token invalide déclenche deux token_matches par tenant, chacun rehachant toute l'entrée ; registre 1 MiB mais cardinalité et bearer non bornés au format secret. Ingress limite 64 échanges et corps 256 KiB mais aucun quota pré-auth ou contrôle réservé. Impact à mesurer.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_api_preauth",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "src/api.rs",
+          "src/gateway_config.rs",
+          "src/ingress.rs",
+          "src/main.rs"
+        ],
+        "invariant": "Le candidat api/preauth-linear-tenant-credential-hash-amplification doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour api/preauth-linear-tenant-credential-hash-amplification.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "api/preauth-linear-tenant-credential-hash-amplification"
+    ],
+    "unresolved": [
+      "Cardinalité, longueur d'en-tête, exposition et retard d'une décision autorisée non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fapi.rs%23stream-export::src%2Fapi.rs%23GatewayState%3A%3Aauthorize::src%2Fapi.rs::ATTACK-CLASSES.md%23Feature%20abuse%20and%20data%20leakage",
+    "canonical_refs": {
+      "surface": "src/api.rs#stream-export",
+      "boundary": "src/api.rs#GatewayState::authorize",
+      "subsystem": "src/api.rs",
+      "attack_class": "ATTACK-CLASSES.md#Feature abuse and data leakage"
+    },
+    "surface": "Lectures, SSE, projections et export audit",
+    "boundary": "Viewer/runner authentifié vers données dérivées du tenant",
+    "subsystem": "API de consultation",
+    "attack_class": "Fuite de données et abus de fonctionnalité",
+    "starting_paths": [
+      "src/api.rs",
+      "src/audit.rs",
+      "src/declared_agents.rs",
+      "src/model.rs",
+      "tests/tenant_api.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Feature abuse and data leakage",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Missing tenant or owner enforcement",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Search, cache, and index ACL drift",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Analytics, logs, traces, and diagnostics as alternate readers",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Export and backup scope expansion",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Stale authorization and derived copy use",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Database and downstream query amplification",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Unbounded buffering and cardinality",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Detached work after cancellation",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Worker, pool, and priority starvation",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Soft-delete and tombstone bypass",
+        "reason": "Aucune suppression logique d'événement n'est implémentée."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [
+      {
+        "wave": 1,
+        "status": "covered",
+        "agent_id": "hunter_web",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/audit.rs",
+          "src/declared_agents.rs",
+          "src/model.rs",
+          "tests/tenant_api.rs",
+          "docs/operations.md"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_web",
+            "reviewed_paths": [
+              "src/api.rs",
+              "src/audit.rs",
+              "src/declared_agents.rs",
+              "src/model.rs",
+              "tests/tenant_api.rs",
+              "docs/operations.md"
+            ],
+            "invariant": "Listes, projections, SSE et exports restent dans le Store du tenant authentifié.",
+            "method": "source",
+            "result": "Chaque lecture capture le TenantState autorisé ; SQL paramétré, SSE attaché au Store et export borné au head. Aucun cache global ou export transversal trouvé ; les erreurs de flux ne sont pas transformées en succès.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [],
+        "unresolved": [],
+        "reassignment_reason": "Le critique a établi que les coûts des projections/intégrité, leur contention avec les écritures et le drainage SSE/shutdown n'étaient pas examinés."
+      },
+      {
+        "wave": 2,
+        "status": "candidate",
+        "agent_id": "hunter_read_availability",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/audit.rs",
+          "src/declared_agents.rs",
+          "src/main.rs",
+          "src/ingress.rs",
+          "src/gateway_config.rs",
+          "tests/tenant_api.rs",
+          "tests/review_regressions.rs",
+          "tests/audit_load.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CODING_RULES.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/engineering/TEST_STRATEGY.md"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_read_availability",
+            "reviewed_paths": [
+              "src/api.rs",
+              "src/audit.rs",
+              "src/declared_agents.rs",
+              "src/main.rs",
+              "src/ingress.rs",
+              "src/gateway_config.rs",
+              "tests/tenant_api.rs",
+              "tests/review_regressions.rs",
+              "tests/audit_load.rs",
+              "deploy/docker/compose.yaml",
+              "deploy/podman/compose.yaml",
+              "docs/engineering/ARCHITECTURE_CONTRACT.md",
+              "docs/engineering/CODING_RULES.md",
+              "docs/engineering/PRODUCTION_READINESS.md",
+              "docs/engineering/TEST_STRATEGY.md"
+            ],
+            "invariant": "Une lecture viewer ou un SSE ne doit pas bloquer le contrôle ou l'arrêt sans budget temporel.",
+            "method": "source",
+            "result": "Les handlers exécutent scans/projections/intégrité synchrones sous le mutex partagé avec append/decision ; overview ajoute un NOT EXISTS corrélé non indexé. SSE boucle sans signal et gateway/dashboard n'ont pas de deadline de drainage. Les tailles et quotas bornent le travail mais pas sa durée ni sa répétition.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "api/viewer-synchronous-reads-control-store-contention",
+          "api/sse-graceful-shutdown-without-drain-deadline"
+        ],
+        "unresolved": [
+          "Coût, contention et drainage réels non observés ; sandbox conforme indisponible."
+        ],
+        "reassignment_reason": "Le final-clean exige de rétablir l'isolation tenant, le head d'export et la propagation des erreurs dans le check live."
+      }
+    ],
+    "wave": 3,
+    "status": "candidate",
+    "agent_id": "hunter_stream_complete",
+    "reviewed_paths": [
+      "Cargo.lock",
+      "deploy/docker/compose.yaml",
+      "docs/api.md",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CODING_RULES.md",
+      "docs/engineering/PRODUCTION_READINESS.md",
+      "docs/engineering/TEST_STRATEGY.md",
+      "docs/operations.md",
+      "src/api.rs",
+      "src/audit.rs",
+      "src/declared_agents.rs",
+      "src/gateway_config.rs",
+      "src/ingress.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "tests/api_security.rs",
+      "tests/audit_load.rs",
+      "tests/review_regressions.rs",
+      "tests/tenant_api.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_stream_complete",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/audit.rs",
+          "src/declared_agents.rs",
+          "src/model.rs",
+          "src/main.rs",
+          "src/ingress.rs",
+          "src/gateway_config.rs",
+          "tests/tenant_api.rs",
+          "tests/api_security.rs",
+          "tests/review_regressions.rs",
+          "tests/audit_load.rs",
+          "docs/api.md",
+          "docs/operations.md",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CODING_RULES.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/engineering/TEST_STRATEGY.md"
+        ],
+        "invariant": "Lectures/SSE/export restent dans le Store du bearer, bornés et avec erreurs visibles, sans bloquer indéfiniment contrôle ou arrêt.",
+        "method": "source",
+        "result": "TenantState et Store viennent du bearer ; filtres SQL paramétrés, SSE capture le tenant, export fixe head et filtres, projections sans cache transversal, erreurs propagées. Les lectures synchrones/mutex/NOT EXISTS et SSE sans cancellation/deadline conservent les deux candidats disponibilité.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_api_sse",
+        "reviewed_paths": [
+          "Cargo.lock",
+          "deploy/docker/compose.yaml",
+          "src/api.rs",
+          "src/main.rs"
+        ],
+        "invariant": "Le candidat api/sse-graceful-shutdown-without-drain-deadline doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour api/sse-graceful-shutdown-without-drain-deadline.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_api_viewer",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/audit.rs",
+          "src/main.rs"
+        ],
+        "invariant": "Le candidat api/viewer-synchronous-reads-control-store-contention doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour api/viewer-synchronous-reads-control-store-contention.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "api/sse-graceful-shutdown-without-drain-deadline",
+      "api/viewer-synchronous-reads-control-store-contention"
+    ],
+    "unresolved": [
+      "Contention et drainage réels non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Faudit.rs%23AuditFile%3A%3Aopen::src%2Faudit.rs%23Connection%3A%3Aopen_with_flags::src%2Faudit.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/audit.rs#AuditFile::open",
+      "boundary": "src/audit.rs#Connection::open_with_flags",
+      "subsystem": "src/audit.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "Ouverture du fichier SQLite d'audit",
+    "boundary": "Descripteur validé vers connexion SQLite rouverte par pathname",
+    "subsystem": "Stockage audit",
+    "attack_class": "Ressources et fichiers",
+    "starting_paths": [
+      "src/audit.rs",
+      "src/main.rs",
+      "src/gateway_config.rs",
+      "tests/audit_security.rs",
+      "tests/tenant_storage.rs",
+      "tests/audit_integrity.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Missing tenant or owner enforcement",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Analytics, logs, traces, and diagnostics as alternate readers",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Backup and replication boundary drift",
+        "reason": "Aucune réplication automatique de la base n'est implémentée."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter_audit_file_identity",
+    "reviewed_paths": [
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CLOUD_TENANCY.md",
+      "docs/engineering/DECISIONS.md",
+      "docs/engineering/VALIDATION.md",
+      "images/control.Dockerfile",
+      "src/audit.rs",
+      "src/gateway_config.rs",
+      "src/main.rs",
+      "tests/audit_integrity.rs",
+      "tests/audit_security.rs",
+      "tests/tenant_storage.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_audit_file_identity",
+        "reviewed_paths": [
+          "src/audit.rs",
+          "src/main.rs",
+          "src/gateway_config.rs",
+          "images/control.Dockerfile",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "tests/audit_security.rs",
+          "tests/tenant_storage.rs",
+          "tests/audit_integrity.rs",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CLOUD_TENANCY.md",
+          "docs/engineering/DECISIONS.md",
+          "docs/engineering/VALIDATION.md"
+        ],
+        "invariant": "La connexion SQLite doit utiliser le même inode privé que le descripteur d'audit validé.",
+        "method": "source",
+        "result": "Le mode 0600 ne s'applique qu'à la création et verify omet uid/mode/ACL. SQLite rouvre ensuite le pathname sans comparaison de son inode avec AuditFile ; une substitution aller-retour reste possible sous parent renommable. Binding tenant, schéma, hash, nlink et Compose standard réduisent les préconditions sans fermer ces deux chemins.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_audit_perms",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "docs/engineering/CLOUD_TENANCY.md",
+          "images/control.Dockerfile",
+          "src/audit.rs"
+        ],
+        "invariant": "Le candidat audit/preexisting-database-permissions-not-enforced doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour audit/preexisting-database-permissions-not-enforced.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_audit_race",
+        "reviewed_paths": [
+          "docs/engineering/DECISIONS.md",
+          "src/audit.rs",
+          "tests/audit_integrity.rs"
+        ],
+        "invariant": "Le candidat audit/sqlite-connection-path-reopen-identity-race doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour audit/sqlite-connection-path-reopen-identity-race.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "audit/preexisting-database-permissions-not-enforced",
+      "audit/sqlite-connection-path-reopen-identity-race"
+    ],
+    "unresolved": [
+      "Permissions effectives, principal local, comportement VFS/WAL et course non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Faudit.rs%23Store::src%2Faudit.rs%23tenant-binding-transaction::src%2Faudit.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/audit.rs#Store",
+      "boundary": "src/audit.rs#tenant-binding-transaction",
+      "subsystem": "src/audit.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "SQLite, chaîne d'audit et décisions durables",
+    "boundary": "Événement ou demande runner vers transaction liée au tenant",
+    "subsystem": "Stockage audit",
+    "attack_class": "Logique métier",
+    "starting_paths": [
+      "src/audit.rs",
+      "src/model.rs",
+      "src/policy.rs",
+      "src/api.rs",
+      "tests/audit_integrity.rs",
+      "tests/audit_security.rs",
+      "tests/decision_idempotence.rs",
+      "tests/tenant_storage.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Envelope and payload identity mismatch",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Duplicate delivery and idempotency gaps",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Acknowledgment/commit ordering defects",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Partial multi-consumer transitions",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Missing tenant or owner enforcement",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Composite-key and namespace collision",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "PROTOCOLS-RPC-AND-MESSAGING.md#Topic, routing-key, and subscription scope gaps",
+        "reason": "Aucun broker ou topic métier n'est implémenté dans ce chemin."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_state",
+    "reviewed_paths": [
+      "src/audit.rs",
+      "src/api.rs",
+      "src/model.rs",
+      "src/policy.rs",
+      "src/adapters.rs",
+      "tests/decision_idempotence.rs",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_state",
+        "reviewed_paths": [
+          "src/audit.rs",
+          "src/api.rs",
+          "src/model.rs",
+          "src/policy.rs",
+          "src/adapters.rs",
+          "tests/decision_idempotence.rs",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md"
+        ],
+        "invariant": "Mutations, décisions, quota et accusés sont transactionnels et idempotents dans la base liée au tenant.",
+        "method": "source",
+        "result": "Transactions IMMEDIATE, vérification d'intégrité/schéma/liaison, commit avant réponse, conflit de contenu pour request_id/hash et revue durable préalable. Les événements adapter declared ne satisfont pas la provenance d'une décision gateway.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "src%2Fingress.rs%23forward::src%2Fingress.rs%23fixed-upstream-preauth::src%2Fingress.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/ingress.rs#forward",
+      "boundary": "src/ingress.rs#fixed-upstream-preauth",
+      "subsystem": "src/ingress.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "Ingress HTTP sans credential",
+    "boundary": "Client non authentifié vers upstream fixe authentifiant",
+    "subsystem": "Relais HTTP",
+    "attack_class": "Ressources et traitement HTTP",
+    "starting_paths": [
+      "src/ingress.rs",
+      "src/main.rs",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "tests/ingress.rs",
+      "tests/ingress_cli.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Unbounded buffering and cardinality",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Pre-authentication work imbalance",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Worker, pool, and priority starvation",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules",
+      "WEB-PROTOCOL-AND-AUTH.md#Core discipline",
+      "WEB-PROTOCOL-AND-AUTH.md#Request framing and desynchronization",
+      "WEB-PROTOCOL-AND-AUTH.md#Host and forwarded-header trust",
+      "WEB-PROTOCOL-AND-AUTH.md#Universal moves",
+      "WEB-PROTOCOL-AND-AUTH.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Ordinary CSRF",
+        "reason": "L'ingress ne crée pas de session cookie et l'upstream exige un bearer."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [
+      {
+        "wave": 1,
+        "status": "candidate",
+        "agent_id": "hunter_web",
+        "reviewed_paths": [
+          "src/ingress.rs",
+          "src/main.rs",
+          "src/api.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_web",
+            "reviewed_paths": [
+              "src/ingress.rs",
+              "src/main.rs",
+              "src/api.rs",
+              "deploy/docker/compose.yaml",
+              "deploy/podman/compose.yaml"
+            ],
+            "invariant": "Un échange non authentifié ou un autre tenant ne doit pas monopoliser toute l'admission de contrôle.",
+            "method": "source",
+            "result": "Le pool global de 64 est acquis avant corps et auth upstream et reste attaché à la réponse ; corps incomplets ou SSE peuvent produire 429 pour les demandes suivantes. Les délais bornent l'occupation mais n'isolent pas la capacité par identité.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "ingress:forward:shared-preauth-exchange-pool"
+        ],
+        "unresolved": [
+          "Effet 429 sur une demande autorisée et reachability attaquante non observés dans un sandbox conforme."
+        ],
+        "reassignment_reason": "Le final-clean exige de couvrir framing, destination fixe et filtrage headers dans la tentative live."
+      }
+    ],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter_ingress_complete",
+    "reviewed_paths": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/operations.md",
+      "src/ingress.rs",
+      "src/main.rs",
+      "tests/ingress.rs",
+      "tests/ingress_cli.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_ingress_complete",
+        "reviewed_paths": [
+          "src/ingress.rs",
+          "src/main.rs",
+          "Cargo.toml",
+          "Cargo.lock",
+          "tests/ingress.rs",
+          "tests/ingress_cli.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "docs/operations.md"
+        ],
+        "invariant": "Destination, framing et headers restent contrôlés, sans masquer la famine du pool pré-auth partagé.",
+        "method": "source",
+        "result": "Origine fixe, méthodes/cibles/upgrades refusés, buffering borné puis reconstruction reqwest, Host/Forwarded/hop-by-hop filtrés symétriquement, redirects/retries/proxies désactivés ; aucun bypass survit. Le permis global 64 reste acquis avant corps/auth et jusqu'au body réponse, conservant le candidat famine.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_ingress_pool",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "src/ingress.rs",
+          "tests/ingress.rs"
+        ],
+        "invariant": "Le candidat ingress:forward:shared-preauth-exchange-pool doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour ingress:forward:shared-preauth-exchange-pool.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "ingress:forward:shared-preauth-exchange-pool"
+    ],
+    "unresolved": [
+      "Effet 429 et reachability attaquante non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fjev.rs%23decide::src%2Fapi.rs%23local-policy-then-jev::src%2Fjev.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/jev.rs#decide",
+      "boundary": "src/api.rs#local-policy-then-jev",
+      "subsystem": "src/jev.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "Décision Jev facultative",
+    "boundary": "Service externe moins fiable vers décision locale déjà allow",
+    "subsystem": "Intégration Jev",
+    "attack_class": "Logique métier",
+    "starting_paths": [
+      "src/jev.rs",
+      "src/api.rs",
+      "src/redaction.rs",
+      "tests/jev_contract.rs",
+      "deploy/docker/compose.jev.example.yaml"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "AI-AND-LLM.md#Core discipline",
+      "AI-AND-LLM.md#Prompt role and provenance confusion",
+      "AI-AND-LLM.md#Action-confirmation and approval binding",
+      "AI-AND-LLM.md#Tool-schema and dispatcher disagreement",
+      "AI-AND-LLM.md#Sensitive context extraction",
+      "AI-AND-LLM.md#Universal moves",
+      "AI-AND-LLM.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "AI-AND-LLM.md#Persistent memory poisoning",
+        "reason": "Aucune mémoire Jev persistante n'est visible dans le dépôt."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_state",
+    "reviewed_paths": [
+      "src/jev.rs",
+      "src/api.rs",
+      "src/audit.rs",
+      "src/policy.rs",
+      "src/redaction.rs",
+      "src/main.rs",
+      "src/runner.rs",
+      "tests/jev_contract.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_state",
+        "reviewed_paths": [
+          "src/jev.rs",
+          "src/api.rs",
+          "src/audit.rs",
+          "src/policy.rs",
+          "src/redaction.rs",
+          "src/main.rs",
+          "src/runner.rs",
+          "tests/jev_contract.rs"
+        ],
+        "invariant": "Jev ne peut accroître une autorisation locale et ses échecs restent fail-closed.",
+        "method": "source",
+        "result": "Jev n'est appelé qu'après allow local ; deny/review/incertitude/format/transport deviennent deny, HTTPS est requis hors loopback, redirects/proxy sont désactivés et réponse bornée avant décision durable.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "src%2Foperations.rs%23initialize_config::src%2Foperations.rs%23secret_projections::src%2Foperations.rs::ATTACK-CLASSES.md%23Cryptography%20and%20secrets",
+    "canonical_refs": {
+      "surface": "src/operations.rs#initialize_config",
+      "boundary": "src/operations.rs#secret_projections",
+      "subsystem": "src/operations.rs",
+      "attack_class": "ATTACK-CLASSES.md#Cryptography and secrets"
+    },
+    "surface": "Initialisation et migration des credentials opérateur",
+    "boundary": "Génération, permissions, identité de fichier et publication des projections de secrets",
+    "subsystem": "Opérations et configuration",
+    "attack_class": "Cryptographie et secrets",
+    "starting_paths": [
+      "src/operations.rs",
+      "src/main.rs",
+      "src/gateway_config.rs",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "tests/runtime_operations.rs",
+      "tests/api_security.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Cryptography and secrets",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Secret exposure across workload boundaries",
+      "CLOUD-AND-DEPLOYMENT.md#Credential renewal and outage fallback",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Retention and queued-work overrun",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Cookie scope and transport",
+        "reason": "Les projections sont des fichiers montés ; aucun cookie n'intervient."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [
+      {
+        "wave": 1,
+        "status": "candidate",
+        "agent_id": "hunter_secret_lifecycle",
+        "reviewed_paths": [
+          "src/operations.rs",
+          "src/main.rs",
+          "src/gateway_config.rs",
+          "src/jev.rs",
+          "src/api.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "deploy/docker/compose.jev.example.yaml",
+          "tests/runtime_operations.rs",
+          "tests/api_security.rs",
+          "docs/operations.md",
+          "docs/engineering/CLOUD_TENANCY.md"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_secret_lifecycle",
+            "reviewed_paths": [
+              "src/operations.rs",
+              "src/main.rs",
+              "src/gateway_config.rs",
+              "src/jev.rs",
+              "src/api.rs",
+              "deploy/docker/compose.yaml",
+              "deploy/podman/compose.yaml",
+              "deploy/docker/compose.jev.example.yaml",
+              "tests/runtime_operations.rs",
+              "tests/api_security.rs",
+              "docs/operations.md",
+              "docs/engineering/CLOUD_TENANCY.md"
+            ],
+            "invariant": "Les credentials Jev doivent être distincts des autorités de contrôle et l'identité du répertoire validé doit rester liée au handoff moteur.",
+            "method": "source",
+            "result": "init ne compare que runner et viewer puis JevClient peut envoyer une clé égale comme Bearer. Up valide le config_dir par descripteur mais compose recanonicalise son pathname après un await sans comparer inode/dev ni protéger un parent renommable. Les opérations internes utilisent openat/O_NOFOLLOW et fsync, mais ces deux frontières restent conditionnelles à valider dynamiquement.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "operations/config-path-reopen-secret-substitution",
+          "operations/jev-control-credential-reuse"
+        ],
+        "unresolved": [
+          "Course et header factice non observés faute de sandbox conforme ; précondition parent renommable et résolution Compose effectives inconnues."
+        ],
+        "reassignment_reason": "Le critique exige une couverture explicite des fsync de répertoire, états partiellement publiés, temporaires et ACL."
+      }
+    ],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter_ops_recovery",
+    "reviewed_paths": [
+      "deploy/docker/compose.jev.example.yaml",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/engineering/CLOUD_TENANCY.md",
+      "docs/engineering/PRODUCTION_READINESS.md",
+      "docs/engineering/TEST_STRATEGY.md",
+      "docs/operations.md",
+      "src/api.rs",
+      "src/gateway_config.rs",
+      "src/jev.rs",
+      "src/main.rs",
+      "src/operations.rs",
+      "tests/api_security.rs",
+      "tests/runtime_operations.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_ops_recovery",
+        "reviewed_paths": [
+          "src/operations.rs",
+          "src/main.rs",
+          "src/gateway_config.rs",
+          "src/jev.rs",
+          "src/api.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "deploy/docker/compose.jev.example.yaml",
+          "tests/runtime_operations.rs",
+          "tests/api_security.rs",
+          "docs/operations.md",
+          "docs/engineering/CLOUD_TENANCY.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/engineering/TEST_STRATEGY.md"
+        ],
+        "invariant": "Le lifecycle des projections doit être durable, récupérable et effectivement privé, tout en conservant les frontières Jev et handoff moteur.",
+        "method": "source",
+        "result": "Fsync de répertoire manque après mkdir/source/unlink Jev, publication multi-fichier n'est pas atomique et les temporaires/ACL ne sont pas récupérés ou vérifiés. Ces lacunes de reprise restent des exigences absentes ; une ACL effective pourrait rendre les projections 0444 lisibles. Les deux candidats précédents survivent.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_ops_config",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "src/api.rs",
+          "src/main.rs",
+          "src/operations.rs"
+        ],
+        "invariant": "Le candidat operations/config-path-reopen-secret-substitution doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour operations/config-path-reopen-secret-substitution.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_ops_acl",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "docs/operations.md",
+          "src/api.rs",
+          "src/operations.rs"
+        ],
+        "invariant": "Le candidat operations/extended-acl-secret-projection-disclosure doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour operations/extended-acl-secret-projection-disclosure.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_ops_jev",
+        "reviewed_paths": [
+          "docs/operations.md",
+          "src/api.rs",
+          "src/gateway_config.rs",
+          "src/jev.rs",
+          "src/main.rs",
+          "src/operations.rs"
+        ],
+        "invariant": "Le candidat operations/jev-control-credential-reuse doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour operations/jev-control-credential-reuse.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "operations/config-path-reopen-secret-substitution",
+      "operations/extended-acl-secret-projection-disclosure",
+      "operations/jev-control-credential-reuse"
+    ],
+    "unresolved": [
+      "États de panne, ACL effectives et lecture par seconde identité non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Frunner.rs%23choose_plan-run::src%2Frunner.rs%23decision-to-execution::src%2Frunner.rs::ATTACK-CLASSES.md%23Business%20logic",
+    "canonical_refs": {
+      "surface": "src/runner.rs#choose_plan-run",
+      "boundary": "src/runner.rs#decision-to-execution",
+      "subsystem": "src/runner.rs",
+      "attack_class": "ATTACK-CLASSES.md#Business logic"
+    },
+    "surface": "Plans, approbation et lancement broker",
+    "boundary": "Décision durable et approbation vers effet moteur",
+    "subsystem": "Broker runner",
+    "attack_class": "Logique métier",
+    "starting_paths": [
+      "src/runner.rs",
+      "src/policy.rs",
+      "src/api.rs",
+      "src/audit.rs",
+      "src/runtime.rs",
+      "tests/runtime_authorization.rs",
+      "tests/decision_idempotence.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Business logic",
+    "selected_companion_blocks": [
+      "AI-AND-LLM.md#Core discipline",
+      "AI-AND-LLM.md#Excessive agency and confused-deputy authority",
+      "AI-AND-LLM.md#Action-confirmation and approval binding",
+      "AI-AND-LLM.md#Tool-schema and dispatcher disagreement",
+      "AI-AND-LLM.md#Universal moves",
+      "AI-AND-LLM.md#Validation rules",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Duplicate delivery and idempotency gaps",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Acknowledgment/commit ordering defects",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Partial multi-consumer transitions",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "AI-AND-LLM.md#MCP server and tool identity confusion",
+        "reason": "Aucun MCP n'est implémenté dans le chemin de lancement."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_state",
+    "reviewed_paths": [
+      "src/runner.rs",
+      "src/runtime.rs",
+      "src/operations.rs",
+      "src/model.rs",
+      "src/policy.rs",
+      "tests/runtime_authorization.rs",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/PRODUCTION_READINESS.md",
+      "docs/engineering/CURRENT_STATE.md"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_state",
+        "reviewed_paths": [
+          "src/runner.rs",
+          "src/runtime.rs",
+          "src/operations.rs",
+          "src/model.rs",
+          "src/policy.rs",
+          "tests/runtime_authorization.rs",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/engineering/CURRENT_STATE.md"
+        ],
+        "invariant": "Le plan autorisé et l'approbation exacte précèdent l'effet moteur et le replay concurrent ordinaire échoue.",
+        "method": "source",
+        "result": "Hash/ack durable vérifiés, pending options comparées intégralement, consommation par rename, session create_new et runtime.submitted acquitté avant execute. La reprise après crash reste une exigence absente distincte.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  },
+  {
+    "coverage_id": "src%2Frunner.rs%23credentials-adapters-audit::src%2Fredaction.rs%23Redactor%3A%3Avalue::src%2Frunner.rs%2Bsrc%2Fadapters.rs::ATTACK-CLASSES.md%23Cryptography%20and%20secrets",
+    "canonical_refs": {
+      "surface": "src/runner.rs#credentials-adapters-audit",
+      "boundary": "src/redaction.rs#Redactor::value",
+      "subsystem": "src/runner.rs+src/adapters.rs",
+      "attack_class": "ATTACK-CLASSES.md#Cryptography and secrets"
+    },
+    "surface": "Credentials worker, sorties et événements normalisés",
+    "boundary": "Secret injecté au worker vers audit, logs et viewer",
+    "subsystem": "Secrets, adapters et redaction",
+    "attack_class": "Cryptographie et secrets",
+    "starting_paths": [
+      "src/runner.rs",
+      "src/runtime.rs",
+      "src/adapters.rs",
+      "src/redaction.rs",
+      "src/audit.rs",
+      "src/model.rs",
+      "tests/adapters_fixtures",
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Cryptography and secrets",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Analytics, logs, traces, and diagnostics as alternate readers",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Retention and queued-work overrun",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules",
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Secret exposure across workload boundaries",
+      "CLOUD-AND-DEPLOYMENT.md#Credential renewal and outage fallback",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules",
+      "AI-AND-LLM.md#Core discipline",
+      "AI-AND-LLM.md#Sensitive context extraction",
+      "AI-AND-LLM.md#Universal moves",
+      "AI-AND-LLM.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "WEB-PROTOCOL-AND-AUTH.md#Cookie scope and transport",
+        "reason": "Les secrets ne sont pas stockés dans des cookies."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter_runtime",
+    "reviewed_paths": [
+      "src/adapters.rs",
+      "src/api.rs",
+      "src/audit.rs",
+      "src/jev.rs",
+      "src/main.rs",
+      "src/model.rs",
+      "src/policy.rs",
+      "src/redaction.rs",
+      "src/runner.rs",
+      "src/runtime.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_runtime",
+        "reviewed_paths": [
+          "src/runner.rs",
+          "src/runtime.rs",
+          "src/redaction.rs",
+          "src/adapters.rs",
+          "src/audit.rs",
+          "src/api.rs",
+          "src/model.rs",
+          "src/main.rs"
+        ],
+        "invariant": "Les credentials connus du runner doivent être masqués avant audit, décision externe et lecture viewer.",
+        "method": "source",
+        "result": "Les clés JSON sont copiées intactes, des projections tronquent avant le remplacement exact, et decide sérialise la commande brute sans le dictionnaire enrichi du runner ; le second redactor ne connaît pas les credentials worker.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_redact_keys",
+        "reviewed_paths": [
+          "src/adapters.rs",
+          "src/api.rs",
+          "src/audit.rs",
+          "src/redaction.rs",
+          "src/runner.rs"
+        ],
+        "invariant": "Le candidat redaction/json-object-keys-preserved doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour redaction/json-object-keys-preserved.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_redact_truncate",
+        "reviewed_paths": [
+          "src/adapters.rs",
+          "src/api.rs",
+          "src/audit.rs",
+          "src/main.rs",
+          "src/redaction.rs",
+          "src/runner.rs",
+          "src/runtime.rs"
+        ],
+        "invariant": "Le candidat redaction/truncation-before-secret-masking doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour redaction/truncation-before-secret-masking.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runner_decision_secret",
+        "reviewed_paths": [
+          "src/api.rs",
+          "src/audit.rs",
+          "src/jev.rs",
+          "src/main.rs",
+          "src/policy.rs",
+          "src/redaction.rs",
+          "src/runner.rs"
+        ],
+        "invariant": "Le candidat runner/decision-omits-known-worker-secret-redaction doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runner/decision-omits-known-worker-secret-redaction.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "redaction/json-object-keys-preserved",
+      "redaction/truncation-before-secret-masking",
+      "runner/decision-omits-known-worker-secret-redaction"
+    ],
+    "unresolved": [
+      "Fixtures de bout en bout avec secrets factices non exécutées faute de sandbox complet."
+    ]
+  },
+  {
+    "coverage_id": "src%2Frunner.rs%23credentials::src%2Fruntime.rs%23ContainerSpec%3A%3Awith_secret_env_file::src%2Frunner.rs%2Bsrc%2Fruntime.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/runner.rs#credentials",
+      "boundary": "src/runtime.rs#ContainerSpec::with_secret_env_file",
+      "subsystem": "src/runner.rs+src/runtime.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "Fichier de credentials du worker",
+    "boundary": "Pathname opérateur vers copie temporaire puis --env-file moteur",
+    "subsystem": "Runner et runtime",
+    "attack_class": "Ressources et fichiers",
+    "starting_paths": [
+      "src/runner.rs",
+      "src/runtime.rs",
+      "tests/runtime_security.rs",
+      "tests/runtime_races.rs",
+      "tests/runtime_authorization.rs",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Secret exposure across workload boundaries",
+      "CLOUD-AND-DEPLOYMENT.md#Credential renewal and outage fallback",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "ATTACK-CLASSES.md#Injection",
+        "reason": "Syntaxe NAME=value et noms d'environnement sont contrôlés ; l'unité porte sur l'identité du fichier entre ouvertures."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "candidate",
+    "agent_id": "hunter_worker_secret_file_retry",
+    "reviewed_paths": [
+      "Cargo.lock",
+      "docs/architecture.md",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/operations.md",
+      "src/model.rs",
+      "src/policy.rs",
+      "src/runner.rs",
+      "src/runtime.rs",
+      "tests/runtime_authorization.rs",
+      "tests/runtime_confinement.rs",
+      "tests/runtime_races.rs",
+      "tests/runtime_security.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_worker_secret_file_retry",
+        "reviewed_paths": [
+          "src/runner.rs",
+          "src/runtime.rs",
+          "src/policy.rs",
+          "src/model.rs",
+          "Cargo.lock",
+          "tests/runtime_security.rs",
+          "tests/runtime_races.rs",
+          "tests/runtime_authorization.rs",
+          "tests/runtime_confinement.rs",
+          "docs/operations.md",
+          "docs/architecture.md",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md"
+        ],
+        "invariant": "Les validations source et tempfile doivent porter sur les mêmes inodes que la lecture et l'ouverture --env-file.",
+        "method": "source",
+        "result": "symlink_metadata puis read_to_string rouvrent indépendamment le fichier source ; la copie NamedTempFile est revérifiée par pathname puis ouverte plus tard par le CLI. Aucun fstat/dev-inode ne lie ces opérations. Les parents privés, tempfile 0600 et absence de bind réduisent fortement la précondition locale sans la prouver.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runner_cred_reopen",
+        "reviewed_paths": [
+          "src/runner.rs",
+          "src/runtime.rs"
+        ],
+        "invariant": "Le candidat runner/credential-env-path-reopen-substitution doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runner/credential-env-path-reopen-substitution.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "runner/credential-env-path-reopen-substitution"
+    ],
+    "unresolved": [
+      "Parent ou TMPDIR renommable, principal local et résolution Docker/Podman non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fruntime.rs%23Runtime%3A%3Acommand::src%2Fruntime.rs%23host-runtime-cli::src%2Fruntime.rs::ATTACK-CLASSES.md%23Injection",
+    "canonical_refs": {
+      "surface": "src/runtime.rs#Runtime::command",
+      "boundary": "src/runtime.rs#host-runtime-cli",
+      "subsystem": "src/runtime.rs",
+      "attack_class": "ATTACK-CLASSES.md#Injection"
+    },
+    "surface": "Invocation Docker/Podman sur l'hôte",
+    "boundary": "Processus broker de confiance vers exécutable moteur résolu localement",
+    "subsystem": "Adaptateur runtime",
+    "attack_class": "Injection",
+    "starting_paths": [
+      "src/runtime.rs",
+      "src/operations.rs",
+      "src/runner.rs",
+      "src/main.rs",
+      "tests/runtime_terminal.rs",
+      "tests/runtime_races.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Injection",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Host or control-plane capability exposure",
+      "CLOUD-AND-DEPLOYMENT.md#Security-control precedence drift",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Core discipline",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Dependency source and namespace confusion",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Universal moves",
+      "SUPPLY-CHAIN-AND-RELEASE.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "ATTACK-CLASSES.md#Resource and file handling",
+        "reason": "Le chemin est couvert séparément pour les fichiers workspace et le lifecycle moteur."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [
+      {
+        "wave": 1,
+        "status": "candidate",
+        "agent_id": "hunter_runtime",
+        "reviewed_paths": [
+          "src/runtime.rs",
+          "src/runner.rs",
+          "src/operations.rs",
+          "tests/runtime_security.rs",
+          "tests/runtime_races.rs",
+          "tests/runtime_terminal.rs"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_runtime",
+            "reviewed_paths": [
+              "src/runtime.rs",
+              "src/runner.rs",
+              "src/operations.rs",
+              "tests/runtime_security.rs",
+              "tests/runtime_races.rs",
+              "tests/runtime_terminal.rs"
+            ],
+            "invariant": "Seul le moteur de confiance doit être exécuté sur l'hôte.",
+            "method": "source",
+            "result": "Les arguments sont séparés et validés, mais docker/podman est un basename résolu par PATH hérité ; avec cwd projet et PATH relatif/prioritaire, un exécutable projet peut être spawné avant import.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "runtime/path-resolves-project-executable"
+        ],
+        "unresolved": [
+          "Configuration PATH dangereuse et marqueur local non observés."
+        ],
+        "reassignment_reason": "Le critique exige de couvrir l'environnement hérité et la liaison entre doctor et le moteur qui réalise l'effet."
+      }
+    ],
+    "wave": 2,
+    "status": "candidate",
+    "agent_id": "hunter_runtime_environment",
+    "reviewed_paths": [
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CURRENT_STATE.md",
+      "docs/operations.md",
+      "src/main.rs",
+      "src/operations.rs",
+      "src/policy.rs",
+      "src/runner.rs",
+      "src/runtime.rs",
+      "tests/runtime_confinement.rs",
+      "tests/runtime_races.rs",
+      "tests/runtime_security.rs",
+      "tests/runtime_terminal.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_runtime_environment",
+        "reviewed_paths": [
+          "src/runtime.rs",
+          "src/operations.rs",
+          "src/runner.rs",
+          "src/main.rs",
+          "src/policy.rs",
+          "tests/runtime_security.rs",
+          "tests/runtime_races.rs",
+          "tests/runtime_terminal.rs",
+          "tests/runtime_confinement.rs",
+          "docs/operations.md",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CURRENT_STATE.md"
+        ],
+        "invariant": "L'exécutable et l'identité du moteur attesté doivent rester fixes jusqu'aux effets.",
+        "method": "source",
+        "result": "Chaque commande résout le basename, cwd et environnement à nouveau. doctor conserve seulement kind/rootless/version, sans endpoint/context/daemon. Un contexte ou socket modifiable pourrait faire attester A puis agir sur B ; le projet ne contrôle toutefois pas normalement l'environnement opérateur et cette précondition locale reste à établir.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runtime_doctor",
+        "reviewed_paths": [
+          "docs/operations.md",
+          "src/operations.rs",
+          "src/runner.rs",
+          "src/runtime.rs"
+        ],
+        "invariant": "Le candidat runtime/doctor-effect-engine-identity-unbound doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runtime/doctor-effect-engine-identity-unbound.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runtime_path",
+        "reviewed_paths": [
+          "src/operations.rs",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "tests/runtime_terminal.rs"
+        ],
+        "invariant": "Le candidat runtime/path-resolves-project-executable doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runtime/path-resolves-project-executable.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "runtime/doctor-effect-engine-identity-unbound",
+      "runtime/path-resolves-project-executable"
+    ],
+    "unresolved": [
+      "PATH/cwd/config/endpoint et principal modificateur non observés ; précédence Docker/Podman inconnue."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fruntime.rs%23Runtime%3A%3Aexecute::src%2Fruntime.rs%23worker-host-lifecycle::src%2Fruntime.rs::ATTACK-CLASSES.md%23Chained%20vulnerabilities%20and%20trust%20boundaries",
+    "canonical_refs": {
+      "surface": "src/runtime.rs#Runtime::execute",
+      "boundary": "src/runtime.rs#worker-host-lifecycle",
+      "subsystem": "src/runtime.rs",
+      "attack_class": "ATTACK-CLASSES.md#Chained vulnerabilities and trust boundaries"
+    },
+    "surface": "Création, exécution, observation et cleanup conteneur",
+    "boundary": "Worker non fiable vers moteur/hôte et audit terminal",
+    "subsystem": "Lifecycle runtime",
+    "attack_class": "Chaînes et frontières de confiance",
+    "starting_paths": [
+      "src/runtime.rs",
+      "src/runner.rs",
+      "src/operations.rs",
+      "tests/runtime_terminal.rs",
+      "tests/runtime_confinement.rs",
+      "tests/runtime_smoke.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Chained vulnerabilities and trust boundaries",
+    "selected_companion_blocks": [
+      "CLOUD-AND-DEPLOYMENT.md#Core discipline",
+      "CLOUD-AND-DEPLOYMENT.md#Host or control-plane capability exposure",
+      "CLOUD-AND-DEPLOYMENT.md#Metadata and internal-service reachability",
+      "CLOUD-AND-DEPLOYMENT.md#Secret exposure across workload boundaries",
+      "CLOUD-AND-DEPLOYMENT.md#Universal moves",
+      "CLOUD-AND-DEPLOYMENT.md#Validation rules",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Unbounded buffering and cardinality",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Detached work after cancellation",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Unsafe recovery and capacity rollback",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Core discipline",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Acknowledgment/commit ordering defects",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Universal moves",
+      "PROTOCOLS-RPC-AND-MESSAGING.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "CLOUD-AND-DEPLOYMENT.md#Admission and policy path inconsistency",
+        "reason": "Kubernetes et admission controllers ne sont pas implémentés."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [
+      {
+        "wave": 1,
+        "status": "candidate",
+        "agent_id": "hunter_runtime",
+        "reviewed_paths": [
+          "src/runtime.rs",
+          "src/runner.rs",
+          "src/operations.rs",
+          "tests/runtime_confinement.rs",
+          "tests/runtime_terminal.rs",
+          "docs/engineering/CURRENT_STATE.md",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_runtime",
+            "reviewed_paths": [
+              "src/runtime.rs",
+              "src/runner.rs",
+              "src/operations.rs",
+              "tests/runtime_confinement.rs",
+              "tests/runtime_terminal.rs",
+              "docs/engineering/CURRENT_STATE.md",
+              "docs/engineering/ARCHITECTURE_CONTRACT.md"
+            ],
+            "invariant": "Le worker ne doit pas épuiser le stockage partagé et l'observation terminale doit survivre au cleanup.",
+            "method": "source",
+            "result": "Le volume /workspace est inscriptible sans quota bytes/inodes produit et conservé ; l'observation terminale reste en mémoire pendant rm puis n'est auditée qu'après retour, sans réconciliateur. Seul le défaut de quota a un chemin worker autonome candidat.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "runtime/workspace-volume-no-byte-quota"
+        ],
+        "unresolved": [
+          "Quota externe et partage du stockage non observés ; aucun test runtime isolé."
+        ],
+        "reassignment_reason": "Le critique post-vague 2 demande de suivre séparément la rétention stdout/stderr du moteur, hors bornes du broker."
+      },
+      {
+        "wave": 2,
+        "status": "candidate",
+        "agent_id": "hunter_runtime_logs",
+        "reviewed_paths": [
+          "src/runtime.rs",
+          "src/runner.rs",
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "tests/runtime_security.rs",
+          "tests/runtime_confinement.rs",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/operations.md"
+        ],
+        "local_checks": [
+          {
+            "agent_id": "hunter_runtime_logs",
+            "reviewed_paths": [
+              "src/runtime.rs",
+              "src/runner.rs",
+              "deploy/docker/compose.yaml",
+              "deploy/podman/compose.yaml",
+              "tests/runtime_security.rs",
+              "tests/runtime_confinement.rs",
+              "docs/engineering/ARCHITECTURE_CONTRACT.md",
+              "docs/engineering/PRODUCTION_READINESS.md",
+              "docs/operations.md"
+            ],
+            "invariant": "Le volume worker et chaque copie persistante de stdout/stderr doivent avoir une borne bytes/inodes appliquée au runtime effectif.",
+            "method": "source",
+            "result": "Le volume /workspace reste sans quota produit. create_args n'impose aucun driver, quota ou rotation de logs ; capture_stream borne uniquement la copie mémoire du broker tout en drainant tous les octets. Les limites Compose Docker visent les services de contrôle et Podman n'en déclare pas. Driver, quotas, stockage et partage effectifs restent externes et non observés.",
+            "artifact": null
+          }
+        ],
+        "result_fingerprints": [
+          "runtime/workspace-volume-no-byte-quota",
+          "runtime/worker-output-engine-log-retention-unbounded"
+        ],
+        "unresolved": [
+          "Driver, rotation, quotas bytes/inodes et partage du stockage moteur non observés ; moteur non exécuté faute de sandbox conforme."
+        ],
+        "reassignment_reason": "Le critique exige de couvrir observation terminale, cleanup, annulation, commit et reprise dans la tentative live."
+      }
+    ],
+    "wave": 3,
+    "status": "candidate",
+    "agent_id": "hunter_runtime_recovery",
+    "reviewed_paths": [
+      "deploy/docker/compose.yaml",
+      "deploy/podman/compose.yaml",
+      "docs/acceptance.md",
+      "docs/architecture.md",
+      "docs/engineering/ARCHITECTURE_CONTRACT.md",
+      "docs/engineering/CODING_RULES.md",
+      "docs/engineering/CURRENT_STATE.md",
+      "docs/engineering/IMPLEMENTATION_PLAN.md",
+      "docs/engineering/PRODUCTION_READINESS.md",
+      "docs/engineering/USAGE_METERING.md",
+      "docs/operations.md",
+      "src/main.rs",
+      "src/operations.rs",
+      "src/runner.rs",
+      "src/runtime.rs",
+      "src/workspace.rs",
+      "tests/runtime_confinement.rs",
+      "tests/runtime_smoke.rs",
+      "tests/runtime_terminal.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_runtime_recovery",
+        "reviewed_paths": [
+          "src/runtime.rs",
+          "src/runner.rs",
+          "src/operations.rs",
+          "src/main.rs",
+          "tests/runtime_terminal.rs",
+          "tests/runtime_confinement.rs",
+          "tests/runtime_smoke.rs",
+          "docs/architecture.md",
+          "docs/operations.md",
+          "docs/acceptance.md",
+          "docs/engineering/ARCHITECTURE_CONTRACT.md",
+          "docs/engineering/CODING_RULES.md",
+          "docs/engineering/CURRENT_STATE.md",
+          "docs/engineering/IMPLEMENTATION_PLAN.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/engineering/USAGE_METERING.md"
+        ],
+        "invariant": "Observation terminale, audit, cleanup, annulation et reprise doivent former un état durable et réconciliable.",
+        "method": "source",
+        "result": "Le résultat terminal peut être jeté si rm échoue et n'est audité qu'après execute ; aucune identité runtime durable ni réconciliateur n'existe. Operator::Run ne gère que Ctrl+C, pas SIGTERM. La survie du conteneur après arrêt broker reste dépendante du moteur/superviseur. Les deux candidats de capacité restent présents.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runtime_abrupt",
+        "reviewed_paths": [
+          "docs/engineering/CURRENT_STATE.md",
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "src/main.rs",
+          "src/operations.rs",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "tests/runtime_confinement.rs"
+        ],
+        "invariant": "Le candidat runtime/abrupt-broker-stop-leaves-worker-unfenced doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runtime/abrupt-broker-stop-leaves-worker-unfenced.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runtime_logs",
+        "reviewed_paths": [
+          "deploy/docker/compose.yaml",
+          "deploy/podman/compose.yaml",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "tests/runtime_confinement.rs"
+        ],
+        "invariant": "Le candidat runtime/worker-output-engine-log-retention-unbounded doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runtime/worker-output-engine-log-retention-unbounded.",
+        "artifact": null
+      },
+      {
+        "agent_id": "v_runtime_volume",
+        "reviewed_paths": [
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/operations.md",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "src/workspace.rs"
+        ],
+        "invariant": "Le candidat runtime/workspace-volume-no-byte-quota doit être réfuté ou conservé uniquement avec un bloqueur décisif.",
+        "method": "source",
+        "result": "Validation indépendante Phase 3: needs_validation; la trace source survit, mais les faits runtime ou de déploiement listés dans findings.json restent décisifs pour runtime/workspace-volume-no-byte-quota.",
+        "artifact": null
+      },
+      {
+        "agent_id": "r_runtime_volume_replacement_check",
+        "reviewed_paths": [
+          "docs/engineering/PRODUCTION_READINESS.md",
+          "docs/operations.md",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "src/workspace.rs"
+        ],
+        "invariant": "La trace corrigee du quota volume doit suivre ordre reel creation puis montage RW.",
+        "method": "source",
+        "result": "Le remplacement Phase 5 a ete verifie independamment; create_volume reste une preuve et le sink est le montage workspace RW non borne.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [
+      "runtime/abrupt-broker-stop-leaves-worker-unfenced",
+      "runtime/worker-output-engine-log-retention-unbounded",
+      "runtime/workspace-volume-no-byte-quota"
+    ],
+    "unresolved": [
+      "Survie du conteneur, portée superviseur, quotas et reprise non observés faute de sandbox conforme."
+    ]
+  },
+  {
+    "coverage_id": "src%2Fworkspace.rs%23prepare-extract::src%2Fworkspace.rs%23project-volume-host::src%2Fworkspace.rs::ATTACK-CLASSES.md%23Resource%20and%20file%20handling",
+    "canonical_refs": {
+      "surface": "src/workspace.rs#prepare-extract",
+      "boundary": "src/workspace.rs#project-volume-host",
+      "subsystem": "src/workspace.rs",
+      "attack_class": "ATTACK-CLASSES.md#Resource and file handling"
+    },
+    "surface": "Import projet et export volume",
+    "boundary": "Arbres et archives non fiables vers filesystem hôte",
+    "subsystem": "Workspace",
+    "attack_class": "Ressources et fichiers",
+    "starting_paths": [
+      "src/workspace.rs",
+      "src/runner.rs",
+      "src/runtime.rs",
+      "tests/runtime_security.rs",
+      "tests/runtime_races.rs"
+    ],
+    "ordinary_attack_class_block": "ATTACK-CLASSES.md#Resource and file handling",
+    "selected_companion_blocks": [
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Core discipline",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Export and backup scope expansion",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Import and restore authority expansion",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Universal moves",
+      "DATA-ISOLATION-AND-LIFECYCLE.md#Validation rules",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Core discipline",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Decompression and representation amplification",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#File descriptor, handle, and temporary-resource leaks",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Universal moves",
+      "RESOURCE-EXHAUSTION-AND-AVAILABILITY.md#Validation rules"
+    ],
+    "excluded_blocks": [
+      {
+        "block": "DATA-ISOLATION-AND-LIFECYCLE.md#Backup and replication boundary drift",
+        "reason": "Aucune réplication ou sauvegarde automatique n'est implémentée."
+      }
+    ],
+    "prior_status": "none",
+    "attempts": [],
+    "wave": 1,
+    "status": "covered",
+    "agent_id": "hunter_runtime",
+    "reviewed_paths": [
+      "src/workspace.rs",
+      "src/runner.rs",
+      "src/runtime.rs",
+      "tests/runtime_security.rs",
+      "tests/runtime_races.rs"
+    ],
+    "local_checks": [
+      {
+        "agent_id": "hunter_runtime",
+        "reviewed_paths": [
+          "src/workspace.rs",
+          "src/runner.rs",
+          "src/runtime.rs",
+          "tests/runtime_security.rs",
+          "tests/runtime_races.rs"
+        ],
+        "invariant": "Projet et archive worker ne doivent pas traverser les racines, suivre des liens ou écraser l'original.",
+        "method": "source",
+        "result": "Import openat/O_NOFOLLOW et limites ; export refuse liens/spéciaux/doublons/traversées, crée sous staging dirfd, publie no-replace et nettoie via descripteurs. Aucun chemin d'évasion survivant trouvé.",
+        "artifact": null
+      }
+    ],
+    "result_fingerprints": [],
+    "unresolved": []
+  }
+]

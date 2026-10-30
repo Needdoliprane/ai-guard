@@ -1,0 +1,12 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.03s
+     Running tests/runtime_terminal_persistence.rs (target/debug/deps/runtime_terminal_persistence-747469244cf969f0)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-EJshjl
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+PASS terminal audit HTTP503; same stopped instance retained: agentsandbox-2341e860-67ad-4f12-a874-a2a31d132789-run-cd9f0ec93e1e4ce5bc644e87dd1a6b84; audit valid; no false terminal persisted
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.30s
+

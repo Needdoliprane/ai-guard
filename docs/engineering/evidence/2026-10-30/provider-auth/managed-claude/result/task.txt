@@ -1,0 +1,3 @@
+Create only a new file named result.txt at the workspace root. Its full content must be exactly this ASCII text, with no newline at the end:
+AI_GUARD_CLAUDE_MANAGED_API_OK_20261030_C1
+Use only the direct file-writing capability. Do not run commands or tests, access the network, create or edit any other file, or start subagents. Then report the exact content written.

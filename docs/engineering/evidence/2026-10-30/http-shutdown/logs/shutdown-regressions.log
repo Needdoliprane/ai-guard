@@ -1,0 +1,17 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.58s
+     Running tests/gateway_tenancy.rs (target/debug/deps/gateway_tenancy-571582bf9b4b62c7)
+
+running 1 test
+test configured_tenants_remain_isolated_over_http_and_after_control_plane_crash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.70s
+
+     Running tests/ingress_cli.rs (target/debug/deps/ingress_cli-3f6b0eff2dd8a2d0)
+
+running 2 tests
+test healthcheck_fails_if_either_destination_is_down_or_oversized ... ok
+test ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_client ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s
+

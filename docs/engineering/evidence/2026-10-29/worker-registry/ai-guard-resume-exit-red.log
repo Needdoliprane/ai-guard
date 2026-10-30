@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.85s
+     Running tests/runner_recovery.rs (target/debug/deps/runner_recovery-a0ced062bf8d992b)
+
+running 1 test
+test recovered_first_start_reports_a_failed_command_as_cli_failure ... FAILED
+
+failures:
+
+---- recovered_first_start_reports_a_failed_command_as_cli_failure stdout ----
+
+thread 'recovered_first_start_reports_a_failed_command_as_cli_failure' (1745773) panicked at tests/runner_recovery.rs:293:5:
+a failed recovered command must not exit zero
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    recovered_first_start_reports_a_failed_command_as_cli_failure
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 1.48s
+
+error: test failed, to rerun pass `--test runner_recovery`

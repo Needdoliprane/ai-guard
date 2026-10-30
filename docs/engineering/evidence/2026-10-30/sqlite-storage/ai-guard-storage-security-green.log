@@ -1,0 +1,70 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.08s
+     Running tests/audit_integrity.rs (target/debug/deps/audit_integrity-ca5ff017a565b408)
+
+running 12 tests
+test hardlinked_database_is_rejected_in_distinct_processes ... ok
+test external_schema_change_is_detected_before_append ... ok
+test final_symlink_and_parent_symlink_alias_are_refused ... ok
+test external_quota_corruption_blocks_append_instead_of_granting_capacity ... ok
+test external_corruption_is_detected_before_append_without_integrity_endpoint ... ok
+test unknown_schema_version_is_rejected_before_creating_application_tables ... ok
+test corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event ... ok
+test database_path_substitution_or_new_hardlink_blocks_append ... ok
+test another_valid_store_can_append_without_false_corruption ... ok
+test startup_rejects_trigger_that_discards_audit_before_acknowledgement ... ok
+test token_concatenation_cannot_disguise_missing_primary_key_constraint ... ok
+test missing_versioned_schema_objects_are_refused_without_repair ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/storage_security.rs (target/debug/deps/storage_security-d61944835463a132)
+
+running 17 tests
+test existing_nonprivate_parent_is_refused_without_creation_or_repair ... ok
+test existing_permissive_database_is_refused_without_mutation_or_repair ... ok
+test mutable_ancestor_is_refused_before_creating_database_or_lock ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test orphan_sidecars_are_preserved_without_creating_a_new_database ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test a_lock_hardlink_to_another_live_sqlite_inode_is_refused_without_closing_it ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test legitimate_processes_can_open_and_append_to_one_private_database ... ok
+test reserved_sqlite_and_lock_names_are_refused_without_creation ... ok
+test changed_sidecar_and_parent_permissions_latch_before_append ... ok
+test unicode_casefold_aliases_of_reserved_names_are_refused_before_creation ... ok
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+test permission_change_after_open_latches_before_new_event ... ok
+test unicode_parent_names_support_an_ascii_sqlite_filename ... ok
+test parallel_first_open_creates_one_private_database_and_preserves_all_events ... ok
+test unsafe_sidecars_are_refused_before_sqlite_changes_any_bytes ... ok
+test extended_acl_on_main_or_sidecar_is_refused_and_preserved ... ok
+test main_and_sidecar_special_entries_are_refused_without_opening_them ... ok
+test initialization_lock_timeout_preserves_existing_database ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.21s
+
+     Running tests/tenant_storage.rs (target/debug/deps/tenant_storage-6b5fbf82995b054b)
+
+running 3 tests
+test invalid_tenant_identity_does_not_create_database ... ok
+test legacy_nonempty_database_requires_explicit_local_identity ... ok
+test database_cannot_be_reassigned_to_another_tenant_after_restart ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+

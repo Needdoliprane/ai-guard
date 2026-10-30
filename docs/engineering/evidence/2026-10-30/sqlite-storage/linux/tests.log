@@ -1,0 +1,84 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+     Running tests/audit_integrity.rs (/build/target/debug/deps/audit_integrity-f41d8e61e776b277)
+
+running 12 tests
+test corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event ... ok
+test another_valid_store_can_append_without_false_corruption ... ok
+test external_corruption_is_detected_before_append_without_integrity_endpoint ... ok
+test database_path_substitution_or_new_hardlink_blocks_append ... ok
+test external_quota_corruption_blocks_append_instead_of_granting_capacity ... ok
+test external_schema_change_is_detected_before_append ... ok
+test hardlinked_database_is_rejected_in_distinct_processes ... ok
+test final_symlink_and_parent_symlink_alias_are_refused ... ok
+test startup_rejects_trigger_that_discards_audit_before_acknowledgement ... ok
+test token_concatenation_cannot_disguise_missing_primary_key_constraint ... ok
+test unknown_schema_version_is_rejected_before_creating_application_tables ... ok
+test missing_versioned_schema_objects_are_refused_without_repair ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running tests/control_migration.rs (/build/target/debug/deps/control_migration-58e492ddb5893340)
+
+running 10 tests
+test backup_directory_alias_is_refused_without_writing_through_it ... ok
+test backup_private_directory_under_mutable_ancestor_is_refused ... ok
+test backup_parent_must_be_private_before_any_destination_or_ddl_is_created ... ok
+test existing_backup_entries_are_refused_without_repair_or_replacement ... ok
+test explicit_migration_preserves_prior_events_and_verified_backup ... ok
+test future_and_partial_schemas_are_refused_without_repair ... ok
+test migration_never_overwrites_backup_and_audit_full_rolls_back_ddl ... ok
+test missing_v2_projection_is_not_repaired_and_backup_sidecars_are_preserved ... ok
+test source_cannot_be_selected_as_its_own_backup ... ok
+test every_preexisting_backup_sidecar_is_preserved_before_main_creation ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s
+
+     Running tests/storage_security.rs (/build/target/debug/deps/storage_security-dc0673e3bc66721f)
+
+running 16 tests
+test a_lock_hardlink_to_another_live_sqlite_inode_is_refused_without_closing_it ... ok
+test changed_sidecar_and_parent_permissions_latch_before_append ... ok
+test existing_nonprivate_parent_is_refused_without_creation_or_repair ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 1 test
+test existing_permissive_database_is_refused_without_mutation_or_repair ... ok
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+test legitimate_processes_can_open_and_append_to_one_private_database ... ok
+test main_and_sidecar_special_entries_are_refused_without_opening_them ... ok
+test mutable_ancestor_is_refused_before_creating_database_or_lock ... ok
+test orphan_sidecars_are_preserved_without_creating_a_new_database ... ok
+test parallel_first_open_creates_one_private_database_and_preserves_all_events ... ok
+test permission_change_after_open_latches_before_new_event ... ok
+test reserved_sqlite_and_lock_names_are_refused_without_creation ... ok
+test unicode_casefold_aliases_of_reserved_names_are_refused_before_creation ... ok
+test unicode_parent_names_support_an_ascii_sqlite_filename ... ok
+test unsafe_sidecars_are_refused_before_sqlite_changes_any_bytes ... ok
+test initialization_lock_timeout_preserves_existing_database ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.06s
+
+     Running tests/tenant_storage.rs (/build/target/debug/deps/tenant_storage-cee5f1fa5a279694)
+
+running 3 tests
+test invalid_tenant_identity_does_not_create_database ... ok
+test database_cannot_be_reassigned_to_another_tenant_after_restart ... ok
+test legacy_nonempty_database_requires_explicit_local_identity ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

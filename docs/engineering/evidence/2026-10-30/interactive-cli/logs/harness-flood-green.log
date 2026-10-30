@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running tests/runtime_interactive.rs (target/debug/deps/runtime_interactive-5b5bcb6c7c4f92ae)
+
+running 1 test
+PASS PTY flood regression: pump returned and parsed control status under active flood; read budget and capture cap held
+test pty_pump_services_control_during_flood_and_caps_capture ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.01s
+

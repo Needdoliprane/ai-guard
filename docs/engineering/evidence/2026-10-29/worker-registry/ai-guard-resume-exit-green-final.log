@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.60s
+     Running tests/runner_recovery.rs (target/debug/deps/runner_recovery-a0ced062bf8d992b)
+
+running 7 tests
+test recovery_refuses_another_origin_tenant_binding_manifest_or_archive_before_runtime_effects ... ok
+test lost_start_claim_ack_keeps_unknown_quota_and_never_starts ... ok
+test broker_crash_recovery_observes_then_stops_the_same_running_instance ... ok
+test preparation_without_any_helper_emission_can_resume_from_unknown ... ok
+test recovered_first_start_reports_a_failed_command_as_cli_failure ... ok
+test live_owner_blocks_resume_and_processes_a_durable_stop_intent ... ok
+test recovered_create_and_import_keep_the_same_instance_and_first_start ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.37s
+
+     Running tests/runner_terminal_audit.rs (target/debug/deps/runner_terminal_audit-e3d4f6bc47a5af6f)
+
+running 1 test
+test terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.51s
+

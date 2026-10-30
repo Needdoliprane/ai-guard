@@ -1,0 +1,15 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.45s
+     Running tests/runtime_terminal_persistence.rs (target/debug/deps/runtime_terminal_persistence-747469244cf969f0)
+
+running 1 test
+retained terminal-audit evidence: /var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-terminal-audit-sYbBpd
+WARNING: runtime does not report rootless mode; this explicit downgrade is audited.
+PASS terminal audit HTTP503; same stopped instance retained: agentsandbox-77c9af32-0750-4fd8-94a8-3c84c183342b-run-35c41cd53ef64b1c80996db91c56716b; audit valid; no false terminal persisted
+test rejected_terminal_audit_keeps_the_real_terminal_instance_inspectable ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.55s
+

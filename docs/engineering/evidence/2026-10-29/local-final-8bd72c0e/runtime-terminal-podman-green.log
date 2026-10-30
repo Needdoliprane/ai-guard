@@ -1,0 +1,45 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.76s
+     Running tests/runtime_terminal.rs (target/debug/deps/runtime_terminal-b3842d75fc3aad6a)
+
+running 1 test
+case docker/stopped_success: PASS
+case docker/stopped_failure: PASS
+case docker/negative_exit: PASS
+case docker/stopped_negative_exit: PASS
+case docker/stopped_running: PASS
+case docker/stopped_missing_finish: PASS
+case docker/stopped_reversed_finish: PASS
+case docker/missing_exit_code: PASS
+case docker/still_running: PASS
+case docker/inconsistent_running: PASS
+case docker/inconsistent_status: PASS
+case docker/missing_running: PASS
+case docker/missing_finish: PASS
+case docker/invalid_finish: PASS
+case docker/reversed_finish: PASS
+case docker/fast_success: PASS
+case docker/fast_failure: PASS
+case docker/lowercase_aliases: PASS
+case podman/stopped_success: PASS
+case podman/stopped_failure: PASS
+case podman/negative_exit: PASS
+case podman/stopped_negative_exit: PASS
+case podman/stopped_running: PASS
+case podman/stopped_missing_finish: PASS
+case podman/stopped_reversed_finish: PASS
+case podman/missing_exit_code: PASS
+case podman/still_running: PASS
+case podman/inconsistent_running: PASS
+case podman/inconsistent_status: PASS
+case podman/missing_running: PASS
+case podman/missing_finish: PASS
+case podman/invalid_finish: PASS
+case podman/reversed_finish: PASS
+case podman/fast_success: PASS
+case podman/fast_failure: PASS
+case podman/lowercase_aliases: PASS
+test only_observed_terminal_results_are_returned_and_fast_exits_remain_valid ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.92s
+

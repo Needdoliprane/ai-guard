@@ -1,0 +1,41 @@
+
+> agent-sandbox-front@0.1.0 test:browser:live
+> node tests/browser_live.mjs
+
+{
+  "status": "FAIL",
+  "stage": "téléchargement export cohérent avec la gateway",
+  "message": "Expected values to be strictly equal:\n+ actual - expected\n\n+ '6d8caa358603cf0e5a234d51241b13f6f06b969cf84449071e97a7450d664060'\n- '95484a8c0a40250e3be5a4a16fb7c1f3531fb5063117cfab1b604119a2c05451'\n",
+  "checks": [
+    {
+      "name": "services HTTP réels",
+      "status": "PASS"
+    },
+    {
+      "name": "refus serveur anonyme, invalide, runner et écritures viewer",
+      "status": "PASS"
+    },
+    {
+      "name": "bundle compilé servi par le dashboard",
+      "status": "PASS"
+    },
+    {
+      "name": "connexion UI, mémoire seule et proxy authentifié",
+      "status": "PASS"
+    },
+    {
+      "name": "SSE réel et XSS rendu comme texte déclaré",
+      "status": "PASS"
+    },
+    {
+      "name": "reconnexion SSE avec Last-Event-ID et rattrapage réel",
+      "status": "PASS"
+    },
+    {
+      "name": "fermeture contexte et navigateur",
+      "status": "PASS"
+    }
+  ],
+  "artifacts": "/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-browser-live-63d49L",
+  "networkViolations": []
+}

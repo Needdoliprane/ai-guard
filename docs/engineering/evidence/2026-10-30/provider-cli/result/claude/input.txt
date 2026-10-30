@@ -1,0 +1,1 @@
+This fixture designates the exact result string: OVPT-CLAUDE-API-QUALIFICATION-20261030

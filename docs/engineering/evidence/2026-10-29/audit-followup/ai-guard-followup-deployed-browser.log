@@ -1,0 +1,74 @@
+{
+  "status": "PASS",
+  "node": "v24.22.2",
+  "browser": "156.0.8078.76",
+  "gateway": "http://127.0.0.1:48787",
+  "dashboard": "http://127.0.0.1:48400",
+  "dashboardMode": "shared",
+  "checks": [
+    {
+      "name": "services HTTP réels",
+      "status": "PASS"
+    },
+    {
+      "name": "refus serveur anonyme, invalide, runner et écritures viewer",
+      "status": "PASS"
+    },
+    {
+      "name": "bundle compilé servi par le dashboard",
+      "status": "PASS"
+    },
+    {
+      "name": "connexion UI, mémoire seule et proxy authentifié",
+      "status": "PASS"
+    },
+    {
+      "name": "SSE réel et XSS rendu comme texte déclaré",
+      "status": "PASS"
+    },
+    {
+      "name": "reconnexion SSE avec Last-Event-ID et rattrapage réel",
+      "status": "PASS"
+    },
+    {
+      "name": "téléchargement export cohérent avec la gateway",
+      "status": "PASS"
+    },
+    {
+      "name": "workers, quotas et allocations réels dans le dashboard",
+      "status": "PASS"
+    },
+    {
+      "name": "déconnexion, actualisation et absence de persistance du jeton",
+      "status": "PASS"
+    },
+    {
+      "name": "fermeture contexte et navigateur",
+      "status": "PASS"
+    }
+  ],
+  "artifacts": "/var/folders/ny/3tnyr3194xq7zt80kp9_g5bm0000gn/T/ai-guard-browser-live-e9gQtt",
+  "worker": {
+    "workerId": "054861a4-53ac-4748-8eec-1b579227d7da",
+    "attemptId": "98d53fe8-cbae-4100-ae4c-6010ba2cd393",
+    "containerId": "4ef49d7ef8fa5da154e62c407cd65c569819bdf994106ed78bc16fc49abdc5c4",
+    "allocationObservationId": "63ece470-532b-425d-9587-72a94897f5d5",
+    "provenance": "observed",
+    "billable": false
+  },
+  "qa": {
+    "project": "qa-browser-15d1f3b1-961d-4e54-ae2a-780ea7872036",
+    "eventIds": [
+      "9d618f6a-7195-40ec-9955-0b9d0a1190dd",
+      "2f1556e9-6867-4690-a542-b36c7205612c"
+    ],
+    "sequences": [
+      283,
+      284
+    ],
+    "provenance": "declared",
+    "source": "qa.browser.live",
+    "exportSha256": "5140f34c406aac27382f0726cac89ce13b9e77d63d1e698a80a954763b33ce88"
+  },
+  "scope": "Dashboard Rust et gateway réels ; injection QA déclarée ; aucun effet runtime/fournisseur attesté."
+}

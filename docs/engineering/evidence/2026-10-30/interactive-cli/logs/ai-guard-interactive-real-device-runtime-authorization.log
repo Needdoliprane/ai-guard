@@ -1,0 +1,16 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.11s
+     Running tests/runtime_authorization.rs (target/debug/deps/runtime_authorization-5cb11c603e63cc05)
+
+running 8 tests
+test bearer_token_is_never_sent_over_non_loopback_plain_http ... ok
+test interactive_capture_is_refused_by_programmatic_api_before_filesystem_or_network ... ok
+test known_runner_credential_in_command_is_refused_before_transmission ... ok
+test unavailable_or_unacknowledged_audit_never_yields_allow ... ok
+test denied_command_cannot_be_promoted_by_human_approval ... ok
+test review_requires_the_exact_request_hash_and_resubmits_unchanged_identity ... ok
+test provider_secrets_in_identity_and_control_secrets_in_injection_never_reach_http ... ok
+test interactive_cli_refuses_pipes_before_project_import_or_admission ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+

@@ -1,0 +1,7 @@
+{
+  "from_version": 1,
+  "to_version": 2,
+  "backup_path": "/data/audit-before-control-v2-31d2c5af.sqlite",
+  "genesis_seq": 138,
+  "genesis_hash": "2309a3f68a560fce4a52bb6c4e747844b40ab0414f954ece73b8c9ce605aab61"
+}

@@ -1,0 +1,79 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.70s
+     Running tests/jev_credentials.rs (target/debug/deps/jev_credentials-4f60a097f7fd6d00)
+
+running 8 tests
+test library_gateway_refuses_viewer_reuse_before_authorization ... FAILED
+test library_gateway_refuses_padded_runner_key_reuse ... FAILED
+test library_gateway_refuses_padded_viewer_key_reuse ... FAILED
+test library_gateway_refuses_runner_reuse_before_authorization ... FAILED
+test library_registry_refuses_second_tenant_viewer_key_reuse ... FAILED
+test library_registry_refuses_second_tenant_padded_viewer_key_reuse ... FAILED
+test library_registry_refuses_second_tenant_runner_key_reuse ... FAILED
+test library_registry_refuses_second_tenant_padded_runner_key_reuse ... FAILED
+
+failures:
+
+---- library_gateway_refuses_viewer_reuse_before_authorization stdout ----
+
+thread 'library_gateway_refuses_viewer_reuse_before_authorization' (1863867) panicked at tests/jev_credentials.rs:260:9:
+assertion `left == right` failed
+  left: 200
+ right: 503
+
+---- library_gateway_refuses_padded_runner_key_reuse stdout ----
+
+thread 'library_gateway_refuses_padded_runner_key_reuse' (1863864) panicked at tests/jev_credentials.rs:260:9:
+assertion `left == right` failed
+  left: 200
+ right: 503
+
+---- library_gateway_refuses_padded_viewer_key_reuse stdout ----
+
+thread 'library_gateway_refuses_padded_viewer_key_reuse' (1863865) panicked at tests/jev_credentials.rs:260:9:
+assertion `left == right` failed
+  left: 200
+ right: 503
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- library_gateway_refuses_runner_reuse_before_authorization stdout ----
+
+thread 'library_gateway_refuses_runner_reuse_before_authorization' (1863866) panicked at tests/jev_credentials.rs:260:9:
+assertion `left == right` failed
+  left: 200
+ right: 503
+
+---- library_registry_refuses_second_tenant_viewer_key_reuse stdout ----
+
+thread 'library_registry_refuses_second_tenant_viewer_key_reuse' (1863871) panicked at tests/jev_credentials.rs:336:18:
+library assembly accepted Jev/control credential reuse
+
+---- library_registry_refuses_second_tenant_padded_viewer_key_reuse stdout ----
+
+thread 'library_registry_refuses_second_tenant_padded_viewer_key_reuse' (1863869) panicked at tests/jev_credentials.rs:336:18:
+library assembly accepted Jev/control credential reuse
+
+---- library_registry_refuses_second_tenant_runner_key_reuse stdout ----
+
+thread 'library_registry_refuses_second_tenant_runner_key_reuse' (1863870) panicked at tests/jev_credentials.rs:336:18:
+library assembly accepted Jev/control credential reuse
+
+---- library_registry_refuses_second_tenant_padded_runner_key_reuse stdout ----
+
+thread 'library_registry_refuses_second_tenant_padded_runner_key_reuse' (1863868) panicked at tests/jev_credentials.rs:336:18:
+library assembly accepted Jev/control credential reuse
+
+
+failures:
+    library_gateway_refuses_padded_runner_key_reuse
+    library_gateway_refuses_padded_viewer_key_reuse
+    library_gateway_refuses_runner_reuse_before_authorization
+    library_gateway_refuses_viewer_reuse_before_authorization
+    library_registry_refuses_second_tenant_padded_runner_key_reuse
+    library_registry_refuses_second_tenant_padded_viewer_key_reuse
+    library_registry_refuses_second_tenant_runner_key_reuse
+    library_registry_refuses_second_tenant_viewer_key_reuse
+
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `--test jev_credentials`

@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running tests/runtime_program.rs (target/debug/deps/runtime_program-997e40b6e3fb5706)
+
+running 1 test
+
+thread 'doctor_ignores_project_program_for_empty_relative_and_absolute_path_entries' (2072754) panicked at tests/runtime_program.rs:38:9:
+doctor executed a project program for PATH="": 
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test doctor_ignores_project_program_for_empty_relative_and_absolute_path_entries ... FAILED
+
+failures:
+
+failures:
+    doctor_ignores_project_program_for_empty_relative_and_absolute_path_entries
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.95s
+
+error: test failed, to rerun pass `--test runtime_program`
