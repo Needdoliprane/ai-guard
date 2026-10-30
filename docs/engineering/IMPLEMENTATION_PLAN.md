@@ -6,7 +6,7 @@ Objectif : satisfaire les exigences complètes local-first/cloud et produire des
 
 ## Cycle actif : établir puis sécuriser la référence
 
-### Lot actif P1 — authentification avant traitement HTTP
+### Lot P1 livré — authentification avant traitement HTTP
 
 Besoin constaté le 30 octobre dans `src/api.rs` : les extracteurs JSON/query s'exécutent avant l'autorisation placée dans le corps du handler ; une requête non authentifiée peut donc imposer lecture/désérialisation. Le balayage des tenants recalcule également les digests de la même entrée et des credentials configurés à chaque comparaison. Il s'agit de défauts à reproduire et corriger, pas d'une reproduction rétroactive du rapport de sécurité figé.
 
@@ -23,7 +23,7 @@ Propriétaires : agent core pour `src/api.rs` et un éventuel module `src/api/au
 
 En parallèle, la proposition de supervision permanente dans `BROKER_SUPERVISION.md` a été actualisée pour les plans fournisseurs v3, relue puis approuvée par le mainteneur. Cette direction est maintenant autorisée à l'implémentation. Aucune installation de service OS ni migration existante implicite.
 
-### Lot P1 suivant — arrêt HTTP/SSE borné
+### Lot P1 livré — arrêt HTTP/SSE borné
 
 Diagnostic : gateway et dashboard attendent sans limite `with_graceful_shutdown` dans `main.rs`, alors qu'un SSE valide peut rester ouvert indéfiniment. L'ingress possède déjà une borne de drainage de 5 s. Reprendre ce comportement pour les deux services, dans le même binaire et sans changer la donnée d'audit ou le flux SSE en fonctionnement normal.
 
@@ -56,6 +56,30 @@ Premier sous-lot immédiatement applicable : arrêt sur snapshot vérifié. La r
 Préparation centrale : [DTO et helper policy](evidence/2026-10-30/supervision-contract/README.md) compilés/testés/relus, initialement sans API ni activation par défaut. Nil boot et lien révision claim/arm corrigés par RED/GREEN, hashes legacy conservés. Le [Store transactionnel v3](evidence/2026-10-30/supervision-store/README.md) est ensuite validé indépendamment : 94 tests uniques,24 concernés rejoués après mutex final, revue close et fmt/Clippy/release PASS. Avant tout premier start v3, import exact, manifeste concordant et autorité fraîche privée sont requis. Clone/reopen restent maintenance ; legacy Created n'est pas réactivable.
 
 Sous-lot suivant [API et horloge native](evidence/2026-10-30/supervision-api-clock/README.md) : neuf routes v1 uniquement, guards avant corps, parent helper retrouvé dans le Store authentifié ; producteur d'horloge continue Rust avec boot retenu et arithmétique vérifiée. Le journal immuable, l'IPC, l'ordonnanceur et les consommateurs de cette horloge restent à intégrer. Aucun cutover avant batch/helpers/TTY qualifiés, aucune réactivation implicite du schéma3 ; les résultats et limites de validation restent dans le dossier du lot.
+
+### Lot actif — intention d'exécution immuable
+
+Spécification : [intention/checkpoint du design approuvé](BROKER_SUPERVISION.md#intention-immuable-checkpoints-et-secrets). Base `11eb871db40ca9893a4492547561ec604247257c`, worktree `codex/broker-supervision`. Besoin : le hash d'une exécution ne peut porter sur `RunPlan.managed`, modifié après chaque transition ; il doit conserver le choix fournisseur et la demande initiaux. Aucun nouveau service ni changement structurel hors de la direction déjà approuvée.
+
+Fichiers : core possède `src/broker/intent.rs`, l'export de `src/broker/mod.rs` et une couture privée bornée dans `src/runner.rs`. Un helper pur limité à la comparaison du prompt dans `src/provider.rs` peut réutiliser le parseur bootstrap existant, sans modifier ses appels historiques. Luna possède `tests/broker_intent.rs` et ses éventuels JSON de référence dans `tests/fixtures/`. Root possède suivi, intégration et preuves. Les autres modules et les plans historiques restent inchangés.
+
+Contrat public du composant : `ExecutionIntentV1::from_plan_bytes(&[u8])`, `from_bytes(&[u8])`, `validate()`, `canonical_bytes()` et `intent_hash()`, avec résultat et erreur typés. `from_plan_bytes` projette le vrai `RunPlan` via une fonction privée au crate, sans exposer son type ou ses credentials. Les données figées sont privées, sans setter ; getters de métadonnées et snapshots typés pour le futur journal. Aucun appel réseau, accès au disque, résolution Auto ou vérification supposée du contenu d'un binding par ces fonctions.
+
+Le format1, distinct des plans1/2/3, contient version/plan_version/operation_id/session/options et demande initiales, provider_input et référence de binding facultatives. Projection d'options fermée, sans modifier rétroactivement le serde de `RunOptions`. Pas de `managed`, de FD, de bytes de credential ni d'approbation déjà appliquée. UUID non nil, versions connues, empreintes hexadécimales64, forme/cohérence commande/session/profil/transport/fournisseur vérifiées ; une entrée ancienne sans identité initiale suffisante est refusée, jamais réparée ou enrichie implicitement. Ce refus du nouveau composant ne modifie pas la lecture des anciens plans.
+
+Limites : plan source32Mio au plus, intention canonique256Kio au plus ; commandes et métadonnées soumises aux bornes existantes du domaine, chaînes privées restantes bornées. Aucun path canonicalize ni lecture de source pour fabriquer le hash. Le JSON canonique trie récursivement les clés, conserve ordre des tableaux et texte ; le SHA256 porte sur `ai-guard.execution-intent.v1`, octet NUL, puis ces octets UTF-8. Les UUID typés ont leur représentation serde canonique explicite. Les hashes historiques de décision/admission/provider ne changent pas. Debug/Display/erreurs du composant restent opaques pour les valeurs privées.
+
+Points de revue : options inconnues dans le nouveau format ; session/argv/provider incohérents ; approval préexistante ; binding tourné ou absent ; références privées révélées par diagnostics. Le binding désigne seulement des métadonnées à ce stade : sa présence/digest réels seront exigés avant l'ACK du journal, sans substitution ni extraction OAuth.
+
+Portée précise du hash : identité de l'invocation et des références présentes dans le plan, sans attester les bytes d'un credential manuel. Le journal doit engager avant ACK un enregistrement privé immuable liant `intent_hash`, payload Submit exact, scope authentifié et bindings des handoffs manuel/fournisseur (identité, nom privé, digest, noms autorisés). En mode manuel, persister depuis le `PrivateFile` retenu initial, synchroniser fichier/parent, puis engager le marqueur d'acceptation ; un Snapshot éphémère unlink-on-drop ne suffit pas. Le rejeu relit cet engagement et le même binding, jamais `secret_env_file` ou Auto ; binding absent/altéré bloque admission/start sans nouvelle source. Ce contrat du journal est à implémenter/tester séparément ; il n'est pas livré par cette projection pure et ne change pas les plans1/2/3.
+
+- [x] Luna : RED ciblé avant code, avec golden indépendant du domaine/octet NUL et JSON canonique ; ce RED préparatoire n'est pas une vulnérabilité du broker existant.
+- [x] Core : format/validation/hash et projection privée ; mêmes octets/hash après mutations managed/pending/résultat ; changement de champs stables et de binding couvert.
+- [x] Luna : roundtrip strict, champs/version/UUID/borne/cohérences refusés, source de credential inexistante non consultée, diagnostics opaques et canaris historiques ciblés. Six fonctions finales et douze canaris PASS, sans additionner les rejeux ; les canaris ne sont pas répétés après le seul delta d'opacité.
+- [x] Revue indépendante : BIR-01 sur désérialisation publique des snapshots reproduit puis fermé ; oracles de bornes affinés. Fmt/Clippy strict et unique release PASS, [preuves](evidence/2026-10-30/broker-intent/README.md).
+- [x] Root : preuves, limites et lot relu préparés pour commit/push ; intégration suivie par Git. Le [complément clock Linux ARM64](evidence/2026-10-30/broker-clock-linux/README.md) concerne le gel précédent et conserve sa portée distincte.
+
+Prochaine priorité : journal privé réellement durable, avec bindings des handoffs manuel/fournisseur et rejet de toute acceptation incomplète ; puis IPC/service/ordonnanceur/gardien. Aucun ACK accepté, effet runtime, migration ou réactivation n'est délivré par le seul format d'intention.
 
 ### Choix complémentaires du mainteneur — 30 octobre
 

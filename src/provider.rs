@@ -182,6 +182,16 @@ impl ProviderResolutionV1 {
     }
 }
 
+/// Compare the frozen prompt through the existing strict bootstrap parser.
+pub(crate) fn validate_frozen_prompt(argv: &[String], prompt: Option<&str>) -> Result<()> {
+    let arguments = selection::parse_bootstrap_argv(argv)?;
+    ensure!(
+        arguments.prompt.as_deref() == prompt,
+        "provider invocation differs from its frozen prompt"
+    );
+    Ok(())
+}
+
 pub struct ProviderCredential {
     source: PrivateFile,
     bootstrap: String,

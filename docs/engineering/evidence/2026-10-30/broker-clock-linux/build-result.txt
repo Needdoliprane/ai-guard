@@ -1,0 +1,2 @@
+exit_code=0
+image=agentsandbox-broker-clock-linux:qa-20261030-intent

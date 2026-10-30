@@ -1,0 +1,21 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+error[E0432]: unresolved import `agentsandbox::broker::intent`
+ --> tests/broker_intent.rs:4:13
+  |
+4 |     broker::intent::ExecutionIntentV1,
+  |             ^^^^^^ could not find `intent` in `broker`
+
+warning: method call on a diverging inference variable
+   --> tests/broker_intent.rs:257:20
+    |
+257 |     assert!(!error.to_string().contains(PRIVATE_CANARY));
+    |                    ^^^^^^^^^
+    |
+    = help: consider providing a type annotation
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #156047 <https://github.com/rust-lang/rust/issues/156047>
+    = note: `#[warn(method_call_on_diverging_infer_var)]` (part of `#[warn(future_incompatible)]`) on by default
+
+For more information about this error, try `rustc --explain E0432`.
+warning: `agentsandbox` (test "broker_intent") generated 1 warning
+error: could not compile `agentsandbox` (test "broker_intent") due to 1 previous error; 2 warnings emitted

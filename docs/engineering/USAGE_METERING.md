@@ -1,6 +1,6 @@
 # Contrat de mesure d'usage
 
-Le lot de registre courant implémente un ledger d'allocation dans chaque base SQLite v2. Sa qualification intégrée reste décrite dans [CURRENT_STATE.md](CURRENT_STATE.md) ; le précédent candidat déployé ne contient pas ce ledger. Ne pas interpréter les déclarations fournisseurs de tokens ou la durée d'une commande comme une consommation CPU réellement mesurée.
+Le registre implémente un ledger d'allocation dans chaque base SQLite de contrôle v2 ou v3. Les candidats réellement déployés et leurs qualifications datées restent décrits dans [CURRENT_STATE.md](CURRENT_STATE.md) ; une compilation locale ne prouve pas un déploiement. Ne pas interpréter les déclarations fournisseurs de tokens ou la durée d'une commande comme une consommation CPU réellement mesurée.
 
 Le contrôle authentifié doit attribuer à chaque tenant et worker les réservations CPU/RAM et leur intervalle d'allocation issu du runtime de confiance. Les unités conservent source, bornes, identités d'idempotence et provenance. Un replay identique ne double pas l'usage ; un contenu divergent pour la même identité est un conflit. La transition terminale, la libération du quota, la mesure et l'audit obligatoire doivent être atomiques et durables.
 

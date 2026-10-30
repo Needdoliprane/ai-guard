@@ -1,0 +1,13 @@
+# Horloge native — Linux ARM64 dans Docker Desktop
+
+Complément du 30 octobre au [lot API/clock](../supervision-api-clock/README.md). Code gelé à `11eb871db40ca9893a4492547561ec604247257c`, archive privée SHA `3e1451dfb5ce997bb169b8fafef0529c5fd00266098c6c8c7677eff112bc1307`. Ce complément ne qualifie pas le code d'intention développé ensuite. [Rapport Luna](report.md), [revue indépendante](review.md).
+
+**PASS ciblé :** `cargo test --locked --offline --test broker_clock`, cinq tests, zéro échec, une entrée helper ignorée explicitement invoquée par le test parent. Les mêmes cinq fonctions ont déjà leur preuve macOS ; elles ne sont pas cinq tests supplémentaires. [Sortie originale](container.log) : Linux `7.0.14-linuxkit` aarch64, Rust/Cargo1.99.1, code0. Vrais compteur `CLOCK_BOOTTIME`, identité de boot et second processus Rust ; pas de consommation d'échéance par un ordonnanceur.
+
+Compilation depuis copie filtrée, sans montage du dépôt, secret, compte ou socket : [Dockerfile](Dockerfile), [build offline/réseau none](build.log), [résultat](build-result.txt). Cache local préexistant `sha256:07f9d4821dc1acc9c882378cee7e64ff0f69d94b73d2e8c05719913610317f24`, nouvelle image conservée `sha256:8e48e6c9b949d58cef12237644a3b13e2ef8448666cf2d6b732473f2a96072aa`. Aucun build hermétique de toute la chaîne revendiqué.
+
+Un seul conteneur, conservé après sortie naturelle : `889779a4e2dc1462d9d01b295803f6ea7243e9d8c6d78e34c952c67100195f7d`. [Inspection avant](container-inspect-before.txt) : user1000:1000, réseau none, toutes capabilities supprimées, no-new-privileges, non privilégié, 2CPU/2Gio/256PID, aucun montage ni port publié. [Après](container-inspect-after.txt) : même conteneur/image, exited0. Le rootfs de développement est inscriptible pour la compilation.
+
+La recopie des quatre fichiers depuis le conteneur arrêté concorde avec les empreintes [source sélectionnée](source-selected.sha256) et les blobs Git de la base : clock.rs, broker_clock.rs, Cargo.toml et Cargo.lock. Copie privée `/tmp/ai-guard-clock-linux-recopy.ieHti5` ; contexte, sources et logs `/tmp/ai-guard-broker-clock-linux.xOuU0P`, dossiers0700/fichiers0600. Aucun fichier utilisateur, volume, image ou conteneur antérieur supprimé. Les logs et rapports sont conservés byte pour byte, y compris leurs fins de ligne ; ils sont exclus du contrôle d'espaces Git.
+
+**NOT_RUN / hors portée :** hôte Linux natif, Linux x86_64, Podman, sommeil/reprise, reboot, erreurs syscall injectées, consommateur d'échéances, service/gardien, résilience et D5. Aucun worker, modèle, fournisseur, API externe ou E2E. Les gates du produit restent ouverts.

@@ -1,0 +1,16 @@
+Linux 889779a4e2dc 7.0.14-linuxkit #1 SMP PREEMPT Fri Oct 16 11:55:50 UTC 2026 aarch64 GNU/Linux
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/broker_clock.rs (/build/target/debug/deps/broker_clock-17ed29d3aaf36003)
+
+running 6 tests
+test darwin_timebase_conversion_uses_integer_floor_and_checks_overflow ... ok
+test boot_identity_and_native_sample_are_canonical_and_send_sync ... ok
+test deadline_math_is_checked_and_zero_timeout_is_invalid ... ok
+test native_child_probe ... ignored, private subprocess probe; invoked by independent_native_process_samples_share_boot_and_monotonic_counter
+test timespec_conversion_is_bounded_and_rejects_invalid_readings ... ok
+test independent_native_process_samples_share_boot_and_monotonic_counter ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

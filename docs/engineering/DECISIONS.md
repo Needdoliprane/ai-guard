@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 30 octobre — identité immuable et acceptation durable distinctes
+
+`ExecutionIntentV1` porte l'invocation et les références initiales du vrai RunPlan, sans ses états managed. Format1 distinct des plans1/2/3 ; JSON canonique aux clés ordonnées et domaine SHA256 `ai-guard.execution-intent.v1` suivi de NUL. La lecture historique reste inchangée ; une identité initiale absente ou déjà approuvée n'est pas réparée lors de la projection. Snapshots publics à champs privés et diagnostics opaques, pas de source de credential relue ou d'Auto résolu à nouveau. [Validation et revue](evidence/2026-10-30/broker-intent/README.md).
+
+Le hash ne prouve ni un binding réellement présent, ni les bytes d'un credential manuel, ni une autorisation tenant. Avant ACK, le journal devra lier immuablement l'opération, le Submit exact et son périmètre authentifié aux bindings durables des handoffs manuel/fournisseur, y compris l'absence explicite de credential. En manuel, persister depuis le PrivateFile initial retenu et synchroniser avant marqueur ; le Snapshot éphémère actuel ne suffit pas. Rejeu sous verrou : même engagement/binding, sans source relue ni Auto ; binding absent/altéré refuse admission et premier start. Le binding plan3 existant conserve son digest et son identité. Ce journal reste à implémenter/tester ; aucun droit de start ou de reprise n'est conféré par le composant pur.
+
 ## 30 octobre — API v1 et producteur d'horloge de supervision
 
 Les contrats du Store3 disposent de neuf routes HTTP sous `/api/v1` uniquement, sans alias nouveau `/api`, bind legacy ni commande d'activation. Les guards existants authentifient le tenant et vérifient le rôle avant toute extraction de corps ; chaque opération helper retrouve son armement et son parent réels dans cette base. Les prélectures d'admission écartent les demandes invalides et l'autorité inactive avant l'évaluation externe ; un rejeu durable n'appelle pas Jev. Les transactions du Store restent seules habilitées à réserver, consommer et refuser. Une prélecture n'élimine pas une concurrence ou une invalidation postérieure, ni plusieurs évaluations simultanées avant le premier commit.

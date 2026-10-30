@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.09s
+     Running tests/broker_intent.rs (target/debug/deps/broker_intent-bf2c2dd4dee012f4)
+
+running 5 tests
+test canonical_v1_matches_independent_golden_and_roundtrips_strictly ... ok
+test stable_execution_and_binding_fields_change_the_hash ... ok
+test managed_checkpoint_mutations_do_not_change_the_intent_hash ... ok
+test malformed_versions_approvals_and_provider_relationships_are_refused ... ok
+test strict_wire_bounds_opaque_diagnostics_and_legacy_hashes_are_preserved ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+

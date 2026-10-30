@@ -1,0 +1,1 @@
+sha256:07f9d4821dc1acc9c882378cee7e64ff0f69d94b73d2e8c05719913610317f24|linux|arm64|1000:1000|/sqlite-qualification

@@ -346,6 +346,46 @@ struct StoredProviderCredentialV1 {
 fn legacy_plan_version() -> u32 {
     1
 }
+
+pub(crate) fn execution_intent_from_plan_bytes(
+    bytes: &[u8],
+) -> crate::broker::intent::IntentResult<crate::broker::intent::ExecutionIntentV1> {
+    use crate::broker::intent::{ExecutionIntentV1, IntentError};
+    let plan: RunPlan = serde_json::from_slice(bytes).map_err(|_| IntentError::InvalidPlan)?;
+    ExecutionIntentV1::from_projection(
+        plan.version,
+        plan.operation_id,
+        plan.session,
+        plan.options,
+        plan.request,
+        plan.provider_input,
+        plan.provider_credential
+            .map(|reference| (reference.binding_id, reference.file_name, reference.digest)),
+    )
+}
+
+pub(crate) fn validate_execution_intent_provider(
+    intent: &crate::broker::intent::ExecutionIntentV1,
+) -> crate::broker::intent::IntentResult<()> {
+    let plan = RunPlan {
+        version: intent.plan_version(),
+        operation_id: intent.operation_id(),
+        session: intent.session(),
+        options: intent.initial_options().run_options(),
+        request: intent.request_data().clone(),
+        managed: None,
+        provider_input: intent.provider_input().map(|input| input.run_options()),
+        provider_credential: intent.provider_credential().map(|reference| {
+            FrozenProviderCredentialV1 {
+                binding_id: reference.binding_id(),
+                file_name: reference.file_name().into(),
+                digest: reference.digest().into(),
+            }
+        }),
+        credential_source: None,
+    };
+    validate_provider_plan(&plan).map_err(|_| crate::broker::intent::IntentError::Incoherent)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunSummary {
     pub session_id: Uuid,
