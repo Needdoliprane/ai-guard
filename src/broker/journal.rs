@@ -1,5 +1,5 @@
 //! Durable private job data. This module never authorizes or starts a workload.
-use super::intent::ExecutionIntentV1;
+use super::{checkpoint::BrokerCheckpointV2, intent::ExecutionIntentV1};
 use crate::{
     control_fs::{Directory, PrivateFile},
     runner::CheckpointPayloadV1,
@@ -15,7 +15,7 @@ use std::{
 use uuid::Uuid;
 mod types;
 pub use types::*;
-use types::{AcceptedData, BindingData};
+use types::{AcceptedData, BindingData, LoadedCheckpoint};
 
 macro_rules! stage {
     ($stage:ident) => {{
@@ -130,6 +130,7 @@ record!(Bindings {
     binding: BindingManifestV1
 });
 record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:CheckpointPayloadV1 });
+record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
 record!(Current {
     version: u32,
     operation_id: Uuid,
@@ -494,29 +495,69 @@ impl Journal {
         expected: RevisionRefV1,
         next: &CheckpointPayloadV1,
     ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V1(next.clone()))
+    }
+    pub fn advance_supervised(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: &BrokerCheckpointV2,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V2(next.clone()))
+    }
+    fn advance_checkpoint(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: LoadedCheckpoint,
+    ) -> JournalResult<CheckpointReceiptV1> {
         valid_hash(&expected.hash)?;
         let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
         self.check_writer()?;
         let loaded = self
             .load_locked(operation_id, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
-        self.context(next, &loaded.0.intent, &loaded.0.binding)?;
+        if matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some() {
+            return Err(JournalError::Conflict);
+        }
+        self.context_checkpoint(&next, &loaded.0.intent, &loaded.0.binding)?;
         let next_revision = expected
             .revision
             .checked_add(1)
             .ok_or(JournalError::LimitExceeded)?;
-        let checkpoint = Checkpoint {
-            version: 1,
-            operation_id,
-            intent_hash: loaded.0.intent_hash.clone(),
-            revision: next_revision,
-            previous: Some(expected.clone()),
-            payload: next.clone(),
+        let (bytes, domain) = match &next {
+            LoadedCheckpoint::V1(payload) => (
+                self.checked_record(
+                    &Checkpoint {
+                        version: 1,
+                        operation_id,
+                        intent_hash: loaded.0.intent_hash.clone(),
+                        revision: next_revision,
+                        previous: Some(expected.clone()),
+                        payload: payload.clone(),
+                    },
+                    CHECKPOINT,
+                )?,
+                "ai-guard:broker-checkpoint:v1",
+            ),
+            LoadedCheckpoint::V2(payload) => (
+                self.checked_record(
+                    &SupervisedCheckpoint {
+                        version: 2,
+                        operation_id,
+                        intent_hash: loaded.0.intent_hash.clone(),
+                        revision: next_revision,
+                        previous: Some(expected.clone()),
+                        payload: payload.clone(),
+                    },
+                    CHECKPOINT,
+                )?,
+                "ai-guard:broker-checkpoint:v2",
+            ),
         };
-        let bytes = self.checked_record(&checkpoint, CHECKPOINT)?;
         let head = RevisionRefV1 {
             revision: next_revision,
-            hash: digest("ai-guard:broker-checkpoint:v1", &bytes),
+            hash: digest(domain, &bytes),
         };
         if expected.revision < loaded.0.head.revision {
             let index = usize::try_from(expected.revision).map_err(|_| JournalError::Conflict)?;
@@ -531,6 +572,7 @@ impl Journal {
         if expected != loaded.0.head {
             return Err(JournalError::Conflict);
         }
+        self.check_transition(&loaded.0.checkpoint, &next, loaded.0.legacy_managed_seen)?;
         if next_revision >= u64::from(self.0.limits.revisions) {
             return Err(JournalError::LimitExceeded);
         }
@@ -842,42 +884,73 @@ impl Journal {
         valid_hash(&current.head.hash).map_err(|_| JournalError::Corrupt)?;
         let mut chain = Vec::new();
         let mut previous = None;
-        let mut payload = None;
+        let mut payload: Option<LoadedCheckpoint> = None;
+        let mut legacy_managed_seen = false;
         for revision in 0..=current.head.revision {
             let file = self
                 .read_file(&job, &revision_name(revision), CHECKPOINT)?
                 .ok_or(JournalError::Interrupted)?;
             self.0.control.record(file.bytes())?;
-            let checkpoint: Checkpoint = parse(file.bytes())?;
             let raw: Value = parse(file.bytes())?;
-            CheckpointPayloadV1::from_bytes(&canonical(
-                raw.get("payload").ok_or(JournalError::Corrupt)?,
-            )?)?;
-            if checkpoint.version != 1
-                || checkpoint.operation_id != operation_id
-                || checkpoint.intent_hash != intent_hash
-                || checkpoint.revision != revision
-                || checkpoint.previous != previous
-                || canonical(&checkpoint)? != file.bytes()
-            {
+            let (next_payload, domain) = match raw.get("version").and_then(Value::as_u64) {
+                Some(1) => {
+                    let raw_payload = canonical(raw.get("payload").ok_or(JournalError::Corrupt)?)?;
+                    let checkpoint: Checkpoint = parse(file.bytes())?;
+                    CheckpointPayloadV1::from_bytes(&raw_payload)?;
+                    if checkpoint.operation_id != operation_id
+                        || checkpoint.intent_hash != intent_hash
+                        || checkpoint.revision != revision
+                        || checkpoint.previous != previous
+                        || canonical(&checkpoint)? != file.bytes()
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    (
+                        LoadedCheckpoint::V1(checkpoint.payload),
+                        "ai-guard:broker-checkpoint:v1",
+                    )
+                }
+                Some(2) => {
+                    let checkpoint: SupervisedCheckpoint = parse(file.bytes())?;
+                    if checkpoint.operation_id != operation_id
+                        || checkpoint.intent_hash != intent_hash
+                        || checkpoint.revision != revision
+                        || checkpoint.previous != previous
+                        || canonical(&checkpoint)? != file.bytes()
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    (
+                        LoadedCheckpoint::V2(checkpoint.payload),
+                        "ai-guard:broker-checkpoint:v2",
+                    )
+                }
+                _ => return Err(JournalError::UnsupportedVersion),
+            };
+            self.context_checkpoint(&next_payload, &intent, &bindings.binding)?;
+            if let Some(old) = &payload {
+                self.check_transition(old, &next_payload, legacy_managed_seen)?;
+            } else if !matches!(next_payload, LoadedCheckpoint::V1(_)) {
                 return Err(JournalError::Corrupt);
             }
-            self.context(&checkpoint.payload, &intent, &bindings.binding)?;
+            if let LoadedCheckpoint::V1(value) = &next_payload {
+                legacy_managed_seen |= value.broker_context().managed;
+            }
             let head = RevisionRefV1 {
                 revision,
-                hash: digest("ai-guard:broker-checkpoint:v1", file.bytes()),
+                hash: digest(domain, file.bytes()),
             };
             if revision == 0
                 && (accepted.initial_checkpoint != head
                     || CheckpointPayloadV1::initial(&intent)?.canonical_bytes()?
-                        != checkpoint.payload.canonical_bytes()?)
+                        != next_payload.runner().canonical_bytes()?)
             {
                 return Err(JournalError::Corrupt);
             }
             io(file.persistent_sync())?;
             previous = Some(head.clone());
             chain.push(head);
-            payload = Some(checkpoint.payload);
+            payload = Some(next_payload);
         }
         if previous.as_ref() != Some(&current.head) {
             return Err(JournalError::Corrupt);
@@ -901,6 +974,7 @@ impl Journal {
             source,
             head: current.head,
             checkpoint: payload.ok_or(JournalError::Corrupt)?,
+            legacy_managed_seen,
             chain,
         }))))
     }
@@ -987,6 +1061,41 @@ impl Journal {
             binding.names(),
             binding.handoff_sha(),
         )
+    }
+    fn context_checkpoint(
+        &self,
+        checkpoint: &LoadedCheckpoint,
+        intent: &ExecutionIntentV1,
+        binding: &BindingManifestV1,
+    ) -> JournalResult<()> {
+        self.context(checkpoint.runner(), intent, binding)?;
+        if let LoadedCheckpoint::V2(value) = checkpoint {
+            value.validate_context(intent, self.0.scope.0.control_namespace_uuid, binding)?;
+        }
+        Ok(())
+    }
+    fn check_transition(
+        &self,
+        previous: &LoadedCheckpoint,
+        next: &LoadedCheckpoint,
+        legacy_managed_seen: bool,
+    ) -> JournalResult<()> {
+        match (previous, next) {
+            (LoadedCheckpoint::V1(old), LoadedCheckpoint::V2(value)) => {
+                if legacy_managed_seen
+                    || (old.broker_context().request.human_approved
+                        && !value.runner().broker_context().request.human_approved)
+                {
+                    return Err(JournalError::Conflict);
+                }
+                value.validate_transition(None)
+            }
+            (LoadedCheckpoint::V2(old), LoadedCheckpoint::V2(value)) => {
+                value.validate_transition(Some(old))
+            }
+            (LoadedCheckpoint::V2(_), LoadedCheckpoint::V1(_)) => Err(JournalError::Conflict),
+            (LoadedCheckpoint::V1(_), LoadedCheckpoint::V1(_)) => Ok(()),
+        }
     }
     fn budget(&self, name: &str, bytes: u64, entries: u32) -> JournalResult<()> {
         self.usage(Some(name))?

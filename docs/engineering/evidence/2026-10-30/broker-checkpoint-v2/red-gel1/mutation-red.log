@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.51s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test sqlite_decision_and_admission_ack_follow_pending_journal_revisions ... FAILED
+
+failures:
+
+---- sqlite_decision_and_admission_ack_follow_pending_journal_revisions stdout ----
+
+thread 'sqlite_decision_and_admission_ack_follow_pending_journal_revisions' (4836152) panicked at tests/broker_checkpoint.rs:616:9:
+journal accepted pending unknown-empty-reason
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sqlite_decision_and_admission_ack_follow_pending_journal_revisions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.50s
+
+error: test failed, to rerun pass `--test broker_checkpoint`

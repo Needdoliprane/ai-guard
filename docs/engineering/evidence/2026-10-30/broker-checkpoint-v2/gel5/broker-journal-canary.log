@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.22s
+     Running tests/broker_journal.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_journal-0cacbeecaf0cf892)
+
+running 12 tests
+test managed_checkpoint_rejects_unknown_runtime_schema_versions ... ok
+test plan_checkpoint_builder_accepts_known_nulls_but_rejects_unknown_nulls ... ok
+test none_binding_acceptance_reopens_with_same_intent_submit_and_checkpoint ... ok
+test manual_binding_canonicalizes_source_and_reloads_without_the_source_path ... ok
+test submit_literals_and_caps_are_rejected_before_job_creation ... ok
+test journal_refuses_symlink_and_hardlink_replacements_without_repair ... ok
+test provider_binding_preserves_exact_record_and_reports_actual_handoff_digest ... ok
+test reservation_ticket_is_live_once_then_interrupted_after_drop_or_reopen ... ok
+test checkpoint_cas_accepts_only_the_confirmed_chain_and_replays_original_receipt ... ok
+test journal_context_managed_checkpoint_live_floor_refuses_pointer_rollback ... ok
+test configured_job_entry_revision_and_byte_limits_prevent_publication ... ok
+test journal_context_managed_checkpoint_roundtrips_and_rejects_incoherent_context ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+

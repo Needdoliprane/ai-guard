@@ -19,6 +19,7 @@ use std::{
 };
 
 mod control;
+pub(crate) use control::expected_worker_transition;
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
 

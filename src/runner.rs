@@ -358,6 +358,17 @@ struct CheckpointDataV1 {
     current_request: DecisionRequest,
     managed: Option<managed::ManagedCheckpoint>,
 }
+/// Borrowed data for pure broker validation; never an execution capability.
+pub(crate) struct BrokerRunnerContext<'a> {
+    pub request: &'a DecisionRequest,
+    pub admission: Option<&'a crate::control::AdmissionV1>,
+    pub worker: Option<&'a crate::control::WorkerV1>,
+    pub binding: Option<&'a crate::runtime::RuntimeAuthority>,
+    pub owned: Option<&'a crate::runtime::OwnedContainerSnapshot>,
+    pub managed: bool,
+    pub legacy_pending: bool,
+    pub legacy_import: bool,
+}
 impl std::fmt::Debug for CheckpointPayloadV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("CheckpointPayloadV1(<private>)")
@@ -382,6 +393,20 @@ impl<'de> Deserialize<'de> for CheckpointPayloadV1 {
     }
 }
 impl CheckpointPayloadV1 {
+    pub(crate) fn broker_context(&self) -> BrokerRunnerContext<'_> {
+        let managed = self.0.managed.as_ref();
+        BrokerRunnerContext {
+            request: &self.0.current_request,
+            admission: managed.map(|value| &value.admission),
+            worker: managed.and_then(|value| value.worker.as_ref()),
+            binding: managed.and_then(|value| value.binding.as_ref()),
+            owned: managed.and_then(|value| value.owned.as_ref()),
+            managed: managed.is_some(),
+            legacy_pending: managed
+                .is_some_and(|value| value.pending.is_some() || !value.uncertain.is_empty()),
+            legacy_import: managed.is_some_and(|value| value.import.is_some()),
+        }
+    }
     pub fn initial(
         intent: &crate::broker::intent::ExecutionIntentV1,
     ) -> crate::broker::journal::JournalResult<Self> {

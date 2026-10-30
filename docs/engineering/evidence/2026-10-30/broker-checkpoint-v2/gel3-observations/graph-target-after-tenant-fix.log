@@ -1,0 +1,24 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+warning: unused imports: `AdmissionResultV1`, `HelperClaimResultV1`, and `MutationResultV1`
+ --> tests/broker_checkpoint.rs:5:9
+  |
+5 |         AdmissionResultV1, AdmissionV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1,
+  |         ^^^^^^^^^^^^^^^^^
+6 |         DecisionPhaseV1, DecisionReceiptV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1,
+  |                                                              ^^^^^^^^^^^^^^^^^^^
+...
+9 |         LaunchSpecV1, MutationReceiptV1, MutationResultV1, NetworkV1, QuotaPolicyV1,
+  |                                          ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agentsandbox` (test "broker_checkpoint") generated 1 warning (run `cargo fix --test "broker_checkpoint" -p agentsandbox` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test sqlite_store_receipts_cover_all_supervision_operation_variants has been running for over 60 seconds
+test sqlite_store_receipts_cover_all_supervision_operation_variants ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 230.66s
+

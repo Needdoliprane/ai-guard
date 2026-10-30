@@ -1,0 +1,17 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s
+     Running tests/supervision_store.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/supervision_store-672f2811666b1d73)
+
+running 9 tests
+test projection_corruption_latches_v3_store_unhealthy ... ok
+test audit_capacity_failure_does_not_persist_an_arm_or_permission ... ok
+test live_watermark_rejects_same_process_rollback_for_all_siblings ... ok
+test reopened_historical_schema3_http_mutation_returns_typed_maintenance_503 ... ok
+test schema2_keeps_legacy_api_and_schema3_supervised_admission_is_atomic_and_idempotent ... ok
+test supervised_admission_requires_uuid_authority_while_legacy_v2_keeps_opaque_ids ... ok
+test schema2_default_and_explicit_migration_preserve_history_and_legacy_replay ... ok
+test pre_claim_sqlite_clone_cannot_reauthorize_armed_start ... ok
+test import_verification_success_mismatch_and_unknown_terminal_gate_create ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+

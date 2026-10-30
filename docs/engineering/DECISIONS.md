@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 30 octobre — révisions de supervision V2 dans le journal existant
+
+Décision d'implémentation à l'intérieur du broker permanent déjà autorisé : enveloppe typée V2 avec domaine de hash propre, payload runner V1 conservé et vrais DTO de décision/admission/arm/claim/helpers/export. Pas de JSON libre nouveau ni fichier de supervision parallèle. La promotion conserve rev0/bytes/plans historiques et refuse tout préfixe V1 ayant contenu managed ; une tête vide ne suffit pas. Après V2, aucun retour via advance V1, même en replay. Les requêtes naissent pending dans une révision durable avant leur réponse connue ; helper préparé avant owned. L'autorité complète reste dans le vrai contexte managed, obligatoire dès préparation runtime, sans duplication déclarative. Les reçus référencés et parents historiques sont liés causalement, sans constituer une preuve d'authenticité ou un permis rechargeable.
+
+Le [contrat actif](IMPLEMENTATION_PLAN.md) fixe API, bornes, propriété des fichiers et acceptation. Le gel5 a ses [preuves logicielles ciblées](evidence/2026-10-30/broker-checkpoint-v2/README.md) : six fonctions et26canaris PASS, fmt/Clippy/release et corrections de revue traitées. Le raccord au reducer Store reste pur/craté et ne change ni SQL ni état live ; le loader garde la comparaison canonique complète après suppression d'une seconde désérialisation V2 redondante. Deux dérogations Clippy locales justifient les enums de snapshots bornés, sans changement de wire. Ce format ne livre ni IPC, ni échéance autonome, ni fence D5, ni restauration d'autorité. Ces mécanismes et les faits locaux de cycle de vie avant admission exigent leur propre code et leurs essais ; G09 reste FAIL.
+
 ## 30 octobre — bootstrap3 exclusif, sans réactivation implicite
 
 Une nouvelle factory conserve le backing réellement créé par O_EXCL et le garde d'initialisation, réutilise l'init2, puis libère ce garde avant le backup/migration3. Parent cible et parent backup reçoivent leurs barrières d'ancêtres. Retour actif seulement dans cette origine neuve ; copier, restaurer ou rouvrir une base ne l'active pas. Le chemin historique reste en schéma2 par défaut.

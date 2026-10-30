@@ -1,0 +1,23 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+warning: unused imports: `AdmissionResultV1`, `HelperClaimResultV1`, and `MutationResultV1`
+ --> tests/broker_checkpoint.rs:5:9
+  |
+5 |         AdmissionResultV1, AdmissionV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1,
+  |         ^^^^^^^^^^^^^^^^^
+6 |         DecisionPhaseV1, DecisionReceiptV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1,
+  |                                                              ^^^^^^^^^^^^^^^^^^^
+...
+9 |         LaunchSpecV1, MutationReceiptV1, MutationResultV1, NetworkV1, QuotaPolicyV1,
+  |                                          ^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: no method named `input_hash` found for struct `WorkerMutationV1` in the current scope
+    --> tests/broker_checkpoint.rs:1300:58
+     |
+1300 |     unique_result.receipt.input_hash = duplicate_prepare.input_hash().unwrap();
+     |                                                          ^^^^^^^^^^ method not found in `WorkerMutationV1`
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `agentsandbox` (test "broker_checkpoint") generated 1 warning
+error: could not compile `agentsandbox` (test "broker_checkpoint") due to 1 previous error; 1 warning emitted

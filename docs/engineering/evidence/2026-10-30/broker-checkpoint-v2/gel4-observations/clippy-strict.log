@@ -1,0 +1,60 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: large size difference between variants
+   --> src/broker/checkpoint.rs:106:9
+    |
+106 |           pub enum SupervisionOperationV1 { $($variant { $($field: $kind),* }),* }
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------------------------^^^^^
+    |           |                                   |
+    |           |                                   the largest variant contains at least 2840 bytes
+    |           |                                   the second-largest variant contains at least 2384 bytes
+    |           the entire enum is at least 2840 bytes
+...
+123 | / operation_types! {
+124 | |     Decision { request: DecisionRequest, response: Option<DecisionAnswerV1> },
+125 | |     Admission { request: SupervisedAdmissionV1, response: Option<AdmissionResultV1> },
+126 | |     WorkerMutation { request: WorkerMutationV1, response: Option<MutationResultV1> },
+...   |
+132 | |     Export { request: ExportRequestV1, response: Option<MutationReceiptV1> },
+133 | | }
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#large_enum_variant
+    = note: `-D clippy::large-enum-variant` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::large_enum_variant)]`
+    = note: this error originates in the macro `operation_types` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+    |
+127 -     Arm { parent: WorkerV1, #[serde(deserialize_with = "deserialize_owned")] owned: OwnedContainerSnapshot, request: ArmV1, response: Option<ArmResultV1> },
+127 +     Arm { parent: Box<WorkerV1>, #[serde(deserialize_with = "deserialize_owned")] owned: OwnedContainerSnapshot, request: ArmV1, response: Option<ArmResultV1> },
+    |
+
+error: large size difference between variants
+   --> src/broker/checkpoint.rs:109:9
+    |
+109 |           enum OperationWire { $($variant { $($(#[$attribute])* $field: $kind),* }),* }
+    |           ^^^^^^^^^^^^^^^^^^^^^^^-------------------------------------------------^^^^^
+    |           |                      |
+    |           |                      the largest variant contains at least 2840 bytes
+    |           |                      the second-largest variant contains at least 2384 bytes
+    |           the entire enum is at least 2840 bytes
+...
+123 | / operation_types! {
+124 | |     Decision { request: DecisionRequest, response: Option<DecisionAnswerV1> },
+125 | |     Admission { request: SupervisedAdmissionV1, response: Option<AdmissionResultV1> },
+126 | |     WorkerMutation { request: WorkerMutationV1, response: Option<MutationResultV1> },
+...   |
+132 | |     Export { request: ExportRequestV1, response: Option<MutationReceiptV1> },
+133 | | }
+    | |_- in this macro invocation
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#large_enum_variant
+    = note: this error originates in the macro `operation_types` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider boxing the large fields or introducing indirection in some other way to reduce the total size of the enum
+    |
+127 -     Arm { parent: WorkerV1, #[serde(deserialize_with = "deserialize_owned")] owned: OwnedContainerSnapshot, request: ArmV1, response: Option<ArmResultV1> },
+127 +     Arm { parent: Box<WorkerV1>, #[serde(deserialize_with = "deserialize_owned")] owned: OwnedContainerSnapshot, request: ArmV1, response: Option<ArmResultV1> },
+    |
+
+error: could not compile `agentsandbox` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agentsandbox` (lib test) due to 2 previous errors

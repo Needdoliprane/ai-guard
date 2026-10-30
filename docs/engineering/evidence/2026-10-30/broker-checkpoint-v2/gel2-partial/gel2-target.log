@@ -1,0 +1,12 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.09s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 4 tests
+test approved_v1_runner_cannot_be_downgraded_by_first_v2_revision ... ok
+test admission_pending_must_equal_approved_current_runner_request ... ok
+test real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0 ... ok
+test sqlite_decision_and_admission_ack_follow_pending_journal_revisions ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+

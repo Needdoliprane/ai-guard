@@ -1,0 +1,101 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+warning: unused imports: `AdmissionResultV1`, `ArmResultV1`, `ArmedStartClaimV1`, `ExportRequestV1`, `HelperClaimResultV1`, `MutationResultV1`, and `WorkerStateV1`
+  --> tests/broker_checkpoint.rs:5:9
+   |
+ 5 |         AdmissionResultV1, AdmissionV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1,
+   |         ^^^^^^^^^^^^^^^^^               ^^^^^^^^^^^                       ^^^^^^^^^^^^^^^^^
+ 6 |         DecisionPhaseV1, DecisionReceiptV1, ExportRequestV1, HelperClaimResultV1, HelperCleanupV1,
+   |                                             ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+...
+ 9 |         LaunchSpecV1, MutationResultV1, NetworkV1, QuotaPolicyV1, RestartPolicyV1,
+   |                       ^^^^^^^^^^^^^^^^
+...
+12 |         WorkerStateV1, WorkerTransitionV1, WorkerV1, helper_execution_policy_v1,
+   |         ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `managed_runner_checkpoint` is never used
+   --> tests/broker_checkpoint.rs:183:4
+    |
+183 | fn managed_runner_checkpoint(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `synthetic_owned_snapshot` is never used
+   --> tests/broker_checkpoint.rs:259:4
+    |
+259 | fn synthetic_owned_snapshot(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `helper_arm_request` is never used
+   --> tests/broker_checkpoint.rs:291:4
+    |
+291 | fn helper_arm_request(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `helper_claim_request` is never used
+   --> tests/broker_checkpoint.rs:360:4
+    |
+360 | fn helper_claim_request(
+    |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `helper_observation_request` is never used
+   --> tests/broker_checkpoint.rs:381:4
+    |
+381 | fn helper_observation_request(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `helper_cleanup_request` is never used
+   --> tests/broker_checkpoint.rs:407:4
+    |
+407 | fn helper_cleanup_request(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `synthetic_worker_inspection` is never used
+   --> tests/broker_checkpoint.rs:421:4
+    |
+421 | fn synthetic_worker_inspection(worker: &WorkerV1) -> RuntimeInspectionV1 {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `worker_arm_request` is never used
+   --> tests/broker_checkpoint.rs:439:4
+    |
+439 | fn worker_arm_request(worker: &WorkerV1, intent_hash: &str, authority: &RuntimeAuthority) -> ArmV1 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `worker_mutation` is never used
+   --> tests/broker_checkpoint.rs:468:4
+    |
+468 | fn worker_mutation(worker: &WorkerV1, transition: WorkerTransitionV1) -> WorkerMutationV1 {
+    |    ^^^^^^^^^^^^^^^
+
+warning: function `parent_observation` is never used
+   --> tests/broker_checkpoint.rs:479:4
+    |
+479 | fn parent_observation(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: `agentsandbox` (test "broker_checkpoint") generated 11 warnings (run `cargo fix --test "broker_checkpoint" -p agentsandbox` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.31s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test prepared_managed_runner_can_match_a_pending_admission_without_worker ... FAILED
+
+failures:
+
+---- prepared_managed_runner_can_match_a_pending_admission_without_worker stdout ----
+
+thread 'prepared_managed_runner_can_match_a_pending_admission_without_worker' (4857537) panicked at tests/broker_checkpoint.rs:160:10:
+called `Result::unwrap()` on an `Err` value: Conflict
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    prepared_managed_runner_can_match_a_pending_admission_without_worker
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.29s
+
+error: test failed, to rerun pass `--test broker_checkpoint`

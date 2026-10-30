@@ -1,0 +1,40 @@
+# D5 — start retardé et fencing du seul CID
+
+Revue ciblée en lecture seule, 30 octobre 2026, `broker-service`, HEAD `3e2cffa86c0d0c4784507e78f289419a9e39890f`. Sources : runtime.rs, runtime/managed.rs, runner/managed.rs, audit/control.rs et BROKER_SUPERVISION. Aucun code, test, moteur, modèle ou navigation exécuté ; aucun fichier du dépôt modifié. Les garanties externes Docker/Podman non établies ci-dessous restent à vérifier.
+
+**Conclusion : aucun appel actuel ne fournit un fence D5 irréversible prouvé.** Le stop protège l'identité ciblée et observe un état ; il ne révoque pas un ancien start en vol. Ce constat ne bloque pas le checkpoint de données et ne ferme pas D5/G09.
+
+## Scénarios concrets
+
+1. **Effet de start encore retardé, CID Created.** Le claim est consommé, le broker a lancé son client `start --attach <CID>` (`runtime.rs:919-928`, interactif : 1013-1023), mais l'effet moteur n'a pas encore commencé. Le stop inspecte Created avec Running=false et retourne immédiatement (`runtime/managed.rs:784-785`, `stopped_process:1064-1069`) sans kill. L'ancien appel peut ensuite parvenir au moteur. Le code n'a ni annulé cette émission ni rendu le CID inexécutable. C'est un ordre d'événements que le code ne clôt pas, pas une course reproduite sur moteur dans cette revue.
+2. **Running puis kill.** `stop_snapshot_target` inspecte le CID/config, émet kill sur ce CID, puis réinspecte (782-805). Cela constate un processus arrêté. L'inspection et le kill ne sont pas atomiques ; l'objet conteneur reste présent. Aucun token de génération/fence n'est transmis au moteur.
+3. **ACK seulement perdu après effet déjà appliqué.** Un unique start ayant déjà produit Running n'implique pas, par la seule perte d'ACK, un deuxième start après kill. Ne pas inventer cette relance. La question restante est l'ordre réel d'un start concurrent encore dans son traitement moteur face à kill/remove ; elle exige une preuve propre à l'adaptateur. Les scénarios 1 et 3 doivent être injectés séparément.
+4. **Client tué, timeout ou broker mort.** Tuer la CLI d'attach ou annuler sa future n'établit pas que le moteur a annulé une requête déjà reçue. Les branches timeout/interruption demandent un stop ciblé et tuent éventuellement le client (`runtime.rs:955-959`, 1095-1114). Le Drop interactif ne fait qu'enqueue une tâche async de stop si l'executor existe (492-503), sans présence durable après mort du processus. Le service/scheduler reste nécessaire.
+
+## Primitives disponibles et limites
+
+| Primitive actuelle | Portée réelle |
+|---|---|
+| `ManagedRuntime::stop_snapshot_owned/target` (749-805) | Handle lié à l'autorité, CID complet, baseline image/config/ressources recoupée ; divergences refusées, aucune résolution par nom. Kill seulement si état running/paused/restarting crédible. Created, absence ou panne ne constituent aucun fence. |
+| `kill_target` (736-744) | Revalidation de l'autorité puis `kill <CID>`. Pas de suppression, révocation durable ou génération moteur. |
+| `cleanup_terminal` (1044-1061) | Revalidation du handle, terminal/timestamps/exit code identiques au terminal fourni, puis autorité et `rm <CID>` sans option volume. C'est la seule suppression publique managed ciblée actuelle ; son caller doit avoir engagé terminal/audit. Pas utilisable comme clôture d'un Created ambigu. |
+| `Runtime::remove_container` (runtime.rs:681-687) | Helper privé générique `rm --force <target>`, appelé par cleanup d'une exécution retenue. Pas une API de fencing owned avec baseline et autorité managed. Ne pas l'exposer directement en préterminal pour contourner les invariants. |
+
+Une suppression vérifiée du seul CID, sans `--volumes`, est un **candidat de primitive à étudier**, pas une garantie acquise : il faut établir que son ACK réussi est ordonné après toute activité de l'ancien start et que celui-ci ne peut plus lancer le processus après cet ACK, y compris si le moteur avait déjà gardé une référence interne. La disparition lors d'un inspect ou le code retour de rm ne démontrent pas seuls cette propriété. Ni les labels, ni restart_policy=no, ni flock/claim central ne révoquent un RPC déjà émis. Aucun stop par nom, prune, volume rm, suppression de projet ou nouveau start de compensation.
+
+## Audit, usage et preuves à conserver
+
+Le parcours actuel reste conservateur sur Created : `stop_worker` engage l'intention, mais sans terminal complet et start durable il marque unknown et conserve le quota (`runner/managed.rs:2642-2655`). `validate_terminal` exige identité/config/ressources, restart_count=0, état terminal, exit code et timestamps réels (`runtime.rs:1272-1296`). La transaction centrale crée alors l'allocation unique billable=false et libère le quota (`audit/control.rs:1381-1403`). Stop seul ne le fait pas (1422-1425).
+
+Un futur fence préterminal exige un contrat distinct autorisé/audité : opération idempotente liée à intent/arm/claim/autorité/CID/baseline, motif d'expiration et deadline originale, résultat observé ou inconnu. Conserver le claim consommé et la cible d'enforcement jusqu'à preuve suffisante. Capturer les faits bornés nécessaires avant suppression : le volume conservé ne préserve pas à lui seul les timestamps, l'inspect ou la couche writable du conteneur supprimé. Le stop préarmé ne doit pas attendre HTTP/fsync ; une intention non confirmée reste explicitement non durable (BROKER_SUPERVISION:65-69).
+
+Un fence établi peut prouver l'impossibilité d'un futur effet sans retrouver une durée passée. Si StartedAt/FinishedAt deviennent indisponibles, ne pas fabriquer allocation zéro, terminal complet ou quota libéré. Les DTO/transactions actuels ne fournissent pas une clôture dédiée « fenced, usage inconnu » ; décider cette sémantique et son audit est un travail ultérieur. L'ACK cleanup après terminal existant ne peut pas être réinterprété pour cela.
+
+## Tests réels minimaux à prévoir, tous NOT_RUN ici
+
+- Sur chaque adaptateur/plateforme qualifiée, un worker sacrifiable et un témoin inchangé, volume de test conservé : retarder le start du CID avant son effet, observer Created, demander stop, puis libérer **l'ancienne requête**, sans nouvel appel start. Vérifier son éventuelle exécution tardive et la poursuite de l'enforcement sous la même deadline, claim et quota.
+- Séparer perte de réponse après Running et retard avant application. Un proxy Rust local qui retient le start avant transmission prouve la course transport ; il ne prouve pas le cas « moteur a déjà accepté mais pas encore appliqué ». Ce dernier demande un point de faute moteur contrôlé ou une analyse officielle/source de son ordre de verrouillage, plus un essai pertinent. Pas de qualification par simple attente finie sans effet observé.
+- Pour tout candidat fence, ordonner les deux côtés de la course avec de vrais points de synchronisation : start d'abord accepté, ou fence avant arrivée du start ; ACK perdu ; timeout ; reprise du broker ; réponse moteur ambiguë. Le résultat doit établir que l'ancien appel ne peut agir après confirmation. Tester aussi autorité/config/CID divergents : aucun effet destructeur autorisé.
+- Après retrait éventuel, créer un nouveau conteneur témoin de même nom : aucun appel de l'ancien job ne doit le viser. Vérifier volume/données de test inchangés, aucune action par nom, aucune suppression volume/projet. Recouper audit/claim/arm/CID et ledger : pas de deuxième émission, pas de double allocation, aucune libération sur absence/timeout seul ; échec d'audit conserve l'incertitude.
+
+Les tests `runtime_stop_snapshot` actuels utilisent un exécutable fixture et prouvent le choix de CID/config/kill, pas l'irréversibilité d'un moteur réel. La fixture lost_start_claim_ack vérifie une perte d'ACK centrale avant émission worker ; ce n'est pas une preuve de start moteur accepté en retard. Les budgets de disponibilité, arrêt et terminal, la sémantique concurrente start/remove Docker, celle de Podman local/remote et les pertes de preuves après suppression sont **à vérifier**, séparément par version/plateforme. Aucune garantie de fencing universel ou de délai absolu proposée ici.

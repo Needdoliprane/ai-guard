@@ -397,8 +397,28 @@ pub(super) struct AcceptedData {
     pub(super) binding: BindingManifestV1,
     pub(super) source: Option<PrivateFile>,
     pub(super) head: RevisionRefV1,
-    pub(super) checkpoint: CheckpointPayloadV1,
+    pub(super) checkpoint: LoadedCheckpoint,
+    pub(super) legacy_managed_seen: bool,
     pub(super) chain: Vec<RevisionRefV1>,
+}
+#[derive(Clone)]
+pub(super) enum LoadedCheckpoint {
+    V1(CheckpointPayloadV1),
+    V2(super::super::checkpoint::BrokerCheckpointV2),
+}
+impl LoadedCheckpoint {
+    pub(super) fn runner(&self) -> &CheckpointPayloadV1 {
+        match self {
+            Self::V1(value) => value,
+            Self::V2(value) => value.runner(),
+        }
+    }
+    pub(super) fn supervised(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
+        match self {
+            Self::V1(_) => None,
+            Self::V2(value) => Some(value),
+        }
+    }
 }
 impl AcceptedJobV1 {
     pub fn operation_id(&self) -> Uuid {
@@ -423,7 +443,10 @@ impl AcceptedJobV1 {
         &self.0.head
     }
     pub fn checkpoint(&self) -> &CheckpointPayloadV1 {
-        &self.0.checkpoint
+        self.0.checkpoint.runner()
+    }
+    pub fn broker_checkpoint_v2(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
+        self.0.checkpoint.supervised()
     }
 }
 pub struct CheckpointReceiptV1 {

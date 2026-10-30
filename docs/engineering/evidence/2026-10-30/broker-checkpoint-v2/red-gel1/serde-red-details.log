@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test sqlite_decision_and_admission_ack_follow_pending_journal_revisions ... FAILED
+
+failures:
+
+---- sqlite_decision_and_admission_ack_follow_pending_journal_revisions stdout ----
+
+thread 'sqlite_decision_and_admission_ack_follow_pending_journal_revisions' (4842461) panicked at tests/broker_checkpoint.rs:727:5:
+unknown Arm nested fields must be rejected: owned(from_bytes=false, Deserialize=false), observation(from_bytes=false, Deserialize=false)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    sqlite_decision_and_admission_ack_follow_pending_journal_revisions
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.27s
+
+error: test failed, to rerun pass `--test broker_checkpoint`

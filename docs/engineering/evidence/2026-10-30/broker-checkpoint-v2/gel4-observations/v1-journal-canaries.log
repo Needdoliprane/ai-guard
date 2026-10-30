@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.34s
+     Running tests/broker_journal.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_journal-0cacbeecaf0cf892)
+
+running 2 tests
+test journal_context_managed_checkpoint_live_floor_refuses_pointer_rollback ... ok
+test journal_context_managed_checkpoint_roundtrips_and_rejects_incoherent_context ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.92s
+

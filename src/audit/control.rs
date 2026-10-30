@@ -1267,6 +1267,27 @@ impl Store {
     }
 }
 
+/// Derive checkpoint facts from an acknowledged parent without storage or IO.
+/// The returned clone is data, never a start or mutation permission.
+pub(crate) fn expected_worker_transition(
+    parent: &WorkerV1,
+    mutation: &WorkerMutationV1,
+) -> anyhow::Result<WorkerV1> {
+    invalid(mutation.version == 1 && mutation.expected_revision > 0)?;
+    uuid(&mutation.operation_id)?;
+    uuid(&mutation.worker_id)?;
+    uuid(&mutation.attempt_id)?;
+    invalid(serde_json::to_vec(mutation)?.len() <= 65536)?;
+    conflict(
+        mutation.worker_id == parent.worker_id
+            && mutation.attempt_id == parent.attempt.attempt_id
+            && mutation.expected_revision == parent.revision,
+    )?;
+    let mut expected = parent.clone();
+    apply_worker_transition(&mut expected, mutation)?;
+    Ok(expected)
+}
+
 /// Deterministic state change shared by live mutations and journal replay.
 /// This function performs no database or runtime operation.
 fn apply_worker_transition(

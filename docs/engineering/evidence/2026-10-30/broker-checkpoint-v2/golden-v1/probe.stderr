@@ -1,0 +1,4 @@
+
+thread 'main' (4816253) panicked at /tmp/ai-guard-broker-checkpoint-v1-golden-3e2cffa/probe.rs:45:53:
+called `Result::unwrap()` on an `Err` value: control directory must exist without symbolic links: Not a directory (os error 20)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

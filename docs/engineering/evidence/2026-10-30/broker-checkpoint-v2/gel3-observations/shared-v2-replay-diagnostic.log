@@ -1,0 +1,21 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.24s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0 ... FAILED
+
+failures:
+
+---- real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0 stdout ----
+
+thread 'real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0' (4876437) panicked at tests/broker_checkpoint.rs:86:6:
+open real private journal: Busy
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.20s
+
+error: test failed, to rerun pass `--test broker_checkpoint`

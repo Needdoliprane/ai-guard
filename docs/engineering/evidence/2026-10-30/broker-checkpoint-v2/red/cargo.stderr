@@ -1,0 +1,33 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0432]: unresolved import `agentsandbox::broker::checkpoint`
+ --> tests/broker_checkpoint.rs:3:9
+  |
+3 |         checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1, SupervisionOperationV1},
+  |         ^^^^^^^^^^ could not find `checkpoint` in `broker`
+
+error[E0599]: no method named `advance_supervised` found for struct `Journal` in the current scope
+   --> tests/broker_checkpoint.rs:134:10
+    |
+133 |       let receipt = journal
+    |  ___________________-
+134 | |         .advance_supervised(operation_id, rev0_head.clone(), &next)
+    | |         -^^^^^^^^^^^^^^^^^^ method not found in `Journal`
+    | |_________|
+    |
+
+error[E0599]: no method named `broker_checkpoint_v2` found for struct `AcceptedJobV1` in the current scope
+   --> tests/broker_checkpoint.rs:160:14
+    |
+159 | /         recovered
+160 | |             .broker_checkpoint_v2()
+    | |_____________-^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `checkpoint` with a similar name
+    |
+160 -             .broker_checkpoint_v2()
+160 +             .checkpoint()
+    |
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `agentsandbox` (test "broker_checkpoint") due to 3 previous errors
