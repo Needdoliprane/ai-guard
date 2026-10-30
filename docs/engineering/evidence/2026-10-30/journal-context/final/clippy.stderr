@@ -1,0 +1,13 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+error: very complex type used. Consider factoring parts into `type` definitions
+   --> tests/broker_journal.rs:536:20
+    |
+536 |     let mutations: [(&str, Box<dyn Fn(&mut Value)>); 6] = [
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#type_complexity
+    = note: `-D clippy::type-complexity` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::type_complexity)]`
+
+error: could not compile `agentsandbox` (test "broker_journal") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

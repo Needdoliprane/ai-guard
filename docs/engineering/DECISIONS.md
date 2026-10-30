@@ -1,5 +1,9 @@
 # Décisions d'industrialisation
 
+## 30 octobre — opération physique et tentative centrale distinctes
+
+Le handle runtime du worker conserve l'opération du plan/intention, comme le produisent worker_spec et le runtime et comme le vérifie déjà la reprise. L'attempt UUID du Store identifie la tentative centrale et ses mutations ; il ne remplace pas cette opération physique. Le nouveau validateur du journal est corrigé selon le producteur, sans accepter indistinctement les deux UUID ni réécrire les anciennes exécutions. Les helpers gardent leur opération propre. La fixture précédente partageait l'hypothèse incorrecte du consommateur : elle est corrigée et ses premiers PASS ne sont pas attribués au vrai parcours. [Preuves et limites](evidence/2026-10-30/journal-context/README.md).
+
 ## 30 octobre — persistance privée du broker et codec strict
 
 Le [journal v1](BROKER_JOURNAL.md) conserve des enregistrements immuables et un pointeur publié sous verrou, dans un namespace privé distinct des bases SQLite. L'acceptation engage le Submit exact, le scope fourni par le contrôle, l'intention, les bindings durables et la révision initiale ; elle n'accorde aucune autorisation runtime. Rejouer l'opération utilise cet engagement et les sources retenues, sans résoudre à nouveau Auto ni rouvrir le credential utilisateur. Une réservation partielle reste explicitement interrompue après perte de son propriétaire.

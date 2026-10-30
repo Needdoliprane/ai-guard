@@ -641,7 +641,7 @@ impl CheckpointPayloadV1 {
                 }
             }
             if let Some(owned) = &checkpoint.owned
-                && (owned.handle.operation_id() != attempt_id
+                && (owned.handle.operation_id() != intent.operation_id()
                     || owned.handle.session_id() != intent.session()
                     || owned.handle.name() != worker.attempt.stable_name
                     || owned.observation.name != owned.handle.name()

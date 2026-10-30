@@ -78,10 +78,14 @@ fn private_root(path: &Path) -> std::path::PathBuf {
 }
 
 fn scope() -> JournalScopeV1 {
+    scope_with("tenant-journal-test", "http://127.0.0.1:8787")
+}
+
+fn scope_with(tenant: &str, gateway_origin: &str) -> JournalScopeV1 {
     JournalScopeV1::new(
         Uuid::from_u128(0x11111111111141118111111111111111),
-        "tenant-journal-test",
-        "http://127.0.0.1:8787",
+        tenant,
+        gateway_origin,
         Uuid::from_u128(0x22222222222242228222222222222222),
         "broker-test",
     )
@@ -112,9 +116,18 @@ fn open_journal_with_limits_and_control(
     limits: JournalLimitsV1,
     control: ControlSecrets,
 ) -> Journal {
+    open_journal_at_scope(root, scope(), limits, control)
+}
+
+fn open_journal_at_scope(
+    root: &Path,
+    scope: JournalScopeV1,
+    limits: JournalLimitsV1,
+    control: ControlSecrets,
+) -> Journal {
     let root = private_root(root);
     let directory = Directory::open_existing(&root).expect("private root exists");
-    Journal::open(&directory, scope(), &FsExclusions::new(), limits, control)
+    Journal::open(&directory, scope, &FsExclusions::new(), limits, control)
         .expect("open private journal")
 }
 
@@ -161,7 +174,7 @@ fn versioned_managed_plan() -> (ExecutionIntentV1, Value) {
         agentsandbox::control::content_hash("ai-guard:workspace-manifest:v1", &before).unwrap();
     let admission = AdmissionV1 {
         version: 1,
-        operation_id: operation,
+        operation_id: operation.clone(),
         receipt: DecisionReceiptV1 {
             version: 1,
             request_id: request.request_id.clone(),
@@ -275,7 +288,11 @@ fn versioned_managed_plan() -> (ExecutionIntentV1, Value) {
         "configuration_fingerprint":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "configuration_fingerprint_version":2, "observed_at":"2026-10-30T12:00:00Z", "diagnostics":[]
     });
-    let owned = json!({"handle":{"authority_fingerprint":authority.fingerprint(),"session":session,"operation":worker.attempt.attempt_id,"id":"d".repeat(64),"name":worker.attempt.stable_name,"configuration_fingerprint_version":2},"observation":observation});
+    assert_ne!(
+        operation, worker.attempt.attempt_id,
+        "plan operation and worker attempt are distinct IDs"
+    );
+    let owned = json!({"handle":{"authority_fingerprint":authority.fingerprint(),"session":session,"operation":operation,"id":"d".repeat(64),"name":worker.attempt.stable_name,"configuration_fingerprint_version":2},"observation":observation});
     let managed = json!({
         "tenant_id":"tenant-journal-test", "gateway_origin":"http://127.0.0.1:8787", "config_root":"/private/control",
         "binding":authority, "authority_file":"runtime-authority.json", "admission":admission,
@@ -359,7 +376,8 @@ fn managed_checkpoint_rejects_unknown_runtime_schema_versions() {
 
     let mut import_handle = baseline.clone();
     let import_operation = import_handle["managed"]["worker"]["attempt"]["attempt_id"].clone();
-    let import_owned = import_handle["managed"]["owned"].clone();
+    let mut import_owned = import_handle["managed"]["owned"].clone();
+    import_owned["handle"]["operation"] = import_operation.clone();
     import_handle["managed"]["import"] = json!({"operation_id":import_operation,"owned":import_owned,"start_issued":true,"completed":false});
     import_handle["managed"]["import"]["owned"]["handle"]["configuration_fingerprint_version"] =
         json!(999);
@@ -371,7 +389,8 @@ fn managed_checkpoint_rejects_unknown_runtime_schema_versions() {
 
     let mut import_observation = baseline.clone();
     let import_operation = import_observation["managed"]["worker"]["attempt"]["attempt_id"].clone();
-    let import_owned = import_observation["managed"]["owned"].clone();
+    let mut import_owned = import_observation["managed"]["owned"].clone();
+    import_owned["handle"]["operation"] = import_operation.clone();
     import_observation["managed"]["import"] = json!({"operation_id":import_operation,"owned":import_owned,"start_issued":true,"completed":false});
     import_observation["managed"]["import"]["owned"]["observation"]["configuration_fingerprint_version"] =
         json!(999);
@@ -439,6 +458,247 @@ fn managed_checkpoint_rejects_unknown_runtime_schema_versions() {
             .map(|(name, _)| name)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn journal_context_managed_checkpoint_roundtrips_and_rejects_incoherent_context() {
+    let (intent, baseline) = versioned_managed_plan();
+    let managed =
+        CheckpointPayloadV1::from_plan_bytes(&intent, &serde_json::to_vec(&baseline).unwrap())
+            .expect("valid Store-derived managed checkpoint");
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let submit = br#"{"action":"managed-context"}"#;
+
+    // accept() must create revision zero from the exact initial(intent)
+    // payload; a pre-populated managed checkpoint cannot mark the job accepted.
+    let rejected_root = tempfile::tempdir().unwrap();
+    let rejected_journal = open_journal(rejected_root.path());
+    let ticket = match rejected_journal.reserve(operation(), submit).unwrap() {
+        ReserveResult::New(ticket) => ticket,
+        _ => panic!("new managed operation requires a reservation"),
+    };
+    assert!(matches!(
+        rejected_journal.accept(ticket, &intent, BindingInputs::None, &managed),
+        Err(agentsandbox::broker::journal::JournalError::Conflict)
+    ));
+    let accepted_path = current_pointer_path(rejected_root.path(), operation())
+        .parent()
+        .unwrap()
+        .join("accepted.json");
+    assert!(
+        !accepted_path.exists(),
+        "invalid rev0 must not publish accepted marker"
+    );
+    assert!(matches!(
+        rejected_journal.load(operation()),
+        Err(agentsandbox::broker::journal::JournalError::Interrupted)
+    ));
+
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open_journal(temporary.path());
+    let ticket = match journal.reserve(operation(), submit).unwrap() {
+        ReserveResult::New(ticket) => ticket,
+        _ => panic!("new managed operation requires a reservation"),
+    };
+    let accepted = journal
+        .accept(ticket, &intent, BindingInputs::None, &initial)
+        .expect("valid initial checkpoint must accept");
+    assert_eq!(accepted.head().revision(), 0);
+    let loaded_initial = journal.load(operation()).unwrap().unwrap();
+    assert_eq!(loaded_initial.head().revision(), 0);
+    assert!(
+        loaded_initial.checkpoint().canonical_bytes().unwrap()
+            == initial.canonical_bytes().unwrap()
+    );
+
+    let advanced = journal
+        .advance(operation(), accepted.head().clone(), &managed)
+        .expect("valid managed checkpoint must advance");
+    assert_eq!(advanced.head().revision(), 1);
+    let loaded = journal.load(operation()).unwrap().unwrap();
+    assert_eq!(loaded.head().revision(), 1);
+    assert_eq!(
+        loaded.checkpoint().canonical_bytes().unwrap(),
+        managed.canonical_bytes().unwrap()
+    );
+    drop(journal);
+
+    let reopened = open_journal(temporary.path());
+    let recovered = reopened.load(operation()).unwrap().unwrap();
+    assert_eq!(recovered.head().revision(), 1);
+    assert_eq!(
+        recovered.checkpoint().canonical_bytes().unwrap(),
+        managed.canonical_bytes().unwrap()
+    );
+
+    // Each malformed context starts from a fresh accepted initial checkpoint;
+    // only its managed payload changes, so the failure is a context refusal.
+    type ContextMutation = (&'static str, Box<dyn Fn(&mut Value)>);
+    let mutations: [ContextMutation; 6] = [
+        (
+            "tenant",
+            Box::new(|plan| plan["managed"]["tenant_id"] = json!("tenant-other")),
+        ),
+        (
+            "origin",
+            Box::new(|plan| plan["managed"]["gateway_origin"] = json!("http://127.0.0.1:8788")),
+        ),
+        (
+            "spec",
+            Box::new(|plan| plan["managed"]["worker"]["spec_hash"] = json!("f".repeat(64))),
+        ),
+        (
+            "owned operation",
+            Box::new(|plan| {
+                let attempt_id = plan["managed"]["worker"]["attempt"]["attempt_id"].clone();
+                plan["managed"]["owned"]["handle"]["operation"] = attempt_id;
+            }),
+        ),
+        (
+            "handoff",
+            Box::new(|plan| plan["managed"]["credential_digest"] = json!("e".repeat(64))),
+        ),
+        (
+            "worker",
+            Box::new(|plan| {
+                let attempt_id = plan["managed"]["worker"]["attempt"]["attempt_id"].clone();
+                let revision = plan["managed"]["worker"]["revision"].clone();
+                plan["managed"]["pending"] = json!({
+                    "version":1, "operation_id":Uuid::new_v4().to_string(),
+                    "worker_id":"ffffffff-ffff-4fff-8fff-ffffffffffff",
+                    "attempt_id":attempt_id,
+                    "expected_revision":revision, "transition":{"action":"stop"}
+                });
+            }),
+        ),
+    ];
+    for (label, mutate) in mutations {
+        let mut changed = baseline.clone();
+        mutate(&mut changed);
+        let changed_checkpoint =
+            CheckpointPayloadV1::from_plan_bytes(&intent, &serde_json::to_vec(&changed).unwrap())
+                .unwrap_or_else(|error| {
+                    panic!("{label} mutation must remain a parseable checkpoint: {error}")
+                });
+        let root = tempfile::tempdir().unwrap();
+        let journal = open_journal(root.path());
+        let ticket = match journal.reserve(operation(), submit).unwrap() {
+            ReserveResult::New(ticket) => ticket,
+            _ => panic!("new operation requires a reservation"),
+        };
+        let accepted = journal
+            .accept(ticket, &intent, BindingInputs::None, &initial)
+            .unwrap();
+        assert!(
+            matches!(
+                journal.advance(operation(), accepted.head().clone(), &changed_checkpoint),
+                Err(agentsandbox::broker::journal::JournalError::Conflict)
+            ),
+            "managed {label} mismatch must be refused"
+        );
+        assert_eq!(
+            journal
+                .load(operation())
+                .unwrap()
+                .unwrap()
+                .head()
+                .revision(),
+            0
+        );
+    }
+
+    // A scope with a different origin cannot accept even the initial checkpoint.
+    let root = tempfile::tempdir().unwrap();
+    let scope_mismatch = open_journal_at_scope(
+        root.path(),
+        scope_with("tenant-journal-test", "http://127.0.0.1:8788"),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    );
+    let ticket = match scope_mismatch.reserve(operation(), submit).unwrap() {
+        ReserveResult::New(ticket) => ticket,
+        _ => panic!("new scope mismatch case requires a reservation"),
+    };
+    assert!(matches!(
+        scope_mismatch.accept(ticket, &intent, BindingInputs::None, &initial),
+        Err(agentsandbox::broker::journal::JournalError::Conflict)
+    ));
+}
+
+#[test]
+fn journal_context_managed_checkpoint_live_floor_refuses_pointer_rollback() {
+    let (intent, baseline) = versioned_managed_plan();
+    let managed =
+        CheckpointPayloadV1::from_plan_bytes(&intent, &serde_json::to_vec(&baseline).unwrap())
+            .expect("valid Store-derived managed checkpoint");
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let submit = br#"{"action":"managed-floor"}"#;
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open_journal(temporary.path());
+    let sibling = journal.clone();
+    let ticket = match journal.reserve(operation(), submit).unwrap() {
+        ReserveResult::New(ticket) => ticket,
+        _ => panic!("new operation requires a reservation"),
+    };
+    let accepted = journal
+        .accept(ticket, &intent, BindingInputs::None, &initial)
+        .unwrap();
+    let path = current_pointer_path(temporary.path(), operation());
+    let valid_rev0_pointer = std::fs::read(&path).unwrap();
+    let rev1 = journal
+        .advance(operation(), accepted.head().clone(), &managed)
+        .unwrap();
+    let rev2 = journal
+        .advance(operation(), rev1.head().clone(), &managed)
+        .unwrap();
+    assert_eq!(rev2.head().revision(), 2);
+
+    // Restore the exact old, valid pointer in place. The graph remains valid;
+    // only the live writer's acknowledged floor can identify the rollback.
+    std::fs::write(&path, &valid_rev0_pointer).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), valid_rev0_pointer);
+    for live in [&journal, &sibling] {
+        assert!(matches!(
+            live.load(operation()),
+            Err(agentsandbox::broker::journal::JournalError::Conflict)
+        ));
+        assert!(matches!(
+            live.reserve(operation(), submit),
+            Err(agentsandbox::broker::journal::JournalError::Conflict)
+        ));
+        assert!(matches!(
+            live.advance(operation(), rev2.head().clone(), &managed),
+            Err(agentsandbox::broker::journal::JournalError::Conflict)
+        ));
+    }
+    drop(sibling);
+    drop(journal);
+
+    // Process-reopen intentionally has no promised anti-restore floor. Since
+    // revision zero is a valid prefix, recovery may read it conservatively.
+    let reopened = open_journal(temporary.path());
+    let old = reopened.load(operation()).unwrap().unwrap();
+    assert_eq!(old.head().revision(), 0);
+    assert_eq!(
+        old.checkpoint().canonical_bytes().unwrap(),
+        initial.canonical_bytes().unwrap()
+    );
+    assert!(matches!(
+        reopened.reserve(operation(), submit).unwrap(),
+        ReserveResult::Accepted(_)
+    ));
+}
+
+fn current_pointer_path(root: &Path, operation: Uuid) -> std::path::PathBuf {
+    std::fs::read_dir(root.join("broker-journal-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("jobs")
+        .join(operation.to_string())
+        .join("current.json")
 }
 
 #[test]

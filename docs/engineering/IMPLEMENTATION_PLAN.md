@@ -99,7 +99,18 @@ Propriétaires : core pour `src/broker/journal.rs`, ses types, la couture checkp
 
 Les plafonds d'admission du journal ne sont pas des quotas physiques bytes/inodes. SIGKILL ne prouve pas la résistance à la panne électrique ; aucun de ces tests ne clôture G09 ou la recette A1/A2/B1.
 
-Suite obligatoire : tests complets du contexte managed au niveau Journal et du plancher mémoire sur rollback, puis raccord IPC/service/ordonnanceur dans la verticale batch/helpers. Le simple composant de stockage ne ferme pas ces critères d'activation et ne justifie pas un cutover du CLI.
+Suite obligatoire : le complément ci-dessous vérifie contexte managed et plancher mémoire sur rollback, puis le raccord IPC/service/ordonnanceur doit compléter la verticale batch/helpers. Le simple composant de stockage ne ferme pas les critères d'activation et ne justifie pas un cutover du CLI.
+
+### Lot validé pour intégration — contexte produit par le runner et plancher du journal
+
+Base `537f8d2c072139bb4ced0f3b7bd385f15fb1e9dd`. Luna possède les deux nouvelles fonctions dans `tests/broker_journal.rs` ; root possède le correctif éventuel de `src/runner.rs`, les preuves et l'intégration. Un agent Rust cartographie en lecture seule le futur service/IPC et ses coutures réelles ; aucun service n'est activé par ce travail.
+
+Les premiers tests managed/plancher ont passé avec une fixture Store-backed. La cartographie a ensuite identifié une divergence : `worker_spec` place `plan.operation_id` dans le spec et le handle runtime, tandis que le nouveau validateur et sa fixture attendaient `worker.attempt.attempt_id`. Ces UUID ont des rôles distincts. Le défaut a été reproduit puis le consommateur corrigé selon le producteur, sans modifier les exécutions historiques ni accepter indistinctement les deux identités.
+
+- [x] Vérifier initial rev0 obligatoire puis advance/load/reopen avec le checkpoint managed cohérent et les refus tenant/origine/spec/handoff/worker/identité physique ; pas de managed accepté directement en rev0.
+- [x] Vérifier rollback du pointeur valide contre le writer vivant et ses clones, puis lecture conservée après drop/reopen sans prétendre à un anti-restore.
+- [x] Conserver les sorties brutes et gels de chaque étape,12tests ciblés/fmt/Clippy/release PASS ; correctif et oracles relus indépendamment.
+- [x] Mettre à jour les limites, fermer la revue et préparer le lot pour intégration/push suivi par Git ; poursuivre la verticale service/batch/helpers, sans modifier les JSON RunPlan1/2/3.
 
 ### Choix complémentaires du mainteneur — 30 octobre
 
