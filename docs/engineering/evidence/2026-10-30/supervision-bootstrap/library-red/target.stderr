@@ -1,0 +1,144 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0599]: no associated function or constant named `create_supervised_for_tenant` found for struct `Store` in the current scope
+   --> tests/supervision_bootstrap.rs:106:24
+    |
+106 |     let store = Store::create_supervised_for_tenant(
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Store`
+    |
+note: if you're trying to build a new `Store` consider using one of the following associated functions:
+      Store::open
+      Store::open_for_tenant
+   --> src/audit.rs:386:5
+    |
+386 |       pub fn open(path: &Path, redactor: Redactor, max_events: u64) -> anyhow::Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+help: there is an associated function `open_for_tenant` with a similar name
+   --> src/audit.rs:389:5
+    |
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+
+error[E0599]: no associated function or constant named `create_supervised_for_tenant` found for struct `Store` in the current scope
+   --> tests/supervision_bootstrap.rs:210:24
+    |
+210 |     let error = Store::create_supervised_for_tenant(
+    |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Store`
+    |
+note: if you're trying to build a new `Store` consider using one of the following associated functions:
+      Store::open
+      Store::open_for_tenant
+   --> src/audit.rs:386:5
+    |
+386 |       pub fn open(path: &Path, redactor: Redactor, max_events: u64) -> anyhow::Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+help: there is an associated function `open_for_tenant` with a similar name
+   --> src/audit.rs:389:5
+    |
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+
+error[E0599]: no associated function or constant named `create_supervised_for_tenant` found for struct `Store` in the current scope
+   --> tests/supervision_bootstrap.rs:238:16
+    |
+238 |         Store::create_supervised_for_tenant(
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Store`
+    |
+note: if you're trying to build a new `Store` consider using one of the following associated functions:
+      Store::open
+      Store::open_for_tenant
+   --> src/audit.rs:386:5
+    |
+386 |       pub fn open(path: &Path, redactor: Redactor, max_events: u64) -> anyhow::Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+help: there is an associated function `open_for_tenant` with a similar name
+   --> src/audit.rs:389:5
+    |
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+
+error[E0599]: no associated function or constant named `create_supervised_for_tenant` found for struct `Store` in the current scope
+   --> tests/supervision_bootstrap.rs:258:30
+    |
+258 |     let error = match Store::create_supervised_for_tenant(
+    |                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `Store`
+    |
+note: if you're trying to build a new `Store` consider using one of the following associated functions:
+      Store::open
+      Store::open_for_tenant
+   --> src/audit.rs:386:5
+    |
+386 |       pub fn open(path: &Path, redactor: Redactor, max_events: u64) -> anyhow::Result<Self> {
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+help: there is an associated function `open_for_tenant` with a similar name
+   --> src/audit.rs:389:5
+    |
+389 | /     pub fn open_for_tenant(
+390 | |         path: &Path,
+391 | |         tenant_id: &str,
+392 | |         redactor: Redactor,
+393 | |         max_events: u64,
+394 | |     ) -> anyhow::Result<Self> {
+    | |_____________________________^
+
+warning: method call on a diverging inference variable
+   --> tests/supervision_bootstrap.rs:268:20
+    |
+268 |     assert!(!error.to_string().is_empty());
+    |                    ^^^^^^^^^
+    |
+    = help: consider providing a type annotation
+    = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+    = note: for more information, see issue #156047 <https://github.com/rust-lang/rust/issues/156047>
+    = note: `#[warn(method_call_on_diverging_infer_var)]` (part of `#[warn(future_incompatible)]`) on by default
+
+For more information about this error, try `rustc --explain E0599`.
+warning: `agentsandbox` (test "supervision_bootstrap") generated 1 warning
+error: could not compile `agentsandbox` (test "supervision_bootstrap") due to 4 previous errors; 2 warnings emitted
+warning: build failed, waiting for other jobs to finish...

@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 30 octobre — bootstrap3 exclusif, sans réactivation implicite
+
+Une nouvelle factory conserve le backing réellement créé par O_EXCL et le garde d'initialisation, réutilise l'init2, puis libère ce garde avant le backup/migration3. Parent cible et parent backup reçoivent leurs barrières d'ancêtres. Retour actif seulement dans cette origine neuve ; copier, restaurer ou rouvrir une base ne l'active pas. Le chemin historique reste en schéma2 par défaut.
+
+Le gateway propose une option explicite de création de stores neufs, pas une commande de récupération : backup privé distinct par tenant, aucune réparation/écriture de fichier existant, erreur avant serve avec partiels conservés. Les chemins privés des clés configurées sont retenus sans changer le JSON du registre ; comparaison dev/ino/ancêtres pour séparer backup et répertoires credentials connus. L'image prépare `/run/secrets` en1000/0700 pour ces contrôles, avec projections de fichiers0444 readonly. La qualification Docker comparative vérifie ce besoin réel, sans reconstruire toute la chaîne multi-stage ni remplacer QA. [Preuves, décisions de revue et limites](evidence/2026-10-30/supervision-bootstrap/README.md).
+
 ## 30 octobre — opération physique et tentative centrale distinctes
 
 Le handle runtime du worker conserve l'opération du plan/intention, comme le produisent worker_spec et le runtime et comme le vérifie déjà la reprise. L'attempt UUID du Store identifie la tentative centrale et ses mutations ; il ne remplace pas cette opération physique. Le nouveau validateur du journal est corrigé selon le producteur, sans accepter indistinctement les deux UUID ni réécrire les anciennes exécutions. Les helpers gardent leur opération propre. La fixture précédente partageait l'hypothèse incorrecte du consommateur : elle est corrigée et ses premiers PASS ne sont pas attribués au vrai parcours. [Preuves et limites](evidence/2026-10-30/journal-context/README.md).

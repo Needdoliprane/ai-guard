@@ -4,6 +4,8 @@ Ce parcours part d'un checkout existant et mène à une première commande autor
 
 ai-guard vise un produit open source destiné à la production. Sa qualification globale reste ouverte : lire l'[état courant](engineering/CURRENT_STATE.md) et les [gates](engineering/PRODUCTION_READINESS.md) avant de retenir un environnement d'exploitation. Les essais Docker Desktop/macOS ARM64 ne qualifient pas Podman, Linux ou Kubernetes.
 
+Ce parcours utilise le contrôle schéma2 par défaut. Le [bootstrap explicite d'un contrôle neuf en schéma3](operations.md#initialiser-un-contrôle-de-supervision-neuf) prépare le broker permanent en cours d'intégration ; il emploie des bases distinctes et ne remplace pas le démarrage ci-dessous.
+
 ## 1. Préparer les outils
 
 | Outil | Utilité | Nécessaire sur l'hôte |

@@ -28,6 +28,8 @@ struct TenantFiles {
 pub struct ConfiguredTenant {
     pub tenant_id: String,
     pub data: PathBuf,
+    pub runner_token_file: PathBuf,
+    pub viewer_token_file: PathBuf,
     pub runner_token: String,
     pub viewer_token: String,
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
@@ -92,8 +94,10 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             "Identifiant de tenant dupliqué"
         );
         let data = resolve(tenant.data)?;
-        let runner_token = crate::read_token(&resolve(tenant.runner_token_file)?)?;
-        let viewer_token = crate::read_token(&resolve(tenant.viewer_token_file)?)?;
+        let runner_token_file = resolve(tenant.runner_token_file)?;
+        let viewer_token_file = resolve(tenant.viewer_token_file)?;
+        let runner_token = crate::read_token(&runner_token_file)?;
+        let viewer_token = crate::read_token(&viewer_token_file)?;
         for credential in [&runner_token, &viewer_token] {
             // Keep only hashes in the uniqueness index; raw credentials stay in
             // the configured identities and the redactor, never diagnostics.
@@ -106,6 +110,8 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
         result.push(ConfiguredTenant {
             tenant_id: tenant.tenant_id,
             data,
+            runner_token_file,
+            viewer_token_file,
             runner_token,
             viewer_token,
             worker_quota: tenant.worker_quota,

@@ -1,0 +1,2 @@
+FROM ai-guard-supervision-bootstrap-unprepared:qa-20261030
+COPY bootstrap-probe /usr/local/bin/bootstrap-probe

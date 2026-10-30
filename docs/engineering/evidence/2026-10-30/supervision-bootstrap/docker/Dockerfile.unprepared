@@ -1,0 +1,2 @@
+FROM agentsandbox-control:qa-20261030-engine-logs-v2-final-c53bd8
+COPY agentsandbox /usr/local/bin/agentsandbox

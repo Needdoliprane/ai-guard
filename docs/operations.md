@@ -304,7 +304,27 @@ Le JSON conserve le résultat connu même lorsque la CLI retourne en échec pour
 
 **Limite ouverte :** le timer du broker courant ne survit pas à sa mort brutale. [Défaut reproduit sur Docker Desktop](engineering/evidence/2026-10-30/cli-crash/README.md) : même worker encore Running après7s malgré une limite5s, puis arrêt/réconciliation ciblés. La reprise manuelle et le quota conservé ne remplacent pas la supervision autonome attendue. Le port d'arrêt sur snapshot est durci ; broker permanent, gardien et reprise autonome restent à intégrer et qualifier.
 
-Les procédures ci-dessus emploient le schéma2 livré par défaut. Le nouveau Storev3 ne dispose pas encore de parcours CLI/HTTP de supervision exposé : son activation fraîche ne survit volontairement pas à la fermeture du processus, et une réouverture/restauration conserve la maintenance et le refus d'exécution. Aucun fresh bind d'ancien Created ne lui donne une nouvelle durée ou un start. Ne pas changer manuellement le numéro de schéma ou un flag pour contourner ce refus ; conserver bases/plans/volumes et réconcilier l'autorité avant la future réactivation qualifiée. [Preuves et portée](engineering/evidence/2026-10-30/supervision-store/README.md).
+Les procédures ci-dessus emploient le schéma2 livré par défaut. Les API v1 de supervision et un bootstrap explicite de Storev3 neuf existent ; le raccord au broker permanent reste à livrer. L'activation fraîche ne survit volontairement pas à la fermeture du processus, et une réouverture/restauration conserve la maintenance et le refus d'exécution. Aucun fresh bind d'ancien Created ne lui donne une nouvelle durée ou un start. Conserver bases/plans/volumes et réconcilier l'autorité avant la future réactivation qualifiée ; aucune édition manuelle du schéma ou d'un flag ne la remplace. [Preuves Store](engineering/evidence/2026-10-30/supervision-store/README.md), [bootstrap neuf](engineering/evidence/2026-10-30/supervision-bootstrap/README.md).
+
+### Initialiser un contrôle de supervision neuf
+
+Cette étape prépare les API du broker permanent. Le parcours actuel de `run`/`worker-resume` conserve le schéma2 : ces clients ne fournissent pas encore les armements v3. Utiliser des bases distinctes et neuves pour le nouveau contrôle ; le composant journal et le bootstrap ne constituent pas une supervision autonome.
+
+L'option gateway `--initialize-supervised-stores BACKUP_ROOT` exige que chaque fichier DB soit absent, crée une sauvegarde2 vérifiée et engage le schéma3 dans cette seule origine. Elle fonctionne avec un contrôle local ou un registre multi-client existant. Conserver les fichiers de clés privés déjà configurés : ils ne sont ni recréés ni déplacés.
+
+```sh
+agentsandbox gateway \
+  --data /chemin/neuf/controle-local/audit.sqlite \
+  --runner-token-file /chemin/controle/secrets/runner \
+  --viewer-token-file /chemin/controle/secrets/viewer \
+  --initialize-supervised-stores /chemin/prive/supervision-backups
+```
+
+Pour un registre, utiliser `--tenants-file /chemin/controle/tenants.json` avec cette même option et des destinations `data` toutes neuves. Le JSON du registre ne change pas. La racine de backup est privée0700, dédiée, et séparée des répertoires de clés runner/viewer/Jev connus ; les aliases ordinaires du même répertoire sont refusés. En mode bootstrap, les parents des fichiers de clés doivent être privés0700. Les fichiers de sauvegarde0600 sont nommés `tenant-<SHA256 du tenant exact>-v2.sqlite` ; ce nom ne constitue aucune authentification.
+
+`GET /api/v1/control/protocol`, avec l'identité authentifiée habituelle, expose tenant, rôle, namespace, schéma et état du contrôle. `active=true` décrit l'autorité fraîche du Store et ne prouve pas qu'un ordonnanceur fonctionne. Les [tests HTTP A/B et limites](engineering/evidence/2026-10-30/supervision-bootstrap/README.md) vérifient cette différence.
+
+Au redémarrage ordinaire sans l'option, les bases3 et leurs namespaces sont conservés en maintenance inactive. Réutiliser l'option sur ces fichiers refuse le démarrage ; elle n'est pas une commande de reprise/restauration. Une erreur empêche serve et conserve les nouveaux partiels pour diagnostic. Le bootstrap de plusieurs bases n'est pas globalement atomique : si un tenant ultérieur échoue, les nouveaux fichiers antérieurs restent en place. Garder ces fichiers et les backups ; aucune suppression ou réparation automatique ne débloque le contrôle. La qualification de panne électrique, la réactivation sûre et les parcours workers restent ouverts.
 
 ## Jev optionnel
 

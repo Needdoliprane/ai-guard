@@ -1,0 +1,18 @@
+
+running 1 test
+test pre_claim_sqlite_clone_cannot_reauthorize_armed_start ... FAILED
+
+failures:
+
+---- pre_claim_sqlite_clone_cannot_reauthorize_armed_start stdout ----
+
+thread 'pre_claim_sqlite_clone_cannot_reauthorize_armed_start' (4704956) panicked at tests/supervision_store.rs:29:58:
+called `Result::unwrap()` on an `Err` value: private database entry requires a regular single-link file, effective-UID ownership and mode 0600; existing data is never repaired
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pre_claim_sqlite_clone_cannot_reauthorize_armed_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.18s
+

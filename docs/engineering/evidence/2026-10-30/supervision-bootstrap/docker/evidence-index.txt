@@ -1,0 +1,20 @@
+Bootstrap Docker evidence index (private folder mode 0700)
+
+Gateway logs: witness.log, corrected.log
+Healthcheck command result: healthcheck.stdout (empty output), healthcheck.exit-code
+AuditClient probe result: probe.stdout, probe.exit-code
+Final inspect (both owned containers): runtime-inspect.json
+Observed file metadata from docker exec: corrected-metadata.stdout
+Witness auto-created secret directory: witness-secrets/ (UID 0, mode 0755); witness DATA: witness-data-copy-2/ (directories only)
+Corrected DATA copied after stop: corrected-data-copy/
+Source hash verification before build: source-reverify.log
+Source hash verification after recopy from stopped builder: builder-source-reverify.log (112 entries, all OK)
+Frozen manifest: source.sha256; frozen archive: source.tar
+Builder source recopy: builder-source-recopy/ (contains frozen112 and policies/default.json)
+Comparative Dockerfiles: image-context/Dockerfile.unprepared, image-context/Dockerfile.prepared, image-context/Dockerfile.unprepared.probe, image-context/Dockerfile.prepared.probe
+Probe source/build Dockerfile: bootstrap_qualification_probe.rs, probe-build-context/Dockerfile; probe ELF: probe-output/bootstrap-probe
+Linux release app binary: `linux-artifacts/agentsandbox` (SHA-256 `764b91d0297669c0c07db094dd46fb4874f5145bb8966f330a62138b9cc94e9e`); release app rlib: `linux-artifacts/libagentsandbox.rlib` (SHA-256 `dd446b353c38a3d2bd374edc5854bb94ecd2fc8877ee26336c520722505485fc`). The same Linux app bytes copied from both stopped runtime containers are `runtime-binaries/witness-linux` and `runtime-binaries/corrected-linux`; equality/hash proof: `runtime-binaries.sha256`. Probe copied from stopped runtime: `runtime-binaries/probe-linux`.
+Pre-existing native macOS artifacts are separate and unchanged: `agentsandbox-macos` (SHA-256 `3188c3a6848925a2995d7096fe2f5433d4a609e1eb7daa2c009e70dea5a19b39`) and `libagentsandbox-macos.rlib` (SHA-256 `10d191a1c4e457b57bc358ae9698241ec69b0701036c5da46ee60f87e09376d4`). Root-level native artifacts `agentsandbox` and `libagentsandbox.rlib` are retained as originally present; they are not the Linux outputs.
+
+Healthcheck/probe stdout files above are captured command output; no token values were logged. Namespace strings are emitted by the gateway as UUID-formatted values. The probe checks length36, non-nil sentinel and pairwise distinctness; it does not parse UUID syntax itself.
+The Docker probe checks backup count and filesystem metadata only; it does not read SQLite or run PRAGMA/schema/quick_check, and does not independently verify the tenant-hash-to-filename relationship. Pre-migration2 backup format is supported by product construction plus the separate native verification, not by a SQLite reread in this Docker run.

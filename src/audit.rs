@@ -20,7 +20,7 @@ use std::{
 
 mod control;
 mod storage;
-use storage::StoreStorage;
+use storage::{InitializationGuard, StoreStorage};
 
 #[derive(Debug, Serialize)]
 pub struct Integrity {
@@ -394,7 +394,66 @@ impl Store {
     ) -> anyhow::Result<Self> {
         validate_tenant_id(tenant_id)?;
         anyhow::ensure!(max_events <= i64::MAX as u64, "invalid audit capacity");
-        let (backing, _initialization_guard) = StoreStorage::open(path)?;
+        let (backing, initialization_guard) = StoreStorage::open(path)?;
+        Self::open_prepared_for_tenant(
+            backing,
+            initialization_guard,
+            tenant_id,
+            redactor,
+            max_events,
+        )
+    }
+    /// Create a new audit origin and its exclusive pre-supervision backup.
+    /// Existing databases and sidecars are refused before any SQLite open.
+    /// Reopening the result does not recreate its live execution authority.
+    pub fn create_supervised_for_tenant(
+        path: &Path,
+        tenant_id: &str,
+        redactor: Redactor,
+        max_events: u64,
+        backup_path: &Path,
+    ) -> anyhow::Result<Self> {
+        validate_tenant_id(tenant_id)?;
+        anyhow::ensure!(max_events <= i64::MAX as u64, "invalid audit capacity");
+        let (backing, initialization_guard) = StoreStorage::create_new(path)?;
+        let target_parent = crate::control_fs::Directory::open_existing(
+            backing
+                .path()
+                .parent()
+                .context("new supervised audit parent is missing")?,
+        )?;
+        target_parent.durable_bootstrap()?;
+        let store = Self::open_prepared_for_tenant(
+            backing,
+            initialization_guard,
+            tenant_id,
+            redactor,
+            max_events,
+        )?;
+        // The prepared-open guard has now been released. The backup may use
+        // the same parent and must acquire its own initialization guard.
+        let backup_path = crate::control_fs::absolute_path(backup_path)?;
+        let backup_parent = crate::control_fs::Directory::open_or_create(
+            backup_path
+                .parent()
+                .context("new supervised backup parent is missing")?,
+        )?;
+        backup_parent.durable_bootstrap()?;
+        store.migrate_control_v3(&backup_path)?;
+        let state = store.supervision_state()?;
+        anyhow::ensure!(
+            state.schema_version == 3 && state.active,
+            "new supervised audit origin could not establish live execution authority"
+        );
+        Ok(store)
+    }
+    fn open_prepared_for_tenant(
+        backing: StoreStorage,
+        _initialization_guard: InitializationGuard,
+        tenant_id: &str,
+        redactor: Redactor,
+        max_events: u64,
+    ) -> anyhow::Result<Self> {
         let mut db = Connection::open_with_flags(
             backing.path(),
             OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,

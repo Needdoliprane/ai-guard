@@ -1,0 +1,4 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.04s
+     Running tests/supervision_store.rs (target/debug/deps/supervision_store-41f0dd9877062ad4)
+error: test failed, to rerun pass `--test supervision_store`

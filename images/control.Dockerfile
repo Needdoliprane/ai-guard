@@ -17,9 +17,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 agent \
     && useradd --uid 1000 --gid 1000 --no-create-home --home-dir /tmp --shell /usr/sbin/nologin agent \
-    && mkdir -p /app/front /app/policies /data \
-    && chown 1000:1000 /data \
-    && chmod 0700 /data
+    && mkdir -p /app/front /app/policies /data /run/secrets \
+    && chown 1000:1000 /data /run/secrets \
+    && chmod 0700 /data /run/secrets
 COPY --from=rust-build /build/target/release/agentsandbox /usr/local/bin/agentsandbox
 COPY --from=front-build /build/front/dist/ /app/front/
 COPY policies/ /app/policies/

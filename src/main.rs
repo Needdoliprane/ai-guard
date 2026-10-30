@@ -1,6 +1,7 @@
 use agentsandbox::{
     api::{self, GatewayState, TenantGateway},
     audit::Store,
+    control_fs::{Directory, absolute_path},
     jev::{JevClient, validate_credential_separation},
     operations::{self, OperatorCommand},
     policy::Policy,
@@ -9,10 +10,12 @@ use agentsandbox::{
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use futures_util::FutureExt;
+use sha2::{Digest, Sha256};
 use std::{
     future::Future,
     io::Read,
     net::SocketAddr,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -78,6 +81,9 @@ struct GatewayArgs {
     policy: PathBuf,
     #[arg(long, default_value_t = 100_000)]
     max_events: u64,
+    /// Create only new supervised stores, with private verified schema2 backups.
+    #[arg(long, value_name = "BACKUP_ROOT")]
+    initialize_supervised_stores: Option<PathBuf>,
     #[arg(long, default_value_t = 3)]
     worker_limit: u32,
     #[arg(long, default_value_t = 6000)]
@@ -209,6 +215,55 @@ async fn serve_http(
     Ok(())
 }
 
+fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result<Directory> {
+    let mut credential_directories = Vec::with_capacity(credential_files.len());
+    for credential_file in credential_files {
+        let path = absolute_path(credential_file)
+            .context("supervised backup credential reference is unsafe")?;
+        let parent = path
+            .parent()
+            .context("supervised backup credential reference has no parent")?;
+        credential_directories.push(
+            Directory::open_existing(parent)
+                .context("supervised backup requires private credential directories")?,
+        );
+    }
+    let root = Directory::open_or_create(&absolute_path(root)?)
+        .context("supervised backup root is missing or unsafe")?;
+    let identity = |path: &Path| -> Result<(u64, u64)> {
+        let metadata = std::fs::metadata(path)
+            .context("supervised backup credential directory identity is unavailable")?;
+        anyhow::ensure!(
+            metadata.is_dir(),
+            "supervised backup credential directory identity is invalid"
+        );
+        Ok((metadata.dev(), metadata.ino()))
+    };
+    root.revalidate()?;
+    let root_identity = identity(root.path())?;
+    for directory in credential_directories {
+        directory.revalidate()?;
+        let credential_identity = identity(directory.path())?;
+        // Compare directory identities along both validated chains. Lexical
+        // paths alone miss ordinary aliases on case-insensitive filesystems.
+        for ancestor in root.path().ancestors() {
+            anyhow::ensure!(
+                identity(ancestor)? != credential_identity,
+                "supervised backup root overlaps a configured credential directory"
+            );
+        }
+        for ancestor in directory.path().ancestors() {
+            anyhow::ensure!(
+                identity(ancestor)? != root_identity,
+                "supervised backup root overlaps a configured credential directory"
+            );
+        }
+        directory.revalidate()?;
+        root.revalidate()?;
+    }
+    Ok(root)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -220,6 +275,8 @@ async fn main() -> Result<()> {
                 vec![gateway_config::ConfiguredTenant {
                     tenant_id: "local".into(),
                     data: args.data,
+                    runner_token_file: args.runner_token_file.clone(),
+                    viewer_token_file: args.viewer_token_file.clone(),
                     runner_token: read_token(&args.runner_token_file)?,
                     viewer_token: read_token(&args.viewer_token_file)?,
                     worker_quota: agentsandbox::control::QuotaPolicyV1 {
@@ -266,6 +323,23 @@ async fn main() -> Result<()> {
                 args.max_events > 0 && args.max_events <= 1_000_000,
                 "max-events doit être compris entre 1 et 1000000"
             );
+            let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
+                let mut credential_files: Vec<&Path> = tenants
+                    .iter()
+                    .flat_map(|tenant| {
+                        [
+                            tenant.runner_token_file.as_path(),
+                            tenant.viewer_token_file.as_path(),
+                        ]
+                    })
+                    .collect();
+                if let Some(path) = args.jev_key_file.as_deref() {
+                    credential_files.push(path);
+                }
+                Some(prepare_supervised_backups(root, &credential_files)?)
+            } else {
+                None
+            };
             let mut gateways = Vec::new();
             let mut quotas = Vec::new();
             let mut event_count = 0_u64;
@@ -275,12 +349,27 @@ async fn main() -> Result<()> {
                     .validate()
                     .context("Quota workers invalide")?;
                 quotas.push((tenant.tenant_id.clone(), tenant.worker_quota));
-                let store = Arc::new(Store::open_for_tenant(
-                    &tenant.data,
-                    &tenant.tenant_id,
-                    redactor.clone(),
-                    args.max_events,
-                )?);
+                let store = Arc::new(if let Some(root) = &backup_root {
+                    root.revalidate()?;
+                    let name = format!(
+                        "tenant-{}-v2.sqlite",
+                        hex::encode(Sha256::digest(tenant.tenant_id.as_bytes()))
+                    );
+                    Store::create_supervised_for_tenant(
+                        &tenant.data,
+                        &tenant.tenant_id,
+                        redactor.clone(),
+                        args.max_events,
+                        &root.path().join(name),
+                    )?
+                } else {
+                    Store::open_for_tenant(
+                        &tenant.data,
+                        &tenant.tenant_id,
+                        redactor.clone(),
+                        args.max_events,
+                    )?
+                });
                 let check = store.integrity()?;
                 anyhow::ensure!(
                     check.valid,

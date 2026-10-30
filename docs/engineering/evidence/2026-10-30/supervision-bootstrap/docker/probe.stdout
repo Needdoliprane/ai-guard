@@ -1,0 +1,3 @@
+http_protocol_confirmed tenant=tenant-a role=runner schema=3 active=true namespace=ee3fa5d6-6707-45ac-8509-083196ee53c0
+http_protocol_confirmed tenant=tenant-b role=runner schema=3 active=true namespace=232a088e-572f-40d4-80fd-b0d7520538e2
+backup_metadata_confirmed count=2 owner=1000 mode=0600

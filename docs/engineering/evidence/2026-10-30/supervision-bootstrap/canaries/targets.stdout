@@ -1,0 +1,89 @@
+
+running 12 tests
+test hardlinked_database_is_rejected_in_distinct_processes ... ok
+test external_schema_change_is_detected_before_append ... ok
+test external_quota_corruption_blocks_append_instead_of_granting_capacity ... ok
+test final_symlink_and_parent_symlink_alias_are_refused ... ok
+test external_corruption_is_detected_before_append_without_integrity_endpoint ... ok
+test unknown_schema_version_is_rejected_before_creating_application_tables ... ok
+test corrupted_audit_opens_for_diagnosis_but_never_accepts_a_new_event ... ok
+test database_path_substitution_or_new_hardlink_blocks_append ... ok
+test another_valid_store_can_append_without_false_corruption ... ok
+test startup_rejects_trigger_that_discards_audit_before_acknowledgement ... ok
+test token_concatenation_cannot_disguise_missing_primary_key_constraint ... ok
+test missing_versioned_schema_objects_are_refused_without_repair ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 1 test
+test configured_tenants_remain_isolated_over_http_and_after_control_plane_crash ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+
+running 17 tests
+test existing_nonprivate_parent_is_refused_without_creation_or_repair ... ok
+test existing_permissive_database_is_refused_without_mutation_or_repair ... ok
+test mutable_ancestor_is_refused_before_creating_database_or_lock ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test orphan_sidecars_are_preserved_without_creating_a_new_database ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test a_lock_hardlink_to_another_live_sqlite_inode_is_refused_without_closing_it ... ok
+
+running 1 test
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+test legitimate_processes_can_open_and_append_to_one_private_database ... ok
+test reserved_sqlite_and_lock_names_are_refused_without_creation ... ok
+test changed_sidecar_and_parent_permissions_latch_before_append ... ok
+test unicode_casefold_aliases_of_reserved_names_are_refused_before_creation ... ok
+test dropping_or_refusing_another_store_preserves_sqlite_connection_locks ... ok
+test permission_change_after_open_latches_before_new_event ... ok
+test unicode_parent_names_support_an_ascii_sqlite_filename ... ok
+test parallel_first_open_creates_one_private_database_and_preserves_all_events ... ok
+test unsafe_sidecars_are_refused_before_sqlite_changes_any_bytes ... ok
+test extended_acl_on_main_or_sidecar_is_refused_and_preserved ... ok
+test main_and_sidecar_special_entries_are_refused_without_opening_them ... ok
+test initialization_lock_timeout_preserves_existing_database ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.09s
+
+
+running 9 tests
+test projection_corruption_latches_v3_store_unhealthy ... ok
+test audit_capacity_failure_does_not_persist_an_arm_or_permission ... ok
+test live_watermark_rejects_same_process_rollback_for_all_siblings ... ok
+test reopened_historical_schema3_http_mutation_returns_typed_maintenance_503 ... ok
+test schema2_keeps_legacy_api_and_schema3_supervised_admission_is_atomic_and_idempotent ... ok
+test supervised_admission_requires_uuid_authority_while_legacy_v2_keeps_opaque_ids ... ok
+test pre_claim_sqlite_clone_cannot_reauthorize_armed_start ... FAILED
+test schema2_default_and_explicit_migration_preserve_history_and_legacy_replay ... ok
+test import_verification_success_mismatch_and_unknown_terminal_gate_create ... ok
+
+failures:
+
+---- pre_claim_sqlite_clone_cannot_reauthorize_armed_start stdout ----
+
+thread 'pre_claim_sqlite_clone_cannot_reauthorize_armed_start' (4701107) panicked at tests/supervision_store.rs:29:58:
+called `Result::unwrap()` on an `Err` value: private database entry requires a regular single-link file, effective-UID ownership and mode 0600; existing data is never repaired
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    pre_claim_sqlite_clone_cannot_reauthorize_armed_start
+
+test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.22s
+

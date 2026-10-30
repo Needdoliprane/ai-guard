@@ -884,6 +884,19 @@ fn run_import_gate(
         let clone_path = directory.path().join("pre-claim-clone.sqlite");
         {
             let source = Connection::open(&path).unwrap();
+            #[cfg(unix)]
+            let destination_file = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&clone_path)
+                    .expect("create private clone destination independent of umask")
+            };
+            #[cfg(not(unix))]
+            let destination_file = std::fs::File::create(&clone_path).unwrap();
+            drop(destination_file);
             let mut destination = Connection::open(&clone_path).unwrap();
             let backup = Backup::new(&source, &mut destination).unwrap();
             backup

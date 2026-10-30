@@ -1,0 +1,3 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.61s
+     Running tests/supervision_bootstrap.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/supervision_bootstrap-e28060faee536dfa)

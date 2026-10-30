@@ -1,0 +1,5 @@
+FROM agentsandbox-control:qa-20261030-engine-logs-v2-final-c53bd8
+USER 0:0
+RUN mkdir -p /run/secrets && chown 1000:1000 /run/secrets && chmod 0700 /run/secrets
+COPY agentsandbox /usr/local/bin/agentsandbox
+USER 1000:1000

@@ -1,0 +1,15 @@
+1000:1000 700 1 /run/secrets
+1000:1000 444 1 /run/secrets/tenants.json
+1000:1000 444 1 /run/secrets/a-runner
+1000:1000 444 1 /run/secrets/a-viewer
+1000:1000 444 1 /run/secrets/b-runner
+1000:1000 444 1 /run/secrets/b-viewer
+1000:1000 700 5 /data
+1000:1000 700 2 /data/a
+1000:1000 600 1 /data/a/audit.sqlite
+1000:1000 700 2 /data/b
+1000:1000 600 1 /data/b/audit.sqlite
+1000:1000 700 2 /data/backups
+1000:1000 600 1 0 /data/backups/.ai-guard-sqlite-open.lock
+1000:1000 600 1 155648 /data/backups/tenant-df6b6a5f230ea55af66fbc138653f50906674c62e103019d7af1d3bba6862ac2-v2.sqlite
+1000:1000 600 1 155648 /data/backups/tenant-80a707af7dc77ee1228f9127180f3964835e5beb4c4ab0d812f0fe7593579b3a-v2.sqlite

@@ -112,6 +112,24 @@ Les premiers tests managed/plancher ont passé avec une fixture Store-backed. La
 - [x] Conserver les sorties brutes et gels de chaque étape,12tests ciblés/fmt/Clippy/release PASS ; correctif et oracles relus indépendamment.
 - [x] Mettre à jour les limites, fermer la revue et préparer le lot pour intégration/push suivi par Git ; poursuivre la verticale service/batch/helpers, sans modifier les JSON RunPlan1/2/3.
 
+### Lot P1 validé — bootstrap explicite d'un contrôle de supervision frais
+
+Base `f46a23ecb8d17f098d325c017536e7c8a146ed83`, worktree `broker-service`. Couture nécessaire à la verticale déjà approuvée : le gateway actuel ne crée que le schéma2 et une réouverture du schéma3 reste en maintenance. Ajouter une création exclusivement neuve avec sauvegarde vérifiée et activation dans cette seule origine ; ne pas changer le défaut2 ni réactiver une base existante/restaurée.
+
+Core possède `src/audit.rs`, `src/main.rs` et la couture minimale de références de chemins dans `src/gateway_config.rs` ; Luna possède `tests/supervision_bootstrap.rs`, la correction privée du clone dans `tests/supervision_store.rs` et toutes les exécutions. Root garde `images/control.Dockerfile`, contrat, suivi, preuves et intégration. Factory implémentée : `Store::create_supervised_for_tenant(path, tenant_id, redactor, max_events, backup_path) -> Result<Store>`, via le vrai `StoreStorage::create_new` exclusif, puis la migration3 existante. Initialisation et garde réutilisés sans refonte du VFS. Le backup existant ne peut être écrasé et la cible DB préexistante est refusée avant ouverture SQLite.
+
+Option gateway implémentée : `--initialize-supervised-stores BACKUP_ROOT`, explicitement demandée, utilisable en local ou avec registre A/B. Chaque backup reste privé, dans un fichier distinct dérivé du SHA256 du tenant exact ; ce nom ne constitue aucune identité authentifiée. Une erreur empêche serve ; les nouveaux partiels éventuels restent conservés et les stores existants intacts. Aucun bootstrap multi-base globalement atomique n'est promis.
+
+- [x] Capturer RED de fonctionnalité absente avant code ; ce RED ne constitue pas une vulnérabilité.
+- [x] Vérifier création neuve3 active, sauvegarde2 intègre, reopen maintenance et défaut2 inchangé ; barrières d'ancêtres ajoutées en revue.
+- [x] Vérifier refus des cibles/backups existants sans écrasement, erreurs d'entrée et préservation des locks SQLite existants avant toute réacquisition possible par le parent.
+- [x] Exercer le vrai gateway loopback sur A/B, identités/namespaces distincts, restart sans flag en maintenance, flag réutilisé refusé ; aucun worker ou modèle.
+- [x] Vérifications natives ciblées7+39fonctions, fmt/Clippy/release ; fixture clone600 indépendante de l'umask. Complément Docker du contrôle A/B avec parent `/run/secrets` privé, sans qualifier worker ou build multi-stage complet.
+- [x] Fermer la revue documentaire et préparer l'intégration du lot testé ; aucun constat bloquant résiduel.
+- [ ] Poursuivre checkpoint V2/IPC/ordonnanceur/batch/helpers, puis démontrer l'arrêt autonome sur un vrai moteur après mort du CLI.
+
+Ce lot ne lance aucun worker supervisé et ne corrige pas seul G09. Pas d'installation OS, modification QA, opération cloud ou nouvelle dépendance d'infrastructure.
+
 ### Choix complémentaires du mainteneur — 30 octobre
 
 - [x] Enregistrer les trois moteurs Jev : réel, Rust sans modèle avec limites annoncées, et petit modèle local Jev-like Docker/Podman ; choix/configuration explicites, aucun remplacement du confinement.

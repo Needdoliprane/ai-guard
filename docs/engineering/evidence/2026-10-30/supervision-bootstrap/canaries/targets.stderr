@@ -1,0 +1,7 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.29s
+     Running tests/audit_integrity.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/audit_integrity-3159efd6a0104e48)
+     Running tests/gateway_tenancy.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/gateway_tenancy-d86fc41bdfbd332f)
+     Running tests/storage_security.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/storage_security-8bee13cef191500b)
+     Running tests/supervision_store.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/supervision_store-672f2811666b1d73)
+error: test failed, to rerun pass `--test supervision_store`

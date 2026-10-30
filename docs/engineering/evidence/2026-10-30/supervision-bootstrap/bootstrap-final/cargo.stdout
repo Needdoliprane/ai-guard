@@ -1,0 +1,13 @@
+
+running 8 tests
+test sqlite_lock_probe_child_for_bootstrap_refusal ... ignored, child-only F_GETLK and journal_mode=DELETE lock probe
+test invalid_tenant_is_refused_before_database_or_backup_creation ... ok
+test legacy_default_open_stays_schema2_and_inactive ... ok
+test post_backup_migration_failure_preserves_target_and_verified_partial_backup ... ok
+test bootstrap_refuses_preexisting_target_and_backup_without_closing_existing_store ... ok
+test fresh_supervised_bootstrap_verifies_backup_and_reopens_in_maintenance ... ok
+test bootstrap_durably_creates_missing_nested_target_and_backup_parents ... ok
+test cli_rejects_backup_root_overlapping_configured_credential_directory_before_database_creation ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.14s
+

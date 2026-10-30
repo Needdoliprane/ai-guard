@@ -1,0 +1,11 @@
+
+running 1 test
+test cli_rejects_backup_root_overlapping_configured_credential_directory_before_database_creation ... FAILED
+
+failures:
+
+failures:
+    cli_rejects_backup_root_overlapping_configured_credential_directory_before_database_creation
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.62s
+

@@ -1,0 +1,530 @@
+[
+    {
+        "Id": "cd4bb90f84659bd1a1292b112a5047d590a3c3122c23d6c33413d4b984e1e21b",
+        "Created": "2026-10-30T21:23:37.157181836Z",
+        "Path": "agentsandbox",
+        "Args": [
+            "gateway",
+            "--listen",
+            "127.0.0.1:8787",
+            "--tenants-file",
+            "/run/secrets/tenants.json",
+            "--initialize-supervised-stores",
+            "/data/backups"
+        ],
+        "State": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 1,
+            "Error": "",
+            "StartedAt": "2026-10-30T21:23:37.233352336Z",
+            "FinishedAt": "2026-10-30T21:23:37.293541003Z"
+        },
+        "Image": "sha256:90a9ee55fc358425b3cc70df3441cfcf56b298697874d117bbeef74c043808d9",
+        "ResolvConfPath": "/var/lib/docker/containers/cd4bb90f84659bd1a1292b112a5047d590a3c3122c23d6c33413d4b984e1e21b/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/cd4bb90f84659bd1a1292b112a5047d590a3c3122c23d6c33413d4b984e1e21b/hostname",
+        "HostsPath": "/var/lib/docker/containers/cd4bb90f84659bd1a1292b112a5047d590a3c3122c23d6c33413d4b984e1e21b/hosts",
+        "LogPath": "",
+        "Name": "/ag-bootstrap-witness-20261030",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "ai-guard-bootstrap-witness-20261030:/data:rw",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/tenants.json:/run/secrets/tenants.json:ro",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-runner:/run/secrets/a-runner:ro",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-viewer:/run/secrets/a-viewer:ro",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-runner:/run/secrets/b-runner:ro",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-viewer:/run/secrets/b-viewer:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "local",
+                "Config": {}
+            },
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": [
+                "ALL"
+            ],
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": true,
+            "SecurityOpt": [
+                "no-new-privileges"
+            ],
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 536870912,
+            "NanoCpus": 2000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 1073741824,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": 256,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "ID": "cd4bb90f84659bd1a1292b112a5047d590a3c3122c23d6c33413d4b984e1e21b",
+                "LowerDir": "/var/lib/docker/overlay2/16da56217c2953faf3686369783906810d2b83c4ef05aa16123f8b807f273292-init/diff:/var/lib/docker/overlay2/foacxzafrg0e38w94v8nqcu5q/diff:/var/lib/docker/overlay2/r6bj8wncjbzvt40iq2frq5thx/diff:/var/lib/docker/overlay2/1x807w8klokxryc4vygsesj8u/diff:/var/lib/docker/overlay2/z76q1a6thz91d6l1q5963p66q/diff:/var/lib/docker/overlay2/fzbcm6xhwhlu829cpd37rm0l2/diff:/var/lib/docker/overlay2/z500wblk4kevvl6ryqwsyh0lv/diff:/var/lib/docker/overlay2/sn9u4xrpo6xny5iuhe4q8f4nr/diff:/var/lib/docker/overlay2/ypvf5m8mdhexsm2ki74nhfbvm/diff:/var/lib/docker/overlay2/5841e1f1eb06e41667928f3b2e0959c5b9200380d1bb029432d85945b5dfbf36/diff",
+                "MergedDir": "/var/lib/docker/overlay2/16da56217c2953faf3686369783906810d2b83c4ef05aa16123f8b807f273292/merged",
+                "UpperDir": "/var/lib/docker/overlay2/16da56217c2953faf3686369783906810d2b83c4ef05aa16123f8b807f273292/diff",
+                "WorkDir": "/var/lib/docker/overlay2/16da56217c2953faf3686369783906810d2b83c4ef05aa16123f8b807f273292/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": "ai-guard-bootstrap-witness-20261030",
+                "Source": "/var/lib/docker/volumes/ai-guard-bootstrap-witness-20261030/_data",
+                "Destination": "/data",
+                "Driver": "local",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": ""
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-runner",
+                "Destination": "/run/secrets/a-runner",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-viewer",
+                "Destination": "/run/secrets/a-viewer",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-runner",
+                "Destination": "/run/secrets/b-runner",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-viewer",
+                "Destination": "/run/secrets/b-viewer",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/tenants.json",
+                "Destination": "/run/secrets/tenants.json",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "cd4bb90f8465",
+            "Domainname": "",
+            "User": "1000:1000",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "4000/tcp": {},
+                "8787/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Cmd": [
+                "gateway",
+                "--listen",
+                "127.0.0.1:8787",
+                "--tenants-file",
+                "/run/secrets/tenants.json",
+                "--initialize-supervised-stores",
+                "/data/backups"
+            ],
+            "Image": "ai-guard-supervision-bootstrap-unprepared-probe:qa-20261030",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "agentsandbox"
+            ],
+            "Labels": {}
+        },
+        "NetworkSettings": {
+            "SandboxID": "",
+            "SandboxKey": "",
+            "Ports": {},
+            "Networks": {
+                "none": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "1b34077fa8e8e6cb56551c26fd5e17e7a6dfc053bb821d726fbd2cc92a478a7c",
+                    "EndpointID": "",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        }
+    },
+    {
+        "Id": "6481d50b8e05cfddf8379f373c8791d231f50c9876bd10cecc9239e39a4509cb",
+        "Created": "2026-10-30T21:23:57.293766013Z",
+        "Path": "agentsandbox",
+        "Args": [
+            "gateway",
+            "--listen",
+            "127.0.0.1:8787",
+            "--tenants-file",
+            "/run/secrets/tenants.json",
+            "--initialize-supervised-stores",
+            "/data/backups"
+        ],
+        "State": {
+            "Status": "exited",
+            "Running": false,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": false,
+            "Dead": false,
+            "Pid": 0,
+            "ExitCode": 0,
+            "Error": "",
+            "StartedAt": "2026-10-30T21:23:57.364083846Z",
+            "FinishedAt": "2026-10-30T21:24:11.14290788Z"
+        },
+        "Image": "sha256:63139bcbb9afdc13f3401d5c9472fe91f45b539853e3eceed8589ee91df87698",
+        "ResolvConfPath": "/var/lib/docker/containers/6481d50b8e05cfddf8379f373c8791d231f50c9876bd10cecc9239e39a4509cb/resolv.conf",
+        "HostnamePath": "/var/lib/docker/containers/6481d50b8e05cfddf8379f373c8791d231f50c9876bd10cecc9239e39a4509cb/hostname",
+        "HostsPath": "/var/lib/docker/containers/6481d50b8e05cfddf8379f373c8791d231f50c9876bd10cecc9239e39a4509cb/hosts",
+        "LogPath": "",
+        "Name": "/ag-bootstrap-corrected-20261030",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": {
+            "Binds": [
+                "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-runner:/run/secrets/a-runner:ro",
+                "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-viewer:/run/secrets/a-viewer:ro",
+                "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-runner:/run/secrets/b-runner:ro",
+                "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-viewer:/run/secrets/b-viewer:ro",
+                "ai-guard-bootstrap-corrected-20261030:/data:rw",
+                "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/tenants.json:/run/secrets/tenants.json:ro"
+            ],
+            "ContainerIDFile": "",
+            "LogConfig": {
+                "Type": "local",
+                "Config": {}
+            },
+            "NetworkMode": "none",
+            "PortBindings": {},
+            "RestartPolicy": {
+                "Name": "no",
+                "MaximumRetryCount": 0
+            },
+            "AutoRemove": false,
+            "VolumeDriver": "",
+            "VolumesFrom": null,
+            "ConsoleSize": [
+                0,
+                0
+            ],
+            "CapAdd": null,
+            "CapDrop": [
+                "ALL"
+            ],
+            "CgroupnsMode": "private",
+            "Dns": null,
+            "DnsOptions": [],
+            "DnsSearch": [],
+            "ExtraHosts": null,
+            "GroupAdd": null,
+            "IpcMode": "private",
+            "Cgroup": "",
+            "Links": null,
+            "OomScoreAdj": 0,
+            "PidMode": "",
+            "Privileged": false,
+            "PublishAllPorts": false,
+            "ReadonlyRootfs": true,
+            "SecurityOpt": [
+                "no-new-privileges"
+            ],
+            "UTSMode": "",
+            "UsernsMode": "",
+            "ShmSize": 67108864,
+            "Runtime": "runc",
+            "Isolation": "",
+            "CpuShares": 0,
+            "Memory": 536870912,
+            "NanoCpus": 2000000000,
+            "CgroupParent": "",
+            "BlkioWeight": 0,
+            "BlkioWeightDevice": [],
+            "BlkioDeviceReadBps": [],
+            "BlkioDeviceWriteBps": [],
+            "BlkioDeviceReadIOps": [],
+            "BlkioDeviceWriteIOps": [],
+            "CpuPeriod": 0,
+            "CpuQuota": 0,
+            "CpuRealtimePeriod": 0,
+            "CpuRealtimeRuntime": 0,
+            "CpusetCpus": "",
+            "CpusetMems": "",
+            "Devices": [],
+            "DeviceCgroupRules": null,
+            "DeviceRequests": null,
+            "MemoryReservation": 0,
+            "MemorySwap": 1073741824,
+            "MemorySwappiness": null,
+            "OomKillDisable": null,
+            "PidsLimit": 256,
+            "Ulimits": [],
+            "CpuCount": 0,
+            "CpuPercent": 0,
+            "IOMaximumIOps": 0,
+            "IOMaximumBandwidth": 0,
+            "MaskedPaths": [
+                "/proc/acpi",
+                "/proc/asound",
+                "/proc/interrupts",
+                "/proc/kcore",
+                "/proc/keys",
+                "/proc/latency_stats",
+                "/proc/sched_debug",
+                "/proc/scsi",
+                "/proc/timer_list",
+                "/proc/timer_stats",
+                "/sys/devices/virtual/powercap",
+                "/sys/firmware"
+            ],
+            "ReadonlyPaths": [
+                "/proc/bus",
+                "/proc/fs",
+                "/proc/irq",
+                "/proc/sys",
+                "/proc/sysrq-trigger"
+            ]
+        },
+        "GraphDriver": {
+            "Data": {
+                "ID": "6481d50b8e05cfddf8379f373c8791d231f50c9876bd10cecc9239e39a4509cb",
+                "LowerDir": "/var/lib/docker/overlay2/3b4e5af5981d3a6f2c35ac7fd3f6934b6e37f3a3e72d4c7094384621cc5f859e-init/diff:/var/lib/docker/overlay2/qzkac1utrvblpk814sfivxo6k/diff:/var/lib/docker/overlay2/9rnzeetly8c28a6dpkxhtbthp/diff:/var/lib/docker/overlay2/0grq0the8r0v0623xlf3kg8jg/diff:/var/lib/docker/overlay2/1x807w8klokxryc4vygsesj8u/diff:/var/lib/docker/overlay2/z76q1a6thz91d6l1q5963p66q/diff:/var/lib/docker/overlay2/fzbcm6xhwhlu829cpd37rm0l2/diff:/var/lib/docker/overlay2/z500wblk4kevvl6ryqwsyh0lv/diff:/var/lib/docker/overlay2/sn9u4xrpo6xny5iuhe4q8f4nr/diff:/var/lib/docker/overlay2/ypvf5m8mdhexsm2ki74nhfbvm/diff:/var/lib/docker/overlay2/5841e1f1eb06e41667928f3b2e0959c5b9200380d1bb029432d85945b5dfbf36/diff",
+                "MergedDir": "/var/lib/docker/overlay2/3b4e5af5981d3a6f2c35ac7fd3f6934b6e37f3a3e72d4c7094384621cc5f859e/merged",
+                "UpperDir": "/var/lib/docker/overlay2/3b4e5af5981d3a6f2c35ac7fd3f6934b6e37f3a3e72d4c7094384621cc5f859e/diff",
+                "WorkDir": "/var/lib/docker/overlay2/3b4e5af5981d3a6f2c35ac7fd3f6934b6e37f3a3e72d4c7094384621cc5f859e/work"
+            },
+            "Name": "overlay2"
+        },
+        "Mounts": [
+            {
+                "Type": "volume",
+                "Name": "ai-guard-bootstrap-corrected-20261030",
+                "Source": "/var/lib/docker/volumes/ai-guard-bootstrap-corrected-20261030/_data",
+                "Destination": "/data",
+                "Driver": "local",
+                "Mode": "rw",
+                "RW": true,
+                "Propagation": ""
+            },
+            {
+                "Type": "bind",
+                "Source": "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-runner",
+                "Destination": "/run/secrets/a-runner",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/a-viewer",
+                "Destination": "/run/secrets/a-viewer",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-runner",
+                "Destination": "/run/secrets/b-runner",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/b-viewer",
+                "Destination": "/run/secrets/b-viewer",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            },
+            {
+                "Type": "bind",
+                "Source": "/host_mnt/private/tmp/ai-guard-supervision-bootstrap-qualified.zZ7woB/synthetic/tenants.json",
+                "Destination": "/run/secrets/tenants.json",
+                "Mode": "ro",
+                "RW": false,
+                "Propagation": "rprivate"
+            }
+        ],
+        "Config": {
+            "Hostname": "6481d50b8e05",
+            "Domainname": "",
+            "User": "1000:1000",
+            "AttachStdin": false,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "ExposedPorts": {
+                "4000/tcp": {},
+                "8787/tcp": {}
+            },
+            "Tty": false,
+            "OpenStdin": false,
+            "StdinOnce": false,
+            "Env": [
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+            "Cmd": [
+                "gateway",
+                "--listen",
+                "127.0.0.1:8787",
+                "--tenants-file",
+                "/run/secrets/tenants.json",
+                "--initialize-supervised-stores",
+                "/data/backups"
+            ],
+            "Image": "ai-guard-supervision-bootstrap-prepared-probe:qa-20261030",
+            "Volumes": null,
+            "WorkingDir": "/app",
+            "Entrypoint": [
+                "agentsandbox"
+            ],
+            "Labels": {}
+        },
+        "NetworkSettings": {
+            "SandboxID": "",
+            "SandboxKey": "",
+            "Ports": {},
+            "Networks": {
+                "none": {
+                    "IPAMConfig": null,
+                    "Links": null,
+                    "Aliases": null,
+                    "DriverOpts": null,
+                    "GwPriority": 0,
+                    "NetworkID": "1b34077fa8e8e6cb56551c26fd5e17e7a6dfc053bb821d726fbd2cc92a478a7c",
+                    "EndpointID": "",
+                    "Gateway": "",
+                    "IPAddress": "",
+                    "MacAddress": "",
+                    "IPPrefixLen": 0,
+                    "IPv6Gateway": "",
+                    "GlobalIPv6Address": "",
+                    "GlobalIPv6PrefixLen": 0,
+                    "DNSNames": null
+                }
+            }
+        }
+    }
+]
