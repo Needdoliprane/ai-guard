@@ -1,0 +1,36 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+warning: unused import: `path::Path`
+  --> tests/supervision_api.rs:33:5
+   |
+33 |     path::Path,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agentsandbox` (test "supervision_api") generated 1 warning (run `cargo fix --test "supervision_api" -p agentsandbox` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.03s
+     Running tests/broker_clock.rs (target/debug/deps/broker_clock-a4ac45d5a613eab6)
+
+running 6 tests
+test native_child_probe ... ignored, private subprocess probe; invoked by independent_native_process_samples_share_boot_and_monotonic_counter
+test darwin_timebase_conversion_uses_integer_floor_and_checks_overflow ... ok
+test timespec_conversion_is_bounded_and_rejects_invalid_readings ... ok
+test deadline_math_is_checked_and_zero_timeout_is_invalid ... ok
+test boot_identity_and_native_sample_are_canonical_and_send_sync ... ok
+test independent_native_process_samples_share_boot_and_monotonic_counter ... FAILED
+
+failures:
+
+---- independent_native_process_samples_share_boot_and_monotonic_counter stdout ----
+
+thread 'independent_native_process_samples_share_boot_and_monotonic_counter' (4282533) panicked at tests/broker_clock.rs:200:37:
+decode private child sample: Error("expected value", line: 2, column: 1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    independent_native_process_samples_share_boot_and_monotonic_counter
+
+test result: FAILED. 4 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--test broker_clock`

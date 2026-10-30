@@ -38,6 +38,7 @@ use std::{
 };
 
 mod auth;
+mod supervision;
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 
 type ApiResult<T> = Result<T, (StatusCode, Json<Value>)>;
@@ -342,7 +343,7 @@ pub fn gateway_router(state: GatewayState) -> Router {
                 Json(json!({"status":"ok","service":"gateway","version":env!("CARGO_PKG_VERSION")}))
             }),
         )
-        .nest("/api/v1", routes.clone())
+        .nest("/api/v1", routes.clone().merge(supervision::routes()))
         .nest("/api", routes)
         .layer(DefaultBodyLimit::max(262_144))
         .layer(middleware::from_fn(security_headers))

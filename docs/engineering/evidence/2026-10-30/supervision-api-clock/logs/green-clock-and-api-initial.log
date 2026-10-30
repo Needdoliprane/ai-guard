@@ -1,0 +1,23 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+     Running tests/broker_clock.rs (target/debug/deps/broker_clock-a4ac45d5a613eab6)
+
+running 6 tests
+test native_child_probe ... ignored, private subprocess probe; invoked by independent_native_process_samples_share_boot_and_monotonic_counter
+test deadline_math_is_checked_and_zero_timeout_is_invalid ... ok
+test darwin_timebase_conversion_uses_integer_floor_and_checks_overflow ... ok
+test timespec_conversion_is_bounded_and_rejects_invalid_readings ... ok
+test boot_identity_and_native_sample_are_canonical_and_send_sync ... ok
+test independent_native_process_samples_share_boot_and_monotonic_counter ... ok
+
+test result: ok. 5 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/supervision_api.rs (target/debug/deps/supervision_api-e994feef62f24c61)
+
+running 3 tests
+test new_write_routes_authenticate_before_polling_bodies_and_legacy_aliases_remain ... ok
+test control_protocol_reports_authenticated_tenant_role_namespace_and_inactive_schema2 ... ok
+test supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
+

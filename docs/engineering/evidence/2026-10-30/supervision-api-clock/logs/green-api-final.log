@@ -1,0 +1,12 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.19s
+     Running tests/supervision_api.rs (target/debug/deps/supervision_api-e994feef62f24c61)
+
+running 4 tests
+test new_write_routes_authenticate_before_polling_bodies_and_legacy_aliases_remain ... ok
+test control_protocol_reports_authenticated_tenant_role_namespace_and_inactive_schema2 ... ok
+test jev_transport_is_skipped_for_inactive_fresh_admission_and_exact_replay ... ok
+test supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+

@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 30 octobre — API v1 et producteur d'horloge de supervision
+
+Les contrats du Store3 disposent de neuf routes HTTP sous `/api/v1` uniquement, sans alias nouveau `/api`, bind legacy ni commande d'activation. Les guards existants authentifient le tenant et vérifient le rôle avant toute extraction de corps ; chaque opération helper retrouve son armement et son parent réels dans cette base. Les prélectures d'admission écartent les demandes invalides et l'autorité inactive avant l'évaluation externe ; un rejeu durable n'appelle pas Jev. Les transactions du Store restent seules habilitées à réserver, consommer et refuser. Une prélecture n'élimine pas une concurrence ou une invalidation postérieure, ni plusieurs évaluations simultanées avant le premier commit.
+
+Le producteur Rust `NativeHostClock` retient l'identité de boot et les paramètres natifs à sa construction, puis produit un compteur continu entier avec erreurs typées, sans UTC de secours ni lecture de fichier par échantillon. Linux utilise `CLOCK_BOOTTIME` ; Darwin utilise `mach_continuous_time` et une conversion entière vérifiée. Références primaires : [Linux timekeeping](https://www.kernel.org/doc/html/latest/core-api/timekeeping.html), [ABI Apple XNU](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/mach/mach_time.h). L'identité de boot n'est ni une identité tenant ni une permission. Les consommateurs doivent encore vérifier méthode, boot et progression, conserver l'échéance et déclencher l'arrêt indépendamment des IO.
+
+Ce lot prépare le service permanent autorisé, sans le remplacer : schéma2 par défaut, pas de migration/activation CLI, pas de réactivation au redémarrage, d'ordonnanceur, d'IPC ou de gardien livré. Qualification native limitée au macOS testé ; Linux, sommeil/reprise, reboot et fencing D5 restent ouverts. Les [preuves propres au lot](evidence/2026-10-30/supervision-api-clock/README.md) distinguent logiciel et effets runtime.
+
 ## 30 octobre — arrêt strict et politique helper commune
 
 Les chemins possédant un snapshot runtime complet utilisent un port d'arrêt qui compare identité, image, configuration/version, restart et ressources avant effet. Une divergence ou inspection inconnue conserve l'incertitude sans kill ; l'observation après effet reste nécessaire. Le port legacy sans baseline n'est pas une alternative pour les futurs armements. Aucun terminal, quota ou cleanup supplémentaire n'est déduit d'un retour Created non-running. [Correctif relu et vérifié](evidence/2026-10-30/runtime-stop-snapshot/README.md) ; la perte de durée après SIGKILL du CLI reste un FAIL réel distinct.

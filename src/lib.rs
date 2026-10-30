@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod api;
 pub mod audit;
+pub mod broker;
 pub mod control;
 pub mod control_fs;
 pub mod declared_agents;

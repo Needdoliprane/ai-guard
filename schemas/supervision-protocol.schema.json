@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:agentsandbox:supervision-protocol:v1",
+  "title": "ai-guard control supervision protocol v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "schema_version", "control_namespace_uuid", "tenant_id", "role", "protocols", "active"],
+  "properties": {
+    "version": {"const": 1},
+    "schema_version": {"enum": [1, 2, 3]},
+    "control_namespace_uuid": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "string", "format": "uuid", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"}
+      ]
+    },
+    "tenant_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_-]+$"},
+    "role": {"enum": ["runner", "viewer"]},
+    "protocols": {"type": "array", "maxItems": 1, "uniqueItems": true, "items": {"enum": ["broker_supervision_v1"]}},
+    "active": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"active": {"const": true}}, "required": ["active"]},
+      "then": {
+        "properties": {
+          "schema_version": {"const": 3},
+          "control_namespace_uuid": {"type": "string"},
+          "protocols": {"const": ["broker_supervision_v1"]}
+        }
+      }
+    }
+  ]
+}
