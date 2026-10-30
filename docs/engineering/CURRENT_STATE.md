@@ -1,6 +1,6 @@
 # État constaté — 29–30 octobre 2026
 
-Ce fichier décrit le checkout réel, sans transférer les résultats historiques. Aucun commit initial n'existait au début du chantier ; tous les fichiers préexistants étaient non suivis. Travail en place avec périmètres exclusifs : un worktree Git ne peut pas être créé depuis un HEAD absent sans enregistrer d'abord tout le travail du mainteneur. Copie de référence des sources/tests/configurations : `/tmp/ai-guard-baseline.KqN9Hi` (temporaire, ne constitue pas une archive de release).
+Ce fichier décrit le checkout réel, sans transférer les résultats historiques. Aucun commit initial n'existait au début du chantier ; les fichiers préexistants étaient non suivis et le travail a commencé en place avec périmètres exclusifs. Le30octobre, à la demande du mainteneur, le checkpoint initial `fa75d6ef34ee506a4d5facdc9e50fc515f79cf7b` est poussé sur `origin/main` du dépôt privé configuré, référence distante vérifiée. Secrets, `.env`, caches, bases et volumes restent hors Git ; seules les preuves assainies de documentation sont partagées. Branches et worktrees sont désormais possibles. La copie initiale `/tmp/ai-guard-baseline.KqN9Hi` reste une archive temporaire, pas une release.
 
 ## Indicateur de pilotage — 30 octobre 2026
 
