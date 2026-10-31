@@ -1,0 +1,26 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0433]: cannot find type `LocalCommandRequestV1` in this scope
+   --> src/broker/journal/confirmed.rs:129:48
+    |
+129 |                 if matches!(command.request(), LocalCommandRequestV1::CancelRequested) {
+    |                                                ^^^^^^^^^^^^^^^^^^^^^ use of undeclared type `LocalCommandRequestV1`
+    |
+help: a struct with a similar name exists
+    |
+129 -                 if matches!(command.request(), LocalCommandRequestV1::CancelRequested) {
+129 +                 if matches!(command.request(), LocalCommandReceiptV1::CancelRequested) {
+    |
+help: consider importing this enum
+    |
+  2 + use crate::broker::lifecycle::LocalCommandRequestV1;
+    |
+
+error[E0609]: no field `generation` on type `CancellingJob`
+   --> src/broker/service/targets.rs:586:42
+    |
+586 |             started_tx.send(cancellation.generation).unwrap();
+    |                                          ^^^^^^^^^^ unknown field
+
+Some errors have detailed explanations: E0433, E0609.
+For more information about an error, try `rustc --explain E0433`.
+error: could not compile `agentsandbox` (lib test) due to 2 previous errors

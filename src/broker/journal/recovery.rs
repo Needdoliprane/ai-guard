@@ -17,6 +17,7 @@ pub struct StopRecoveryReaderV1 {
     exclusions: FsExclusions,
     limits: JournalLimitsV1,
     control: ControlSecrets,
+    synchronize_reads: bool,
 }
 /// Retains the existing exclusive journal lease until the report is dropped.
 /// Restore its stop data before attempting to open the ordinary writer.
@@ -32,6 +33,9 @@ pub struct RecoveredJobV1 {
     managed_workspace: bool,
     cancel_command_ids: Vec<Uuid>,
     stops: Vec<RecoveredStopV1>,
+    chain: Vec<RevisionRefV1>,
+    command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    cancel_boundaries: HashMap<Uuid, usize>,
 }
 pub struct RecoveredStopV1 {
     arm: ArmV1,
@@ -39,6 +43,19 @@ pub struct RecoveredStopV1 {
     authority: RuntimeAuthority,
     owned: OwnedContainerSnapshot,
     cancel_after_arm: Option<Uuid>,
+    birth_index: usize,
+}
+
+/// A verified, immutable cancellation prefix. Its retained reader shares the
+/// writer's existing lock FD; it neither acquires nor releases another lease.
+/// No business job, credential bytes or start capability can be obtained here.
+pub struct CancelStopProjectionV1 {
+    reader: StopRecoveryReaderV1,
+    operation_id: Uuid,
+    command_id: Uuid,
+    receipt: LocalCommandReceiptV1,
+    stops: Vec<RecoveredStopV1>,
+    incomplete: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopRecoveryPhaseV1 {
@@ -63,8 +80,113 @@ opaque!(
     StopRecoveryReportV1,
     RecoveredJobV1,
     RecoveredStopV1,
-    StopRecoveryIssueV1
+    StopRecoveryIssueV1,
+    CancelStopProjectionV1
 );
+
+impl CancelStopProjectionV1 {
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.reader.scope
+    }
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn command_id(&self) -> Uuid {
+        self.command_id
+    }
+    pub fn receipt(&self) -> &LocalCommandReceiptV1 {
+        &self.receipt
+    }
+    pub fn stops(&self) -> &[RecoveredStopV1] {
+        &self.stops
+    }
+    /// Diagnostics concern the selected job, not a global namespace inventory.
+    /// Known targets remain usable even when coverage cannot be proved complete.
+    pub fn incomplete(&self) -> bool {
+        self.incomplete
+    }
+}
+
+impl Journal {
+    /// Read STOP-only facts on the writer's bounded FS thread. In contrast to
+    /// load/status/command_receipt, this never opens the credential blob.
+    pub fn cancel_stop_projection(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<Option<CancelStopProjectionV1>> {
+        if operation_id.is_nil() || command_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        fscheck(self.0.jobs.revalidate())?;
+        let name = operation_id.to_string();
+        if fscheck(self.0.jobs.persistent_child(&name, false))?.is_none() {
+            return if writer.observed_jobs.contains(&operation_id)
+                || writer.floors.contains_key(&operation_id)
+                || writer.rejected_floors.contains_key(&operation_id)
+            {
+                Err(JournalError::Conflict)
+            } else {
+                Ok(None)
+            };
+        }
+        self.check_observation_capacity(operation_id, &writer)?;
+        let reader = StopRecoveryReaderV1::from_live_writer(self)?;
+        let (recovered, incomplete) = reader.read_job(operation_id, &mut Usage::default())?;
+        let Some(recovered) = recovered else {
+            // A previously accepted job may never become a rejected prefix.
+            return if writer.floors.contains_key(&operation_id) {
+                Err(JournalError::Conflict)
+            } else {
+                Err(JournalError::InvalidInput)
+            };
+        };
+        if writer.rejected_floors.contains_key(&operation_id) {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(floor) = writer.floors.get(&operation_id) {
+            let index = usize::try_from(floor.revision).map_err(|_| JournalError::Corrupt)?;
+            if recovered.chain.get(index) != Some(floor) {
+                return Err(JournalError::Conflict);
+            }
+        }
+        let head = recovered.head.clone();
+        reader.check_shared()?;
+        writer.floors.insert(operation_id, head);
+        writer.observed_jobs.insert(operation_id);
+        let Some(boundary) = recovered.cancel_boundaries.get(&command_id).copied() else {
+            return if recovered.command_receipts.contains_key(&command_id) {
+                Err(JournalError::Conflict)
+            } else {
+                Ok(None)
+            };
+        };
+        let receipt = recovered
+            .command_receipts
+            .get(&command_id)
+            .cloned()
+            .ok_or(JournalError::Corrupt)?;
+        let stops = recovered
+            .stops
+            .into_iter()
+            .filter(|stop| stop.birth_index < boundary)
+            .map(|mut stop| {
+                stop.cancel_after_arm = Some(command_id);
+                stop
+            })
+            .collect();
+        Ok(Some(CancelStopProjectionV1 {
+            reader,
+            operation_id,
+            command_id,
+            receipt,
+            stops,
+            incomplete,
+        }))
+    }
+}
 
 impl StopRecoveryReportV1 {
     pub fn scope(&self) -> &JournalScopeV1 {
@@ -131,7 +253,8 @@ impl RecoveredStopV1 {
     pub fn owned(&self) -> &OwnedContainerSnapshot {
         &self.owned
     }
-    /// The last confirmed cancellation only applies to arms born before it.
+    /// The confirmed cancellation selecting this stop applies only to Arms
+    /// born before its boundary (the last Cancel for a startup report).
     pub fn cancel_after_arm(&self) -> Option<Uuid> {
         self.cancel_after_arm
     }
@@ -149,6 +272,31 @@ impl StopRecoveryIssueV1 {
 }
 
 impl StopRecoveryReaderV1 {
+    fn from_live_writer(journal: &Journal) -> JournalResult<Self> {
+        // This namespace FD is an observation only. Job reads use the original
+        // retained directory capabilities, revalidated before and after reads.
+        let namespace_path = journal
+            .0
+            .directory
+            .path()
+            .parent()
+            .ok_or(JournalError::Corrupt)?;
+        let namespace = fscheck(Directory::open_existing(namespace_path))?;
+        let reader = Self {
+            scope: journal.0.scope.clone(),
+            scope_hash: journal.0.scope_hash.clone(),
+            namespace,
+            directory: journal.0.directory.clone(),
+            jobs: journal.0.jobs.clone(),
+            lock: journal.0.lock.clone(),
+            exclusions: journal.0.exclusions.clone(),
+            limits: journal.0.limits.clone(),
+            control: journal.0.control.clone(),
+            synchronize_reads: true,
+        };
+        reader.check_shared()?;
+        Ok(reader)
+    }
     pub fn open_existing(
         root: &Directory,
         scope: JournalScopeV1,
@@ -190,6 +338,7 @@ impl StopRecoveryReaderV1 {
             exclusions: exclusions.clone(),
             limits,
             control,
+            synchronize_reads: false,
         };
         reader.check_shared()?;
         Ok(Some(reader))
@@ -347,7 +496,15 @@ impl StopRecoveryReaderV1 {
         name: &str,
         max: u64,
     ) -> JournalResult<Option<PrivateFile>> {
-        fscheck(directory.persistent_read(name, max, &self.exclusions.0))
+        let file = fscheck(directory.persistent_read(name, max, &self.exclusions.0))?;
+        if self.synchronize_reads
+            && let Some(file) = &file
+        {
+            // Live delivery must not mistake a visible, unknown-outcome
+            // metadata publication for a durable Cancel. No blob is read.
+            io(file.persistent_sync())?;
+        }
+        Ok(file)
     }
     fn read_record<T: DeserializeOwned + Serialize>(
         &self,
@@ -637,13 +794,15 @@ impl StopRecoveryReaderV1 {
                 if authority.invocation.is_none() {
                     return Err(JournalError::Corrupt);
                 }
-                let cancel_after_arm = if confirmed
-                    .last_cancel_operations
-                    .is_some_and(|boundary| index < boundary)
-                {
-                    Some(*cancel_command_ids.last().ok_or(JournalError::Corrupt)?)
-                } else {
-                    None
+                let cancel_after_arm = match cancel_command_ids.last() {
+                    Some(command_id) => {
+                        let boundary = confirmed
+                            .cancel_boundaries
+                            .get(command_id)
+                            .ok_or(JournalError::Corrupt)?;
+                        (index < *boundary).then_some(*command_id)
+                    }
+                    None => None,
                 };
                 stops.push(RecoveredStopV1 {
                     arm: request.clone(),
@@ -651,10 +810,16 @@ impl StopRecoveryReaderV1 {
                     authority: authority.clone(),
                     owned: owned.clone(),
                     cancel_after_arm,
+                    birth_index: index,
                 });
             }
         }
         fscheck(job.revalidate())?;
+        if self.synchronize_reads {
+            io(job.sync())?;
+            io(self.jobs.sync())?;
+            io(self.directory.sync())?;
+        }
         self.check_shared()?;
         Ok((
             Some(RecoveredJobV1 {
@@ -663,6 +828,9 @@ impl StopRecoveryReaderV1 {
                 managed_workspace: confirmed.payload.runner().broker_context().managed,
                 cancel_command_ids,
                 stops,
+                chain: confirmed.chain,
+                command_receipts: confirmed.command_receipts,
+                cancel_boundaries: confirmed.cancel_boundaries,
             }),
             partial,
         ))

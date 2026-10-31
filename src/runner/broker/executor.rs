@@ -12,7 +12,7 @@ use crate::{
         },
         clock::{HostClock, checked_deadline},
         enforcer::{CancelGeneration, EnforcedSlot, EnforcerClient, RegistrationV1},
-        journal::{AcceptedJobV1, JournalError},
+        journal::{AcceptedJobV1, CancelStopProjectionV1, JournalError},
         lifecycle::{
             BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1, LocalFailureCodeV1,
             LocalFailurePhaseV1,
@@ -39,8 +39,12 @@ use std::{
         Arc,
         atomic::{AtomicU8, Ordering},
     },
+    time::Duration,
 };
 use uuid::Uuid;
+
+const CANCEL_FANOUT: usize = 16;
+const CANCEL_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone)]
 pub(crate) struct BatchExecutor {
@@ -197,109 +201,70 @@ impl BatchExecutor {
             }
         }
     }
-    /// The caller first invalidates this same shared generation and durably
-    /// appends CancelRequested. This method only restores and stops old targets.
+    /// The projection proves this exact durable Cancel's original arm prefix.
+    /// Replaying it never invalidates a job generation or selects later arms.
     /// Success acknowledges delivery to known armed targets; it proves neither
     /// runtime terminal/absence nor central quota release.
     pub(crate) async fn cancel(
         &self,
-        operation: Uuid,
-        generation: u64,
+        projection: CancelStopProjectionV1,
         cancel: &CancelGeneration,
     ) -> Result<()> {
         ensure!(
-            generation != u64::MAX && generation == cancel.current(),
-            "invalid cancellation generation"
-        );
-        let job = self
-            .writer
-            .load(operation)
-            .await?
-            .context("cancellation job is unavailable")?;
-        ensure!(
-            same(job.scope(), self.writer.scope())?,
+            same(projection.scope(), self.writer.scope())?,
             "cancellation scope mismatch"
         );
         ensure!(
-            job.broker_checkpoint_v3()
-                .is_some_and(
-                    |checkpoint| checkpoint.commands().iter().any(|command| matches!(
-                        command.request(),
-                        LocalCommandRequestV1::CancelRequested
-                    ))
-                ),
-            "cancellation is not durable"
+            !projection.operation_id().is_nil()
+                && !projection.command_id().is_nil()
+                && projection.receipt().command_id() == projection.command_id(),
+            "invalid durable cancellation projection"
         );
-        let registrations = retained_registrations(&job)?;
-        // Every target gets an attempt, even if another target is unavailable.
-        // The list is bounded by the validated checkpoint operation limit.
-        let mut tasks = tokio::task::JoinSet::new();
-        for registration in registrations {
-            let enforcer = self.enforcer.clone();
-            let cancel = cancel.clone();
-            tasks.spawn(async move {
-                let slot = enforcer.restore(registration, cancel.clone()).await?;
-                slot.cancel(cancel.current()).await
-            });
-        }
+        let origin = hex::encode(Sha256::digest(
+            projection.scope().gateway_origin().as_bytes(),
+        ));
+        let expires = tokio::time::Instant::now() + CANCEL_TOTAL_TIMEOUT;
+        let batches = projection.stops().len().div_ceil(CANCEL_FANOUT);
         let mut failed = false;
-        while let Some(result) = tasks.join_next().await {
-            if !matches!(result, Ok(Ok(()))) {
-                failed = true;
+        for (index, stops) in projection.stops().chunks(CANCEL_FANOUT).enumerate() {
+            // Divide the remaining total deadline fairly between batches. An
+            // unavailable early target cannot consume every later attempt.
+            let budget = expires.saturating_duration_since(tokio::time::Instant::now())
+                / u32::try_from(batches - index)
+                    .context("cancellation inventory exceeds its bound")?;
+            let mut attempts = Vec::with_capacity(stops.len());
+            for stop in stops {
+                let registration = RegistrationV1::new(
+                    origin.clone(),
+                    projection.scope().tenant_id().into(),
+                    stop.arm().clone(),
+                    stop.receipt().clone(),
+                    stop.authority().clone(),
+                    stop.owned().clone(),
+                );
+                let registration = match registration {
+                    Ok(registration) => registration,
+                    Err(_) => {
+                        failed = true;
+                        continue;
+                    }
+                };
+                let enforcer = self.enforcer.clone();
+                let cancel = cancel.clone();
+                attempts.push(async move {
+                    tokio::time::timeout(budget, enforcer.cancel_retained(registration, cancel))
+                        .await
+                });
             }
+            let outcomes = futures_util::future::join_all(attempts).await;
+            failed |= outcomes.iter().any(|result| !matches!(result, Ok(Ok(()))));
         }
         ensure!(
-            !failed,
-            "one or more cancellation targets require reconciliation"
+            !failed && !projection.incomplete(),
+            "cancellation delivery is incomplete; retained targets require reconciliation"
         );
         Ok(())
     }
-}
-
-/// Extracts already acknowledged arms only. This is a pure stop inventory,
-/// never an authentication check, a fresh arm, or a start permission.
-pub(crate) fn retained_registrations(job: &AcceptedJobV1) -> Result<Vec<RegistrationV1>> {
-    let Some(checkpoint) = job.broker_checkpoint_v2() else {
-        return Ok(Vec::new());
-    };
-    let arms = checkpoint
-        .supervision()
-        .operations()
-        .iter()
-        .filter_map(|operation| match operation {
-            Operation::Arm {
-                owned,
-                request,
-                response: Some(response),
-                ..
-            } => Some((owned, request, response)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if arms.is_empty() {
-        return Ok(Vec::new());
-    }
-    let context = job.checkpoint().broker_context();
-    let authority = context
-        .binding
-        .context("retained arm has no durable runtime binding")?;
-    let origin = hex::encode(Sha256::digest(job.scope().gateway_origin().as_bytes()));
-    arms.into_iter()
-        .map(|(owned, request, response)| {
-            ensure!(
-                same(request, &response.arm)?,
-                "retained arm acknowledgement differs"
-            );
-            Ok(RegistrationV1::new(
-                origin.clone(),
-                job.scope().tenant_id().into(),
-                request.clone(),
-                response.receipt.clone(),
-                authority.clone(),
-                owned.clone(),
-            )?)
-        })
-        .collect()
 }
 
 impl<'a> Execution<'a> {

@@ -1,0 +1,22 @@
+--- /private/tmp/ai-guard-cancel-gel4.P4xvU2/sources/tests/broker_checkpoint.rs	2026-10-31 16:34:59.217755769 +0100
++++ tests/broker_checkpoint.rs	2026-10-31 16:38:51.286479230 +0100
+@@ -3560,6 +3560,11 @@
+     let private_source = PrivateFile::open(&source_path, 64 * 1024).unwrap();
+     let mut plan = legacy_plan_value();
+     plan["options"]["secret_env_file"] = json!(source_path);
++    // Match the explicit manual-credential contract, rather than inheriting
++    // the no-credential fixture's strict/no-network options.
++    plan["options"]["profile"] = json!("observe");
++    plan["options"]["network"] = json!("bridge");
++    plan["request"]["profile"] = json!("observe");
+     let intent = ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+     let request: DecisionRequest = serde_json::from_value(plan["request"].clone()).unwrap();
+     let operation_id = intent.operation_id();
+@@ -3668,6 +3673,7 @@
+     };
+     append(&mut head, &initial, &[], &operations);
+     let mut admission = supervised_admission(&intent, &request, decision_receipt);
++    admission.admission.launch.network = NetworkV1::Bridge;
+     admission.admission.launch.credential_binding_id = Some(credential_id);
+     admission.admission.launch.credential_names = credential_names;
+     operations.push(SupervisionOperationV1::Admission {

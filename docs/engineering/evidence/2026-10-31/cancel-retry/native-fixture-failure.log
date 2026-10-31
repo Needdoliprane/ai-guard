@@ -1,0 +1,19 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 1 test
+
+thread 'broker::enforcer::client::retained_cancel_tests::retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slots' (6031821) panicked at src/broker/enforcer/cancel_tests.rs:245:18:
+called `Result::unwrap()` on an `Err` value: Unavailable
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+private native Cancel diagnostics retained at /private/tmp/cr-pQleDS
+test broker::enforcer::client::retained_cancel_tests::retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slots ... FAILED
+
+failures:
+
+failures:
+    broker::enforcer::client::retained_cancel_tests::retained_cancel_real_ipc_retries_without_seeding_or_targeting_later_slots
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 123 filtered out; finished in 3.06s
+
+error: test failed, to rerun pass `--lib`

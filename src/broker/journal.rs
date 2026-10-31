@@ -20,6 +20,7 @@ use std::{
 use uuid::Uuid;
 mod confirmed;
 pub mod recovery;
+pub use recovery::CancelStopProjectionV1;
 mod types;
 pub use types::*;
 use types::{AcceptedData, BindingData, LoadedCheckpoint};
@@ -1322,6 +1323,7 @@ impl Journal {
             legacy_managed_seen,
             chain,
             command_receipts,
+            cancel_boundaries: _,
             outbox_receipts,
             last_cancel_operations,
         } = verifier.finish(&current.head)?;

@@ -3,9 +3,9 @@
 use super::{
     checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
     journal::{
-        AcceptedJobV1, CheckpointReceiptV1, Journal, JournalError, JournalPageV1, JournalResult,
-        JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1,
-        ReservationTicket, ReserveResult, RevisionRefV1,
+        AcceptedJobV1, CancelStopProjectionV1, CheckpointReceiptV1, Journal, JournalError,
+        JournalPageV1, JournalResult, JournalScopeV1, JournalStatusV1, RejectionCodeV1,
+        RejectionPhaseV1, RejectionReceiptV1, ReservationTicket, ReserveResult, RevisionRefV1,
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
@@ -127,6 +127,11 @@ enum Command {
         command_id: Uuid,
         request: Box<LocalCommandRequestV1>,
         reply: Reply<LocalCommandReceiptV1>,
+    },
+    CancelStopProjection {
+        operation_id: Uuid,
+        command_id: Uuid,
+        reply: Reply<Option<CancelStopProjectionV1>>,
     },
     EnqueueEvents {
         operation_id: Uuid,
@@ -314,6 +319,18 @@ impl WriterClient {
         })
         .await
     }
+    pub async fn cancel_stop_projection(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<Option<CancelStopProjectionV1>> {
+        self.call(move |reply| Command::CancelStopProjection {
+            operation_id,
+            command_id,
+            reply,
+        })
+        .await
+    }
     pub async fn status(&self, operation_id: Uuid) -> JournalResult<Option<JournalStatusV1>> {
         self.call(move |reply| Command::Status {
             operation_id,
@@ -495,6 +512,13 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
                 reply,
             } => {
                 let _ = reply.send(append_command(&journal, operation_id, command_id, *request));
+            }
+            Command::CancelStopProjection {
+                operation_id,
+                command_id,
+                reply,
+            } => {
+                let _ = reply.send(journal.cancel_stop_projection(operation_id, command_id));
             }
             Command::EnqueueEvents {
                 operation_id,

@@ -583,7 +583,7 @@ mod tests {
                 .begin_cancel(command)
                 .expect("cancel identity begins")
                 .expect("fresh cancel identity");
-            started_tx.send(cancellation.generation).unwrap();
+            started_tx.send(cancel_job.cancel.current()).unwrap();
             let _identity = cancel_jobs.identity_gate().await.unwrap();
             let outcome = reject_reserved_id(&root, &profile, request);
             finished_tx.send(outcome).unwrap();

@@ -27,8 +27,9 @@ use agentsandbox::{
             recovery::StopRecoveryReaderV1,
         },
         lifecycle::{BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1},
+        writer::WriterClient,
     },
-    control_fs::Directory,
+    control_fs::{Directory, PrivateFile},
     model::DecisionRequest,
     runner::CheckpointPayloadV1,
     runtime::RuntimeAuthority,
@@ -39,6 +40,7 @@ use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
     path::Path,
+    time::Duration,
 };
 use uuid::Uuid;
 
@@ -2966,7 +2968,7 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
         &worker,
         &authority,
         HelperPurposeV1::Export,
-        export_permission,
+        export_permission.clone(),
         None,
     );
 
@@ -3002,6 +3004,53 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     assert_eq!(final_checkpoint.supervision().helpers().len(), 4);
     assert!(store.integrity().unwrap().valid);
 
+    // A real Arm ACK may arrive at the journal after Cancel even though the
+    // Arm operation was already born. Do not create/claim/rearm after Cancel.
+    let late_helper_id = Uuid::new_v4();
+    let (late_policy, late_arm, late_owned) = helper_arm_request(
+        &worker,
+        &intent.intent_hash().unwrap(),
+        late_helper_id,
+        HelperPurposeV1::Export,
+        export_permission.clone(),
+        &authority,
+    );
+    helpers.push(
+        HelperPreparationV1::new(late_policy.clone(), export_permission.clone(), None).unwrap(),
+    );
+    head = append_v2(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+    )
+    .head()
+    .clone();
+    *helpers.last_mut().unwrap() =
+        HelperPreparationV1::new(late_policy, export_permission, Some(late_owned.clone())).unwrap();
+    let late_arm_index = operations.len();
+    operations.push(SupervisionOperationV1::Arm {
+        parent: worker.clone(),
+        owned: late_owned.clone(),
+        request: late_arm.clone(),
+        response: None,
+    });
+    head = append_v2(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+    )
+    .head()
+    .clone();
+    let late_arm_ack = store.arm_execution(&late_arm).unwrap();
+
     // A durable cancel closes the previously acknowledged export grant. An
     // otherwise valid new helper claim must use an export request born after
     // that cancellation, even though the earlier grant remains in the journal.
@@ -3014,6 +3063,32 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     )
     .unwrap();
     let commands = vec![cancel.clone()];
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands,
+    )
+    .head()
+    .clone();
+    let cancel1_head = head.clone();
+    let cancel1_pointer =
+        fs::read(current_pointer_path(journal_root.path(), operation_id)).unwrap();
+    let cancel1_receipt = journal
+        .command_receipt(operation_id, cancel.command_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(cancel1_receipt.head(), &cancel1_head);
+    operations[late_arm_index] = SupervisionOperationV1::Arm {
+        parent: worker.clone(),
+        owned: late_owned,
+        request: late_arm.clone(),
+        response: Some(late_arm_ack),
+    };
     head = append_v3(
         &journal,
         operation_id,
@@ -3276,6 +3351,12 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     )
     .expect("only a grant born after the last Cancel authorizes Export");
 
+    let cancel2_receipt = journal
+        .command_receipt(operation_id, cancel2.command_id())
+        .unwrap()
+        .unwrap();
+    assert!(cancel1_receipt.head().revision() < cancel2_receipt.head().revision());
+
     // STOP-only recovery projects the exact durable head and acknowledged
     // Arm receipts. The last Cancel applies only to Arms before its boundary.
     let expected_head = head.clone();
@@ -3301,6 +3382,83 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
         expected_stops
             .iter()
             .any(|(index, _, _, _)| *index >= cancel2_boundary)
+    );
+
+    // The same live lease projects each exact command, not the latest Cancel.
+    // The late ACK is selected by its earlier Arm birth, and both projections
+    // exclude the helper born after C2 without creating a revision.
+    for (command, boundary, historical) in [
+        (&cancel, cancel1_boundary, &cancel1_receipt),
+        (&cancel2, cancel2_boundary, &cancel2_receipt),
+    ] {
+        let projection = journal
+            .cancel_stop_projection(operation_id, command.command_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(projection.scope()).unwrap(),
+            serde_json::to_value(&scope).unwrap()
+        );
+        assert_eq!(projection.operation_id(), operation_id);
+        assert_eq!(projection.command_id(), command.command_id());
+        assert!(!projection.incomplete());
+        assert_eq!(projection.receipt().command_id(), historical.command_id());
+        assert_eq!(projection.receipt().input_hash(), historical.input_hash());
+        assert_eq!(
+            projection.receipt().head().revision(),
+            historical.head().revision()
+        );
+        assert_eq!(projection.receipt().head().hash(), historical.head().hash());
+        let expected = expected_stops
+            .iter()
+            .filter(|(index, _, _, _)| *index < boundary)
+            .collect::<Vec<_>>();
+        assert_eq!(projection.stops().len(), expected.len());
+        assert!(
+            projection
+                .stops()
+                .iter()
+                .any(|stop| stop.arm().operation_id == late_arm.operation_id),
+            "late ACK belongs to its pre-Cancel Arm birth"
+        );
+        for (stop, (_, owned, arm, response)) in projection.stops().iter().zip(expected) {
+            assert_eq!(
+                serde_json::to_value(stop.arm()).unwrap(),
+                serde_json::to_value(arm).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(stop.receipt()).unwrap(),
+                serde_json::to_value(&response.receipt).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(stop.owned()).unwrap(),
+                serde_json::to_value(owned).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(stop.authority()).unwrap(),
+                serde_json::to_value(&authority).unwrap()
+            );
+            assert_eq!(stop.cancel_after_arm(), Some(command.command_id()));
+        }
+    }
+    assert_eq!(
+        journal.load(operation_id).unwrap().unwrap().head(),
+        &expected_head
+    );
+    let current_path = current_pointer_path(journal_root.path(), operation_id);
+    let current_bytes = fs::read(&current_path).unwrap();
+    fs::write(&current_path, cancel1_pointer).unwrap();
+    assert!(
+        matches!(
+            journal.cancel_stop_projection(operation_id, cancel.command_id()),
+            Err(agentsandbox::broker::journal::JournalError::Conflict)
+        ),
+        "metadata-only STOP reads retain the live anti-rollback floor"
+    );
+    fs::write(&current_path, &current_bytes).unwrap();
+    assert_eq!(
+        journal.load(operation_id).unwrap().unwrap().head(),
+        &expected_head
     );
 
     drop(journal);
@@ -3392,6 +3550,330 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
         normal_open.is_err(),
         "strict journal open rejects the sibling"
     );
+}
+
+#[tokio::test]
+async fn cancel_projection_retains_manual_bound_arm_after_blob_loss() {
+    let source = tempfile::NamedTempFile::new().unwrap();
+    fs::write(source.path(), b"FIXTURE_KEY=synthetic-manual-value-123\n").unwrap();
+    let source_path = source.path().canonicalize().unwrap();
+    let private_source = PrivateFile::open(&source_path, 64 * 1024).unwrap();
+    let mut plan = legacy_plan_value();
+    plan["options"]["secret_env_file"] = json!(source_path);
+    // Match the explicit manual-credential contract, rather than inheriting
+    // the no-credential fixture's strict/no-network options.
+    plan["options"]["profile"] = json!("observe");
+    plan["options"]["network"] = json!("bridge");
+    plan["request"]["profile"] = json!("observe");
+    let intent = ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+    let request: DecisionRequest = serde_json::from_value(plan["request"].clone()).unwrap();
+    let operation_id = intent.operation_id();
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let store_root = support::private_tempdir();
+    let store = Store::open(
+        &store_root.path().join("audit.sqlite"),
+        Redactor::new(vec![]),
+        1000,
+    )
+    .unwrap();
+    store
+        .migrate_control_v3(&store_root.path().join("migration-backup.sqlite"))
+        .unwrap();
+    let namespace = Uuid::parse_str(
+        store
+            .supervision_state()
+            .unwrap()
+            .control_namespace_uuid
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    let scope = JournalScopeV1::new(
+        Uuid::new_v4(),
+        "tenant-checkpoint-test",
+        "http://127.0.0.1:8787",
+        namespace,
+        "broker-test",
+    )
+    .unwrap();
+    let journal_root = support::private_tempdir();
+    let journal = open_journal(journal_root.path(), scope);
+    let ticket = match journal
+        .reserve(operation_id, br#"{"action":"manual-stop-projection"}"#)
+        .unwrap()
+    {
+        ReserveResult::New(ticket) => ticket,
+        other => panic!("fresh manual fixture requires a reservation: {other:?}"),
+    };
+    let accepted = journal
+        .accept(
+            ticket,
+            &intent,
+            BindingInputs::Manual {
+                source: &private_source,
+            },
+            &initial,
+        )
+        .unwrap();
+    let credential_id = accepted
+        .binding_manifest()
+        .binding_id()
+        .unwrap()
+        .to_string();
+    let credential_names = accepted.binding_manifest().names().to_vec();
+    let credential_digest = accepted
+        .binding_manifest()
+        .handoff_sha()
+        .unwrap()
+        .to_owned();
+    let mut head = accepted.head().clone();
+    drop(accepted);
+    let append = |head: &mut RevisionRefV1,
+                  runner: &CheckpointPayloadV1,
+                  helpers: &[HelperPreparationV1],
+                  operations: &[SupervisionOperationV1]| {
+        *head = append_v2(
+            &journal,
+            operation_id,
+            head,
+            runner,
+            namespace,
+            helpers.to_vec(),
+            operations.to_vec(),
+        )
+        .head()
+        .clone();
+    };
+    let policy = Policy::default();
+    let stored = store
+        .decision(
+            &request,
+            Some((policy::evaluate(&policy, &request), json!(null))),
+        )
+        .unwrap()
+        .unwrap();
+    let decision = stored.event.decision.unwrap();
+    assert_eq!(decision.outcome, agentsandbox::model::Outcome::Allow);
+    let decision_receipt = DecisionReceiptV1 {
+        version: 1,
+        request_id: request.request_id.clone(),
+        request_hash: policy::request_hash(&request),
+        phase: DecisionPhaseV1::Initial,
+        audit_seq: stored.seq,
+        audit_hash: stored.hash,
+    };
+    let mut operations = vec![SupervisionOperationV1::Decision {
+        request: request.clone(),
+        response: None,
+    }];
+    append(&mut head, &initial, &[], &operations);
+    operations[0] = SupervisionOperationV1::Decision {
+        request: request.clone(),
+        response: Some(DecisionAnswerV1::new(decision.clone(), decision_receipt.clone()).unwrap()),
+    };
+    append(&mut head, &initial, &[], &operations);
+    let mut admission = supervised_admission(&intent, &request, decision_receipt);
+    admission.admission.launch.network = NetworkV1::Bridge;
+    admission.admission.launch.credential_binding_id = Some(credential_id);
+    admission.admission.launch.credential_names = credential_names;
+    operations.push(SupervisionOperationV1::Admission {
+        request: admission.clone(),
+        response: None,
+    });
+    append(&mut head, &initial, &[], &operations);
+    let admitted = store
+        .admit_supervised(
+            &admission,
+            &policy,
+            decision.clone(),
+            json!(null),
+            &QuotaPolicyV1::default(),
+        )
+        .unwrap();
+    let mut worker = admitted.worker.clone().unwrap();
+    operations[1] = SupervisionOperationV1::Admission {
+        request: admission.clone(),
+        response: Some(admitted.clone()),
+    };
+    append(&mut head, &initial, &[], &operations);
+    let prepare = worker_mutation(&worker, WorkerTransitionV1::Prepare);
+    operations.push(SupervisionOperationV1::WorkerMutation {
+        request: prepare.clone(),
+        response: None,
+    });
+    append(&mut head, &initial, &[], &operations);
+    let prepared = store.mutate_worker(&prepare).unwrap();
+    worker = prepared.worker.clone();
+    operations[2] = SupervisionOperationV1::WorkerMutation {
+        request: prepare,
+        response: Some(prepared),
+    };
+    append(&mut head, &initial, &[], &operations);
+    let authority = synthetic_runtime_authority();
+    plan["managed"] = json!({
+        "tenant_id":"tenant-checkpoint-test", "gateway_origin":"http://127.0.0.1:8787", "config_root":"/private/control",
+        "binding":authority, "authority_file":"runtime-authority.json", "admission":admission.admission,
+        "worker":worker, "owned":null, "pending":null, "uncertain":[], "lock_identity":null,
+        "before":{}, "import":null, "decision":decision, "output_event":null,
+        "output_acknowledged":false, "result":null, "archive_name":"worker.tar",
+        "archive_digest":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "credential_digest":credential_digest, "workspace_control_exclusion_version":1, "invocation_event":null
+    });
+    let runner =
+        CheckpointPayloadV1::from_plan_bytes(&intent, &serde_json::to_vec(&plan).unwrap()).unwrap();
+    let permission = HelperPermissionV1::Admission {
+        receipt: admitted.receipt,
+    };
+    let (helper_policy, arm, owned) = helper_arm_request(
+        &worker,
+        &intent.intent_hash().unwrap(),
+        Uuid::new_v4(),
+        HelperPurposeV1::Import,
+        permission.clone(),
+        &authority,
+    );
+    let mut helpers =
+        vec![HelperPreparationV1::new(helper_policy.clone(), permission.clone(), None).unwrap()];
+    append(&mut head, &runner, &helpers, &operations);
+    helpers[0] = HelperPreparationV1::new(helper_policy, permission, Some(owned.clone())).unwrap();
+    let arm_index = operations.len();
+    operations.push(SupervisionOperationV1::Arm {
+        parent: worker.clone(),
+        owned: owned.clone(),
+        request: arm.clone(),
+        response: None,
+    });
+    append(&mut head, &runner, &helpers, &operations);
+    let armed = store.arm_execution(&arm).unwrap();
+    operations[arm_index] = SupervisionOperationV1::Arm {
+        parent: worker,
+        owned: owned.clone(),
+        request: arm.clone(),
+        response: Some(armed.clone()),
+    };
+    append(&mut head, &runner, &helpers, &operations);
+    let cancel = LocalCommandV1::new(
+        operation_id,
+        &intent.intent_hash().unwrap(),
+        Uuid::new_v4(),
+        LocalCommandRequestV1::CancelRequested,
+    )
+    .unwrap();
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        std::slice::from_ref(&cancel),
+    )
+    .head()
+    .clone();
+    let receipt = journal
+        .command_receipt(operation_id, cancel.command_id())
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.head(), &head);
+    let failure = LocalCommandV1::new(
+        operation_id,
+        &intent.intent_hash().unwrap(),
+        Uuid::new_v4(),
+        LocalCommandRequestV1::FailureObserved {
+            phase: agentsandbox::broker::lifecycle::LocalFailurePhaseV1::Cleanup,
+            code: agentsandbox::broker::lifecycle::LocalFailureCodeV1::TransportFailed,
+        },
+    )
+    .unwrap();
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers,
+        operations,
+        &[cancel.clone(), failure.clone()],
+    )
+    .head()
+    .clone();
+    let complete = journal
+        .cancel_stop_projection(operation_id, cancel.command_id())
+        .unwrap()
+        .unwrap();
+    assert!(!complete.incomplete());
+    assert_eq!(complete.stops().len(), 1);
+    drop(complete);
+    let pointer = current_pointer_path(journal_root.path(), operation_id);
+    let pointer_bytes = fs::read(&pointer).unwrap();
+    drop(private_source);
+    fs::remove_file(&source_path).unwrap();
+    drop(source);
+    let blob = revision_zero_path(journal_root.path(), operation_id)
+        .parent()
+        .unwrap()
+        .join("bindings/manual-env-v1.bin");
+    fs::remove_file(blob).unwrap();
+    let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(10)).unwrap();
+    assert!(
+        writer.load(operation_id).await.is_err(),
+        "business reconstruction still refuses the missing credential blob"
+    );
+    let projection = writer
+        .cancel_stop_projection(operation_id, cancel.command_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        projection.incomplete(),
+        "missing credential bytes never become a complete inventory"
+    );
+    assert_eq!(projection.receipt().command_id(), receipt.command_id());
+    assert_eq!(projection.receipt().input_hash(), receipt.input_hash());
+    assert_eq!(
+        projection.receipt().head().revision(),
+        receipt.head().revision()
+    );
+    assert_eq!(projection.receipt().head().hash(), receipt.head().hash());
+    assert_eq!(projection.stops().len(), 1);
+    let stop = &projection.stops()[0];
+    assert_eq!(
+        serde_json::to_value(stop.arm()).unwrap(),
+        serde_json::to_value(&arm).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(stop.receipt()).unwrap(),
+        serde_json::to_value(&armed.receipt).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(stop.owned()).unwrap(),
+        serde_json::to_value(&owned).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(stop.authority()).unwrap(),
+        serde_json::to_value(&authority).unwrap()
+    );
+    assert!(matches!(
+        writer
+            .cancel_stop_projection(operation_id, failure.command_id())
+            .await,
+        Err(agentsandbox::broker::journal::JournalError::Conflict)
+    ));
+    assert_eq!(
+        fs::read(pointer).unwrap(),
+        pointer_bytes,
+        "STOP projection and a non-Cancel lookup never add a revision"
+    );
+    assert!(
+        head.revision() > receipt.head().revision(),
+        "the historical Cancel receipt is not the latest head"
+    );
+    assert!(
+        writer.load(operation_id).await.is_err(),
+        "STOP data grants no new business credential or start capability"
+    );
+    assert!(store.integrity().unwrap().valid);
 }
 
 mod support;

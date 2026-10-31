@@ -1,11 +1,13 @@
 //! Shared verification of confirmed revision bytes. No filesystem or runtime effects.
 use super::*;
+use crate::broker::lifecycle::LocalCommandRequestV1;
 
 pub(super) struct ConfirmedChainV1 {
     pub payload: LoadedCheckpoint,
     pub legacy_managed_seen: bool,
     pub chain: Vec<RevisionRefV1>,
     pub command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    pub cancel_boundaries: HashMap<Uuid, usize>,
     pub outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     pub last_cancel_operations: Option<usize>,
 }
@@ -21,6 +23,7 @@ pub(super) struct ChainVerifierV1<'a> {
     payload: Option<LoadedCheckpoint>,
     legacy_managed_seen: bool,
     command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    cancel_boundaries: HashMap<Uuid, usize>,
     outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     last_cancel_operations: Option<usize>,
 }
@@ -43,6 +46,7 @@ impl<'a> ChainVerifierV1<'a> {
             payload: None,
             legacy_managed_seen: false,
             command_receipts: HashMap::new(),
+            cancel_boundaries: HashMap::new(),
             outbox_receipts: HashMap::new(),
             last_cancel_operations: None,
         })
@@ -123,6 +127,13 @@ impl<'a> ChainVerifierV1<'a> {
                 self.last_cancel_operations,
             );
             for command in value.commands() {
+                if matches!(command.request(), LocalCommandRequestV1::CancelRequested) {
+                    // Operation birth, rather than acknowledgement time, is
+                    // the causal boundary. A later Arm ACK must not move it.
+                    self.cancel_boundaries
+                        .entry(command.command_id())
+                        .or_insert(value.broker().supervision().operations().len());
+                }
                 self.command_receipts
                     .entry(command.command_id())
                     .or_insert_with(|| LocalCommandReceiptV1 {
@@ -166,6 +177,7 @@ impl<'a> ChainVerifierV1<'a> {
             legacy_managed_seen: self.legacy_managed_seen,
             chain: self.chain,
             command_receipts: self.command_receipts,
+            cancel_boundaries: self.cancel_boundaries,
             outbox_receipts: self.outbox_receipts,
             last_cancel_operations: self.last_cancel_operations,
         })

@@ -161,6 +161,8 @@ Pour arrêter les services de contrôle, après la fin des sessions :
 
 `down` conserve les volumes d'audit et de session et n'arrête pas les workers à votre place. Il ne prend pas `--allow-rootful-runtime`. Un prochain `up` avec la même configuration remonte l'audit conservé. Aucun `prune` ni effacement de volume n'est nécessaire à ce parcours.
 
+Pour la sous-commande explicite `broker cancel`, encore en qualification distincte du parcours ci-dessus, conserver l'UUID de commande dès le premier appel : fournir `--command-id` avec un UUID neuf choisi, ou noter la ligne `Command: <UUID>` affichée avant l'envoi quand la CLI le génère. Passer ensuite cet UUID à `--command-id` pour un retry. Réutiliser le même identifiant retente cette annulation précise ; en choisir un nouveau exprime une nouvelle demande et peut inclure des exports plus récents. Un reçu durable ou une livraison au gardien ne prouve pas la fin du worker. Après `NeedsReconciliation`, consulter les preuves et l'état runtime avant toute conclusion sur le quota. [Portée et limites du rejeu](engineering/evidence/2026-10-31/cancel-retry/README.md).
+
 ## Configuration et données à conserver
 
 | Réglage ou donnée | Valeur / emplacement livré |

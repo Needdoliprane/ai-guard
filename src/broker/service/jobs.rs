@@ -152,13 +152,22 @@ impl Job {
         }
         commands.insert(command, false);
         self.cancelling.fetch_add(1, Ordering::SeqCst);
-        let generation = self.cancel.invalidate();
+        self.cancel.invalidate();
         Ok(Some(CancellingJob {
             job: Arc::clone(self),
             command,
-            generation,
             retain_pending: false,
         }))
+    }
+    /// This cache records a durable request, never successful stop delivery.
+    /// Replaying it must not begin another cancellation or revoke later work.
+    pub(super) fn has_acknowledged_cancel(&self, command: Uuid) -> Result<bool, BrokerErrorCodeV1> {
+        Ok(self
+            .cancel_commands
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
+            .get(&command)
+            == Some(&true))
     }
     pub(super) fn remember_cancellations(&self, durable: &AcceptedJobV1) {
         let Some(checkpoint) = durable.broker_checkpoint_v3() else {
@@ -254,7 +263,6 @@ impl Drop for RunningJob {
 pub(super) struct CancellingJob {
     job: Arc<Job>,
     command: Uuid,
-    pub(super) generation: u64,
     retain_pending: bool,
 }
 impl CancellingJob {
@@ -517,17 +525,19 @@ mod tests {
     fn acknowledged_cancel_replay_does_not_invalidate_a_later_execution() {
         let job = Arc::new(Job::new());
         let command = Uuid::new_v4();
+        assert!(!job.has_acknowledged_cancel(command).expect("cache"));
         let mut cancellation = job
             .begin_cancel(command)
             .expect("cancel")
             .expect("new command");
-        let cancelled_generation = cancellation.generation;
+        let cancelled_generation = job.cancel.current();
         assert!(matches!(job.enter(), Err(BrokerErrorCodeV1::Busy)));
         assert!(matches!(
             job.begin_cancel(command),
             Err(BrokerErrorCodeV1::Busy)
         ));
         cancellation.acknowledged();
+        assert!(job.has_acknowledged_cancel(command).expect("durable cache"));
         drop(cancellation);
         let export = job.enter().expect("fresh post-cancel command");
         assert_eq!(export.generation(), cancelled_generation);

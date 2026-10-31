@@ -19,6 +19,9 @@ use std::{
 };
 use tokio::{net::UnixStream, sync::watch};
 
+const RETAINED_CANCEL_TIMEOUT: Duration = Duration::from_secs(5);
+const RETAINED_CANCEL_ATTEMPTS: usize = 3;
+
 #[derive(Clone)]
 pub struct EnforcerClient(Arc<Client>);
 impl fmt::Debug for EnforcerClient {
@@ -55,6 +58,9 @@ struct LocalSlot {
     stop: watch::Sender<bool>,
     acknowledged: AtomicBool,
     cancel_durable: AtomicBool,
+    // An exact durable Cancel replay stops this target without seeding a job's
+    // shared generation, including when the enforcer itself must be recovered.
+    retained_cancel: AtomicBool,
 }
 
 impl EnforcerClient {
@@ -219,12 +225,13 @@ impl EnforcerClient {
             .await
     }
 
-    async fn register_current(
+    fn retain_registration(
         &self,
         registration: RegistrationV1,
         generation: CancelGeneration,
         observe_only: bool,
-    ) -> EnforcerResult<EnforcedSlot> {
+        retained_cancel: bool,
+    ) -> EnforcerResult<(Arc<LocalSlot>, u64)> {
         let digest = registration.digest()?;
         let expected = generation.current();
         if (expected == u64::MAX && !observe_only) || self.0.failed.load(Ordering::SeqCst) {
@@ -265,7 +272,8 @@ impl EnforcerClient {
                     generation,
                     stop,
                     acknowledged: AtomicBool::new(false),
-                    cancel_durable: AtomicBool::new(false),
+                    cancel_durable: AtomicBool::new(retained_cancel),
+                    retained_cancel: AtomicBool::new(retained_cancel),
                 });
                 slots.insert(
                     local.registration.arm.operation_id.clone(),
@@ -274,6 +282,10 @@ impl EnforcerClient {
                 local
             }
         };
+        if retained_cancel {
+            local.retained_cancel.store(true, Ordering::SeqCst);
+            local.cancel_durable.store(true, Ordering::SeqCst);
+        }
         if observe_only {
             // Revoke any previously issued local guard before the RPC. A lost
             // restoration ACK cannot leave an old start permit usable.
@@ -285,6 +297,17 @@ impl EnforcerClient {
                 .0
                 .prepared_once = true;
         }
+        Ok((local, expected))
+    }
+
+    async fn register_current(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        observe_only: bool,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let (local, expected) =
+            self.retain_registration(registration, generation, observe_only, false)?;
         // Retain before sending: an accepted request whose ACK is lost still
         // belongs to the recovery set, without consulting the journal writer.
         let expires = Instant::now() + REGISTER_TIMEOUT;
@@ -328,13 +351,171 @@ impl EnforcerClient {
         }
         let observed_generation = value.generation;
         accept_registration(&self.0, &local, value, replayed)?;
-        if observe_only {
+        if observe_only && !local.retained_cancel.load(Ordering::SeqCst) {
             local.generation.advance_to(observed_generation);
         }
         Ok(EnforcedSlot {
             client: self.clone(),
             local,
         })
+    }
+
+    /// Deliver only a previously durable Cancel's exact retained target. The
+    /// caller has verified its command/prefix projection. No new start permit
+    /// or shared job-generation change can be produced by this port.
+    pub(crate) async fn cancel_retained(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+    ) -> EnforcerResult<()> {
+        let digest = registration.digest()?;
+        let active =
+            self.active_for_retained_cancel(&registration.arm.operation_id, &digest, &generation)?;
+        // These synchronous mutations precede every RPC, even if registration
+        // was accepted remotely but its acknowledgement is lost.
+        let (local, _) = active.retain_registration(registration, generation, true, true)?;
+        let expires = Instant::now() + RETAINED_CANCEL_TIMEOUT;
+        let mut failure = EnforcerError::Unavailable;
+        for attempt in 0..RETAINED_CANCEL_ATTEMPTS {
+            let current = match active.active() {
+                Ok(current) => current,
+                Err(error) => {
+                    failure = error;
+                    if attempt + 1 < RETAINED_CANCEL_ATTEMPTS {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                    continue;
+                }
+            };
+            let registered = retained_request(
+                &current.0,
+                Request::Register {
+                    registration: Box::new(local.registration.clone()),
+                    generation: local.generation.current(),
+                    observe_only: true,
+                },
+                expires,
+            )
+            .await;
+            match registered {
+                Ok(Response::Registered { value, replayed }) => {
+                    accept_registration(&current.0, &local, *value, replayed)?;
+                }
+                // NotReady may already have reserved the actor. A lost reply
+                // may also hide acceptance: try its exact hash without Ready.
+                Ok(Response::Error {
+                    code: EnforcerError::NotReady | EnforcerError::Unavailable,
+                })
+                | Err(_) => {}
+                Ok(response) => return Err(response_error(response)),
+            }
+            let observed = local
+                .status
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .0
+                .generation;
+            let generation = observed.max(local.generation.current());
+            match retained_request(
+                &current.0,
+                Request::Cancel {
+                    arm_id: local.registration.arm.operation_id.clone(),
+                    registration_hash: local.digest.clone(),
+                    generation,
+                },
+                expires,
+            )
+            .await
+            {
+                Ok(Response::Acknowledged {}) => return Ok(()),
+                Ok(Response::Error {
+                    code: EnforcerError::Conflict,
+                }) => {
+                    // Another cancellation may have advanced this actor while
+                    // this request was in flight. Observe only this same slot.
+                    match retained_request(
+                        &current.0,
+                        Request::Slots {
+                            arm_ids: vec![local.registration.arm.operation_id.clone()],
+                        },
+                        expires,
+                    )
+                    .await
+                    {
+                        Ok(Response::Slots { mut values }) if values.len() == 1 => {
+                            let value = values.remove(0);
+                            if value.arm_id != local.registration.arm.operation_id
+                                || value.registration_hash != local.digest
+                            {
+                                return Err(EnforcerError::Conflict);
+                            }
+                            *local.status.lock().map_err(|_| EnforcerError::Unhealthy)? =
+                                (value, Instant::now());
+                        }
+                        Ok(_) | Err(_) => {}
+                    }
+                    failure = EnforcerError::Conflict;
+                }
+                Ok(response) => failure = response_error(response),
+                Err(error) => failure = error,
+            }
+            if Instant::now() >= expires {
+                break;
+            }
+            if attempt + 1 < RETAINED_CANCEL_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        Err(failure)
+    }
+
+    fn active_for_retained_cancel(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        generation: &CancelGeneration,
+    ) -> EnforcerResult<Self> {
+        let mut current = self.clone();
+        // A target can have entered R1 after the root client was replaced.
+        // Mark existing matching Arcs on every traversed generation before
+        // returning its failure; never insert after a permanent recovery fuse.
+        for _ in 0..128 {
+            {
+                let slots = current
+                    .0
+                    .slots
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?;
+                if let Some(local) = slots.get(arm_id) {
+                    if local.digest != digest || !Arc::ptr_eq(&local.generation.0, &generation.0) {
+                        return Err(EnforcerError::Conflict);
+                    }
+                    local.retained_cancel.store(true, Ordering::SeqCst);
+                    local.cancel_durable.store(true, Ordering::SeqCst);
+                    local.stop.send_replace(true);
+                    local
+                        .status
+                        .lock()
+                        .map_err(|_| EnforcerError::Unhealthy)?
+                        .0
+                        .prepared_once = true;
+                }
+            }
+            let next = current
+                .0
+                .replacement
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .clone();
+            match next {
+                Some(next) => current = next,
+                None if current.0.failed.load(Ordering::SeqCst) => {
+                    return Err(EnforcerError::Unhealthy);
+                }
+                None => return Ok(current),
+            }
+        }
+        Err(EnforcerError::Unhealthy)
     }
 
     pub async fn status(&self) -> EnforcerResult<EnforcerStatusV1> {
@@ -437,6 +618,27 @@ impl EnforcerClient {
         }
         Err(EnforcerError::Unhealthy)
     }
+}
+
+#[cfg(test)]
+#[path = "cancel_tests.rs"]
+mod retained_cancel_tests;
+
+async fn retained_request(
+    client: &Client,
+    request: Request,
+    expires: Instant,
+) -> EnforcerResult<Response> {
+    let remaining = expires.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(EnforcerError::Unavailable);
+    }
+    tokio::time::timeout(
+        remaining,
+        client.request(request, remaining.min(IO_TIMEOUT)),
+    )
+    .await
+    .map_err(|_| EnforcerError::Unavailable)?
 }
 
 fn accept_registration(
@@ -865,7 +1067,7 @@ async fn recover_stops(client: Arc<Client>) {
     }
 }
 
-async fn restore_slot(client: &Client, local: Arc<LocalSlot>) -> EnforcerResult<()> {
+async fn restore_slot(client: &Arc<Client>, local: Arc<LocalSlot>) -> EnforcerResult<()> {
     {
         let mut slots = client.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
         if slots.len() >= client.max_slots as usize
@@ -877,6 +1079,11 @@ async fn restore_slot(client: &Client, local: Arc<LocalSlot>) -> EnforcerResult<
             local.registration.arm.operation_id.clone(),
             Arc::clone(&local),
         );
+    }
+    if local.retained_cancel.load(Ordering::SeqCst) {
+        return EnforcerClient(Arc::clone(client))
+            .cancel_retained(local.registration.clone(), local.generation.clone())
+            .await;
     }
     let generation = local.generation.current();
     let response = client

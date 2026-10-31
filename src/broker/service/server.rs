@@ -11,7 +11,7 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::RoleLease,
-        enforcer::{EnforcerClient, RegistrationV1},
+        enforcer::{CancelGeneration, EnforcerClient, RegistrationV1},
         journal::{
             AcceptedJobV1, ControlSecrets, FsExclusions, Journal, JournalLimitsV1, JournalScopeV1,
             JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReserveResult,
@@ -51,6 +51,14 @@ const FRAME_BYTES: u32 = 512 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITER_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+#[path = "cancel_retry_tests.rs"]
+mod cancel_retry_tests;
+#[cfg(test)]
+type ServiceEnforcer = cancel_retry_tests::TestEnforcer;
+#[cfg(not(test))]
+type ServiceEnforcer = EnforcerClient;
 
 struct Material {
     literals: Vec<String>,
@@ -185,7 +193,7 @@ struct Service {
     root: Directory,
     material: Arc<Material>,
     profiles: BTreeMap<String, Arc<ProfileJobs>>,
-    enforcer: EnforcerClient,
+    enforcer: ServiceEnforcer,
     blocking: Arc<Semaphore>,
     preparation: Arc<Semaphore>,
     execution: Arc<Semaphore>,
@@ -279,6 +287,9 @@ pub async fn serve(config_path: &Path) -> Result<()> {
         root,
         material,
         profiles,
+        #[cfg(test)]
+        enforcer: ServiceEnforcer::Native(enforcer),
+        #[cfg(not(test))]
         enforcer,
         blocking: Arc::new(Semaphore::new(8)),
         preparation: Arc::new(Semaphore::new(4)),
@@ -912,37 +923,35 @@ impl Service {
         let job = jobs.job(operation)?;
         // Invalidate before the first awaited journal operation. A blocked
         // writer cannot leave an already issued spawn guard locally valid.
-        let Some(mut cancellation) = job.begin_cancel(command)? else {
-            let acknowledgement = writer
+        // A confirmed replay has no new invalidation or execution gate.
+        let mut cancellation = if job.has_acknowledged_cancel(command)? {
+            None
+        } else {
+            job.begin_cancel(command)?
+        };
+        if let Some(cancellation) = cancellation.as_mut() {
+            let identity = jobs.identity_gate().await?;
+            let durable = match writer
+                .status(operation)
+                .await
+                .map_err(jobs::journal_error)?
+            {
+                Some(JournalStatusV1::Accepted(durable)) => durable,
+                Some(JournalStatusV1::ReservedInProcess) => return Err(BrokerErrorCodeV1::Busy),
+                Some(JournalStatusV1::Rejected(receipt)) => {
+                    return Ok(Response::reply(rejected(&receipt, true)));
+                }
+                Some(JournalStatusV1::Interrupted) => return Err(BrokerErrorCodeV1::Interrupted),
+                None => return Err(BrokerErrorCodeV1::InvalidInput),
+            };
+            reject_event_command_reuse(&durable, command)?;
+            self.reject_export_command_reuse(&durable, command).await?;
+            // Never wait behind the live execution/export gate. The receipt
+            // returned below comes from its first confirmed revision.
+            if let Err(error) = writer
                 .append_command(operation, command, LocalCommandRequestV1::CancelRequested)
                 .await
-                .map_err(jobs::journal_error)?;
-            return Ok(Response::reply(command_ack(operation, &acknowledgement)));
-        };
-        let generation = cancellation.generation;
-        let identity = jobs.identity_gate().await?;
-        let durable = match writer
-            .status(operation)
-            .await
-            .map_err(jobs::journal_error)?
-        {
-            Some(JournalStatusV1::Accepted(durable)) => durable,
-            Some(JournalStatusV1::ReservedInProcess) => return Err(BrokerErrorCodeV1::Busy),
-            Some(JournalStatusV1::Rejected(receipt)) => {
-                return Ok(Response::reply(rejected(&receipt, true)));
-            }
-            Some(JournalStatusV1::Interrupted) => return Err(BrokerErrorCodeV1::Interrupted),
-            None => return Err(BrokerErrorCodeV1::InvalidInput),
-        };
-        reject_event_command_reuse(&durable, command)?;
-        self.reject_export_command_reuse(&durable, command).await?;
-        // Never wait behind the live execution/export gate before invalidation.
-        let acknowledgement = match writer
-            .append_command(operation, command, LocalCommandRequestV1::CancelRequested)
-            .await
-        {
-            Ok(acknowledgement) => acknowledgement,
-            Err(error) => {
+            {
                 if error == crate::broker::journal::JournalError::Io {
                     cancellation.unknown();
                 }
@@ -950,17 +959,47 @@ impl Service {
                 job.result(Some(code));
                 return Err(code);
             }
-        };
-        cancellation.acknowledged();
-        drop(identity);
-        self.executor(writer)?
-            .cancel(operation, generation, &job.cancel)
+            cancellation.acknowledged();
+            drop(identity);
+        }
+        let acknowledgement = self
+            .deliver_cancel(writer, operation, command, &job.cancel)
             .await
-            .map_err(|_| {
-                job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
-                BrokerErrorCodeV1::NeedsReconciliation
-            })?;
+            .inspect_err(|code| job.result(Some(*code)))?;
         Ok(Response::reply(command_ack(operation, &acknowledgement)))
+    }
+    async fn deliver_cancel(
+        &self,
+        writer: WriterClient,
+        operation: Uuid,
+        command: Uuid,
+        cancel: &CancelGeneration,
+    ) -> Result<LocalCommandReceiptV1, BrokerErrorCodeV1> {
+        let projection = writer
+            .cancel_stop_projection(operation, command)
+            .await
+            .map_err(jobs::journal_error)?
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let receipt = projection.receipt().clone();
+        let incomplete = projection.incomplete();
+        async {
+            // Handler control-flow only, after the real confirmed projection.
+            // This seam supplies no runtime observation or terminal fact.
+            #[cfg(test)]
+            if let Some(result) = cancel_retry_tests::delivery(operation, cancel.current()) {
+                return result;
+            }
+            self.executor(writer)?
+                .cancel(projection, cancel)
+                .await
+                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+        }
+        .await?;
+        // Known targets were attempted even when coverage was incomplete.
+        if incomplete {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        Ok(receipt)
     }
     async fn resume(
         &self,

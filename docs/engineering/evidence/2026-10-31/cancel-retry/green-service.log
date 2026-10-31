@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.28s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 11 tests
+test broker::service::jobs::tests::local_error_is_visible_without_fabricating_a_durable_terminal ... ok
+test broker::service::jobs::tests::cancel_generation_invalidates_while_execution_gate_is_held ... ok
+test broker::service::jobs::tests::acknowledged_cancel_replay_does_not_invalidate_a_later_execution ... ok
+test broker::service::server::tests::submissions_screen_presented_and_configured_control_literals_after_json_decoding ... ok
+test broker::service::server::tests::screening_preserves_long_safe_prompt_and_rejects_short_literal_credentials ... ok
+test broker::service::targets::tests::immutable_input_reserves_id_without_creating_metadata_for_a_fresh_id ... ok
+test broker::service::targets::tests::unauthorized_or_partial_input_never_becomes_an_export_grant ... ok
+test broker::service::targets::tests::cancel_invalidates_then_waits_for_export_identity_publication ... ok
+test broker::service::targets::tests::replaced_parent_cannot_reconstruct_original_export_capability ... ok
+test broker::service::targets::tests::immutable_export_input_replays_exactly_and_rejects_divergence ... ok
+test broker::service::server::cancel_retry_tests::acknowledged_cancel_retry_redelivers_without_revoking_later_execution ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.40s
+

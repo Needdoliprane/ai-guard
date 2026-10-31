@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 31 octobre — rejeu causal des annulations, en intégration
+
+La régression du handler reproduit un Cancel durable dont la première livraison échoue puis dont le rejeu ne retente rien. Corriger dans les composants existants : chaque commande conserve une frontière éphémère immuable, égale au nombre d'opérations de supervision à sa première apparition confirmée. Seules les Arms nées avant cette frontière et actuellement acquittées sont ciblées ; un ACK tardif d'une ancienne Arm reste inclus, un export postérieur reste exclu. Aucun nouveau champ JSON, domaine de hash, claim, Arm, permission de lancement, échéance ou quota n'est créé par ce rejeu.
+
+Une projection STOP typée du writer vivant réutilise le vérificateur du reader de récupération, sans ouvrir le blob de credentials ni construire de job métier. Elle partage l'Arc du FD de lease déjà acquis, conserve les planchers anti-retour et les bornes d'observation du writer, synchronise ses métadonnées et leurs parents avant retour. La projection est limitée au job demandé : elle ne certifie pas l'inventaire des siblings, les quotas physiques ou la complétude globale du namespace. Une preuve partielle conserve les cibles connues pour tentative puis signale la réconciliation nécessaire ; jamais un zéro cible complet par défaut. Le port du gardien ne modifie pas la génération partagée lors du rejeu, garde les identités/receipts/deadlines d'origine et borne la livraison. Un ACK de livraison n'est ni un terminal runtime ni une libération de quota.
+
+Les cas de premier Cancel sans credential durable, d'ouverture du writer strict impossible et de convergence automatique après perte du transport restent des critères obligatoires à traiter et qualifier. La lecture blob-free d'un writer déjà ouvert ne ferme pas ces cas à elle seule. Code et tests sont en intégration ; le RED du handler constitue une preuve de défaut, pas une qualification du gardien ou de Docker. Ce chantier ne clôture aucun gate.
+
 ## 31 octobre — intégrité et durabilité de la publication d'export
 
 Correction retenue dans les frontières existantes : l'autorisation d'un parent d'export inclut ses ancêtres, leurs propriétaires, modes, ACL et filesystem supporté. Le namespace doit appartenir à root ou au compte de contrôle et interdire les modifications par d'autres UID ; l'exception existante des répertoires sticky appartenant à root reste contrôlée. Une allowlist seule ne garantit pas ces droits. Les capacités FD sont conservées et revalidées pendant l'export. Le contrôle ne répare jamais les permissions d'un chemin existant et ne propage pas cette politique aux sources non fiables.

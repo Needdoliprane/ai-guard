@@ -236,6 +236,9 @@ impl LocalCommandV1 {
     }
 }
 
+// Receipts acknowledge immutable durable facts; cloning never grants a fresh
+// execution permission or consumes/reloads a start claim.
+#[derive(Clone)]
 pub struct LocalCommandReceiptV1 {
     pub(crate) command_id: Uuid,
     pub(crate) input_hash: String,
