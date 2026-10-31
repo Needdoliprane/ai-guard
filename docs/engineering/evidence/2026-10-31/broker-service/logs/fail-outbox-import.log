@@ -1,0 +1,52 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0433]: cannot find type `BrokerCheckpointV4` in this scope
+   --> tests/broker_outbox.rs:291:9
+    |
+291 |         BrokerCheckpointV4::new(export_and_cancel, vec![]).unwrap_err(),
+    |         ^^^^^^^^^^^^^^^^^^ use of undeclared type `BrokerCheckpointV4`
+    |
+help: a struct with a similar name exists
+    |
+291 -         BrokerCheckpointV4::new(export_and_cancel, vec![]).unwrap_err(),
+291 +         BrokerCheckpointV2::new(export_and_cancel, vec![]).unwrap_err(),
+    |
+
+error[E0433]: cannot find type `BrokerCheckpointV4` in this scope
+   --> tests/broker_outbox.rs:310:9
+    |
+310 |         BrokerCheckpointV4::new(export_cancel, vec![]).unwrap_err(),
+    |         ^^^^^^^^^^^^^^^^^^ use of undeclared type `BrokerCheckpointV4`
+    |
+help: a struct with a similar name exists
+    |
+310 -         BrokerCheckpointV4::new(export_cancel, vec![]).unwrap_err(),
+310 +         BrokerCheckpointV2::new(export_cancel, vec![]).unwrap_err(),
+    |
+
+error[E0433]: cannot find type `BrokerCheckpointV4` in this scope
+   --> tests/broker_outbox.rs:325:9
+    |
+325 |         BrokerCheckpointV4::new(export_first_lifecycle, vec![outbox_event.clone()]).unwrap_err(),
+    |         ^^^^^^^^^^^^^^^^^^ use of undeclared type `BrokerCheckpointV4`
+    |
+help: a struct with a similar name exists
+    |
+325 -         BrokerCheckpointV4::new(export_first_lifecycle, vec![outbox_event.clone()]).unwrap_err(),
+325 +         BrokerCheckpointV2::new(export_first_lifecycle, vec![outbox_event.clone()]).unwrap_err(),
+    |
+
+error[E0433]: cannot find type `BrokerCheckpointV4` in this scope
+   --> tests/broker_outbox.rs:335:9
+    |
+335 |         BrokerCheckpointV4::new(event_then_export, event_checkpoint.events().to_vec()).unwrap_err(),
+    |         ^^^^^^^^^^^^^^^^^^ use of undeclared type `BrokerCheckpointV4`
+    |
+help: a struct with a similar name exists
+    |
+335 -         BrokerCheckpointV4::new(event_then_export, event_checkpoint.events().to_vec()).unwrap_err(),
+335 +         BrokerCheckpointV2::new(event_then_export, event_checkpoint.events().to_vec()).unwrap_err(),
+    |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `agentsandbox` (test "broker_outbox") due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...

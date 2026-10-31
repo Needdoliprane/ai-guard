@@ -1,0 +1,12 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.63s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 4 tests
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_symlink_parent_and_missing_source_root_for_disjointness ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_source_requires_allowlisted_root_and_rejects_relocated_symlink_mapping ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_traversal_and_symlink_archives_with_rollback ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_restores_archive_after_source_removal_and_never_overwrites_destination ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 105 filtered out; finished in 0.01s
+

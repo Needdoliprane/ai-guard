@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running tests/broker_journal.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_journal-b36c0a76d0e7000e)
+
+running 1 test
+
+thread 'provider_binding_preserves_exact_record_and_reports_actual_handoff_digest' (5717990) panicked at tests/broker_journal.rs:131:10:
+open private journal: Corrupt
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test provider_binding_preserves_exact_record_and_reports_actual_handoff_digest ... FAILED
+
+failures:
+
+failures:
+    provider_binding_preserves_exact_record_and_reports_actual_handoff_digest
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `--test broker_journal`

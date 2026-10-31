@@ -97,6 +97,25 @@ pub enum Authorization {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlIdentityError {
+    Unauthorized,
+    Forbidden,
+    Unavailable,
+    InvalidResponse,
+}
+impl std::fmt::Display for ControlIdentityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unauthorized => "control credential is not authenticated",
+            Self::Forbidden => "control credential is not authorized",
+            Self::Unavailable => "control identity is unavailable",
+            Self::InvalidResponse => "control identity response is incompatible",
+        })
+    }
+}
+impl std::error::Error for ControlIdentityError {}
+
 /// Keep error context while explicitly masking typed engine captures before
 /// decoding them. Generic RuntimeCommandFailure formatting never exposes its
 /// stderr, so the capture boundary must be handled here while it is available.
@@ -134,6 +153,50 @@ fn redacted_error(redactor: &Redactor, error: &anyhow::Error) -> String {
 }
 
 impl AuditClient {
+    /// Authenticate this exact client against the existing versioned protocol
+    /// route. Failure classes are retained without exposing response bodies or
+    /// credential-bearing transport/parser errors.
+    pub async fn supervision_identity(
+        &self,
+    ) -> std::result::Result<crate::control::ControlProtocolV1, ControlIdentityError> {
+        use ControlIdentityError as Error;
+        let url = self
+            .base
+            .join("api/v1/control/protocol")
+            .map_err(|_| Error::InvalidResponse)?;
+        let mut response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        match response.status() {
+            reqwest::StatusCode::UNAUTHORIZED => return Err(Error::Unauthorized),
+            reqwest::StatusCode::FORBIDDEN => return Err(Error::Forbidden),
+            reqwest::StatusCode::OK => {}
+            _ => return Err(Error::Unavailable),
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unavailable)? {
+            if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+                return Err(Error::InvalidResponse);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut decoder = serde_json::Deserializer::from_slice(&bytes);
+        let mut ignored = false;
+        let protocol: crate::control::ControlProtocolV1 =
+            serde_ignored::deserialize(&mut decoder, |_| ignored = true)
+                .map_err(|_| Error::InvalidResponse)?;
+        decoder.end().map_err(|_| Error::InvalidResponse)?;
+        if ignored {
+            return Err(Error::InvalidResponse);
+        }
+        protocol.validate().map_err(|_| Error::InvalidResponse)?;
+        Ok(protocol)
+    }
+
     fn validate_identity_payload(&self, value: &impl Serialize) -> Result<()> {
         let value = serde_json::to_value(value)?;
         if self.redactor.value(&value) != value {
@@ -178,7 +241,7 @@ impl AuditClient {
             redactor: Redactor::new(vec![token.into()]),
         })
     }
-    fn with_secrets(mut self, secrets: Vec<String>) -> Self {
+    pub(crate) fn with_secrets(mut self, secrets: Vec<String>) -> Self {
         let mut secrets = secrets;
         secrets.push(self.token.clone());
         self.redactor = Redactor::new(secrets);

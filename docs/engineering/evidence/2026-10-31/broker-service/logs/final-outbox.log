@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 14.79s
+     Running tests/broker_outbox.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_outbox-0ea6de065e8de255)
+
+running 5 tests
+test duplicate_divergent_and_conflicting_events_do_not_mutate_head ... ok
+test v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_refused ... ok
+test wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes ... ok
+test local_command_event_and_export_ids_are_unique_across_checkpoint_stores ... ok
+test five_hundred_events_birth_and_ack_in_single_revisions_with_stable_history ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.45s
+

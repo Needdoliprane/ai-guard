@@ -470,7 +470,7 @@ impl AuditClient {
         serde_json::from_value(self.get_json(path).await?)
             .context("gateway returned an incompatible control response")
     }
-    async fn post_control<T: serde::de::DeserializeOwned>(
+    pub(super) async fn post_control<T: serde::de::DeserializeOwned>(
         &self,
         path: &str,
         input: &impl Serialize,
@@ -968,6 +968,211 @@ async fn authorize_plan(
 fn credential_digest(credentials: Option<&CredentialFile>) -> Result<Option<String>> {
     Ok(credentials.map(|credentials| credentials.file.digest().to_owned()))
 }
+
+/// Inputs supplied by the authenticated broker after its durable decision.
+/// This builder performs no admission and creates no runtime resource.
+pub(super) struct BrokerPreparation<'a> {
+    pub plan: &'a RunPlan,
+    pub scope: &'a crate::broker::journal::JournalScopeV1,
+    pub binding: &'a crate::broker::journal::BindingManifestV1,
+    pub answer: &'a crate::broker::checkpoint::DecisionAnswerV1,
+    pub runtime: &'a Runtime,
+    pub workspace: workspace::PreparedWorkspace,
+    pub credentials: Option<&'a CredentialFile>,
+}
+
+pub(super) fn broker_require_new_archive(config: &Path, operation: Uuid) -> Result<()> {
+    let root = crate::control_fs::Directory::open_existing(config)?;
+    let sessions = root.child("sessions")?;
+    sessions.sync()?;
+    root.sync()?;
+    anyhow::ensure!(
+        sessions
+            .private_entry(std::ffi::OsStr::new(&format!("{operation}.tar")))?
+            .is_none(),
+        "unbound workspace archive requires reconciliation; original source was not reread"
+    );
+    Ok(())
+}
+
+pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<ManagedCheckpoint> {
+    let plan = input.plan;
+    anyhow::ensure!(!plan.options.interactive, "broker requires batch mode");
+    let root = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?;
+    let authorities = root.child("authorities")?;
+    authorities.sync()?;
+    root.sync()?;
+    let (authority_file, seed, image_id) = prepare_authority(plan, input.runtime).await?;
+    let archive_name = format!("{}.tar", plan.operation_id);
+    // O_EXCL is the authority here. An orphan, including a partial file, is
+    // preserved and cannot cause the original project to be copied again.
+    let config = plan.options.config_dir.clone();
+    let name = archive_name.clone();
+    let archive = input.workspace.archive.reopen()?;
+    let archive_digest = tokio::task::spawn_blocking(move || {
+        Directory::root(&config)?
+            .child("sessions")?
+            .copy_archive(&name, archive)
+    })
+    .await??;
+    let launch = LaunchSpecV1 {
+        version: 1,
+        session_id: plan.session.to_string(),
+        command: plan.request.command.clone(),
+        profile: plan.options.profile.clone(),
+        runtime_kind: runtime_kind(plan.options.runtime),
+        authority_id: seed.authority_id.to_string(),
+        image_ref: plan.options.image.clone(),
+        image_id,
+        network: network_kind(plan.options.network),
+        cpu_millis: 2000,
+        memory_bytes: 1024 * 1024 * 1024,
+        pids_limit: 256,
+        timeout_seconds: u32::try_from(plan.options.timeout)?,
+        security_preset: SecurityPresetV1::FixedSandboxV2,
+        restart_policy: RestartPolicyV1::No,
+        workspace_manifest_digest: content_hash(
+            "ai-guard:workspace-manifest:v1",
+            &input.workspace.manifest,
+        )?,
+        workspace_import_policy_version: 1,
+        provider: plan.options.provider.clone(),
+        capture_output: plan.options.capture_output,
+        credential_binding_id: input.binding.binding_id().map(|id| id.to_string()),
+        credential_names: input.binding.names().to_vec(),
+        provider_resolution: plan.request.provider_resolution.clone(),
+    };
+    Ok(ManagedCheckpoint {
+        tenant_id: input.scope.tenant_id().into(),
+        gateway_origin: input.scope.gateway_origin().into(),
+        config_root: plan.options.config_dir.clone(),
+        binding: seed.binding,
+        authority_file,
+        admission: AdmissionV1 {
+            version: 1,
+            operation_id: plan.operation_id.to_string(),
+            decision_request: plan.request.clone(),
+            receipt: input.answer.receipt().clone(),
+            launch,
+        },
+        worker: None,
+        owned: None,
+        pending: None,
+        uncertain: Vec::new(),
+        lock_identity: None,
+        before: input.workspace.manifest,
+        import: None,
+        decision: serde_json::to_value(input.answer.decision())?,
+        output_event: None,
+        output_acknowledged: false,
+        result: None,
+        archive_name,
+        archive_digest,
+        credential_digest: credential_digest(input.credentials)?,
+        workspace_control_exclusion_version: Some(1),
+        invocation_event: None,
+    })
+}
+
+pub(super) fn broker_archive(checkpoint: &ManagedCheckpoint) -> Result<fs::File> {
+    let sessions = Directory::root(&checkpoint.config_root)?.child("sessions")?;
+    let mut archive = sessions.archive(&checkpoint.archive_name, &checkpoint.archive_digest)?;
+    let manifest = workspace::scan_workspace_archive(&mut archive, Limits::default())?;
+    anyhow::ensure!(
+        manifest == checkpoint.before
+            && content_hash("ai-guard:workspace-manifest:v1", &manifest)?
+                == checkpoint.admission.launch.workspace_manifest_digest,
+        "immutable archive manifest differs from the admitted workspace"
+    );
+    use std::io::{Seek, SeekFrom};
+    archive.seek(SeekFrom::Start(0))?;
+    Ok(archive)
+}
+
+/// Exact invocation only. Podman's existing bootstrap is retained, but is
+/// reachable here only after an accepted admission has supplied the real worker.
+pub(super) async fn broker_runtime(
+    checkpoint: &ManagedCheckpoint,
+    approved: &Runtime,
+    allow_rootful: bool,
+) -> Result<ManagedRuntime> {
+    anyhow::ensure!(
+        checkpoint.worker.is_some(),
+        "runtime requires an admitted worker"
+    );
+    let runtime = if let Some(binding) = &checkpoint.binding {
+        anyhow::ensure!(
+            binding.invocation.as_ref() == Some(approved.invocation()),
+            "runtime invocation differs from its durable binding"
+        );
+        ManagedRuntime::reopen_with_runtime(binding.clone(), approved.clone()).await?
+    } else {
+        let directory = Directory::root(&checkpoint.config_root)?.child("authorities")?;
+        let mut seed: AuthoritySeed = directory
+            .read(&checkpoint.authority_file)?
+            .context("runtime authority seed is unavailable")?;
+        anyhow::ensure!(
+            seed.authority_id.to_string() == checkpoint.admission.launch.authority_id
+                && seed.kind == RuntimeKind::Podman
+                && seed.invocation.as_ref() == Some(approved.invocation()),
+            "runtime authority differs from the admitted launch"
+        );
+        let runtime = if let Some(binding) = seed.binding.clone() {
+            ManagedRuntime::reopen_with_runtime(binding, approved.clone()).await?
+        } else {
+            ManagedRuntime::bootstrap_podman_with_runtime(
+                seed.authority_id,
+                &seed.endpoint,
+                approved.clone(),
+            )
+            .await?
+        };
+        seed.binding = Some(runtime.binding().clone());
+        directory.write(&checkpoint.authority_file, &seed)?;
+        runtime
+    };
+    runtime.doctor(allow_rootful).await?;
+    anyhow::ensure!(
+        runtime
+            .resolve_image(&checkpoint.admission.launch.image_id)
+            .await?
+            == checkpoint.admission.launch.image_id,
+        "admitted image changed"
+    );
+    Ok(runtime)
+}
+
+pub(super) fn broker_helper_spec(policy: &HelperExecutionPolicyV1) -> Result<ContainerSpec> {
+    policy.validate()?;
+    ContainerSpec::with_operation(
+        Uuid::parse_str(&policy.session_id)?,
+        if policy.purpose == HelperPurposeV1::Import {
+            ContainerPurpose::Import
+        } else {
+            ContainerPurpose::Export
+        },
+        &policy.image_id,
+        policy.command.argv.clone(),
+        NetworkMode::None,
+        Uuid::parse_str(&policy.helper_id)?,
+    )?
+    .with_security_preset(policy.security_preset)
+    .with_managed_names(&policy.stable_name, &policy.volume_name)
+}
+
+pub(super) fn broker_helper_observation(
+    parent: &WorkerV1,
+    policy: &HelperExecutionPolicyV1,
+    observation: &ContainerObservation,
+) -> Result<RuntimeObservationV1> {
+    // Reuse the existing pure allocation/process normalization. Override only
+    // the specification identity, which belongs to this real helper policy.
+    let mut normalized = observation_dto(parent, observation)?;
+    normalized.inspection.spec_hash = policy.spec_hash()?;
+    normalized.inspection.network = policy.network;
+    normalized.inspection.security_preset = policy.security_preset;
+    Ok(normalized)
+}
 #[cfg(test)]
 mod credential_digest_tests {
     use super::*;
@@ -1012,7 +1217,7 @@ fn network_kind(network: NetworkMode) -> NetworkV1 {
         NetworkMode::Bridge => NetworkV1::Bridge,
     }
 }
-fn inspection(
+pub(super) fn inspection(
     worker: &WorkerV1,
     observation: &ContainerObservation,
 ) -> Result<RuntimeInspectionV1> {
@@ -1070,7 +1275,7 @@ fn inspection(
         restart_policy: RestartPolicyV1::No,
     })
 }
-fn observation_dto(
+pub(super) fn observation_dto(
     worker: &WorkerV1,
     observation: &ContainerObservation,
 ) -> Result<RuntimeObservationV1> {
@@ -1101,7 +1306,7 @@ fn observation_dto(
         restart_count: observation.restart_count.map(u32::try_from).transpose()?,
     })
 }
-fn worker_spec(
+pub(super) fn worker_spec(
     plan: &RunPlan,
     worker: &WorkerV1,
     credentials: Option<&CredentialFile>,

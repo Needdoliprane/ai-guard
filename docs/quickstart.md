@@ -6,6 +6,10 @@ ai-guard vise un produit open source destiné à la production. Sa qualification
 
 Ce parcours utilise le contrôle schéma2 par défaut. Le [bootstrap explicite d'un contrôle neuf en schéma3](operations.md#initialiser-un-contrôle-de-supervision-neuf) prépare le broker permanent en cours d'intégration ; il emploie des bases distinctes et ne remplace pas le démarrage ci-dessous.
 
+La [cible d'essai rapide et SSO](sso.md) prévoit un lancement Compose et une clé API du fournisseur choisi, avec une variante Keycloak préconfigurée pour le dashboard et le CLI. Environ cinq minutes est une cible à mesurer, sans promesse de durée. **Ce nouveau parcours est à livrer et qualifier** : les comptes de démonstration et une commande Compose SSO ne sont pas disponibles par leur seule description. Les étapes ci-dessous restent celles du fonctionnement actuellement documenté. Le futur guide distinguera démo locale et raccordement au SSO de l'entreprise ; le SSO restera facultatif.
+
+Aujourd'hui, les commandes de ce guide et le dashboard utilisent les clés locales runner/viewer. Le [contrat technique OIDC/Keycloak et PKCE](engineering/SSO_OIDC.md) ne livre encore aucune commande de login SSO ni configuration utilisable ; Keycloak n'est pas un prérequis de ce quick start. L'authentification Codex/Claude reste distincte de celle d'ai-guard.
+
 ## 1. Préparer les outils
 
 | Outil | Utilité | Nécessaire sur l'hôte |

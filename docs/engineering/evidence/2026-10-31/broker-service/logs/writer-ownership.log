@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.65s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 2 tests
+test broker::writer::tests::full_queue_returns_reject_ticket_for_retry ... ok
+test broker::writer::tests::timed_out_queued_reject_keeps_unknown_input_and_replays_after_recovery ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 103 filtered out; finished in 0.16s
+

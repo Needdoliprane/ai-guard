@@ -82,6 +82,21 @@ impl<'de> Deserialize<'de> for JournalScopeV1 {
     }
 }
 impl JournalScopeV1 {
+    pub fn installation_id(&self) -> Uuid {
+        self.0.installation_id
+    }
+    pub fn tenant_id(&self) -> &str {
+        &self.0.tenant_id
+    }
+    pub fn gateway_origin(&self) -> &str {
+        &self.0.gateway_origin
+    }
+    pub fn control_namespace_uuid(&self) -> Uuid {
+        self.0.control_namespace_uuid
+    }
+    pub fn profile_id(&self) -> &str {
+        &self.0.profile_id
+    }
     pub fn new(
         installation_id: Uuid,
         tenant_id: &str,
@@ -394,6 +409,7 @@ impl RevisionRefV1 {
 }
 pub struct AcceptedJobV1(pub(super) Box<AcceptedData>);
 pub(super) struct AcceptedData {
+    pub(super) scope: JournalScopeV1,
     pub(super) operation_id: Uuid,
     pub(super) intent: ExecutionIntentV1,
     pub(super) intent_hash: String,
@@ -405,6 +421,7 @@ pub(super) struct AcceptedData {
     pub(super) legacy_managed_seen: bool,
     pub(super) chain: Vec<RevisionRefV1>,
     pub(super) command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    pub(super) outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     pub(super) last_cancel_operations: Option<usize>,
 }
 #[derive(Clone)]
@@ -412,6 +429,7 @@ pub(super) enum LoadedCheckpoint {
     V1(CheckpointPayloadV1),
     V2(super::super::checkpoint::BrokerCheckpointV2),
     V3(BrokerCheckpointV3),
+    V4(BrokerCheckpointV4),
 }
 impl LoadedCheckpoint {
     pub(super) fn runner(&self) -> &CheckpointPayloadV1 {
@@ -419,6 +437,7 @@ impl LoadedCheckpoint {
             Self::V1(value) => value,
             Self::V2(value) => value.runner(),
             Self::V3(value) => value.broker().runner(),
+            Self::V4(value) => value.lifecycle().broker().runner(),
         }
     }
     pub(super) fn supervised(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
@@ -426,16 +445,27 @@ impl LoadedCheckpoint {
             Self::V1(_) => None,
             Self::V2(value) => Some(value),
             Self::V3(value) => Some(value.broker()),
+            Self::V4(value) => Some(value.lifecycle().broker()),
         }
     }
     pub(super) fn lifecycle(&self) -> Option<&BrokerCheckpointV3> {
         match self {
             Self::V3(value) => Some(value),
+            Self::V4(value) => Some(value.lifecycle()),
+            _ => None,
+        }
+    }
+    pub(super) fn outbox(&self) -> Option<&BrokerCheckpointV4> {
+        match self {
+            Self::V4(value) => Some(value),
             _ => None,
         }
     }
 }
 impl AcceptedJobV1 {
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.0.scope
+    }
     pub fn operation_id(&self) -> Uuid {
         self.0.operation_id
     }
@@ -465,6 +495,16 @@ impl AcceptedJobV1 {
     }
     pub fn broker_checkpoint_v3(&self) -> Option<&BrokerCheckpointV3> {
         self.0.checkpoint.lifecycle()
+    }
+    pub fn broker_checkpoint_v4(&self) -> Option<&BrokerCheckpointV4> {
+        self.0.checkpoint.outbox()
+    }
+    pub(crate) fn outbox_receipt(
+        &self,
+        event_id: Uuid,
+        audit_seq: Option<i64>,
+    ) -> Option<&OutboxReceiptV1> {
+        self.0.outbox_receipts.get(&(event_id, audit_seq))
     }
 }
 pub struct CheckpointReceiptV1 {

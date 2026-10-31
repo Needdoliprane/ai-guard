@@ -9,6 +9,13 @@ use std::{
 };
 use walkdir::WalkDir;
 
+#[cfg(unix)]
+mod authorized;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use authorized::AuthorizedExportParent;
+#[cfg(unix)]
+pub(crate) use authorized::AuthorizedSource;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_files: usize,
@@ -138,6 +145,35 @@ pub(crate) fn prepare_workspace_excluding(
     limits: Limits,
     excluded_roots: &[&File],
 ) -> Result<PreparedWorkspace> {
+    if fs::symlink_metadata(source)?.file_type().is_symlink() {
+        bail!("the project root must not be a symlink");
+    }
+    let source = source
+        .canonicalize()
+        .context("project directory does not exist")?;
+    if !source.is_dir() {
+        bail!("project must be a directory");
+    }
+    #[cfg(unix)]
+    let root = open_beneath(&File::open("/")?, source.strip_prefix("/")?)?;
+    #[cfg(not(unix))]
+    let root = File::open(&source)?;
+    collect_workspace_from_root(&source, &root, limits, excluded_roots)
+}
+
+/// Collect using the descriptor selected by the caller, without reopening the
+/// source pathname. Enumeration names are untrusted; every content read stays
+/// beneath this retained descriptor. AuthorizedSource also revalidates the
+/// pathname mapping and its directory ancestry before accepting this archive.
+fn collect_workspace_from_root(
+    source: &Path,
+    root: &File,
+    limits: Limits,
+    excluded_roots: &[&File],
+) -> Result<PreparedWorkspace> {
+    if !root.metadata()?.is_dir() {
+        bail!("project must be a directory");
+    }
     #[cfg(unix)]
     let excluded_identities = {
         use std::os::unix::fs::MetadataExt;
@@ -155,19 +191,6 @@ pub(crate) fn prepare_workspace_excluding(
     if !excluded_roots.is_empty() {
         bail!("descriptor-relative workspace exclusions require Unix");
     }
-    if fs::symlink_metadata(source)?.file_type().is_symlink() {
-        bail!("the project root must not be a symlink");
-    }
-    let source = source
-        .canonicalize()
-        .context("project directory does not exist")?;
-    if !source.is_dir() {
-        bail!("project must be a directory");
-    }
-    #[cfg(unix)]
-    let root = open_beneath(&File::open("/")?, source.strip_prefix("/")?)?;
-    #[cfg(not(unix))]
-    let root = File::open(&source)?;
     #[cfg(unix)]
     if !excluded_identities.is_empty() {
         use std::os::{
@@ -218,7 +241,7 @@ pub(crate) fn prepare_workspace_excluding(
     let mut excluded_count = 0;
     let mut bytes = 0_u64;
     let mut entries = 0_usize;
-    let mut walker = WalkDir::new(&source)
+    let mut walker = WalkDir::new(source)
         .follow_links(false)
         .sort_by_file_name()
         .into_iter();
@@ -227,7 +250,7 @@ pub(crate) fn prepare_workspace_excluding(
         if entry.depth() == 0 {
             continue;
         }
-        let relative = validate_relative_path(entry.path().strip_prefix(&source)?)?;
+        let relative = validate_relative_path(entry.path().strip_prefix(source)?)?;
         let name = entry
             .file_name()
             .to_str()
@@ -248,7 +271,7 @@ pub(crate) fn prepare_workspace_excluding(
         if !entry.file_type().is_file() && !entry.file_type().is_dir() {
             bail!("special source file refused: {}", relative.display());
         }
-        let mut file = open_beneath(&root, &relative)?;
+        let mut file = open_beneath(root, &relative)?;
         let metadata = file.metadata()?;
         #[cfg(unix)]
         {
@@ -331,7 +354,7 @@ pub(crate) fn prepare_workspace_excluding(
         manifest,
         excluded,
         excluded_count,
-        source,
+        source: source.to_owned(),
         bytes,
     })
 }
@@ -572,9 +595,50 @@ mod anchored_export {
         Ok(directory)
     }
 
+    fn target_name(target: &OsStr) -> Result<CString> {
+        let mut components = Path::new(target).components();
+        if !matches!(components.next(), Some(Component::Normal(name)) if name == target)
+            || components.next().is_some()
+        {
+            bail!("export destination needs a single normal directory name");
+        }
+        CString::new(target.as_bytes()).context("export destination name contains NUL")
+    }
+
+    /// Check absence relative to the authorized parent, refusing every entry
+    /// type and every inspection failure other than an actual missing entry.
+    pub(super) fn require_new_destination(parent: &File, target: &OsStr) -> Result<()> {
+        let target = target_name(target)?;
+        let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();
+        // SAFETY: parent owns a live FD, target is one C component, and facts
+        // is writable; AT_SYMLINK_NOFOLLOW also rejects dangling symlinks.
+        let result = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                target.as_ptr(),
+                facts.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if result == 0 {
+            bail!("export destination already exists; nothing overwritten");
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ENOENT) {
+            return Err(error).context("cannot safely inspect export destination");
+        }
+        Ok(())
+    }
+
     impl Staging {
         pub(super) fn new(parent: &Path) -> Result<Self> {
             let parent = open_beneath(&File::open("/")?, parent.strip_prefix("/")?)?;
+            Self::new_from_parent(parent)
+        }
+
+        pub(super) fn new_from_parent(parent: File) -> Result<Self> {
+            // Validate before the first mkdir; this FD is the creation and
+            // publication authority for the complete staging lifetime.
             if !parent.metadata()?.is_dir() {
                 bail!("export parent is not a directory");
             }
@@ -633,6 +697,7 @@ mod anchored_export {
             Ok(unsafe { File::from_raw_fd(fd) })
         }
         pub(super) fn publish(&mut self, target: &OsStr, parent_path: &Path) -> Result<()> {
+            let target = target_name(target)?;
             let current = open_beneath(&File::open("/")?, parent_path.strip_prefix("/")?)
                 .context("export parent path changed while reading the archive")?;
             if !same_directory(&self.parent, &current)? {
@@ -642,7 +707,6 @@ mod anchored_export {
             if !same_directory(&self.directory, &current_staging)? {
                 bail!("export staging identity changed");
             }
-            let target = CString::new(target.as_bytes())?;
             // The identity check detects relocation for the caller; the dirfd
             // rename remains safe even if the pathname changes after that check.
             #[cfg(target_os = "linux")]

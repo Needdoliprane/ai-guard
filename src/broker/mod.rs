@@ -4,6 +4,13 @@
 
 pub mod checkpoint;
 pub mod clock;
+pub(crate) mod discovery;
+#[doc(hidden)]
+pub mod enforcer;
 pub mod intent;
 pub mod journal;
 pub mod lifecycle;
+pub mod local_ipc;
+pub mod outbox;
+pub mod service;
+pub mod writer;

@@ -12,6 +12,8 @@ Le mode normal exige un moteur rootless. Docker Desktop peut annoncer un daemon 
 
 ## Prérequis
 
+Pour l'authentification du produit, les clés runner/viewer sont le mécanisme actuellement livré. Le [contrat SSO OIDC/Keycloak et PKCE](engineering/SSO_OIDC.md) précise les clients Web/CLI, les paramètres à obtenir de l'administrateur, les contrôles côté Rust, la migration et les tests nécessaires. Cette intégration est encore absente : ne pas interpréter ces paramètres cibles comme des flags supportés. Aucun realm, client, compte ou instance Keycloak existant n'est supposé ; aucune instance distante n'est modifiée. L'exploitation locale hors ligne reste indépendante d'un IdP.
+
 - Rust **1.99.1**, fixé dans `rust-toolchain.toml`, pour compiler la CLI hôte. La compilation de l'image de contrôle utilise la même version.
 - Docker Engine avec Compose, ou Podman rootless avec un fournisseur `podman compose` installé. `doctor` interroge réellement `info` et `version` ; une installation de binaire sans moteur fonctionnel ne suffit pas.
 - Node **24** est utilisé dans les étapes de build des images. Il n'est pas nécessaire sur l'hôte pour construire celles-ci. Le build de l'interface utilise son lockfile npm.

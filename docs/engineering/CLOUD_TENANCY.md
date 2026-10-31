@@ -2,6 +2,8 @@
 
 Le [contrat d'architecture](ARCHITECTURE_CONTRACT.md) fixe la cible complète. L'identité runner/viewer et l'isolement des API d'audit par base SQLite ont été vérifiés sur le précédent candidat. Le lot courant ajoute le registre, les quotas, l'allocation et le dashboard partagé ; ses tests logiciels ne remplacent pas la qualification intégrée du nouveau broker. Le rôle worker, le relais métier et l'adaptateur Kubernetes restent absents ; les preuves datées sont dans [CURRENT_STATE.md](CURRENT_STATE.md).
 
+Le mainteneur demande également un [SSO OIDC compatible Keycloak et PKCE](SSO_OIDC.md),31octobre2026. Le code actuel utilise les clés runner/viewer, pas un validateur JWT/OIDC. La future identité humaine doit être vérifiée côté Rust puis liée à des memberships/permissions administrés côté serveur. Un realm, un client public, un email ou un `tenant_id` de requête n'est pas à lui seul une autorisation ; une sélection de contexte ne peut choisir que parmi les associations déjà autorisées. Les identités des brokers/workers restent distinctes des sessions humaines. La configuration SSO et sa matrice A/B sont obligatoires à implémenter et qualifier avant de déclarer ce parcours cloud livré.
+
 ## Configuration du contrôle de confiance
 
 Le gateway accepte `--tenants-file /chemin/tenants.json`. Cette option est incompatible avec `--data`, `--runner-token-file`, `--viewer-token-file` et les quatre options de quota locales. Sans registre, la configuration locale historique est conservée avec identité `local`.

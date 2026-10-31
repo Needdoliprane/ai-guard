@@ -20,6 +20,7 @@ use std::{
     sync::Arc,
 };
 
+mod broker_cli;
 mod gateway_config;
 
 #[derive(Parser)]
@@ -34,6 +35,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Explicit durable local broker, jobs and controlled exports.
+    Broker(broker_cli::BrokerArgs),
+    #[command(name = "__broker-enforcer", hide = true)]
+    InternalBrokerEnforcer {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        max_slots: u32,
+    },
     /// Collecteur d'audit et moteur de décisions ; normalement lancé dans un conteneur.
     Gateway(GatewayArgs),
     /// Serveur de l'IHM et proxy strictement en lecture seule.
@@ -267,6 +277,7 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Gateway(args) => {
             validate_bind(args.listen, args.container_listen)?;
             let tenants = if let Some(path) = &args.tenants_file {
@@ -540,6 +551,12 @@ async fn main() -> Result<()> {
                 }
             }))
             .await?;
+        }
+        Command::InternalBrokerEnforcer { root, max_slots } => {
+            let root = absolute_path(&root)
+                .and_then(|root| Directory::open_existing(&root))
+                .map_err(|_| anyhow::anyhow!("private enforcer root validation failed"))?;
+            agentsandbox::broker::enforcer::run_internal_enforcer(&root, max_slots).await?;
         }
         Command::Operator(command) => operations::execute(command).await?,
     }

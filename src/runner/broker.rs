@@ -19,6 +19,54 @@ use sha2::{Digest, Sha256};
 use std::{fmt, path::Path};
 use uuid::Uuid;
 
+mod executor;
+pub(crate) use executor::{BatchExecutor, BatchOutcome};
+
+/// Live, single-use provenance from the executor's freshly acknowledged claim.
+/// There is deliberately no public constructor, Clone or serde implementation.
+/// Stored claim dispositions can never reconstruct this process-local value.
+pub struct FreshStartPermission {
+    arm_id: String,
+    worker_id: String,
+    attempt_id: String,
+    control_namespace: String,
+    subject_key: String,
+    emitter_id: String,
+    claim_operation_id: String,
+    generation: u64,
+}
+impl fmt::Debug for FreshStartPermission {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FreshStartPermission(<private consumed claim>)")
+    }
+}
+impl FreshStartPermission {
+    pub(crate) fn arm_id(&self) -> &str {
+        &self.arm_id
+    }
+    pub(crate) fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+    pub(crate) fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    pub(crate) fn control_namespace(&self) -> &str {
+        &self.control_namespace
+    }
+    pub(crate) fn subject_key(&self) -> &str {
+        &self.subject_key
+    }
+    pub(crate) fn emitter_id(&self) -> &str {
+        &self.emitter_id
+    }
+    pub(crate) fn claim_operation_id(&self) -> &str {
+        &self.claim_operation_id
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 enum PreparedBinding {
     None,
     Manual(PrivateFile),
@@ -90,6 +138,20 @@ pub fn prepare_broker_submission(
     );
     prepare_submission(options, operation_id, control_literals)
         .map_err(|_| anyhow!("broker submission preparation failed"))
+}
+
+/// Preflight before granting a fresh source capability for an unprepared job.
+/// Configuration metadata only; never reads project/provider contents or opens
+/// the original credential source. Call on the service's blocking work queue.
+pub(crate) fn require_fresh_source(job: &AcceptedJobV1) -> Result<()> {
+    let state = BrokerRunState::from_job(job)
+        .map_err(|_| anyhow!("broker source preparation is unavailable"))?;
+    ensure!(
+        state.plan.managed.is_none(),
+        "broker job already has an immutable workspace"
+    );
+    super::managed::broker_require_new_archive(&state.options().config_dir, state.operation_id())
+        .map_err(|_| anyhow!("broker immutable workspace requires reconciliation"))
 }
 
 fn prepare_submission(

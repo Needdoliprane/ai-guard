@@ -3,6 +3,7 @@ use super::{
     checkpoint::BrokerCheckpointV2,
     intent::ExecutionIntentV1,
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1},
+    outbox::{BrokerCheckpointV4, OutboxReceiptV1},
 };
 use crate::{
     control_fs::{Directory, PrivateFile},
@@ -17,6 +18,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 use uuid::Uuid;
+mod confirmed;
+pub mod recovery;
 mod types;
 pub use types::*;
 use types::{AcceptedData, BindingData, LoadedCheckpoint};
@@ -138,6 +141,7 @@ record!(Bindings {
 record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:CheckpointPayloadV1 });
 record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
 record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
+record!(OutboxCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV4 });
 record!(Rejected {
     version: u32,
     scope_hash: String,
@@ -209,6 +213,10 @@ impl Usage {
 }
 
 impl Journal {
+    /// The immutable scope admitted by this journal, never a caller assertion.
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.0.scope
+    }
     pub fn open(
         root: &Directory,
         scope: JournalScopeV1,
@@ -809,6 +817,27 @@ impl Journal {
         Ok(job.0.command_receipts.remove(&command_id))
     }
 
+    /// The first confirmed revision for this delivery state, derived from the
+    /// validated chain. `None` asks for birth even if an ACK was later recorded.
+    pub fn outbox_receipt(
+        &self,
+        operation_id: Uuid,
+        event_id: Uuid,
+        audit_seq: Option<i64>,
+    ) -> JournalResult<Option<OutboxReceiptV1>> {
+        if operation_id.is_nil() || event_id.is_nil() || audit_seq.is_some_and(|seq| seq <= 0) {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        let Some(JournalStatusV1::Accepted(mut job)) =
+            self.status_locked(operation_id, &mut writer)?
+        else {
+            return Err(JournalError::InvalidInput);
+        };
+        Ok(job.0.outbox_receipts.remove(&(event_id, audit_seq)))
+    }
+
     pub fn advance(
         &self,
         operation_id: Uuid,
@@ -833,6 +862,14 @@ impl Journal {
     ) -> JournalResult<CheckpointReceiptV1> {
         self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V3(next.clone()))
     }
+    pub fn advance_outbox(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: &BrokerCheckpointV4,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V4(next.clone()))
+    }
     fn advance_checkpoint(
         &self,
         operation_id: Uuid,
@@ -846,7 +883,8 @@ impl Journal {
             .load_locked(operation_id, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
         if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
-            || (!matches!(next, LoadedCheckpoint::V3(_)) && loaded.broker_checkpoint_v3().is_some())
+            || (next.lifecycle().is_none() && loaded.broker_checkpoint_v3().is_some())
+            || (next.outbox().is_none() && loaded.broker_checkpoint_v4().is_some())
         {
             return Err(JournalError::Conflict);
         }
@@ -897,6 +935,20 @@ impl Journal {
                     CHECKPOINT,
                 )?,
                 "ai-guard:broker-checkpoint:v3",
+            ),
+            LoadedCheckpoint::V4(payload) => (
+                self.checked_record(
+                    &OutboxCheckpoint {
+                        version: 4,
+                        operation_id,
+                        intent_hash: loaded.0.intent_hash.clone(),
+                        revision: next_revision,
+                        previous: Some(expected.clone()),
+                        payload: payload.clone(),
+                    },
+                    CHECKPOINT,
+                )?,
+                "ai-guard:broker-checkpoint:v4",
             ),
         };
         let head = RevisionRefV1 {
@@ -1251,116 +1303,28 @@ impl Journal {
             return Err(JournalError::Corrupt);
         }
         valid_hash(&current.head.hash).map_err(|_| JournalError::Corrupt)?;
-        let mut chain = Vec::new();
-        let mut previous = None;
-        let mut payload: Option<LoadedCheckpoint> = None;
-        let mut legacy_managed_seen = false;
-        let mut command_receipts = HashMap::new();
-        let mut last_cancel_operations = None;
+        let mut verifier = confirmed::ChainVerifierV1::new(
+            &self.0.scope,
+            &self.0.control,
+            &intent,
+            &bindings.binding,
+            &accepted.initial_checkpoint,
+        )?;
         for revision in 0..=current.head.revision {
             let file = self
                 .read_file(&job, &revision_name(revision), CHECKPOINT)?
                 .ok_or(JournalError::Interrupted)?;
-            self.0.control.record(file.bytes())?;
-            let raw: Value = parse(file.bytes())?;
-            let (next_payload, domain) = match raw.get("version").and_then(Value::as_u64) {
-                Some(1) => {
-                    let raw_payload = canonical(raw.get("payload").ok_or(JournalError::Corrupt)?)?;
-                    let checkpoint: Checkpoint = parse(file.bytes())?;
-                    CheckpointPayloadV1::from_bytes(&raw_payload)?;
-                    if checkpoint.operation_id != operation_id
-                        || checkpoint.intent_hash != intent_hash
-                        || checkpoint.revision != revision
-                        || checkpoint.previous != previous
-                        || canonical(&checkpoint)? != file.bytes()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    (
-                        LoadedCheckpoint::V1(checkpoint.payload),
-                        "ai-guard:broker-checkpoint:v1",
-                    )
-                }
-                Some(2) => {
-                    let checkpoint: SupervisedCheckpoint = parse(file.bytes())?;
-                    if checkpoint.operation_id != operation_id
-                        || checkpoint.intent_hash != intent_hash
-                        || checkpoint.revision != revision
-                        || checkpoint.previous != previous
-                        || canonical(&checkpoint)? != file.bytes()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    (
-                        LoadedCheckpoint::V2(checkpoint.payload),
-                        "ai-guard:broker-checkpoint:v2",
-                    )
-                }
-                Some(3) => {
-                    let checkpoint: LifecycleCheckpoint = parse(file.bytes())?;
-                    if checkpoint.operation_id != operation_id
-                        || checkpoint.intent_hash != intent_hash
-                        || checkpoint.revision != revision
-                        || checkpoint.previous != previous
-                        || canonical(&checkpoint)? != file.bytes()
-                    {
-                        return Err(JournalError::Corrupt);
-                    }
-                    (
-                        LoadedCheckpoint::V3(checkpoint.payload),
-                        "ai-guard:broker-checkpoint:v3",
-                    )
-                }
-                _ => return Err(JournalError::UnsupportedVersion),
-            };
-            self.context_checkpoint(&next_payload, &intent, &bindings.binding)?;
-            if let Some(old) = &payload {
-                self.check_transition(
-                    old,
-                    &next_payload,
-                    legacy_managed_seen,
-                    last_cancel_operations,
-                )?;
-            } else if !matches!(next_payload, LoadedCheckpoint::V1(_)) {
-                return Err(JournalError::Corrupt);
-            }
-            if let LoadedCheckpoint::V1(value) = &next_payload {
-                legacy_managed_seen |= value.broker_context().managed;
-            }
-            let head = RevisionRefV1 {
-                revision,
-                hash: digest(domain, file.bytes()),
-            };
-            if let Some(value) = next_payload.lifecycle() {
-                last_cancel_operations = value.cancel_boundary(
-                    payload.as_ref().and_then(LoadedCheckpoint::lifecycle),
-                    last_cancel_operations,
-                );
-                for command in value.commands() {
-                    command_receipts
-                        .entry(command.command_id())
-                        .or_insert_with(|| LocalCommandReceiptV1 {
-                            command_id: command.command_id(),
-                            input_hash: command.input_hash().into(),
-                            head: head.clone(),
-                        });
-                }
-            }
-            if revision == 0
-                && (accepted.initial_checkpoint != head
-                    || CheckpointPayloadV1::initial(&intent)?.canonical_bytes()?
-                        != next_payload.runner().canonical_bytes()?)
-            {
-                return Err(JournalError::Corrupt);
-            }
+            verifier.push(revision, file.bytes())?;
             io(file.persistent_sync())?;
-            previous = Some(head.clone());
-            chain.push(head);
-            payload = Some(next_payload);
         }
-        if previous.as_ref() != Some(&current.head) {
-            return Err(JournalError::Corrupt);
-        }
+        let confirmed::ConfirmedChainV1 {
+            payload,
+            legacy_managed_seen,
+            chain,
+            command_receipts,
+            outbox_receipts,
+            last_cancel_operations,
+        } = verifier.finish(&current.head)?;
         if let Some(floor) = writer.floors.get(&operation_id) {
             let index = usize::try_from(floor.revision).map_err(|_| JournalError::Corrupt)?;
             if chain.get(index) != Some(floor) {
@@ -1373,6 +1337,7 @@ impl Journal {
         writer.floors.insert(operation_id, current.head.clone());
         writer.observed_jobs.insert(operation_id);
         Ok(Some(AcceptedJobV1(Box::new(AcceptedData {
+            scope: self.0.scope.clone(),
             operation_id,
             intent,
             intent_hash,
@@ -1380,10 +1345,11 @@ impl Journal {
             binding: bindings.binding,
             source,
             head: current.head,
-            checkpoint: payload.ok_or(JournalError::Corrupt)?,
+            checkpoint: payload,
             legacy_managed_seen,
             chain,
             command_receipts,
+            outbox_receipts,
             last_cancel_operations,
         }))))
     }
@@ -1469,24 +1435,7 @@ impl Journal {
         intent: &ExecutionIntentV1,
         binding: &BindingManifestV1,
     ) -> JournalResult<()> {
-        let bytes = checkpoint.canonical_bytes()?;
-        self.0.control.record(&bytes)?;
-        let options = intent.initial_options().run_options();
-        let expected = reqwest::Url::parse(&self.0.scope.0.gateway_origin)
-            .map_err(|_| JournalError::InvalidInput)?;
-        let configured =
-            reqwest::Url::parse(&options.gateway).map_err(|_| JournalError::InvalidInput)?;
-        if expected.origin() != configured.origin() {
-            return Err(JournalError::Conflict);
-        }
-        checkpoint.validate_journal_context(
-            intent,
-            &self.0.scope.0.tenant_id,
-            &self.0.scope.0.gateway_origin,
-            binding.binding_id(),
-            binding.names(),
-            binding.handoff_sha(),
-        )
+        confirmed::context(&self.0.scope, &self.0.control, checkpoint, intent, binding)
     }
     fn context_checkpoint(
         &self,
@@ -1494,19 +1443,7 @@ impl Journal {
         intent: &ExecutionIntentV1,
         binding: &BindingManifestV1,
     ) -> JournalResult<()> {
-        self.context(checkpoint.runner(), intent, binding)?;
-        if let Some(value) = checkpoint.supervised() {
-            value.validate_context(intent, self.0.scope.0.control_namespace_uuid, binding)?;
-        }
-        if let Some(value) = checkpoint.lifecycle() {
-            value.validate_context(
-                intent.operation_id(),
-                &intent
-                    .intent_hash()
-                    .map_err(|_| JournalError::InvalidInput)?,
-            )?;
-        }
-        Ok(())
+        confirmed::context_checkpoint(&self.0.scope, &self.0.control, checkpoint, intent, binding)
     }
     fn check_transition(
         &self,
@@ -1515,45 +1452,7 @@ impl Journal {
         legacy_managed_seen: bool,
         last_cancel_operations: Option<usize>,
     ) -> JournalResult<()> {
-        if let LoadedCheckpoint::V3(value) = next {
-            if let LoadedCheckpoint::V1(old) = previous
-                && (legacy_managed_seen
-                    || (old.broker_context().request.human_approved
-                        && !value
-                            .broker()
-                            .runner()
-                            .broker_context()
-                            .request
-                            .human_approved))
-            {
-                return Err(JournalError::Conflict);
-            }
-            value.broker().validate_transition(previous.supervised())?;
-            return value.validate_transition(
-                previous.lifecycle(),
-                previous.supervised(),
-                previous.runner(),
-                last_cancel_operations,
-            );
-        }
-        match (previous, next) {
-            (LoadedCheckpoint::V1(old), LoadedCheckpoint::V2(value)) => {
-                if legacy_managed_seen
-                    || (old.broker_context().request.human_approved
-                        && !value.runner().broker_context().request.human_approved)
-                {
-                    return Err(JournalError::Conflict);
-                }
-                value.validate_transition(None)
-            }
-            (LoadedCheckpoint::V2(old), LoadedCheckpoint::V2(value)) => {
-                value.validate_transition(Some(old))
-            }
-            (LoadedCheckpoint::V2(_), LoadedCheckpoint::V1(_)) => Err(JournalError::Conflict),
-            (LoadedCheckpoint::V1(_), LoadedCheckpoint::V1(_)) => Ok(()),
-            (LoadedCheckpoint::V3(_), _) => Err(JournalError::Conflict),
-            (_, LoadedCheckpoint::V3(_)) => Err(JournalError::Conflict),
-        }
+        confirmed::check_transition(previous, next, legacy_managed_seen, last_cancel_operations)
     }
     fn budget(&self, name: &str, bytes: u64, entries: u32) -> JournalResult<()> {
         self.usage(Some(name))?

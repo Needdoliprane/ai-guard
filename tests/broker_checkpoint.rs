@@ -24,6 +24,7 @@ use agentsandbox::{
         journal::{
             BindingInputs, CheckpointReceiptV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, ReserveResult, RevisionRefV1,
+            recovery::StopRecoveryReaderV1,
         },
         lifecycle::{BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1},
     },
@@ -34,7 +35,11 @@ use agentsandbox::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use std::{
+    fs,
+    os::unix::fs::{PermissionsExt, symlink},
+    path::Path,
+};
 use uuid::Uuid;
 
 fn legacy_plan_value() -> Value {
@@ -2380,7 +2385,7 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     // D01: real V1 history once contained a managed checkpoint, then returned
     // to None. The promotion check must inspect the full V1 prefix.
     let downgrade_root = support::private_tempdir();
-    let downgrade = open_journal(downgrade_root.path(), scope);
+    let downgrade = open_journal(downgrade_root.path(), scope.clone());
     let downgrade_ticket = match downgrade
         .reserve(
             operation_id,
@@ -2442,6 +2447,33 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
         fs::read(revision_zero_path(downgrade_root.path(), operation_id)).unwrap(),
         v1_rev0_bytes
     );
+    drop(downgrade);
+    let downgrade_path = downgrade_root.path().canonicalize().unwrap();
+    let recovery = StopRecoveryReaderV1::open_existing(
+        &Directory::open_existing(&downgrade_path).unwrap(),
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap()
+    .expect("the historical V1 job already has a journal namespace")
+    .scan();
+    assert!(
+        recovery.incomplete(),
+        "managed V1 history that returned to None is incomplete for STOP recovery"
+    );
+    let historical_job = recovery
+        .jobs()
+        .iter()
+        .find(|job| job.operation_id() == operation_id)
+        .expect("the validated historical head remains visible");
+    assert_eq!(historical_job.head(), none_v1.head());
+    assert!(
+        historical_job.stops().is_empty(),
+        "a historical managed checkpoint without an acknowledged Arm yields no stop target"
+    );
+    drop(recovery);
 
     // GEL3 permits the runner's prepared managed projection while Admission is
     // pending; all worker/helper/owned authority still requires acknowledged
@@ -2973,6 +3005,7 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     // A durable cancel closes the previously acknowledged export grant. An
     // otherwise valid new helper claim must use an export request born after
     // that cancellation, even though the earlier grant remains in the journal.
+    let cancel1_boundary = operations.len();
     let cancel = LocalCommandV1::new(
         operation_id,
         &intent.intent_hash().unwrap(),
@@ -3101,6 +3134,7 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     // A second durable cancellation invalidates even a grant born after the
     // first one. An ExportRequest co-born with that second boundary is not a
     // post-cancel grant and cannot authorize a helper.
+    let cancel2_boundary = operations.len();
     let cancel2 = LocalCommandV1::new(
         operation_id,
         &intent.intent_hash().unwrap(),
@@ -3241,6 +3275,123 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
         post_last_permission,
     )
     .expect("only a grant born after the last Cancel authorizes Export");
+
+    // STOP-only recovery projects the exact durable head and acknowledged
+    // Arm receipts. The last Cancel applies only to Arms before its boundary.
+    let expected_head = head.clone();
+    let expected_stops = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| match operation {
+            SupervisionOperationV1::Arm {
+                owned,
+                request,
+                response: Some(response),
+                ..
+            } => Some((index, owned, request, response)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        expected_stops
+            .iter()
+            .any(|(index, _, _, _)| *index < cancel1_boundary)
+    );
+    assert!(
+        expected_stops
+            .iter()
+            .any(|(index, _, _, _)| *index >= cancel2_boundary)
+    );
+
+    drop(journal);
+    let root = journal_root.path().canonicalize().unwrap();
+    let reader = StopRecoveryReaderV1::open_existing(
+        &Directory::open_existing(&root).unwrap(),
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap()
+    .expect("existing job namespace is recovered without creating it");
+    let recovered = reader.scan();
+    assert!(!recovered.incomplete(), "the intact fixture is complete");
+    assert!(recovered.issues().is_empty());
+    let job = recovered
+        .jobs()
+        .iter()
+        .find(|job| job.operation_id() == operation_id)
+        .expect("the durable operation is retained");
+    assert_eq!(job.head(), &expected_head);
+    assert_eq!(
+        job.cancel_command_ids(),
+        &[cancel.command_id(), cancel2.command_id()]
+    );
+    assert_eq!(job.stops().len(), expected_stops.len());
+    for (stop, (index, owned, arm, response)) in job.stops().iter().zip(expected_stops) {
+        assert_eq!(
+            serde_json::to_value(stop.arm()).unwrap(),
+            serde_json::to_value(arm).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(stop.receipt()).unwrap(),
+            serde_json::to_value(&response.receipt).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(stop.owned()).unwrap(),
+            serde_json::to_value(owned).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(stop.authority()).unwrap(),
+            serde_json::to_value(&authority).unwrap()
+        );
+        assert_eq!(
+            stop.cancel_after_arm(),
+            if index < cancel2_boundary {
+                Some(cancel2.command_id())
+            } else {
+                None
+            }
+        );
+    }
+    drop(recovered);
+
+    // A malformed sibling is isolated from the proven job, but it closes
+    // admissions globally and the ordinary strict opener rejects the tree.
+    let jobs_dir = revision_path(&root, operation_id, 0)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let bad_sibling = jobs_dir.join(Uuid::new_v4().to_string());
+    symlink(root.join("missing-sibling-target"), &bad_sibling).unwrap();
+    let reader = StopRecoveryReaderV1::open_existing(
+        &Directory::open_existing(&root).unwrap(),
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap()
+    .expect("reader retains access to the existing namespace");
+    let partial = reader.scan();
+    assert!(partial.incomplete());
+    assert_eq!(partial.jobs().len(), 1, "the bad sibling is not projected");
+    assert_eq!(partial.jobs()[0].operation_id(), operation_id);
+    assert_eq!(partial.jobs()[0].head(), &expected_head);
+    drop(partial);
+    let normal_open = Journal::open(
+        &Directory::open_existing(&root).unwrap(),
+        scope,
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    );
+    assert!(
+        normal_open.is_err(),
+        "strict journal open rejects the sibling"
+    );
 }
 
 mod support;

@@ -1,0 +1,1007 @@
+use super::*;
+use crate::{
+    broker::{
+        clock::{HostClock, NativeHostClock},
+        discovery::{RoleLease, load_endpoint},
+        local_ipc::{EndpointRecordV1, read_frame, write_frame},
+    },
+    control_fs::Directory,
+    runner::broker::FreshStartPermission,
+    runtime::{BeforeSpawnGuard, PrearmedStartControl},
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Weak, atomic::AtomicBool},
+    time::Instant,
+};
+use tokio::{net::UnixStream, sync::watch};
+
+#[derive(Clone)]
+pub struct EnforcerClient(Arc<Client>);
+impl fmt::Debug for EnforcerClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EnforcerClient(<private>)")
+    }
+}
+struct Client {
+    root: Directory,
+    executable: PathBuf,
+    max_slots: u32,
+    endpoint_root: Directory,
+    endpoint: EndpointRecordV1,
+    capability: [u8; 32],
+    liveness: OwnedFd,
+    replacement: Mutex<Option<EnforcerClient>>,
+    unknown_slots: AtomicU64,
+    lost_unknown: AtomicBool,
+    accounted: Mutex<BTreeSet<String>>,
+    auto_recovery: AtomicBool,
+    recovery_gate: Mutex<()>,
+    failed: AtomicBool,
+    health: Mutex<Option<(u64, Instant)>>,
+    // Retained exactly as long as the client, even if executor handles vanish.
+    // A child failure must not force rereading a potentially blocked journal to
+    // recover the original stop target/deadline.
+    slots: Mutex<BTreeMap<String, Arc<LocalSlot>>>,
+}
+struct LocalSlot {
+    registration: RegistrationV1,
+    digest: String,
+    generation: CancelGeneration,
+    status: Mutex<(EnforcerSlotStatusV1, Instant)>,
+    stop: watch::Sender<bool>,
+    acknowledged: AtomicBool,
+    cancel_durable: AtomicBool,
+}
+
+impl EnforcerClient {
+    pub async fn connect_or_spawn(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        Self::connect_or_spawn_mode(root, executable, max_slots, true).await
+    }
+
+    async fn connect_or_spawn_mode(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        auto_recovery: bool,
+    ) -> EnforcerResult<Self> {
+        if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
+            return Err(EnforcerError::InvalidInput);
+        }
+        root.revalidate()
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+        let secret = capability(root, true)?;
+        if let Some(endpoint) = load_endpoint(root)? {
+            match Self::connect(root, executable, endpoint, secret, max_slots, auto_recovery).await
+            {
+                Ok(client) => return Ok(client),
+                // A peer that accepts then fails authentication/handshake, or
+                // times out, never grants takeover. Only a refused connection
+                // can reach the lease probe below.
+                Err(ConnectFailure::Absent) => {}
+                Err(ConnectFailure::Other(error)) => return Err(error),
+            }
+        }
+        // The child must take this lease itself. A successful probe is dropped
+        // before spawn; two racers are still serialized by the child's lease.
+        let lease = RoleLease::acquire(root)?;
+        drop(lease);
+        spawn_helper(root, executable, max_slots)?;
+        let expires = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(endpoint) = load_endpoint(root)? {
+                match Self::connect(root, executable, endpoint, secret, max_slots, auto_recovery)
+                    .await
+                {
+                    Ok(client) => return Ok(client),
+                    Err(ConnectFailure::Absent) => {}
+                    Err(ConnectFailure::Other(error)) => return Err(error),
+                }
+            }
+            if Instant::now() >= expires {
+                return Err(EnforcerError::Unavailable);
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    }
+
+    async fn connect(
+        root: &Directory,
+        executable: &Path,
+        endpoint: EndpointRecordV1,
+        secret: [u8; 32],
+        max_slots: u32,
+        auto_recovery: bool,
+    ) -> Result<Self, ConnectFailure> {
+        let endpoint_root = root
+            .persistent_child("endpoints", false)
+            .map_err(|_| ConnectFailure::Other(EnforcerError::UnsafeFilesystem))?
+            .ok_or(ConnectFailure::Other(EnforcerError::UnsafeFilesystem))?;
+        // Distinguish a definitely refused connect from a silent live peer.
+        let stream = endpoint.connect_checked(&endpoint_root).await;
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(crate::broker::local_ipc::IpcError::Unavailable) => {
+                return Err(ConnectFailure::Absent);
+            }
+            Err(error) => return Err(ConnectFailure::Other(error.into())),
+        };
+        // Retain a kernel object, not a PID that could later be reused. The
+        // monitor reads heartbeats; the final guard only polls HUP/ERR without
+        // reading, blocking or touching the filesystem.
+        // SAFETY: duplicate this live socket; the returned FD is newly owned.
+        let fd = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if fd < 0 {
+            return Err(ConnectFailure::Other(EnforcerError::Unavailable));
+        }
+        // SAFETY: successful F_DUPFD_CLOEXEC returned a fresh owned descriptor.
+        let liveness = unsafe { OwnedFd::from_raw_fd(fd) };
+        let client = Self(Arc::new(Client {
+            root: root.clone(),
+            executable: executable.into(),
+            max_slots,
+            endpoint_root,
+            endpoint,
+            capability: secret,
+            liveness,
+            replacement: Mutex::new(None),
+            unknown_slots: AtomicU64::new(0),
+            lost_unknown: AtomicBool::new(false),
+            accounted: Mutex::new(BTreeSet::new()),
+            auto_recovery: AtomicBool::new(auto_recovery),
+            recovery_gate: Mutex::new(()),
+            failed: AtomicBool::new(false),
+            health: Mutex::new(None),
+            slots: Mutex::new(BTreeMap::new()),
+        }));
+        client
+            .0
+            .authenticate(&mut stream)
+            .await
+            .map_err(ConnectFailure::Other)?;
+        write_frame(&mut stream, &Request::Watch {}, MAX_FRAME, IO_TIMEOUT)
+            .await
+            .map_err(|error| ConnectFailure::Other(error.into()))?;
+        let response: Response = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT)
+            .await
+            .map_err(|error| ConnectFailure::Other(error.into()))?;
+        match response {
+            Response::Status { value }
+                if value.epoch == client.0.endpoint.epoch()
+                    && value.healthy
+                    && value.max_slots == max_slots =>
+            {
+                client
+                    .0
+                    .unknown_slots
+                    .store(value.slot_count as u64, Ordering::SeqCst);
+                *client
+                    .0
+                    .health
+                    .lock()
+                    .map_err(|_| ConnectFailure::Other(EnforcerError::Unhealthy))? =
+                    Some((value.progress, Instant::now()));
+            }
+            _ => return Err(ConnectFailure::Other(EnforcerError::Unhealthy)),
+        }
+        tokio::spawn(monitor(Arc::downgrade(&client.0), stream));
+        Ok(client)
+    }
+
+    pub async fn register(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let active = self.active()?;
+        active
+            .register_current(registration, generation, false)
+            .await
+    }
+
+    /// Recover only the original armed stop. This permanently revokes local
+    /// start/transport permits and tells even a new child to retain ObserveOnly.
+    pub async fn restore(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let active = self.active()?;
+        active
+            .register_current(registration, generation, true)
+            .await
+    }
+
+    async fn register_current(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        observe_only: bool,
+    ) -> EnforcerResult<EnforcedSlot> {
+        let digest = registration.digest()?;
+        let expected = generation.current();
+        if (expected == u64::MAX && !observe_only) || self.0.failed.load(Ordering::SeqCst) {
+            return Err(EnforcerError::Unhealthy);
+        }
+        let local = {
+            let mut slots = self.0.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if self.0.failed.load(Ordering::SeqCst) {
+                return Err(EnforcerError::Unhealthy);
+            }
+            if let Some(existing) = slots.get(&registration.arm.operation_id) {
+                if existing.digest != digest || !Arc::ptr_eq(&existing.generation.0, &generation.0)
+                {
+                    return Err(EnforcerError::Conflict);
+                }
+                Arc::clone(existing)
+            } else {
+                if slots.len() >= self.0.max_slots as usize {
+                    return Err(EnforcerError::Capacity);
+                }
+                let (stop, _) = watch::channel(observe_only);
+                let local = Arc::new(LocalSlot {
+                    status: Mutex::new((
+                        EnforcerSlotStatusV1 {
+                            arm_id: registration.arm.operation_id.clone(),
+                            registration_hash: digest.clone(),
+                            phase: SlotPhaseV1::Initializing,
+                            prepared_once: observe_only,
+                            generation: expected,
+                            clock: None,
+                            observation: None,
+                            stop_failures: 0,
+                        },
+                        Instant::now(),
+                    )),
+                    registration,
+                    digest,
+                    generation,
+                    stop,
+                    acknowledged: AtomicBool::new(false),
+                    cancel_durable: AtomicBool::new(false),
+                });
+                slots.insert(
+                    local.registration.arm.operation_id.clone(),
+                    Arc::clone(&local),
+                );
+                local
+            }
+        };
+        if observe_only {
+            // Revoke any previously issued local guard before the RPC. A lost
+            // restoration ACK cannot leave an old start permit usable.
+            local.stop.send_replace(true);
+            local
+                .status
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .0
+                .prepared_once = true;
+        }
+        // Retain before sending: an accepted request whose ACK is lost still
+        // belongs to the recovery set, without consulting the journal writer.
+        let expires = Instant::now() + REGISTER_TIMEOUT;
+        let response = loop {
+            let remaining = expires.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(EnforcerError::NotReady);
+            }
+            let response = self
+                .0
+                .request(
+                    Request::Register {
+                        registration: Box::new(local.registration.clone()),
+                        generation: expected,
+                        observe_only,
+                    },
+                    remaining,
+                )
+                .await?;
+            if observe_only
+                && matches!(
+                    response,
+                    Response::Error {
+                        code: EnforcerError::NotReady
+                    }
+                )
+            {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                continue;
+            }
+            break response;
+        };
+        let Response::Registered { value, replayed } = response else {
+            return Err(response_error(response));
+        };
+        let value = *value;
+        if value.arm_id != local.registration.arm.operation_id
+            || value.registration_hash != local.digest
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let observed_generation = value.generation;
+        accept_registration(&self.0, &local, value, replayed)?;
+        if observe_only {
+            local.generation.advance_to(observed_generation);
+        }
+        Ok(EnforcedSlot {
+            client: self.clone(),
+            local,
+        })
+    }
+
+    pub async fn status(&self) -> EnforcerResult<EnforcerStatusV1> {
+        let active = self.active()?;
+        match active.0.request(Request::Status {}, IO_TIMEOUT).await? {
+            Response::Status { value } if value.epoch == active.0.endpoint.epoch() => Ok(value),
+            response => Err(response_error(response)),
+        }
+    }
+
+    /// Check the current helper before a new central admission. Status alone
+    /// does not account for unknown targets, a failed old client or a partial
+    /// stop-only recovery. Existing acknowledged facts remain readable without
+    /// this gate; replaying an unknown POST can still create an admission.
+    pub async fn require_admission_ready(&self) -> EnforcerResult<()> {
+        let active = self.active()?;
+        active.0.check_health()?;
+        let response = active.0.request(Request::Status {}, IO_TIMEOUT).await?;
+        let Response::Status { value } = response else {
+            return Err(response_error(response));
+        };
+        active.0.check_health()?;
+        let slots = active
+            .0
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if value.epoch != active.0.endpoint.epoch()
+            || !value.healthy
+            || value.max_slots != active.0.max_slots
+            || value.slot_count != slots.len()
+            || slots
+                .values()
+                .any(|slot| !slot.acknowledged.load(Ordering::SeqCst))
+        {
+            return Err(EnforcerError::Unhealthy);
+        }
+        if value.slot_count >= value.max_slots as usize {
+            return Err(EnforcerError::Capacity);
+        }
+        Ok(())
+    }
+
+    pub async fn slot_status(&self, arm_id: &str) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let active = self.active()?;
+        let response = active
+            .0
+            .request(
+                Request::Slots {
+                    arm_ids: vec![arm_id.into()],
+                },
+                IO_TIMEOUT,
+            )
+            .await?;
+        match response {
+            Response::Slots { mut values } if values.len() == 1 => {
+                values.pop().ok_or(EnforcerError::Unavailable)
+            }
+            response => Err(response_error(response)),
+        }
+    }
+
+    pub async fn shutdown_if_idle(&self) -> EnforcerResult<()> {
+        let active = self.active()?;
+        let previous = active.0.auto_recovery.swap(false, Ordering::SeqCst);
+        match active
+            .0
+            .request(Request::ShutdownIfIdle {}, IO_TIMEOUT)
+            .await
+        {
+            Ok(Response::Acknowledged {}) => Ok(()),
+            Ok(response) => {
+                active.0.auto_recovery.store(previous, Ordering::SeqCst);
+                Err(response_error(response))
+            }
+            Err(error) => {
+                active.0.auto_recovery.store(previous, Ordering::SeqCst);
+                Err(error)
+            }
+        }
+    }
+
+    fn active(&self) -> EnforcerResult<Self> {
+        let mut active = self.clone();
+        // The same bound as append-only discovery generations.
+        for _ in 0..128 {
+            let replacement = active
+                .0
+                .replacement
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .clone();
+            match replacement {
+                Some(next) => active = next,
+                None if active.0.failed.load(Ordering::SeqCst) => {
+                    return Err(EnforcerError::Unhealthy);
+                }
+                None => return Ok(active),
+            }
+        }
+        Err(EnforcerError::Unhealthy)
+    }
+}
+
+fn accept_registration(
+    client: &Client,
+    local: &LocalSlot,
+    value: EnforcerSlotStatusV1,
+    replayed: bool,
+) -> EnforcerResult<()> {
+    if value.arm_id != local.registration.arm.operation_id
+        || value.registration_hash != local.digest
+    {
+        return Err(EnforcerError::Conflict);
+    }
+    let first = client
+        .accounted
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)?
+        .insert(value.arm_id.clone());
+    if first && replayed {
+        let _ = client
+            .unknown_slots
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                Some(count.saturating_sub(1))
+            });
+    }
+    if value.phase != SlotPhaseV1::Ready {
+        local.stop.send_replace(true);
+    }
+    *local.status.lock().map_err(|_| EnforcerError::Unhealthy)? = (value, Instant::now());
+    local.acknowledged.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+enum ConnectFailure {
+    Absent,
+    Other(EnforcerError),
+}
+
+impl Client {
+    async fn authenticate(&self, stream: &mut UnixStream) -> EnforcerResult<()> {
+        let challenge: Challenge = read_frame(stream, 1024, IO_TIMEOUT).await?;
+        if challenge.epoch != self.endpoint.epoch() || challenge.nonce.is_nil() {
+            return Err(EnforcerError::Unauthorized);
+        }
+        write_frame(
+            stream,
+            &Authentication {
+                proof: proof(&self.capability, &challenge),
+            },
+            1024,
+            IO_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+    async fn request(&self, request: Request, timeout: Duration) -> EnforcerResult<Response> {
+        let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        self.authenticate(&mut stream).await?;
+        write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+        Ok(read_frame(&mut stream, MAX_FRAME, timeout).await?)
+    }
+    fn fail(&self) {
+        self.failed.store(true, Ordering::SeqCst);
+        if let Ok(slots) = self.slots.lock() {
+            for slot in slots.values() {
+                slot.stop.send_replace(true);
+            }
+        }
+    }
+}
+
+/// Losing this handle never releases the remote slot or its armed stop.
+pub struct EnforcedSlot {
+    client: EnforcerClient,
+    local: Arc<LocalSlot>,
+}
+impl fmt::Debug for EnforcedSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EnforcedSlot(<private retained stop>)")
+    }
+}
+impl EnforcedSlot {
+    /// Call immediately before requesting a central start claim. A registration
+    /// handle can also represent a retained ObserveOnly/quarantined target.
+    pub fn check_ready_for_claim(&self, expected_generation: u64) -> EnforcerResult<()> {
+        self.client.0.check_health()?;
+        let (status, received) = &*self
+            .local
+            .status
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if !self.local.acknowledged.load(Ordering::SeqCst)
+            || status.prepared_once
+            || status.phase != SlotPhaseV1::Ready
+            || expected_generation == u64::MAX
+            || self.local.generation.current() != expected_generation
+            || status.generation != expected_generation
+            || received.elapsed() > HEALTH_WINDOW
+            || *self.local.stop.borrow()
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        let clock = NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?;
+        self.local
+            .registration
+            .arm
+            .validate_clock_check(&clock.sample().map_err(|_| EnforcerError::Unhealthy)?)
+            .map_err(|_| EnforcerError::NotReady)
+    }
+
+    pub async fn prepare_start(
+        &self,
+        permission: FreshStartPermission,
+        expected_generation: u64,
+    ) -> EnforcerResult<PrearmedStartControl> {
+        let registration = &self.local.registration;
+        let arm = &registration.arm;
+        if permission.arm_id() != arm.operation_id
+            || permission.worker_id() != arm.worker_id
+            || permission.attempt_id() != arm.attempt_id
+            || permission.control_namespace() != registration.receipt.control_namespace_uuid
+            || permission.subject_key()
+                != arm.subject_key().map_err(|_| EnforcerError::InvalidInput)?
+            || permission.generation() != expected_generation
+            || self.local.generation.current() != expected_generation
+            || expected_generation == u64::MAX
+            || !valid_uuid(permission.emitter_id())
+            || !valid_uuid(permission.claim_operation_id())
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        self.client.0.check_health()?;
+        let clock = NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?;
+        arm.validate_clock_check(&clock.sample().map_err(|_| EnforcerError::Unhealthy)?)
+            .map_err(|_| EnforcerError::NotReady)?;
+        let response = self
+            .client
+            .0
+            .request(
+                Request::Prepare {
+                    arm_id: arm.operation_id.clone(),
+                    registration_hash: self.local.digest.clone(),
+                    generation: expected_generation,
+                },
+                IO_TIMEOUT,
+            )
+            .await?;
+        let Response::Prepared { value } = response else {
+            return Err(response_error(response));
+        };
+        let value = *value;
+        if value.arm_id != arm.operation_id || value.registration_hash != self.local.digest {
+            return Err(EnforcerError::Conflict);
+        }
+        *self
+            .local
+            .status
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)? = (value, Instant::now());
+        Ok(PrearmedStartControl::new(
+            Box::new(SpawnGuard {
+                client: self.client.clone(),
+                local: Arc::clone(&self.local),
+                expected_generation,
+                clock,
+            }),
+            self.local.stop.subscribe(),
+        ))
+    }
+
+    /// The caller first invalidates memory, then persists CancelRequested, and
+    /// only after its durable ACK requests this early stop. This is not disarm.
+    pub async fn cancel(&self, generation: u64) -> EnforcerResult<()> {
+        if generation != self.local.generation.current() {
+            return Err(EnforcerError::Conflict);
+        }
+        self.local.cancel_durable.store(true, Ordering::SeqCst);
+        self.local.stop.send_replace(true);
+        let active = self.client.active()?;
+        match active
+            .0
+            .request(
+                Request::Cancel {
+                    arm_id: self.local.registration.arm.operation_id.clone(),
+                    registration_hash: self.local.digest.clone(),
+                    generation,
+                },
+                IO_TIMEOUT,
+            )
+            .await?
+        {
+            Response::Acknowledged {} => Ok(()),
+            response => Err(response_error(response)),
+        }
+    }
+}
+
+struct SpawnGuard {
+    client: EnforcerClient,
+    local: Arc<LocalSlot>,
+    expected_generation: u64,
+    clock: NativeHostClock,
+}
+impl BeforeSpawnGuard for SpawnGuard {
+    fn check_before_spawn(self: Box<Self>, target: &str) -> anyhow::Result<()> {
+        let _gate = self
+            .local
+            .generation
+            .0
+            .gate
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        self.client.0.check_health()?;
+        let (status, received) = &*self
+            .local
+            .status
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if target != self.local.registration.owned.handle.id()
+            || self.local.generation.current() != self.expected_generation
+            || self.expected_generation == u64::MAX
+            || status.generation != self.expected_generation
+            || status.phase != SlotPhaseV1::Ready
+            || !status.prepared_once
+            || received.elapsed() > HEALTH_WINDOW
+            || *self.local.stop.borrow()
+        {
+            return Err(EnforcerError::NotReady.into());
+        }
+        let current = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        let observed = status.clock.as_ref().ok_or(EnforcerError::Unhealthy)?;
+        let current_ns = current
+            .continuous_ns()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let observed_ns = observed
+            .continuous_ns()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if current.method != observed.method
+            || current.boot_id != observed.boot_id
+            || current_ns < observed_ns
+            || current_ns - observed_ns > HEALTH_WINDOW.as_nanos()
+        {
+            return Err(EnforcerError::Unhealthy.into());
+        }
+        self.local
+            .registration
+            .arm
+            .validate_clock_check(&current)
+            .map_err(|_| EnforcerError::NotReady)?;
+        Ok(())
+    }
+}
+impl Client {
+    fn check_health(&self) -> EnforcerResult<()> {
+        let mut descriptor = libc::pollfd {
+            fd: self.liveness.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one initialized pollfd for a socket retained by self, timeout
+        // zero. POLLHUP is checked even if old heartbeat bytes remain queued.
+        let polled = unsafe { libc::poll(&mut descriptor, 1, 0) };
+        let health = self.health.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if polled < 0
+            || descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+            || self.failed.load(Ordering::SeqCst)
+            || self.lost_unknown.load(Ordering::SeqCst)
+            || self.unknown_slots.load(Ordering::SeqCst) != 0
+            || health.is_none_or(|(_, received)| received.elapsed() > HEALTH_WINDOW)
+        {
+            return Err(EnforcerError::Unhealthy);
+        }
+        Ok(())
+    }
+}
+
+fn monitor(
+    client: Weak<Client>,
+    mut stream: UnixStream,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(async move {
+        loop {
+            let Some(client) = client.upgrade() else {
+                return;
+            };
+            if monitor_once(&client, &mut stream).await.is_err() {
+                client.fail();
+                let recover = {
+                    match client.recovery_gate.lock() {
+                        Ok(_gate) => client.auto_recovery.load(Ordering::SeqCst),
+                        Err(_) => false,
+                    }
+                };
+                if recover {
+                    recover_stops(client).await;
+                }
+                return;
+            }
+        }
+    })
+}
+async fn monitor_once(client: &Client, stream: &mut UnixStream) -> EnforcerResult<()> {
+    let response: Response = read_frame(stream, MAX_FRAME, IO_TIMEOUT).await?;
+    let Response::Status { value } = response else {
+        return Err(EnforcerError::Unhealthy);
+    };
+    if value.epoch != client.endpoint.epoch() || !value.healthy {
+        return Err(EnforcerError::Unhealthy);
+    }
+    {
+        let mut health = client.health.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        match *health {
+            Some((previous, changed)) if previous == value.progress => {
+                if changed.elapsed() > HEALTH_WINDOW {
+                    return Err(EnforcerError::Unhealthy);
+                }
+            }
+            Some((previous, _)) if previous > value.progress => {
+                return Err(EnforcerError::Unhealthy);
+            }
+            _ => *health = Some((value.progress, Instant::now())),
+        }
+    }
+    let retained: Vec<_> = {
+        let slots = client.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        slots
+            .values()
+            .filter(|slot| slot.acknowledged.load(Ordering::SeqCst))
+            .cloned()
+            .collect()
+    };
+    for chunk in retained.chunks(MAX_SLOT_QUERY) {
+        let arm_ids = chunk
+            .iter()
+            .map(|slot| slot.registration.arm.operation_id.clone())
+            .collect();
+        let Response::Slots { values } = client
+            .request(Request::Slots { arm_ids }, IO_TIMEOUT)
+            .await?
+        else {
+            return Err(EnforcerError::Unhealthy);
+        };
+        if values.len() != chunk.len() {
+            return Err(EnforcerError::Conflict);
+        }
+        for (slot, value) in chunk.iter().zip(values) {
+            if value.registration_hash != slot.digest
+                || value.arm_id != slot.registration.arm.operation_id
+            {
+                return Err(EnforcerError::Conflict);
+            }
+            if value.phase != SlotPhaseV1::Ready {
+                slot.stop.send_replace(true);
+            }
+            *slot.status.lock().map_err(|_| EnforcerError::Unhealthy)? = (value, Instant::now());
+        }
+    }
+    Ok(())
+}
+
+async fn recover_stops(client: Arc<Client>) {
+    // This set was retained before every Register request. The failed bit is
+    // already permanent, so no concurrent new target can enter this client.
+    let retained: Vec<_> = match client.slots.lock() {
+        Ok(slots) => slots.values().cloned().collect(),
+        Err(_) => return,
+    };
+    loop {
+        let replacement = match EnforcerClient::connect_or_spawn_mode(
+            &client.root,
+            &client.executable,
+            client.max_slots,
+            false,
+        )
+        .await
+        {
+            Ok(replacement) => replacement,
+            Err(_) => {
+                // A silent/occupied endpoint is not takeover permission. Its
+                // existing actors may still enforce; keep the global fuse.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+        let new_epoch = replacement.0.endpoint.epoch() != client.endpoint.epoch();
+        let unknown_lost = client.lost_unknown.load(Ordering::SeqCst)
+            || (new_epoch && client.unknown_slots.load(Ordering::SeqCst) != 0);
+        replacement
+            .0
+            .lost_unknown
+            .store(unknown_lost, Ordering::SeqCst);
+        let mut restored = true;
+        for chunk in retained.chunks(16) {
+            let outcomes = futures_util::future::join_all(
+                chunk
+                    .iter()
+                    .map(|local| restore_slot(&replacement.0, Arc::clone(local))),
+            )
+            .await;
+            // Never skip a later target because an earlier authority is down.
+            restored &= outcomes.iter().all(Result::is_ok);
+        }
+        if restored {
+            // Publish only after all targets were accepted as ObserveOnly, with
+            // original immutable deadlines. Older guards keep their old failed
+            // Client forever and can never regain permission through this link.
+            let published = {
+                match replacement.0.recovery_gate.lock() {
+                    Ok(_gate) if !replacement.0.failed.load(Ordering::SeqCst) => {
+                        if let Ok(mut next) = client.replacement.lock() {
+                            replacement.0.auto_recovery.store(true, Ordering::SeqCst);
+                            *next = Some(replacement.clone());
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                }
+            };
+            if published {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn restore_slot(client: &Client, local: Arc<LocalSlot>) -> EnforcerResult<()> {
+    {
+        let mut slots = client.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if slots.len() >= client.max_slots as usize
+            && !slots.contains_key(&local.registration.arm.operation_id)
+        {
+            return Err(EnforcerError::Capacity);
+        }
+        slots.insert(
+            local.registration.arm.operation_id.clone(),
+            Arc::clone(&local),
+        );
+    }
+    let generation = local.generation.current();
+    let response = client
+        .request(
+            Request::Register {
+                registration: Box::new(local.registration.clone()),
+                generation,
+                observe_only: true,
+            },
+            REGISTER_TIMEOUT,
+        )
+        .await?;
+    let Response::Registered { value, replayed } = response else {
+        return Err(response_error(response));
+    };
+    let observed_generation = value.generation;
+    accept_registration(client, &local, *value, replayed)?;
+    local.generation.advance_to(observed_generation);
+    if local.cancel_durable.load(Ordering::SeqCst) {
+        match client
+            .request(
+                Request::Cancel {
+                    arm_id: local.registration.arm.operation_id.clone(),
+                    registration_hash: local.digest.clone(),
+                    generation: local.generation.current(),
+                },
+                IO_TIMEOUT,
+            )
+            .await?
+        {
+            Response::Acknowledged {} => {}
+            response => return Err(response_error(response)),
+        }
+    }
+    Ok(())
+}
+
+fn response_error(response: Response) -> EnforcerError {
+    match response {
+        Response::Error { code } => code,
+        _ => EnforcerError::Unavailable,
+    }
+}
+fn valid_uuid(value: &str) -> bool {
+    Uuid::parse_str(value)
+        .is_ok_and(|value_id| !value_id.is_nil() && value_id.hyphenated().to_string() == value)
+}
+
+fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> EnforcerResult<()> {
+    use std::os::unix::process::CommandExt;
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: read-only process resource query into writable ABI storage.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(EnforcerError::Unavailable);
+    }
+    // SAFETY: successful getrlimit initialized the structure.
+    let limit = unsafe { limit.assume_init() }.rlim_cur;
+    let mut limit = i32::try_from(limit).map_err(|_| EnforcerError::Unavailable)?;
+    // An existing FD can exceed a subsequently lowered soft limit. Inventory
+    // those already open too; later opens are bounded by the current limit.
+    for entry in std::fs::read_dir("/dev/fd").map_err(|_| EnforcerError::Unavailable)? {
+        let entry = entry.map_err(|_| EnforcerError::Unavailable)?;
+        let fd: i32 = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+            .ok_or(EnforcerError::Unavailable)?;
+        limit = limit.max(fd.checked_add(1).ok_or(EnforcerError::Unavailable)?);
+    }
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("__broker-enforcer")
+        .arg("--root")
+        .arg(root.path())
+        .arg("--max-slots")
+        .arg(max_slots.to_string())
+        .env_clear()
+        .current_dir("/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: only async-signal-safe syscalls; no parent lock, token, socket or
+    // incidental inherited FD may survive exec. CLOEXEC preserves Command's
+    // exec-error pipe until exec, unlike closing all descriptors in pre_exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    3_u32,
+                    u32::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                ) == 0
+                {
+                    return Ok(());
+                }
+                if !matches!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ENOSYS | libc::EINVAL)
+                ) {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            for fd in 3..limit {
+                if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+                    && std::io::Error::last_os_error().raw_os_error() != Some(libc::EBADF)
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().map_err(|_| EnforcerError::Unavailable)?;
+    // Reap the owned helper when it eventually exits; dropping this handle must
+    // not kill it, and the reap thread owns no broker lease/credential FD.
+    std::thread::Builder::new()
+        .name("enforcer-reap".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map_err(|_| EnforcerError::Unavailable)?;
+    Ok(())
+}

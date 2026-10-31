@@ -1,0 +1,574 @@
+//! Process-local source authorization. Directory capabilities are retained from
+//! authorization through collection and are never reconstructed from a job.
+//!
+//! Revalidation detects changed mappings/ancestry at the observation points. It
+//! does not provide an atomic snapshot against concurrent same-UID/root changes.
+
+use super::{Limits, PreparedWorkspace, collect_workspace_from_root};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::{Manifest, anchored_export, read_workspace_archive};
+use anyhow::{Context, Result, ensure};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::io::Read;
+use std::{
+    ffi::{CString, OsStr, OsString},
+    fs::{File, OpenOptions},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, fs::MetadataExt, fs::OpenOptionsExt},
+    },
+    path::{Component, Path, PathBuf},
+};
+
+const DIRECTORY_FLAGS: libc::c_int =
+    libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK;
+const MAX_SOURCE_DEPTH: usize = 4096;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Identity {
+    device: u64,
+    inode: u64,
+}
+
+impl Identity {
+    fn directory(file: &File) -> Result<Self> {
+        let facts = file
+            .metadata()
+            .context("cannot inspect authorized source directory")?;
+        ensure!(facts.is_dir(), "authorized source must be a directory");
+        Ok(Self {
+            device: facts.dev(),
+            inode: facts.ino(),
+        })
+    }
+}
+
+struct RetainedDirectory {
+    file: File,
+    identity: Identity,
+    // The filesystem root is the only entry without a name relative to a
+    // retained parent. All other names are single normal path components.
+    name: Option<OsString>,
+}
+
+/// An allowlisted project and the live directory capabilities that authorized
+/// it. No Clone, Debug or serialization implementation can expose/rebuild them.
+pub(crate) struct AuthorizedSource {
+    path: PathBuf,
+    chain: Vec<RetainedDirectory>,
+    boundary_index: usize,
+}
+
+impl AuthorizedSource {
+    pub(crate) fn open(source: &Path, allowed_roots: &[PathBuf]) -> Result<Self> {
+        let path = crate::control_fs::absolute_path(source)?;
+        // Select the most specific matching policy root. Normalize all policy
+        // paths first so a malformed root cannot be silently ignored.
+        let roots = allowed_roots
+            .iter()
+            .map(|root| crate::control_fs::absolute_path(root))
+            .collect::<Result<Vec<_>>>()?;
+        let boundary = roots
+            .iter()
+            .filter(|root| path.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .context("project is outside the authorized source roots")?;
+        let root = OpenOptions::new()
+            .read(true)
+            .custom_flags(DIRECTORY_FLAGS)
+            .open("/")
+            .context("cannot open source filesystem root")?;
+        let identity = Identity::directory(&root)?;
+        let mut chain = vec![RetainedDirectory {
+            file: root,
+            identity,
+            name: None,
+        }];
+        append_directories(&mut chain, boundary.strip_prefix("/")?)?;
+        let boundary_index = chain.len() - 1;
+        append_directories(&mut chain, path.strip_prefix(boundary)?)?;
+        let authorized = Self {
+            path,
+            chain,
+            boundary_index,
+        };
+        authorized.revalidate()?;
+        Ok(authorized)
+    }
+
+    /// Provenance only; preparation uses the retained descriptor, never this
+    /// pathname as a new content authority.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        let first = self
+            .chain
+            .first()
+            .context("source authorization has no root")?;
+        let mut current = OpenOptions::new()
+            .read(true)
+            .custom_flags(DIRECTORY_FLAGS)
+            .open("/")
+            .context("cannot revalidate source filesystem root")?;
+        ensure!(
+            Identity::directory(&current)? == first.identity
+                && Identity::directory(&first.file)? == first.identity,
+            "authorized source filesystem root changed"
+        );
+        for (index, directory) in self.chain.iter().enumerate().skip(1) {
+            let parent = &self.chain[index - 1];
+            let name = directory
+                .name
+                .as_deref()
+                .context("source directory has no component")?;
+            // Recoup both the current absolute mapping and the retained parent
+            // mapping. The latter includes the exact allowlist boundary FD.
+            current = open_directory(&current, name)?;
+            let retained_child = open_directory(&parent.file, name)?;
+            let current_parent = open_directory(&directory.file, OsStr::new(".."))?;
+            ensure!(
+                Identity::directory(&directory.file)? == directory.identity
+                    && Identity::directory(&current)? == directory.identity
+                    && Identity::directory(&retained_child)? == directory.identity
+                    && Identity::directory(&current_parent)? == parent.identity,
+                "authorized source path or ancestry changed; import refused"
+            );
+        }
+        ensure!(
+            self.boundary_index < self.chain.len(),
+            "source authorization lost its allowlist boundary"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        limits: Limits,
+        excluded_roots: &[&File],
+    ) -> Result<PreparedWorkspace> {
+        self.revalidate()?;
+        let project = self
+            .chain
+            .last()
+            .context("source authorization has no project")?;
+        let prepared =
+            collect_workspace_from_root(&self.path, &project.file, limits, excluded_roots);
+        // Reject a substitution even if pathname enumeration and the anchored
+        // content reads happened to have compatible entry names. Revalidate on
+        // error too, without accepting or publishing a partial archive.
+        self.revalidate()?;
+        prepared
+    }
+}
+
+/// A retained export parent under policy roots checked for lexical and observed
+/// physical overlap with every source policy root. Each policy root must remain
+/// identifiable; an individual project underneath it need not still exist.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) struct AuthorizedExportParent {
+    anchor: AuthorizedSource,
+    source_roots: Vec<AuthorizedSource>,
+    export_roots: Vec<AuthorizedSource>,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl AuthorizedExportParent {
+    pub(crate) fn identity(&self) -> Result<(u64, u64)> {
+        self.revalidate()?;
+        let parent = self
+            .anchor
+            .chain
+            .last()
+            .context("export authorization has no parent")?;
+        let identity = Identity::directory(&parent.file)?;
+        Ok((identity.device, identity.inode))
+    }
+    pub(crate) fn open(
+        parent: &Path,
+        allowed_export_roots: &[PathBuf],
+        forbidden_source_roots: &[PathBuf],
+    ) -> Result<Self> {
+        let export_roots = allowed_export_roots
+            .iter()
+            .map(|root| crate::control_fs::absolute_path(root))
+            .collect::<Result<Vec<_>>>()?;
+        let source_roots = forbidden_source_roots
+            .iter()
+            .map(|root| crate::control_fs::absolute_path(root))
+            .collect::<Result<Vec<_>>>()?;
+        ensure!(
+            export_roots.iter().all(|export| source_roots
+                .iter()
+                .all(|source| !export.starts_with(source) && !source.starts_with(export))),
+            "export and source policy roots must be disjoint"
+        );
+        let anchor = AuthorizedSource::open(parent, &export_roots)
+            .context("cannot authorize export parent")?;
+        let source_roots = source_roots
+            .iter()
+            .map(|root| {
+                AuthorizedSource::open(root, std::slice::from_ref(root)).context(
+                    "configured source policy root is unavailable or unsafe; export disjointness cannot be verified",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let export_roots = export_roots
+            .iter()
+            .map(|root| {
+                AuthorizedSource::open(root, std::slice::from_ref(root)).context(
+                    "configured export policy root is unavailable or unsafe; export disjointness cannot be verified",
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let authorized = Self {
+            anchor,
+            source_roots,
+            export_roots,
+        };
+        authorized.revalidate()?;
+        Ok(authorized)
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        self.anchor.path()
+    }
+
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        for root in &self.source_roots {
+            root.revalidate().context(
+                "configured source policy root changed or became unavailable; export disjointness cannot be verified",
+            )?;
+        }
+        for root in &self.export_roots {
+            root.revalidate().context(
+                "configured export policy root changed or became unavailable; export disjointness cannot be verified",
+            )?;
+        }
+        self.anchor
+            .revalidate()
+            .context("export parent path or ancestry changed")?;
+        for source in &self.source_roots {
+            for export in &self.export_roots {
+                require_physically_disjoint(source, export)?;
+            }
+            // Check the requested parent as well as all configured roots: an
+            // alias deeper underneath an export root may lead back to a source.
+            require_physically_disjoint(source, &self.anchor)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn extract<R: Read>(
+        &self,
+        reader: R,
+        name: &OsStr,
+        limits: Limits,
+    ) -> Result<Manifest> {
+        self.revalidate()?;
+        let parent = self
+            .anchor
+            .chain
+            .last()
+            .context("export authorization has no parent")?;
+        anchored_export::require_new_destination(&parent.file, name)?;
+        // Clone the authorized capability, never reopen its pathname to choose
+        // a new creation authority after policy validation.
+        let mut staging = anchored_export::Staging::new_from_parent(parent.file.try_clone()?)?;
+        let manifest = read_workspace_archive(reader, limits, Some(&staging))?;
+        self.revalidate()?;
+        staging
+            .publish(name, self.path())
+            .context("cannot publish authorized export")?;
+        Ok(manifest)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn require_physically_disjoint(left: &AuthorizedSource, right: &AuthorizedSource) -> Result<()> {
+    let left_root = left
+        .chain
+        .last()
+        .context("source policy root has no retained identity")?;
+    let right_root = right
+        .chain
+        .last()
+        .context("export policy root has no retained identity")?;
+    // Common ancestors such as / are expected. Overlap means that one whole
+    // policy root is an ancestor of the other, including an identity reached
+    // under a differently cased name or an accessible mount alias. A mount can
+    // hide underlying ancestors; this inspection does not prove disjointness
+    // against every privileged mount topology or concurrent administrator.
+    ensure!(
+        !right
+            .chain
+            .iter()
+            .any(|directory| directory.identity == left_root.identity)
+            && !left
+                .chain
+                .iter()
+                .any(|directory| directory.identity == right_root.identity),
+        "export and source policy roots physically overlap; export refused"
+    );
+    Ok(())
+}
+
+fn append_directories(chain: &mut Vec<RetainedDirectory>, path: &Path) -> Result<()> {
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("authorized source path has an invalid component");
+        };
+        ensure!(
+            chain.len() <= MAX_SOURCE_DEPTH,
+            "authorized source ancestry exceeds the supported bound"
+        );
+        let parent = chain.last().context("source authorization has no parent")?;
+        let file = open_directory(&parent.file, name)?;
+        let identity = Identity::directory(&file)?;
+        chain.push(RetainedDirectory {
+            file,
+            identity,
+            name: Some(name.to_owned()),
+        });
+    }
+    Ok(())
+}
+
+fn open_directory(parent: &File, name: &OsStr) -> Result<File> {
+    let name = CString::new(name.as_bytes()).context("source component contains NUL")?;
+    // SAFETY: parent owns a live directory FD; name is a single normalized
+    // component (or the fixed internal parent lookup), and flags deny symlinks.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | DIRECTORY_FLAGS,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("authorized source directory changed or contains a symlink; import refused");
+    }
+    // SAFETY: successful openat returned a new uniquely owned descriptor.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod authorized_workspace_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::symlink};
+
+    fn canonical(path: &Path) -> PathBuf {
+        path.canonicalize().expect("fixture path exists")
+    }
+
+    fn write_project(root: &Path) -> PathBuf {
+        let project = root.join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("README.txt"), b"synthetic project content\n").unwrap();
+        project
+    }
+
+    // Mirror the existing workspace archive fixture writer so unsafe paths
+    // reach the product parser instead of being normalized by tar::Builder.
+    fn raw_archive(path: &str, kind: u8, contents: &[u8]) -> Vec<u8> {
+        let mut archive = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+        header.set_entry_type(tar::EntryType::new(kind));
+        header.set_size(contents.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive.append(&header, contents).unwrap();
+        archive.into_inner().unwrap()
+    }
+
+    #[test]
+    fn authorized_source_requires_allowlisted_root_and_rejects_relocated_symlink_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = canonical(temp.path());
+        let allowed = base.join("allowed");
+        let project = write_project(&allowed);
+        let outside = base.join("outside");
+        let outside_project = write_project(&outside);
+        fs::write(
+            outside_project.join("outside-only-canary.txt"),
+            b"SYNTHETIC_OUTSIDE_CANARY",
+        )
+        .unwrap();
+
+        assert!(AuthorizedSource::open(&outside_project, std::slice::from_ref(&allowed)).is_err());
+
+        let grant = AuthorizedSource::open(&project, std::slice::from_ref(&allowed)).unwrap();
+        assert_eq!(grant.path(), project.as_path());
+        let moved = base.join("allowed-moved");
+        fs::rename(&allowed, &moved).unwrap();
+        symlink(&outside, &allowed).unwrap();
+
+        assert!(grant.revalidate().is_err());
+        assert!(grant.prepare(Limits::default(), &[]).is_err());
+        assert!(AuthorizedSource::open(&project, std::slice::from_ref(&allowed)).is_err());
+
+        fs::remove_file(&allowed).unwrap();
+        fs::rename(&moved, &allowed).unwrap();
+        let restored = grant
+            .prepare(Limits::default(), &[])
+            .expect("restoring the original directory mapping restores its authority");
+        assert!(restored.manifest.contains_key("README.txt"));
+        assert!(!restored.manifest.contains_key("outside-only-canary.txt"));
+        let mut archive = tar::Archive::new(fs::File::open(restored.archive.path()).unwrap());
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let path = entry.path().unwrap().into_owned();
+            assert!(!path.ends_with("outside-only-canary.txt"));
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            assert!(
+                !bytes
+                    .windows(b"SYNTHETIC_OUTSIDE_CANARY".len())
+                    .any(|part| part == b"SYNTHETIC_OUTSIDE_CANARY")
+            );
+        }
+        assert_eq!(
+            fs::read(outside_project.join("outside-only-canary.txt")).unwrap(),
+            b"SYNTHETIC_OUTSIDE_CANARY"
+        );
+    }
+
+    #[test]
+    fn authorized_export_restores_archive_after_source_removal_and_never_overwrites_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = canonical(temp.path());
+        let sources = base.join("sources");
+        let exports = base.join("exports");
+        fs::create_dir(&sources).unwrap();
+        fs::create_dir(&exports).unwrap();
+        let project = write_project(&sources);
+        fs::write(project.join("nested.txt"), b"synthetic nested content").unwrap();
+
+        let source = AuthorizedSource::open(&project, std::slice::from_ref(&sources)).unwrap();
+        let prepared = source.prepare(Limits::default(), &[]).unwrap();
+        assert!(prepared.manifest.contains_key("README.txt"));
+        assert!(prepared.manifest.contains_key("nested.txt"));
+
+        let export = AuthorizedExportParent::open(
+            &exports,
+            std::slice::from_ref(&exports),
+            std::slice::from_ref(&sources),
+        )
+        .unwrap();
+        let authorized_identity = export.identity().unwrap();
+        fs::remove_dir_all(&project).unwrap();
+        let restored_manifest = export
+            .extract(
+                fs::File::open(prepared.archive.path()).unwrap(),
+                OsStr::new("restored"),
+                Limits::default(),
+            )
+            .expect("a missing original project does not invalidate a live export parent");
+        let restored = exports.join("restored");
+        assert_eq!(restored_manifest, prepared.manifest);
+        assert_eq!(
+            fs::read(restored.join("README.txt")).unwrap(),
+            b"synthetic project content\n"
+        );
+        assert_eq!(
+            fs::read(restored.join("nested.txt")).unwrap(),
+            b"synthetic nested content"
+        );
+        assert_eq!(export.identity().unwrap(), authorized_identity);
+
+        fs::write(
+            restored.join("README.txt"),
+            b"preserve existing destination",
+        )
+        .unwrap();
+        assert!(
+            export
+                .extract(
+                    fs::File::open(prepared.archive.path()).unwrap(),
+                    OsStr::new("restored"),
+                    Limits::default(),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(restored.join("README.txt")).unwrap(),
+            b"preserve existing destination"
+        );
+    }
+
+    #[test]
+    fn authorized_export_rejects_symlink_parent_and_missing_source_root_for_disjointness() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = canonical(temp.path());
+        let exports = base.join("exports");
+        let sources = base.join("sources");
+        fs::create_dir(&exports).unwrap();
+        fs::create_dir(&sources).unwrap();
+        let real_parent = exports.join("real-parent");
+        fs::create_dir(&real_parent).unwrap();
+        symlink(&real_parent, exports.join("symlink-parent")).unwrap();
+
+        assert!(
+            AuthorizedExportParent::open(
+                &exports.join("symlink-parent"),
+                std::slice::from_ref(&exports),
+                std::slice::from_ref(&sources),
+            )
+            .is_err()
+        );
+
+        let missing_sources = base.join("configured-source-root-missing");
+        let error = match AuthorizedExportParent::open(
+            &exports,
+            std::slice::from_ref(&exports),
+            std::slice::from_ref(&missing_sources),
+        ) {
+            Ok(_) => {
+                panic!("unavailable source policy root must prevent disjointness authorization")
+            }
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("export disjointness cannot be verified"));
+    }
+
+    #[test]
+    fn authorized_export_rejects_traversal_and_symlink_archives_with_rollback() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = canonical(temp.path());
+        let sources = base.join("sources");
+        let exports = base.join("exports");
+        fs::create_dir(&sources).unwrap();
+        fs::create_dir(&exports).unwrap();
+        let export = AuthorizedExportParent::open(
+            &exports,
+            std::slice::from_ref(&exports),
+            std::slice::from_ref(&sources),
+        )
+        .unwrap();
+        let outside = base.join("escape.txt");
+        fs::write(&outside, b"preserve outside fixture").unwrap();
+
+        for (name, bytes) in [
+            (
+                "traversal",
+                raw_archive("../escape.txt", b'0', b"overwrite attempt"),
+            ),
+            ("symlink", raw_archive("link", b'2', b"")),
+        ] {
+            assert!(
+                export
+                    .extract(
+                        std::io::Cursor::new(bytes),
+                        OsStr::new(name),
+                        Limits::default(),
+                    )
+                    .is_err()
+            );
+            assert!(!exports.join(name).exists());
+            assert_eq!(fs::read(&outside).unwrap(), b"preserve outside fixture");
+            assert_eq!(fs::read_dir(&exports).unwrap().count(), 0);
+        }
+    }
+}

@@ -6,7 +6,7 @@ use agentsandbox::{
         intent::ExecutionIntentV1,
         journal::{
             BindingInputs, BindingKindV1, ControlSecrets, FsExclusions, Journal, JournalLimitsV1,
-            JournalScopeV1, ReserveResult,
+            JournalScopeV1, ReserveResult, recovery::StopRecoveryReaderV1,
         },
     },
     control::{
@@ -137,6 +137,36 @@ fn operation() -> Uuid {
 
 fn second_operation() -> Uuid {
     Uuid::parse_str("44444444-4444-4444-8444-444444444444").unwrap()
+}
+
+fn durable_binding_path(root: &Path, operation_id: Uuid, file_name: &str) -> std::path::PathBuf {
+    let namespace = root.join("broker-journal-v1");
+    let scope_dir = std::fs::read_dir(namespace)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_type().unwrap().is_dir())
+        .expect("fixture has one durable journal scope")
+        .path();
+    scope_dir
+        .join("jobs")
+        .join(operation_id.to_string())
+        .join("bindings")
+        .join(file_name)
+}
+
+fn scan_recovery(root: &Path) -> agentsandbox::broker::journal::recovery::StopRecoveryReportV1 {
+    let canonical_root = private_root(root);
+    let directory = Directory::open_existing(&canonical_root).unwrap();
+    StopRecoveryReaderV1::open_existing(
+        &directory,
+        scope(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap()
+    .expect("fixture journal exists")
+    .scan()
 }
 
 fn versioned_managed_plan() -> (ExecutionIntentV1, Value) {
@@ -1194,15 +1224,34 @@ fn manual_binding_canonicalizes_source_and_reloads_without_the_source_path() {
     drop(private_source);
     std::fs::remove_file(&source_path).unwrap();
     drop(source);
+    let accepted_head = accepted.head().clone();
     drop(accepted);
-    let replay = journal.load(operation()).unwrap().unwrap();
-    assert_eq!(replay.binding_source().unwrap().bytes(), stored_bytes);
-    assert!(matches!(
-        journal
-            .reserve(operation(), br#"{"action":"manual-binding"}"#)
-            .unwrap(),
-        ReserveResult::Accepted(_)
-    ));
+    let durable_blob = durable_binding_path(temporary.path(), operation(), "manual-env-v1.bin");
+    std::fs::remove_file(&durable_blob).unwrap();
+    drop(journal);
+
+    let recovered = scan_recovery(temporary.path());
+    assert!(
+        recovered.incomplete(),
+        "a missing opaque blob is incomplete"
+    );
+    let recovered_job = recovered
+        .jobs()
+        .iter()
+        .find(|job| job.operation_id() == operation())
+        .expect("metadata-valid job remains available for STOP projection");
+    assert_eq!(recovered_job.head(), &accepted_head);
+    assert!(
+        recovered_job.stops().is_empty(),
+        "no Arm receipt was recorded"
+    );
+    drop(recovered);
+
+    let reopened = open_journal(temporary.path());
+    assert!(
+        reopened.load(operation()).is_err(),
+        "business replay still requires the durable credential blob"
+    );
 }
 
 #[test]
@@ -1268,6 +1317,43 @@ fn provider_binding_preserves_exact_record_and_reports_actual_handoff_digest() {
     assert_eq!(manifest.handoff_sha(), Some(handoff_sha.as_str()));
     assert_eq!(manifest.stored_bytes(), raw_record.len() as u64);
     assert!(accepted.binding_source().unwrap().bytes() == raw_record);
+
+    // The reader inventories binding names without opening the provider blob.
+    // An unexpected private regular file marks this job incomplete while the
+    // manifest-validated STOP projection remains available.
+    let accepted_head = accepted.head().clone();
+    let unexpected = durable_binding_path(temporary.path(), operation(), "unexpected-test-entry");
+    std::fs::write(&unexpected, b"synthetic opaque fixture").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&unexpected, std::fs::Permissions::from_mode(0o600)).unwrap();
+    drop(accepted);
+    drop(private_source);
+    std::fs::remove_file(source_path).unwrap();
+    drop(source);
+    drop(journal);
+    let recovered = scan_recovery(temporary.path());
+    assert!(recovered.incomplete());
+    let recovered_job = recovered
+        .jobs()
+        .iter()
+        .find(|job| job.operation_id() == operation())
+        .expect("extra binding entry does not discard the proven job head");
+    assert_eq!(recovered_job.head(), &accepted_head);
+    assert!(recovered_job.stops().is_empty());
+    drop(recovered);
+    let journal_root = private_root(temporary.path());
+    let directory = Directory::open_existing(&journal_root).unwrap();
+    let normal_open = Journal::open(
+        &directory,
+        scope(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    );
+    assert!(matches!(
+        normal_open,
+        Err(agentsandbox::broker::journal::JournalError::Corrupt)
+    ));
 
     let blocked_root = tempfile::tempdir().unwrap();
     let hidden_control_value = "synthetic-control-canary-escape";

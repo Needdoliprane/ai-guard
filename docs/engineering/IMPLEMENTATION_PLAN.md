@@ -4,6 +4,24 @@
 
 Objectif : satisfaire les exigences complètes local-first/cloud et produire des preuves reproductibles, sans assimiler un lot à une qualification du produit. Rust/SQLite et frontend TypeScript existants sont conservés. Les décisions structurelles restent soumises au mainteneur.
 
+## Point de reprise — raccord permanent du 31 octobre, en cours
+
+Base publiée `c4c4d2a7560d31768da08d8ad9335f4f08667344`, travail isolé dans `.worktrees/broker-service`. Service/CLI explicite, IPC, writer, outbox V4, capacités de source/export et gardien natif sont raccordés. Les premiers tests ciblés passent ; la nouvelle verticale n'est pas encore qualifiée sur moteur et aucun cutover du CLI n'est autorisé par ces résultats.
+
+- [x] Compilation all-targets d'un gel intermédiaire sans avertissement ; tests IPC/CLI/writer, ownership de la queue et états/identités du service exécutés. Les échecs de compilation de fixtures sont conservés.
+- [x] Vrai processus gardien vide : refus pendant SIGSTOP, reprise SIGCONT sur la même epoch, arrêt propre et absence de child résiduel. Le harnais crée sa seule capability privée neuve ; aucune clé réelle ni moteur.
+- [x] Corriger en source et faire relire la reprise STOP indépendante des blobs/du chargement global, la causalité Cancel/Export, la santé avant admission et l'exclusion des identités pendant publication de l'input Export. Les tests de concurrence du verrou et les quatre capacités workspace passent ; revue source seule distincte des preuves runtime.
+- [x] Tests V4 et de récupération de chaîne, dont sibling corrompu, blob perdu, ancien managed V1 et annulations multiples ; canaris, Clippy et build exécutés. [40 fonctions uniques, gels et limites](evidence/2026-10-31/broker-service/README.md). Le périmètre de validation demeure ciblé et non une qualification de la verticale runtime.
+- [ ] Qualifier le bootstrap public du gardien et le service complet avec un vrai contrôle3 local : authentification/rôle/tenant avant FS, perte du client, erreurs d'audit, replays et reprise des faits. Le seul child lancé directement par le harnais ne qualifie pas le bootstrap parent.
+- [ ] Vérifier les retries d'une annulation durable dont le stop RPC échoue : le replay ne doit pas invalider ni arrêter un export postérieur, et doit pouvoir réessayer les seules cibles déjà annulées. Le chemin existant de replay d'ACK ne suffit pas à prouver cette convergence.
+- [ ] Vérifier les slots non vides, les générations restaurées, la panne/reprise du child et la course de publication du moniteur par des régressions contrôlées ; puis la verticale batch/helpers sur vrai Docker. Préserver le FAIL G09 historique tant que les vrais workers n'ont pas démontré la deadline après perte du CLI/broker.
+- [ ] Gardien TTY, fencing/disarm D5, rétention/caps physiques et récupération métier restent obligatoires avant cutover. Le rappel Daybreak Blue attend une version stable et les scénarios réels d'arrêt/reprise de workers.
+- [ ] Traiter le fsync de l'arborescence exportée et du parent avant preuve de durabilité après panne, ainsi que la borne du travail d'énumération total incluant les entrées exclues ; la revue n'a pas qualifié ces deux garanties.
+
+### P1 ajouté le 31 octobre — SSO et documentation d'installation
+
+- [x] Enregistrer le [cahier produit canonique](../sso.md) et sa [déclinaison technique OIDC/PKCE](SSO_OIDC.md), sans annoncer une implémentation. Le suivi détaillé unique est la section [fonctionnalités demandées](#fonctionnalités-demandées--identité-sso-et-découverte-31-octobre) ; elle conserve les critères d'identité, traçabilité, découverte et qualification.
+
 ## Cycle actif : établir puis sécuriser la référence
 
 ### Lot P1 livré — authentification avant traitement HTTP
@@ -220,6 +238,21 @@ Contrat : endpoint déjà existant api/v1/workers/supervised-reservations, crede
 - [x] Vérifier sur vrai gateway/Store loopback acceptation/replay et refus Policy/Quota/replay, auth et Worker initial altéré conservés en erreur. BLC-04 reproduit par mutation technique d'un vrai DTO201 puis corrigé ; aucun moteur/modèle ou endpoint inventé. Les bornes sont implémentées et relues, sans campagne exhaustive de mutations HTTP revendiquée.
 - [x] Revue indépendante et validation au même gel applicatif que lifecycle, [preuves](evidence/2026-10-31/broker-lifecycle/README.md). L'identité/namespace attendus doivent encore être recoupés par le service avant effet ; le client seul ne fournit ni durabilité ni autorité de start.
 
+#### Plan initial du raccord — base c4c4d2a, 31 octobre, conservé pour historique
+
+État de cette liste au premier RED, avant les raccords et validations décrits dans le point de reprise en tête du document. Les cases ci-dessous ne sont pas le statut courant ; source/IPC/CLI sont maintenant raccordés, les qualifications runtime/TTY/D5 demeurent ouvertes.
+
+Le lot lifecycle est intégré et poussé, sources122 vérifiées après fast-forward. Le [contrat de raccord concret](BROKER_SUPERVISION.md#raccord-en-cours--interfaces-dimplémentation-du-31-octobre) fixe les propriétaires et interfaces du vrai service. Revue de constructibilité du child interne stop-only : direction approuvée conservée, aucun service OS installé ; Ready exige capacité réelle et disarm exige un témoin non ambigu, pas un Ok générique. Les notes privées d'implémentation ne remplacent pas ce contrat.
+
+- [x] Capturer RED comportement du vrai binaire : `broker --help` retourne exit2, sous-commande absente ; aucun service/moteur démarré.
+- [x] Capturer RED API locale absente puis premier transport sur vrais sockets Unix ; trois fonctions ciblées passent. La revue demande portabilité du répertoire temporaire et oracles discriminants avant clôture des preuves.
+- [ ] Finaliser transport/découverte/leases et thread writer borné, avec tests utiles et revue ; UID seul ne choisit aucun tenant.
+- [ ] Raccorder profils de contrôle privés, identité/protocole frais, commandes IPC et CLI réelles, sans paramètre de contrôle libre ni fallback de credential.
+- [ ] Raccorder stop child, capacité réservée, dernier garde et reprise aux mêmes cibles/échéances, sans déduire D5 d'un simple retour transport.
+- [ ] Raccorder le moteur batch et tous ses helpers, approbation/cancel/export séparés et reprise des pending, puis qualifier la mort CLI sur moteur réel. Aucun cutover par défaut avant batch/helpers/TTY qualifiés.
+
+Luna reste propriétaire des tests/Cargo ciblés ; aucun E2E global, modèle fournisseur ou frontend systématique. Les deux RED sont des preuves de manque actuel, pas une vulnérabilité ou une recette fonctionnelle. G09 reste FAIL et aucun gate global n'est fermé par cette préparation.
+
 ### Choix complémentaires du mainteneur — 30 octobre
 
 - [x] Enregistrer les trois moteurs Jev : réel, Rust sans modèle avec limites annoncées, et petit modèle local Jev-like Docker/Podman ; choix/configuration explicites, aucun remplacement du confinement.
@@ -249,6 +282,27 @@ Contrat : endpoint déjà existant api/v1/workers/supervised-reservations, crede
 - [x] Traiter les trois P0 reproduits par revue : schéma/trigger qui efface l'audit, corruption externe avant append, hardlinks multiprocessus/WAL divergents. Conserver les régressions et vérifier absence de mutation d'un schéma incompatible.
 - [x] Faire relire indépendamment les changements, traiter les défauts bloquants, puis format/Clippy/tests/build et preuves courantes : 109 PASS, 1 smoke ignoré, re-probes HTTP et deux processus PASS.
 - [x] Aligner la gouvernance persistante sur un vrai produit open source complet et soigné, sans réduction en MVP/V2 ; préserver les preuves historiques. Vingt documents relus, 93 liens/234 chemins vérifiés, copies synchronisées.
+
+## Fonctionnalités demandées — identité, SSO et découverte, 31 octobre
+
+Contrat approuvé : [identité individuelle, traçabilité complète et essai rapide](../sso.md). SSO facultatif pour l'opérateur, support et tests obligatoires pour le produit. ai-guard reste client OIDC ; aucun fournisseur d'identité métier nouveau ni exploitation Keycloak de production à prendre en charge. Les cinq minutes sont une cible de parcours, sans promesse. Ce lot documentaire ne livre aucun des comportements ci-dessous et ne remplace pas le chantier de supervision en cours.
+
+| Identifiant | Fonctionnalité à livrer | Critère d'acceptation |
+|---|---|---|
+| IDN-01 | Utilisateurs individuels en local et via fournisseur OIDC configurable | Identité locale ou `(iss, sub)` vérifiée, appartenances tenant et rôles côté Rust ; compatibilité des anciennes clés sans réattribution fictive |
+| SSO-01 | Clients publics Web et CLI, Authorization Code + PKCE S256 | Aucun secret client distribué ; connexion réelle, expiration/renouvellement, déconnexion/révocation, refus d'issuer/audience/signature/nonce et replay |
+| TRC-01 | Identités d'exécution et délégations authentifiées | Parent, initiateur, acteur, mission et droits liés durablement ; pas d'élévation, d'usurpation ou de jeton SSO humain dans un worker |
+| TRC-02 | Chaîne demandes/réponses visibles → outils/commandes → décisions → effets | Causalité conservée sous concurrence/reprise, messages masqués/bornés, couverture partielle explicite, audit obligatoire avant effet |
+| TRC-03 | Recherche et export de preuves par utilisateur/session/agent/commande | Navigation des parents et résultats selon les droits ; audit indépendant, chaîné et points de contrôle signés, vérification et limites documentées |
+| DEM-01 | Premier essai Compose avec une clé API du fournisseur choisi | Prérequis diagnostiqués, interface disponible et première exécution réelle auditée, sans autre clé fournisseur/SSO obligatoire ; temps et étapes manuelles mesurés |
+| DEM-02 | Profil Keycloak de découverte prêt à lancer | Version épinglée, realm/clients/PKCE préconfigurés, `admin/admin` pour Keycloak et `user/user` pour CLI/dashboard, loopback et activation explicite, aucune donnée existante remplacée |
+| DOC-01 | Documentation découverte et raccordement entreprise | Quick start, configuration, Compose/realm, commandes CLI, diagnostic, arrêt/reprise et migration cohérents avec les comportements réellement testés |
+
+- [ ] Définir les contrats typés de configuration et de principal, migrations et règles de rattachement/révocation dans l'authentification existante, sans changer les frontières de confiance ; inclure vérification cryptographique des tokens, découverte/JWKS bornés et PKCE/state/nonce/replay, puis revue indépendante.
+- [ ] Implémenter les parcours individuels, le connecteur OIDC et les délégations/audits avec les refus et états incomplets ; qualifier login/renouvellement/logout/révocation/SSE et CLI, aucun secret public-client ni token en URL ou élévation implicite runner.
+- [ ] Livrer le packaging et les configurations de découverte ; aucune commande future n'est présentée comme exécutable avant validation.
+- [ ] Exécuter la [matrice ciblée](TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier) avec vrai Keycloak, vrais Web/CLI et trace d'exécution, puis mesurer la cible d'essai rapide. Aucune qualification globale par fixture ou par simple démarrage du fournisseur.
+- [ ] Mettre à jour documentation et preuves au même gel, faire relire les changements de sécurité et traiter les écarts des gates G04/G06/G07/G08/G09/G12.
 
 ## Ordre des lots suivants
 

@@ -25,6 +25,15 @@ pub(crate) struct Entry {
     pub bytes: u64,
 }
 
+/// A bounded metadata inventory, not an admission of an entire namespace.
+/// Rejected names are counted but never returned or opened as regular files.
+pub(crate) struct Inventory {
+    pub entries: Vec<Entry>,
+    pub visited: u32,
+    pub rejected: u32,
+    pub incomplete: bool,
+}
+
 impl Directory {
     /// Synchronize this directory and all its retained, verified ancestors.
     /// `open_or_create` does not synchronize newly created ancestors. Keep the
@@ -277,6 +286,95 @@ impl Directory {
 
     /// Bounded metadata enumeration includes every temporary/partial entry.
     /// No regular-file inode is opened here, including unexpected entries.
+    /// Recovery may continue past an isolated unsafe entry. The strict business
+    /// enumeration below retains its original fail-fast behavior.
+    pub(crate) fn persistent_inventory(&self, limit: u32) -> Result<Inventory> {
+        self.revalidate()?;
+        // SAFETY: duplicate only a retained directory FD, never a database FD.
+        let fd = unsafe { libc::fcntl(self.0.file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error()).context("recovery directory unavailable");
+        }
+        // SAFETY: fdopendir takes ownership on success; fd is a directory.
+        let pointer = unsafe { libc::fdopendir(fd) };
+        if pointer.is_null() {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: failed fdopendir left this owned DIRECTORY descriptor open.
+            unsafe { libc::close(fd) };
+            return Err(error).context("recovery inventory unavailable");
+        }
+        let stream = DirectoryStream(pointer);
+        // SAFETY: live stream, serialized by the caller's exclusive journal lease.
+        unsafe { libc::rewinddir(stream.0) };
+        let mut inventory = Inventory {
+            entries: Vec::new(),
+            visited: 0,
+            rejected: 0,
+            incomplete: false,
+        };
+        loop {
+            clear_errno();
+            // SAFETY: live stream, errno cleared to distinguish EOF from error.
+            let next = unsafe { libc::readdir(stream.0) };
+            if next.is_null() {
+                inventory.incomplete |= std::io::Error::last_os_error().raw_os_error() != Some(0);
+                break;
+            }
+            // SAFETY: copy this valid dirent name before the next readdir.
+            let bytes = unsafe { std::ffi::CStr::from_ptr((*next).d_name.as_ptr()) }.to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            if inventory.visited >= limit {
+                inventory.incomplete = true;
+                break;
+            }
+            inventory.visited += 1;
+            let admitted = (|| -> Result<Entry> {
+                let name = std::str::from_utf8(bytes)
+                    .context("recovery name is unsupported")?
+                    .to_owned();
+                let encoded = persistent_name(&name)?;
+                let facts =
+                    named_metadata(self, &encoded)?.context("recovery entry disappeared")?;
+                let directory = facts.st_mode & libc::S_IFMT == libc::S_IFDIR;
+                let logical_bytes = if directory {
+                    let child = self
+                        .persistent_child(&name, false)?
+                        .context("recovery directory disappeared")?;
+                    ensure!(
+                        entry_identity(&child.0.file.metadata()?) == native_identity(&facts),
+                        "recovery directory changed"
+                    );
+                    0
+                } else {
+                    // Metadata and ACL inspection only: no file FD is opened.
+                    ensure!(
+                        self.private_entry(OsStr::new(&name))? == Some(native_identity(&facts)),
+                        "recovery entry changed"
+                    );
+                    u64::try_from(facts.st_size).context("recovery size is unsupported")?
+                };
+                Ok(Entry {
+                    name,
+                    directory,
+                    bytes: logical_bytes,
+                })
+            })();
+            match admitted {
+                Ok(entry) => inventory.entries.push(entry),
+                Err(_) => {
+                    inventory.rejected += 1;
+                    inventory.incomplete = true;
+                }
+            }
+        }
+        inventory.incomplete |= stream.close().is_err();
+        // A changed shared anchor invalidates all entries, unlike a bad sibling.
+        self.revalidate()?;
+        Ok(inventory)
+    }
+
     pub(crate) fn persistent_entries(&self, limit: u32) -> Result<Vec<Entry>> {
         self.revalidate()?;
         // SAFETY: retained directory FD; the new descriptor is independently

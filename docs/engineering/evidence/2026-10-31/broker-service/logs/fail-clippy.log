@@ -1,0 +1,139 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: casting to the same type is unnecessary (`u64` -> `u64`)
+   --> src/broker/local_ipc.rs:350:16
+    |
+350 |         inode: facts.st_ino as u64,
+    |                ^^^^^^^^^^^^^^^^^^^ help: try: `facts.st_ino`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#unnecessary_cast
+    = note: `-D clippy::unnecessary-cast` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::unnecessary_cast)]`
+
+error: this `if` statement can be collapsed
+   --> src/broker/service/jobs.rs:272:9
+    |
+272 | /         if !self.retain_pending {
+273 | |             if let Ok(mut commands) = self.job.cancel_commands.lock() {
+274 | |                 if commands.get(&self.command) == Some(&false) {
+275 | |                     commands.remove(&self.command);
+...   |
+278 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+272 ~         if !self.retain_pending
+273 ~             && let Ok(mut commands) = self.job.cancel_commands.lock() {
+274 |                 if commands.get(&self.command) == Some(&false) {
+275 |                     commands.remove(&self.command);
+276 |                 }
+277 ~             }
+    |
+
+error: this `if` statement can be collapsed
+   --> src/broker/service/jobs.rs:273:13
+    |
+273 | /             if let Ok(mut commands) = self.job.cancel_commands.lock() {
+274 | |                 if commands.get(&self.command) == Some(&false) {
+275 | |                     commands.remove(&self.command);
+276 | |                 }
+277 | |             }
+    | |_____________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+help: collapse nested if block
+    |
+273 ~             if let Ok(mut commands) = self.job.cancel_commands.lock()
+274 ~                 && commands.get(&self.command) == Some(&false) {
+275 |                     commands.remove(&self.command);
+276 ~                 }
+    |
+
+error: using `map_err` over `inspect_err`
+   --> src/broker/service/server.rs:888:46
+    |
+888 |         let executor = self.executor(writer).map_err(|code| {
+    |                                              ^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_inspect
+    = note: `-D clippy::manual-inspect` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::manual_inspect)]`
+help: try
+    |
+888 ~         let executor = self.executor(writer).inspect_err(|&code| {
+889 ~             job.result(Some(code));
+    |
+
+error: using `map_err` over `inspect_err`
+    --> src/broker/service/server.rs:1033:46
+     |
+1033 |         let executor = self.executor(writer).map_err(|code| {
+     |                                              ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_inspect
+help: try
+     |
+1033 ~         let executor = self.executor(writer).inspect_err(|&code| {
+1034 ~             job.result(Some(code));
+     |
+
+error: using `map_err` over `inspect_err`
+    --> src/broker/service/server.rs:1109:14
+     |
+1109 |             .map_err(|code| {
+     |              ^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#manual_inspect
+help: try
+     |
+1109 ~             .inspect_err(|&code| {
+1110 ~                 job.result(Some(code));
+     |
+
+error: variant name ends with the enum's name
+   --> src/broker/writer.rs:125:5
+    |
+125 | /     AppendCommand {
+126 | |         operation_id: Uuid,
+127 | |         command_id: Uuid,
+128 | |         request: Box<LocalCommandRequestV1>,
+129 | |         reply: Reply<LocalCommandReceiptV1>,
+130 | |     },
+    | |_____^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#enum_variant_names
+    = note: `-D clippy::enum-variant-names` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::enum_variant_names)]`
+
+error: unnecessary use of `clone` to create a slice from a reference
+   --> src/workspace/authorized.rs:400:58
+    |
+400 |         assert!(AuthorizedSource::open(&outside_project, &[allowed.clone()]).is_err());
+    |                                                          ^^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&allowed)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cloned_ref_to_slice_refs
+    = note: `-D clippy::cloned-ref-to-slice-refs` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::cloned_ref_to_slice_refs)]`
+
+error: unnecessary use of `clone` to create a slice from a reference
+   --> src/workspace/authorized.rs:402:54
+    |
+402 |         let grant = AuthorizedSource::open(&project, &[allowed.clone()]).unwrap();
+    |                                                      ^^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&allowed)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cloned_ref_to_slice_refs
+
+error: unnecessary use of `clone` to create a slice from a reference
+   --> src/workspace/authorized.rs:410:50
+    |
+410 |         assert!(AuthorizedSource::open(&project, &[allowed.clone()]).is_err());
+    |                                                  ^^^^^^^^^^^^^^^^^^ help: try: `std::slice::from_ref(&allowed)`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#cloned_ref_to_slice_refs
+
+error: could not compile `agentsandbox` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `agentsandbox` (lib test) due to 10 previous errors

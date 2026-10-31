@@ -1,0 +1,11 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.02s
+     Running tests/broker_local_ipc.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_local_ipc-89180edc9dce2163)
+
+running 3 tests
+test checked_listener_and_connector_exchange_bounded_strict_frames ... ok
+test listener_generations_never_unlink_prior_socket_and_tampered_record_is_refused ... ok
+test frame_reader_rejects_unknown_fields_oversize_and_total_timeout ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
