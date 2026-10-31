@@ -6,7 +6,7 @@ Les exigences détaillées G01–G12 sont conservées dans le [document racine](
 |---|---|---|
 | G01 | Contrats et matrice des plateformes/artefacts | BLOCKED : candidat, versions et environnements non qualifiés |
 | G02 | Confinement et isolation tenant | BLOCKED : identité/base API vérifiées ; confinement réel partiel Docker Desktop ARM64 PASS, recette workers A1/A2/B1 et autres moteurs/plateformes ouverts |
-| G03 | Copie/export sûrs et séparés par tenant | BLOCKED : régressions logicielles et copie/export réels Docker Desktop PASS ; isolation de volumes A/B et matrice complète manquantes |
+| G03 | Copie/export sûrs et séparés par tenant | BLOCKED : régressions logicielles et copie/export réels Docker Desktop PASS ; publication avec barrières fichiers/répertoires/parent et ascendance UID/modes/ACL vérifiée au gel du31octobre ; pannes stockage, autres UID, isolation de volumes A/B et matrice complète manquantes |
 | G04 | Autorisation, identité, quotas | BLOCKED : registre/quota/CAS/claim durables et parcours Docker ciblés PASS au gel209 ; reprise/crash sur moteur réel, recette3workers et durée autonome encore ouverts ; candidats d'audit à traiter |
 | G05 | Réseau, secrets et relais contrôlé | BLOCKED : entrée Rust relue et vérifiée sur Docker Desktop, restrictions runtime partiellement observées ; identité worker, grants et relais métier absents, cloud non qualifié |
 | G06 | Audit/usage durables, restauration, migrations | BLOCKED : schéma v2/ledger non facturable, migration/backup privés et gel327 PASS ; StoreStorage/locks/ACL vérifiés sur macOS et Linux dev, deux UID réels, maintenance QA avec591événements inchangés. Restauration sûre des claims, pannes et portée adverse/FS restante non qualifiées ; voir dossier SQLite |

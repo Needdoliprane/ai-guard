@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.21s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 5 tests
+test workspace::export_durability_tests::implicit_directory_and_depth_limits_precede_entry_creation ... ok
+test workspace::export_durability_tests::authorized_export_requires_durable_barriers_before_success ... ok
+test workspace::export_durability_tests::legacy_export_requires_durable_barriers_before_success ... ok
+test workspace::export_durability_tests::prepublication_barrier_faults_refuse_success_and_clean_only_staging ... ok
+test workspace::export_durability_tests::postpublication_barrier_faults_preserve_destination_and_refuse_retry ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 116 filtered out; finished in 0.11s
+

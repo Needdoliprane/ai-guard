@@ -143,6 +143,19 @@ impl AuthorizedSource {
         Ok(())
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn check_export_ancestry(&self) -> Result<()> {
+        self.revalidate()
+            .context("export parent path or ancestry changed; export refused")?;
+        for directory in &self.chain {
+            crate::control_fs::check_export_directory(&directory.file)?;
+        }
+        // Reopened paths are observations only. All creation/publication
+        // authority remains in the retained chain, even after a failed check.
+        self.revalidate()
+            .context("export parent path or ancestry changed during permission checks")
+    }
+
     pub(crate) fn prepare(
         &self,
         limits: Limits,
@@ -160,6 +173,76 @@ impl AuthorizedSource {
         // error too, without accepting or publishing a partial archive.
         self.revalidate()?;
         prepared
+    }
+}
+
+/// Export-only namespace capability. Keep this through publication and its
+/// durability barrier. Other UIDs must not be able to replace its entries;
+/// same-UID/root and storage-administrator mutation remains outside the policy.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) struct ExportAncestry {
+    anchor: AuthorizedSource,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl ExportAncestry {
+    /// Legacy path entry point: authorize a normalized, no-symlink chain once,
+    /// then retain it rather than resolving a publication authority again.
+    pub(super) fn open(parent: &Path) -> Result<Self> {
+        let parent =
+            crate::control_fs::absolute_path(parent).context("invalid export parent path")?;
+        let anchor = AuthorizedSource::open(&parent, std::slice::from_ref(&parent))
+            .context("cannot retain export parent ancestry")?;
+        let retained = Self { anchor };
+        retained.revalidate()?;
+        Ok(retained)
+    }
+
+    fn from_retained(anchor: &AuthorizedSource) -> Result<Self> {
+        anchor.check_export_ancestry()?;
+        let chain = anchor
+            .chain
+            .iter()
+            .map(|directory| {
+                Ok(RetainedDirectory {
+                    file: directory
+                        .file
+                        .try_clone()
+                        .context("cannot clone retained export ancestry descriptor")?,
+                    identity: directory.identity,
+                    name: directory.name.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let retained = Self {
+            anchor: AuthorizedSource {
+                path: anchor.path.clone(),
+                chain,
+                boundary_index: anchor.boundary_index,
+            },
+        };
+        retained.revalidate()?;
+        Ok(retained)
+    }
+
+    pub(super) fn revalidate(&self) -> Result<()> {
+        self.anchor.check_export_ancestry()
+    }
+
+    pub(super) fn try_clone_parent(&self) -> Result<File> {
+        self.revalidate()?;
+        self.anchor
+            .chain
+            .last()
+            .context("export ancestry has no parent")?
+            .file
+            .try_clone()
+            .context("cannot clone retained export parent descriptor")
+    }
+
+    /// Provenance for the caller, never a replacement creation authority.
+    pub(super) fn path(&self) -> &Path {
+        self.anchor.path()
     }
 }
 
@@ -247,8 +330,8 @@ impl AuthorizedExportParent {
             )?;
         }
         self.anchor
-            .revalidate()
-            .context("export parent path or ancestry changed")?;
+            .check_export_ancestry()
+            .context("export parent namespace is no longer safe; export refused")?;
         for source in &self.source_roots {
             for export in &self.export_roots {
                 require_physically_disjoint(source, export)?;
@@ -258,6 +341,11 @@ impl AuthorizedExportParent {
             require_physically_disjoint(source, &self.anchor)?;
         }
         Ok(())
+    }
+
+    pub(super) fn retained_ancestry(&self) -> Result<ExportAncestry> {
+        self.revalidate()?;
+        ExportAncestry::from_retained(&self.anchor)
     }
 
     pub(crate) fn extract<R: Read>(
@@ -275,7 +363,7 @@ impl AuthorizedExportParent {
         anchored_export::require_new_destination(&parent.file, name)?;
         // Clone the authorized capability, never reopen its pathname to choose
         // a new creation authority after policy validation.
-        let mut staging = anchored_export::Staging::new_from_parent(parent.file.try_clone()?)?;
+        let mut staging = anchored_export::Staging::new_with_ancestry(self.retained_ancestry()?)?;
         let manifest = read_workspace_archive(reader, limits, Some(&staging))?;
         self.revalidate()?;
         staging
@@ -356,7 +444,10 @@ fn open_directory(parent: &File, name: &OsStr) -> Result<File> {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod authorized_workspace_tests {
     use super::*;
-    use std::{fs, os::unix::fs::symlink};
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
 
     fn canonical(path: &Path) -> PathBuf {
         path.canonicalize().expect("fixture path exists")
@@ -367,6 +458,171 @@ mod authorized_workspace_tests {
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("README.txt"), b"synthetic project content\n").unwrap();
         project
+    }
+
+    struct ExportParentFixture {
+        _temp: tempfile::TempDir,
+        sources: PathBuf,
+        exports: PathBuf,
+        ancestor: PathBuf,
+        parent: PathBuf,
+    }
+
+    fn export_parent_fixture() -> ExportParentFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let base = canonical(temp.path());
+        let sources = base.join("sources");
+        // This ancestor is above the allowlisted export root: validating only
+        // the root and its descendants would leave this namespace mutable.
+        let ancestor = base.join("ancestor");
+        let exports = ancestor.join("exports");
+        let parent = exports.join("parent");
+        for path in [&sources, &ancestor, &exports, &parent] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        ExportParentFixture {
+            _temp: temp,
+            sources,
+            exports,
+            ancestor,
+            parent,
+        }
+    }
+
+    fn authorize_export_fixture(fixture: &ExportParentFixture) -> Result<AuthorizedExportParent> {
+        AuthorizedExportParent::open(
+            &fixture.parent,
+            std::slice::from_ref(&fixture.exports),
+            std::slice::from_ref(&fixture.sources),
+        )
+    }
+
+    fn assert_export_namespace_unchanged(
+        fixture: &ExportParentFixture,
+        parent_mode: u32,
+        ancestor_mode: u32,
+    ) {
+        assert_eq!(
+            fs::metadata(&fixture.parent).unwrap().permissions().mode() & 0o7777,
+            parent_mode,
+            "authorization must not repair the export parent's permissions"
+        );
+        assert_eq!(
+            fs::metadata(&fixture.ancestor)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            ancestor_mode,
+            "authorization must not repair an export ancestor's permissions"
+        );
+        assert_eq!(
+            fs::read_dir(&fixture.parent).unwrap().count(),
+            0,
+            "authorization must not create a staging or destination entry"
+        );
+        assert_eq!(fs::read_dir(&fixture.ancestor).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&fixture.exports).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn authorized_export_rejects_world_writable_parent_without_mutation() {
+        let fixture = export_parent_fixture();
+        fs::set_permissions(&fixture.parent, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let result = authorize_export_fixture(&fixture);
+
+        assert_export_namespace_unchanged(&fixture, 0o777, 0o755);
+        assert!(
+            result.is_err(),
+            "an allowlisted nonsticky parent writable by another UID must be refused"
+        );
+    }
+
+    fn reject_mutable_export_ancestor(mode: u32) {
+        let fixture = export_parent_fixture();
+        fs::set_permissions(&fixture.parent, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&fixture.ancestor, fs::Permissions::from_mode(mode)).unwrap();
+
+        let result = authorize_export_fixture(&fixture);
+
+        assert_export_namespace_unchanged(&fixture, 0o700, mode);
+        assert!(
+            result.is_err(),
+            "a private export parent does not make its mutable ancestor trustworthy"
+        );
+    }
+
+    #[test]
+    fn authorized_export_rejects_group_writable_ancestor_without_mutation() {
+        reject_mutable_export_ancestor(0o775);
+    }
+
+    #[test]
+    fn authorized_export_rejects_world_writable_ancestor_without_mutation() {
+        reject_mutable_export_ancestor(0o777);
+    }
+
+    #[test]
+    fn authorized_export_accepts_private_or_nonwritable_parent_without_mutation() {
+        for mode in [0o700, 0o755] {
+            let fixture = export_parent_fixture();
+            fs::set_permissions(&fixture.parent, fs::Permissions::from_mode(mode)).unwrap();
+
+            let export = authorize_export_fixture(&fixture)
+                .expect("a safely owned parent without group/other writes is allowed");
+            export.revalidate().unwrap();
+
+            assert_export_namespace_unchanged(&fixture, mode, 0o755);
+        }
+    }
+
+    #[test]
+    fn authorized_export_revalidate_rejects_new_parent_write_permissions() {
+        let fixture = export_parent_fixture();
+        let export = authorize_export_fixture(&fixture).unwrap();
+        fs::set_permissions(&fixture.parent, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let result = export.revalidate();
+
+        assert_export_namespace_unchanged(&fixture, 0o777, 0o755);
+        assert!(
+            result.is_err(),
+            "a retained inode must lose export authority when its parent permissions become unsafe"
+        );
+    }
+
+    #[test]
+    fn authorized_export_revalidate_rejects_new_ancestor_write_permissions() {
+        let fixture = export_parent_fixture();
+        let export = authorize_export_fixture(&fixture).unwrap();
+        fs::set_permissions(&fixture.ancestor, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let result = export.revalidate();
+
+        assert_export_namespace_unchanged(&fixture, 0o755, 0o775);
+        assert!(
+            result.is_err(),
+            "an unchanged ancestry mapping must still reject newly mutable ancestors"
+        );
+    }
+
+    #[test]
+    fn authorized_export_does_not_require_trusted_source_permissions() {
+        let fixture = export_parent_fixture();
+        fs::set_permissions(&fixture.sources, fs::Permissions::from_mode(0o777)).unwrap();
+
+        let export = authorize_export_fixture(&fixture)
+            .expect("untrusted source content does not grant mutation of the export namespace");
+        export.revalidate().unwrap();
+
+        assert_export_namespace_unchanged(&fixture, 0o755, 0o755);
+        assert_eq!(
+            fs::metadata(&fixture.sources).unwrap().permissions().mode() & 0o7777,
+            0o777,
+            "export policy must not repair or impose private-control modes on source roots"
+        );
     }
 
     // Mirror the existing workspace archive fixture writer so unsafe paths

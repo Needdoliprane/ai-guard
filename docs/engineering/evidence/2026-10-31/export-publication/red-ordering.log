@@ -1,0 +1,24 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.59s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 2 tests
+
+thread 'workspace::export_durability_tests::legacy_export_requires_durable_barriers_before_success' (5893256) panicked at src/workspace/export_durability_tests.rs:323:5:
+export returned Ok without required durable barriers: ["FileSynced(root.txt)", "FileSynced(implicit/a/tool.bin)", "DirectorySynced(implicit/a)", "DirectorySynced(implicit)", "DirectorySynced(empty)", "StagingSynced", "ParentSynced"]; actual trace: [Observation { stage: FileFlushed, relative: "root.txt", facts: Some(Facts { device: 16777229, inode: 106328816, mode: 384, directory: false }) }, Observation { stage: FileModeApplied, relative: "root.txt", facts: Some(Facts { device: 16777229, inode: 106328816, mode: 420, directory: false }) }, Observation { stage: FileFlushed, relative: "implicit/a/tool.bin", facts: Some(Facts { device: 16777229, inode: 106328819, mode: 384, directory: false }) }, Observation { stage: FileModeApplied, relative: "implicit/a/tool.bin", facts: Some(Facts { device: 16777229, inode: 106328819, mode: 493, directory: false }) }, Observation { stage: RenamedExclusive, relative: "legacy-export", facts: Some(Facts { device: 16777229, inode: 106328815, mode: 448, directory: true }) }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test workspace::export_durability_tests::legacy_export_requires_durable_barriers_before_success ... FAILED
+
+thread 'workspace::export_durability_tests::authorized_export_requires_durable_barriers_before_success' (5893255) panicked at src/workspace/export_durability_tests.rs:323:5:
+export returned Ok without required durable barriers: ["FileSynced(root.txt)", "FileSynced(implicit/a/tool.bin)", "DirectorySynced(implicit/a)", "DirectorySynced(implicit)", "DirectorySynced(empty)", "StagingSynced", "ParentSynced"]; actual trace: [Observation { stage: FileFlushed, relative: "root.txt", facts: Some(Facts { device: 16777229, inode: 106328822, mode: 384, directory: false }) }, Observation { stage: FileModeApplied, relative: "root.txt", facts: Some(Facts { device: 16777229, inode: 106328822, mode: 420, directory: false }) }, Observation { stage: FileFlushed, relative: "implicit/a/tool.bin", facts: Some(Facts { device: 16777229, inode: 106328825, mode: 384, directory: false }) }, Observation { stage: FileModeApplied, relative: "implicit/a/tool.bin", facts: Some(Facts { device: 16777229, inode: 106328825, mode: 493, directory: false }) }, Observation { stage: RenamedExclusive, relative: "authorized-export", facts: Some(Facts { device: 16777229, inode: 106328821, mode: 448, directory: true }) }]
+test workspace::export_durability_tests::authorized_export_requires_durable_barriers_before_success ... FAILED
+
+failures:
+
+failures:
+    workspace::export_durability_tests::authorized_export_requires_durable_barriers_before_success
+    workspace::export_durability_tests::legacy_export_requires_durable_barriers_before_success
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 116 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

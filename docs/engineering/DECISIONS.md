@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 31 octobre — intégrité et durabilité de la publication d'export
+
+Correction retenue dans les frontières existantes : l'autorisation d'un parent d'export inclut ses ancêtres, leurs propriétaires, modes, ACL et filesystem supporté. Le namespace doit appartenir à root ou au compte de contrôle et interdire les modifications par d'autres UID ; l'exception existante des répertoires sticky appartenant à root reste contrôlée. Une allowlist seule ne garantit pas ces droits. Les capacités FD sont conservées et revalidées pendant l'export. Le contrôle ne répare jamais les permissions d'un chemin existant et ne propage pas cette politique aux sources non fiables.
+
+Avant de retourner un succès, synchroniser les fichiers après leurs données et modes finaux, les répertoires créés des feuilles vers la racine de staging, puis le parent après le renommage exclusif. Les répertoires implicites comptent dans une borne explicite. Le fait d'avoir renommé et la durabilité acquise sont distincts : toute erreur après le renommage conserve la destination et produit un résultat inconnu à réconcilier. Aucun remplacement, adoption ou nettoyage automatique de cette destination au retry. L'événement de succès reste postérieur à ces barrières ; la fenêtre avant sa naissance durable dans l'outbox ne devient pas une transaction globale filesystem/audit.
+
+Les régressions utilisent le vrai filesystem et des fautes de contrôle après de vraies opérations ; elles ne qualifient pas une panne électrique, des erreurs matérielles de disque ou un adversaire root/même UID. La durabilité préalable des ancêtres externes et la matrice de stockage restent à qualifier. Cette décision ne clôture aucun gate ; les preuves et limitations du lot sont consignées après vérification.
+
 ## 31 octobre — identité individuelle, SSO client et découverte préconfigurée
 
 Choix explicitement confirmés par le mainteneur : traçabilité complète de l'utilisateur aux délégations/actions/effets, SSO facultatif mais testé, fournisseur configurable, client public OIDC Authorization Code + PKCE S256 sans secret client distribué. ai-guard intègre le SSO du client et ne devient pas fournisseur d'identité ; le mode local nominatif hors ligne conserve le même contrat d'autorisation/audit. Identité humaine, identités d'exécution et authentifications Codex/Claude restent distinctes. Les restrictions de rôle et de tenant sont appliquées côté Rust ; les traces déclarées ne deviennent pas des identités vérifiées.

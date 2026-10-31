@@ -123,7 +123,7 @@ AIGUARD_EXPORT="/chemin/absolu/vers/un-parent-existant/resultat-neuf"
   --output "$AIGUARD_EXPORT"
 ```
 
-Remplacer ces deux espaces réservés. Le parent de sortie doit exister ; `resultat-neuf` doit être **absent et extérieur au projet original**. L'export exige une session terminale durable et réutilise son runtime enregistré ; il ne prend pas `--runtime`. Il ne remplace aucun fichier existant.
+Remplacer ces deux espaces réservés. Le parent de sortie doit exister ; `resultat-neuf` doit être **absent et extérieur au projet original**. Le parent et ses ancêtres doivent appartenir à root ou au compte de contrôle, sur un filesystem local pris en charge, sans écriture par d'autres utilisateurs ; les ACL sont vérifiées et l'exception des répertoires sticky appartenant à root reste contrôlée. En cas de refus, choisir un autre parent sûr : ai-guard ne modifie pas ses permissions. L'export exige une session terminale durable et réutilise son runtime enregistré ; il ne prend pas `--runtime`. Il ne remplace aucun fichier existant.
 
 Vérifier que le nouveau fichier existe dans l'export et reste absent de l'original :
 
@@ -134,7 +134,9 @@ test ! -e "$AIGUARD_PROJECT/ai-guard-example.txt"
 
 Chaque vérification doit rendre le code zéro. Ouvrir ensuite le résultat dans votre éditeur et examiner les changements avant toute intégration manuelle. ai-guard constate les différences de contenu par empreintes ; il ne fournit pas encore un diff Git détaillé. `.git`, les dépendances/caches courants et les noms sensibles connus sont exclus de l'import. L'export n'est donc pas une copie d'archive exhaustive de l'original.
 
-Liens symboliques/physiques, fichiers spéciaux et chemins ambigus sont refusés. Les bornes sont **20 000 entrées**, **128 Mio** de contenu cumulé et **32 Mio** par fichier. Une dépendance créée dans le worker avec des liens peut empêcher le scan ou l'export complet : conserver le volume et suivre le diagnostic, sans interpréter l'échec comme zéro changement. La liste de noms exclus n'est pas un détecteur universel de secrets.
+Liens symboliques/physiques, fichiers spéciaux et chemins ambigus sont refusés. Les bornes sont **20 000 entrées**, **128 Mio** de contenu cumulé et **32 Mio** par fichier. Le scan d'archive et l'export refusent aussi plus de **20 000 répertoires**, parents implicites compris, ou un chemin de plus de **64 composants**. Un ancien volume plus profond peut donc être refusé à cette étape. Une dépendance créée dans le worker avec des liens peut empêcher le scan ou l'export complet : conserver le volume et suivre le diagnostic, sans interpréter l'échec comme zéro changement. La liste de noms exclus n'est pas un détecteur universel de secrets.
+
+L'export attend les synchronisations des fichiers, de l'arborescence et du parent avant son succès. Une erreur après renommage peut laisser une destination déjà publiée : conserver cette destination et le volume, examiner le diagnostic et réconcilier le résultat ; ne pas supprimer ou remplacer les fichiers pour forcer une nouvelle tentative. Cette vérification logicielle ne constitue pas une qualification de panne électrique du stockage. [Preuves et limites](engineering/evidence/2026-10-31/export-publication/README.md).
 
 ## 7. Suivre, arrêter et reprendre
 

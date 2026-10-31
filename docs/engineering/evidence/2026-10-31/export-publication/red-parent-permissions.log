@@ -1,0 +1,43 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 10 tests
+
+thread 'workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_parent_without_mutation' (5894083) panicked at src/workspace/authorized.rs:449:9:
+an allowlisted nonsticky parent writable by another UID must be refused
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_symlink_parent_and_missing_source_root_for_disjointness ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_parent_without_mutation ... FAILED
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_traversal_and_symlink_archives_with_rollback ... ok
+
+thread 'workspace::authorized::authorized_workspace_tests::authorized_export_rejects_group_writable_ancestor_without_mutation' (5894079) panicked at src/workspace/authorized.rs:463:9:
+a private export parent does not make its mutable ancestor trustworthy
+
+thread 'workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_ancestor_without_mutation' (5894082) panicked at src/workspace/authorized.rs:463:9:
+a private export parent does not make its mutable ancestor trustworthy
+test workspace::authorized::authorized_workspace_tests::authorized_export_does_not_require_trusted_source_permissions ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_group_writable_ancestor_without_mutation ... FAILED
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_ancestor_without_mutation ... FAILED
+
+thread 'workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_parent_write_permissions' (5894086) panicked at src/workspace/authorized.rs:502:9:
+a retained inode must lose export authority when its parent permissions become unsafe
+
+thread 'workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_ancestor_write_permissions' (5894085) panicked at src/workspace/authorized.rs:517:9:
+an unchanged ancestry mapping must still reject newly mutable ancestors
+test workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_parent_write_permissions ... FAILED
+test workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_ancestor_write_permissions ... FAILED
+test workspace::authorized::authorized_workspace_tests::authorized_export_accepts_private_or_nonwritable_parent_without_mutation ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_restores_archive_after_source_removal_and_never_overwrites_destination ... ok
+
+failures:
+
+failures:
+    workspace::authorized::authorized_workspace_tests::authorized_export_rejects_group_writable_ancestor_without_mutation
+    workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_ancestor_without_mutation
+    workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_parent_without_mutation
+    workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_ancestor_write_permissions
+    workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_parent_write_permissions
+
+test result: FAILED. 5 passed; 5 failed; 0 ignored; 0 measured; 108 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

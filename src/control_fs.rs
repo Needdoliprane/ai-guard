@@ -556,6 +556,16 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Check an export namespace component without imposing private-control modes
+/// or changing existing permissions. Callers retain and validate the complete
+/// ancestry; this does not authorize a new pathname or distrust source content.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn check_export_directory(file: &File) -> Result<()> {
+    check_directory(file, false).map(|_| ()).context(
+        "unsafe export parent or ancestor; choose a root/effective-UID-owned path without group/other modification and with supported filesystem/ACL permissions; existing paths are never repaired",
+    )
+}
+
 fn check_directory(file: &File, private: bool) -> Result<Metadata> {
     let facts = file
         .metadata()

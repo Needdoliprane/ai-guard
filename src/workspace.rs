@@ -15,6 +15,8 @@ mod authorized;
 pub(crate) use authorized::AuthorizedExportParent;
 #[cfg(unix)]
 pub(crate) use authorized::AuthorizedSource;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod export_durability_tests;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -37,6 +39,25 @@ pub struct Fingerprint {
     pub bytes: u64,
 }
 pub type Manifest = BTreeMap<String, Fingerprint>;
+
+/// Publication happened, but its durable result could not be confirmed. The
+/// destination is preserved and must be reconciled before another export.
+#[derive(Debug)]
+pub(crate) struct ExportPublicationUnknown;
+
+impl std::fmt::Display for ExportPublicationUnknown {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(
+            "export publication outcome is unknown; destination preserved; reconcile before retry",
+        )
+    }
+}
+impl std::error::Error for ExportPublicationUnknown {}
+
+// Bound both explicit and implicit directory depth before creating an entry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const MAX_EXPORT_DEPTH: usize = 64;
+
 pub struct PreparedWorkspace {
     pub archive: tempfile::NamedTempFile,
     pub manifest: Manifest,
@@ -427,6 +448,7 @@ fn read_workspace_archive<R: Read>(
 ) -> Result<Manifest> {
     let mut archive = tar::Archive::new(reader.take(limits.max_archive_bytes() as u64));
     let mut seen = BTreeMap::new();
+    let mut directories = BTreeSet::new();
     let mut manifest = Manifest::new();
     let mut total = 0_u64;
     let mut entries = 0_usize;
@@ -446,6 +468,25 @@ fn read_workspace_archive<R: Read>(
         entries += 1;
         if entries > limits.max_files {
             bail!("export exceeds the entry limit");
+        }
+        if path.components().count() > MAX_EXPORT_DEPTH {
+            bail!("export exceeds the path depth limit");
+        }
+        let directory = if kind.is_dir() {
+            path.as_path()
+        } else {
+            path.parent().unwrap_or_else(|| Path::new(""))
+        };
+        // A single tar header can imply many parents. Preflight the complete
+        // entry before its first mkdir, for scanner/extractor parity.
+        for parent in directory
+            .ancestors()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            if !directories.contains(parent) && directories.len() >= limits.max_files {
+                bail!("export exceeds the directory limit including implicit parents");
+            }
+            directories.insert(parent.to_path_buf());
         }
         if seen.insert(path.clone(), kind.is_dir()).is_some() {
             bail!("duplicate archive path: {}", path.display());
@@ -512,7 +553,27 @@ fn read_workspace_archive<R: Read>(
         if let Some(file) = &mut file {
             use std::os::unix::fs::PermissionsExt;
             file.flush()?;
+            #[cfg(test)]
+            export_durability_tests::record(
+                export_durability_tests::Stage::FileFlushed,
+                &path,
+                file,
+            );
             file.set_permissions(fs::Permissions::from_mode(mode))?;
+            #[cfg(test)]
+            export_durability_tests::record(
+                export_durability_tests::Stage::FileModeApplied,
+                &path,
+                file,
+            );
+            file.sync_all()
+                .context("cannot synchronize exported file data and final mode")?;
+            #[cfg(test)]
+            export_durability_tests::after_barrier(
+                export_durability_tests::Stage::FileSynced,
+                &path,
+                file,
+            )?;
         }
         manifest.insert(
             path.to_string_lossy().into_owned(),
@@ -537,8 +598,10 @@ pub fn extract_workspace<R: Read>(
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod anchored_export {
+    use super::authorized::ExportAncestry;
     use super::*;
     use std::{
+        cell::RefCell,
         ffi::{CStr, CString, OsStr},
         os::{
             fd::{AsRawFd, FromRawFd},
@@ -546,9 +609,29 @@ mod anchored_export {
         },
     };
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct DirectoryIdentity {
+        device: u64,
+        inode: u64,
+    }
+    impl DirectoryIdentity {
+        fn of(file: &File) -> Result<Self> {
+            let metadata = file.metadata()?;
+            if !metadata.is_dir() {
+                bail!("export directory changed type");
+            }
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        }
+    }
+
     pub(super) struct Staging {
+        ancestry: ExportAncestry,
         parent: File,
         directory: File,
+        directories: RefCell<BTreeMap<PathBuf, DirectoryIdentity>>,
         name: CString,
         published: bool,
     }
@@ -576,25 +659,6 @@ mod anchored_export {
         }
         Ok(unsafe { File::from_raw_fd(fd) })
     }
-    fn create_directory_beneath(root: &File, path: &Path) -> Result<File> {
-        let mut directory = root.try_clone()?;
-        for component in path.components() {
-            let Component::Normal(part) = component else {
-                bail!("invalid relative export directory");
-            };
-            let name = CString::new(part.as_bytes())?;
-            let result = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) };
-            if result != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::EEXIST) {
-                    return Err(error.into());
-                }
-            }
-            directory = open_child_directory(&directory, &name)?;
-        }
-        Ok(directory)
-    }
-
     fn target_name(target: &OsStr) -> Result<CString> {
         let mut components = Path::new(target).components();
         if !matches!(components.next(), Some(Component::Normal(name)) if name == target)
@@ -632,47 +696,126 @@ mod anchored_export {
 
     impl Staging {
         pub(super) fn new(parent: &Path) -> Result<Self> {
-            let parent = open_beneath(&File::open("/")?, parent.strip_prefix("/")?)?;
-            Self::new_from_parent(parent)
+            Self::new_with_ancestry(ExportAncestry::open(parent)?)
         }
 
-        pub(super) fn new_from_parent(parent: File) -> Result<Self> {
-            // Validate before the first mkdir; this FD is the creation and
-            // publication authority for the complete staging lifetime.
-            if !parent.metadata()?.is_dir() {
-                bail!("export parent is not a directory");
-            }
+        pub(super) fn new_with_ancestry(ancestry: ExportAncestry) -> Result<Self> {
+            // Keep the checked ancestry, not only its last FD, until publication
+            // and its parent barrier have both been confirmed.
+            let parent = ancestry.try_clone_parent()?;
             let name = CString::new(format!(".agentsandbox-export-{}", uuid::Uuid::new_v4()))?;
             if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
                 return Err(std::io::Error::last_os_error())
                     .context("cannot create private export staging");
             }
-            let directory = match open_child_directory(&parent, &name) {
-                Ok(directory) => directory,
-                Err(error) => {
-                    // The mkdir succeeded, so this invocation owns this entry.
-                    unsafe {
-                        libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR);
-                    }
-                    return Err(error);
-                }
-            };
+            // If opening fails, there is no retained staging identity: leave
+            // the entry rather than unlinking a potentially replaced name.
+            let directory = open_child_directory(&parent, &name)?;
             Ok(Self {
+                ancestry,
                 parent,
                 directory,
+                directories: RefCell::new(BTreeMap::new()),
                 name,
                 published: false,
             })
         }
+
+        fn create_directory_beneath(&self, path: &Path) -> Result<File> {
+            let mut directory = self.directory.try_clone()?;
+            let mut relative = PathBuf::new();
+            for component in path.components() {
+                let Component::Normal(part) = component else {
+                    bail!("invalid relative export directory");
+                };
+                relative.push(part);
+                let expected = self.directories.borrow().get(&relative).copied();
+                let name = CString::new(part.as_bytes())?;
+                if expected.is_none()
+                    && unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) } != 0
+                {
+                    return Err(std::io::Error::last_os_error())
+                        .context("cannot create an exclusive export directory");
+                }
+                directory = open_child_directory(&directory, &name)?;
+                let identity = DirectoryIdentity::of(&directory)?;
+                if expected.is_some_and(|expected| expected != identity) {
+                    bail!("export directory identity changed");
+                }
+                if expected.is_none() {
+                    self.directories
+                        .borrow_mut()
+                        .insert(relative.clone(), identity);
+                    #[cfg(test)]
+                    export_durability_tests::record(
+                        export_durability_tests::Stage::DirectoryCreated,
+                        &relative,
+                        &directory,
+                    );
+                }
+            }
+            Ok(directory)
+        }
+
+        fn reopen_directory(&self, path: &Path) -> Result<File> {
+            let mut directory = self.directory.try_clone()?;
+            let mut relative = PathBuf::new();
+            for component in path.components() {
+                let Component::Normal(part) = component else {
+                    bail!("invalid tracked export directory");
+                };
+                relative.push(part);
+                let expected = self
+                    .directories
+                    .borrow()
+                    .get(&relative)
+                    .copied()
+                    .context("untracked export directory refused")?;
+                let name = CString::new(part.as_bytes())?;
+                directory = open_child_directory(&directory, &name)?;
+                if DirectoryIdentity::of(&directory)? != expected {
+                    bail!("tracked export directory identity changed");
+                }
+            }
+            Ok(directory)
+        }
+
+        fn synchronize_directories(&self) -> Result<()> {
+            // Tracked paths are bounded by the archive preflight. Reversing
+            // their prefix order visits children before parents, without
+            // enumerating the filesystem or retaining one FD per directory.
+            let paths: Vec<_> = self.directories.borrow().keys().rev().cloned().collect();
+            for path in paths {
+                let directory = self.reopen_directory(&path)?;
+                directory
+                    .sync_all()
+                    .context("cannot synchronize export directory")?;
+                #[cfg(test)]
+                export_durability_tests::after_barrier(
+                    export_durability_tests::Stage::DirectorySynced,
+                    &path,
+                    &directory,
+                )?;
+            }
+            self.directory
+                .sync_all()
+                .context("cannot synchronize export staging")?;
+            #[cfg(test)]
+            export_durability_tests::after_barrier(
+                export_durability_tests::Stage::StagingSynced,
+                Path::new(""),
+                &self.directory,
+            )?;
+            Ok(())
+        }
+
         pub(super) fn create_directory(&self, path: &Path) -> Result<()> {
-            create_directory_beneath(&self.directory, path)?;
+            self.create_directory_beneath(path)?;
             Ok(())
         }
         pub(super) fn create_file(&self, path: &Path) -> Result<File> {
-            let directory = create_directory_beneath(
-                &self.directory,
-                path.parent().unwrap_or_else(|| Path::new("")),
-            )?;
+            let directory =
+                self.create_directory_beneath(path.parent().unwrap_or_else(|| Path::new("")))?;
             let name = CString::new(
                 path.file_name()
                     .context("empty export filename")?
@@ -698,14 +841,19 @@ mod anchored_export {
         }
         pub(super) fn publish(&mut self, target: &OsStr, parent_path: &Path) -> Result<()> {
             let target = target_name(target)?;
-            let current = open_beneath(&File::open("/")?, parent_path.strip_prefix("/")?)
-                .context("export parent path changed while reading the archive")?;
-            if !same_directory(&self.parent, &current)? {
-                bail!("export parent identity changed while reading the archive");
+            if parent_path != self.ancestry.path() {
+                bail!("export parent provenance changed");
             }
+            self.ancestry.revalidate()?;
             let current_staging = open_child_directory(&self.parent, &self.name)?;
             if !same_directory(&self.directory, &current_staging)? {
                 bail!("export staging identity changed");
+            }
+            self.synchronize_directories()?;
+            self.ancestry.revalidate()?;
+            let current_staging = open_child_directory(&self.parent, &self.name)?;
+            if !same_directory(&self.directory, &current_staging)? {
+                bail!("export staging identity changed before publication");
             }
             // The identity check detects relocation for the caller; the dirfd
             // rename remains safe even if the pathname changes after that check.
@@ -733,8 +881,33 @@ mod anchored_export {
                 return Err(std::io::Error::last_os_error())
                     .context("atomic publication refused to replace the destination");
             }
+            // Ownership changes at the successful kernel rename, before any
+            // fallible barrier or test hook. Drop must never clear this tree.
             self.published = true;
-            Ok(())
+            let confirm = || -> Result<()> {
+                #[cfg(test)]
+                export_durability_tests::after_barrier(
+                    export_durability_tests::Stage::RenamedExclusive,
+                    Path::new(OsStr::from_bytes(target.as_bytes())),
+                    &self.directory,
+                )?;
+                self.parent
+                    .sync_all()
+                    .context("cannot synchronize export publication parent")?;
+                #[cfg(test)]
+                export_durability_tests::after_barrier(
+                    export_durability_tests::Stage::ParentSynced,
+                    Path::new(""),
+                    &self.parent,
+                )?;
+                self.ancestry.revalidate()?;
+                let destination = open_child_directory(&self.parent, &target)?;
+                if !same_directory(&self.directory, &destination)? {
+                    bail!("published export identity changed");
+                }
+                Ok(())
+            };
+            confirm().context(ExportPublicationUnknown)
         }
     }
     struct DirectoryStream(*mut libc::DIR);
@@ -788,13 +961,24 @@ mod anchored_export {
             }
             // Never let a stale path-based TempDir destructor follow a replaced
             // parent into the original project. Cleanup uses the held fds too.
-            if clear_directory(&self.directory).is_err() {
+            // If ancestry rights/mappings became unsafe, preserve the staging
+            // rather than unlink names in a namespace we can no longer trust.
+            if self.ancestry.revalidate().is_err() {
                 return;
             }
             if open_child_directory(&self.parent, &self.name)
                 .ok()
                 .and_then(|current| same_directory(&self.directory, &current).ok())
                 != Some(true)
+            {
+                return;
+            }
+            if clear_directory(&self.directory).is_err()
+                || self.ancestry.revalidate().is_err()
+                || open_child_directory(&self.parent, &self.name)
+                    .ok()
+                    .and_then(|current| same_directory(&self.directory, &current).ok())
+                    != Some(true)
             {
                 return;
             }

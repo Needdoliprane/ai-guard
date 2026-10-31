@@ -1,0 +1,18 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 11 tests
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_symlink_parent_and_missing_source_root_for_disjointness ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_group_writable_ancestor_without_mutation ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_ancestor_without_mutation ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_does_not_require_trusted_source_permissions ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_world_writable_parent_without_mutation ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_accepts_private_or_nonwritable_parent_without_mutation ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_parent_write_permissions ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_revalidate_rejects_new_ancestor_write_permissions ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_source_requires_allowlisted_root_and_rejects_relocated_symlink_mapping ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_rejects_traversal_and_symlink_archives_with_rollback ... ok
+test workspace::authorized::authorized_workspace_tests::authorized_export_restores_archive_after_source_removal_and_never_overwrites_destination ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 110 filtered out; finished in 0.04s
+
