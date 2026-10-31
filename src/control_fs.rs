@@ -7,6 +7,26 @@
 //! process-local capabilities and must never be serialized.
 #![cfg(unix)]
 
+// The non-test expansion is exactly the supplied body. The test expansion
+// executes that same body once and returns its original result unchanged.
+macro_rules! measure_control_fs {
+    ($operation:ident, $path:expr, $bytes:expr, $body:block) => {{
+        #[cfg(test)]
+        {
+            crate::control_fs::cost_probe::measure(
+                crate::control_fs::cost_probe::Operation::$operation,
+                $path,
+                || $body,
+                $bytes,
+            )
+        }
+        #[cfg(not(test))]
+        $body
+    }};
+}
+
+#[cfg(test)]
+pub(crate) mod cost_probe;
 pub(crate) mod persistent;
 
 use anyhow::{Context, Result, ensure};
@@ -95,12 +115,14 @@ struct Anchor {
 
 impl Anchor {
     fn revalidate(&self) -> Result<()> {
-        let current = walk(&self.path, false, self.private)?;
-        ensure!(
-            current.chain == self.chain,
-            "control directory path identity changed; reopen the intended private configuration"
-        );
-        Ok(())
+        measure_control_fs!(DirectoryRevalidate, &self.path, |_| 0, {
+            let current = walk(&self.path, false, self.private)?;
+            ensure!(
+                current.chain == self.chain,
+                "control directory path identity changed; reopen the intended private configuration"
+            );
+            Ok(())
+        })
     }
 }
 
@@ -246,11 +268,13 @@ impl Directory {
     }
 
     pub(crate) fn sync(&self) -> Result<()> {
-        self.revalidate()?;
-        self.0
-            .file
-            .sync_all()
+        measure_control_fs!(DirectorySync, self.path(), |_| 0, {
+            self.revalidate()?;
+            measure_control_fs!(DirectorySyncAll, self.path(), |_| 0, {
+                self.0.file.sync_all()
+            })
             .context("private directory synchronization failed")
+        })
     }
 
     /// Clone the already validated descriptor for other trusted control code.

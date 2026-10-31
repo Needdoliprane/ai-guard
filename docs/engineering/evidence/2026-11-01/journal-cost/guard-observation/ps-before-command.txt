@@ -1,0 +1,1 @@
+/bin/ps -p 23300 -o pid,ppid,lstart,etime,time,%cpu,rss,comm

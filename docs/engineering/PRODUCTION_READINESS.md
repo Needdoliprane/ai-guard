@@ -1,5 +1,7 @@
 # Gates de qualification production
 
+Complément du1er novembre : [mesure du journal et observation passive](evidence/2026-11-01/journal-cost/README.md),7 fonctions ciblées et checks stricts/release PASS, revue traitée,160 sources et binaires vérifiés. Cette instrumentation cfg(test) conserve les opérations applicatives ; elle ne corrige ni ne qualifie le runtime. Huit échantillons debug aux heads0/8 ne reproduisent pas H10, ne mesurent ni capacité100 ni performance CPU release ; FS exact NOT_RECORDED. Le coût propre d'un gardien est observé, sans coût global ni permission de disarm. G09 reste FAIL, D5 ouvert et0/12 gates clos ; aucun résultat ci-dessous n'est élargi.
+
 Les exigences détaillées G01–G12 sont conservées dans le [document racine](../../PRODUCTION_READINESS.md). Ses anciennes affirmations d'implémentation multi-client ont été contredites par l'inventaire du checkout ; elles ne constituent pas des preuves. L'[état courant](CURRENT_STATE.md) et les [résultats exécutés](VALIDATION.md) font autorité sur l'avancement.
 
 | Gate | Exigence | État de qualification courant |

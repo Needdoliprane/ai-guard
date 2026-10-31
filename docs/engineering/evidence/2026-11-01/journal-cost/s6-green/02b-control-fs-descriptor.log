@@ -1,0 +1,11 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-7d5a613baeb2a72e)
+
+running 4 tests
+test control_fs::descriptor_tests::darwin_ownership_ignoring_mounts_are_refused_even_for_local_apfs_hfs ... ok
+test control_fs::descriptor_tests::cloned_directory_retains_verified_identity_and_lives_after_the_handle ... ok
+test control_fs::descriptor_tests::cloning_a_directory_refuses_a_changed_path_identity ... ok
+test control_fs::descriptor_tests::source_containment_compares_directory_identities_without_requiring_private_project_modes ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 150 filtered out; finished in 0.05s
+

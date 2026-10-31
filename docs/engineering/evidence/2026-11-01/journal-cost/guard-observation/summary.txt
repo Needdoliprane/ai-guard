@@ -1,0 +1,5 @@
+Status: ESTABLISHED for PID attribution and a bounded passive process snapshot.
+The corrected find -type s enumeration found exactly /private/tmp/br-euAmXg/b/enforcer/endpoints/i-a5818dc2b2df49fc/s. The initial and final lsof projections both identify one process: PID 23300, PPID 1, comm agentsandbox; FD 9 is the specified owner lock and FD 14 is the specified socket. Attribution is unambiguous for these two FDs.
+Two ps snapshots were separated by a 20-second sleep. Parent cumulative TIME changed from 23:16.55 to 23:21.15, a 4.60-second increase; parent RSS was 7664 KiB in both snapshots. Parent lifetime %CPU changed 20.1 to 11.5 and is not an interval measurement.
+No direct child was present in the first PPID scan. The second found child PID 73225 (comm ./docker), with cumulative TIME 0:00.04 and RSS 26160 KiB at that snapshot. No argv or environment was collected.
+Limits: short-lived children between snapshots may be missed; parent CPU is not total runtime/control cost; ps %CPU is not an exact interval rate. No process, socket, volume, or QA data was changed.

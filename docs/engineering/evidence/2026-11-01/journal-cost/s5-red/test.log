@@ -1,0 +1,22 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 13s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-7d5a613baeb2a72e)
+
+running 1 test
+test broker::journal::tests::measure_durable_journal_cost_without_runtime ... durable_journal_cost {"caller_ns":38062625,"cpu_release":"NOT_RUN","head_after":0,"head_before":0,"outcome":"ok","snapshot":{"outstanding":0,"samples":[{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"read","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"read_to_end","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"revalidate","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"read_at","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"directory_revalidate","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"directory_sync","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"directory_sync_all","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"file_sync","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"file_sync_all","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"create","succeeded":0},{"abandoned":0,"bytes":0,"calls":0,"elapsed_ns":0,"failed":0,"operation":"publish","succeeded":0}]},"span_durations":"inclusive_and_overlapping","stage":"load_first","sync_all_spans":"exact_std_call"}
+
+thread 'broker::journal::tests::measure_durable_journal_cost_without_runtime' (27032615) panicked at src/broker/journal/tests.rs:544:13:
+assertion `left == right` failed: real load must observe every file synchronization
+  left: 0
+ right: 6
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    broker::journal::tests::measure_durable_journal_cost_without_runtime
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 153 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `--lib`

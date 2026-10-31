@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-7d5a613baeb2a72e)
+
+running 1 test
+test broker::journal::tests::full_writer_rechecks_binding_after_real_publication_before_ack ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 153 filtered out; finished in 1.56s
+

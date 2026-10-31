@@ -1,0 +1,2 @@
+CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target CARGO_INCREMENTAL=0 TMPDIR=<private-capture-fixtures> cargo test --locked --lib broker::journal::tests::measure_durable_journal_cost_without_runtime -- --exact --ignored --nocapture --test-threads=1
+TMPDIR is inside this private capture's mode-0700 fixtures directory; its concrete path is not copied into the summary.

@@ -133,99 +133,133 @@ impl Directory {
         max: u64,
         exclusions: &[PrivateEntryIdentity],
     ) -> Result<Option<PrivateFile>> {
-        ensure!(
-            max <= MAX_PRIVATE_FILE_BYTES,
-            "persistent input bound is unsupported"
-        );
-        let encoded = persistent_name(name)?;
-        let Some(identity) = self.private_entry(OsStr::new(name))? else {
-            return Ok(None);
-        };
-        // Reject an aliased SQLite inode BEFORE opening/closing an FD that could
-        // release the process's POSIX locks on that inode.
-        ensure!(
-            !exclusions.contains(&identity),
-            "protected file identity in persistent namespace"
-        );
-        let mut file = open_file(&self.0.file, &encoded)?;
-        let before = check_private_file(&file)?;
-        ensure!(
-            identity == entry_identity(&before),
-            "persistent file changed during opening"
-        );
-        ensure!(before.len() <= max, "persistent file exceeds its bound");
-        let mut bytes = Vec::new();
-        Read::by_ref(&mut file)
-            .take(max + 1)
-            .read_to_end(&mut bytes)
-            .context("persistent bounded read failed")?;
-        ensure!(
-            bytes.len() as u64 <= max,
-            "persistent file grew beyond its bound"
-        );
-        let facts = check_private_file(&file)?;
-        ensure!(
-            same_file_state(&before, &facts),
-            "persistent file changed during reading"
-        );
-        let result = PrivateFile(Arc::new(FileInner {
-            file,
-            path: self.path().join(name),
-            parent: self.0.clone(),
-            name: name.into(),
-            facts,
-            digest: hex::encode(Sha256::digest(&bytes)),
-            bytes,
-            remove_on_drop: false,
-        }));
-        result.persistent_revalidate()?;
-        Ok(Some(result))
+        measure_control_fs!(
+            Read,
+            self.path(),
+            |result: &Result<Option<PrivateFile>>| {
+                match result {
+                    Ok(Some(file)) => file.bytes().len() as u64,
+                    _ => 0,
+                }
+            },
+            {
+                ensure!(
+                    max <= MAX_PRIVATE_FILE_BYTES,
+                    "persistent input bound is unsupported"
+                );
+                let encoded = persistent_name(name)?;
+                let Some(identity) = self.private_entry(OsStr::new(name))? else {
+                    return Ok(None);
+                };
+                // Reject an aliased SQLite inode BEFORE opening/closing an FD that could
+                // release the process's POSIX locks on that inode.
+                ensure!(
+                    !exclusions.contains(&identity),
+                    "protected file identity in persistent namespace"
+                );
+                let mut file = open_file(&self.0.file, &encoded)?;
+                let before = check_private_file(&file)?;
+                ensure!(
+                    identity == entry_identity(&before),
+                    "persistent file changed during opening"
+                );
+                ensure!(before.len() <= max, "persistent file exceeds its bound");
+                let mut bytes = Vec::new();
+                measure_control_fs!(
+                    ReadToEnd,
+                    self.path(),
+                    |result: &std::io::Result<usize>| {
+                        result.as_ref().map_or(0, |count| *count as u64)
+                    },
+                    {
+                        Read::by_ref(&mut file)
+                            .take(max + 1)
+                            .read_to_end(&mut bytes)
+                    }
+                )
+                .context("persistent bounded read failed")?;
+                ensure!(
+                    bytes.len() as u64 <= max,
+                    "persistent file grew beyond its bound"
+                );
+                let facts = check_private_file(&file)?;
+                ensure!(
+                    same_file_state(&before, &facts),
+                    "persistent file changed during reading"
+                );
+                let result = PrivateFile(Arc::new(FileInner {
+                    file,
+                    path: self.path().join(name),
+                    parent: self.0.clone(),
+                    name: name.into(),
+                    facts,
+                    digest: hex::encode(Sha256::digest(&bytes)),
+                    bytes,
+                    remove_on_drop: false,
+                }));
+                result.persistent_revalidate()?;
+                Ok(Some(result))
+            }
+        )
     }
 
     /// Exclusive immutable record, with partial failures retained. Caller must
     /// synchronize this file AND its parent before acknowledging it.
     pub(crate) fn persistent_create(&self, name: &str, bytes: &[u8]) -> Result<PrivateFile> {
-        ensure!(
-            bytes.len() as u64 <= MAX_PRIVATE_FILE_BYTES,
-            "persistent record exceeds its bound"
-        );
-        let encoded = persistent_name(name)?;
-        self.revalidate()?;
-        if self.private_entry(OsStr::new(name))?.is_some() {
-            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
-        }
-        // SAFETY: checked component and retained private parent. O_EXCL never
-        // opens, truncates or repairs an existing inode, including a symlink.
-        let fd = unsafe {
-            libc::openat(
-                self.0.file.as_raw_fd(),
-                encoded.as_ptr(),
-                libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | FILE_FLAGS,
-                0o600,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error())
-                .context("persistent exclusive creation failed");
-        }
-        // SAFETY: successful openat transfers exactly one owned descriptor.
-        let mut file = unsafe { File::from_raw_fd(fd) };
-        check_private_file(&file)?;
-        file.write_all(bytes)
-            .context("persistent record write failed")?;
-        let facts = check_private_file(&file)?;
-        let result = PrivateFile(Arc::new(FileInner {
-            file,
-            path: self.path().join(name),
-            parent: self.0.clone(),
-            name: name.into(),
-            facts,
-            digest: hex::encode(Sha256::digest(bytes)),
-            bytes: bytes.to_vec(),
-            remove_on_drop: false,
-        }));
-        result.persistent_revalidate()?;
-        Ok(result)
+        measure_control_fs!(
+            Create,
+            self.path(),
+            |result: &Result<PrivateFile>| {
+                if result.is_ok() {
+                    bytes.len() as u64
+                } else {
+                    0
+                }
+            },
+            {
+                ensure!(
+                    bytes.len() as u64 <= MAX_PRIVATE_FILE_BYTES,
+                    "persistent record exceeds its bound"
+                );
+                let encoded = persistent_name(name)?;
+                self.revalidate()?;
+                if self.private_entry(OsStr::new(name))?.is_some() {
+                    return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
+                }
+                // SAFETY: checked component and retained private parent. O_EXCL never
+                // opens, truncates or repairs an existing inode, including a symlink.
+                let fd = unsafe {
+                    libc::openat(
+                        self.0.file.as_raw_fd(),
+                        encoded.as_ptr(),
+                        libc::O_RDWR | libc::O_CREAT | libc::O_EXCL | FILE_FLAGS,
+                        0o600,
+                    )
+                };
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("persistent exclusive creation failed");
+                }
+                // SAFETY: successful openat transfers exactly one owned descriptor.
+                let mut file = unsafe { File::from_raw_fd(fd) };
+                check_private_file(&file)?;
+                file.write_all(bytes)
+                    .context("persistent record write failed")?;
+                let facts = check_private_file(&file)?;
+                let result = PrivateFile(Arc::new(FileInner {
+                    file,
+                    path: self.path().join(name),
+                    parent: self.0.clone(),
+                    name: name.into(),
+                    facts,
+                    digest: hex::encode(Sha256::digest(bytes)),
+                    bytes: bytes.to_vec(),
+                    remove_on_drop: false,
+                }));
+                result.persistent_revalidate()?;
+                Ok(result)
+            }
+        )
     }
 
     /// Replace only the journal pointer after a retained-identity comparison.
@@ -237,51 +271,53 @@ impl Directory {
         current: &PrivateFile,
         target: &str,
     ) -> Result<()> {
-        ensure!(
-            target == "current.json" && temporary.0.name == OsStr::new("current-next.json"),
-            "unsupported persistent publication name"
-        );
-        let target = persistent_name(target)?;
-        let source = child_name(&temporary.0.name)?;
-        self.revalidate()?;
-        ensure!(
-            temporary.0.parent.chain == self.0.chain
-                && current.0.parent.chain == self.0.chain
-                && temporary.0.parent.path == self.0.path
-                && current.0.parent.path == self.0.path
-                && current.0.name == OsStr::new("current.json")
-                && entry_identity(&temporary.0.facts) != entry_identity(&current.0.facts),
-            "persistent publication parent or identity mismatch"
-        );
-        temporary.persistent_sync()?;
-        // Final CAS check before replacement: held old FD and metadata-only
-        // pathname inspection, without opening another FD to the old inode.
-        current.persistent_revalidate()?;
-        // SAFETY: checked names in the same retained private parent. No other
-        // business record is eligible for this narrowly scoped replacement.
-        if unsafe {
-            libc::renameat(
-                self.0.file.as_raw_fd(),
-                source.as_ptr(),
-                self.0.file.as_raw_fd(),
-                target.as_ptr(),
-            )
-        } != 0
-        {
-            return Err(std::io::Error::last_os_error())
-                .context("persistent pointer publication failed");
-        }
-        let expected = entry_identity(&temporary.0.facts);
-        ensure!(
-            self.private_entry(OsStr::new("current.json"))? == Some(expected),
-            "published persistent pointer identity changed"
-        );
-        self.sync()?;
-        ensure!(
-            self.private_entry(OsStr::new("current.json"))? == Some(expected),
-            "durable persistent pointer identity changed"
-        );
-        Ok(())
+        measure_control_fs!(Publish, self.path(), |_| 0, {
+            ensure!(
+                target == "current.json" && temporary.0.name == OsStr::new("current-next.json"),
+                "unsupported persistent publication name"
+            );
+            let target = persistent_name(target)?;
+            let source = child_name(&temporary.0.name)?;
+            self.revalidate()?;
+            ensure!(
+                temporary.0.parent.chain == self.0.chain
+                    && current.0.parent.chain == self.0.chain
+                    && temporary.0.parent.path == self.0.path
+                    && current.0.parent.path == self.0.path
+                    && current.0.name == OsStr::new("current.json")
+                    && entry_identity(&temporary.0.facts) != entry_identity(&current.0.facts),
+                "persistent publication parent or identity mismatch"
+            );
+            temporary.persistent_sync()?;
+            // Final CAS check before replacement: held old FD and metadata-only
+            // pathname inspection, without opening another FD to the old inode.
+            current.persistent_revalidate()?;
+            // SAFETY: checked names in the same retained private parent. No other
+            // business record is eligible for this narrowly scoped replacement.
+            if unsafe {
+                libc::renameat(
+                    self.0.file.as_raw_fd(),
+                    source.as_ptr(),
+                    self.0.file.as_raw_fd(),
+                    target.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error())
+                    .context("persistent pointer publication failed");
+            }
+            let expected = entry_identity(&temporary.0.facts);
+            ensure!(
+                self.private_entry(OsStr::new("current.json"))? == Some(expected),
+                "published persistent pointer identity changed"
+            );
+            self.sync()?;
+            ensure!(
+                self.private_entry(OsStr::new("current.json"))? == Some(expected),
+                "durable persistent pointer identity changed"
+            );
+            Ok(())
+        })
     }
 
     /// Bounded metadata enumeration includes every temporary/partial entry.
@@ -581,56 +617,76 @@ impl PrivateFile {
     /// Retained FD, exact cache and metadata-only name validation. Deliberately
     /// never opens a second descriptor to the source pathname.
     pub(crate) fn persistent_revalidate(&self) -> Result<()> {
-        self.0.parent.revalidate()?;
-        let before = check_private_file(&self.0.file)?;
-        ensure!(
-            same_file_state(&before, &self.0.facts),
-            "persistent retained file changed"
-        );
-        ensure!(
-            self.0.bytes.len() as u64 == before.len()
-                && before.len() <= MAX_PRIVATE_FILE_BYTES
-                && self.0.digest == hex::encode(Sha256::digest(&self.0.bytes)),
-            "persistent cached bytes changed"
-        );
-        let mut digest = Sha256::new();
-        let mut offset = 0usize;
-        let mut buffer = [0u8; 65536];
-        while offset < self.0.bytes.len() {
-            let wanted = buffer.len().min(self.0.bytes.len() - offset);
-            let count = match self.0.file.read_at(&mut buffer[..wanted], offset as u64) {
-                Ok(count) => count,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error).context("persistent retained read failed"),
-            };
-            ensure!(count != 0, "persistent retained file was truncated");
-            digest.update(&buffer[..count]);
-            offset += count;
-        }
-        ensure!(
-            self.0.digest == hex::encode(digest.finalize()),
-            "persistent retained contents changed"
-        );
-        let after = check_private_file(&self.0.file)?;
-        ensure!(
-            same_file_state(&before, &after),
-            "persistent file changed during retained reading"
-        );
-        let parent = Directory(self.0.parent.clone());
-        ensure!(
-            parent.private_entry(&self.0.name)? == Some(entry_identity(&after)),
-            "persistent pathname identity changed"
-        );
-        Ok(())
+        measure_control_fs!(
+            Revalidate,
+            &self.0.path,
+            |result: &Result<()>| {
+                if result.is_ok() {
+                    self.0.bytes.len() as u64
+                } else {
+                    0
+                }
+            },
+            {
+                self.0.parent.revalidate()?;
+                let before = check_private_file(&self.0.file)?;
+                ensure!(
+                    same_file_state(&before, &self.0.facts),
+                    "persistent retained file changed"
+                );
+                ensure!(
+                    self.0.bytes.len() as u64 == before.len()
+                        && before.len() <= MAX_PRIVATE_FILE_BYTES
+                        && self.0.digest == hex::encode(Sha256::digest(&self.0.bytes)),
+                    "persistent cached bytes changed"
+                );
+                let mut digest = Sha256::new();
+                let mut offset = 0usize;
+                let mut buffer = [0u8; 65536];
+                while offset < self.0.bytes.len() {
+                    let wanted = buffer.len().min(self.0.bytes.len() - offset);
+                    let count = match measure_control_fs!(
+                        ReadAt,
+                        &self.0.path,
+                        |result: &std::io::Result<usize>| {
+                            result.as_ref().map_or(0, |count| *count as u64)
+                        },
+                        { self.0.file.read_at(&mut buffer[..wanted], offset as u64) }
+                    ) {
+                        Ok(count) => count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error).context("persistent retained read failed"),
+                    };
+                    ensure!(count != 0, "persistent retained file was truncated");
+                    digest.update(&buffer[..count]);
+                    offset += count;
+                }
+                ensure!(
+                    self.0.digest == hex::encode(digest.finalize()),
+                    "persistent retained contents changed"
+                );
+                let after = check_private_file(&self.0.file)?;
+                ensure!(
+                    same_file_state(&before, &after),
+                    "persistent file changed during retained reading"
+                );
+                let parent = Directory(self.0.parent.clone());
+                ensure!(
+                    parent.private_entry(&self.0.name)? == Some(entry_identity(&after)),
+                    "persistent pathname identity changed"
+                );
+                Ok(())
+            }
+        )
     }
 
     pub(crate) fn persistent_sync(&self) -> Result<()> {
-        self.persistent_revalidate()?;
-        self.0
-            .file
-            .sync_all()
-            .context("persistent file synchronization failed")?;
-        self.persistent_revalidate()
+        measure_control_fs!(FileSync, &self.0.path, |_| 0, {
+            self.persistent_revalidate()?;
+            measure_control_fs!(FileSyncAll, &self.0.path, |_| 0, { self.0.file.sync_all() })
+                .context("persistent file synchronization failed")?;
+            self.persistent_revalidate()
+        })
     }
 
     /// Clones share Arc/File: dropping one clone never explicitly unlocks.

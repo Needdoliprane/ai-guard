@@ -1,0 +1,2 @@
+  PID  PPID STARTED                       ELAPSED      TIME  %CPU    RSS COMM
+23300     1 Sat Oct 31 22:32:40 2026     01:47:07  23:16.55  20.1   7664 /Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/agentsandbox

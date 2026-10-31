@@ -1,0 +1,6 @@
+Status: expected RED, RC 101; compilation succeeded, then the exact test assertion failed.
+Observed: Writer.load completed with head_before=0 and head_after=0; the closed diagnostic JSON was emitted before the assertion; file_sync.succeeded observed=0 versus expected=6 (`real load must observe every file synchronization`). Test duration after launch was 0.17 s; `cpu_release` remains NOT_RUN.
+TMPDIR points inside this private capture's mode-0700 fixtures directory; the concrete retained journal path is intentionally excluded from summary/metadata.
+No other test, build, engine/provider action, or source edit was performed.
+source_files_verified=160
+test_rc=101

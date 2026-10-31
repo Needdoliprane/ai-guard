@@ -1,0 +1,28 @@
+Socket enumeration (find does not follow symlinks by default):
+/usr/bin/find /private/tmp/br-euAmXg/b/enforcer/endpoints -type s -print
+RC 0; output is socket-paths.txt.
+
+Initial attribution, restricted to the lock and the single discovered socket:
+/usr/sbin/lsof -nP -F pRcnf -- /private/tmp/br-euAmXg/b/enforcer/.owner.lock /private/tmp/br-euAmXg/b/enforcer/endpoints/i-a5818dc2b2df49fc/s
+RC 0; output is lsof-before.txt.
+
+Direct-child lookup before snapshot 1:
+/bin/ps -axo pid=,ppid= | /usr/bin/awk -v parent=23300 '$2 == parent {print $1}'
+Selected snapshot 1:
+/bin/ps -p 23300 -o pid,ppid,lstart,etime,time,%cpu,rss,comm
+RC 0; output is ps-before.txt; children-before.txt is empty.
+
+Sampling gap:
+/bin/sleep 20
+
+Direct-child lookup before snapshot 2:
+/bin/ps -axo pid=,ppid= | /usr/bin/awk -v parent=23300 '$2 == parent {print $1}'
+Selected snapshot 2:
+/bin/ps -p 23300,73225 -o pid,ppid,lstart,etime,time,%cpu,rss,comm
+RC 0; output is ps-after.txt.
+
+Final attribution:
+/usr/sbin/lsof -nP -F pRcnf -- /private/tmp/br-euAmXg/b/enforcer/.owner.lock /private/tmp/br-euAmXg/b/enforcer/endpoints/i-a5818dc2b2df49fc/s
+RC 0; output is lsof-after.txt.
+
+No socket connection, Docker command, signal, process start/stop, or file-content read was performed.

@@ -1,0 +1,4 @@
+Status: NOT_ESTABLISHED.
+Socket enumeration under /private/tmp/br-euAmXg/b/enforcer/endpoints found zero socket entries.
+Per instruction, no lsof attribution, process snapshots, socket connection, or retry was performed because the required socket resource was absent.
+No process, volume, or QA data was changed.

@@ -110,6 +110,20 @@ H10 expire RC101 après600,04s, sans `broker.batch.failure` visible. La lecture 
 
 ## Cycle actif : établir puis sécuriser la référence
 
+### Mesure active du coût durable — 1er novembre, base b32711d
+
+Besoin : obtenir une mesure du chemin Journal/Writer avant toute optimisation ou répétition équivalente de H10. La lecture source trouve des relectures/validations/synchronisations répétées ; elle ne prouve pas leur coût ni la cause de H10. Les résultats n'autorisent aucun retrait de slot, suppression de barrière ou extension de deadline.
+
+Architecture inchangée : instrumentation **uniquement `cfg(test)`**, vraie copie neuve de journal privé, Writer réel et mêmes fonctions d'IO. Aucun gateway, enforcer ou moteur nouveau. Les corps applicatifs conservent opérations, ordre, erreurs, CAS, floors et synchronisations. Un collecteur de mesure activé explicitement traverse le thread Writer ; ses compteurs fermés n'enregistrent aucun contenu, path, hash, identité ou credential. Distinguer temps inclusifs imbriqués et durée exacte des appels `File::sync_all`, sans nommer un syscall non observé.
+
+- [x] Diagnostic source : cartographier Full load/status, pré/post de mutation, relecture post-reçu et publication du pointeur ; choisir les fixtures existantes plutôt qu'une simulation du stockage.
+- [x] Agent Core, propriétaire exclusif de `src/control_fs.rs`, `src/control_fs/persistent.rs`, nouveau `src/control_fs/cost_probe.rs` et ajout ciblé à `src/broker/journal/tests.rs` : probes compilés seulement pour les tests, jamais activés implicitement ; réutiliser `intent_for`/`open` et un journal réel sans binding secret.
+- [x] Ajouter une seule mesure opt-in ignorée par défaut, `broker::journal::tests::measure_durable_journal_cost_without_runtime`, lancée seule : deux lectures Writer au même head, status et mutation lifecycle acquittée aux heads0 et8. Vérifier head/chaîne/reçu et compteurs, sans seuil arbitraire de rapidité ni conclusion sur capacité100. Les temps d'installation du journal restent séparés des opérations mesurées.
+- [x] Luna : exécuter la cible exacte une fois après gel et conserver commandes, versions, RC, mesures et manifeste avant/après ; sélectionner les régressions FS pertinentes, fmt/Clippy/build, sans E2E général, modèle ou moteur. Une erreur/timeout conserve les preuves et n'autorise aucun restart automatique du même essai.
+- [x] Observation parallèle passive du gardien H10 retenu : attribution PID par FD de verrou et socket exacts, puis deux snapshots scalaires20s, sans argv/contenu/IPC/signal ; absence ou ambiguïté n'est pas zéro coût. Conserver les biais de collecte des enfants et ne pas en déduire un coût par Arm.
+- [x] Revue indépendante des probes, chemins inchangés et interprétation traitée ;7 fonctions et fmt/Clippy/release RC0,160 sources et binaires vérifiés. [Mesures, erreurs de harnais et portée](evidence/2026-11-01/journal-cost/README.md). D5 et G09 restent ouverts.
+- [ ] Prochain critère : mesurer le graphe plus riche et isoler le coût restant avant optimisation ; qualifier un profil de transport/configuration permettant un témoin vivant de fin normale lié à l'émetteur exact, puis terminal/ACK et retrait durable. La [recherche primaire Docker](evidence/2026-11-01/journal-cost/d5-normal-completion-source.md) est conditionnelle, sans attestation des binaires ni témoin construit ; ne pas modifier les configurations/credentials existants ou retirer d'anciens slots depuis cette note.
+
 ### Lot P1 livré — authentification avant traitement HTTP
 
 Besoin constaté le 30 octobre dans `src/api.rs` : les extracteurs JSON/query s'exécutent avant l'autorisation placée dans le corps du handler ; une requête non authentifiée peut donc imposer lecture/désérialisation. Le balayage des tenants recalcule également les digests de la même entrée et des credentials configurés à chaque comparaison. Il s'agit de défauts à reproduire et corriger, pas d'une reproduction rétroactive du rapport de sécurité figé.

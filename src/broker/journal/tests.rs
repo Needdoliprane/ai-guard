@@ -455,6 +455,282 @@ fn submit() -> &'static [u8] {
     br#"{"action":"crash-test"}"#
 }
 
+/// A manual diagnostic, not a latency threshold or a runtime qualification.
+/// Measures real FS calls without changing the normal Journal/Writer path.
+/// The 600-second timeout is cooperative: synchronous filesystem calls may
+/// delay observation, and caller cancellation never cancels accepted work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opt-in bounded Journal/Writer cost measurement; no runtime or provider"]
+async fn measure_durable_journal_cost_without_runtime() {
+    use crate::{
+        broker::{
+            checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
+            journal::{JournalStatusV1, RevisionRefV1},
+            lifecycle::BrokerCheckpointV3,
+            writer::WriterClient,
+        },
+        control_fs::cost_probe::Operation,
+    };
+
+    tokio::time::timeout(Duration::from_secs(600), async {
+        let temporary = tempfile::Builder::new()
+            .prefix("ai-guard-journal-cost-")
+            .tempdir()
+            .unwrap_or_else(|_| panic!("cost fixture private directory unavailable"));
+        // This entirely new private fixture survives a failed/unknown sample.
+        // Its path remains in memory and is never part of a diagnostic.
+        let root = temporary
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| panic!("cost fixture root resolution failed"));
+        let _retained = temporary.keep();
+        let journal = open(&root);
+        let operation_id = operation();
+        let intent = intent_for(operation_id);
+        let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+        let ReserveResult::New(ticket) = journal.reserve(operation_id, submit()).unwrap() else {
+            panic!("cost fixture requires a fresh reservation");
+        };
+        let accepted = journal
+            .accept(ticket, &intent, BindingInputs::None, &initial)
+            .unwrap();
+        assert_eq!(accepted.head().revision(), 0);
+        let mut head = accepted.head().clone();
+        let lifecycle = BrokerCheckpointV3::new(
+            BrokerCheckpointV2::new(
+                initial,
+                SupervisionCheckpointV1::new(
+                    journal.scope().control_namespace_uuid(),
+                    vec![],
+                    vec![],
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+            vec![],
+        )
+        .unwrap();
+        // Only this diagnostic fixture uses a 60-second caller wait. This does
+        // not cancel an accepted actor command; product defaults are intact.
+        let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(60)).unwrap();
+
+        for (target, load_syncs, advance_syncs) in [(0, 6, 16), (8, 14, 32)] {
+            // Setup uses the normal writer path and actual acknowledged chain.
+            // It is outside every sample.
+            while head.revision() < target {
+                let receipt = writer
+                    .advance_lifecycle(operation_id, head.clone(), lifecycle.clone())
+                    .await
+                    .unwrap();
+                assert!(
+                    receipt.operation_id() == operation_id,
+                    "receipt operation changed"
+                );
+                assert_eq!(receipt.head().revision(), head.revision() + 1);
+                head = receipt.head().clone();
+            }
+            assert_eq!(head.revision(), target);
+
+            let (loaded, first) = measure_writer_cost(
+                &root,
+                "load_first",
+                target,
+                writer.load(operation_id),
+                |job| job.as_ref().map(|job| job.head().revision()),
+            )
+            .await;
+            let loaded = loaded.expect("accepted cost fixture must remain present");
+            assert!(loaded.head() == &head, "load must confirm the current head");
+            // The original RED observed zero calls here after a real load.
+            // The head-zero oracle remains six real file synchronizations.
+            assert_eq!(
+                first.metric(Operation::FileSync).calls,
+                load_syncs,
+                "real load must observe every file synchronization"
+            );
+            verify_cost_snapshot(&first, load_syncs, 3);
+
+            let (loaded, second) = measure_writer_cost(
+                &root,
+                "load_second",
+                target,
+                writer.load(operation_id),
+                |job| job.as_ref().map(|job| job.head().revision()),
+            )
+            .await;
+            assert!(
+                loaded.unwrap().head() == &head,
+                "repeated load changed head"
+            );
+            verify_cost_snapshot(&second, load_syncs, 3);
+
+            let (status, status_cost) = measure_writer_cost(
+                &root,
+                "status",
+                target,
+                writer.status(operation_id),
+                |status| match status {
+                    Some(JournalStatusV1::Accepted(job)) => Some(job.head().revision()),
+                    _ => None,
+                },
+            )
+            .await;
+            assert!(
+                matches!(status, Some(JournalStatusV1::Accepted(job)) if job.head() == &head),
+                "status must confirm the same accepted head"
+            );
+            verify_cost_snapshot(&status_cost, load_syncs, 3);
+
+            let before = head.clone();
+            let (receipt, advanced) = measure_writer_cost(
+                &root,
+                "advance_lifecycle",
+                target,
+                writer.advance_lifecycle(operation_id, before.clone(), lifecycle.clone()),
+                |receipt| Some(receipt.head().revision()),
+            )
+            .await;
+            assert!(
+                receipt.operation_id() == operation_id,
+                "receipt operation changed"
+            );
+            assert_eq!(receipt.head().revision(), target + 1);
+            verify_cost_snapshot(&advanced, advance_syncs, 9);
+            assert_eq!(advanced.metric(Operation::Create).calls, 2);
+            assert_eq!(advanced.metric(Operation::Publish).calls, 1);
+            head = receipt.head().clone();
+
+            // These functional checks are deliberately outside timed samples.
+            let confirmed = journal.load(operation_id).unwrap().unwrap();
+            assert!(
+                confirmed.head() == &head,
+                "ACK must identify the strict confirmed head"
+            );
+            assert!(confirmed.broker_checkpoint_v3().is_some());
+            let mut wrong_hash = "f".repeat(64);
+            if wrong_hash == head.hash() {
+                wrong_hash = "e".repeat(64);
+            }
+            let wrong_cas = RevisionRefV1::new(head.revision(), &wrong_hash).unwrap();
+            assert!(
+                wrong_cas.hash() != head.hash(),
+                "CAS fixture requires a different hash"
+            );
+            assert!(
+                matches!(
+                    writer
+                        .advance_lifecycle(operation_id, wrong_cas, lifecycle.clone(),)
+                        .await,
+                    Err(JournalError::Conflict)
+                ),
+                "wrong CAS must be refused"
+            );
+            assert!(
+                journal.load(operation_id).unwrap().unwrap().head() == &head,
+                "refused CAS must preserve the acknowledged chain"
+            );
+        }
+    })
+    .await
+    .expect("durable cost measurement exceeded its cooperative 600-second observation bound");
+}
+
+async fn measure_writer_cost<T>(
+    root: &Path,
+    stage: &'static str,
+    head_before: u64,
+    call: impl std::future::Future<Output = JournalResult<T>>,
+    head_after: impl FnOnce(&T) -> Option<u64>,
+) -> (T, crate::control_fs::cost_probe::Snapshot) {
+    use crate::control_fs::cost_probe::Measurement;
+
+    let measurement = Measurement::start(root).unwrap();
+    let started = Instant::now();
+    let result = call.await;
+    let caller_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let snapshot = measurement.finish().unwrap();
+    let observed_head = result.as_ref().ok().and_then(head_after);
+    let outcome = match &result {
+        Ok(_) => "ok",
+        Err(JournalError::InvalidInput) => "invalid_input",
+        Err(JournalError::UnsupportedVersion) => "unsupported_version",
+        Err(JournalError::TooLarge) => "too_large",
+        Err(JournalError::LimitExceeded) => "limit_exceeded",
+        Err(JournalError::Busy) => "busy",
+        Err(JournalError::Conflict) => "conflict",
+        Err(JournalError::Interrupted) => "interrupted",
+        Err(JournalError::Corrupt) => "corrupt",
+        Err(JournalError::UnsafeFilesystem) => "unsafe_filesystem",
+        Err(JournalError::ControlSecret) => "control_secret",
+        Err(JournalError::Io) => "io_or_unknown_completion",
+    };
+    eprintln!(
+        "durable_journal_cost {}",
+        json!({
+            "stage": stage,
+            "head_before": head_before,
+            "head_after": observed_head,
+            "outcome": outcome,
+            "caller_ns": caller_ns,
+            "span_durations": "inclusive_and_overlapping",
+            "sync_all_spans": "exact_std_call",
+            "debug_assertions": cfg!(debug_assertions),
+            "snapshot": snapshot,
+        })
+    );
+    assert_eq!(
+        snapshot.outstanding, 0,
+        "completed measurement has unfinished spans"
+    );
+    let value = result.unwrap_or_else(|error| panic!("cost measurement failed: {error:?}"));
+    (value, snapshot)
+}
+
+fn verify_cost_snapshot(
+    snapshot: &crate::control_fs::cost_probe::Snapshot,
+    file_syncs: u64,
+    directory_syncs: u64,
+) {
+    use crate::control_fs::cost_probe::Operation;
+
+    for (operation, expected) in [
+        (Operation::FileSync, file_syncs),
+        (Operation::FileSyncAll, file_syncs),
+        (Operation::DirectorySync, directory_syncs),
+        (Operation::DirectorySyncAll, directory_syncs),
+    ] {
+        let metric = snapshot.metric(operation);
+        assert_eq!(
+            metric.calls, expected,
+            "synchronization call count mismatch"
+        );
+        assert_eq!(
+            metric.succeeded, expected,
+            "synchronization did not succeed"
+        );
+        assert_eq!(metric.failed, 0);
+        assert_eq!(metric.abandoned, 0);
+    }
+    for operation in [
+        Operation::Read,
+        Operation::ReadToEnd,
+        Operation::Revalidate,
+        Operation::ReadAt,
+        Operation::DirectoryRevalidate,
+    ] {
+        let metric = snapshot.metric(operation);
+        assert!(
+            metric.calls > 0,
+            "real validation/read calls must be observed"
+        );
+        assert_eq!(metric.calls, metric.succeeded);
+        assert_eq!(metric.failed, 0);
+        assert_eq!(metric.abandoned, 0);
+    }
+    assert!(snapshot.metric(Operation::ReadToEnd).bytes > 0);
+    assert!(snapshot.metric(Operation::ReadAt).bytes > 0);
+}
+
 #[test]
 #[ignore = "spawned only by the parent SIGKILL test"]
 fn crash_child_at_stage() {

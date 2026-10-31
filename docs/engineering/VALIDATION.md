@@ -2,7 +2,7 @@
 
 Les sections sont chronologiques : conserver les FAIL/BLOCKED de chaque tentative. Le [candidat local antérieur](#candidat-local-final--29-octobre-2026), le [snapshot P1 intermédiaire](#p1-autorité-terminale-et-ingestion--snapshot-intermédiaire), puis le [gel P1 final et ses rejeux](#p1-autorité-terminale-et-ingestion--gel-logiciel-147) sont séparés ; leurs preuves ne qualifient que leurs périmètres nommés, jamais le produit ou la matrice globale.
 
-Dernier point courant : [H10 et rapport des échecs inconnus](#31-octobre--h10-et-rapport-des-échecs-inconnus). Les mentions NOT_RUN des paragraphes précédant ce point restent celles de leur gel historique.
+Dernier point courant : [coût durable et gardien retenu](#1er-novembre--coût-durable-et-gardien-retenu-gels-s5s6). Les mentions NOT_RUN des paragraphes précédant ce point restent celles de leur gel historique.
 
 ## Référence initiale — 29 octobre 2026
 
@@ -763,3 +763,17 @@ Intégration documentaire dans `codex/broker-service` : fusion à trois versions
 **Revue du candidat fusionné : PASS documentaire ciblé.** La [revue indépendante](evidence/2026-10-31/broker-runtime/governance-independent-review.md) ne relève aucun P0/P1 ni correction bloquante dans les quinze documents ; elle recoupe contrats main, sauvegarde de branche, propositions et historiques, sans test applicatif. Les contrôles logiciels S4/frontend ci-dessus conservent leurs propres gels. Les modifications du checkout principal sont préservées ; cette intégration ne clôture aucun gate.
 
 Contrôle Root final des dix-huit documents : **587 liens relatifs, zéro cible manquante**, sortie0 ; contrôle d'existence des chemins, non validation exhaustive des ancres ou références HTTP. Vérification indépendante finale des manifestes :159 sources Rust et24 sources frontend inchangées depuis leurs gels de test ; aucune réexécution superflue des suites ou moteurs.
+
+## 1er novembre — coût durable et gardien retenu, gels S5/S6
+
+Base `b32711d`, worktree broker-service. [Dossier, commandes et limites](evidence/2026-11-01/journal-cost/README.md). Aucun moteur/modèle/service nouveau ou retrait de gardien ; seuls des processus existants sont observés passivement et le probe utilise un Journal/Writer neuf réel.
+
+**Observation passive limitée : PASS.** Les FD lock+socket attribuent le même PID23300 au rôle H10 avant/après ; CPU propre cumulé +4,60s, RSS7664KiB aux deux bornes, ELAPSED arrondi environ21s pour une attente20s. Enfants brefs, moteur et coût global/par Arm inconnus. Premier inventaire zéro socket invalidé par ls/stat/find corrects : **FAIL de harnais conservé**, commande initiale non retenue, pas preuve d'absence. Aucun argv, environnement, credential ou contenu d'annonce collecté ; aucun sampling/signal.
+
+**S5 RED :** compilation debug réussie4min13s, vrai load head0 retourné ok puis `FileSync.calls=0` contre6, RC101/test0,17s ; compteur succeeded également0 mais pas oracle de l'assertion. **S6 GREEN :7 fonctions uniques**, probe1/1 (7,38s,8échantillons), descriptor4/4, recontrôle binding après publication1/1 (1,56s), erreurs IO injectées1/1 (0,79s). Le mauvais filtre initial `control_fs::tests` donné par Root sélectionne0 : **NOT_RUN**, corrigé en descriptor_tests sans replay du probe. Fmt-check/Clippy strict/build release RC0 ; build12min16s, pas temps du test.
+
+Les lectures debug prennent22,863–371,133ms, mutations292,668/765,696ms ; compteurs file/dir-sync6/3 puis14/3 pour load/status,16/9 puis32/9 pour mutation, tous terminés sans erreur/abandon/outstanding. Leurs durées inclusives se chevauchent ; les octets lus incluent relectures/caches et ne sont pas du disque physique. Aucune cause H10, performance CPU release, percentile ou capacité100. Les31fichiers de révision H10 totalisant866540octets ne sont pas reproduits par cette fixture heads0/8.
+
+Source uniquement cfg(test) pour la collecte, expansions applicatives identiques : aucune IO/barrière, CAS/floor ou erreur métier supprimé. Revue indépendante sans P0/P1 identifié dans ce périmètre.160sources S6 vérifiées avant/après, puis Root compare checkout et archive extraite ; manifeste SHA`0f8e37354f14b9d177f250622807f0b3a7e520efdcfd30fd0ceb6ea9a43026b1`, archive privée SHA`e0e804536f7085d52355343e849865a2f2bb16ac668acf70a01fdb2f09f6ce55`. Copies binaires600 hors cache/Git vérifiées : agentsandbox`411a840f1cff7563921c5bca8f814340bcc433c093059d7512cdec724068d0d8`, provider`222e7e07ba94d2bc3e505fa839fb9bdbd808e24776c5b1d127500b709493c8a5`. Aucun redéploiement, archives/binaires hors Git, pas de rebuild bit à bit promis.
+
+Rust/Cargo1.99.1, Darwin27.2.0 arm64/macOS27.2 ; FS exact **NOT_RECORDED**. **NOT_RUN :** performances release et graphe riche H10, nouveaux Docker/Podman/Kubernetes/autres plateformes,100workers, pannes stockage, arrêt/reprise/D5, frontend/navigateur/fournisseurs/SSO. La recherche primaire Docker/Moby donne une piste conditionnelle pour la fin normale d'un émetteur ; elle ne prouve ni binaires ni requête réelle et ne construit aucun témoin de retrait. Prochaine priorité : mesure sur graphe plus riche, puis provenance/fermeture sûre des slots, sans suppression de barrières ni nouveau H11 aveugle. **G09 FAIL et0/12 gates clos**, objectif produit actif.

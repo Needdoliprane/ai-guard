@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 1er novembre — mesurer sans supprimer les barrières du journal
+
+Après H10, séparer le coût des lectures/validations, des appels exacts `File::sync_all` et de la queue du Writer avant d'optimiser. Le probe est uniquement `cfg(test)`, opt-in et ignoré par défaut ; il exécute les corps applicatifs originaux sur un vrai journal neuf. Champs fermés, racine conservée seulement en mémoire, aucun contenu/credential/identifiant dans les métriques. Les temps inclusifs se chevauchent et le timeout reste coopératif, sans annulation d'une commande Writer déjà acceptée.
+
+Les huit mesures aux heads0/8 confirment les décomptes de source mais montrent aussi une variabilité au même head ; sept fonctions ciblées passent. Elles ne reproduisent pas le graphe H10 de31révisions/866540octets, ne mesurent pas la capacité100 ni la performance CPU release et ne prouvent aucune cause de l'échec. L'observation passive du gardien attribué mesure un CPU propre non nul, pas le coût global ou par Arm. [Preuves, erreurs de harnais et limites](evidence/2026-11-01/journal-cost/README.md).
+
+Aucune suppression de Full pré/post, CAS, floors, contrôles FD, synchronisations ou enforcement n'est autorisée par ces mesures. La prochaine correction doit être étayée sur le graphe plus riche et garder ses refus négatifs. Le coût des slots retenus ne constitue jamais une preuve de retrait sûr ; D5, reprise et G09 restent ouverts.
+
 Journal de décisions datées, distinct des preuves de livraison. Les compléments les plus récents remplacent les choix antérieurs incompatibles ; les entrées historiques restent conservées. Les exigences actuelles d'identité, de configuration et de découverte sont regroupées dans le [contrat canonique](../sso.md), celles des vues dans [ui.md](../ui.md). L'avancement est dans [CURRENT_STATE.md](CURRENT_STATE.md), avec les résultats de [VALIDATION.md](VALIDATION.md).
 
 ## 31 octobre — configuration indépendante des catégories de clients
