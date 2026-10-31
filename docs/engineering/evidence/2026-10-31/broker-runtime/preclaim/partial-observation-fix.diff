@@ -1,0 +1,17 @@
+--- /private/tmp/ai-guard-lifecycle-adapter-green.Q91ePK/src/broker/journal.rs	2026-10-31 20:13:53.029258246 +0100
++++ src/broker/journal.rs	2026-10-31 20:25:38.433963678 +0100
+@@ -1026,9 +1026,11 @@
+         }
+         let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+         self.check_writer()?;
+-        let loaded = self
+-            .load_locked(operation_id, &mut writer)?
+-            .ok_or(JournalError::InvalidInput)?;
++        let loaded = match self.status_locked(operation_id, &mut writer)? {
++            Some(JournalStatusV1::Accepted(job)) => job,
++            None | Some(JournalStatusV1::Rejected(_)) => return Err(JournalError::InvalidInput),
++            Some(_) => return Err(JournalError::Interrupted),
++        };
+         let next = if let Some(current) = loaded.broker_checkpoint_v4() {
+             if loaded.head() != &expected {
+                 return Err(JournalError::Conflict);

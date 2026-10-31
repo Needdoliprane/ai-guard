@@ -1,0 +1,11 @@
+--- /private/tmp/ai-guard-pr3-final.4G2xpZ/SHA256SUMS	2026-10-31 20:26:09.113398377 +0100
++++ /private/tmp/ai-guard-pr4-final.cAd8vX/SHA256SUMS	2026-10-31 20:28:07.988226184 +0100
+@@ -23,7 +23,7 @@
+ bbf829317219756e075cfa18e5d55f88ee54886de5ba99ec82a8cd70613c36ab  ./src/broker/journal.rs
+ 86fba26a7d2b9ad656c0d24631750afb504a192d4c4ebae9c5c43a9058065c5f  ./src/broker/journal/confirmed.rs
+ 964b93c7b584d922842cd7f16fc405efa7bd3ff069133060229830fb4299170a  ./src/broker/journal/recovery.rs
+-3d1ad064979dbee4670ddb32f307f78f0fc11996f8294eb58d030b8d69eb5ad0  ./src/broker/journal/tests.rs
++89958ca42855383cdf33fce9a402aef1a5ad06367112deb1994b4238319935af  ./src/broker/journal/tests.rs
+ f1dd4d91e3e040c04f68bdfb43125d9ff517d4da749e9e38befe20b5a9c1340a  ./src/broker/journal/types.rs
+ eef63419926873cd21059a614d2b5247102681102499755029b6527d3e5e39bd  ./src/broker/lifecycle.rs
+ 43142e0420df8d0cc588988a599666b2c1bb2c36441c25e0ee7f2dfb6d929fbb  ./src/broker/local_ipc.rs

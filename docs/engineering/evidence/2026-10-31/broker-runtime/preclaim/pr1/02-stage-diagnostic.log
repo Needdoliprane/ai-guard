@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.38s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 2 tests
+test broker::enforcer::client::stage_diagnostic_tests::final_spawn_snapshot_distinguishes_generation_phase_permit_and_freshness ... ok
+test broker::enforcer::client::stage_diagnostic_tests::preclaim_snapshot_distinguishes_each_guard_and_keeps_first_failure_order ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 144 filtered out; finished in 0.00s
+

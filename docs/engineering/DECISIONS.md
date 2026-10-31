@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 31 octobre — préclaim diagnostiqué et adaptation lifecycle sous le verrou existant
+
+H7 atteint une Arm worker ACKée puis une erreur locale avant claim, hors de la couverture D3. Ajouter les étapes fermées `broker_step` et les diagnostics Register/BeforeClaim : aucune chaîne d'erreur arbitraire sérialisée, aucun sample inventé. La factory Register valide les métadonnées uniquement sur erreur ; `register` reste inchangé. Le Ready public partage le même corps et conserve ordre des gardes, codes, horloge, santé, génération, état et échéance. Ces données restent informatives avec effet inconnu et n'accordent aucune permission de start.
+
+Le writer effectuait un Fullload d'adaptation V3/V4, puis le Journal rechargeait intégralement avant mutation et après publication. Déplacer seulement cette adaptation dans un port interne du Journal sous son mutex existant : une mutation lifecycle passe de trois Fullloads à deux, sans cache ni retrait de préload, postload, fsync, CAS, floors ou recontrôle des bindings. Préserver les événements/ACK V4 exacts et sa règle writer `expected==head`, même au rejeu obsolète ; les ports publics gardent refus de downgrade et contrats historiques. L'élimination de cette duplication est établie en source, sans revendication de gain mesuré ni de correction de la deadline réelle. [Preuves du chantier](evidence/2026-10-31/broker-runtime/README.md).
+
 ## 31 octobre — diagnostic typé sans nouvelle autorité de lancement
 
 Les deux premières tentatives Docker du broker permanent échouent après claim durable mais avant Running ; `worker/unavailable` ne permet pas de distinguer Prepare, dernier garde et transport runtime. Ajouter des contextes typés privés aux points de refus existants et un payload version1 `broker.batch.failure`, livré par le chemin V4 de masquage/enqueue/HTTP/ACK déjà présent. Aucun texte arbitraire d'erreur, argv, credential ou configuration n'est sérialisé. Une erreur inconnue ne reçoit pas de cause inventée ; transport Prepare inconnu et refus explicite restent distincts. Le sample d'horloge est celui déjà lu par le contrôle, parfois absent, sans faux horodatage de l'erreur.

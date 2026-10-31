@@ -1,0 +1,13 @@
+--- /private/tmp/ai-guard-pr1-targeted.bHdR8Q/SHA256SUMS	2026-10-31 20:15:24.453194731 +0100
++++ /private/tmp/ai-guard-pr2-final.fI5wMF/SHA256SUMS	2026-10-31 20:19:45.249071467 +0100
+@@ -61,8 +61,8 @@
+ ac62f2fcbe278afbfe3ef11b3ade8b78cfe988b9c6181994c1a9cc15674fbf45  ./src/runner.rs
+ a0bc8e8898ba32f7726906aeaf0c98117bb6ee9e19674fef1fb59069e54d449e  ./src/runner/broker.rs
+ 7bad7f8dc1ed5b9e7f19b09786ae7fc21158839ae0d0d7e23a906ad701dfb2ab  ./src/runner/broker/executor.rs
+-b879436a533d8514638416d80b2399b1da1982fc916b659a190d5249401ec25e  ./src/runner/broker/executor/diagnostics.rs
+-2776e7553567eabf2ae63bc154e02db620dbce601523ce5a4f19a1f637fce3b6  ./src/runner/broker/executor/helpers.rs
++db6b6eee4951bb3afa5839d2075f689b74244e65e83f4c7cc8fe6b1b922d44d8  ./src/runner/broker/executor/diagnostics.rs
++b3a913e355d5a50f1c84f2217be61eb31fc9de754487f6c59811bc2cc501833c  ./src/runner/broker/executor/helpers.rs
+ 780600599b5dc05fe2fb651b8cf339d12f1db81f3130a9927f1572e69dad5f6c  ./src/runner/broker/executor/journal.rs
+ c9564b9abb342a0eca088b925b568dbc9582292ef1cf6342f276bc57669a6d3f  ./src/runner/broker/executor/results.rs
+ 3c3c2fb468ad4ab0840fbafbbafdff5c1a3db583c5ba1e4b63991046a7cb4059  ./src/runner/managed.rs

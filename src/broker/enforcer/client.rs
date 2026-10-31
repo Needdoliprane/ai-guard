@@ -725,29 +725,48 @@ impl EnforcedSlot {
     /// Call immediately before requesting a central start claim. A registration
     /// handle can also represent a retained ObserveOnly/quarantined target.
     pub fn check_ready_for_claim(&self, expected_generation: u64) -> EnforcerResult<()> {
-        self.client.0.check_health()?;
+        self.check_ready_for_claim_diagnosed(expected_generation)
+            .map_err(|failure| failure.wire_code())
+    }
+
+    pub(crate) fn check_ready_for_claim_diagnosed(
+        &self,
+        expected_generation: u64,
+    ) -> Result<(), EnforcerStageFailure> {
+        let arm = &self.local.registration.arm;
+        let failure = |reason, sample: Option<&HostClockSampleV1>| {
+            EnforcerStageFailure::from_arm(arm, EnforcerStage::BeforeClaim, reason, sample)
+        };
+        self.client
+            .0
+            .check_health()
+            .map_err(|_| failure(EnforcerFailureReason::HelperUnhealthy, None))?;
         let (status, received) = &*self
             .local
             .status
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?;
-        if !self.local.acknowledged.load(Ordering::SeqCst)
-            || status.prepared_once
-            || status.phase != SlotPhaseV1::Ready
-            || expected_generation == u64::MAX
-            || self.local.generation.current() != expected_generation
-            || status.generation != expected_generation
-            || received.elapsed() > HEALTH_WINDOW
-            || *self.local.stop.borrow()
-        {
-            return Err(EnforcerError::NotReady);
+            .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, None))?;
+        if let Some(reason) = claim_snapshot_failure(
+            status,
+            expected_generation,
+            received,
+            &self.local.acknowledged,
+            &self.local.generation,
+            &self.local.stop,
+        ) {
+            return Err(failure(reason, None));
         }
-        let clock = NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?;
-        self.local
-            .registration
-            .arm
-            .validate_clock_check(&clock.sample().map_err(|_| EnforcerError::Unhealthy)?)
-            .map_err(|_| EnforcerError::NotReady)
+        let clock = NativeHostClock::new()
+            .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+        let sample = clock
+            .sample()
+            .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+        arm.validate_clock_check(&sample).map_err(|_| {
+            failure(
+                arm_clock_rejection(&arm.clock, &arm.deadline_ns_decimal, &sample),
+                Some(&sample),
+            )
+        })
     }
 
     pub async fn prepare_start(
@@ -975,6 +994,34 @@ impl BeforeSpawnGuard for SpawnGuard {
             )
         })?;
         Ok(())
+    }
+}
+
+fn claim_snapshot_failure(
+    status: &EnforcerSlotStatusV1,
+    expected_generation: u64,
+    received: &Instant,
+    acknowledged: &AtomicBool,
+    generation: &CancelGeneration,
+    stop: &watch::Sender<bool>,
+) -> Option<EnforcerFailureReason> {
+    if !acknowledged.load(Ordering::SeqCst) {
+        Some(EnforcerFailureReason::SlotUnacknowledged)
+    } else if status.prepared_once {
+        Some(EnforcerFailureReason::SlotAlreadyPrepared)
+    } else if status.phase != SlotPhaseV1::Ready {
+        Some(EnforcerFailureReason::SlotPhaseMismatch)
+    } else if expected_generation == u64::MAX
+        || generation.current() != expected_generation
+        || status.generation != expected_generation
+    {
+        Some(EnforcerFailureReason::GenerationChanged)
+    } else if received.elapsed() > HEALTH_WINDOW {
+        Some(EnforcerFailureReason::SlotSnapshotStale)
+    } else if *stop.borrow() {
+        Some(EnforcerFailureReason::StopSignalled)
+    } else {
+        None
     }
 }
 
@@ -1321,6 +1368,80 @@ fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> Enforcer
 #[cfg(test)]
 mod stage_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn preclaim_snapshot_distinguishes_each_guard_and_keeps_first_failure_order() {
+        let mut status = EnforcerSlotStatusV1 {
+            arm_id: "11111111-1111-4111-8111-111111111111".into(),
+            registration_hash: "1".repeat(64),
+            phase: SlotPhaseV1::Ready,
+            prepared_once: false,
+            generation: 7,
+            clock: None,
+            observation: None,
+            stop_failures: 0,
+        };
+        let generation = CancelGeneration::new();
+        generation.advance_to(7);
+        let acknowledged = AtomicBool::new(true);
+        let (stop, _) = watch::channel(false);
+        let fresh = Instant::now();
+        let stale = fresh - HEALTH_WINDOW - Duration::from_nanos(1);
+        let check = |status: &EnforcerSlotStatusV1, expected, received: &Instant| {
+            claim_snapshot_failure(
+                status,
+                expected,
+                received,
+                &acknowledged,
+                &generation,
+                &stop,
+            )
+        };
+        assert_eq!(check(&status, 7, &fresh), None);
+        acknowledged.store(false, Ordering::SeqCst);
+        status.prepared_once = true;
+        status.phase = SlotPhaseV1::Quarantined;
+        status.generation = 8;
+        stop.send_replace(true);
+        assert_eq!(
+            check(&status, u64::MAX, &stale),
+            Some(EnforcerFailureReason::SlotUnacknowledged)
+        );
+        acknowledged.store(true, Ordering::SeqCst);
+        assert_eq!(
+            check(&status, u64::MAX, &stale),
+            Some(EnforcerFailureReason::SlotAlreadyPrepared)
+        );
+        status.prepared_once = false;
+        assert_eq!(
+            check(&status, u64::MAX, &stale),
+            Some(EnforcerFailureReason::SlotPhaseMismatch)
+        );
+        status.phase = SlotPhaseV1::Ready;
+        assert_eq!(
+            check(&status, u64::MAX, &stale),
+            Some(EnforcerFailureReason::GenerationChanged)
+        );
+        assert_eq!(
+            check(&status, 8, &stale),
+            Some(EnforcerFailureReason::GenerationChanged)
+        );
+        assert_eq!(
+            check(&status, 7, &stale),
+            Some(EnforcerFailureReason::GenerationChanged)
+        );
+        status.generation = 7;
+        assert_eq!(
+            check(&status, 7, &stale),
+            Some(EnforcerFailureReason::SlotSnapshotStale)
+        );
+        assert_eq!(
+            check(&status, 7, &fresh),
+            Some(EnforcerFailureReason::StopSignalled)
+        );
+        stop.send_replace(false);
+        assert_eq!(check(&status, 7, &fresh), None);
+    }
 
     #[test]
     fn final_spawn_snapshot_distinguishes_generation_phase_permit_and_freshness() {

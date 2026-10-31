@@ -194,7 +194,8 @@ impl<'a> Execution<'a> {
         };
         if let Some(slot) = ready {
             self.generation_current()?;
-            slot.check_ready_for_claim(self.generation)?;
+            slot.check_ready_for_claim_diagnosed(self.generation)
+                .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
         }
         let completed = self.call(input.clone()).await?;
         self.patch(|draft| {

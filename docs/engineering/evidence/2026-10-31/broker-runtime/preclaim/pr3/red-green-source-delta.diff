@@ -1,0 +1,11 @@
+--- /private/tmp/ai-guard-journal-partial-red.GgRDO1/SHA256SUMS	2026-10-31 20:24:13.734069572 +0100
++++ /private/tmp/ai-guard-pr3-final.4G2xpZ/SHA256SUMS	2026-10-31 20:26:09.113398377 +0100
+@@ -20,7 +20,7 @@
+ dfabc58b46fecd812223b5eb71b40ae8115e0e62116c63f9b6c36dcdf10c13fe  ./src/broker/enforcer/diagnostics.rs
+ e141119af2c9e91c5023e6df57987629192a0bbd9e657cca1f845afd03e7fa9d  ./src/broker/enforcer/server.rs
+ 73078447289411744e410b8c2e7ee1db97444dde4cff4863c9455775795adbf3  ./src/broker/intent.rs
+-b13798153545c6aa4de5b9437da214759772f76ec504014522570da7a2b527c3  ./src/broker/journal.rs
++bbf829317219756e075cfa18e5d55f88ee54886de5ba99ec82a8cd70613c36ab  ./src/broker/journal.rs
+ 86fba26a7d2b9ad656c0d24631750afb504a192d4c4ebae9c5c43a9058065c5f  ./src/broker/journal/confirmed.rs
+ 964b93c7b584d922842cd7f16fc405efa7bd3ff069133060229830fb4299170a  ./src/broker/journal/recovery.rs
+ 3d1ad064979dbee4670ddb32f307f78f0fc11996f8294eb58d030b8d69eb5ad0  ./src/broker/journal/tests.rs

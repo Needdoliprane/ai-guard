@@ -870,19 +870,7 @@ fn advance_lifecycle(
     expected: RevisionRefV1,
     next: &BrokerCheckpointV3,
 ) -> JournalResult<CheckpointReceiptV1> {
-    let job = journal
-        .load(operation_id)?
-        .ok_or(JournalError::InvalidInput)?;
-    if let Some(current) = job.broker_checkpoint_v4() {
-        if job.head() != &expected {
-            return Err(JournalError::Conflict);
-        }
-        let next = BrokerCheckpointV4::new(next.clone(), current.events().to_vec())?;
-        journal.advance_outbox(operation_id, expected, &next)
-    } else {
-        super::outbox::validate_command_ids(next, &[])?;
-        journal.advance_lifecycle(operation_id, expected, next)
-    }
+    journal.advance_lifecycle_preserving_outbox(operation_id, expected, next)
 }
 
 fn lifecycle(job: &AcceptedJobV1) -> JournalResult<BrokerCheckpointV3> {

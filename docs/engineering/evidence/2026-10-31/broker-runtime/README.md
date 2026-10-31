@@ -1,6 +1,6 @@
 # Broker permanent — essais Docker et diagnostics, 31 octobre 2026
 
-**G09 FAIL ; aucun gate global fermé.** Deux vrais essais échouent avant Running, donc avant injection de panne. Le nouveau diagnostic passe ses vérifications logicielles ; son émission réelle reste **NOT_RUN**. Aucun fournisseur IA, SSO, frontend, cloud ou PKI utilisé par ce lot. Les revues indépendantes ne trouvent pas de P0/P1 dans leur périmètre ; elles ne qualifient pas le produit.
+**G09 FAIL ; aucun gate global fermé.** H4/H5 échouent après claim, H6 atteint la borne d'observation du harnais pendant la préparation, H7 enregistre une erreur préclaim. Aucun Running ni faute au point prévu. Le diagnostic D3 passe ses vérifications logicielles mais sa frontière typée n'a pas été atteinte ; son complément préclaim attend encore l'essai réel. Aucun fournisseur IA, SSO, frontend, cloud ou PKI utilisé par ce lot. Les revues indépendantes ne qualifient pas le produit.
 
 ## Périmètre et gels
 
@@ -51,6 +51,54 @@ Les erreurs natives Prepare/garde conservent code fermé, Arm, deadline d'origin
 
 `runtime_effect=unknown` ne donne aucune autorité, preuve d'absence, terminal, fencing ou libération de quota. Wire IPC, LocalFailureV1, Status, formats persistés et dépendances inchangés. Le dernier garde reste immédiatement avant spawn ; aucune IO/attente/lecture d'horloge ajoutée au chemin de succès. Aucun réarmement, nouveau claim, rallonge de durée ou affaiblissement des synchronisations.
 
+## H6 — limite d'observation atteinte pendant la préparation
+
+Une tentative sur le produit D3, HEAD`99238e3`, utilise les158 mêmes fichiers source. **FAIL RC101,48,25s**, avant Arm worker. Le worker reste Preparing rev2 ;9/9 opérations sont ACKées, dernière HelperClaim ImportVerification rev22, aucun pending, aucune FailureObserved ni événement diagnostic dans le journal/SQLite. Ce résultat ne démontre pas un refus Prepare du worker. [Rapport Core en lecture seule](h6/core-diagnostic.md), [sortie](h6/runtime.log) et [scalaires Docker projetés](h6/container-scalars.txt).
+
+Racine privée `/private/tmp/br-6dPLTS`, CID helper `f3ed32a35cd3ed767beacda7c01029f1c8033353990915c3fb8052cf0f88218a`. Il démarre à`2026-10-31T18:58:07.705873553Z` et termine à`18:58:07.87673872Z`, exit0/nonOOM/restart0. La publication resultFAIL a un mtime`18:58:13.879424470Z` ; ce n'est pas un sample de l'instant exact de l'erreur. Le test retourne sur sa borne préRunning45s et Drop tue/reap ses seuls enfants broker/gateway. L'Arm du helper vaut120s, avec115,877s encore disponibles au sample du claim ; aucune Arm worker5s n'existe dans H6. Les sources ne permettent pas d'appeler cette observation un refus produit ou une expiration du helper.
+
+Correction du seul harnais : observation préRunning120s, global240s et libellé cohérent. Les5s d'Arm worker, la faute après Running/Ready mais avant deadline d'origine, les contrôles nonOOM/137/durée<20s et les identités Arm/claim/start/CID restent inchangés. Une nouvelle expiration120s resterait un FAIL d'observation, sans cause produit établie ; cette fenêtre globale ne garantit pas l'expiration de chaque helper armé tardivement. [Revue de ce delta](h6/harness-review.md). Aucune source applicative modifiée, aucun réarmement ni retrait de synchronisation. Racine, gardien et ressources conservés ; zéro ressource baseline manquante. Les causes H4/H5 restent inconnues.
+
+## H7 — erreur préclaim, pas de démarrage qualifié
+
+Sur ce harnais corrigé, produit D3 inchangé : **FAIL RC101,122,78s**. Racine `/private/tmp/br-yEdg2N`. Worker `fecfaf08-5402-4f7d-bb26-afd4b008b0b5` Created rev4, CID `229b3c948ed9048001362df0acc192414af3a5cb603c038dd553fddfd314316a` Created, aucune date de démarrage/fin effective.14/14 opérations ACKées, WorkerArm `ac4dca97-3fcf-41b6-9d53-fd3ce82bbfc5` ACKrev33/seq16, puis première FailureObserved34 worker/unavailable. Aucun WorkerClaim, aucun pending, aucun `broker.batch.failure`. [Faits du journal/SQLite en lecture seule](h7/core-diagnostic.md) et [sortie du test](h7/runtime.log).
+
+Arm native`343733635626041`, deadline`343738635626041` : cinq secondes. Mtimes pending32=`1793473574.161340113`, ACK33=`1793473579.058683342`, Failure34=`1793473585.507432199`. L'intervalle pending→ACK de4,897343229s indique un chemin coûteux ; sans sample natif de l'erreur et sans offset UTC exact, il ne prouve pas une expiration au point de refus. Register, relecture et Ready précèdent ici la première publication du claim et n'avaient pas encore de diagnostic codé D3.
+
+Le delta runtime est fondé sur les IDs stables : un CID et un volume neufs, zéro ID antérieur manquant, H4/H5/H6 conservés. Une première comparaison de lignes complètes a confondu les libellés d'âge Docker avec des changements d'identité ; la capture initiale et la correction sont conservées en privé. Cela a entraîné la lecture supplémentaire des seuls scalaires de deux anciens CID, sans mutation ni contenu secret ; aucune inspection historique supplémentaire. Fmt et Clippy strict H7 PASS, sans rebuild du produit D3 inchangé. Ce résultat n'est pas une qualification du délai ou de la reprise.
+
+## Complément préclaim et adaptation lifecycle
+
+Les étapes fermées `broker_step` couvrent échange Arm, registration, relecture, Ready, clock, échange claim, génération et Prepare. Un contexte d'échange n'est pas une preuve d'envoi ou d'ACK ; le diagnostic natif imbriqué peut préciser le contrôle en échec. Register conserve son implémentation ; une factory valide ses seules métadonnées sur erreur. Le Ready public partage le corps diagnostiqué et conserve ordre, codes, health/freshness/génération/stop/clock/deadline. Aucun nouveau sample, texte arbitraire ou effet observé inventé ; l'événement garde `runtime_effect=unknown` et ne libère rien.
+
+L'adaptation lifecycle V3→V4 est déplacée sous le verrou du Journal, à partir du preload strict déjà nécessaire. Le writer n'effectue plus son Fullload d'adaptation séparé : trois chargements complets deviennent deux par mutation lifecycle, sans supprimer preload, postload, fsync, recontrôle du binding, CAS, floors ou validation des transitions. Les bytes d'événements/ACK V4 sont conservés ; expectedV4 obsolète reste Conflict, downgrade public refusé. Ce comptage est une propriété du code, pas une mesure de performance.
+
+La revue a trouvé une régression dans cette optimisation en cours : appeler directement load_locked au lieu de la classification status_locked oubliait l'observation d'une réservation héritée partielle. Un nouveau test de filesystem réel réserve, ferme/réouvre sans prélecture, tente l'avancement, puis déplace le seul job de fixture sans effacer ses bytes ; l'observation doit empêcher sa disparition silencieuse et sa réadmission. Le test **RED RC101** échoue à l'assertion status→Conflict, compilation correcte. Correction limitée au préload du nouveau port : même match status_locked que Journal.load, sous le même mutex ; Accepted garde un seul Fullload, les autres états gardent leurs erreurs historiques. Le test **GREEN RC0** passe sans modification de ses assertions. Cette régression n'a pas été publiée. Les revues et logs finaux sont conservés avec le lot ; aucune correction réelle de startup n'est revendiquée.
+
+| Gel logiciel | Résultat et portée |
+|---|---|
+| PR1 |9 diagnostics,2 prédicats natifs,1 canari postpublication et1 outbox V4 :13 fonctions PASS |
+| PR2 |1 contrat lifecycle et1 promotion V1→V2 : total15 fonctions uniques PASS ;3 tests Root rejoués pour le seul renommage Exchange, non additionnés ; fmt/Clippy PASS |
+| RED |1 nouvelle régression partielle FAIL RC101 sur le port optimisé avant correction ; [log](preclaim/red/journal-partial-red.log) et manifeste conservés |
+| PR3 |Cette régression GREEN RC0 et V4 rejoué PASS ; total16 fonctions uniques. Fmt FAIL sur le seul format du nouveau test, sans échec métier |
+| PR4 |Seul test `journal/tests.rs` reformaté ; logique/assertions et toutes sources métier PR3 inchangées. Fmt/Clippy strict et release PASS RC0, build6min20s ; aucun test rejoué après cette transformation |
+
+Les sorties sont dans `preclaim/pr1`, `preclaim/pr2`, `preclaim/red`, `preclaim/pr3` et `preclaim/pr4`. Les manifests et deltas distinguent chaque gel : PR1→PR2 renomme deux frontières ; RED→PR3 corrige seulement le préload du port ; PR3→PR4 ne change que le format du test. Les huit fonctions D3 historiques ne sont pas ajoutées à ces16. Les canaris utilisent filesystem/Journal/Writer réels, pas un moteur de conteneurs ; les modèles et tests E2E n'ont pas été relancés.
+
+Cibles de reproduction du complément, exécutées par Luna avec `CARGO_TARGET_DIR=../broker-supervision/target` (les replays et commandes de format/build sont séparés dans les logs) :
+
+```sh
+cargo test --locked --lib diagnostics::tests -- --nocapture
+cargo test --locked --lib broker::enforcer::client::stage_diagnostic_tests -- --nocapture
+cargo test --locked --lib broker::journal::tests::full_writer_rechecks_binding_after_real_publication_before_ack -- --exact --nocapture
+cargo test --locked --test broker_outbox v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_refused -- --exact --nocapture
+cargo test --locked --test broker_lifecycle lifecycle_wire_context_replay_caps_and_legacy_approval_boundaries -- --exact --nocapture
+cargo test --locked --test broker_checkpoint real_journal_promotes_v1_rev0_to_pending_decision_v2_without_rewriting_rev0 -- --exact --nocapture
+cargo test --locked --lib broker::journal::tests::lifecycle_adapter_retains_observation_of_an_inherited_partial_job -- --exact --nocapture
+```
+
+La [revue indépendante finale](preclaim/independent-review.md) conserve le constat, sa reproduction et sa correction ; aucun P0/P1 restant identifié dans le périmètre. Le manifeste final vérifie158 fichiers avant/après, puis root vérifie indépendamment checkout et archive extraite. Copies de binaires privées hors cache : agentsandbox `ec99e7817efc53ccb912d99bd5d5130c24bc89c9e7a59ef5d24cfb782338e9f6`, provider `e50f668b1aafd5928df9b0ff364348b18e5514883308db2d2dabc045743046c9`. Source archive `41f76fecc4b5cfbb9f41420a947af34bef12c6abcb6a19412882d59b7cdeaf8f`, manifeste `0089c36c457625ff01d342954dccd4e3dfcc94452246084c5de396c9153ded9d` ; archives/binaires non publiés dans Git, aucune promesse de rebuild byte-identique. Aucun H8 exécuté dans ce lot.
+
 ## Commandes exécutées
 
 Toutes les commandes Cargo sont exécutées par Luna depuis le worktree, avec `CARGO_TARGET_DIR=../broker-supervision/target`. Les filtres unitaires restent ciblés :
@@ -89,4 +137,4 @@ cargo test --release --locked --test broker_runtime inspect_retained_guard_after
 
 Les captures privées originales sont `/private/tmp/ai-guard-runtime-h4.1Y3B4Z`, `/private/tmp/ai-guard-runtime-h5.4pwJ7e`, `/private/tmp/ai-guard-runtime-h5-retry.fxob46`, `/private/tmp/ai-guard-d1-software.3ipHYm`, `/private/tmp/ai-guard-d2-software.DkH0QN` et `/private/tmp/ai-guard-d3-final.UPraQc`. Root vérifie indépendamment158 fichiers de l'archive finale extraite et158 fichiers du checkout contre le manifeste D3, plus les deux copies de binaires. SHA agentsandbox D3 : `709b70eee959fb23bb309164ae5e7f8e32a5dcc6dfd96fd91673aa8fef8221ae` ; provider : `2cb846f02db229a673c95b3c35d287db6f0d0d5f16029deb3d580df664483390`.
 
-Prochain critère : une seule tentative réelle instrumentée sur D3 pour livrer/lire le diagnostic codé, localiser le refus et corriger avec régression avant répétition. Puis établir Running, panne SIGKILL, arrêt sur deadline d'origine, reprise idempotente et cycle terminal/disarm. SSO/Keycloak/PKCE reste obligatoire mais absent, qualification NOT_RUN ; [contrat et documentation](../../../SSO_OIDC.md). Le rappel Daybreak Blue attend ces parcours réels stabilisés.
+Prochain critère : une seule tentative réelle H8 instrumentée sur PR4 pour livrer/lire le diagnostic préclaim complété, localiser l'erreur et corriger avec régression avant répétition. Puis établir Running, panne SIGKILL, arrêt sur deadline d'origine, reprise idempotente et cycle terminal/disarm. Les quatre racines et gardiens non vides H4–H7 restent conservés, aucun effacement pour obtenir un PASS. SSO/Keycloak/PKCE reste obligatoire mais absent, qualification NOT_RUN ; [contrat et documentation](../../../SSO_OIDC.md). Le rappel Daybreak Blue attend ces parcours réels stabilisés.

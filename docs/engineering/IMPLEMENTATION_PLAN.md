@@ -46,8 +46,23 @@ Résultats : **H4 FAIL réel**,47,39s, et **H5 FAIL réel**,46,59s, tous deux av
 
 - [x] Implémenter et relire des diagnostics typés Prepare/garde/runtime, sans sérialiser la chaîne d'erreur arbitraire, sans changer les codes IPC ni déplacer le dernier garde. Raccorder `broker.batch.failure` à l'outbox V4 existante, effet explicitement inconnu.
 - [x] Vérifier huit fonctions logicielles uniques, fmt, Clippy strict et release ; conserver les échecs Clippy intermédiaires et les deltas mécaniques. [Preuves H4/H5/D1–D3](evidence/2026-10-31/broker-runtime/README.md).
+- [x] Exécuter H6 sur le diagnostic : FAIL d'observation45s pendant ImportVerification, aucun refus produit ni Arm worker établi. Recouper9/9 ACK, helper réellement terminé exit0 et teardown des enfants du test ; corriger seulement l'observation120s/global240s après revue, sans changer les5s du worker. La livraison du diagnostic reste non exercée, pas qualifiée par cet essai.
 - [ ] Exécuter une seule tentative réelle instrumentée sur le nouveau binaire ; vérifier la livraison réelle du diagnostic, identifier le point précis de refus puis corriger avec régression. Ni la fraîcheur750ms ni l'expiration5s ne sont une cause démontrée à ce stade.
 - [ ] Après démarrage obtenu, reprendre les critères SIGKILL/deadline/reprise ci-dessus, puis cycle terminal/disarm D5 et recette multi-client. SSO/Keycloak/PKCE et documentation découverte/entreprise demeurent un chantier obligatoire distinct, sans statut livré par ces preuves.
+
+### Lot actif après H7 : frontière préclaim et lecture redondante
+
+H7 a atteint WorkerArm ACKrev33 puis FailureObserved34, sans WorkerClaim ni événement typé. Le registre/Ready préclaim ne possède pas encore le diagnostic D3. L'intervalle mtime pendingArm→ACK atteint4,897s ; sans sample natif de l'erreur, cela reste compatible avec une expiration, pas une preuve de sa cause. Ne plus relancer le moteur à l'identique.
+
+Deux tâches internes indépendantes, sans changement d'architecture ni de contrat d'autorité :
+
+- Agent native : `enforcer/client.rs` et `enforcer/diagnostics.rs`, corps Ready commun avec wrapper public gardant les codes, factory de refus Register appelée seulement sur erreur avec métadonnées validées. Root : `executor/helpers.rs`, `executor/journal.rs` et `executor/diagnostics.rs`, contextes d'étapes fermés sans texte arbitraire ; mêmes vérifications et samples, aucun nouveau travail externe sur succès.
+- Agent core : `broker/writer.rs`, `broker/journal.rs`, régression outbox existante. Déplacer l'adaptation V3→V4 sous le mutex du préload déjà obligatoire pour éliminer le `Journal.load` complet redondant du writer. Garder tous les contrôles du préload/postload, CAS, barrières, floors, refus de downgrade et règle V4 expected==head ; aucun cache de confiance ni changement à load_locked/persistent_sync.
+
+Critères : conservation byte-à-byte des événements/ACK V4 lors d'une mutation lifecycle, conflit obsolète et downgrade refusés sans mutation, recontrôle des bindings après publication toujours fail-closed ; diagnostics Registration/Ready et étapes génériques sans secret/attribution inventée. Luna exécute les seules régressions pertinentes et fmt/Clippy/release après gel commun ; revue indépendante avant intégration. Une réduction de lectures vérifiée en source ne constitue pas une mesure de performance ni une correction démontrée de G09. La prochaine tentative réelle attend ce lot vérifié.
+
+- [x] Lot logiciel vérifié :16 fonctions uniques PASS, fmt/Clippy strict/release RC0. Constat de revue sur l'observation d'une réservation héritée reproduit RED puis corrigé GREEN ; nouveau port réutilise status_locked comme Journal.load, sans réintroduire un Fullload Accepted. Renommage Exchange pour ne pas présenter une frontière comme un ACK. Revues traitées,158 sources/artefacts vérifiés ; [preuves](evidence/2026-10-31/broker-runtime/README.md).
+- [ ] Prochain critère H8 : une seule tentative réelle sur ce gel, observation120s/global240s, Arm worker5s inchangée ; capturer la première étape et raison native sans texte arbitraire. Aucun gain ou correction de startup déduit des tests logiciels. Conserver les quatre racines/gardiens/ressources H4–H7 et ne pas contourner D5. Après Running seulement, reprendre la faute SIGKILL, deadline et reprise idempotente, puis le cycle terminal/disarm.
 
 ## Cycle actif : établir puis sécuriser la référence
 

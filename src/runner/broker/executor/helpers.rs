@@ -77,16 +77,23 @@ impl Execution<'_> {
                 response: None,
             }
         };
-        let (arm, _) = self.rpc(pending).await?;
+        let (arm, _) = self
+            .rpc(pending)
+            .await
+            .context(diagnostics::PreclaimStep::ArmExchange)?;
         let Operation::Arm {
             request,
             response: Some(response),
             ..
         } = arm
         else {
-            return Err(anyhow!("arm acknowledgement is missing"));
+            return Err(anyhow!("arm acknowledgement is missing")
+                .context(diagnostics::PreclaimStep::ArmExchange));
         };
-        response.receipt.validate_for_arm(&request)?;
+        response
+            .receipt
+            .validate_for_arm(&request)
+            .context(diagnostics::PreclaimStep::ArmExchange)?;
         let slot = self
             .executor
             .enforcer
@@ -100,11 +107,24 @@ impl Execution<'_> {
                     response.receipt.clone(),
                     runtime.binding().clone(),
                     owned,
-                )?,
+                )
+                .context(diagnostics::PreclaimStep::Registration)?,
                 self.context.cancel_generation().clone(),
             )
-            .await?;
-        let (_, current) = self.load().await?;
+            .await
+            .map_err(|code| -> anyhow::Error {
+                match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
+                    &request, code,
+                ) {
+                    Some(failure) => failure.into(),
+                    None => code.into(),
+                }
+            })
+            .context(diagnostics::PreclaimStep::Registration)?;
+        let (_, current) = self
+            .load()
+            .await
+            .context(diagnostics::PreclaimStep::LoadAfterRegistration)?;
         if current.operations.iter().any(|op| match op {
             Operation::WorkerClaim { request: claim, .. } => {
                 claim.arm_receipt.arm_id == request.operation_id
@@ -116,13 +136,19 @@ impl Execution<'_> {
         }) {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
-        self.generation_current()?;
+        self.generation_current()
+            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
         // This is mandatory immediately before the HTTP claim, in addition to
         // the enforcer's consumed guard immediately before the engine spawn.
-        slot.check_ready_for_claim(self.generation)?;
+        slot.check_ready_for_claim_diagnosed(self.generation)
+            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
         let operation_id = Uuid::new_v4().to_string();
         let emitter_id = Uuid::new_v4().to_string();
-        let check = self.executor.clock.sample()?;
+        let check = self
+            .executor
+            .clock
+            .sample()
+            .context(diagnostics::PreclaimStep::ClockBeforeClaim)?;
         let claim = if let Some((policy, _)) = helper {
             Operation::HelperClaim {
                 request: HelperStartClaimV1 {
@@ -150,7 +176,10 @@ impl Execution<'_> {
                 response: None,
             }
         };
-        let (acknowledged, fresh) = self.rpc_checked(claim, Some(&slot)).await?;
+        let (acknowledged, fresh) = self
+            .rpc_checked(claim, Some(&slot))
+            .await
+            .context(diagnostics::PreclaimStep::ClaimExchange)?;
         let emit = match acknowledged {
             Operation::HelperClaim {
                 response: Some(response),
@@ -165,20 +194,24 @@ impl Execution<'_> {
         if !fresh || !emit {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
-        self.generation_current()?;
+        self.generation_current()
+            .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?;
         let permission = FreshStartPermission {
             arm_id: request.operation_id.clone(),
             worker_id: request.worker_id.clone(),
             attempt_id: request.attempt_id.clone(),
             control_namespace: response.receipt.control_namespace_uuid,
-            subject_key: request.subject_key()?,
+            subject_key: request
+                .subject_key()
+                .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?,
             emitter_id,
             claim_operation_id: operation_id,
             generation: self.generation,
         };
         Ok(PrearmedStartDirective::EmitOnce(
             slot.prepare_start_diagnosed(permission, self.generation)
-                .await?,
+                .await
+                .context(diagnostics::PreclaimStep::Prepare)?,
         ))
     }
 

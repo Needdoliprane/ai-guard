@@ -1,0 +1,45 @@
+Diff in /Users/louis/Documents/ai-guard/.worktrees/broker-service/src/broker/journal/tests.rs:229:
+     let lifecycle = BrokerCheckpointV3::new(
+         BrokerCheckpointV2::new(
+             initial,
+-            SupervisionCheckpointV1::new(
+-                journal.scope().control_namespace_uuid(),
+-                vec![],
+-                vec![],
+-            )
+-            .unwrap(),
++            SupervisionCheckpointV1::new(journal.scope().control_namespace_uuid(), vec![], vec![])
++                .unwrap(),
+         )
+         .unwrap(),
+         vec![],
+Diff in /Users/louis/Documents/ai-guard/.worktrees/broker-service/src/broker/journal/tests.rs:246:
+         Err(JournalError::Interrupted)
+     ));
+ 
+-    let preserved = temporary.path().canonicalize().unwrap().join("preserved-partial-job");
++    let preserved = temporary
++        .path()
++        .canonicalize()
++        .unwrap()
++        .join("preserved-partial-job");
+     std::fs::rename(&job_path, &preserved).unwrap();
+     assert!(preserved.join("reservation.json").is_file());
+-    assert!(matches!(journal.status(operation()), Err(JournalError::Conflict)));
+     assert!(matches!(
++        journal.status(operation()),
++        Err(JournalError::Conflict)
++    ));
++    assert!(matches!(
+         journal.reserve(operation(), submit()),
+         Err(JournalError::Conflict)
+     ));
+Diff in /Users/louis/Documents/ai-guard/.worktrees/broker-service/src/broker/journal/tests.rs:257:
+-    assert!(!job_path.exists(), "no replacement reservation may be created");
++    assert!(
++        !job_path.exists(),
++        "no replacement reservation may be created"
++    );
+ }
+ 
+ #[test]

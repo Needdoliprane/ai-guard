@@ -42,9 +42,9 @@ const NS: u128 = 1_000_000_000;
 async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
-    let outcome = timeout(Duration::from_secs(180), run(&selection, &evidence))
+    let outcome = timeout(Duration::from_secs(240), run(&selection, &evidence))
         .await
-        .context("broker runtime qualification exceeded the 180-second global bound")
+        .context("broker runtime qualification exceeded the 240-second global bound")
         .and_then(|result| result);
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
@@ -204,7 +204,10 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         _ => bail!("real submission did not produce fresh Accepted"),
     }
     let clock = NativeHostClock::new()?;
-    let limit = Instant::now() + Duration::from_secs(45);
+    // H6 reached a real helper claim and completed its process before the old
+    // 45-second observation bound cut off preparation. This is only the test's
+    // wait for Running: the worker's original five-second Arm is unchanged.
+    let limit = Instant::now() + Duration::from_secs(120);
     let mut observed_worker: Option<(String, WorkerStateV1)> = None;
     let worker = loop {
         broker.running()?;

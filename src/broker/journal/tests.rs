@@ -207,6 +207,63 @@ fn injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers() {
 }
 
 #[test]
+fn lifecycle_adapter_retains_observation_of_an_inherited_partial_job() {
+    use crate::broker::{
+        checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
+        lifecycle::BrokerCheckpointV3,
+    };
+
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open(temporary.path());
+    let ReserveResult::New(ticket) = journal.reserve(operation(), submit()).unwrap() else {
+        panic!("a fresh fixture requires its reservation ticket");
+    };
+    let job_path = journal.0.jobs.path().join(operation().to_string());
+    drop(ticket);
+    drop(journal);
+
+    // Reopening must not first observe this inherited reservation via status.
+    let journal = open(temporary.path());
+    let intent = intent();
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let lifecycle = BrokerCheckpointV3::new(
+        BrokerCheckpointV2::new(
+            initial,
+            SupervisionCheckpointV1::new(journal.scope().control_namespace_uuid(), vec![], vec![])
+                .unwrap(),
+        )
+        .unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let expected = super::RevisionRefV1::new(0, &"a".repeat(64)).unwrap();
+    assert!(matches!(
+        journal.advance_lifecycle_preserving_outbox(operation(), expected, &lifecycle),
+        Err(JournalError::Interrupted)
+    ));
+
+    let preserved = temporary
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("preserved-partial-job");
+    std::fs::rename(&job_path, &preserved).unwrap();
+    assert!(preserved.join("reservation.json").is_file());
+    assert!(matches!(
+        journal.status(operation()),
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        journal.reserve(operation(), submit()),
+        Err(JournalError::Conflict)
+    ));
+    assert!(
+        !job_path.exists(),
+        "no replacement reservation may be created"
+    );
+}
+
+#[test]
 fn full_writer_rechecks_binding_after_real_publication_before_ack() {
     let temporary = tempfile::tempdir().unwrap();
     let journal = open(temporary.path());

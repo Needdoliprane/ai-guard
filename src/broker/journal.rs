@@ -1013,6 +1013,41 @@ impl Journal {
     ) -> JournalResult<CheckpointReceiptV1> {
         self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V4(next.clone()))
     }
+    /// Writer adaptation shares the mutation's strict preload and mutex. A V4
+    /// writer update requires the current head even for an otherwise exact replay.
+    pub(crate) fn advance_lifecycle_preserving_outbox(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: &BrokerCheckpointV3,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        if operation_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        let loaded = match self.status_locked(operation_id, &mut writer)? {
+            Some(JournalStatusV1::Accepted(job)) => job,
+            None | Some(JournalStatusV1::Rejected(_)) => return Err(JournalError::InvalidInput),
+            Some(_) => return Err(JournalError::Interrupted),
+        };
+        let next = if let Some(current) = loaded.broker_checkpoint_v4() {
+            if loaded.head() != &expected {
+                return Err(JournalError::Conflict);
+            }
+            LoadedCheckpoint::V4(BrokerCheckpointV4::new(
+                next.clone(),
+                current.events().to_vec(),
+            )?)
+        } else {
+            super::outbox::validate_command_ids(next, &[])?;
+            LoadedCheckpoint::V3(next.clone())
+        };
+        // Preserve the writer adapter's ordering: load and V4 head/ID checks
+        // precede the expected-hash validation of the ordinary advance path.
+        valid_hash(&expected.hash)?;
+        self.advance_loaded_checkpoint(operation_id, expected, next, loaded, &mut writer)
+    }
     fn advance_checkpoint(
         &self,
         operation_id: Uuid,
@@ -1025,6 +1060,19 @@ impl Journal {
         let loaded = self
             .load_locked(operation_id, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
+        self.advance_loaded_checkpoint(operation_id, expected, next, loaded, &mut writer)
+    }
+
+    /// The caller retains the writer mutex from this strict preload through
+    /// publication and the unchanged strict postload below.
+    fn advance_loaded_checkpoint(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: LoadedCheckpoint,
+        loaded: AcceptedJobV1,
+        writer: &mut Writer,
+    ) -> JournalResult<CheckpointReceiptV1> {
         if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
             || (next.lifecycle().is_none() && loaded.broker_checkpoint_v3().is_some())
             || (next.outbox().is_none() && loaded.broker_checkpoint_v4().is_some())
@@ -1073,7 +1121,7 @@ impl Journal {
         writer.floors.insert(operation_id, head.clone());
         writer.observed_jobs.insert(operation_id);
         let result = self
-            .load_locked(operation_id, &mut writer)?
+            .load_locked(operation_id, writer)?
             .ok_or(JournalError::Corrupt)?;
         if result.0.head != head {
             return Err(JournalError::Corrupt);

@@ -4,6 +4,28 @@ use crate::{
     runtime::RuntimePrestartStageFailure,
 };
 use serde::Serialize;
+use std::fmt;
+
+/// An outer control boundary, never evidence that a request was sent or ACKed.
+/// A nested enforcer diagnostic can identify a more precise failing check.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum PreclaimStep {
+    ArmExchange,
+    Registration,
+    LoadAfterRegistration,
+    ReadinessBeforeClaim,
+    ClockBeforeClaim,
+    ClaimExchange,
+    GenerationBeforePrepare,
+    Prepare,
+}
+impl fmt::Display for PreclaimStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("broker preclaim stage failed")
+    }
+}
+impl std::error::Error for PreclaimStep {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -20,6 +42,8 @@ pub(super) struct BatchFailureDiagnosticV1 {
     runtime_effect: EffectEvidence,
     enforcer: Option<EnforcerStageFailure>,
     runtime: Option<RuntimePrestartStageFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broker_step: Option<PreclaimStep>,
 }
 
 pub(super) fn classify(
@@ -28,7 +52,8 @@ pub(super) fn classify(
 ) -> Option<BatchFailureDiagnosticV1> {
     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
-    if enforcer.is_none() && runtime.is_none() {
+    let broker_step = error.downcast_ref::<PreclaimStep>().copied();
+    if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
     }
     Some(BatchFailureDiagnosticV1 {
@@ -37,6 +62,7 @@ pub(super) fn classify(
         runtime_effect: EffectEvidence::Unknown,
         enforcer,
         runtime,
+        broker_step,
     })
 }
 
@@ -72,5 +98,22 @@ mod tests {
         let serialized = serde_json::to_string(&value).unwrap();
         assert!(!serialized.contains(private));
         assert!(!serialized.contains("another private transport context"));
+    }
+
+    #[test]
+    fn preclaim_context_reports_only_the_fixed_boundary() {
+        let private = "synthetic-private-journal-error-keep-out-of-audit";
+        let error = anyhow::anyhow!("{private}")
+            .context(PreclaimStep::LoadAfterRegistration)
+            .context("private outer context");
+        let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
+        let value = serde_json::to_value(diagnostic).unwrap();
+        assert_eq!(value["broker_step"], "load_after_registration");
+        assert_eq!(value["runtime_effect"], "unknown");
+        assert!(value["enforcer"].is_null());
+        assert!(value["runtime"].is_null());
+        let bytes = serde_json::to_string(&value).unwrap();
+        assert!(!bytes.contains(private));
+        assert!(!bytes.contains("private outer context"));
     }
 }

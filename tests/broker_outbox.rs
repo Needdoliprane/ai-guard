@@ -508,9 +508,40 @@ async fn v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_re
     let operation_id = Uuid::from_u128(0x66666666666646668666666666666666);
     let session_id = Uuid::from_u128(0x77777777777747778777777777777777);
     let (_intent, request) = fixture.accept(operation_id, session_id);
-    fixture
+    let accepted = fixture.journal.load(operation_id).unwrap().unwrap();
+    let initial_lifecycle = BrokerCheckpointV3::new(
+        BrokerCheckpointV2::new(
+            accepted.checkpoint().clone(),
+            SupervisionCheckpointV1::new(accepted.scope().control_namespace_uuid(), vec![], vec![])
+                .unwrap(),
+        )
+        .unwrap(),
+        vec![],
+    )
+    .unwrap();
+    let v3_receipt = fixture
+        .writer
+        .advance_lifecycle(
+            operation_id,
+            accepted.head().clone(),
+            initial_lifecycle.clone(),
+        )
+        .await
+        .unwrap();
+    let v3_replay = fixture
+        .writer
+        .advance_lifecycle(operation_id, accepted.head().clone(), initial_lifecycle)
+        .await
+        .unwrap();
+    assert_same_head(v3_replay.head(), v3_receipt.head());
+    let event = fixture
         .writer
         .enqueue_event(operation_id, synthetic_event(&request, 0))
+        .await
+        .unwrap();
+    fixture
+        .writer
+        .acknowledge_event(operation_id, event.event_id(), 71)
         .await
         .unwrap();
 
@@ -529,7 +560,9 @@ async fn v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_re
     let after_command = fixture.journal.load(operation_id).unwrap().unwrap();
     let checkpoint = after_command.broker_checkpoint_v4().unwrap();
     assert_eq!(checkpoint.events().len(), 1);
+    assert_eq!(checkpoint.events()[0].audit_seq(), Some(71));
     assert_eq!(checkpoint.lifecycle().commands().len(), 1);
+    let acknowledged_events = serde_json::to_vec(checkpoint.events()).unwrap();
 
     let expected = after_command.head().clone();
     let lifecycle = checkpoint.lifecycle().clone();
@@ -543,6 +576,25 @@ async fn v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_re
     let current_v4 = after_lifecycle.broker_checkpoint_v4().unwrap();
     assert_eq!(current_v4.events().len(), 1);
     assert_eq!(current_v4.lifecycle().commands().len(), 1);
+    assert_eq!(
+        serde_json::to_vec(current_v4.events()).unwrap(),
+        acknowledged_events
+    );
+
+    // Unlike direct checkpoint history replay, the writer's V4 adapter has
+    // always required the current expected head, even for identical contents.
+    assert_eq!(
+        fixture
+            .writer
+            .advance_lifecycle(operation_id, expected, lifecycle)
+            .await
+            .unwrap_err(),
+        JournalError::Conflict
+    );
+    assert_same_head(
+        fixture.journal.load(operation_id).unwrap().unwrap().head(),
+        after_lifecycle.head(),
+    );
 
     let before_downgrade = after_lifecycle.head().clone();
     assert_eq!(
