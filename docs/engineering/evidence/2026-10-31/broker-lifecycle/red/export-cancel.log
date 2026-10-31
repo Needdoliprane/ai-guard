@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 53.39s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_checkpoint-fbf2367c2d397b9c)
+
+running 1 test
+
+thread 'sqlite_store_receipts_cover_all_supervision_operation_variants' (5071832) panicked at tests/broker_checkpoint.rs:3034:5:
+a helper claim under an export grant from before cancellation must conflict
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test sqlite_store_receipts_cover_all_supervision_operation_variants ... FAILED
+
+failures:
+
+failures:
+    sqlite_store_receipts_cover_all_supervision_operation_variants
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 27.90s
+
+error: test failed, to rerun pass `--test broker_checkpoint`
+RC=101

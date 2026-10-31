@@ -1,0 +1,105 @@
+use agentsandbox::{
+    broker::{
+        intent::ExecutionIntentV1,
+        journal::{
+            BindingInputs, ControlSecrets, FsExclusions, Journal, JournalError, JournalScopeV1,
+            ReserveResult,
+        },
+    },
+    control_fs::Directory,
+    runner::CheckpointPayloadV1,
+};
+use serde_json::{Value, json};
+use std::{fs, os::unix::fs::PermissionsExt};
+use tempfile::tempdir;
+
+fn legacy_plan_value() -> Value {
+    let mut plan: Value = serde_json::from_str(include_str!("fixtures/broker_intent-plan-v3.json"))
+        .expect("typed private plan fixture");
+    plan["version"] = json!(1);
+    plan["options"]["profile"] = json!("strict");
+    plan["options"]["network"] = json!("none");
+    plan["options"]["provider"] = json!("generic");
+    plan["options"]["argv"] = json!(["/usr/bin/id"]);
+    for field in [
+        "client",
+        "auth_mode",
+        "client_profile",
+        "providers_file",
+        "prompt",
+        "model",
+    ] {
+        plan["options"].as_object_mut().unwrap().remove(field);
+    }
+    plan["request"]["profile"] = json!("strict");
+    plan["request"]["agent_id"] = json!("generic-22222222-2222-4222-8222-222222222222");
+    plan["request"]["command"]["argv"] = json!(["/usr/bin/id"]);
+    plan["request"]
+        .as_object_mut()
+        .unwrap()
+        .remove("provider_resolution");
+    plan["provider_input"] = Value::Null;
+    plan["provider_credential"] = Value::Null;
+    plan
+}
+
+#[test]
+fn reserve_does_not_report_interrupted_after_live_accepted_marker_is_missing() {
+    let temporary = tempdir().expect("private test root");
+    fs::set_permissions(temporary.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let directory = Directory::open_existing(&root).unwrap();
+    let scope = JournalScopeV1::new(
+        uuid::Uuid::from_u128(0x11111111111141118111111111111111),
+        "tenant-lifecycle-floor-test",
+        "http://127.0.0.1:8787",
+        uuid::Uuid::from_u128(0x22222222222242228222222222222222),
+        "broker-lifecycle-floor-test",
+    )
+    .unwrap();
+    let journal = Journal::open(
+        &directory,
+        scope,
+        &FsExclusions::new(),
+        Default::default(),
+        ControlSecrets::new(Vec::new()).unwrap(),
+    )
+    .unwrap();
+
+    let intent =
+        ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&legacy_plan_value()).unwrap())
+            .unwrap();
+    let operation_id = intent.operation_id();
+    let submit = br#"{"action":"accepted-floor"}"#;
+    let ticket = match journal.reserve(operation_id, submit).unwrap() {
+        ReserveResult::New(ticket) => ticket,
+        other => panic!("expected fresh reservation, got {other:?}"),
+    };
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    journal
+        .accept(ticket, &intent, BindingInputs::None, &initial)
+        .unwrap();
+
+    let scope_root = fs::read_dir(root.join("broker-journal-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let accepted = scope_root
+        .join("jobs")
+        .join(operation_id.to_string())
+        .join("accepted.json");
+    let accepted_bytes = fs::read(&accepted).unwrap();
+    let saved = root.join("accepted-marker-saved.outside-namespace");
+    fs::rename(&accepted, &saved).unwrap();
+
+    let replay = journal.reserve(operation_id, submit);
+
+    fs::rename(&saved, &accepted).unwrap();
+    assert_eq!(fs::read(&accepted).unwrap(), accepted_bytes);
+    assert!(
+        matches!(&replay, Err(JournalError::Conflict)),
+        "accepted floor with missing marker must conflict, got {replay:?}"
+    );
+}

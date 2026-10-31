@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.02s
+     Running tests/journal_lifecycle_floor.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/journal_lifecycle_floor-ee81ce73269bf1a5)
+
+running 1 test
+
+thread 'reserve_does_not_report_interrupted_after_live_accepted_marker_is_missing' (5038666) panicked at tests/journal_lifecycle_floor.rs:101:5:
+accepted floor with missing marker must conflict, got Ok(Interrupted)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test reserve_does_not_report_interrupted_after_live_accepted_marker_is_missing ... FAILED
+
+failures:
+
+failures:
+    reserve_does_not_report_interrupted_after_live_accepted_marker_is_missing
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+error: test failed, to rerun pass `--test journal_lifecycle_floor`
+RC=101

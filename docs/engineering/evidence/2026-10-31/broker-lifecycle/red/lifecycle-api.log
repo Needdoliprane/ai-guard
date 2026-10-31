@@ -1,0 +1,77 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0432]: unresolved imports `agentsandbox::broker::journal::JournalEntryKindV1`, `agentsandbox::broker::journal::JournalEntryV1`, `agentsandbox::broker::journal::JournalPageV1`, `agentsandbox::broker::journal::JournalStatusV1`, `agentsandbox::broker::journal::RejectionCodeV1`, `agentsandbox::broker::journal::RejectionPhaseV1`, `agentsandbox::broker::journal::RejectionReceiptV1`, `agentsandbox::broker::lifecycle`
+ --> tests/broker_lifecycle.rs:5:58
+  |
+5 |             AcceptedJobV1, CheckpointReceiptV1, Journal, JournalEntryKindV1, JournalEntryV1,
+  |                                                          ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^ no `JournalEntryV1` in `broker::journal`
+  |                                                          |
+  |                                                          no `JournalEntryKindV1` in `broker::journal`
+6 |             JournalError, JournalPageV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
+  |                           ^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^ no `RejectionPhaseV1` in `broker::journal`
+  |                           |              |                |
+  |                           |              |                no `RejectionCodeV1` in `broker::journal`
+  |                           |              no `JournalStatusV1` in `broker::journal`
+  |                           no `JournalPageV1` in `broker::journal`
+7 |             RejectionReceiptV1, ReservationTicket, RevisionRefV1,
+  |             ^^^^^^^^^^^^^^^^^^ no `RejectionReceiptV1` in `broker::journal`
+8 |         },
+9 |         lifecycle::{
+  |         ^^^^^^^^^ could not find `lifecycle` in `broker`
+  |
+help: a similar name exists in the module
+  |
+6 -             JournalError, JournalPageV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
+6 +             JournalError, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
+  |
+help: a similar name exists in the module
+  |
+6 -             JournalError, JournalPageV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
+6 +             JournalError, JournalPageV1, JournalScopeV1, RejectionCodeV1, RejectionPhaseV1,
+  |
+
+error[E0599]: no associated function or constant named `reject` found for struct `Journal` in the current scope
+  --> tests/broker_lifecycle.rs:26:62
+   |
+26 |     ) -> Result<RejectionReceiptV1, JournalError> = Journal::reject;
+   |                                                              ^^^^^^ associated function or constant not found in `Journal`
+
+error[E0599]: no associated function or constant named `status` found for struct `Journal` in the current scope
+  --> tests/broker_lifecycle.rs:28:18
+   |
+28 |         Journal::status;
+   |                  ^^^^^^ associated function or constant not found in `Journal`
+
+error[E0599]: no associated function or constant named `list` found for struct `Journal` in the current scope
+  --> tests/broker_lifecycle.rs:30:18
+   |
+30 |         Journal::list;
+   |                  ^^^^ associated function or constant not found in `Journal`
+
+error[E0599]: no associated function or constant named `advance_lifecycle` found for struct `Journal` in the current scope
+  --> tests/broker_lifecycle.rs:36:63
+   |
+36 |     ) -> Result<CheckpointReceiptV1, JournalError> = Journal::advance_lifecycle;
+   |                                                               ^^^^^^^^^^^^^^^^^ associated function or constant not found in `Journal`
+
+error[E0599]: no associated function or constant named `command_receipt` found for struct `Journal` in the current scope
+  --> tests/broker_lifecycle.rs:41:73
+   |
+41 |     ) -> Result<Option<LocalCommandReceiptV1>, JournalError> = Journal::command_receipt;
+   |                                                                         ^^^^^^^^^^^^^^^ associated function or constant not found in `Journal`
+
+error[E0599]: no associated function or constant named `broker_checkpoint_v3` found for struct `AcceptedJobV1` in the current scope
+   --> tests/broker_lifecycle.rs:43:24
+    |
+ 43 |         AcceptedJobV1::broker_checkpoint_v3;
+    |                        ^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `AcceptedJobV1`
+    |
+help: there is a method `broker_checkpoint_v2` with a similar name
+   --> src/broker/journal/types.rs:448:5
+    |
+448 |     pub fn broker_checkpoint_v2(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `agentsandbox` (test "broker_lifecycle") due to 7 previous errors
+RC=101

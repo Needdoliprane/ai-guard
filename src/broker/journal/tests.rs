@@ -2,7 +2,8 @@
 
 use super::{
     BindingInputs, ControlSecrets, FaultStage, FsExclusions, Journal, JournalError,
-    JournalLimitsV1, JournalResult, JournalScopeV1, ReserveResult,
+    JournalLimitsV1, JournalResult, JournalScopeV1, RejectionCodeV1, RejectionPhaseV1,
+    ReserveResult,
 };
 use crate::{
     broker::intent::ExecutionIntentV1, control_fs::Directory, runner::CheckpointPayloadV1,
@@ -147,6 +148,47 @@ fn injected_journal_io_error_never_returns_ack_and_recovery_is_conservative() {
             .revision(),
         1
     );
+}
+
+#[test]
+fn injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers() {
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open(temporary.path());
+    let operations = [
+        (operation(), FaultStage::RejectedWritten),
+        (second_operation(), FaultStage::RejectedDurable),
+        (
+            Uuid::parse_str("55555555-5555-4555-8555-555555555555").unwrap(),
+            FaultStage::BeforeAck,
+        ),
+    ];
+
+    for (operation, stage) in operations {
+        let ticket = match journal.reserve(operation, submit()).unwrap() {
+            ReserveResult::New(ticket) => ticket,
+            _ => panic!("reject test requires a fresh ticket"),
+        };
+        fail_once_at(stage);
+        assert!(matches!(
+            journal.reject(
+                ticket,
+                RejectionPhaseV1::SubmissionPreparation,
+                RejectionCodeV1::PreparationFailed,
+            ),
+            Err(JournalError::Io)
+        ));
+
+        let replay = match journal.reserve(operation, submit()).unwrap() {
+            ReserveResult::Rejected(receipt) => receipt,
+            other => panic!("replay after durable rejection returned {other:?}"),
+        };
+        assert_eq!(replay.operation_id(), operation);
+        assert!(matches!(
+            journal.status(operation).unwrap(),
+            Some(super::JournalStatusV1::Rejected(receipt))
+                if receipt.record_hash() == replay.record_hash()
+        ));
+    }
 }
 
 fn intent_for(operation: Uuid) -> ExecutionIntentV1 {

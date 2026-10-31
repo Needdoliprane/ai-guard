@@ -1,5 +1,9 @@
 //! Durable private job data. This module never authorizes or starts a workload.
-use super::{checkpoint::BrokerCheckpointV2, intent::ExecutionIntentV1};
+use super::{
+    checkpoint::BrokerCheckpointV2,
+    intent::ExecutionIntentV1,
+    lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1},
+};
 use crate::{
     control_fs::{Directory, PrivateFile},
     runner::CheckpointPayloadV1,
@@ -8,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt,
     sync::{Arc, Mutex, Weak},
 };
@@ -49,7 +53,7 @@ pub(crate) fn canonical(value: &impl Serialize) -> JournalResult<Vec<u8>> {
     ))
     .map_err(|_| JournalError::InvalidInput)
 }
-fn digest(domain: &str, bytes: &[u8]) -> String {
+pub(super) fn digest(domain: &str, bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
     hash.update(domain.as_bytes());
     hash.update([0]);
@@ -59,7 +63,7 @@ fn digest(domain: &str, bytes: &[u8]) -> String {
 fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
-fn valid_hash(hash: &str) -> JournalResult<()> {
+pub(super) fn valid_hash(hash: &str) -> JournalResult<()> {
     if hash.len() == 64
         && hash
             .bytes()
@@ -103,6 +107,8 @@ struct Inner {
 struct Writer {
     tickets: HashMap<Uuid, Weak<()>>,
     floors: HashMap<Uuid, RevisionRefV1>,
+    rejected_floors: HashMap<Uuid, String>,
+    observed_jobs: HashSet<Uuid>,
 }
 pub struct ReservationTicket {
     owner: Arc<Inner>,
@@ -131,6 +137,15 @@ record!(Bindings {
 });
 record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:CheckpointPayloadV1 });
 record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
+record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
+record!(Rejected {
+    version: u32,
+    scope_hash: String,
+    operation_id: Uuid,
+    submit_hash: String,
+    phase: RejectionPhaseV1,
+    code: RejectionCodeV1
+});
 record!(Current {
     version: u32,
     operation_id: Uuid,
@@ -291,7 +306,7 @@ impl Journal {
         let name = operation_id.to_string();
         if let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? {
             if self.read_file(&job, "reservation.json", SMALL)?.is_none() {
-                self.usage(Some(&name))?;
+                self.status_locked(operation_id, &mut writer)?;
                 return Ok(ReserveResult::Interrupted);
             }
             let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
@@ -299,27 +314,23 @@ impl Journal {
             if reservation.submit_hash != submit_hash {
                 return Err(JournalError::Conflict);
             }
-            if self.read_file(&job, "accepted.json", SMALL)?.is_some() {
-                let accepted = self
-                    .load_locked(operation_id, &mut writer)?
-                    .ok_or(JournalError::Corrupt)?;
-                stage!(BeforeAck);
-                return Ok(ReserveResult::Accepted(accepted));
-            }
-            self.usage(Some(&name))?;
-            if writer
-                .tickets
-                .get(&operation_id)
-                .and_then(Weak::upgrade)
-                .is_some()
-            {
-                return Ok(ReserveResult::InProgress);
-            }
-            return Ok(ReserveResult::Interrupted);
+            let result = match self.status_locked(operation_id, &mut writer)? {
+                Some(JournalStatusV1::Accepted(job)) => ReserveResult::Accepted(job),
+                Some(JournalStatusV1::Rejected(receipt)) => ReserveResult::Rejected(receipt),
+                Some(JournalStatusV1::ReservedInProcess) => ReserveResult::InProgress,
+                Some(JournalStatusV1::Interrupted) => ReserveResult::Interrupted,
+                None => return Err(JournalError::Interrupted),
+            };
+            stage!(BeforeAck);
+            return Ok(result);
         }
-        if writer.floors.contains_key(&operation_id) {
+        if writer.observed_jobs.contains(&operation_id)
+            || writer.floors.contains_key(&operation_id)
+            || writer.rejected_floors.contains_key(&operation_id)
+        {
             return Err(JournalError::Conflict);
         }
+        self.check_observation_capacity(operation_id, &writer)?;
         let reservation = Reservation {
             version: 1,
             scope_hash: self.0.scope_hash.clone(),
@@ -340,6 +351,7 @@ impl Journal {
         io(job.sync())?;
         io(self.0.jobs.sync())?;
         stage!(ReservationDurable);
+        writer.observed_jobs.insert(operation_id);
         let lease = Arc::new(());
         writer.tickets.insert(operation_id, Arc::downgrade(&lease));
         Ok(ReserveResult::New(ReservationTicket {
@@ -348,6 +360,184 @@ impl Journal {
             operation: operation_id,
             submit_hash,
         }))
+    }
+
+    pub fn reject(
+        &self,
+        ticket: ReservationTicket,
+        phase: RejectionPhaseV1,
+        code: RejectionCodeV1,
+    ) -> JournalResult<RejectionReceiptV1> {
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        if !Arc::ptr_eq(&ticket.owner, &self.0)
+            || writer
+                .tickets
+                .get(&ticket.operation)
+                .and_then(Weak::upgrade)
+                .is_none_or(|lease| !Arc::ptr_eq(&lease, &ticket.lease))
+            || writer.floors.contains_key(&ticket.operation)
+            || writer.rejected_floors.contains_key(&ticket.operation)
+        {
+            return Err(JournalError::Conflict);
+        }
+        let job = self.job(ticket.operation)?;
+        let entries = fscheck(job.persistent_entries(self.0.limits.job_entries))?;
+        if entries.iter().any(|entry| entry.name == "accepted.json")
+            && entries.iter().any(|entry| entry.name == "rejected.json")
+        {
+            return Err(JournalError::Corrupt);
+        }
+        if entries.len() != 1 || entries[0].name != "reservation.json" || entries[0].directory {
+            return Err(JournalError::Interrupted);
+        }
+        let reservation: Reservation = self.read_canonical(&job, "reservation.json", SMALL)?;
+        self.check_reservation(&reservation, ticket.operation)?;
+        if reservation.submit_hash != ticket.submit_hash {
+            return Err(JournalError::Conflict);
+        }
+        let record = Rejected {
+            version: 1,
+            scope_hash: self.0.scope_hash.clone(),
+            operation_id: ticket.operation,
+            submit_hash: ticket.submit_hash.clone(),
+            phase,
+            code,
+        };
+        let bytes = self.checked_record(&record, SMALL)?;
+        self.budget(&ticket.operation.to_string(), bytes.len() as u64, 1)?;
+        let file = io(job.persistent_create("rejected.json", &bytes))?;
+        stage!(RejectedWritten);
+        io(file.persistent_sync())?;
+        io(job.sync())?;
+        io(self.0.jobs.sync())?;
+        stage!(RejectedDurable);
+        let receipt = self.read_rejection(&job, &reservation, &mut writer)?;
+        writer.tickets.remove(&ticket.operation);
+        stage!(BeforeAck);
+        Ok(receipt)
+    }
+
+    pub fn status(&self, operation_id: Uuid) -> JournalResult<Option<JournalStatusV1>> {
+        if operation_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        self.status_locked(operation_id, &mut writer)
+    }
+
+    fn status_locked(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+    ) -> JournalResult<Option<JournalStatusV1>> {
+        let name = operation_id.to_string();
+        let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
+            if writer.observed_jobs.contains(&operation_id)
+                || writer.floors.contains_key(&operation_id)
+                || writer.rejected_floors.contains_key(&operation_id)
+            {
+                return Err(JournalError::Conflict);
+            }
+            return Ok(None);
+        };
+        self.usage(Some(&name))?;
+        self.check_observation_capacity(operation_id, writer)?;
+        let accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
+        let rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
+        if accepted && rejected {
+            return Err(JournalError::Corrupt);
+        }
+        if (writer.floors.contains_key(&operation_id) && !accepted)
+            || (writer.rejected_floors.contains_key(&operation_id) && !rejected)
+        {
+            return Err(JournalError::Conflict);
+        }
+        if accepted {
+            let value = self
+                .load_locked(operation_id, writer)?
+                .ok_or(JournalError::Corrupt)?;
+            return Ok(Some(JournalStatusV1::Accepted(value)));
+        }
+        if self.read_file(&job, "reservation.json", SMALL)?.is_none() {
+            return if rejected {
+                Err(JournalError::Corrupt)
+            } else {
+                writer.observed_jobs.insert(operation_id);
+                Ok(Some(JournalStatusV1::Interrupted))
+            };
+        }
+        let reservation: Reservation = self.read_canonical(&job, "reservation.json", SMALL)?;
+        self.check_reservation(&reservation, operation_id)?;
+        if rejected {
+            return Ok(Some(JournalStatusV1::Rejected(self.read_rejection(
+                &job,
+                &reservation,
+                writer,
+            )?)));
+        }
+        let entries = fscheck(job.persistent_entries(self.0.limits.job_entries))?;
+        writer.observed_jobs.insert(operation_id);
+        if entries.len() == 1
+            && entries[0].name == "reservation.json"
+            && writer
+                .tickets
+                .get(&operation_id)
+                .and_then(Weak::upgrade)
+                .is_some()
+        {
+            Ok(Some(JournalStatusV1::ReservedInProcess))
+        } else {
+            Ok(Some(JournalStatusV1::Interrupted))
+        }
+    }
+
+    fn read_rejection(
+        &self,
+        job: &Directory,
+        reservation: &Reservation,
+        writer: &mut Writer,
+    ) -> JournalResult<RejectionReceiptV1> {
+        let entries = fscheck(job.persistent_entries(self.0.limits.job_entries))?;
+        if entries.len() != 2
+            || entries.iter().any(|entry| {
+                entry.directory
+                    || !matches!(entry.name.as_str(), "reservation.json" | "rejected.json")
+            })
+        {
+            return Err(JournalError::Corrupt);
+        }
+        let record: Rejected = self.read_canonical(job, "rejected.json", SMALL)?;
+        if record.version != 1
+            || record.scope_hash != self.0.scope_hash
+            || record.operation_id != reservation.operation_id
+            || record.submit_hash != reservation.submit_hash
+        {
+            return Err(JournalError::Corrupt);
+        }
+        let record_hash = digest("ai-guard:broker-rejection:v1", &canonical(&record)?);
+        if writer.floors.contains_key(&record.operation_id)
+            || writer
+                .rejected_floors
+                .get(&record.operation_id)
+                .is_some_and(|old| old != &record_hash)
+        {
+            return Err(JournalError::Conflict);
+        }
+        io(job.sync())?;
+        io(self.0.jobs.sync())?;
+        writer.observed_jobs.insert(record.operation_id);
+        writer
+            .rejected_floors
+            .insert(record.operation_id, record_hash.clone());
+        Ok(RejectionReceiptV1 {
+            operation_id: record.operation_id,
+            submit_hash: record.submit_hash,
+            phase: record.phase,
+            code: record.code,
+            record_hash,
+        })
     }
 
     pub fn accept(
@@ -486,7 +676,137 @@ impl Journal {
         }
         let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
         self.check_writer()?;
-        self.load_locked(operation_id, &mut writer)
+        match self.status_locked(operation_id, &mut writer)? {
+            None => Ok(None),
+            Some(JournalStatusV1::Accepted(value)) => Ok(Some(value)),
+            Some(JournalStatusV1::Rejected(_)) => Err(JournalError::InvalidInput),
+            Some(_) => Err(JournalError::Interrupted),
+        }
+    }
+
+    pub fn list(&self, after: Option<Uuid>, limit: u32) -> JournalResult<JournalPageV1> {
+        if !(1..=100).contains(&limit) || after.is_some_and(|id| id.is_nil()) {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        self.usage(None)?;
+        let mut ids = Vec::new();
+        for entry in fscheck(self.0.jobs.persistent_entries(self.0.limits.scope_entries))? {
+            let id = Uuid::parse_str(&entry.name).map_err(|_| JournalError::Corrupt)?;
+            if !entry.directory || id.is_nil() || id.to_string() != entry.name {
+                return Err(JournalError::Corrupt);
+            }
+            ids.push(id);
+        }
+        ids.sort_unstable();
+        let observed: HashSet<_> = writer
+            .observed_jobs
+            .iter()
+            .chain(writer.floors.keys())
+            .chain(writer.rejected_floors.keys())
+            .copied()
+            .collect();
+        for id in observed {
+            if ids.binary_search(&id).is_err() {
+                return Err(JournalError::Conflict);
+            }
+            self.status_locked(id, &mut writer)?
+                .ok_or(JournalError::Conflict)?;
+        }
+        let mut selected = ids
+            .into_iter()
+            .filter(|id| after.is_none_or(|cursor| *id > cursor));
+        let mut entries = Vec::new();
+        for id in selected.by_ref().take(limit as usize) {
+            let status = self
+                .status_locked(id, &mut writer)?
+                .ok_or(JournalError::Interrupted)?;
+            entries.push(Self::summary(id, status));
+        }
+        let next_after = if selected.next().is_some() {
+            entries.last().map(|entry| entry.operation_id)
+        } else {
+            None
+        };
+        Ok(JournalPageV1 {
+            entries,
+            next_after,
+        })
+    }
+
+    fn summary(operation_id: Uuid, status: JournalStatusV1) -> JournalEntryV1 {
+        let kind = match &status {
+            JournalStatusV1::ReservedInProcess => JournalEntryKindV1::ReservedInProcess,
+            JournalStatusV1::Interrupted => JournalEntryKindV1::Interrupted,
+            JournalStatusV1::Rejected(_) => JournalEntryKindV1::Rejected,
+            JournalStatusV1::Accepted(_) => JournalEntryKindV1::Accepted,
+        };
+        let mut entry = JournalEntryV1 {
+            operation_id,
+            kind,
+            head: None,
+            cancel_requested: false,
+            approval_submitted: false,
+            failure_count: 0,
+            pending_rpc_count: None,
+            worker_state: None,
+            quota_held: None,
+            runtime_status: None,
+            last_observed_at: None,
+        };
+        if let JournalStatusV1::Accepted(job) = status {
+            entry.head = Some(job.head().clone());
+            if let Some(checkpoint) = job.broker_checkpoint_v2() {
+                entry.pending_rpc_count = Some(
+                    checkpoint
+                        .supervision()
+                        .operations()
+                        .iter()
+                        .filter(|op| !op.has_response())
+                        .count(),
+                );
+            }
+            if let Some(checkpoint) = job.broker_checkpoint_v3() {
+                use super::lifecycle::LocalCommandRequestV1;
+                for command in checkpoint.commands() {
+                    match command.request() {
+                        LocalCommandRequestV1::CancelRequested => entry.cancel_requested = true,
+                        LocalCommandRequestV1::ApprovalSubmitted { .. } => {
+                            entry.approval_submitted = true
+                        }
+                        LocalCommandRequestV1::FailureObserved { .. } => entry.failure_count += 1,
+                    }
+                }
+            }
+            if let Some(worker) = job.checkpoint().broker_context().worker {
+                entry.worker_state = Some(worker.state);
+                entry.quota_held = Some(worker.quota_held);
+                if let Some(observation) = &worker.last_observation {
+                    entry.runtime_status = Some(observation.status);
+                    entry.last_observed_at = Some(observation.observed_at.clone());
+                }
+            }
+        }
+        entry
+    }
+
+    pub fn command_receipt(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<Option<LocalCommandReceiptV1>> {
+        if operation_id.is_nil() || command_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        let Some(JournalStatusV1::Accepted(mut job)) =
+            self.status_locked(operation_id, &mut writer)?
+        else {
+            return Err(JournalError::InvalidInput);
+        };
+        Ok(job.0.command_receipts.remove(&command_id))
     }
 
     pub fn advance(
@@ -505,6 +825,14 @@ impl Journal {
     ) -> JournalResult<CheckpointReceiptV1> {
         self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V2(next.clone()))
     }
+    pub fn advance_lifecycle(
+        &self,
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        next: &BrokerCheckpointV3,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V3(next.clone()))
+    }
     fn advance_checkpoint(
         &self,
         operation_id: Uuid,
@@ -517,7 +845,9 @@ impl Journal {
         let loaded = self
             .load_locked(operation_id, &mut writer)?
             .ok_or(JournalError::InvalidInput)?;
-        if matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some() {
+        if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
+            || (!matches!(next, LoadedCheckpoint::V3(_)) && loaded.broker_checkpoint_v3().is_some())
+        {
             return Err(JournalError::Conflict);
         }
         self.context_checkpoint(&next, &loaded.0.intent, &loaded.0.binding)?;
@@ -554,6 +884,20 @@ impl Journal {
                 )?,
                 "ai-guard:broker-checkpoint:v2",
             ),
+            LoadedCheckpoint::V3(payload) => (
+                self.checked_record(
+                    &LifecycleCheckpoint {
+                        version: 3,
+                        operation_id,
+                        intent_hash: loaded.0.intent_hash.clone(),
+                        revision: next_revision,
+                        previous: Some(expected.clone()),
+                        payload: payload.clone(),
+                    },
+                    CHECKPOINT,
+                )?,
+                "ai-guard:broker-checkpoint:v3",
+            ),
         };
         let head = RevisionRefV1 {
             revision: next_revision,
@@ -572,7 +916,12 @@ impl Journal {
         if expected != loaded.0.head {
             return Err(JournalError::Conflict);
         }
-        self.check_transition(&loaded.0.checkpoint, &next, loaded.0.legacy_managed_seen)?;
+        self.check_transition(
+            &loaded.0.checkpoint,
+            &next,
+            loaded.0.legacy_managed_seen,
+            loaded.0.last_cancel_operations,
+        )?;
         if next_revision >= u64::from(self.0.limits.revisions) {
             return Err(JournalError::LimitExceeded);
         }
@@ -824,13 +1173,33 @@ impl Journal {
     ) -> JournalResult<Option<AcceptedJobV1>> {
         let name = operation_id.to_string();
         let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
-            return if writer.floors.contains_key(&operation_id) {
+            return if writer.observed_jobs.contains(&operation_id)
+                || writer.floors.contains_key(&operation_id)
+                || writer.rejected_floors.contains_key(&operation_id)
+            {
                 Err(JournalError::Conflict)
             } else {
                 Ok(None)
             };
         };
         self.usage(Some(&name))?;
+        self.check_observation_capacity(operation_id, writer)?;
+        let has_accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
+        let has_rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
+        if has_accepted && has_rejected {
+            return Err(JournalError::Corrupt);
+        }
+        if (writer.floors.contains_key(&operation_id) && !has_accepted)
+            || writer.rejected_floors.contains_key(&operation_id) && !has_rejected
+        {
+            return Err(JournalError::Conflict);
+        }
+        if has_rejected {
+            let reservation: Reservation = self.read_canonical(&job, "reservation.json", SMALL)?;
+            self.check_reservation(&reservation, operation_id)?;
+            self.read_rejection(&job, &reservation, writer)?;
+            return Err(JournalError::InvalidInput);
+        }
         let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
         self.check_reservation(&reservation, operation_id)?;
         let accepted: Accepted = self.read(&job, "accepted.json", SMALL)?;
@@ -886,6 +1255,8 @@ impl Journal {
         let mut previous = None;
         let mut payload: Option<LoadedCheckpoint> = None;
         let mut legacy_managed_seen = false;
+        let mut command_receipts = HashMap::new();
+        let mut last_cancel_operations = None;
         for revision in 0..=current.head.revision {
             let file = self
                 .read_file(&job, &revision_name(revision), CHECKPOINT)?
@@ -925,11 +1296,31 @@ impl Journal {
                         "ai-guard:broker-checkpoint:v2",
                     )
                 }
+                Some(3) => {
+                    let checkpoint: LifecycleCheckpoint = parse(file.bytes())?;
+                    if checkpoint.operation_id != operation_id
+                        || checkpoint.intent_hash != intent_hash
+                        || checkpoint.revision != revision
+                        || checkpoint.previous != previous
+                        || canonical(&checkpoint)? != file.bytes()
+                    {
+                        return Err(JournalError::Corrupt);
+                    }
+                    (
+                        LoadedCheckpoint::V3(checkpoint.payload),
+                        "ai-guard:broker-checkpoint:v3",
+                    )
+                }
                 _ => return Err(JournalError::UnsupportedVersion),
             };
             self.context_checkpoint(&next_payload, &intent, &bindings.binding)?;
             if let Some(old) = &payload {
-                self.check_transition(old, &next_payload, legacy_managed_seen)?;
+                self.check_transition(
+                    old,
+                    &next_payload,
+                    legacy_managed_seen,
+                    last_cancel_operations,
+                )?;
             } else if !matches!(next_payload, LoadedCheckpoint::V1(_)) {
                 return Err(JournalError::Corrupt);
             }
@@ -940,6 +1331,21 @@ impl Journal {
                 revision,
                 hash: digest(domain, file.bytes()),
             };
+            if let Some(value) = next_payload.lifecycle() {
+                last_cancel_operations = value.cancel_boundary(
+                    payload.as_ref().and_then(LoadedCheckpoint::lifecycle),
+                    last_cancel_operations,
+                );
+                for command in value.commands() {
+                    command_receipts
+                        .entry(command.command_id())
+                        .or_insert_with(|| LocalCommandReceiptV1 {
+                            command_id: command.command_id(),
+                            input_hash: command.input_hash().into(),
+                            head: head.clone(),
+                        });
+                }
+            }
             if revision == 0
                 && (accepted.initial_checkpoint != head
                     || CheckpointPayloadV1::initial(&intent)?.canonical_bytes()?
@@ -965,6 +1371,7 @@ impl Journal {
         io(self.0.jobs.sync())?;
         io(self.0.directory.sync())?;
         writer.floors.insert(operation_id, current.head.clone());
+        writer.observed_jobs.insert(operation_id);
         Ok(Some(AcceptedJobV1(Box::new(AcceptedData {
             operation_id,
             intent,
@@ -976,6 +1383,8 @@ impl Journal {
             checkpoint: payload.ok_or(JournalError::Corrupt)?,
             legacy_managed_seen,
             chain,
+            command_receipts,
+            last_cancel_operations,
         }))))
     }
     fn check_writer(&self) -> JournalResult<()> {
@@ -1024,6 +1433,23 @@ impl Journal {
         io(file.persistent_sync())?;
         Ok(value)
     }
+    fn read_canonical<T: DeserializeOwned + Serialize>(
+        &self,
+        directory: &Directory,
+        name: &str,
+        max: u64,
+    ) -> JournalResult<T> {
+        let file = self
+            .read_file(directory, name, max)?
+            .ok_or(JournalError::Interrupted)?;
+        self.0.control.record(file.bytes())?;
+        let value: T = parse(file.bytes())?;
+        if canonical(&value)? != file.bytes() {
+            return Err(JournalError::Corrupt);
+        }
+        io(file.persistent_sync())?;
+        Ok(value)
+    }
     fn job(&self, operation: Uuid) -> JournalResult<Directory> {
         fscheck(self.0.jobs.persistent_child(&operation.to_string(), false))?
             .ok_or(JournalError::Interrupted)
@@ -1069,8 +1495,16 @@ impl Journal {
         binding: &BindingManifestV1,
     ) -> JournalResult<()> {
         self.context(checkpoint.runner(), intent, binding)?;
-        if let LoadedCheckpoint::V2(value) = checkpoint {
+        if let Some(value) = checkpoint.supervised() {
             value.validate_context(intent, self.0.scope.0.control_namespace_uuid, binding)?;
+        }
+        if let Some(value) = checkpoint.lifecycle() {
+            value.validate_context(
+                intent.operation_id(),
+                &intent
+                    .intent_hash()
+                    .map_err(|_| JournalError::InvalidInput)?,
+            )?;
         }
         Ok(())
     }
@@ -1079,7 +1513,29 @@ impl Journal {
         previous: &LoadedCheckpoint,
         next: &LoadedCheckpoint,
         legacy_managed_seen: bool,
+        last_cancel_operations: Option<usize>,
     ) -> JournalResult<()> {
+        if let LoadedCheckpoint::V3(value) = next {
+            if let LoadedCheckpoint::V1(old) = previous
+                && (legacy_managed_seen
+                    || (old.broker_context().request.human_approved
+                        && !value
+                            .broker()
+                            .runner()
+                            .broker_context()
+                            .request
+                            .human_approved))
+            {
+                return Err(JournalError::Conflict);
+            }
+            value.broker().validate_transition(previous.supervised())?;
+            return value.validate_transition(
+                previous.lifecycle(),
+                previous.supervised(),
+                previous.runner(),
+                last_cancel_operations,
+            );
+        }
         match (previous, next) {
             (LoadedCheckpoint::V1(old), LoadedCheckpoint::V2(value)) => {
                 if legacy_managed_seen
@@ -1095,11 +1551,21 @@ impl Journal {
             }
             (LoadedCheckpoint::V2(_), LoadedCheckpoint::V1(_)) => Err(JournalError::Conflict),
             (LoadedCheckpoint::V1(_), LoadedCheckpoint::V1(_)) => Ok(()),
+            (LoadedCheckpoint::V3(_), _) => Err(JournalError::Conflict),
+            (_, LoadedCheckpoint::V3(_)) => Err(JournalError::Conflict),
         }
     }
     fn budget(&self, name: &str, bytes: u64, entries: u32) -> JournalResult<()> {
         self.usage(Some(name))?
             .add(bytes, entries, true, &self.0.limits)
+    }
+    fn check_observation_capacity(&self, operation_id: Uuid, writer: &Writer) -> JournalResult<()> {
+        if !writer.observed_jobs.contains(&operation_id)
+            && writer.observed_jobs.len() >= self.0.limits.jobs as usize
+        {
+            return Err(JournalError::LimitExceeded);
+        }
+        Ok(())
     }
     fn usage(&self, selected: Option<&str>) -> JournalResult<Usage> {
         let mut usage = Usage::default();
@@ -1169,6 +1635,7 @@ impl Journal {
                         | "current.json"
                         | "current-next.json"
                         | "accepted.json"
+                        | "rejected.json"
                 ) {
                     return Err(JournalError::Corrupt);
                 }
@@ -1211,6 +1678,8 @@ pub(super) enum FaultStage {
     CurrentDurable,
     AcceptedWritten,
     AcceptedDurable,
+    RejectedWritten,
+    RejectedDurable,
     BeforeAck,
 }
 #[cfg(test)]

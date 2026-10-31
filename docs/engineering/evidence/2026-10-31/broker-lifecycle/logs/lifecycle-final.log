@@ -1,0 +1,15 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 19.13s
+     Running tests/broker_lifecycle.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_lifecycle-8863d2b5e78080fc)
+
+running 6 tests
+test lifecycle_journal_and_checkpoint_v3_api_matches_the_contract ... ok
+test rejection_enum_deserialization_errors_do_not_echo_unknown_values ... ok
+test rejection_is_durable_idempotent_and_visible_in_status_and_pages ... ok
+test approval_command_requires_prior_store_review_ack_and_uses_two_runner_commits ... ok
+test cancel_preserves_a_pending_store_admission_and_its_held_quota ... ok
+test lifecycle_wire_context_replay_caps_and_legacy_approval_boundaries ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+
+exit_code=0

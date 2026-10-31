@@ -1,0 +1,13 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+     Running tests/broker_admission_client.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_admission_client-75cbe5c50ac6910c)
+
+running 4 tests
+test typed_client_preserves_policy_refusal_and_its_replay_receipt ... ok
+test typed_client_preserves_created_replay_and_authentication_error ... ok
+test typed_client_preserves_real_quota_refusal_and_its_replay_receipt ... ok
+test typed_client_rejects_an_inconsistent_initial_worker_from_real_gateway_response ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+RC=0

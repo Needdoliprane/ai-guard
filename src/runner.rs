@@ -204,6 +204,168 @@ impl AuditClient {
         }
         serde_json::from_slice(&bytes).context("gateway returned invalid JSON")
     }
+    /// Submit an already durable supervised reservation with this client's
+    /// explicit runner credential. Policy/quota refusals have durable receipts
+    /// even though their HTTP status is 403/429. Other errors stay unknown to the
+    /// caller; this DTO never grants a runtime start or commits a checkpoint.
+    pub async fn admit_supervised(
+        &self,
+        request: &crate::control::SupervisedAdmissionV1,
+    ) -> Result<crate::control::AdmissionResultV1> {
+        use crate::control::{AdmissionRefusalV1, AdmissionResultV1, WorkerStateV1};
+        use reqwest::StatusCode;
+
+        let input_hash = request
+            .input_hash()
+            .map_err(|_| anyhow::anyhow!("invalid supervised reservation"))?;
+        self.validate_identity_payload(request)?;
+        let body = serde_json::to_vec(request)
+            .map_err(|_| anyhow::anyhow!("invalid supervised reservation"))?;
+        anyhow::ensure!(
+            body.len() <= 64 * 1024,
+            "supervised reservation exceeds its input bound"
+        );
+        let url = self
+            .base
+            .join("api/v1/workers/supervised-reservations")
+            .map_err(|_| anyhow::anyhow!("invalid supervised reservation origin"))?;
+        let mut response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| anyhow::anyhow!("supervised reservation response is unavailable"))?;
+        let status = response.status();
+        anyhow::ensure!(
+            matches!(
+                status,
+                StatusCode::OK
+                    | StatusCode::CREATED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::TOO_MANY_REQUESTS
+            ),
+            "gateway rejected the supervised reservation (HTTP {})",
+            status.as_u16()
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| anyhow::anyhow!("supervised reservation response is incomplete"))?
+        {
+            anyhow::ensure!(
+                bytes.len().saturating_add(chunk.len()) <= 512 * 1024,
+                "supervised reservation response exceeds its bound"
+            );
+            bytes.extend_from_slice(&chunk);
+        }
+        let mut decoder = serde_json::Deserializer::from_slice(&bytes);
+        let mut ignored = false;
+        let result: AdmissionResultV1 =
+            serde_ignored::deserialize(&mut decoder, |_| ignored = true)
+                .map_err(|_| anyhow::anyhow!("invalid supervised reservation response"))?;
+        decoder
+            .end()
+            .map_err(|_| anyhow::anyhow!("invalid supervised reservation response"))?;
+        anyhow::ensure!(!ignored, "invalid supervised reservation response");
+        let value = serde_json::to_value(&result)
+            .map_err(|_| anyhow::anyhow!("invalid supervised reservation response"))?;
+        anyhow::ensure!(
+            self.redactor.value(&value) == value,
+            "sensitive data rejected from supervised reservation response"
+        );
+        let receipt = &result.receipt;
+        anyhow::ensure!(
+            receipt.operation_id == request.admission.operation_id
+                && receipt.input_hash == input_hash
+                && receipt.audit_seq > 0
+                && crate::control::hash(&receipt.audit_hash).is_ok(),
+            "supervised reservation receipt does not match its request"
+        );
+        match (&result.worker, result.refusal) {
+            (Some(worker), None) => {
+                let launch = serde_json::to_value(&worker.launch)
+                    .map_err(|_| anyhow::anyhow!("invalid supervised reservation launch"))?;
+                let expected_launch = serde_json::to_value(&request.admission.launch)
+                    .map_err(|_| anyhow::anyhow!("invalid supervised reservation launch"))?;
+                let decision_receipt = serde_json::to_value(&worker.receipt)
+                    .map_err(|_| anyhow::anyhow!("invalid supervised reservation receipt"))?;
+                let expected_receipt = serde_json::to_value(&request.admission.receipt)
+                    .map_err(|_| anyhow::anyhow!("invalid supervised reservation receipt"))?;
+                let expected_spec = request
+                    .admission
+                    .launch
+                    .spec_hash()
+                    .map_err(|_| anyhow::anyhow!("invalid supervised reservation launch"))?;
+                let canonical_uuid = |value: &str| {
+                    Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
+                };
+                let physical_name_matches = worker
+                    .attempt
+                    .stable_name
+                    .strip_prefix("aig-")
+                    .and_then(|name| name.split_once('-'))
+                    .is_some_and(|(namespace, id)| {
+                        namespace.len() == 32
+                            && Uuid::parse_str(namespace).is_ok_and(|parsed| {
+                                !parsed.is_nil() && parsed.simple().to_string() == namespace
+                            })
+                            && id == worker.worker_id.replace('-', "")
+                            && worker.attempt.volume_name
+                                == format!("{}-work", worker.attempt.stable_name)
+                    });
+                anyhow::ensure!(
+                    result.accepted
+                        && ((status == StatusCode::CREATED && !result.replayed)
+                            || (status == StatusCode::OK && result.replayed))
+                        && receipt.worker_id.as_deref() == Some(worker.worker_id.as_str())
+                        && receipt.revision == Some(worker.revision)
+                        && worker.revision == 1
+                        && worker.state == WorkerStateV1::Reserved
+                        && worker.quota_held
+                        && worker.admission_operation_id == request.admission.operation_id
+                        && worker.request_id == request.admission.decision_request.request_id
+                        && launch == expected_launch
+                        && decision_receipt == expected_receipt
+                        && worker.spec_hash == expected_spec
+                        && crate::control::hash(&worker.policy_hash).is_ok()
+                        && canonical_uuid(&worker.worker_id)
+                        && canonical_uuid(&worker.attempt.attempt_id)
+                        && physical_name_matches
+                        && worker.attempt.container_id.is_none()
+                        && worker.attempt.created_inspection.is_none()
+                        && worker.attempt.create_operation_id.is_none()
+                        && worker.attempt.start_operation_id.is_none()
+                        && worker.attempt.start_emitter_id.is_none()
+                        && worker.observed_started_at.is_none()
+                        && !worker.allocation_inconsistent
+                        && worker.last_observation.is_none()
+                        && worker.unknown_reason.is_none()
+                        && worker.cleanup_removed.is_none()
+                        && worker.cleanup_error.is_none(),
+                    "supervised reservation status contradicts its result"
+                );
+            }
+            (None, Some(refusal)) => {
+                anyhow::ensure!(
+                    !result.accepted
+                        && receipt.worker_id.is_none()
+                        && receipt.revision.is_none()
+                        && matches!(
+                            (status, refusal),
+                            (StatusCode::FORBIDDEN, AdmissionRefusalV1::Policy)
+                                | (StatusCode::TOO_MANY_REQUESTS, AdmissionRefusalV1::Quota)
+                        ),
+                    "supervised reservation status contradicts its refusal"
+                );
+            }
+            _ => bail!("invalid supervised reservation outcome"),
+        }
+        Ok(result)
+    }
     pub async fn get_json(&self, path: &str) -> Result<Value> {
         self.response(
             self.http

@@ -6,3 +6,4 @@ pub mod checkpoint;
 pub mod clock;
 pub mod intent;
 pub mod journal;
+pub mod lifecycle;

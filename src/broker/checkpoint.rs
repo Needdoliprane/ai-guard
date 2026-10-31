@@ -453,7 +453,7 @@ impl DecisionAnswerV1 {
     }
 }
 impl SupervisionOperationV1 {
-    fn has_response(&self) -> bool {
+    pub(crate) fn has_response(&self) -> bool {
         match self {
             Self::Decision { response, .. } => response.is_some(),
             Self::Admission { response, .. } => response.is_some(),

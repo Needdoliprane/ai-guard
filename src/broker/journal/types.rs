@@ -16,7 +16,11 @@ opaque!(
     AcceptedJobV1,
     BindingManifestV1,
     RevisionRefV1,
-    CheckpointReceiptV1
+    CheckpointReceiptV1,
+    RejectionReceiptV1,
+    JournalStatusV1,
+    JournalEntryV1,
+    JournalPageV1
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -400,23 +404,34 @@ pub(super) struct AcceptedData {
     pub(super) checkpoint: LoadedCheckpoint,
     pub(super) legacy_managed_seen: bool,
     pub(super) chain: Vec<RevisionRefV1>,
+    pub(super) command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    pub(super) last_cancel_operations: Option<usize>,
 }
 #[derive(Clone)]
 pub(super) enum LoadedCheckpoint {
     V1(CheckpointPayloadV1),
     V2(super::super::checkpoint::BrokerCheckpointV2),
+    V3(BrokerCheckpointV3),
 }
 impl LoadedCheckpoint {
     pub(super) fn runner(&self) -> &CheckpointPayloadV1 {
         match self {
             Self::V1(value) => value,
             Self::V2(value) => value.runner(),
+            Self::V3(value) => value.broker().runner(),
         }
     }
     pub(super) fn supervised(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
         match self {
             Self::V1(_) => None,
             Self::V2(value) => Some(value),
+            Self::V3(value) => Some(value.broker()),
+        }
+    }
+    pub(super) fn lifecycle(&self) -> Option<&BrokerCheckpointV3> {
+        match self {
+            Self::V3(value) => Some(value),
+            _ => None,
         }
     }
 }
@@ -448,6 +463,9 @@ impl AcceptedJobV1 {
     pub fn broker_checkpoint_v2(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
         self.0.checkpoint.supervised()
     }
+    pub fn broker_checkpoint_v3(&self) -> Option<&BrokerCheckpointV3> {
+        self.0.checkpoint.lifecycle()
+    }
 }
 pub struct CheckpointReceiptV1 {
     pub(super) operation_id: Uuid,
@@ -466,10 +484,135 @@ pub enum ReserveResult {
     New(ReservationTicket),
     InProgress,
     Accepted(AcceptedJobV1),
+    Rejected(RejectionReceiptV1),
     Interrupted,
 }
 pub enum BindingInputs<'a> {
     None,
     Manual { source: &'a PrivateFile },
     Provider { source: &'a PrivateFile },
+}
+
+macro_rules! rejection_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "snake_case")]
+                enum Wire { $($variant),+ }
+                Ok(match Wire::deserialize(decoder)
+                    .map_err(|_| D::Error::custom("invalid private rejection code"))? {
+                    $(Wire::$variant => Self::$variant),+
+                })
+            }
+        }
+    };
+}
+rejection_enum!(RejectionPhaseV1 {
+    SubmissionPreparation
+});
+rejection_enum!(RejectionCodeV1 {
+    PreparationFailed,
+    CancelledBeforeAcceptance
+});
+
+pub struct RejectionReceiptV1 {
+    pub(super) operation_id: Uuid,
+    pub(super) submit_hash: String,
+    pub(super) phase: RejectionPhaseV1,
+    pub(super) code: RejectionCodeV1,
+    pub(super) record_hash: String,
+}
+impl RejectionReceiptV1 {
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn submit_hash(&self) -> &str {
+        &self.submit_hash
+    }
+    pub fn phase(&self) -> RejectionPhaseV1 {
+        self.phase
+    }
+    pub fn code(&self) -> RejectionCodeV1 {
+        self.code
+    }
+    pub fn record_hash(&self) -> &str {
+        &self.record_hash
+    }
+}
+pub enum JournalStatusV1 {
+    ReservedInProcess,
+    Interrupted,
+    Rejected(RejectionReceiptV1),
+    Accepted(AcceptedJobV1),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalEntryKindV1 {
+    ReservedInProcess,
+    Interrupted,
+    Rejected,
+    Accepted,
+}
+pub struct JournalEntryV1 {
+    pub(super) operation_id: Uuid,
+    pub(super) kind: JournalEntryKindV1,
+    pub(super) head: Option<RevisionRefV1>,
+    pub(super) cancel_requested: bool,
+    pub(super) approval_submitted: bool,
+    pub(super) failure_count: usize,
+    pub(super) pending_rpc_count: Option<usize>,
+    pub(super) worker_state: Option<crate::control::WorkerStateV1>,
+    pub(super) quota_held: Option<bool>,
+    pub(super) runtime_status: Option<crate::control::RuntimeStatusV1>,
+    pub(super) last_observed_at: Option<String>,
+}
+impl JournalEntryV1 {
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn kind(&self) -> JournalEntryKindV1 {
+        self.kind
+    }
+    pub fn head(&self) -> Option<&RevisionRefV1> {
+        self.head.as_ref()
+    }
+    pub fn cancel_requested(&self) -> bool {
+        self.cancel_requested
+    }
+    pub fn approval_submitted(&self) -> bool {
+        self.approval_submitted
+    }
+    pub fn failure_count(&self) -> usize {
+        self.failure_count
+    }
+    pub fn pending_rpc_count(&self) -> Option<usize> {
+        self.pending_rpc_count
+    }
+    pub fn worker_state(&self) -> Option<&crate::control::WorkerStateV1> {
+        self.worker_state.as_ref()
+    }
+    pub fn quota_held(&self) -> Option<bool> {
+        self.quota_held
+    }
+    pub fn runtime_status(&self) -> Option<&crate::control::RuntimeStatusV1> {
+        self.runtime_status.as_ref()
+    }
+    pub fn last_observed_at(&self) -> Option<&str> {
+        self.last_observed_at.as_deref()
+    }
+}
+pub struct JournalPageV1 {
+    pub(super) entries: Vec<JournalEntryV1>,
+    pub(super) next_after: Option<Uuid>,
+}
+impl JournalPageV1 {
+    pub fn entries(&self) -> &[JournalEntryV1] {
+        &self.entries
+    }
+    pub fn next_after(&self) -> Option<Uuid> {
+        self.next_after
+    }
 }

@@ -601,3 +601,25 @@ Manifeste118entrées SHA `84bcbb15d0e440975ee345c49c3530519421fb5c53abac865f3238
 **NOT_RUN :** service/IPC/enforcer concret, cycle de vie local durable, helpers supervisés réels, mort du CLI, D5, gardien, Docker/Podman et autres plateformes, recette A1/A2/B1, cloud/Kubernetes/charge100. Aucun E2E général, modèle, frontend ou déploiement rejoué. QA, schéma2 et `billable=false` inchangés ; G09 reste FAIL,0/12gates fermés. Prochaine priorité : lifecycle durable et raccord service/ordonnanceur avant le vrai batch. Rappel Daybreak Blue enregistré pour après stabilisation et tests réels d'arrêt/reprise.
 
 Clôture indépendante **CLOSE logiciel/docs/preuves/artefacts**, rapport final `7dcede125a92903e26dd66d16e4666396ff921191c333cfabf819b261380d699`. Deux formulations précisées : sélection du signal pendant observation/on_started/finition, pas on_created/on_ready ; garde natif concret explicitement futur. Fmt final rejoué seul après let-chain du test,RC0 sur les six SHA finaux. Archive BSD :118sources logiques conformes et118AppleDouble de métadonnées macOS, pas236sources produit. Les contrôles de liens/prepublication restent des vérifications de textes et de motifs, pas une garantie DLP ou une nouvelle campagne de tests.
+
+## Cycle de vie local V3 et admission HTTP — 31 octobre 2026
+
+**PASS logiciel ciblé, revue CLOSE** au périmètre des données lifecycle, lecteurs Journal et client HTTP ; [preuves et gels](evidence/2026-10-31/broker-lifecycle/README.md). Le rejet avant intention valide utilise réservation/ticket/verrou/fsync existants. V3 enveloppe V2 et porte ApprovalSubmitted/CancelRequested/FailureObserved dans la même chaîne ; octets/domaines V1/V2 et RunPlan1/2/3 restent inchangés. Le client conserve les DTO d'admission403/429 et vérifie la réponse Worker initiale, sans créer de durabilité locale ou droit de start.
+
+| Cible finale | Résultat constaté |
+|---|---|
+| `broker_lifecycle`, source `a3716314…` |6/6 PASS en release ; oracles finaux de format/limites, replay/rejets et approbation causale |
+| `broker_checkpoint`, source `9cb7aed9…` |6/6 PASS en release,32,23s ; graphe à vrais reçus Store, cancel/export et faits tardifs |
+| `journal_lifecycle_floor` |2/2 PASS ; disparition d'un accepted confirmé et corruption d'une réservation observée hors page |
+| `broker_admission_client` |4/4 PASS ; vrais routeur Axum/Store SQLite3 loopback, refus typés et réponses initiales altérées |
+| `broker_journal` |12/12 PASS |
+| Unitaires Journal |5 parents PASS ;2 helpers enfants ignorés par défaut, invoqués par leurs parents sans addition |
+| Fmt, Clippy strict all-targets, build release |PASS |
+
+Total : **35 fonctions uniques ciblées**, incluant contrat API, diagnostics et self-test ; ni les rejeux ni les étapes des tests paramétrés ni les deux helpers enfants ne sont recomptés. Ces fonctions ne sont pas 35 preuves runtime. Les faits runtime/horloge du graphe restent synthétiques ; fichiers Journal, HTTP local et transactions Store sont réels.
+
+**BLC-01 à04 reproduits puis corrigés :** ancien grant Export réutilisé après cancel ; ID Reserved/Interrupted observé non revalidé hors page ; diagnostics non opaques des enums de rejet ; contrôle insuffisant du Worker initial HTTP. Le dernier Cancel fixe une frontière historique interne : nouveau grant Export né strictement après lui, sans réouverture worker/import/FinalScan. Ancien grant, ACK tardif ou grant co-né ne suffit pas. Created/owned tardifs exigent leur préparation/CreateIssued antérieurs, sans autoriser de nouveau create. Les commandes locales hashées sont recoupées dans le contexte du job ; l'approbation exige le Review exact antérieur puis deux commits distincts.
+
+**Quota centrale et ACK local sont distincts :** CancelRequested ne libère rien. La transaction CancelReserved du Store libère la quota centrale avant l'ACK du checkpoint local ; une réponse perdue peut donc laisser un pending local alors que la quota centrale est déjà libérée. Une failure locale n'est pas un terminal runtime. Preparing sans CID et cible jamais démarrée sans terminal admissible peuvent conserver quota/NeedsReconciliation selon les règles Store actuelles.
+
+**NOT_RUN pour ce lot :** frontend, moteur, modèle, E2E général et cloud. Service permanent/IPC/enforcer, cancel mémoire/dernier garde, helpers supervisés réels, gardien, D5 et scénario de mort CLI restent à raccorder et qualifier ; aucun cutover CLI. QA, schéma2 par défaut et `billable=false` inchangés ; **G09 reste FAIL, 0/12 gates fermés**. Les résultats historiques ci-dessus gardent leurs gels et leurs limites propres.

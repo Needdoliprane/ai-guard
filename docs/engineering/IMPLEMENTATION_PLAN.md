@@ -197,6 +197,29 @@ API du port fixée pour code/tests : `PrearmedStartControl::new(Box<dyn BeforeSp
 - [ ] Raccorder les étapes v3 réelles, observer un worker poursuivant son effet après SIGKILL du client puis arrêté à l'échéance originale, témoin intact, audit/usage idempotents et aucune reprise avec nouveau claim/durée.
 - [ ] Compléter panne du broker/writer/HTTP, D5, gardien TTY et recette A1/A2/B1 ; conserver les écarts tant que leurs preuves manquent.
 
+#### Troisième couture — cycle de vie local durable
+
+Base `4890df13f56f2a61d9ee773f9d1dbd7cca929e72`. Le [contrat canonique du journal](BROKER_JOURNAL.md#extension-de-cycle-de-vie--contrat-du-lot-suivant31octobre2026) fixe reject avant intention valide, commandes locales typées et checkpoint V3, approbation sur deux commits après vrai Review, cancel monotone et export postmortem sous nouveau grant, statut/liste bornés et planchers. Les plans1/2/3 et bytes/domaines V1/V2 restent conservés. La V3 réutilise le même journal/CAS, sans fichier parallèle de statut ni nouveau stockage.
+
+Core possède lifecycle.rs/sous-modules, journal.rs/types.rs, coutures checkpoint.rs/validation.rs et export broker/mod.rs ; aucune source runner/runtime/API/audit modifiée. Luna possède broker_lifecycle.rs, journal_lifecycle_floor.rs, fixtures et exécutions ; root contrats/intégration et raccord service indépendant, reviewer lecture seulement. Toujours trois agents d'implémentation au plus et aucun Cargo concurrent.
+
+- [x] Reproduire le défaut existant : après accept confirmé, disparition du seul accepted.json faisait revenir reserve avec Ok(Interrupted) malgré le plancher vivant ; marqueur restauré avant assertion, source/logs RED conservés.
+- [x] Capturer l'API manquante par compilation ciblée RC101 avant code ; puis core livre un GEL1 archivé. App compile après corrections test-only et régression du plancher 1/1 GREEN.
+- [x] Qualifier rejets/status/list, chaîne V3/replays, vrais Review/approbation, Admission inconnue/cancel et refus d'actions co-nées ; rejets/failures ne sont ni terminal runtime ni libération locale. La transaction Store CancelReserved libère le quota avant son ACK local, pas la commande CancelRequested.
+- [x] Traiter les écarts de revue GEL1 : ancien grant Export avant cancel ne permet plus de nouveau start après cancel ; jobs Reserved/Interrupted déjà observés revalidés hors page. RED puis GREEN, frontière historique du dernier cancel dérivée sans wire nouveau. Diagnostic enum public également fermé après RED.
+- [x] Revue logicielle et canaris/fmt/Clippy/release au gel final ; [preuves ciblées](evidence/2026-10-31/broker-lifecycle/README.md). Aucun gate global fermé.
+- [ ] Raccorder le vrai service et sa cible préarmée. Annulation de Preparing sans CID/absence de terminal admissible reste un écart Store opérateur explicite, pas un faux Cancelled.
+
+#### Raccord HTTP en parallèle — refus d'admission durables
+
+Défaut de raccord constaté dans AuditClient::response : toute réponse non2xx est rejetée avant lecture du DTO, alors que la route v1 de réservation supervisée rend de vrais AdmissionResultV1 avec reçu durable sur403Policy/429Quota. Root possède uniquement src/runner.rs pour la nouvelle méthode typée `AuditClient::admit_supervised(&SupervisedAdmissionV1) -> Future<Result<AdmissionResultV1>>` ; aucune ancienne méthode ni handler n'est remplacé. Luna possède tests/broker_admission_client.rs. Ce client ne persiste rien et ne donne aucun start ; le service doit enregistrer sa requête pending avant émission et publier l'ACK via le journal validé.
+
+Contrat : endpoint déjà existant api/v1/workers/supervised-reservations, credential explicite du même AuditClient sans fallback, client HTTP existant (timeouts15s/connect3s, pas de proxy/redirect). Corps requête borné64KiB et réponse512KiB, parsing DTO fermé/EOF, erreurs opaques ; auth/503/autre réponse sans DTO ne sont jamais un refus métier durable. Statut201 accepté neuf/200 replay accepté ;403 exige refusalPolicy et429refusalQuota, accepted=false,worker=None,reçu sans worker/révision. Vérifier opération/input_hash/audit_seq/hash, cohérence état initial/révision/quota/identités/launch/spec/receipt du Worker accepté. Les validations de scope/contexte/chaîne du journal restent requises avant action.
+
+- [x] RED absent E0599 par compilation ciblée avant code, log conservé ; root produit un premier gel sans Cargo.
+- [x] Vérifier sur vrai gateway/Store loopback acceptation/replay et refus Policy/Quota/replay, auth et Worker initial altéré conservés en erreur. BLC-04 reproduit par mutation technique d'un vrai DTO201 puis corrigé ; aucun moteur/modèle ou endpoint inventé. Les bornes sont implémentées et relues, sans campagne exhaustive de mutations HTTP revendiquée.
+- [x] Revue indépendante et validation au même gel applicatif que lifecycle, [preuves](evidence/2026-10-31/broker-lifecycle/README.md). L'identité/namespace attendus doivent encore être recoupés par le service avant effet ; le client seul ne fournit ni durabilité ni autorité de start.
+
 ### Choix complémentaires du mainteneur — 30 octobre
 
 - [x] Enregistrer les trois moteurs Jev : réel, Rust sans modèle avec limites annoncées, et petit modèle local Jev-like Docker/Podman ; choix/configuration explicites, aucun remplacement du confinement.

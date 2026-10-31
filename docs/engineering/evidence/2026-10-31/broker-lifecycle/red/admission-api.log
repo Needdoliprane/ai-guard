@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error[E0599]: no method named `admit_supervised` found for reference `&AuditClient` in the current scope
+  --> tests/broker_admission_client.rs:13:27
+   |
+13 |     require_result(client.admit_supervised(request));
+   |                           ^^^^^^^^^^^^^^^^ method not found in `&AuditClient`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `agentsandbox` (test "broker_admission_client") due to 1 previous error
+RC=101

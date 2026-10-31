@@ -25,6 +25,7 @@ use agentsandbox::{
             BindingInputs, CheckpointReceiptV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, ReserveResult, RevisionRefV1,
         },
+        lifecycle::{BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1},
     },
     control_fs::Directory,
     model::DecisionRequest,
@@ -158,6 +159,59 @@ fn append_v2(
     journal
         .advance_supervised(operation_id, expected.clone(), &checkpoint)
         .unwrap()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the V3 append fixture carries one real journal graph and its durable command prefix"
+)]
+fn append_v3(
+    journal: &Journal,
+    operation_id: Uuid,
+    head: &RevisionRefV1,
+    runner: &CheckpointPayloadV1,
+    namespace: Uuid,
+    helpers: Vec<HelperPreparationV1>,
+    operations: Vec<SupervisionOperationV1>,
+    commands: &[LocalCommandV1],
+) -> CheckpointReceiptV1 {
+    try_append_v3(
+        journal,
+        operation_id,
+        head,
+        runner,
+        namespace,
+        helpers,
+        operations,
+        commands,
+    )
+    .unwrap()
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fallible V3 fixture append reports the first causal lifecycle rejection"
+)]
+fn try_append_v3(
+    journal: &Journal,
+    operation_id: Uuid,
+    head: &RevisionRefV1,
+    runner: &CheckpointPayloadV1,
+    namespace: Uuid,
+    helpers: Vec<HelperPreparationV1>,
+    operations: Vec<SupervisionOperationV1>,
+    commands: &[LocalCommandV1],
+) -> Result<CheckpointReceiptV1, agentsandbox::broker::journal::JournalError> {
+    let broker = BrokerCheckpointV2::new(
+        runner.clone(),
+        SupervisionCheckpointV1::new(namespace, helpers, operations).unwrap(),
+    )
+    .unwrap();
+    journal.advance_lifecycle(
+        operation_id,
+        head.clone(),
+        &BrokerCheckpointV3::new(broker, commands.to_vec()).unwrap(),
+    )
 }
 
 fn synthetic_runtime_authority() -> RuntimeAuthority {
@@ -540,7 +594,7 @@ fn run_helper_lifecycle(
 
     let helper_index = helpers.len() - 1;
     helpers[helper_index] =
-        HelperPreparationV1::new(policy, permission, Some(owned.clone())).unwrap();
+        HelperPreparationV1::new(policy.clone(), permission.clone(), Some(owned.clone())).unwrap();
     let arm_index = operations.len();
     operations.push(SupervisionOperationV1::Arm {
         parent: parent.clone(),
@@ -680,6 +734,158 @@ fn run_helper_lifecycle(
     .head()
     .clone();
     (helper_id, armed, terminal, cleanup_receipt)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fixture threads one real Store and Journal through the Export claim transition"
+)]
+fn append_export_helper_claim(
+    journal: &Journal,
+    store: &Store,
+    operation_id: Uuid,
+    head: &mut RevisionRefV1,
+    runner: &CheckpointPayloadV1,
+    namespace: Uuid,
+    helpers: &mut Vec<HelperPreparationV1>,
+    operations: &mut Vec<SupervisionOperationV1>,
+    commands: &[LocalCommandV1],
+    intent: &ExecutionIntentV1,
+    parent: &WorkerV1,
+    authority: &RuntimeAuthority,
+    permission: HelperPermissionV1,
+) -> Result<(), (&'static str, agentsandbox::broker::journal::JournalError)> {
+    let helper_id = Uuid::new_v4();
+    let (policy, arm, owned) = helper_arm_request(
+        parent,
+        &intent.intent_hash().unwrap(),
+        helper_id,
+        HelperPurposeV1::Export,
+        permission.clone(),
+        authority,
+    );
+    helpers.push(HelperPreparationV1::new(policy.clone(), permission.clone(), None).unwrap());
+    *head = match try_append_v3(
+        journal,
+        operation_id,
+        head,
+        runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        commands,
+    ) {
+        Ok(receipt) => receipt.head().clone(),
+        Err(error) => {
+            helpers.pop();
+            return Err(("helper-preparation", error));
+        }
+    };
+
+    let helper_index = helpers.len() - 1;
+    helpers[helper_index] =
+        HelperPreparationV1::new(policy.clone(), permission.clone(), Some(owned.clone())).unwrap();
+    let arm_index = operations.len();
+    operations.push(SupervisionOperationV1::Arm {
+        parent: parent.clone(),
+        owned: owned.clone(),
+        request: arm.clone(),
+        response: None,
+    });
+    *head = match try_append_v3(
+        journal,
+        operation_id,
+        head,
+        runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        commands,
+    ) {
+        Ok(receipt) => receipt.head().clone(),
+        Err(error) => {
+            operations.pop();
+            helpers[helper_index] =
+                HelperPreparationV1::new(policy.clone(), permission.clone(), None).unwrap();
+            return Err(("arm-pending", error));
+        }
+    };
+    let armed = store.arm_execution(&arm).unwrap();
+    operations[arm_index] = SupervisionOperationV1::Arm {
+        parent: parent.clone(),
+        owned: owned.clone(),
+        request: arm.clone(),
+        response: Some(armed.clone()),
+    };
+    *head = match try_append_v3(
+        journal,
+        operation_id,
+        head,
+        runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        commands,
+    ) {
+        Ok(receipt) => receipt.head().clone(),
+        Err(error) => {
+            operations[arm_index] = SupervisionOperationV1::Arm {
+                parent: parent.clone(),
+                owned: owned.clone(),
+                request: arm.clone(),
+                response: None,
+            };
+            return Err(("arm-ack", error));
+        }
+    };
+
+    let claim = helper_claim_request(&arm, &armed.receipt, helper_id);
+    operations.push(SupervisionOperationV1::HelperClaim {
+        request: claim.clone(),
+        response: None,
+    });
+    let checkpoint = BrokerCheckpointV3::new(
+        BrokerCheckpointV2::new(
+            runner.clone(),
+            SupervisionCheckpointV1::new(namespace, helpers.clone(), operations.clone()).unwrap(),
+        )
+        .unwrap(),
+        commands.to_vec(),
+    )
+    .unwrap();
+    let claim_receipt = match journal.advance_lifecycle(operation_id, head.clone(), &checkpoint) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            operations.pop();
+            return Err(("helper-claim", error));
+        }
+    };
+    *head = claim_receipt.head().clone();
+    let claim_result = store.claim_helper_start(&claim).unwrap();
+    *operations.last_mut().unwrap() = SupervisionOperationV1::HelperClaim {
+        request: claim.clone(),
+        response: Some(claim_result),
+    };
+    *head = match try_append_v3(
+        journal,
+        operation_id,
+        head,
+        runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        commands,
+    ) {
+        Ok(receipt) => receipt.head().clone(),
+        Err(error) => {
+            *operations.last_mut().unwrap() = SupervisionOperationV1::HelperClaim {
+                request: claim,
+                response: None,
+            };
+            return Err(("helper-claim-ack", error));
+        }
+    };
+    Ok(())
 }
 
 fn revision_zero_path(root: &Path, operation_id: Uuid) -> std::path::PathBuf {
@@ -2763,6 +2969,278 @@ fn sqlite_store_receipts_cover_all_supervision_operation_variants() {
     );
     assert_eq!(final_checkpoint.supervision().helpers().len(), 4);
     assert!(store.integrity().unwrap().valid);
+
+    // A durable cancel closes the previously acknowledged export grant. An
+    // otherwise valid new helper claim must use an export request born after
+    // that cancellation, even though the earlier grant remains in the journal.
+    let cancel = LocalCommandV1::new(
+        operation_id,
+        &intent.intent_hash().unwrap(),
+        Uuid::new_v4(),
+        LocalCommandRequestV1::CancelRequested,
+    )
+    .unwrap();
+    let commands = vec![cancel.clone()];
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands,
+    )
+    .head()
+    .clone();
+    let stale_receipt = operations
+        .iter()
+        .find_map(|operation| match operation {
+            SupervisionOperationV1::Export {
+                response: Some(receipt),
+                ..
+            } => Some(receipt.clone()),
+            _ => None,
+        })
+        .expect("the previous export request has a real Store receipt");
+    let stale_permission = HelperPermissionV1::Export {
+        receipt: stale_receipt,
+        destination_ref: export.destination_ref.clone(),
+        destination_intent_hash: export.destination_intent_hash.clone(),
+    };
+    let stale_claim = append_export_helper_claim(
+        &journal,
+        &store,
+        operation_id,
+        &mut head,
+        &runner,
+        namespace,
+        &mut helpers,
+        &mut operations,
+        &commands,
+        &intent,
+        &worker,
+        &authority,
+        stale_permission,
+    );
+
+    // This positive control uses a distinct, real Store ExportRequest receipt
+    // recorded strictly after the cancel command.
+    let fresh_export = ExportRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        destination_ref: Uuid::new_v4().to_string(),
+        destination_intent_hash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            .into(),
+    };
+    let fresh_export_index = operations.len();
+    operations.push(SupervisionOperationV1::Export {
+        request: fresh_export.clone(),
+        response: None,
+    });
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands,
+    )
+    .head()
+    .clone();
+    let fresh_export_receipt = store.request_export(&fresh_export).unwrap();
+    operations[fresh_export_index] = SupervisionOperationV1::Export {
+        request: fresh_export.clone(),
+        response: Some(fresh_export_receipt.clone()),
+    };
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands,
+    )
+    .head()
+    .clone();
+    let fresh_permission = HelperPermissionV1::Export {
+        receipt: fresh_export_receipt.clone(),
+        destination_ref: fresh_export.destination_ref.clone(),
+        destination_intent_hash: fresh_export.destination_intent_hash.clone(),
+    };
+    append_export_helper_claim(
+        &journal,
+        &store,
+        operation_id,
+        &mut head,
+        &runner,
+        namespace,
+        &mut helpers,
+        &mut operations,
+        &commands,
+        &intent,
+        &worker,
+        &authority,
+        fresh_permission,
+    )
+    .expect("a new Store export receipt after cancellation permits a helper claim");
+    assert!(
+        matches!(
+            stale_claim,
+            Err((_, agentsandbox::broker::journal::JournalError::Conflict))
+        ),
+        "a helper claim under an export grant from before cancellation must conflict"
+    );
+
+    // A second durable cancellation invalidates even a grant born after the
+    // first one. An ExportRequest co-born with that second boundary is not a
+    // post-cancel grant and cannot authorize a helper.
+    let cancel2 = LocalCommandV1::new(
+        operation_id,
+        &intent.intent_hash().unwrap(),
+        Uuid::new_v4(),
+        LocalCommandRequestV1::CancelRequested,
+    )
+    .unwrap();
+    let commands2 = vec![cancel.clone(), cancel2.clone()];
+    let co_born = ExportRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        destination_ref: Uuid::new_v4().to_string(),
+        destination_intent_hash: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+            .into(),
+    };
+    let co_born_index = operations.len();
+    operations.push(SupervisionOperationV1::Export {
+        request: co_born,
+        response: None,
+    });
+    assert!(matches!(
+        try_append_v3(
+            &journal,
+            operation_id,
+            &head,
+            &runner,
+            namespace,
+            helpers.clone(),
+            operations.clone(),
+            &commands2,
+        ),
+        Err(agentsandbox::broker::journal::JournalError::Conflict)
+    ));
+    operations.truncate(co_born_index);
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands2,
+    )
+    .head()
+    .clone();
+    let old_post_first_cancel_permission = HelperPermissionV1::Export {
+        receipt: fresh_export_receipt,
+        destination_ref: fresh_export.destination_ref,
+        destination_intent_hash: fresh_export.destination_intent_hash,
+    };
+    let second_stale = append_export_helper_claim(
+        &journal,
+        &store,
+        operation_id,
+        &mut head,
+        &runner,
+        namespace,
+        &mut helpers,
+        &mut operations,
+        &commands2,
+        &intent,
+        &worker,
+        &authority,
+        old_post_first_cancel_permission,
+    );
+    assert!(matches!(
+        second_stale,
+        Err((
+            "helper-preparation",
+            agentsandbox::broker::journal::JournalError::Conflict
+        ))
+    ));
+
+    let post_last_cancel_export = ExportRequestV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        destination_ref: Uuid::new_v4().to_string(),
+        destination_intent_hash: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            .into(),
+    };
+    let post_last_index = operations.len();
+    operations.push(SupervisionOperationV1::Export {
+        request: post_last_cancel_export.clone(),
+        response: None,
+    });
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands2,
+    )
+    .head()
+    .clone();
+    let post_last_receipt = store.request_export(&post_last_cancel_export).unwrap();
+    operations[post_last_index] = SupervisionOperationV1::Export {
+        request: post_last_cancel_export.clone(),
+        response: Some(post_last_receipt.clone()),
+    };
+    head = append_v3(
+        &journal,
+        operation_id,
+        &head,
+        &runner,
+        namespace,
+        helpers.clone(),
+        operations.clone(),
+        &commands2,
+    )
+    .head()
+    .clone();
+    let post_last_permission = HelperPermissionV1::Export {
+        receipt: post_last_receipt,
+        destination_ref: post_last_cancel_export.destination_ref,
+        destination_intent_hash: post_last_cancel_export.destination_intent_hash,
+    };
+    append_export_helper_claim(
+        &journal,
+        &store,
+        operation_id,
+        &mut head,
+        &runner,
+        namespace,
+        &mut helpers,
+        &mut operations,
+        &commands2,
+        &intent,
+        &worker,
+        &authority,
+        post_last_permission,
+    )
+    .expect("only a grant born after the last Cancel authorizes Export");
 }
 
 mod support;

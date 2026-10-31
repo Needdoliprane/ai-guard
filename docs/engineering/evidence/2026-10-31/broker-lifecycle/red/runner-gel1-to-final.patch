@@ -1,0 +1,63 @@
+--- a/src/runner.rs
++++ b/src/runner.rs
+@@ -282,11 +282,7 @@
+             receipt.operation_id == request.admission.operation_id
+                 && receipt.input_hash == input_hash
+                 && receipt.audit_seq > 0
+-                && receipt.audit_hash.len() == 64
+-                && receipt
+-                    .audit_hash
+-                    .bytes()
+-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
++                && crate::control::hash(&receipt.audit_hash).is_ok(),
+             "supervised reservation receipt does not match its request"
+         );
+         match (&result.worker, result.refusal) {
+@@ -304,6 +300,23 @@
+                     .launch
+                     .spec_hash()
+                     .map_err(|_| anyhow::anyhow!("invalid supervised reservation launch"))?;
++                let canonical_uuid = |value: &str| {
++                    Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
++                };
++                let physical_name_matches = worker
++                    .attempt
++                    .stable_name
++                    .strip_prefix("aig-")
++                    .and_then(|name| name.split_once('-'))
++                    .is_some_and(|(namespace, id)| {
++                        namespace.len() == 32
++                            && Uuid::parse_str(namespace).is_ok_and(|parsed| {
++                                !parsed.is_nil() && parsed.simple().to_string() == namespace
++                            })
++                            && id == worker.worker_id.replace('-', "")
++                            && worker.attempt.volume_name
++                                == format!("{}-work", worker.attempt.stable_name)
++                    });
+                 anyhow::ensure!(
+                     result.accepted
+                         && ((status == StatusCode::CREATED && !result.replayed)
+@@ -317,7 +330,22 @@
+                         && worker.request_id == request.admission.decision_request.request_id
+                         && launch == expected_launch
+                         && decision_receipt == expected_receipt
+-                        && worker.spec_hash == expected_spec,
++                        && worker.spec_hash == expected_spec
++                        && crate::control::hash(&worker.policy_hash).is_ok()
++                        && canonical_uuid(&worker.worker_id)
++                        && canonical_uuid(&worker.attempt.attempt_id)
++                        && physical_name_matches
++                        && worker.attempt.container_id.is_none()
++                        && worker.attempt.created_inspection.is_none()
++                        && worker.attempt.create_operation_id.is_none()
++                        && worker.attempt.start_operation_id.is_none()
++                        && worker.attempt.start_emitter_id.is_none()
++                        && worker.observed_started_at.is_none()
++                        && !worker.allocation_inconsistent
++                        && worker.last_observation.is_none()
++                        && worker.unknown_reason.is_none()
++                        && worker.cleanup_removed.is_none()
++                        && worker.cleanup_error.is_none(),
+                     "supervised reservation status contradicts its result"
+                 );
+             }

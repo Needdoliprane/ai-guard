@@ -1,0 +1,426 @@
+--- a/src/broker/lifecycle.rs
++++ b/src/broker/lifecycle.rs
+@@ -5,7 +5,8 @@
+ };
+ use crate::{
+     control::{
+-        ArmSubjectV1, DecisionPhaseV1, DecisionReceiptV1, HelperPurposeV1, WorkerTransitionV1,
++        ArmSubjectV1, DecisionPhaseV1, DecisionReceiptV1, HelperPermissionV1, HelperPurposeV1,
++        WorkerTransitionV1,
+     },
+     model::Outcome,
+     runner::CheckpointPayloadV1,
+@@ -337,6 +338,7 @@
+         previous: Option<&Self>,
+         previous_broker: Option<&BrokerCheckpointV2>,
+         previous_runner: &CheckpointPayloadV1,
++        last_cancel_operations: Option<usize>,
+     ) -> JournalResult<()> {
+         let old_commands = previous.map_or(&[][..], |old| old.commands.as_slice());
+         require(self.commands.len() >= old_commands.len())?;
+@@ -396,59 +398,119 @@
+             }))?;
+         }
+         if cancelled {
+-            self.validate_cancel(previous_broker, previous_runner, old_operations)?;
++            self.validate_cancel(
++                previous_broker,
++                previous_runner,
++                old_operations,
++                self.cancel_boundary(previous, last_cancel_operations)
++                    .ok_or(JournalError::Conflict)?,
++            )?;
+         }
+         Ok(())
+     }
++    pub(crate) fn cancel_boundary(
++        &self,
++        previous: Option<&Self>,
++        last_boundary: Option<usize>,
++    ) -> Option<usize> {
++        let cancels = |value: &Self| {
++            value
++                .commands
++                .iter()
++                .filter(|command| matches!(command.request, LocalCommandRequestV1::CancelRequested))
++                .count()
++        };
++        if cancels(self) > previous.map_or(0, cancels) {
++            Some(self.broker.supervision().operations().len())
++        } else {
++            last_boundary
++        }
++    }
+     fn validate_cancel(
+         &self,
+         previous_broker: Option<&BrokerCheckpointV2>,
+         previous_runner: &CheckpointPayloadV1,
+         old_operations: &[SupervisionOperationV1],
++        boundary: usize,
+     ) -> JournalResult<()> {
+         let supervision = self.broker.supervision();
+-        for operation in supervision.operations().iter().skip(old_operations.len()) {
++        let create_was_recorded = old_operations.iter().take(boundary).any(|op| {
++            matches!(op,
++            SupervisionOperationV1::WorkerMutation { request, .. }
++            if matches!(request.transition, WorkerTransitionV1::CreateIssued))
++        });
++        for (index, operation) in supervision
++            .operations()
++            .iter()
++            .enumerate()
++            .skip(old_operations.len())
++        {
+             require(match operation {
+                 SupervisionOperationV1::Decision { .. }
+                 | SupervisionOperationV1::Admission { .. }
+                 | SupervisionOperationV1::WorkerClaim { .. } => false,
+-                SupervisionOperationV1::WorkerMutation { request, .. } => !matches!(
+-                    request.transition,
+-                    WorkerTransitionV1::Prepare
+-                        | WorkerTransitionV1::CreateIssued
+-                        | WorkerTransitionV1::StartClaim { .. }
+-                ),
+-                SupervisionOperationV1::Arm { request, .. } => matches!(
+-                    request.subject,
++                SupervisionOperationV1::WorkerMutation { request, .. } => {
++                    (!matches!(
++                        request.transition,
++                        WorkerTransitionV1::Prepare
++                            | WorkerTransitionV1::CreateIssued
++                            | WorkerTransitionV1::StartClaim { .. }
++                    )) && (!matches!(request.transition, WorkerTransitionV1::Created { .. })
++                        || create_was_recorded)
++                }
++                SupervisionOperationV1::Arm { request, .. } => match &request.subject {
+                     ArmSubjectV1::Helper {
++                        helper_id,
+                         purpose: HelperPurposeV1::Export,
+                         ..
+-                    }
+-                ),
++                    } => self.export_grant_is_current(helper_id, boundary)?,
++                    _ => false,
++                },
+                 SupervisionOperationV1::HelperClaim { request, .. } => {
+-                    supervision.helpers().iter().any(|helper| {
+-                        helper.policy().helper_id == request.helper_id
+-                            && helper.policy().purpose == HelperPurposeV1::Export
+-                    })
++                    self.export_grant_is_current(&request.helper_id, boundary)?
+                 }
+                 SupervisionOperationV1::HelperObservation { .. }
+-                | SupervisionOperationV1::HelperCleanup { .. }
+-                | SupervisionOperationV1::Export { .. } => true,
++                | SupervisionOperationV1::HelperCleanup { .. } => true,
++                SupervisionOperationV1::Export { .. } => index >= boundary,
+             })?;
+         }
+         let old_helpers = previous_broker.map_or(&[][..], |old| old.supervision().helpers());
+         for helper in supervision.helpers().iter().skip(old_helpers.len()) {
+-            require(helper.policy().purpose == HelperPurposeV1::Export)?;
++            require(self.export_grant_is_current(&helper.policy().helper_id, boundary)?)?;
+         }
+         if previous_runner.broker_context().owned.is_none()
+             && self.broker.runner().broker_context().owned.is_some()
+         {
+-            require(old_operations.iter().any(|op| {
+-                matches!(op,
+-                SupervisionOperationV1::WorkerMutation { request, .. }
+-                if matches!(request.transition, WorkerTransitionV1::CreateIssued))
+-            }))?;
++            require(create_was_recorded)?;
+         }
+         Ok(())
+     }
++    fn export_grant_is_current(&self, helper_id: &str, boundary: usize) -> JournalResult<bool> {
++        let Some(helper) = self
++            .broker
++            .supervision()
++            .helpers()
++            .iter()
++            .find(|helper| helper.policy().helper_id == helper_id)
++        else {
++            return Ok(false);
++        };
++        if helper.policy().purpose != HelperPurposeV1::Export {
++            return Ok(false);
++        }
++        let HelperPermissionV1::Export { receipt, .. } = helper.permission() else {
++            return Ok(false);
++        };
++        for operation in self.broker.supervision().operations().iter().skip(boundary) {
++            if let SupervisionOperationV1::Export {
++                response: Some(given),
++                ..
++            } = operation
++                && equal(receipt, given)?
++            {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
+ }
+--- a/src/broker/journal.rs
++++ b/src/broker/journal.rs
+@@ -12,7 +12,7 @@
+ use serde_json::Value;
+ use sha2::{Digest, Sha256};
+ use std::{
+-    collections::HashMap,
++    collections::{HashMap, HashSet},
+     fmt,
+     sync::{Arc, Mutex, Weak},
+ };
+@@ -108,6 +108,7 @@
+     tickets: HashMap<Uuid, Weak<()>>,
+     floors: HashMap<Uuid, RevisionRefV1>,
+     rejected_floors: HashMap<Uuid, String>,
++    observed_jobs: HashSet<Uuid>,
+ }
+ pub struct ReservationTicket {
+     owner: Arc<Inner>,
+@@ -323,11 +324,13 @@
+             stage!(BeforeAck);
+             return Ok(result);
+         }
+-        if writer.floors.contains_key(&operation_id)
++        if writer.observed_jobs.contains(&operation_id)
++            || writer.floors.contains_key(&operation_id)
+             || writer.rejected_floors.contains_key(&operation_id)
+         {
+             return Err(JournalError::Conflict);
+         }
++        self.check_observation_capacity(operation_id, &writer)?;
+         let reservation = Reservation {
+             version: 1,
+             scope_hash: self.0.scope_hash.clone(),
+@@ -348,6 +351,7 @@
+         io(job.sync())?;
+         io(self.0.jobs.sync())?;
+         stage!(ReservationDurable);
++        writer.observed_jobs.insert(operation_id);
+         let lease = Arc::new(());
+         writer.tickets.insert(operation_id, Arc::downgrade(&lease));
+         Ok(ReserveResult::New(ReservationTicket {
+@@ -430,7 +434,8 @@
+     ) -> JournalResult<Option<JournalStatusV1>> {
+         let name = operation_id.to_string();
+         let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
+-            if writer.floors.contains_key(&operation_id)
++            if writer.observed_jobs.contains(&operation_id)
++                || writer.floors.contains_key(&operation_id)
+                 || writer.rejected_floors.contains_key(&operation_id)
+             {
+                 return Err(JournalError::Conflict);
+@@ -438,6 +443,7 @@
+             return Ok(None);
+         };
+         self.usage(Some(&name))?;
++        self.check_observation_capacity(operation_id, writer)?;
+         let accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
+         let rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
+         if accepted && rejected {
+@@ -458,6 +464,7 @@
+             return if rejected {
+                 Err(JournalError::Corrupt)
+             } else {
++                writer.observed_jobs.insert(operation_id);
+                 Ok(Some(JournalStatusV1::Interrupted))
+             };
+         }
+@@ -471,6 +478,7 @@
+             )?)));
+         }
+         let entries = fscheck(job.persistent_entries(self.0.limits.job_entries))?;
++        writer.observed_jobs.insert(operation_id);
+         if entries.len() == 1
+             && entries[0].name == "reservation.json"
+             && writer
+@@ -519,6 +527,7 @@
+         }
+         io(job.sync())?;
+         io(self.0.jobs.sync())?;
++        writer.observed_jobs.insert(record.operation_id);
+         writer
+             .rejected_floors
+             .insert(record.operation_id, record_hash.clone());
+@@ -691,9 +700,10 @@
+             ids.push(id);
+         }
+         ids.sort_unstable();
+-        let observed: Vec<_> = writer
+-            .floors
+-            .keys()
++        let observed: HashSet<_> = writer
++            .observed_jobs
++            .iter()
++            .chain(writer.floors.keys())
+             .chain(writer.rejected_floors.keys())
+             .copied()
+             .collect();
+@@ -906,7 +916,12 @@
+         if expected != loaded.0.head {
+             return Err(JournalError::Conflict);
+         }
+-        self.check_transition(&loaded.0.checkpoint, &next, loaded.0.legacy_managed_seen)?;
++        self.check_transition(
++            &loaded.0.checkpoint,
++            &next,
++            loaded.0.legacy_managed_seen,
++            loaded.0.last_cancel_operations,
++        )?;
+         if next_revision >= u64::from(self.0.limits.revisions) {
+             return Err(JournalError::LimitExceeded);
+         }
+@@ -1158,7 +1173,8 @@
+     ) -> JournalResult<Option<AcceptedJobV1>> {
+         let name = operation_id.to_string();
+         let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
+-            return if writer.floors.contains_key(&operation_id)
++            return if writer.observed_jobs.contains(&operation_id)
++                || writer.floors.contains_key(&operation_id)
+                 || writer.rejected_floors.contains_key(&operation_id)
+             {
+                 Err(JournalError::Conflict)
+@@ -1167,6 +1183,7 @@
+             };
+         };
+         self.usage(Some(&name))?;
++        self.check_observation_capacity(operation_id, writer)?;
+         let has_accepted = self.read_file(&job, "accepted.json", SMALL)?.is_some();
+         let has_rejected = self.read_file(&job, "rejected.json", SMALL)?.is_some();
+         if has_accepted && has_rejected {
+@@ -1239,6 +1256,7 @@
+         let mut payload: Option<LoadedCheckpoint> = None;
+         let mut legacy_managed_seen = false;
+         let mut command_receipts = HashMap::new();
++        let mut last_cancel_operations = None;
+         for revision in 0..=current.head.revision {
+             let file = self
+                 .read_file(&job, &revision_name(revision), CHECKPOINT)?
+@@ -1297,7 +1315,12 @@
+             };
+             self.context_checkpoint(&next_payload, &intent, &bindings.binding)?;
+             if let Some(old) = &payload {
+-                self.check_transition(old, &next_payload, legacy_managed_seen)?;
++                self.check_transition(
++                    old,
++                    &next_payload,
++                    legacy_managed_seen,
++                    last_cancel_operations,
++                )?;
+             } else if !matches!(next_payload, LoadedCheckpoint::V1(_)) {
+                 return Err(JournalError::Corrupt);
+             }
+@@ -1309,6 +1332,10 @@
+                 hash: digest(domain, file.bytes()),
+             };
+             if let Some(value) = next_payload.lifecycle() {
++                last_cancel_operations = value.cancel_boundary(
++                    payload.as_ref().and_then(LoadedCheckpoint::lifecycle),
++                    last_cancel_operations,
++                );
+                 for command in value.commands() {
+                     command_receipts
+                         .entry(command.command_id())
+@@ -1344,6 +1371,7 @@
+         io(self.0.jobs.sync())?;
+         io(self.0.directory.sync())?;
+         writer.floors.insert(operation_id, current.head.clone());
++        writer.observed_jobs.insert(operation_id);
+         Ok(Some(AcceptedJobV1(Box::new(AcceptedData {
+             operation_id,
+             intent,
+@@ -1356,6 +1384,7 @@
+             legacy_managed_seen,
+             chain,
+             command_receipts,
++            last_cancel_operations,
+         }))))
+     }
+     fn check_writer(&self) -> JournalResult<()> {
+@@ -1484,6 +1513,7 @@
+         previous: &LoadedCheckpoint,
+         next: &LoadedCheckpoint,
+         legacy_managed_seen: bool,
++        last_cancel_operations: Option<usize>,
+     ) -> JournalResult<()> {
+         if let LoadedCheckpoint::V3(value) = next {
+             if let LoadedCheckpoint::V1(old) = previous
+@@ -1503,6 +1533,7 @@
+                 previous.lifecycle(),
+                 previous.supervised(),
+                 previous.runner(),
++                last_cancel_operations,
+             );
+         }
+         match (previous, next) {
+@@ -1528,6 +1559,14 @@
+         self.usage(Some(name))?
+             .add(bytes, entries, true, &self.0.limits)
+     }
++    fn check_observation_capacity(&self, operation_id: Uuid, writer: &Writer) -> JournalResult<()> {
++        if !writer.observed_jobs.contains(&operation_id)
++            && writer.observed_jobs.len() >= self.0.limits.jobs as usize
++        {
++            return Err(JournalError::LimitExceeded);
++        }
++        Ok(())
++    }
+     fn usage(&self, selected: Option<&str>) -> JournalResult<Usage> {
+         let mut usage = Usage::default();
+         for entry in fscheck(
+--- a/src/broker/journal/types.rs
++++ b/src/broker/journal/types.rs
+@@ -405,6 +405,7 @@
+     pub(super) legacy_managed_seen: bool,
+     pub(super) chain: Vec<RevisionRefV1>,
+     pub(super) command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
++    pub(super) last_cancel_operations: Option<usize>,
+ }
+ #[derive(Clone)]
+ pub(super) enum LoadedCheckpoint {
+@@ -492,17 +493,31 @@
+     Provider { source: &'a PrivateFile },
+ }
+ 
+-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(rename_all = "snake_case")]
+-pub enum RejectionPhaseV1 {
+-    SubmissionPreparation,
+-}
+-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+-#[serde(rename_all = "snake_case")]
+-pub enum RejectionCodeV1 {
+-    PreparationFailed,
+-    CancelledBeforeAcceptance,
++macro_rules! rejection_enum {
++    ($name:ident { $($variant:ident),+ $(,)? }) => {
++        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
++        #[serde(rename_all = "snake_case")]
++        pub enum $name { $($variant),+ }
++        impl<'de> Deserialize<'de> for $name {
++            fn deserialize<D: Deserializer<'de>>(decoder: D) -> Result<Self, D::Error> {
++                #[derive(Deserialize)]
++                #[serde(rename_all = "snake_case")]
++                enum Wire { $($variant),+ }
++                Ok(match Wire::deserialize(decoder)
++                    .map_err(|_| D::Error::custom("invalid private rejection code"))? {
++                    $(Wire::$variant => Self::$variant),+
++                })
++            }
++        }
++    };
+ }
++rejection_enum!(RejectionPhaseV1 {
++    SubmissionPreparation
++});
++rejection_enum!(RejectionCodeV1 {
++    PreparationFailed,
++    CancelledBeforeAcceptance
++});
+ 
+ pub struct RejectionReceiptV1 {
+     pub(super) operation_id: Uuid,
