@@ -710,13 +710,19 @@ impl<'a> Execution<'a> {
                 }
                 Ok(())
             })
-            .await?;
-            let (_, draft) = self.load().await?;
+            .await
+            .context(diagnostics::BrokerStep::OwnershipCommit)?;
+            let (_, draft) = self
+                .load()
+                .await
+                .context(diagnostics::BrokerStep::OwnershipReload)?;
             if draft.worker()?.attempt.created_inspection.is_none() {
                 self.mutate(WorkerTransitionV1::Created {
-                    inspection: managed::inspection(draft.worker()?, &owned.observation)?,
+                    inspection: managed::inspection(draft.worker()?, &owned.observation)
+                        .context(diagnostics::BrokerStep::CreatedInspection)?,
                 })
-                .await?;
+                .await
+                .context(diagnostics::BrokerStep::CreatedExchange)?;
             }
             let durable = draft
                 .run

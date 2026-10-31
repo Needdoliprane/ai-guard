@@ -477,3 +477,107 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
     drop(executor);
     peer.close().await;
 }
+
+#[tokio::test]
+async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority() {
+    let fixture = Fixture::new().await;
+    let peer = NativePeer::empty(&fixture).await;
+    let runtime =
+        Runtime::with_program(RuntimeKind::Docker, &std::env::current_exe().unwrap()).unwrap();
+    let context = AuthenticatedBatchContext::for_executor_test(
+        fixture.client.clone(),
+        fixture.scope.clone(),
+        fixture.config.clone(),
+        runtime,
+    )
+    .await
+    .unwrap();
+    let executor = BatchExecutor::new(
+        fixture.writer.clone(),
+        peer.client.clone(),
+        Arc::new(NativeHostClock::new().unwrap()),
+    );
+    let operation = Uuid::new_v4();
+    fixture.accept(operation, false);
+    let execution = Execution::open(&executor, operation, &context)
+        .await
+        .unwrap();
+    let private = "synthetic-unknown-batch-failure-private-canary";
+    execution
+        .failure(LocalFailurePhaseV1::Worker, &anyhow!("{private}"))
+        .await;
+    let current = fixture.writer.load(operation).await.unwrap().unwrap();
+    let public: Value = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap()
+        .get(format!("{}/api/v1/events", fixture.scope.gateway_origin()))
+        .bearer_auth(VIEWER)
+        .query(&[("kind", "broker.batch.failure"), ("order", "asc")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let slots = peer.client.status().await.unwrap().slot_count();
+    drop(execution);
+    drop(executor);
+    peer.close().await;
+
+    assert_eq!(
+        slots, 0,
+        "failure reporting must leave the native peer empty"
+    );
+    let draft = Draft::from_job(&current).unwrap();
+    assert_eq!(draft.commands.len(), 1);
+    assert!(matches!(
+        draft.commands[0].request(),
+        LocalCommandRequestV1::FailureObserved {
+            phase: LocalFailurePhaseV1::Worker,
+            code: LocalFailureCodeV1::Unavailable,
+        }
+    ));
+    assert!(draft.operations.is_empty());
+    assert!(draft.helpers.is_empty());
+    assert!(draft.run.plan.managed.is_none());
+    let checkpoint = current
+        .broker_checkpoint_v4()
+        .expect("every observed batch failure must have a durable public outbox event");
+    assert_eq!(checkpoint.events().len(), 1);
+    let pending = &checkpoint.events()[0];
+    let event = pending.event();
+    assert_eq!(event.kind, "broker.batch.failure");
+    assert_eq!(event.source, "runner");
+    assert_eq!(event.provenance, "observed");
+    assert_eq!(event.coverage, "observed");
+    assert!(event.command.is_none());
+    assert!(event.decision.is_none());
+    assert!(event.result.is_none());
+    assert_eq!(
+        event.data,
+        json!({
+            "version": 1,
+            "phase": "worker",
+            "runtime_effect": "unknown",
+            "enforcer": null,
+            "runtime": null,
+            "broker_step": "failure_observed",
+        })
+    );
+    assert_eq!(event.id, pending.event_id().to_string());
+    let items = public["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    let stored: crate::model::StoredEvent = serde_json::from_value(items[0].clone()).unwrap();
+    assert!(stored.seq > 0);
+    assert_eq!(pending.audit_seq(), Some(stored.seq));
+    assert_eq!(
+        serde_json::to_value(&stored.event).unwrap(),
+        serde_json::to_value(event).unwrap()
+    );
+    assert!(!serde_json::to_string(checkpoint).unwrap().contains(private));
+    assert!(!serde_json::to_string(&public).unwrap().contains(private));
+}

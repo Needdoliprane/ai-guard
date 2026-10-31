@@ -1,0 +1,10 @@
+{
+  "engine": {
+    "id": "311179c5-f7e1-4130-bba1-50e8d3d7f537",
+    "os": "linux",
+    "architecture": "aarch64"
+  },
+  "image": {
+    "id": "sha256:7c64760cc4a5f29a40685cae2451afed914ce81671601166792cd087beab9db6"
+  }
+}

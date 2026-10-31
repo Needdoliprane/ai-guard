@@ -1,0 +1,2 @@
+Files /private/tmp/ai-guard-s4-20261031-230349/pre-format/src/runner/broker/executor/diagnostics.rs and /private/tmp/ai-guard-s4-20261031-230349/post-format/src/runner/broker/executor/diagnostics.rs differ
+Files /private/tmp/ai-guard-s4-20261031-230349/pre-format/src/runner/broker/executor/journal_tests.rs and /private/tmp/ai-guard-s4-20261031-230349/post-format/src/runner/broker/executor/journal_tests.rs differ

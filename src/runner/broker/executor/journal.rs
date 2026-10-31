@@ -174,11 +174,13 @@ impl<'a> Execution<'a> {
                 },
             )
             .await;
-        if let Some(diagnostic) = diagnostics::classify(phase, error)
-            && self
-                .fact_event("broker.batch.failure", &diagnostic)
-                .await
-                .is_err()
+        // Reporting the observed error does not assert that its lifecycle
+        // append succeeded; that publication may itself be unknown.
+        let diagnostic = diagnostics::failure_report(phase, error);
+        if self
+            .fact_event("broker.batch.failure", &diagnostic)
+            .await
+            .is_err()
         {
             // Enqueue may already be durable when HTTP/ACK delivery fails.
             // Do not claim that it is absent, retry the start, or print the
@@ -256,7 +258,7 @@ impl<'a> Execution<'a> {
         if let Some(slot) = ready {
             self.generation_current()?;
             slot.check_ready_for_claim_diagnosed(self.generation)
-                .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
+                .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         }
         let completed = self.call(input.clone()).await?;
         let committed = self

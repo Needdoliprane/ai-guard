@@ -1,5 +1,3 @@
-@/Users/louis/.codex/RTK.md
-
 # ai-guard — consignes de développement
 
 ## Mandat
@@ -9,6 +7,18 @@ Construire et maintenir un **produit open source destiné à la production**, lo
 **La cible production est une exigence ; la qualification est un résultat à prouver.** Le code existant est une base à compléter et à qualifier. Ne jamais écrire « production-ready » parce que le projet compile, que les fixtures passent ou que la documentation a été renommée.
 
 L'architecture ci-dessous est validée par le mainteneur. Travailler dans cette architecture ; soumettre un changement structurel motivé avant de le réaliser.
+
+Les consignes récentes du mainteneur priment sur les anciens plans. Les documents ont des fonctions distinctes :
+
+| Référence | Autorité |
+|---|---|
+| Ce fichier et [PROMPT_PRODUCTION.md](PROMPT_PRODUCTION.md) | Mandat, invariants et méthode de travail |
+| [Contrat d'architecture](docs/engineering/ARCHITECTURE_CONTRACT.md) et [règles de code](docs/engineering/CODING_RULES.md) | Frontières techniques et règles d'implémentation |
+| [Identité, SSO et configuration](docs/sso.md), [interface](docs/ui.md) et contrats métier concernés | Exigences détaillées à conserver lors des implémentations et revues |
+| [Plan](docs/engineering/IMPLEMENTATION_PLAN.md) et [décisions](docs/engineering/DECISIONS.md) | Lots, dépendances et décisions datées ; ils ne prouvent pas une livraison |
+| [État constaté](docs/engineering/CURRENT_STATE.md), [validation](docs/engineering/VALIDATION.md) et [gates](docs/engineering/PRODUCTION_READINESS.md) | Avancement et preuves, limités à leurs sources, dates et périmètres |
+
+Un contrat cible ne décrit pas une fonction disponible. Une preuve historique n'est pas transférée au checkout courant ou à un autre worktree.
 
 ## Qualité du produit attendu
 
@@ -46,7 +56,7 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 4. `docs/engineering/TEST_STRATEGY.md` : tests existants, tests manquants et preuves.
 5. Le code, les contrats et les documents directement concernés par la tâche.
 
-Pour le chantier global, lire aussi `PROMPT_PRODUCTION.md` et `docs/engineering/IMPLEMENTATION_PLAN.md`. Pour une publication, lire `docs/engineering/RELEASE_CHECKLIST.md`. Pour TLS, mTLS, certificats ou le NAS, lire d'abord `docs/engineering/INFRASTRUCTURE_PKI.md`.
+Pour le chantier global, lire aussi `PROMPT_PRODUCTION.md` et `docs/engineering/IMPLEMENTATION_PLAN.md`. Pour l'identité, les permissions, la configuration, l'inférence interne ou la découverte, lire le contrat canonique `docs/sso.md` ; pour les vues et les travaux visuels, lire `docs/ui.md`. Pour une publication, lire `docs/engineering/RELEASE_CHECKLIST.md`. Pour TLS, mTLS, certificats ou le NAS, lire d'abord `docs/engineering/INFRASTRUCTURE_PKI.md`.
 
 Ces consignes s'appliquent aux agents principaux, sous-agents et revues. Les exigences récentes du mainteneur priment sur les anciens plans. Signaler un conflit réel ; ne pas réinterpréter un document historique pour réduire la cible à un MVP.
 
@@ -66,23 +76,27 @@ Ces consignes s'appliquent aux agents principaux, sous-agents et revues. Les exi
 
 ## Identité utilisateur, SSO facultatif et traçabilité complète
 
-Le mainteneur demande une attribution individuelle de bout en bout : utilisateur authentifié → demande → session → agent → délégation → sous-agent → action/commande → décision → acceptation du broker → exécution observée → résultat et changements. Conserver séparément l'utilisateur initiateur, l'acteur effectif et les liens de causalité ; une action dans sa session n'est pas nécessairement une instruction explicite de cet utilisateur. Les identités et appartenances tenant sont établies côté contrôle, jamais choisies dans la télémétrie d'un agent.
+Le [contrat canonique d'identité, SSO et configuration](docs/sso.md) est obligatoire pour ce chantier. Il décrit une **cible à implémenter et qualifier**, comprenant l'identité locale nominative hors ligne et le SSO facultatif à l'installation, dont le support reste obligatoire dans le produit. ai-guard est un client OIDC configurable (Keycloak, Entra ID ou autre fournisseur qualifié), avec Authorization Code + PKCE S256 et clients publics ; aucun `client_secret` distribué. Vérificateurs privés éphémères, réponses et autorisations validées côté Rust ; le frontend ne fait pas autorité.
 
-Le SSO est **facultatif à l'installation**, mais son support et sa qualification font partie du produit. Préserver une authentification locale nominative, utilisable hors ligne, et le même contrat d'autorisation/audit. ai-guard est un **client OIDC**, pas un fournisseur SSO : intégrer un fournisseur configurable, dont Keycloak, sans imposer un fournisseur ou un service d'identité interne nouveau. Employer Authorization Code + PKCE S256 avec clients publics, sans `client_secret` dans le build ou la configuration distribuée. Le vérificateur PKCE est privé et éphémère par connexion. Les paramètres publics peuvent être configurés au déploiement. Valider les réponses et les accès côté Rust ; le frontend ne fait pas autorité. Les rôles d'administration du fournisseur n'accordent aucun rôle ai-guard implicite.
+Les appartenances et permissions sont établies par le contrôle. Le mapping configurable des claims vérifiés s'applique au jeton d'accès côté Rust, avec périmètre d'organisation/tenants explicite. Le rôle externe de découverte `admin-ai-guard` n'est pas codé en dur pour les autres installations. Ni nom de compte, ni administration du realm, ni rôle applicatif ne donnent de credential `runner` ou d'accès implicite à un autre client. Le mode local suit le même contrat d'autorisation/audit.
 
-La connexion SSO concerne ai-guard et reste distincte de l'authentification Codex/Claude. Les agents et sous-agents utilisent des identités d'exécution propres, bornées et révocables, sans recevoir le jeton SSO humain ni le credential `runner` du contrôle. Toute délégation lie parent, mission et permissions, sans élévation implicite. Les anciens jetons partagés ne constituent pas rétroactivement une preuve d'identité individuelle ; documenter la compatibilité et les migrations sans réattribuer l'historique.
+L'attribution complète lie utilisateur initiateur → demande → session → agent → délégation → sous-agent → action/commande → décision → acceptation broker → exécution observée → résultat et changements. Distinguer initiateur, acteur effectif et causalité ; une action d'agent ne prouve pas une instruction humaine explicite. Les identités d'exécution sont propres, bornées, révocables et sans élévation lors d'une délégation. Aucun jeton SSO humain ni credential `runner` dans un worker. Les authentifications ai-guard et Codex/Claude restent distinctes ; ne pas réattribuer l'historique des anciennes clés partagées.
 
-Tracer les demandes et réponses visibles, délégations, appels d'outils, commandes structurées, décisions/approbations, sorties et modifications observées dans un audit indépendant des workers, durable, vérifiable et exportable. Masquer les secrets avant persistance/diffusion ; contrôler accès, rétention, volumes et protection des contenus sensibles. Déclarer toute omission, troncature, perte ou couverture partielle. Un sous-agent seulement cité par un client reste `declared` ; aucune chaîne complète authentifiée n'est annoncée sans identité et médiation vérifiées. Un audit obligatoire indisponible bloque l'action. Les critères détaillés sont dans [docs/sso.md](docs/sso.md) et la [stratégie de tests](docs/engineering/TEST_STRATEGY.md).
+Tracer demandes/réponses visibles, délégations, outils, commandes structurées, décisions/approbations, sorties et changements observés dans un audit indépendant, durable, vérifiable et exportable, avec points de contrôle signés selon le contrat. Masquer les secrets avant persistance/diffusion ; contrôler accès, rétention, volumes et contenus sensibles. Toute omission, troncature, perte ou couverture partielle est explicite. Un sous-agent seulement déclaré reste `declared` ; aucune chaîne complète authentifiée sans preuves d'identité et de médiation. Un audit obligatoire indisponible bloque l'action.
+
+Les [axes de configuration indépendants](docs/sso.md#configuration-par-axes-indépendants) couvrent topologie, identité, tenants/permissions, agent, abonnement/API/inférence interne, réseau/TLS, administration et exploitation. Les cas d'usage sont non exhaustifs. Fournir des profils simples, sans coupler SSO et fournisseur IA ; valider choix résolus et prérequis, puis refuser clairement les combinaisons incompatibles ou non qualifiées. Aucun réglage ne désactive un invariant ; aucune combinaison non testée n'est annoncée qualifiée.
 
 ## Essai rapide et environnement SSO de découverte
 
-La cible ergonomique est un premier essai en **environ cinq minutes**, pas une promesse ni un délai garanti. Viser un lancement Compose documenté et une seule clé API du fournisseur choisi pour un premier agent réel, sans exiger les autres fournisseurs/Jev/SSO. Mesurer les temps et les étapes manuelles sur une installation neuve ; distinguer téléchargement/construction initiale et démarrage avec images présentes. Fournir diagnostic des prérequis, URLs et états de disponibilité, commandes utiles et erreurs exploitables ; aucun assouplissement de confinement ou d'audit pour atteindre ce délai.
+Le [parcours canonique de découverte](docs/sso.md#essayer-sans-configurer-toute-une-infrastructure) vise **environ cinq minutes**, sans garantie : Compose documenté, une seule clé API du fournisseur choisi, diagnostic, accès disponibles et premier agent réel audité. Distinguer préparation des images, démarrage à chaud, étapes manuelles et temps mesurés ; conserver confinement et audit.
 
-Fournir un profil Compose de découverte **explicitement activé**, avec Keycloak conteneurisé, version épinglée, realm et clients publics PKCE préconfigurés, plus deux comptes annoncés : `admin / admin` pour administrer Keycloak et `user / user` pour utiliser ai-guard en CLI et dans le dashboard. Ces valeurs sont des identifiants publics de démonstration limités à ce profil local loopback ; elles ne deviennent jamais les valeurs par défaut d'une installation normale. Ne pas remplacer les credentials, bases ou volumes existants. Aucun nom de fichier Compose n'est imposé par cette consigne.
+Fournir le [profil Keycloak](docs/sso.md#profil-keycloak-de-découverte) local loopback **explicitement activé**, épinglé et préconfiguré, avec ses quatre comptes publics : `admin / admin` (realm), `admin-ai-guard / admin-ai-guard` (rôle applicatif), `user-1 / user-1` et `user-2 / user-2` (sans ce rôle). Ces identifiants ne sont jamais les valeurs par défaut d'une installation normale ; préserver credentials, bases et volumes existants. Aucun nom de fichier Compose n'est imposé.
 
-L'essai doit montrer une vraie connexion, une exécution autorisée non destructive et sa trace attribuée à l'utilisateur ; pas d'événements ou de compteurs fictifs. Les données de préparation du realm sont identifiées comme démonstration. Livrer deux procédures : découverte préconfigurée et raccordement du fournisseur de l'entreprise. Le profil démontre l'interopérabilité et le parcours d'ai-guard ; il ne qualifie pas l'exploitation de Keycloak en production et n'abaisse aucun gate du produit. Mettre à jour quick start, configuration, exploitation et tests avec le code ; une documentation de cible ne constitue pas une fonctionnalité livrée.
+La recette montre vraie connexion, action autorisée non destructive et trace attribuée, avec refus de rôle/périmètre, sans activité fictive. Identifier le realm comme démonstration. Livrer ensemble code, tests et procédures de découverte/raccordement entreprise, sans prétendre qualifier Keycloak en production ni fermer un gate par documentation.
 
 ## Clients et authentification dynamiques
+
+Le projet fournit Dockerfiles et instructions ; le client construit et distribue ses images, y compris hors Internet. Aucune image publique préconstruite n'est obligatoire. Le [profil d'inférence interne](docs/sso.md#inférence-interne-et-déploiement-sans-internet), **à implémenter et qualifier**, lie URL, modèle, format compatible OpenAI précis/adaptation Claude, référence de credential, chaîne publique d'AC privée et destinations approuvées. Préparer le worker sans désactiver TLS, sans clé privée d'AC ni repli cloud ; les presets actuels ne prouvent pas ce parcours.
 
 Le produit doit prendre en charge **Codex CLI et Claude Code, chacun avec abonnement et avec clé API**. Détecter les capacités disponibles et permettre une sélection explicite ou automatique du client et du mode, sans argv fournisseur imposé à l'utilisateur. Le choix résolu, sa provenance et ses prérequis sont visibles avant lancement et liés à l'autorisation lorsque leur changement affecte l'exécution.
 
@@ -99,6 +113,8 @@ Le mainteneur demande des essais économes : Luna pour l'orchestration des tests
 Un **dashboard unique par client** regroupe tous ses agents, sous-agents, workers et sandboxes, même répartis sur plusieurs brokers, hôtes ou runtimes. Aucun dashboard par worker à consulter. La cible reste au moins 100 workers par client, à mesurer réellement. L'identité authentifiée sélectionne le tenant : A voit tout A selon son rôle, B tout B, sans exposition inter-client.
 
 Le control plane rassemble registre, événements, décisions, quotas et usage du client ; l'UI utilise ses API autorisées et son flux temps réel, sans moteur ni secrets runner. Afficher autorité d'exécution, provenance, fraîcheur et dernier état connu. Un broker déconnecté ou une collecte partielle n'est jamais présenté comme une vue complète ou zéro activité. Quotas et comptage restent cohérents au niveau du tenant.
+
+Le [contrat des vues par permissions](docs/ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer), **à implémenter et qualifier**, couvre utilisateur, administration et synthèse à 360° du périmètre autorisé : utilisateurs, agents/sous-agents, sessions, sandboxes, workers/brokers, décisions, incidents, quotas, usage et configurations. Droits/configuration effectifs viennent de Rust. Distinguer contexte personnel et administration, métadonnées, contenus, export et mutations ; retirer les données devenues interdites après changement de droits/périmètre, y compris détails, caches et flux. Un bouton visible ne constitue jamais une autorisation.
 
 Conserver le cœur commun local/cloud et les frontières existantes. L'agrégation n'autorise ni fusion des bases clients, ni credentials globaux chez les workers, ni nouveaux microservices sans nécessité. Workload identity, transports, connexion des brokers distants et reprise restent à implémenter et qualifier ; cette consigne ne les déclare pas livrés.
 
@@ -198,3 +214,5 @@ Une tâche est terminée lorsque son comportement est implémenté, ses erreurs 
 Rendre un bilan : **changements ; commandes et résultats constatés ; critères acceptés ; limites ; blocages précis**. Séparer `PASS`, `FAIL`, `BLOCKED`, `NOT_RUN` et `NOT_APPLICABLE` justifié. Citer les sources officielles pour les faits externes et les fichiers pour les faits du dépôt.
 
 Les instructions et skills guident les agents. Les garanties doivent être appliquées par le code, les permissions, les politiques et les contrôles de validation ; la présence de ce fichier n'est pas une barrière de sécurité.
+
+Les réglages personnels d'outillage, chemins de machine et blocs de mémoire de session appartiennent à la configuration locale des agents. Ne pas les injecter dans ces consignes communes ni les traiter comme des exigences du produit.

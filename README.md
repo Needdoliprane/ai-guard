@@ -12,6 +12,8 @@ Le projet est distribué sous [licence Apache-2.0](LICENSE), retenue avec l'auto
 
 Le mandat porte sur un produit complet, utile et soigné : parcours de bout en bout, erreurs et reprise compréhensibles, données réelles, accessibilité, documentation et maintenance. Les lots du [plan d'implémentation](docs/engineering/IMPLEMENTATION_PLAN.md) organisent le travail ; aucune étiquette MVP/V2 ne permet de reporter une exigence obligatoire. Voir le [mandat commun](PROMPT_PRODUCTION.md) et les [critères d'acceptation](docs/acceptance.md).
 
+Le [contrat d'identité et de configuration](docs/sso.md) fixe les parcours à livrer : identité locale nominative hors ligne ou SSO OIDC configurable, découverte Keycloak explicitement activée, inférence interne et vues utilisateur/administration selon les permissions Rust. **Ces parcours restent à implémenter et qualifier** ; la connexion actuelle par clé `viewer` ne les remplace pas.
+
 ## Ce que le produit fait
 
 - Prépare une copie filtrée du projet dans un volume de session, sans monter ni modifier le projet original.
@@ -40,7 +42,7 @@ Le broker Rust s'exécute sur le poste de confiance et utilise la CLI Docker/Pod
 | `tests/` | Contrats, sécurité, persistance, import/export et test moteur explicite. |
 | `docs/` | Architecture, exploitation, API, compatibilité, sécurité et validation. |
 
-La CLI construit `agentsandbox-control:local` et `agentsandbox-worker:local`. Le premier contient le binaire Rust et les fichiers statiques de l'interface ; le même binaire démarre le gateway, le dashboard ou l'ingress, dans trois conteneurs distincts.
+La CLI construit `agentsandbox-control:local` et `agentsandbox-worker:local`. Le premier contient le binaire Rust et les fichiers statiques de l'interface ; le même binaire démarre le gateway, le dashboard ou l'ingress, dans trois conteneurs distincts. Le projet fournit Dockerfiles et instructions ; le client construit et distribue ses images, y compris par import ou registre interne. Aucune image publique préconstruite du projet n'est obligatoire. La préparation sans Internet et le profil d'inférence interne demandent leurs propres procédures et preuves.
 
 ## Démarrer avec Docker ou Podman
 
@@ -149,42 +151,13 @@ Cette commande utilise le réseau `none`. Le fichier apparaît dans le volume de
 
 ## Agents cloud et identifiants explicites
 
-L'image worker générique ne contient aucun CLI fournisseur par défaut. Leur installation optionnelle exige des versions exactes choisies et vérifiées par l'opérateur :
+Le [parcours fournisseur du quick start](docs/quickstart.md#ajouter-un-agent-fournisseur) est la procédure de référence : construire une image avec versions exactes, préparer une référence de credential privée, puis sélectionner Codex CLI ou Claude Code et le mode API ou abonnement, sans construire d'argv fournisseur. Le choix est annoncé et lié à l'autorisation ; un abonnement demandé ne bascule jamais silencieusement vers une API facturée. L'image générique ne contient aucun CLI fournisseur sans installation explicite.
 
-```sh
-"$AIGUARD_BIN" build --runtime docker --codex-version X.Y.Z --claude-code-version A.B.C
-```
+Les mécanismes de résolution et les limites de disponibilité sont décrits dans [PROVIDER_AUTH.md](docs/engineering/PROVIDER_AUTH.md). Un essai **Claude/API batch géré** a créé et exporté un fichier exact sur Docker Desktop/macOS ARM64, avec modèle demandé `claude-haiku-5-5`, audit vérifié après redémarrage et quota libéré. Le modèle effectivement servi reste inconnu. Ce PASS ciblé ne qualifie ni les quatre parcours complets, ni les abonnements ou TUI. Les essais manuels antérieurs gardent leurs versions et limites dans la [validation datée](docs/engineering/VALIDATION.md).
 
-Les lettres sont des espaces réservés, pas des versions validées. Les tags `latest`, jokers et plages sont refusés. Les paquets officiels sont [@openai/codex](https://github.com/openai/codex) et [@anthropic-ai/claude-code](https://code.claude.com/docs/en/setup#install-with-npm).
+Le transport `run --interactive` existe ; les conversations fournisseur, leur authentification et leur reprise demandent leurs propres preuves. Le produit n'extrait aucun cache OAuth ni keychain hôte et ne livre pas encore d'assistant de connexion fournisseur. Suivre les prérequis privés du [guide d'exploitation](docs/operations.md#agents-cloud-et-clés-dapi).
 
-Préparer un fichier de credentials extérieur au projet, privé au propriétaire (`0600`), contenant des lignes littérales `NAME=value`. Il n'est pas interprété par un shell. Utiliser `CODEX_API_KEY` pour [Codex non interactif](https://learn.chatgpt.com/docs/non-interactive-mode) et `ANTHROPIC_API_KEY` pour [Claude en mode `-p`](https://code.claude.com/docs/en/env-vars). Ne placer aucune clé dans le prompt ou les arguments.
-
-```sh
-"$AIGUARD_BIN" run \
-  --runtime docker --config-dir "$AIGUARD_CONFIG" \
-  --project "$AIGUARD_PROJECT" \
-  --profile observe --network bridge --provider codex \
-  --secret-env-file "$AIGUARD_CONFIG/codex.env" --timeout 300 \
-  -- codex exec --json --model gpt-6-luna \
-  --sandbox danger-full-access --skip-git-repo-check --ephemeral \
-  -c 'approval_policy="never"' \
-  "Create only a new file named result.txt at the workspace root. Its full content must be exactly: Codex local smoke test completed. Do not read or modify other files, run tests, or start subagents."
-```
-
-Cette recette demande une image contenant Codex **0.165.0**, un fichier API privé et un projet où `result.txt` est absent. Le projet copié exclut `.git` ; l'option `--skip-git-repo-check` répond au contrôle de dépôt du mode `codex exec`. L'essai ciblé a nécessité le choix explicite du sandbox interne ci-dessus : `workspace-write` échouait sur le namespace utilisateur de `bwrap`. Les contraintes du conteneur ai-guard restent appliquées. Suivre ensuite l'[export neuf et la vérification de `result.txt`](docs/quickstart.md#ajouter-un-agent-fournisseur), avec l'UUID de cette session ; le guide décrit aussi la préparation de l'image et les limites de la preuve. Pour Claude, l'exemple suivant est une exploration sans création/export attendu ; son appel modèle n'est pas qualifié :
-
-```sh
-"$AIGUARD_BIN" run \
-  --runtime docker --config-dir "$AIGUARD_CONFIG" \
-  --project "$AIGUARD_PROJECT" \
-  --profile observe --network bridge --provider claude \
-  --secret-env-file "$AIGUARD_CONFIG/claude.env" \
-  -- claude -p "Décris la structure du projet" --output-format stream-json --verbose
-```
-
-Le réseau bridge est sortant **sans filtrage applicatif**. Les secrets injectés sont accessibles à l'agent et au code exécuté dans le worker ; leur masquage dans les traces ne change pas cette propriété. Le daemon et son administrateur appartiennent aussi au périmètre de confiance. La protection des credentials et les restrictions egress du périmètre annoncé restent des écarts ouverts tant qu'elles ne sont pas implémentées et qualifiées.
-
-Le home du worker est temporaire et stdin est fermé pour la commande métier : aucun TTY ni login interactif fournisseur n'est pris en charge. Codex 0.165.0 a produit un fichier puis un export vérifié lors d'un essai réel ciblé Docker Desktop ARM64. Claude Code 2.1.140 a passé uniquement `--version` et `--help` en worker ; authentification et appel modèle restent `NOT_RUN`. Ces résultats ne qualifient ni les actions transitives ni les autres plateformes. Voir la [validation datée](docs/engineering/VALIDATION.md).
+Le réseau `bridge` est sortant **sans filtrage applicatif**. Les secrets injectés sont accessibles à l'agent et au code du worker, ainsi qu'aux autorités du moteur ; le masquage des traces ne supprime pas cet accès. Les traces fournisseur normalisées après exécution restent `declared`, sans médiation avant action. Le profil d'inférence interne avec TLS et destinations approuvées reste à implémenter et qualifier, sans repli cloud.
 
 ## Lire les actions et les événements
 
@@ -280,7 +253,7 @@ Choisir `podman` pour l'autre moteur. Pour une exception Docker Desktop non root
 - Les modifications de contenu sont constatées au niveau session. Les diffs Git détaillés et la visibilité sur les commits demandés restent à compléter ; `.git` n'est pas importé. Une attribution à un sous-agent exige une preuve propre et ne doit pas être déduite arbitrairement.
 - Les tentatives de syscalls ou de connexions réseau refusées ne sont pas toutes collectées. L'absence d'événement n'atteste pas l'absence de tentative.
 - Les secrets connus et formats reconnus sont masqués ; un secret arbitraire inconnu peut échapper à cette détection. La copie exclut des noms sensibles connus, sans analyser tout contenu comme un scanner de secrets.
-- L'audit a des quotas et refuse de nouvelles écritures lorsqu'il est plein. Rotation/rétention configurables, sauvegarde/restauration et reprise restent à compléter et qualifier. Les signatures et l'ancrage externe sont des protections à évaluer selon la menace annoncée ; la chaîne locale ne résiste pas à la réécriture complète par un administrateur.
+- L'audit a des quotas et refuse de nouvelles écritures lorsqu'il est plein. Rotation/rétention configurables, sauvegarde/restauration et reprise restent à compléter et qualifier. Les points de contrôle signés et l'export vérifiable du [contrat de traçabilité](docs/sso.md#chaîne-de-traçabilité-à-livrer) restent à implémenter et qualifier, avec protection des clés et limites de vérification explicites ; la chaîne locale ne résiste pas à la réécriture complète par un administrateur.
 - La stack est prévue pour localhost. Une exposition distante exige une conception TLS, authentification et droits adaptée ; elle n'est pas fournie par le déploiement local.
 
 ## Documentation
@@ -291,6 +264,7 @@ Choisir `podman` pour l'autre moteur. Pour une exception Docker Desktop non root
 | [Architecture](docs/architecture.md) | Frontières de confiance, choix de stack et cible produit complète. |
 | [Exploitation](docs/operations.md) | Toutes les commandes, secrets, limites de copie, reprise et moteurs. |
 | [Interface](docs/ui.md) | Vues, états incomplets, accessibilité, sécurité DOM et tests navigateur. |
+| [Identité, SSO et configuration](docs/sso.md) | Contrat cible : identité nominative, permissions, axes de déploiement, découverte et inférence interne. |
 | [API](docs/api.md) | Authentification, événements, filtres, SSE et export. |
 | [Modèle de données](docs/data-model.md) | Identités, provenance par champ, événements, dates UTC et projections. |
 | [Adaptateurs](docs/adapters.md) | JSONL, hiérarchie déclarative, mappings et limites. |

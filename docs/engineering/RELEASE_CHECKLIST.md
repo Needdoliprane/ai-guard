@@ -5,6 +5,7 @@ Cette checklist prépare une décision sur une candidate identifiée ; elle ne d
 ## Dossier de candidate
 
 - [ ] Identifier révision/empreinte, date UTC, responsables réels, artefacts distribués, checksums, versions/digests et entrées de build.
+- [ ] Vérifier Dockerfiles et instructions de construction/distribution par le client, y compris préparation/import hors Internet selon le profil annoncé. Aucune image publique préconstruite du projet n'est obligatoire ; traçabilité, versions et preuves concernent les images réellement construites et testées.
 - [ ] Fixer les profils annoncés et la matrice Docker/Podman × Linux x86_64/macOS ARM64 ; conserver séparément recette trois workers A1/A2/B1, charge 100 et Kubernetes/cloud.
 - [ ] Lier chaque exigence à sa procédure, son résultat attendu/constaté, ses artefacts masqués, sa revue et ses limites. Les comptes/accès externes sont autorisés, jamais inventés.
 - [ ] Vérifier les parcours d'installation, diagnostic, identité, lancement/refus, observation, examen/export, arrêt et reprise ; erreurs, données inconnues/périmées, accessibilité et lisibilité sous charge font partie de l'acceptation.
@@ -25,6 +26,8 @@ Cette checklist prépare une décision sur une candidate identifiée ; elle ne d
 | G10 | Ressources, débit, latence et saturation mesurés ; charge 100 workers réels distincte de la recette trois workers et du synthétique. |
 | G11 | Infrastructure et transports applicables, identités de workload, TLS/mTLS et réseau cloud effectivement appliqués ; [guide PKI](INFRASTRUCTURE_PKI.md). |
 | G12 | Licence, notices, redistribution, maintenance, contribution/support, signalement privé, dépendances/SBOM/provenance et procédures install/upgrade/rollback. |
+
+Le [contrat canonique d'identité et de configuration](../sso.md) et les [vues par permissions](../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) font partie de cette revue : identité locale nominative hors ligne, support OIDC public PKCE S256 qualifié même si désactivé à l'installation, mapping et périmètres côté Rust, délégations/audit vérifiable, administration à 360° autorisée et inférence interne sans repli cloud. Examiner leurs [preuves spécifiques](TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier), le profil Keycloak opt-in à quatre comptes et les procédures de découverte/raccordement entreprise. Les clés partagées et les fixtures ne satisfont pas ces exigences.
 
 ## Conditions de publication
 

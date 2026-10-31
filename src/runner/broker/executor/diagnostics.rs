@@ -6,11 +6,12 @@ use crate::{
 use serde::Serialize;
 use std::fmt;
 
-/// An outer control boundary, never evidence that a request was sent or ACKed.
+/// A fixed broker boundary or local error observation, never evidence that a
+/// request was sent or ACKed.
 /// A nested enforcer diagnostic can identify a more precise failing check.
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum PreclaimStep {
+pub(super) enum BrokerStep {
     ArmExchange,
     Registration,
     ReadinessBeforeClaim,
@@ -18,13 +19,18 @@ pub(super) enum PreclaimStep {
     ClaimExchange,
     GenerationBeforePrepare,
     Prepare,
+    OwnershipCommit,
+    OwnershipReload,
+    CreatedInspection,
+    CreatedExchange,
+    FailureObserved,
 }
-impl fmt::Display for PreclaimStep {
+impl fmt::Display for BrokerStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("broker preclaim stage failed")
+        f.write_str("broker control stage failed")
     }
 }
-impl std::error::Error for PreclaimStep {}
+impl std::error::Error for BrokerStep {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,8 +38,8 @@ enum EffectEvidence {
     Unknown,
 }
 
-/// An error at a trusted control boundary is not a runtime terminal, fencing
-/// witness, absence of a process, or permission to release a reservation.
+/// A local failure report is not a runtime terminal, fencing witness, absence
+/// of a process, or permission to release a reservation.
 #[derive(Serialize)]
 pub(super) struct BatchFailureDiagnosticV1 {
     version: u32,
@@ -42,7 +48,7 @@ pub(super) struct BatchFailureDiagnosticV1 {
     enforcer: Option<EnforcerStageFailure>,
     runtime: Option<RuntimePrestartStageFailure>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    broker_step: Option<PreclaimStep>,
+    broker_step: Option<BrokerStep>,
 }
 
 pub(super) fn classify(
@@ -51,7 +57,7 @@ pub(super) fn classify(
 ) -> Option<BatchFailureDiagnosticV1> {
     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
-    let broker_step = error.downcast_ref::<PreclaimStep>().copied();
+    let broker_step = error.downcast_ref::<BrokerStep>().copied();
     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
         return None;
     }
@@ -65,6 +71,23 @@ pub(super) fn classify(
     })
 }
 
+/// Report only the known boundary or the local observation of an error. The
+/// fallback does not establish its cause, a durable lifecycle append, or any
+/// runtime effect; specialized provenance remains unchanged when available.
+pub(super) fn failure_report(
+    phase: LocalFailurePhaseV1,
+    error: &anyhow::Error,
+) -> BatchFailureDiagnosticV1 {
+    classify(phase, error).unwrap_or(BatchFailureDiagnosticV1 {
+        version: 1,
+        phase,
+        runtime_effect: EffectEvidence::Unknown,
+        enforcer: None,
+        runtime: None,
+        broker_step: Some(BrokerStep::FailureObserved),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,8 +96,36 @@ mod tests {
 
     #[test]
     fn arbitrary_error_does_not_become_a_start_diagnostic() {
-        let error = anyhow::anyhow!("private upstream text must not be persisted");
-        assert!(classify(LocalFailurePhaseV1::Worker, &error).is_none());
+        let private = "private upstream text must not be persisted";
+        let error = anyhow::anyhow!("{private}").context("private outer context");
+        for phase in [
+            LocalFailurePhaseV1::Decision,
+            LocalFailurePhaseV1::WorkspacePreparation,
+            LocalFailurePhaseV1::Admission,
+            LocalFailurePhaseV1::Import,
+            LocalFailurePhaseV1::ImportVerification,
+            LocalFailurePhaseV1::Worker,
+            LocalFailurePhaseV1::FinalScan,
+            LocalFailurePhaseV1::Export,
+            LocalFailurePhaseV1::Cleanup,
+        ] {
+            assert!(classify(phase, &error).is_none());
+            let value = serde_json::to_value(failure_report(phase, &error)).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "version": 1,
+                    "phase": phase,
+                    "runtime_effect": "unknown",
+                    "enforcer": null,
+                    "runtime": null,
+                    "broker_step": "failure_observed",
+                })
+            );
+            let bytes = serde_json::to_string(&value).unwrap();
+            assert!(!bytes.contains(private));
+            assert!(!bytes.contains("private outer context"));
+        }
     }
 
     #[test]
@@ -89,6 +140,10 @@ mod tests {
             .context("another private transport context");
         let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
         let value = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(
+            value,
+            serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap()
+        );
         assert_eq!(value["version"], json!(1));
         assert_eq!(value["runtime_effect"], "unknown");
         assert_eq!(value["runtime"]["stage"], "guard_before_spawn");
@@ -100,19 +155,48 @@ mod tests {
     }
 
     #[test]
-    fn preclaim_context_reports_only_the_fixed_boundary() {
+    fn broker_context_reports_only_the_fixed_boundary() {
         let private = "synthetic-private-journal-error-keep-out-of-audit";
-        let error = anyhow::anyhow!("{private}")
-            .context(PreclaimStep::ClaimExchange)
-            .context("private outer context");
-        let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
-        let value = serde_json::to_value(diagnostic).unwrap();
-        assert_eq!(value["broker_step"], "claim_exchange");
-        assert_eq!(value["runtime_effect"], "unknown");
-        assert!(value["enforcer"].is_null());
-        assert!(value["runtime"].is_null());
-        let bytes = serde_json::to_string(&value).unwrap();
-        assert!(!bytes.contains(private));
-        assert!(!bytes.contains("private outer context"));
+        for (step, label) in [
+            (BrokerStep::ArmExchange, "arm_exchange"),
+            (BrokerStep::Registration, "registration"),
+            (BrokerStep::ReadinessBeforeClaim, "readiness_before_claim"),
+            (BrokerStep::ClockBeforeClaim, "clock_before_claim"),
+            (BrokerStep::ClaimExchange, "claim_exchange"),
+            (
+                BrokerStep::GenerationBeforePrepare,
+                "generation_before_prepare",
+            ),
+            (BrokerStep::Prepare, "prepare"),
+            (BrokerStep::OwnershipCommit, "ownership_commit"),
+            (BrokerStep::OwnershipReload, "ownership_reload"),
+            (BrokerStep::CreatedInspection, "created_inspection"),
+            (BrokerStep::CreatedExchange, "created_exchange"),
+            (BrokerStep::FailureObserved, "failure_observed"),
+        ] {
+            let error = anyhow::anyhow!("{private}")
+                .context(step)
+                .context("private outer context");
+            let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
+            let value = serde_json::to_value(diagnostic).unwrap();
+            assert_eq!(
+                value,
+                json!({
+                    "version": 1,
+                    "phase": "worker",
+                    "runtime_effect": "unknown",
+                    "enforcer": null,
+                    "runtime": null,
+                    "broker_step": label,
+                })
+            );
+            assert_eq!(
+                value,
+                serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap()
+            );
+            let bytes = serde_json::to_string(&value).unwrap();
+            assert!(!bytes.contains(private));
+            assert!(!bytes.contains("private outer context"));
+        }
     }
 }

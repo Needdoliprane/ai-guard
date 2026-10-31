@@ -70,6 +70,35 @@ fn batch_failure_marker_empty_page_is_not_a_failure() {
 }
 
 #[test]
+fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
+    let private = "synthetic-private-unclassified-failure-do-not-persist";
+    for stage in [
+        "failure_observed",
+        "ownership_commit",
+        "ownership_reload",
+        "created_inspection",
+        "created_exchange",
+    ] {
+        let page = json!({"items":[{
+            "id":"11111111-1111-4111-8111-111111111111", "seq":17,
+            "kind":"broker.batch.failure", "source":"runner",
+            "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+                "broker_step":stage,"enforcer":null,"runtime":null,
+                "error":private},"private":private
+        }],"next_cursor":17});
+        let marker = harness::batch_failure_marker(&page)
+            .expect("known observed failure stage must parse")
+            .expect("an observed failure must remain visible");
+        assert_eq!(marker["broker_step"], stage);
+        assert_eq!(marker["runtime_effect"], "unknown");
+        assert!(marker["enforcer_stage"].is_null());
+        assert!(marker["runtime_stage"].is_null());
+        assert_eq!(marker.as_object().unwrap().len(), 8);
+        assert!(!serde_json::to_string(&marker).unwrap().contains(private));
+    }
+}
+
+#[test]
 fn batch_failure_marker_rejects_invalid_public_metadata() {
     let private = "synthetic-private-invalid-label-do-not-print";
     let valid = json!({"items":[{

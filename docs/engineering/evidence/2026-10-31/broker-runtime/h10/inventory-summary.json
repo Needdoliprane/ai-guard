@@ -1,0 +1,21 @@
+{
+  "kind": "selected_capture_summary",
+  "baseline_valid_unique_ids": 37,
+  "postflight_valid_unique_ids": 3,
+  "revalidation_valid_unique_ids": 3,
+  "missing_baseline_ids": 34,
+  "new_ids_observed_postflight": 0,
+  "baseline_and_postflight_command_format_equal": true,
+  "initial_exit_status_evidence": "enclosing_set_e_shell_completed_successfully",
+  "initial_stderr_evidence": "not_separately_captured",
+  "revalidation_exit_code": 0,
+  "revalidation_stderr_bytes": 0,
+  "qa_preflight_engine_id_matches_current": true,
+  "continuous_daemon_epoch_proven": false,
+  "maintainer_context": "cache_cleanup_reported_during_test_command_and_scope_unspecified",
+  "cause_of_inventory_change": "unknown",
+  "cause_of_worker_failure": "unknown",
+  "capture_operator_container_inspect_commands": 0,
+  "capture_operator_cleanup_commands": 0,
+  "fencing_proven": false
+}

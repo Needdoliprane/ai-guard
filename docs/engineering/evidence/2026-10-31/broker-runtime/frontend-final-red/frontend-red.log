@@ -1,0 +1,27 @@
+✖ les étapes natives connues complètent les anciens échecs broker sans inventer leur effet (10.686541ms)
+ℹ tests 1
+ℹ suites 0
+ℹ pass 0
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 220.372459
+
+✖ failing tests:
+
+test at tests/model.test.mjs:288:1
+✖ les étapes natives connues complètent les anciens échecs broker sans inventer leur effet (10.686541ms)
+  AssertionError [ERR_ASSERTION]: enforcer.register
+      at TestContext.<anonymous> (file:///Users/louis/Documents/ai-guard/.worktrees/broker-service/front/tests/model.test.mjs:324:14)
+      at Test.runInAsyncScope (node:async_hooks:226:14)
+      at Test.run (node:internal/test_runner/test:1118:25)
+      at Test.start (node:internal/test_runner/test:1015:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:358:17) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '==',
+    diff: 'simple'
+  }

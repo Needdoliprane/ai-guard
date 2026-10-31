@@ -1,60 +1,119 @@
 # Identité individuelle, SSO et essai rapide
 
-Décision du mainteneur, 31 octobre 2026. **Cible approuvée, à implémenter et qualifier.** Ce document décrit les fonctionnalités à livrer ; il n'annonce aucune commande SSO ou stack Keycloak actuellement disponible. Le [quick start existant](quickstart.md) reste le parcours exécutable documenté. Le suivi est dans le [plan d'implémentation](engineering/IMPLEMENTATION_PLAN.md).
+Décisions du mainteneur, 31 octobre 2026. **Contrat produit canonique, cible à implémenter et qualifier.** Il fixe l'identité individuelle, les axes de configuration, le SSO, l'inférence interne et la découverte ; [AGENTS.md](../AGENTS.md) et le [contrat d'architecture](engineering/ARCHITECTURE_CONTRACT.md) en conservent les invariants. Les exigences de vues sont dans [ui.md](ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer), les lots dans le [plan](engineering/IMPLEMENTATION_PLAN.md) et les preuves attendues dans la [stratégie de tests](engineering/TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier).
+
+Le [quick start existant](quickstart.md) documente le parcours actuel avec clés `runner`/`viewer`. Il ne livre pas une authentification locale nominative, une connexion OIDC ou l'administration humaine décrites ici. Aucun profil Keycloak ni profil d'inférence interne qualifié n'est annoncé disponible. Les preuves datées dans [VALIDATION.md](engineering/VALIDATION.md) gardent leur périmètre ; cette spécification ne les étend pas.
 
 ## État livré et parcours disponibles
 
-| Parcours | État au 31 octobre 2026 |
+| Parcours | État constaté au 1er novembre 2026 |
 |---|---|
 | Clés locales `runner` / `viewer` | Présentes : le contrôle Rust associe chaque clé à un tenant et un rôle. Ces clés ne prouvent pas l'identité d'une personne. |
 | Authentification locale nominative hors ligne | **ABSENTE / NOT_RUN** ; les clés statiques ne clôturent pas cette exigence. |
 | Connexion OIDC du dashboard et du CLI, PKCE et autorisation humaine | **ABSENTE / NOT_RUN** ; aucun login SSO ni format de configuration OIDC utilisable n'est livré. |
 | Profil Keycloak préconfiguré et raccordement entreprise exécutable | **ABSENTS / NOT_RUN** ; les procédures ci-dessous décrivent la cible, sans commande d'activation disponible. |
+| Profil administré d'inférence interne | **À implémenter / NOT_RUN** ; les essais API fournisseurs ne qualifient pas ce profil. |
 
-Le fonctionnement actuel est vérifiable dans [l'authentification Rust](../src/api/auth.rs), le [registre de tenants](../src/gateway_config.rs) et le [client du dashboard](../front/src/api.ts). `init` avec `--config-dir` prépare les clés locales ; la saisie **Jeton de lecture** utilise la clé `viewer`. Les commandes exactes, chemins privés et diagnostics disponibles restent ceux du [quick start](quickstart.md). Ni cette initialisation ni les commandes `providers init` et `providers status`, réservées à Codex/Claude, ne configurent le SSO ai-guard. La [déclinaison technique OIDC/PKCE](engineering/SSO_OIDC.md) précise les contrats et écarts ; elle ne fournit pas une configuration déjà acceptée par le programme.
+Le fonctionnement actuel est vérifiable dans [l'authentification Rust](../src/api/auth.rs), le [registre de tenants](../src/gateway_config.rs) et le [client du dashboard](../front/src/api.ts). `init` avec `--config-dir` prépare les clés locales ; la saisie **Jeton de lecture** utilise la clé `viewer`. Les commandes exactes, chemins privés et diagnostics restent ceux du [quick start](quickstart.md). Ni cette initialisation ni les commandes `providers init` et `providers status`, réservées à Codex/Claude, ne configurent le SSO ai-guard. La [déclinaison technique OIDC/PKCE](engineering/SSO_OIDC.md) précise les contrats et écarts ; elle ne fournit pas une configuration déjà acceptée par le programme.
 
 ## Essayer sans configurer toute une infrastructure
 
-L'objectif est qu'une personne découvrant ai-guard puisse démarrer la pile avec une commande Compose documentée, fournir une seule clé API du fournisseur choisi, ouvrir le dashboard, exécuter une première tâche non destructive et retrouver son audit. Aucun compte cloud ai-guard ni clé pour les autres fournisseurs n'est requis. Les modes abonnement restent disponibles selon leurs prérequis propres, sans basculement silencieux vers une API payante.
+L'objectif est qu'une personne découvrant ai-guard puisse démarrer la pile avec une commande Compose documentée, fournir une seule clé API du fournisseur choisi, ouvrir le dashboard, exécuter une première tâche non destructive et retrouver son audit. Aucun compte cloud ai-guard ni clé pour les autres fournisseurs ne doit être requis. Les modes abonnement doivent également être pris en charge selon leurs prérequis propres, sans basculement silencieux vers une API payante.
 
-**Environ cinq minutes est une cible d'expérience, pas une promesse.** Mesurer le parcours sur une machine et un moteur identifiés, avec durée jusqu'à interface disponible puis jusqu'au premier résultat audité. Publier séparément téléchargement/construction initiale, démarrage avec images présentes, étapes manuelles et erreurs rencontrées. Préférer des artefacts prêts à utiliser et versionnés ; ne pas réduire les contrôles de sécurité pour gagner du temps.
+**Environ cinq minutes est une cible d'expérience, pas une promesse.** Mesurer le parcours sur une machine et un moteur identifiés, avec durée jusqu'à interface disponible puis jusqu'au premier résultat audité. Le projet fournit les Dockerfiles et les instructions de configuration ; le client prend en charge la construction, le registre et la distribution de ses images. La publication d'images préconstruites n'est pas un prérequis du produit. Distinguer cette préparation du démarrage avec images présentes et publier les étapes manuelles et erreurs rencontrées ; ne pas réduire les contrôles de sécurité pour gagner du temps.
 
 La procédure doit fournir les prérequis et leur diagnostic, le lancement exact réellement essayé, les accès locaux, la saisie privée de la clé, une commande CLI utile, l'examen des résultats, l'arrêt et la reprise. Elle préserve les installations existantes. Une compilation Rust ou une configuration manuelle ne doit pas être présentée comme inutile si le chemin livré l'exige encore.
 
+## Configuration par axes indépendants
+
+La liste de cas d'usage du mainteneur est **illustrative et non exhaustive**. Le produit doit couvrir leurs combinaisons par une configuration commune, plutôt que coder un mode particulier pour chaque catégorie de client. La configuration ne dépend ni de la taille du client ni de l'étiquette « particulier » ou « entreprise ». Les capacités ci-dessous sont des exigences à implémenter et qualifier, pas un inventaire de fonctions déjà disponibles.
+
+| Axe | Choix à rendre configurables |
+|---|---|
+| Exécution et exploitation | Sandboxes sur le poste de l'utilisateur, sur des hôtes administrés centralement, ou réparties entre plusieurs brokers ; gestion individuelle, déléguée ou centrale selon les permissions |
+| Identité ai-guard | Authentification locale nominative sans SSO, ou fournisseur OIDC configurable : Keycloak personnel/interne, Microsoft Entra ID (Azure AD) ou autre fournisseur conforme au contrat qualifié |
+| Périmètre des données | Tenant individuel ou organisation avec plusieurs utilisateurs et permissions sur les ressources ; un utilisateur peut avoir plusieurs appartenances établies par le contrôle, jamais une sélection libre de tenant |
+| Client IA | Codex CLI, Claude Code ou autre agent via adaptateur qualifié, version et image choisies parmi celles approuvées pour le déploiement |
+| Inférence et authentification IA | Abonnement personnel pris en charge par le client, clé API personnelle, accès API géré par l'organisation, ou serveur d'inférence local/interne compatible ; sélection distincte de l'identité ai-guard |
+| Réseau et confiance | Réseau coupé, destinations Internet approuvées, intranet seul ou installation sans Internet ; DNS, URL, proxy si nécessaire et autorités de certification approuvés explicitement |
+| Administration | Attribution locale des permissions ou mapping OIDC configurable : issuer, audience, clients Web/CLI, redirections, chemins de claims et valeurs de rôles/groupes ; droits et portée vérifiés côté Rust |
+| Règles d'exploitation | Profils et paramètres autorisés, ressources, quotas, durées, communications, rétention et export selon la politique de l'opérateur, en conservant les invariants de sûreté |
+
+L'absence de SSO doit laisser un parcours personnel simple, sans Keycloak ni compte cloud ai-guard obligatoire ; elle ne supprime pas l'identité ni l'audit. La connexion ai-guard ne connecte pas automatiquement l'abonnement ou l'API de l'agent. Le rôle administrateur de l'application reste distinct des permissions d'utilisation, du contrôle `runner` et de l'administration du fournisseur d'identité.
+
+### Parcours à couvrir
+
+| Exemple de déploiement | Identité ai-guard | Exécution et accès IA |
+|---|---|---|
+| Particulier avec compte ChatGPT ou Claude | Locale, sans SSO | Poste personnel ; abonnement via le client compatible et son mécanisme de connexion pris en charge |
+| Particulier avec clé API | Locale, sans SSO | Poste personnel ; clé du seul fournisseur choisi |
+| Particulier avec modèle local | Locale, sans SSO | Poste personnel ; inférence locale compatible, sans fournisseur cloud requis |
+| Entreprise laissant chacun gérer son poste | Locale ou OIDC selon sa politique | Broker local ; abonnement ou API propre à l'utilisateur, paramètres administrés si nécessaire |
+| Entreprise fournissant des sandboxes centrales | Locale ou OIDC | Hôtes administrés ; accès API d'entreprise ou abonnement individuel lorsque son fonctionnement est qualifié dans cette topologie |
+| Entreprise centrale sans Internet et sans SSO | Locale nominative | Hôtes administrés ; inférence interne, images et dépendances préparées par le client |
+| Particulier avec son propre Keycloak | OIDC personnel | Exécution locale ou sur son serveur ; abonnement, API ou inférence interne indépendamment du SSO |
+| Entreprise sans Internet avec Keycloak interne | OIDC interne | Sandboxes et inférence internes ; confiance TLS et dépendances préparées sans service Internet obligatoire |
+| Entreprise utilisant Entra ID ou un autre OIDC | OIDC configurable | Postes utilisateurs, hôtes centraux ou combinaison des deux ; fournisseur IA choisi séparément |
+| Organisation avec sites ou brokers multiples | Locale ou OIDC selon le déploiement | Vue unifiée des ressources autorisées ; provenance, déconnexions et couverture partielle visibles |
+| Poste partagé ou utilisateurs membres de plusieurs périmètres | Identités individuelles distinctes | Sessions, credentials, sandboxes et droits séparés ; changement de contexte validé côté contrôle |
+| Automatisation non interactive | Identité de workload dédiée, bornée et révocable | Exécution autorisée et auditée sans réutiliser la session SSO d'une personne ni son identité comme preuve d'une instruction humaine |
+
+Ces exemples ne ferment pas la liste : chaque combinaison documentée doit annoncer ses prérequis, capacités vérifiées et restrictions. Les profils d'installation simplifient les choix ; ils n'imposent pas SSO avec exécution centrale, abonnement avec usage personnel, ni inférence interne avec Keycloak. Pour un tenant par utilisateur, prévoir plusieurs sandboxes par tenant et des attributions d'administration explicites ; pour un tenant d'organisation partagé, vérifier aussi les permissions entre utilisateurs du même tenant.
+
+### Validation et limites de la configuration
+
+Une configuration effective typée et versionnée doit exposer ses choix résolus et leur provenance, avec secrets masqués. Documenter l'ordre de priorité des réglages ; les choix d'un utilisateur restent dans les permissions et paramètres délégués par l'administrateur. Un changement qui affecte identité, périmètre, destination, confiance, permissions ou facturation exige une nouvelle validation et, lorsque nécessaire, une nouvelle autorisation ; il ne modifie pas silencieusement une session autorisée.
+
+Refuser explicitement les combinaisons impossibles ou non qualifiées, avec diagnostic et action de reprise : un abonnement dépendant d'un service public, un IdP public ou une API Internet ne satisfont pas un profil strictement sans Internet. Dans ce profil, authentification locale ou IdP interne, inférence interne et dépendances disponibles sur place sont nécessaires. Une panne IdP, une incompatibilité de protocole ou un credential manquant ne déclenche ni repli caché vers une autre identité, ni dépense API, ni ouverture réseau.
+
+« Configurable » n'autorise pas à désactiver l'audit obligatoire, l'isolation des tenants, la validation TLS ou les frontières du contrôle. Aucun profil ne distribue de socket moteur, de secret du contrôle ou de jeton SSO humain aux workers. La matrice de qualification couvre les axes et leurs interactions critiques ; une combinaison non essayée reste annoncée comme telle, sans promesse de compatibilité universelle.
+
 ## SSO facultatif et fournisseur interchangeable
 
-ai-guard doit intégrer un fournisseur d'identité ; il ne devient pas un fournisseur SSO. **L'activation du SSO est facultative à l'installation ; son support et sa qualification sont obligatoires dans le produit.** Le mode local nominatif, utilisable hors ligne, doit conserver attribution, permissions et audit ; désactiver le SSO ne désactive pas l'authentification. Une panne du fournisseur ne déclenche aucun repli automatique vers ce mode ou vers les anciennes clés.
+ai-guard intègre un fournisseur d'identité ; il ne devient pas un fournisseur SSO. Le SSO reste facultatif à l'installation. Un mode local nominatif, utilisable hors ligne, conserve attribution, permissions et audit ; désactiver le SSO ne désactive pas l'authentification.
 
-Le connecteur cible utilise OpenID Connect, Authorization Code et PKCE S256 avec **deux clients publics distincts**, pour le dashboard et le CLI. Aucun `client_secret` n'est embarqué dans le frontend, le binaire CLI ou leur configuration distribuée ; aucune valeur secrète n'est intégrée au build frontend. `issuer`, identifiants clients et redirections sont des paramètres publics configurables au déploiement ; le vérificateur PKCE est privé et éphémère par connexion.
+Le connecteur utilise OpenID Connect, Authorization Code et PKCE S256 avec deux clients publics distincts pour le dashboard et le CLI. Aucun `client_secret` n'est embarqué dans le build ou distribué avec la configuration. `issuer`, identifiants clients et redirections sont des paramètres publics configurables au déploiement ; le vérificateur PKCE et les jetons restent privés. Les jetons Web restent en mémoire, hors URL, `localStorage`, `sessionStorage`, logs et exports ; la conservation privée de la transaction PKCE doit assurer la continuité au redirect et la consommation unique. La configuration et les droits sont validés côté Rust, avec refus des fournisseurs/redirections non approuvés. Un ID Token ne sert pas de bearer pour les API métier ai-guard. Une panne du fournisseur ne déclenche aucun repli automatique vers le mode local ou les anciennes clés.
 
-Les jetons Web restent en mémoire, hors URL, `localStorage`, `sessionStorage`, logs et exports. Le mode de conservation privé de la transaction PKCE reste à figer selon son propriétaire, avec continuité au redirect, expiration et consommation unique. La validation des réponses, des access tokens, des tenants et des droits est appliquée côté Rust ; le frontend ne fait pas autorité. Les fournisseurs/redirections non approuvés sont refusés. Un ID Token ne sert pas de bearer pour les API métier ai-guard.
+L'identité humaine durable représente le couple OIDC vérifié `(iss, sub)` ou une identité locale nominative. L'adresse e-mail sert au profil, pas de clé d'attribution ; un même nom ou e-mail ne fusionne pas les identités d'issuers différents. Les appartenances aux tenants et les rôles ai-guard sont contrôlés côté serveur. L'administration du fournisseur n'accorde aucun droit applicatif implicite. Les droits humains permettent de demander les actions autorisées au broker de confiance ; aucun credential `runner` n'est distribué au navigateur ou aux workers.
 
-L'identité locale durable représente le couple OIDC vérifié `(iss, sub)` ou une identité locale nominative. L'adresse e-mail sert au profil, pas de clé d'attribution. Les appartenances aux tenants et les rôles ai-guard sont contrôlés côté serveur. L'administration du fournisseur n'accorde pas implicitement le rôle de contrôle `runner`. Les droits humains permettent de demander les actions autorisées au broker de confiance ; aucun credential `runner` n'est distribué au navigateur ou aux workers.
+Le rôle externe retenu pour le profil de découverte est **`admin-ai-guard`** ; son nom n'est pas imposé aux fournisseurs des autres installations. Le mapping de claims, groupes ou rôles externes vers les permissions internes est configurable et explicitement approuvé côté contrôle. Le serveur Rust l'applique au jeton d'accès après validation de signature, issuer, audience et validité ; un mapping absent ou ambigu ne confère aucun privilège. Pour la découverte Keycloak, prévoir un rôle client `admin-ai-guard` et le mapping explicite du claim du client API configuré. Un nom de compte, un header ou un champ envoyé par le navigateur ne confère pas ce rôle. Ses attributions sont administrées, jamais dérivées d'un attribut de profil modifiable par l'utilisateur. Sa portée administrative est limitée à l'organisation et aux tenants qui lui sont rattachés côté contrôle, sans accès global implicite aux autres clients. Ce rôle n'accorde ni administration du realm, ni credential `runner`, ni contournement des politiques ou de l'audit. Le mode local nominatif doit permettre les mêmes permissions sans IdP.
 
 La documentation de raccordement entreprise doit préciser : fournisseur approuvé et découverte OIDC, clients Web/CLI et redirections exactes, PKCE, validation des jetons, correspondance utilisateurs/groupes/rôles/tenants, sessions et révocation, rotation des clés, diagnostic et retrait de la configuration. L'authentification ai-guard reste indépendante des abonnements et clés API Codex/Claude.
 
+Avant implémentation, fixer le propriétaire de la transaction Web, du callback et de l'échange de code, ainsi que la continuité et la consommation unique de `state`, `nonce` et du vérificateur privé. Définir le callback natif CLI, la politique de renouvellement/révocation, la fin des flux devenus interdits et les accès réseau approuvés au fournisseur et à ses clés. Ces mécanismes doivent respecter les frontières existantes ; un éventuel changement structurel reste soumis au mainteneur. Ne pas présenter une proposition technique ou une variable mémoire perdue au redirect comme un parcours qualifié.
+
+## Inférence interne et déploiement sans Internet
+
+Le client construit et importe les images et dépendances nécessaires dans son environnement. ai-guard doit permettre un profil administré d'inférence interne : client et version, modèle, URL de base, format d'API compatible, référence de clé ou jeton et chaîne publique d'AC d'entreprise. La clé privée de l'AC n'est jamais nécessaire. La configuration du client et sa confiance TLS doivent être préparées dans le worker isolé, avec vérification de chaîne et de nom active, sans reprendre librement des fichiers du projet ni distribuer les secrets du contrôle.
+
+La résolution du profil est versionnée et liée à l'autorisation : URL, modèle, format, confiance TLS et destinations réseau ne changent pas silencieusement après décision ou lors d'une reprise. Les secrets restent dans le handoff privé. Le client doit pouvoir intégrer d'autres outils dans ses images ; chaque nouvel agent exige un adaptateur et une qualification de ses capacités, sans installation Internet implicite au lancement.
+
+« Compatible OpenAI » doit préciser le format et les capacités réellement proposés, notamment Responses ou Chat Completions ; leur interchangeabilité n'est pas présumée. Claude Code doit disposer du format compatible qu'il attend, directement ou via une adaptation qualifiée. Le réseau ne doit autoriser que les services internes approuvés ; aucun repli cloud, téléchargement implicite ou connexion d'abonnement externe n'est requis pour ce profil. URL, authentification, AC, DNS, streaming, appels d'outils et absence de dépendance Internet sont à tester avec les clients épinglés. Ce profil reste **à implémenter et qualifier** ; les presets actuels ne le livrent pas par leur seule configuration de clé API.
+
 ## Profil Keycloak de découverte
 
-**Procédure cible — ABSENTE / NOT_RUN.** Fournir un profil Compose explicitement activé, avec version de Keycloak épinglée et configuration de realm importée automatiquement. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le nom des fichiers, les ports et les commandes seront fixés par l'implémentation vérifiée ; aucun exemple de nom donné en conversation n'est un contrat existant.
+Fournir un profil Compose explicitement activé, avec version de Keycloak épinglée et configuration de realm importée automatiquement. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le nom des fichiers, les ports et les commandes seront fixés par l'implémentation vérifiée ; aucun exemple de nom donné en conversation n'est un contrat existant.
 
 | Compte préconfiguré | Identifiants publics de démonstration | Usage |
 |---|---|---|
 | Administrateur Keycloak | `admin / admin` | Administrer Keycloak et le realm de démonstration |
-| Utilisateur applicatif | `user / user` | Se connecter au dashboard et au CLI ai-guard, avec les permissions applicatives de l'essai |
+| Administrateur ai-guard | `admin-ai-guard / admin-ai-guard` | Rôle applicatif `admin-ai-guard` présent dans les claims ; administrer le périmètre applicatif de découverte sans administrer le realm |
+| Utilisateur normal 1 | `user-1 / user-1` | Se connecter au dashboard et au CLI sans rôle `admin-ai-guard` |
+| Utilisateur normal 2 | `user-2 / user-2` | Se connecter au dashboard et au CLI sans rôle `admin-ai-guard` |
 
-Ce profil devra rendre les clients publics, PKCE S256, redirections et permissions nécessaires au parcours prêts à l'emploi, sans édition de realm ni intervention dans la console d'administration au premier essai. Les accès hôte de cette démo seront limités au loopback. Les identifiants connus ne sont jamais appliqués aux installations normales ni aux credentials existants. Aucun jeton SSO humain, credential d'administration Keycloak ou secret du contrôle ne rejoint un worker.
+Le profil livré devra rendre clients publics, PKCE S256, redirections et permissions prêts à l'emploi, sans édition de realm ni intervention dans la console d'administration pour le premier essai. Les accès hôte de cette démo doivent être limités au loopback. Les identifiants connus ne sont jamais appliqués aux installations normales ni aux credentials existants. Aucun jeton SSO humain, credential d'administration Keycloak ou secret du contrôle ne rejoint un worker.
 
-Le parcours d'acceptation démarre la pile depuis un état neuf, ouvre le dashboard, connecte `user`, connecte le CLI au même compte, lance une tâche réelle non destructive, puis retrouve demande, exécution et résultat dans l'audit. Un contrôle vérifie aussi la séparation entre administration Keycloak et autorisations ai-guard. Les comptes et le realm sont explicitement nommés « démonstration » ; aucune activité d'agent fictive n'est injectée dans le produit.
+Le parcours d'acceptation démarre la pile depuis un état neuf, ouvre le dashboard, connecte `user-1`, connecte le CLI au même compte, lance une tâche réelle non destructive, puis retrouve demande, exécution et résultat dans l'audit. `user-2` permet de vérifier les refus d'accès aux ressources privées du premier utilisateur ; leurs périmètres sont établis côté contrôle. Le compte `admin-ai-guard` doit accéder à la vue d'administration de ce périmètre, tandis que les deux utilisateurs normaux en sont refusés côté serveur. Tester aussi le rôle absent, falsifié, retiré ou émis pour un autre client/issuer. Le compte `admin` du realm n'obtient aucun droit applicatif implicite. Les quatre comptes et le realm sont explicitement nommés « démonstration » ; aucune activité d'agent fictive n'est injectée dans le produit.
 
-Cette recette devra prouver l'interopérabilité et faciliter l'évaluation du produit ; sa description ne constitue pas une preuve exécutée. Elle ne qualifie pas l'exploitation de Keycloak en production et n'impose pas ce fournisseur aux clients.
+La recette réelle devra démontrer l'interopérabilité et faciliter l'évaluation du produit. Elle ne qualifie pas l'exploitation de Keycloak en production, qui appartient à l'opérateur ; ai-guard doit fournir une procédure de raccordement sans imposer ce fournisseur aux clients.
 
 ## Raccorder le SSO de l'entreprise
 
-**Procédure cible — ABSENTE / NOT_RUN.** Ce parcours utilise le fournisseur approuvé de l'opérateur, sans comptes publics de démonstration ni import implicite d'un realm existant. Il doit rester distinct du profil de découverte :
+**Procédure cible — ABSENTE / NOT_RUN.** Ce parcours utilise le fournisseur approuvé de l'opérateur, sans comptes publics de démonstration ni import implicite d'un realm existant. Il reste distinct du profil de découverte :
 
 1. Renseigner la [fiche opérateur](engineering/SSO_OIDC.md#fiche-opérateur-keycloak-à-renseigner) : issuer exact, clients publics Web/CLI, redirections et origines exactes, audience/profil d'access token, clés de confiance, durées et politique de révocation. Cette fiche n'est pas un format de configuration du programme actuel.
 2. Préparer les appartenances et permissions côté contrôle Rust, puis vérifier la connexion Web/CLI et les refus avec deux tenants. Un rôle d'administration du fournisseur n'accorde aucun privilège ai-guard implicite.
-3. Vérifier les accès de chaque acteur : un issuer loopback visible dans le navigateur n'est pas automatiquement joignable depuis le gateway/dashboard conteneurisé sur le réseau interne sans route par défaut. Conserver le même issuer et qualifier les destinations réseau nécessaires, sans réécriture implicite, désactivation de TLS ni accès Internet général. Le raccord doit aussi traiter les origines et le callback sans assouplissement global des guards HTTP existants.
+3. Vérifier les accès de chaque acteur : un issuer loopback visible dans le navigateur n'est pas automatiquement joignable depuis le gateway/dashboard conteneurisé sur le réseau interne sans route par défaut. Conserver le même issuer et qualifier les destinations nécessaires, sans réécriture implicite, désactivation de TLS ni accès Internet général. Traiter les origines et le callback sans assouplissement global des guards HTTP.
 4. Documenter les commandes réellement livrées, les erreurs et actions de reprise, puis qualifier expiration, déconnexion, rotation et panne ; conserver les preuves sans secret. Aucun endpoint, credential ou accès d'entreprise n'est supposé disponible.
 
 ## Chaîne de traçabilité à livrer
@@ -71,6 +130,8 @@ La chaîne attendue est : **utilisateur initiateur → demande → session → a
 Prévoir migrations et compatibilité avec les événements et credentials existants. Une ancienne clé partagée attribue au mieux une activité à son périmètre authentifié ; ne pas inventer une personne pour les événements historiques.
 
 ## Qualification et documentation
+
+Le [contrat IHM par permissions](ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) fait partie du parcours : vue utilisateur adaptée, administration unifiée à 360° du périmètre autorisé, configuration effective visible selon les droits et invalidation des données après changement de rôle ou de contexte. L'autorisation et l'agrégation restent côté Rust ; une modification visuelle seule ne livre pas ce contrat.
 
 Le [cahier de tests](engineering/TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier) couvre le mode sans SSO, une connexion réelle Keycloak Web/CLI, les refus, pannes et révocations, la séparation des tenants, la chaîne de délégation et l'essai chronométré. Un second fournisseur OIDC peut compléter l'interopérabilité sans remplacer la preuve Keycloak. Aucun faux fournisseur permanent ni scénario d'affichage ne qualifie ces parcours.
 

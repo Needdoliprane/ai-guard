@@ -1,0 +1,17 @@
+Baseline capture invocation:
+/opt/homebrew/bin/docker --host unix:///Users/louis/.docker/run/docker.sock ps -a --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+Output file: docker-baseline-all.txt
+Status: enclosing `set -e` shell completed successfully (RC 0); stderr was not separately redirected and no stderr appeared in the captured tool output.
+
+Initial postflight invocation:
+/opt/homebrew/bin/docker --host unix:///Users/louis/.docker/run/docker.sock ps -a --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+Output file: docker-post-all.txt
+Status: enclosing `set -e` shell completed successfully (RC 0); stderr was not separately redirected and no stderr appeared in the captured tool output.
+
+Read-only revalidation invocation:
+/opt/homebrew/bin/docker --host unix:///Users/louis/.docker/run/docker.sock ps -a --no-trunc --format '{{.ID}}\t{{.Names}}\t{{.Status}}\t{{.Image}}'
+Output file: docker-ps-revalidation.tsv; RC 0; stderr file empty (0 bytes).
+
+Server identity revalidation invocation:
+/opt/homebrew/bin/docker --host unix:///Users/louis/.docker/run/docker.sock info --format '{{json .}}' | jq '{ID,Name,ServerVersion,OSType,Architecture}'
+Output file: docker-server-whitelist.json; RC 0; docker stderr file empty (0 bytes); jq output restricted to the listed fields.

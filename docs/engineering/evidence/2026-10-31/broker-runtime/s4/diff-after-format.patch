@@ -1,0 +1,544 @@
+diff --git a/src/runner/broker/executor.rs b/src/runner/broker/executor.rs
+index 763cb20..e00ea68 100644
+--- a/src/runner/broker/executor.rs
++++ b/src/runner/broker/executor.rs
+@@ -710,13 +710,19 @@ impl<'a> Execution<'a> {
+                 }
+                 Ok(())
+             })
+-            .await?;
+-            let (_, draft) = self.load().await?;
++            .await
++            .context(diagnostics::BrokerStep::OwnershipCommit)?;
++            let (_, draft) = self
++                .load()
++                .await
++                .context(diagnostics::BrokerStep::OwnershipReload)?;
+             if draft.worker()?.attempt.created_inspection.is_none() {
+                 self.mutate(WorkerTransitionV1::Created {
+-                    inspection: managed::inspection(draft.worker()?, &owned.observation)?,
++                    inspection: managed::inspection(draft.worker()?, &owned.observation)
++                        .context(diagnostics::BrokerStep::CreatedInspection)?,
+                 })
+-                .await?;
++                .await
++                .context(diagnostics::BrokerStep::CreatedExchange)?;
+             }
+             let durable = draft
+                 .run
+diff --git a/src/runner/broker/executor/diagnostics.rs b/src/runner/broker/executor/diagnostics.rs
+index 4f33906..cc62c3f 100644
+--- a/src/runner/broker/executor/diagnostics.rs
++++ b/src/runner/broker/executor/diagnostics.rs
+@@ -6,11 +6,12 @@ use crate::{
+ use serde::Serialize;
+ use std::fmt;
+ 
+-/// An outer control boundary, never evidence that a request was sent or ACKed.
++/// A fixed broker boundary or local error observation, never evidence that a
++/// request was sent or ACKed.
+ /// A nested enforcer diagnostic can identify a more precise failing check.
+ #[derive(Clone, Copy, Debug, Serialize)]
+ #[serde(rename_all = "snake_case")]
+-pub(super) enum PreclaimStep {
++pub(super) enum BrokerStep {
+     ArmExchange,
+     Registration,
+     ReadinessBeforeClaim,
+@@ -18,13 +19,18 @@ pub(super) enum PreclaimStep {
+     ClaimExchange,
+     GenerationBeforePrepare,
+     Prepare,
++    OwnershipCommit,
++    OwnershipReload,
++    CreatedInspection,
++    CreatedExchange,
++    FailureObserved,
+ }
+-impl fmt::Display for PreclaimStep {
++impl fmt::Display for BrokerStep {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        f.write_str("broker preclaim stage failed")
++        f.write_str("broker control stage failed")
+     }
+ }
+-impl std::error::Error for PreclaimStep {}
++impl std::error::Error for BrokerStep {}
+ 
+ #[derive(Serialize)]
+ #[serde(rename_all = "snake_case")]
+@@ -32,8 +38,8 @@ enum EffectEvidence {
+     Unknown,
+ }
+ 
+-/// An error at a trusted control boundary is not a runtime terminal, fencing
+-/// witness, absence of a process, or permission to release a reservation.
++/// A local failure report is not a runtime terminal, fencing witness, absence
++/// of a process, or permission to release a reservation.
+ #[derive(Serialize)]
+ pub(super) struct BatchFailureDiagnosticV1 {
+     version: u32,
+@@ -42,7 +48,7 @@ pub(super) struct BatchFailureDiagnosticV1 {
+     enforcer: Option<EnforcerStageFailure>,
+     runtime: Option<RuntimePrestartStageFailure>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+-    broker_step: Option<PreclaimStep>,
++    broker_step: Option<BrokerStep>,
+ }
+ 
+ pub(super) fn classify(
+@@ -51,7 +57,7 @@ pub(super) fn classify(
+ ) -> Option<BatchFailureDiagnosticV1> {
+     let enforcer = error.downcast_ref::<EnforcerStageFailure>().cloned();
+     let runtime = error.downcast_ref::<RuntimePrestartStageFailure>().cloned();
+-    let broker_step = error.downcast_ref::<PreclaimStep>().copied();
++    let broker_step = error.downcast_ref::<BrokerStep>().copied();
+     if enforcer.is_none() && runtime.is_none() && broker_step.is_none() {
+         return None;
+     }
+@@ -65,6 +71,23 @@ pub(super) fn classify(
+     })
+ }
+ 
++/// Report only the known boundary or the local observation of an error. The
++/// fallback does not establish its cause, a durable lifecycle append, or any
++/// runtime effect; specialized provenance remains unchanged when available.
++pub(super) fn failure_report(
++    phase: LocalFailurePhaseV1,
++    error: &anyhow::Error,
++) -> BatchFailureDiagnosticV1 {
++    classify(phase, error).unwrap_or(BatchFailureDiagnosticV1 {
++        version: 1,
++        phase,
++        runtime_effect: EffectEvidence::Unknown,
++        enforcer: None,
++        runtime: None,
++        broker_step: Some(BrokerStep::FailureObserved),
++    })
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -73,8 +96,36 @@ mod tests {
+ 
+     #[test]
+     fn arbitrary_error_does_not_become_a_start_diagnostic() {
+-        let error = anyhow::anyhow!("private upstream text must not be persisted");
+-        assert!(classify(LocalFailurePhaseV1::Worker, &error).is_none());
++        let private = "private upstream text must not be persisted";
++        let error = anyhow::anyhow!("{private}").context("private outer context");
++        for phase in [
++            LocalFailurePhaseV1::Decision,
++            LocalFailurePhaseV1::WorkspacePreparation,
++            LocalFailurePhaseV1::Admission,
++            LocalFailurePhaseV1::Import,
++            LocalFailurePhaseV1::ImportVerification,
++            LocalFailurePhaseV1::Worker,
++            LocalFailurePhaseV1::FinalScan,
++            LocalFailurePhaseV1::Export,
++            LocalFailurePhaseV1::Cleanup,
++        ] {
++            assert!(classify(phase, &error).is_none());
++            let value = serde_json::to_value(failure_report(phase, &error)).unwrap();
++            assert_eq!(
++                value,
++                json!({
++                    "version": 1,
++                    "phase": phase,
++                    "runtime_effect": "unknown",
++                    "enforcer": null,
++                    "runtime": null,
++                    "broker_step": "failure_observed",
++                })
++            );
++            let bytes = serde_json::to_string(&value).unwrap();
++            assert!(!bytes.contains(private));
++            assert!(!bytes.contains("private outer context"));
++        }
+     }
+ 
+     #[test]
+@@ -89,6 +140,10 @@ mod tests {
+             .context("another private transport context");
+         let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
+         let value = serde_json::to_value(&diagnostic).unwrap();
++        assert_eq!(
++            value,
++            serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap()
++        );
+         assert_eq!(value["version"], json!(1));
+         assert_eq!(value["runtime_effect"], "unknown");
+         assert_eq!(value["runtime"]["stage"], "guard_before_spawn");
+@@ -100,19 +155,48 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn preclaim_context_reports_only_the_fixed_boundary() {
++    fn broker_context_reports_only_the_fixed_boundary() {
+         let private = "synthetic-private-journal-error-keep-out-of-audit";
+-        let error = anyhow::anyhow!("{private}")
+-            .context(PreclaimStep::ClaimExchange)
+-            .context("private outer context");
+-        let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
+-        let value = serde_json::to_value(diagnostic).unwrap();
+-        assert_eq!(value["broker_step"], "claim_exchange");
+-        assert_eq!(value["runtime_effect"], "unknown");
+-        assert!(value["enforcer"].is_null());
+-        assert!(value["runtime"].is_null());
+-        let bytes = serde_json::to_string(&value).unwrap();
+-        assert!(!bytes.contains(private));
+-        assert!(!bytes.contains("private outer context"));
++        for (step, label) in [
++            (BrokerStep::ArmExchange, "arm_exchange"),
++            (BrokerStep::Registration, "registration"),
++            (BrokerStep::ReadinessBeforeClaim, "readiness_before_claim"),
++            (BrokerStep::ClockBeforeClaim, "clock_before_claim"),
++            (BrokerStep::ClaimExchange, "claim_exchange"),
++            (
++                BrokerStep::GenerationBeforePrepare,
++                "generation_before_prepare",
++            ),
++            (BrokerStep::Prepare, "prepare"),
++            (BrokerStep::OwnershipCommit, "ownership_commit"),
++            (BrokerStep::OwnershipReload, "ownership_reload"),
++            (BrokerStep::CreatedInspection, "created_inspection"),
++            (BrokerStep::CreatedExchange, "created_exchange"),
++            (BrokerStep::FailureObserved, "failure_observed"),
++        ] {
++            let error = anyhow::anyhow!("{private}")
++                .context(step)
++                .context("private outer context");
++            let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
++            let value = serde_json::to_value(diagnostic).unwrap();
++            assert_eq!(
++                value,
++                json!({
++                    "version": 1,
++                    "phase": "worker",
++                    "runtime_effect": "unknown",
++                    "enforcer": null,
++                    "runtime": null,
++                    "broker_step": label,
++                })
++            );
++            assert_eq!(
++                value,
++                serde_json::to_value(failure_report(LocalFailurePhaseV1::Worker, &error)).unwrap()
++            );
++            let bytes = serde_json::to_string(&value).unwrap();
++            assert!(!bytes.contains(private));
++            assert!(!bytes.contains("private outer context"));
++        }
+     }
+ }
+diff --git a/src/runner/broker/executor/helpers.rs b/src/runner/broker/executor/helpers.rs
+index 5b16a36..2b879ee 100644
+--- a/src/runner/broker/executor/helpers.rs
++++ b/src/runner/broker/executor/helpers.rs
+@@ -80,7 +80,7 @@ impl Execution<'_> {
+         let (arm, _, committed) = self
+             .rpc_checked_at_head(pending, None)
+             .await
+-            .context(diagnostics::PreclaimStep::ArmExchange)?;
++            .context(diagnostics::BrokerStep::ArmExchange)?;
+         let Operation::Arm {
+             request,
+             response: Some(response),
+@@ -88,17 +88,17 @@ impl Execution<'_> {
+         } = arm
+         else {
+             return Err(anyhow!("arm acknowledgement is missing")
+-                .context(diagnostics::PreclaimStep::ArmExchange));
++                .context(diagnostics::BrokerStep::ArmExchange));
+         };
+         response
+             .receipt
+             .validate_for_arm(&request)
+-            .context(diagnostics::PreclaimStep::ArmExchange)?;
++            .context(diagnostics::BrokerStep::ArmExchange)?;
+         // The exact acknowledged head is data, not a latest-state or start
+         // capability. Reject any operation/profile mismatch before using it.
+         let (_confirmed_arm_head, current) = committed
+             .into_parts(self.operation, self.context.scope())
+-            .context(diagnostics::PreclaimStep::ArmExchange)?;
++            .context(diagnostics::BrokerStep::ArmExchange)?;
+         let slot = self
+             .executor
+             .enforcer
+@@ -113,7 +113,7 @@ impl Execution<'_> {
+                     runtime.binding().clone(),
+                     owned,
+                 )
+-                .context(diagnostics::PreclaimStep::Registration)?,
++                .context(diagnostics::BrokerStep::Registration)?,
+                 self.context.cancel_generation().clone(),
+             )
+             .await
+@@ -125,7 +125,7 @@ impl Execution<'_> {
+                     None => code.into(),
+                 }
+             })
+-            .context(diagnostics::PreclaimStep::Registration)?;
++            .context(diagnostics::BrokerStep::Registration)?;
+         // Later mutations still reload and use the writer's strict CAS.
+         if current.operations.iter().any(|op| match op {
+             Operation::WorkerClaim { request: claim, .. } => {
+@@ -139,18 +139,18 @@ impl Execution<'_> {
+             return Ok(PrearmedStartDirective::ObserveOnly);
+         }
+         self.generation_current()
+-            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
++            .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
+         // This is mandatory immediately before the HTTP claim, in addition to
+         // the enforcer's consumed guard immediately before the engine spawn.
+         slot.check_ready_for_claim_diagnosed(self.generation)
+-            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
++            .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
+         let operation_id = Uuid::new_v4().to_string();
+         let emitter_id = Uuid::new_v4().to_string();
+         let check = self
+             .executor
+             .clock
+             .sample()
+-            .context(diagnostics::PreclaimStep::ClockBeforeClaim)?;
++            .context(diagnostics::BrokerStep::ClockBeforeClaim)?;
+         let claim = if let Some((policy, _)) = helper {
+             Operation::HelperClaim {
+                 request: HelperStartClaimV1 {
+@@ -181,7 +181,7 @@ impl Execution<'_> {
+         let (acknowledged, fresh) = self
+             .rpc_checked(claim, Some(&slot))
+             .await
+-            .context(diagnostics::PreclaimStep::ClaimExchange)?;
++            .context(diagnostics::BrokerStep::ClaimExchange)?;
+         let emit = match acknowledged {
+             Operation::HelperClaim {
+                 response: Some(response),
+@@ -197,7 +197,7 @@ impl Execution<'_> {
+             return Ok(PrearmedStartDirective::ObserveOnly);
+         }
+         self.generation_current()
+-            .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?;
++            .context(diagnostics::BrokerStep::GenerationBeforePrepare)?;
+         let permission = FreshStartPermission {
+             arm_id: request.operation_id.clone(),
+             worker_id: request.worker_id.clone(),
+@@ -205,7 +205,7 @@ impl Execution<'_> {
+             control_namespace: response.receipt.control_namespace_uuid,
+             subject_key: request
+                 .subject_key()
+-                .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?,
++                .context(diagnostics::BrokerStep::GenerationBeforePrepare)?,
+             emitter_id,
+             claim_operation_id: operation_id,
+             generation: self.generation,
+@@ -213,7 +213,7 @@ impl Execution<'_> {
+         Ok(PrearmedStartDirective::EmitOnce(
+             slot.prepare_start_diagnosed(permission, self.generation)
+                 .await
+-                .context(diagnostics::PreclaimStep::Prepare)?,
++                .context(diagnostics::BrokerStep::Prepare)?,
+         ))
+     }
+ 
+diff --git a/src/runner/broker/executor/journal.rs b/src/runner/broker/executor/journal.rs
+index 137d646..8558ecd 100644
+--- a/src/runner/broker/executor/journal.rs
++++ b/src/runner/broker/executor/journal.rs
+@@ -174,11 +174,13 @@ impl<'a> Execution<'a> {
+                 },
+             )
+             .await;
+-        if let Some(diagnostic) = diagnostics::classify(phase, error)
+-            && self
+-                .fact_event("broker.batch.failure", &diagnostic)
+-                .await
+-                .is_err()
++        // Reporting the observed error does not assert that its lifecycle
++        // append succeeded; that publication may itself be unknown.
++        let diagnostic = diagnostics::failure_report(phase, error);
++        if self
++            .fact_event("broker.batch.failure", &diagnostic)
++            .await
++            .is_err()
+         {
+             // Enqueue may already be durable when HTTP/ACK delivery fails.
+             // Do not claim that it is absent, retry the start, or print the
+@@ -256,7 +258,7 @@ impl<'a> Execution<'a> {
+         if let Some(slot) = ready {
+             self.generation_current()?;
+             slot.check_ready_for_claim_diagnosed(self.generation)
+-                .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
++                .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
+         }
+         let completed = self.call(input.clone()).await?;
+         let committed = self
+diff --git a/src/runner/broker/executor/journal_tests.rs b/src/runner/broker/executor/journal_tests.rs
+index 6f174a2..55bed11 100644
+--- a/src/runner/broker/executor/journal_tests.rs
++++ b/src/runner/broker/executor/journal_tests.rs
+@@ -477,3 +477,107 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
+     drop(executor);
+     peer.close().await;
+ }
++
++#[tokio::test]
++async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority() {
++    let fixture = Fixture::new().await;
++    let peer = NativePeer::empty(&fixture).await;
++    let runtime =
++        Runtime::with_program(RuntimeKind::Docker, &std::env::current_exe().unwrap()).unwrap();
++    let context = AuthenticatedBatchContext::for_executor_test(
++        fixture.client.clone(),
++        fixture.scope.clone(),
++        fixture.config.clone(),
++        runtime,
++    )
++    .await
++    .unwrap();
++    let executor = BatchExecutor::new(
++        fixture.writer.clone(),
++        peer.client.clone(),
++        Arc::new(NativeHostClock::new().unwrap()),
++    );
++    let operation = Uuid::new_v4();
++    fixture.accept(operation, false);
++    let execution = Execution::open(&executor, operation, &context)
++        .await
++        .unwrap();
++    let private = "synthetic-unknown-batch-failure-private-canary";
++    execution
++        .failure(LocalFailurePhaseV1::Worker, &anyhow!("{private}"))
++        .await;
++    let current = fixture.writer.load(operation).await.unwrap().unwrap();
++    let public: Value = reqwest::Client::builder()
++        .no_proxy()
++        .timeout(Duration::from_secs(10))
++        .build()
++        .unwrap()
++        .get(format!("{}/api/v1/events", fixture.scope.gateway_origin()))
++        .bearer_auth(VIEWER)
++        .query(&[("kind", "broker.batch.failure"), ("order", "asc")])
++        .send()
++        .await
++        .unwrap()
++        .error_for_status()
++        .unwrap()
++        .json()
++        .await
++        .unwrap();
++    let slots = peer.client.status().await.unwrap().slot_count();
++    drop(execution);
++    drop(executor);
++    peer.close().await;
++
++    assert_eq!(
++        slots, 0,
++        "failure reporting must leave the native peer empty"
++    );
++    let draft = Draft::from_job(&current).unwrap();
++    assert_eq!(draft.commands.len(), 1);
++    assert!(matches!(
++        draft.commands[0].request(),
++        LocalCommandRequestV1::FailureObserved {
++            phase: LocalFailurePhaseV1::Worker,
++            code: LocalFailureCodeV1::Unavailable,
++        }
++    ));
++    assert!(draft.operations.is_empty());
++    assert!(draft.helpers.is_empty());
++    assert!(draft.run.plan.managed.is_none());
++    let checkpoint = current
++        .broker_checkpoint_v4()
++        .expect("every observed batch failure must have a durable public outbox event");
++    assert_eq!(checkpoint.events().len(), 1);
++    let pending = &checkpoint.events()[0];
++    let event = pending.event();
++    assert_eq!(event.kind, "broker.batch.failure");
++    assert_eq!(event.source, "runner");
++    assert_eq!(event.provenance, "observed");
++    assert_eq!(event.coverage, "observed");
++    assert!(event.command.is_none());
++    assert!(event.decision.is_none());
++    assert!(event.result.is_none());
++    assert_eq!(
++        event.data,
++        json!({
++            "version": 1,
++            "phase": "worker",
++            "runtime_effect": "unknown",
++            "enforcer": null,
++            "runtime": null,
++            "broker_step": "failure_observed",
++        })
++    );
++    assert_eq!(event.id, pending.event_id().to_string());
++    let items = public["items"].as_array().unwrap();
++    assert_eq!(items.len(), 1);
++    let stored: crate::model::StoredEvent = serde_json::from_value(items[0].clone()).unwrap();
++    assert!(stored.seq > 0);
++    assert_eq!(pending.audit_seq(), Some(stored.seq));
++    assert_eq!(
++        serde_json::to_value(&stored.event).unwrap(),
++        serde_json::to_value(event).unwrap()
++    );
++    assert!(!serde_json::to_string(checkpoint).unwrap().contains(private));
++    assert!(!serde_json::to_string(&public).unwrap().contains(private));
++}
+diff --git a/tests/broker_runtime.rs b/tests/broker_runtime.rs
+index df8a231..0383ba5 100644
+--- a/tests/broker_runtime.rs
++++ b/tests/broker_runtime.rs
+@@ -69,6 +69,35 @@ fn batch_failure_marker_empty_page_is_not_a_failure() {
+     );
+ }
+ 
++#[test]
++fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
++    let private = "synthetic-private-unclassified-failure-do-not-persist";
++    for stage in [
++        "failure_observed",
++        "ownership_commit",
++        "ownership_reload",
++        "created_inspection",
++        "created_exchange",
++    ] {
++        let page = json!({"items":[{
++            "id":"11111111-1111-4111-8111-111111111111", "seq":17,
++            "kind":"broker.batch.failure", "source":"runner",
++            "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++                "broker_step":stage,"enforcer":null,"runtime":null,
++                "error":private},"private":private
++        }],"next_cursor":17});
++        let marker = harness::batch_failure_marker(&page)
++            .expect("known observed failure stage must parse")
++            .expect("an observed failure must remain visible");
++        assert_eq!(marker["broker_step"], stage);
++        assert_eq!(marker["runtime_effect"], "unknown");
++        assert!(marker["enforcer_stage"].is_null());
++        assert!(marker["runtime_stage"].is_null());
++        assert_eq!(marker.as_object().unwrap().len(), 8);
++        assert!(!serde_json::to_string(&marker).unwrap().contains(private));
++    }
++}
++
+ #[test]
+ fn batch_failure_marker_rejects_invalid_public_metadata() {
+     let private = "synthetic-private-invalid-label-do-not-print";
+diff --git a/tests/support/broker_runtime.rs b/tests/support/broker_runtime.rs
+index c3724c5..1dda0de 100644
+--- a/tests/support/broker_runtime.rs
++++ b/tests/support/broker_runtime.rs
+@@ -410,6 +410,11 @@ pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
+     let broker_step = optional_failure_label(
+         data.get("broker_step"),
+         &[
++            "failure_observed",
++            "ownership_commit",
++            "ownership_reload",
++            "created_inspection",
++            "created_exchange",
+             "arm_exchange",
+             "registration",
+             "load_after_registration",

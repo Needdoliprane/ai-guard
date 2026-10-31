@@ -1,0 +1,6 @@
+Node v25.6.1.
+Command: node --test --test-isolation=none --test-name-pattern='les étapes natives connues complètent' tests/model.test.mjs
+RC=1; exactly one matched test failed on assertion, no loader/compile error.
+Failure: `enforcer.register` expected the known native/runtime stage to be surfaced; it is currently unknown.
+No source changes during this RED run; no other tests/build/npm/Cargo/runtime executed.
+verified_sources=7

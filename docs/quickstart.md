@@ -6,18 +6,13 @@ ai-guard vise un produit open source destiné à la production. Sa qualification
 
 Ce parcours utilise le contrôle schéma2 par défaut. Le [bootstrap explicite d'un contrôle neuf en schéma3](operations.md#initialiser-un-contrôle-de-supervision-neuf) prépare le broker permanent en cours d'intégration ; il emploie des bases distinctes et ne remplace pas le démarrage ci-dessous.
 
-La [cible d'essai rapide et SSO](sso.md) prévoit un lancement Compose et une clé API du fournisseur choisi. Environ cinq minutes est une cible à mesurer, sans promesse de durée. **L'activation du SSO reste facultative ; son support et sa qualification font partie des exigences du produit.** Les étapes numérotées ci-dessous restent celles du fonctionnement actuellement documenté.
+Le [contrat d'identité, de configuration et d'essai rapide](sso.md) prévoit un parcours Compose avec une clé API du fournisseur choisi, ainsi qu'un profil Keycloak local préconfiguré, explicitement activé. Environ cinq minutes est une cible à mesurer, sans promesse. **Ces nouveaux parcours sont à livrer et qualifier.** Le guide ci-dessous utilise les clés `runner`/`viewer` existantes ; elles ne prouvent pas une identité humaine nominative. Aucun compte de démonstration, login OIDC ou écran administrateur n'est rendu disponible par la spécification. Les procédures de découverte et de raccordement entreprise devront être livrées avec le code ; le SSO restera facultatif à l'installation.
 
-| Parcours d'identité | Disponibilité dans ce checkout |
-|---|---|
-| Contrôle local actuel | Clés statiques `runner`/`viewer`, préparées à l'étape 2 ; le dashboard reçoit seulement `viewer` à l'étape 3. Elles ne prouvent pas l'identité d'une personne. |
-| Local nominatif hors ligne | **ABSENT / NOT_RUN** ; reste obligatoire, avec les mêmes permissions et audit individuel que le SSO. |
-| [Découverte Keycloak préconfigurée](sso.md#profil-keycloak-de-découverte) | **ABSENTE / NOT_RUN** ; aucun profil Compose, compte de démo actif ni commande de login SSO livré. |
-| Raccordement au SSO de l'entreprise | **ABSENT / NOT_RUN** ; les [exigences et la fiche opérateur](engineering/SSO_OIDC.md#fiche-opérateur-keycloak-à-renseigner) ne sont pas une configuration déjà utilisable. |
-
-La cible Web et CLI emploie OpenID Connect Authorization Code + PKCE S256, avec deux clients publics distincts et aucun secret client distribué. Le [contrat technique OIDC/Keycloak](engineering/SSO_OIDC.md) exige validation des tokens, tenants et permissions côté Rust. Keycloak n'est pas un prérequis des commandes ci-dessous ; saisir `user/user` dans **Jeton de lecture** ne remplace pas la clé `viewer`. Les comptes publics `admin/admin` et `user/user` sont réservés au futur profil local explicitement activé et ne doivent pas être appliqués aux credentials existants. L'authentification Codex/Claude et les commandes `providers init` et `providers status` restent distinctes du SSO ai-guard.
+Le client construit et distribue ses images depuis les Dockerfiles fournis, y compris leur préparation/import dans un environnement sans Internet. Aucune image publique préconstruite n'est obligatoire. Le [profil d'inférence interne](sso.md#inférence-interne-et-déploiement-sans-internet) reste à implémenter et qualifier ; les commandes actuelles de clé API ne prouvent pas ce parcours hors ligne.
 
 ## 1. Préparer les outils
+
+Les [parcours d'identité et leur état](sso.md#état-livré-et-parcours-disponibles) distinguent les clés livrées des futures connexions nominatives/OIDC. Le [contrat technique](engineering/SSO_OIDC.md) et sa fiche opérateur ne sont pas une configuration utilisable aujourd'hui. Les quatre comptes publics du futur profil Keycloak ne remplacent jamais **Jeton de lecture**. `providers init` et `providers status` concernent l'authentification Codex/Claude, distincte du SSO ai-guard.
 
 | Outil | Utilité | Nécessaire sur l'hôte |
 |---|---|---|
@@ -180,6 +175,8 @@ Sur le service permanent configuré explicitement, `broker recovery-status` four
 
 Ces variables désignent votre configuration de broker existante ; cette commande ne l'initialise pas. La réponse distingue `journal_mode` (`full` ou `stop_only`), `source=confirmed_journal`, `runtime_evidence=not_queried` et `incomplete`. `full` décrit la capacité de l'acteur, pas la santé actuelle des credentials. `reconciliation_required` ne résume que ces métadonnées et le mode de l'acteur ; sa valeur `false` ne prouve ni la santé du gardien, ni la possibilité de lancer une action. Les armements et échéances sont ceux d'origine. Ni la présence d'un Cancel, ni un code zéro de consultation ne prouve un worker terminé ; conserver les preuves en cas de réconciliation requise. Un namespace absent est refusé sans création. Un ancien service refuse cette commande inconnue avec `InvalidInput`, sans diagnostic de version plus précis : mettre client et service à la version qui la fournit. [Validation et limites](engineering/evidence/2026-10-31/stop-only-actor/README.md).
 
+Pour une exécution batch confiée au service broker permanent, les vues **Journal** et **Actions** présentent `broker.batch.failure` sous « Échec signalé ». Le résumé indique la phase et l'étape reconnues ; une valeur absente reste inconnue et l'état final de l'exécution reste à confirmer. Ce signalement n'est pas une décision de sécurité, une preuve d'arrêt ou une libération de quota. Si sa publication échoue, conserver aussi le journal local et utiliser le diagnostic de reprise ci-dessus ; l'absence d'événement public ne prouve pas une absence d'erreur.
+
 ## Configuration et données à conserver
 
 | Réglage ou donnée | Valeur / emplacement livré |
@@ -201,7 +198,7 @@ Avant une mise à jour, une migration ou une sauvegarde, consulter les [procédu
 
 ## Ajouter un agent fournisseur
 
-Le checkout propose une sélection gérée de **Codex CLI ou Claude Code**, avec **API ou abonnement**, sans argv fournisseur à construire. Le choix est annoncé avant la décision et lié à l'autorisation. La nouvelle image contenant le bootstrap Rust a passé build, versions/aides et refus sans credential sur Docker Desktop/macOS ARM64. Ces sondes n'ont exercé aucune authentification : les quatre parcours natifs gérés restent **NON QUALIFIÉS / NOT_RUN à ce gel**. L'ancienne image QA ne remplace pas cette nouvelle image ; voir [les preuves et limites](engineering/PROVIDER_AUTH.md#état-livré-et-limites--30-octobre-2026-après-revue).
+Le checkout propose une sélection gérée de **Codex CLI ou Claude Code**, avec **API ou abonnement**, sans argv fournisseur à construire. Le choix est annoncé avant la décision et lié à l'autorisation. L'image contenant le bootstrap Rust a passé build, versions/aides et refus sans credential sur Docker Desktop/macOS ARM64 ; ces sondes ne qualifient aucune authentification. Un essai ultérieur **Claude/API batch géré** a une preuve ciblée, décrite ci-dessous ; **Codex géré, abonnements et TUI restent à qualifier**. L'ancienne image QA ne remplace pas cette image ; voir [les preuves et limites](engineering/PROVIDER_AUTH.md#état-livré-et-limites--30-octobre-2026-après-revue).
 
 Préparer l'image depuis ce checkout, avec les versions exactes utilisées comme références datées le 30 octobre 2026 :
 

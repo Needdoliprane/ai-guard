@@ -207,3 +207,143 @@ test("les vues sécurité et fichiers reposent sur les événements présents", 
     [3],
   );
 });
+
+const brokerFailureEvent = {
+  seq: 5,
+  id: "5",
+  timestamp: "2026-10-29T12:00:00Z",
+  kind: "broker.batch.failure",
+  source: "runner",
+  provenance: "observed",
+  data: {
+    version: 1,
+    phase: "worker",
+    broker_step: "failure_observed",
+    runtime_effect: "unknown",
+    enforcer: null,
+    runtime: null,
+  },
+};
+
+test("un échec broker v1 présente sa phase et son étape sans confirmer un effet d’exécution", () => {
+  for (const [step, label] of [
+    ["failure_observed", "Observation d’un échec"],
+    ["ownership_reload", "Vérification du conteneur enregistré"],
+    ["created_exchange", "Confirmation de la création"],
+  ]) {
+    const summary = eventSummary({
+      ...brokerFailureEvent,
+      data: { ...brokerFailureEvent.data, broker_step: step },
+    });
+    assert.ok(summary.includes("Échec signalé"));
+    assert.ok(summary.includes("Phase : Worker"));
+    assert.ok(summary.includes(`Étape : ${label}`));
+    assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
+  }
+});
+
+test("un échec broker sans commande reste dans Actions sans devenir un incident de sécurité", () => {
+  const events = [
+    brokerFailureEvent,
+    { ...brokerFailureEvent, seq: 6, kind: "broker.batch.failure.extra" },
+  ];
+  assert.deepEqual(projectEvents(events, "actions").map((event) => event.seq), [5]);
+  assert.deepEqual(projectEvents(events, "security"), []);
+  assert.deepEqual(projectEvents(events, "overview"), events);
+});
+
+test("les métadonnées broker inconnues restent inconnues sans reprendre de texte arbitraire", () => {
+  const canary = "BROKER_DIAGNOSTIC_PRIVATE_CANARY";
+  for (const data of [
+    { version: 1, phase: canary, broker_step: canary },
+    { version: 2, phase: "worker", broker_step: "created_exchange" },
+    { version: canary, phase: "worker", broker_step: "ownership_reload" },
+    { phase: "worker", broker_step: "failure_observed" },
+    { version: 1, phase: "toString", broker_step: "__proto__" },
+  ]) {
+    const summary = eventSummary({
+      ...brokerFailureEvent,
+      command: { argv: [canary] },
+      decision: { reason: canary },
+      data: {
+        ...data,
+        runtime_effect: "completed",
+        enforcer: { stage: canary },
+        runtime: { stage: canary },
+        path: canary,
+        message: canary,
+        reason: canary,
+        task: canary,
+      },
+    });
+    assert.ok(summary.includes("Échec signalé"));
+    assert.ok(summary.includes("Phase : Inconnue"));
+    assert.ok(summary.includes("Étape : Inconnue"));
+    assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
+    assert.ok(!summary.includes(canary));
+    assert.ok(!/Created|Worker|completed|toString|__proto__|function/.test(summary));
+  }
+});
+
+test("les étapes natives connues complètent les anciens échecs broker sans inventer leur effet", () => {
+  const canary = "NATIVE_FAILURE_PRIVATE_CANARY";
+  const summarize = (data) => eventSummary({
+    ...brokerFailureEvent,
+    command: { argv: [canary] },
+    decision: { reason: canary },
+    data: {
+      version: 1,
+      phase: "worker",
+      runtime_effect: "unknown",
+      enforcer: null,
+      runtime: null,
+      message: canary,
+      reason: canary,
+      cause: canary,
+      ...data,
+    },
+  });
+  const stages = [
+    ["enforcer", "register", "Connexion au gardien d’arrêt"],
+    ["enforcer", "before_claim", "Vérification avant démarrage"],
+    ["enforcer", "prepare", "Préparation de l’exécution"],
+    ["enforcer", "before_spawn", "Vérification finale avant démarrage"],
+    ["runtime", "authority_before_spawn", "Vérification de l’autorité du moteur"],
+    ["runtime", "invocation_before_spawn", "Vérification du programme"],
+    ["runtime", "stop_before_spawn", "Vérification de la poursuite du lancement"],
+    ["runtime", "guard_before_spawn", "Vérification du garde"],
+    ["runtime", "spawn", "Lancement du programme"],
+    ["runtime", "started_observation", "Vérification de l’exécution"],
+  ];
+  for (const [source, stage, label] of stages) {
+    for (const broker of [{}, { broker_step: null }]) {
+      const summary = summarize({
+        ...broker,
+        [source]: { stage, reason: canary, cause: canary, container_id: canary },
+      });
+      assert.ok(summary.includes(`Étape : ${label}`), `${source}.${stage}`);
+      assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
+      assert.ok(!summary.includes(canary));
+    }
+  }
+  for (const [data, label] of [
+    [{ broker_step: "failure_observed", enforcer: { stage: "register" }, runtime: { stage: "spawn" } }, "Observation d’un échec"],
+    [{ broker_step: canary, enforcer: { stage: "before_spawn" }, runtime: { stage: "spawn" } }, "Vérification finale avant démarrage"],
+    [{ enforcer: { stage: canary }, runtime: { stage: "started_observation" } }, "Vérification de l’exécution"],
+    [{ enforcer: { stage: canary }, runtime: { stage: canary } }, "Inconnue"],
+    [{ enforcer: { stage: "constructor" }, runtime: { stage: "toString" } }, "Inconnue"],
+    [{ enforcer: { stage: "spawn" }, runtime: { stage: "register" } }, "Inconnue"],
+    [{ version: 2, broker_step: "ownership_reload", enforcer: { stage: "register" }, runtime: { stage: "spawn" } }, "Inconnue"],
+  ]) {
+    const summary = summarize(data);
+    assert.ok(summary.includes(`Étape : ${label}`));
+    assert.ok(summary.includes("Effet sur l’exécution : non confirmé"));
+    assert.ok(!summary.includes(canary));
+    if (data.version === 2) assert.ok(summary.includes("Phase : Inconnue"));
+  }
+  assert.equal(eventSummary({
+    ...brokerFailureEvent,
+    kind: "broker.batch.failure.extra",
+    data: { version: 1, enforcer: { stage: "register" }, runtime: { stage: "spawn" } },
+  }), "broker.batch.failure.extra");
+});

@@ -1,0 +1,9 @@
+Node v25.6.1; npm 11.13.0; Node 24 NOT_RUN.
+node --test --test-isolation=none tests/model.test.mjs: 12 passed, 0 failed, RC 0.
+npm run build: TypeScript check and Vite build passed, RC 0 (Vite 7.3.7, 10 modules).
+Source snapshots and manifests before/after: 7 files each, verified. package-lock unchanged (SHA256 30d12765534dd2b2f89ae78b0b9f180ccc0fbfeb755fac33bd972608c70f2c44).
+Dist manifest: 4 files, copied dist verification passed.
+Visual/browser QA NOT_RUN. No Cargo, browser, runtime, or provider tests were run.
+Earlier GREEN of 11 model tests remains in its separate evidence directory.
+model_test_rc=0
+build_rc=0

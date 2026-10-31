@@ -1,0 +1,12 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 14m 39s
+     Running tests/broker_runtime.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_runtime-0887fbc2c5518ee2)
+
+running 4 tests
+test batch_failure_marker_empty_page_is_not_a_failure ... ok
+test batch_failure_marker_keeps_only_validated_metadata ... ok
+test batch_failure_marker_rejects_invalid_public_metadata ... ok
+test batch_failure_marker_accepts_observed_failures_without_claiming_effect ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+

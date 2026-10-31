@@ -1,0 +1,149 @@
+diff --git a/src/runner/broker/executor/journal_tests.rs b/src/runner/broker/executor/journal_tests.rs
+index 6f174a2..2f15fb9 100644
+--- a/src/runner/broker/executor/journal_tests.rs
++++ b/src/runner/broker/executor/journal_tests.rs
+@@ -477,3 +477,104 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
+     drop(executor);
+     peer.close().await;
+ }
++
++#[tokio::test]
++async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority() {
++    let fixture = Fixture::new().await;
++    let peer = NativePeer::empty(&fixture).await;
++    let runtime =
++        Runtime::with_program(RuntimeKind::Docker, &std::env::current_exe().unwrap()).unwrap();
++    let context = AuthenticatedBatchContext::for_executor_test(
++        fixture.client.clone(),
++        fixture.scope.clone(),
++        fixture.config.clone(),
++        runtime,
++    )
++    .await
++    .unwrap();
++    let executor = BatchExecutor::new(
++        fixture.writer.clone(),
++        peer.client.clone(),
++        Arc::new(NativeHostClock::new().unwrap()),
++    );
++    let operation = Uuid::new_v4();
++    fixture.accept(operation, false);
++    let execution = Execution::open(&executor, operation, &context)
++        .await
++        .unwrap();
++    let private = "synthetic-unknown-batch-failure-private-canary";
++    execution
++        .failure(LocalFailurePhaseV1::Worker, &anyhow!("{private}"))
++        .await;
++    let current = fixture.writer.load(operation).await.unwrap().unwrap();
++    let public: Value = reqwest::Client::builder()
++        .no_proxy()
++        .timeout(Duration::from_secs(10))
++        .build()
++        .unwrap()
++        .get(format!("{}/api/v1/events", fixture.scope.gateway_origin()))
++        .bearer_auth(VIEWER)
++        .query(&[("kind", "broker.batch.failure"), ("order", "asc")])
++        .send()
++        .await
++        .unwrap()
++        .error_for_status()
++        .unwrap()
++        .json()
++        .await
++        .unwrap();
++    let slots = peer.client.status().await.unwrap().slot_count();
++    drop(execution);
++    drop(executor);
++    peer.close().await;
++
++    assert_eq!(slots, 0, "failure reporting must leave the native peer empty");
++    let draft = Draft::from_job(&current).unwrap();
++    assert_eq!(draft.commands.len(), 1);
++    assert!(matches!(
++        draft.commands[0].request(),
++        LocalCommandRequestV1::FailureObserved {
++            phase: LocalFailurePhaseV1::Worker,
++            code: LocalFailureCodeV1::Unavailable,
++        }
++    ));
++    assert!(draft.operations.is_empty());
++    assert!(draft.helpers.is_empty());
++    assert!(draft.run.plan.managed.is_none());
++    let checkpoint = current
++        .broker_checkpoint_v4()
++        .expect("every observed batch failure must have a durable public outbox event");
++    assert_eq!(checkpoint.events().len(), 1);
++    let pending = &checkpoint.events()[0];
++    let event = pending.event();
++    assert_eq!(event.kind, "broker.batch.failure");
++    assert_eq!(event.source, "runner");
++    assert_eq!(event.provenance, "observed");
++    assert_eq!(event.coverage, "observed");
++    assert!(event.command.is_none());
++    assert!(event.decision.is_none());
++    assert!(event.result.is_none());
++    assert_eq!(
++        event.data,
++        json!({
++            "version": 1,
++            "phase": "worker",
++            "runtime_effect": "unknown",
++            "enforcer": null,
++            "runtime": null,
++            "broker_step": "failure_observed",
++        })
++    );
++    assert_eq!(event.id, pending.event_id().to_string());
++    let items = public["items"].as_array().unwrap();
++    assert_eq!(items.len(), 1);
++    let stored: crate::model::StoredEvent = serde_json::from_value(items[0].clone()).unwrap();
++    assert!(stored.seq > 0);
++    assert_eq!(pending.audit_seq(), Some(stored.seq));
++    assert_eq!(
++        serde_json::to_value(&stored.event).unwrap(),
++        serde_json::to_value(event).unwrap()
++    );
++    assert!(!serde_json::to_string(checkpoint).unwrap().contains(private));
++    assert!(!serde_json::to_string(&public).unwrap().contains(private));
++}
+diff --git a/tests/broker_runtime.rs b/tests/broker_runtime.rs
+index df8a231..0383ba5 100644
+--- a/tests/broker_runtime.rs
++++ b/tests/broker_runtime.rs
+@@ -69,6 +69,35 @@ fn batch_failure_marker_empty_page_is_not_a_failure() {
+     );
+ }
+ 
++#[test]
++fn batch_failure_marker_accepts_observed_failures_without_claiming_effect() {
++    let private = "synthetic-private-unclassified-failure-do-not-persist";
++    for stage in [
++        "failure_observed",
++        "ownership_commit",
++        "ownership_reload",
++        "created_inspection",
++        "created_exchange",
++    ] {
++        let page = json!({"items":[{
++            "id":"11111111-1111-4111-8111-111111111111", "seq":17,
++            "kind":"broker.batch.failure", "source":"runner",
++            "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++                "broker_step":stage,"enforcer":null,"runtime":null,
++                "error":private},"private":private
++        }],"next_cursor":17});
++        let marker = harness::batch_failure_marker(&page)
++            .expect("known observed failure stage must parse")
++            .expect("an observed failure must remain visible");
++        assert_eq!(marker["broker_step"], stage);
++        assert_eq!(marker["runtime_effect"], "unknown");
++        assert!(marker["enforcer_stage"].is_null());
++        assert!(marker["runtime_stage"].is_null());
++        assert_eq!(marker.as_object().unwrap().len(), 8);
++        assert!(!serde_json::to_string(&marker).unwrap().contains(private));
++    }
++}
++
+ #[test]
+ fn batch_failure_marker_rejects_invalid_public_metadata() {
+     let private = "synthetic-private-invalid-label-do-not-print";

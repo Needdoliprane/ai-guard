@@ -1,0 +1,4 @@
+./assets/index-CeMZdRmd.css: OK
+./assets/index-D8OLC3Mc.js: OK
+./favicon.svg: OK
+./index.html: OK

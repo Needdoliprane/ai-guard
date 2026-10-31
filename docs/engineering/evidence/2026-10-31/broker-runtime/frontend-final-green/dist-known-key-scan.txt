@@ -1,0 +1,1 @@
+scan_complete=true files=4 files_with_known_literal_secret=0 secret_sources=3

@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 54s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 1 test
+test runner::broker::executor::journal::tests::unknown_failure_is_durable_public_and_opaque_without_runtime_authority has been running for over 60 seconds
+
+thread 'runner::broker::executor::journal::tests::unknown_failure_is_durable_public_and_opaque_without_runtime_authority' (20963500) panicked at src/runner/broker/executor/journal_tests.rs:546:10:
+every observed batch failure must have a durable public outbox event
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test runner::broker::executor::journal::tests::unknown_failure_is_durable_public_and_opaque_without_runtime_authority ... FAILED
+
+failures:
+
+failures:
+    runner::broker::executor::journal::tests::unknown_failure_is_durable_public_and_opaque_without_runtime_authority
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 152 filtered out; finished in 81.33s
+
+error: test failed, to rerun pass `--lib`

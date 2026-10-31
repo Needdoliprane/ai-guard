@@ -80,7 +80,7 @@ impl Execution<'_> {
         let (arm, _, committed) = self
             .rpc_checked_at_head(pending, None)
             .await
-            .context(diagnostics::PreclaimStep::ArmExchange)?;
+            .context(diagnostics::BrokerStep::ArmExchange)?;
         let Operation::Arm {
             request,
             response: Some(response),
@@ -88,17 +88,17 @@ impl Execution<'_> {
         } = arm
         else {
             return Err(anyhow!("arm acknowledgement is missing")
-                .context(diagnostics::PreclaimStep::ArmExchange));
+                .context(diagnostics::BrokerStep::ArmExchange));
         };
         response
             .receipt
             .validate_for_arm(&request)
-            .context(diagnostics::PreclaimStep::ArmExchange)?;
+            .context(diagnostics::BrokerStep::ArmExchange)?;
         // The exact acknowledged head is data, not a latest-state or start
         // capability. Reject any operation/profile mismatch before using it.
         let (_confirmed_arm_head, current) = committed
             .into_parts(self.operation, self.context.scope())
-            .context(diagnostics::PreclaimStep::ArmExchange)?;
+            .context(diagnostics::BrokerStep::ArmExchange)?;
         let slot = self
             .executor
             .enforcer
@@ -113,7 +113,7 @@ impl Execution<'_> {
                     runtime.binding().clone(),
                     owned,
                 )
-                .context(diagnostics::PreclaimStep::Registration)?,
+                .context(diagnostics::BrokerStep::Registration)?,
                 self.context.cancel_generation().clone(),
             )
             .await
@@ -125,7 +125,7 @@ impl Execution<'_> {
                     None => code.into(),
                 }
             })
-            .context(diagnostics::PreclaimStep::Registration)?;
+            .context(diagnostics::BrokerStep::Registration)?;
         // Later mutations still reload and use the writer's strict CAS.
         if current.operations.iter().any(|op| match op {
             Operation::WorkerClaim { request: claim, .. } => {
@@ -139,18 +139,18 @@ impl Execution<'_> {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
         self.generation_current()
-            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
+            .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         // This is mandatory immediately before the HTTP claim, in addition to
         // the enforcer's consumed guard immediately before the engine spawn.
         slot.check_ready_for_claim_diagnosed(self.generation)
-            .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
+            .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
         let operation_id = Uuid::new_v4().to_string();
         let emitter_id = Uuid::new_v4().to_string();
         let check = self
             .executor
             .clock
             .sample()
-            .context(diagnostics::PreclaimStep::ClockBeforeClaim)?;
+            .context(diagnostics::BrokerStep::ClockBeforeClaim)?;
         let claim = if let Some((policy, _)) = helper {
             Operation::HelperClaim {
                 request: HelperStartClaimV1 {
@@ -181,7 +181,7 @@ impl Execution<'_> {
         let (acknowledged, fresh) = self
             .rpc_checked(claim, Some(&slot))
             .await
-            .context(diagnostics::PreclaimStep::ClaimExchange)?;
+            .context(diagnostics::BrokerStep::ClaimExchange)?;
         let emit = match acknowledged {
             Operation::HelperClaim {
                 response: Some(response),
@@ -197,7 +197,7 @@ impl Execution<'_> {
             return Ok(PrearmedStartDirective::ObserveOnly);
         }
         self.generation_current()
-            .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?;
+            .context(diagnostics::BrokerStep::GenerationBeforePrepare)?;
         let permission = FreshStartPermission {
             arm_id: request.operation_id.clone(),
             worker_id: request.worker_id.clone(),
@@ -205,7 +205,7 @@ impl Execution<'_> {
             control_namespace: response.receipt.control_namespace_uuid,
             subject_key: request
                 .subject_key()
-                .context(diagnostics::PreclaimStep::GenerationBeforePrepare)?,
+                .context(diagnostics::BrokerStep::GenerationBeforePrepare)?,
             emitter_id,
             claim_operation_id: operation_id,
             generation: self.generation,
@@ -213,7 +213,7 @@ impl Execution<'_> {
         Ok(PrearmedStartDirective::EmitOnce(
             slot.prepare_start_diagnosed(permission, self.generation)
                 .await
-                .context(diagnostics::PreclaimStep::Prepare)?,
+                .context(diagnostics::BrokerStep::Prepare)?,
         ))
     }
 

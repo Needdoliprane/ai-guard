@@ -1,0 +1,19 @@
+✔ les périodes fixent le début au moment du choix sans borner les événements futurs (2.496416ms)
+✔ le filtre temporel des événements live utilise received_at avant timestamp (0.693125ms)
+✔ une réponse historique ne supprime pas les événements arrivés pendant sa lecture (0.160083ms)
+✔ construit les liens parent uniquement à partir des identifiants explicites (0.132084ms)
+✔ un cycle de parents reste visible et ne provoque pas de récursion infinie (0.114042ms)
+✔ une métrique absente reste inconnue tandis que zéro est une valeur réelle (81.466708ms)
+✔ les filtres conservent les identifiants exacts et traitent une commande comme du texte (0.588667ms)
+✔ les vues sécurité et fichiers reposent sur les événements présents (0.305625ms)
+✔ un échec broker v1 présente sa phase et son étape sans confirmer un effet d’exécution (0.1255ms)
+✔ un échec broker sans commande reste dans Actions sans devenir un incident de sécurité (0.125042ms)
+✔ les métadonnées broker inconnues restent inconnues sans reprendre de texte arbitraire (0.17975ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 363.246708

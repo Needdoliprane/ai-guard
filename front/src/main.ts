@@ -5,6 +5,7 @@ import { el, button, icon } from "./dom.ts";
 import { ControlDashboard } from "./control-view.ts";
 import {
   asText,
+  brokerFailureDetails,
   buildAgentForest,
   eventSummary,
   formatBytes,
@@ -1807,6 +1808,7 @@ function showSandbox(sandbox: Sandbox) {
   );
 }
 function showEvent(event: AuditEvent) {
+  const failure = brokerFailureDetails(event);
   const { body } = openDialog(event.kind, `ÉVÉNEMENT #${event.seq}`);
   const tabs = el("div", "detail-tabs");
   tabs.setAttribute("role", "tablist");
@@ -1826,6 +1828,17 @@ function showEvent(event: AuditEvent) {
       return;
     }
     if (key === "command") {
+      if (failure) {
+        content.replaceChildren(
+          el("h3", "", "Échec signalé"),
+          el(
+            "p",
+            "detail-task",
+            "L’observation porte sur l’échec du broker. L’état final de l’exécution reste à confirmer.",
+          ),
+        );
+        return;
+      }
       if (!event.command && !event.result) {
         content.replaceChildren(
           empty(
@@ -1867,13 +1880,39 @@ function showEvent(event: AuditEvent) {
         );
       return;
     }
+    const details = failure
+      ? [
+          el("h3", "", "Échec signalé"),
+          el(
+            "dl",
+            "detail-grid",
+            labelValue("Phase", failure.phase),
+            labelValue("Étape", failure.step),
+            labelValue("Effet sur l’exécution", failure.runtimeEffect),
+          ),
+          el(
+            "p",
+            "detail-task",
+            "L’observation porte sur l’échec du broker. La phase et l’étape situent le signalement ; l’état final de l’exécution reste à confirmer.",
+          ),
+        ]
+      : [
+          el("h3", "", "Décision"),
+          el(
+            "dl",
+            "detail-grid",
+            labelValue("Moteur", event.decision?.engine),
+            labelValue("Règle", event.decision?.rule),
+          ),
+          el("p", "detail-task", asText(event.decision?.reason)),
+        ];
     content.replaceChildren(
       el(
         "div",
         "detail-badges",
         provenance(event.provenance),
         coverage(event.coverage),
-        event.decision ? decision(event.decision.outcome) : null,
+        !failure && event.decision ? decision(event.decision.outcome) : null,
       ),
       el(
         "dl",
@@ -1890,14 +1929,7 @@ function showEvent(event: AuditEvent) {
         labelValue("Corrélation", event.correlation_id),
         labelValue("Trace", event.trace_id),
       ),
-      el("h3", "", "Décision"),
-      el(
-        "dl",
-        "detail-grid",
-        labelValue("Moteur", event.decision?.engine),
-        labelValue("Règle", event.decision?.rule),
-      ),
-      el("p", "detail-task", asText(event.decision?.reason)),
+      ...details,
       el("h3", "", "Chaînage d’audit"),
       el(
         "dl",

@@ -1,0 +1,4 @@
+HEAD 6c7b63ebcef4a92cadfc2ec95626033f48011576; 159 source files.
+Target 1: RC 101, compilation passed. Exact RED oracle: prior assertions confirmed worker/unavailable FailureObserved, with zero operation/helper/managed; `.broker_checkpoint_v4().expect(...)` failed because V4 is absent (journal_tests.rs:546).
+Target 2: RC 101, release compilation passed. Exact parser RED: known observed failure stage rejected as `invalid diagnostic stage label` (broker_runtime.rs:90).
+No source edits; source manifest reverified after runs.

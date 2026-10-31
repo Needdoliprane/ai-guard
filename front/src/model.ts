@@ -109,7 +109,74 @@ export function asText(value: unknown, fallback = "Inconnu"): string {
       : String(value);
 }
 
+const failurePhaseLabels: ReadonlyMap<string, string> = new Map([
+  ["decision", "Décision"],
+  ["workspace_preparation", "Préparation de l’espace de travail"],
+  ["admission", "Admission"],
+  ["import", "Import"],
+  ["import_verification", "Vérification de l’import"],
+  ["worker", "Worker"],
+  ["final_scan", "Analyse finale"],
+  ["export", "Export"],
+  ["cleanup", "Nettoyage"],
+]);
+const failureStepLabels: ReadonlyMap<string, string> = new Map([
+  ["arm_exchange", "Armement de l’arrêt automatique"],
+  ["registration", "Connexion au gardien d’arrêt"],
+  ["readiness_before_claim", "Vérification avant démarrage"],
+  ["load_after_registration", "Vérification avant démarrage"],
+  ["clock_before_claim", "Vérification du délai"],
+  ["claim_exchange", "Autorisation de démarrage"],
+  ["generation_before_prepare", "Vérification du lancement"],
+  ["prepare", "Préparation de l’exécution"],
+  ["ownership_commit", "Enregistrement du conteneur"],
+  ["ownership_reload", "Vérification du conteneur enregistré"],
+  ["created_inspection", "Vérification de la création"],
+  ["created_exchange", "Confirmation de la création"],
+  ["failure_observed", "Observation d’un échec"],
+]);
+const enforcerStageLabels: ReadonlyMap<string, string> = new Map([
+  ["register", "Connexion au gardien d’arrêt"],
+  ["before_claim", "Vérification avant démarrage"],
+  ["prepare", "Préparation de l’exécution"],
+  ["before_spawn", "Vérification finale avant démarrage"],
+]);
+const runtimeStageLabels: ReadonlyMap<string, string> = new Map([
+  ["authority_before_spawn", "Vérification de l’autorité du moteur"],
+  ["invocation_before_spawn", "Vérification du programme"],
+  ["stop_before_spawn", "Vérification de la poursuite du lancement"],
+  ["guard_before_spawn", "Vérification du garde"],
+  ["spawn", "Lancement du programme"],
+  ["started_observation", "Vérification de l’exécution"],
+]);
+
+export function brokerFailureDetails(event: AuditEvent) {
+  if (event.kind !== "broker.batch.failure") return null;
+  const supported = event.data?.version === 1;
+  const label = (labels: ReadonlyMap<string, string>, value: unknown) =>
+    supported && typeof value === "string"
+      ? labels.get(value)
+      : undefined;
+  const stage = (value: unknown) =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>).stage
+      : undefined;
+  return {
+    phase: label(failurePhaseLabels, event.data?.phase) ?? "Inconnue",
+    step:
+      label(failureStepLabels, event.data?.broker_step) ??
+      label(enforcerStageLabels, stage(event.data?.enforcer)) ??
+      label(runtimeStageLabels, stage(event.data?.runtime)) ??
+      "Inconnue",
+    // This report observes a broker failure, never an execution outcome.
+    runtimeEffect: "non confirmé",
+  };
+}
+
 export function eventSummary(event: AuditEvent): string {
+  const failure = brokerFailureDetails(event);
+  if (failure)
+    return `Échec signalé · Phase : ${failure.phase} · Étape : ${failure.step} · Effet sur l’exécution : ${failure.runtimeEffect}`;
   if (Array.isArray(event.command?.argv) && event.command.argv.length)
     return event.command.argv.map((arg) => asText(arg, "")).join(" ");
   for (const key of ["path", "message", "reason", "task"]) {
@@ -151,6 +218,7 @@ export function projectEvents(events: AuditEvent[], view: View): AuditEvent[] {
   if (view === "actions")
     return events.filter(
       (event) =>
+        event.kind === "broker.batch.failure" ||
         event.command ||
         event.decision ||
         /^(command|action|exec)\./.test(event.kind),

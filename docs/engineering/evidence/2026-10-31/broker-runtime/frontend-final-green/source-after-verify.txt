@@ -1,0 +1,7 @@
+./index.html: OK
+./main.ts: OK
+./model.test.mjs: OK
+./model.ts: OK
+./package-lock.json: OK
+./package.json: OK
+./tsconfig.json: OK
