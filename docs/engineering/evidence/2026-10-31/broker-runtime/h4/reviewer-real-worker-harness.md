@@ -1,0 +1,60 @@
+# Revue indépendante avant effet — un worker Docker réel
+
+31 octobre 2026, base `e7cc0bb`, worktree `broker-service`. Gouvernance et recette active dans `docs/engineering/IMPLEMENTATION_PLAN.md` relues, ainsi que `/tmp/ai-guard-real-worker-safety-preflight.md` et `/tmp/ai-guard-one-worker-runtime-plan.md`. Lecture seule : aucun Cargo, moteur, processus applicatif, requête HTTP, credential, service, cloud ou PKI exécuté/modifié par le reviewer. Le harnais `tests/broker_runtime.rs` est attendu au gel ; la présente section est une préparation de revue, pas son approbation ni un résultat runtime.
+
+## Périmètre d’effet autorisé et sortie sûre
+
+Une racine QA neuve/courte/canonique/0700, gateway natif neuf schéma3, broker et gardien du même binaire, un seul worker Docker sans fournisseur, `/bin/sleep 20`, timeout5, réseau none et image locale par ID immuable. Aucun pull implicite, service OS, réutilisation des ressources historiques ou moteur choisi par PATH. Les clés runner/viewer sont neuves, privées et absentes des argv, journaux et preuves diffusées ; les enfants ont un environnement explicitement reconstruit.
+
+La seule faute est SIGKILL du ChildBroker possédé, après Ready/prepared du slot exact et Running du CID exact. Gateway et gardien doivent survivre pendant cette mesure. D5/disarm reste un KnownGap explicitement admis : conserver le gardien non vide, la racine et l’inventaire précis CID/volume/epoch, sans shutdown forcé, prune ou suppression pour obtenir PASS. Cette conservation ciblée est autorisée par Root ; elle ne justifie aucune action sur les ressources utilisateur préexistantes.
+
+## Oracles à retrouver dans la source gelée
+
+- **Identités avant faute.** Préflight explicite programme/endpoint/engine ID/image ID, puis protocole HTTP runner/tenant/namespace/schema3 actif réellement lu. Recouper opération, worker/attempt, Arm/receipt, deadline et horloge originales, CID complet, StartedAt, image, allocation/fingerprint, volume/labels, epoch du gardien et ChildBroker possédé. Pas de Docker inspect brut/Config.Env ni de compteur déclaré présenté comme observation moteur.
+- **Kill avant la deadline, pas seulement après Running.** Encadrer le kill par des samples natifs compatibles avec l’Arm et exiger que le kill ait lieu avant la deadline d’origine (un sample juste après kill encore antérieur est un oracle conservateur). Sinon le broker pourrait mourir après qu’un arrêt d’échéance avait déjà été engagé. Refuser la précondition si le temps a été consommé ; ne jamais réarmer ni allonger les5s.
+- **Arrêt distinct de la sortie naturelle.** Le même CID doit devenir terminal dans une borne native d’origine + tolérance explicite, strictement compatible avec la distinction de sleep20. Une borne «20s après Running» seule serait insuffisante : Running peut être observé après StartedAt, puis la sortie naturelle arriver avant cette borne. Conserver l’écart mesuré à la deadline sans promettre une limite physique universelle. CID absent, inspection refusée, délai dépassé ou état inconnu restent FAIL/inconnu.
+- **Reprise des mêmes faits.** Redémarrer le broker sur la même configuration/racine, attendre la restauration réelle, comparer worker/attempt/Arm/deadline/CID/StartedAt/restartcount et naissance du claim/start worker. Pas de second worker ni nouveau claim/start/deadline worker. Les nouvelles Arms/claims d’un FinalScan helper légitime restent identifiées séparément, sans les confondre avec un deuxième lancement worker.
+- **Convergence réelle.** Quota/usage/audit viennent du vrai contrôle et convergent après ACK terminal admissible ; usage pour le CID exact, `billable=false`, durée non fabriquée, audit intègre, pas de zéro substitué à une lecture échouée. Une réconciliation encore manquante est FAIL du parcours, même si le gardien a arrêté le CID.
+- **Fin et preuve.** Le témoin original reste inchangé. Toute terminaison/nettoyage de broker ou gateway de fixture cible leur Child possédé. Le gardien retenu et chaque conteneur/volume restant sont listés précisément avec état connu/absent/inconnu, diagnostic et reprise. Aucune suppression large ni sérialisation d’une racine QA contenant les clés vers des preuves publiques/Git.
+
+## Points connus qui ne constituent pas un blocage inventé
+
+L’absence D5, les helpers/slots retenus, le contrôle natif plutôt que conteneurisé, les autres moteurs/plateformes, TTY, charge100 et les scénarios de panne du gateway/disque/gardien sont hors preuve de cette recette unique, sans être retirés du produit. Une qualification de ces sujets n’est pas exigée pour pouvoir essayer le scénario autorisé ; aucune de leurs garanties n’est déduite d’un succès de ce scénario.
+
+**État :** aucun blocage supplémentaire établi dans les plans. La conformité du harnais et ses chemins FAIL/Drop restent à vérifier sur la source gelée avant effet. Aucun test ni effet réel lancé par le reviewer ; aucune clôture G09 ou qualification production anticipée.
+
+## Revue source avant effet — H2 puis H4 corrigé
+
+H2 relu intégralement : `tests/broker_runtime.rs` `d89117a2fdc6ca49ca08e547cdb2974c3c84d52566af8f0a3813d537a8d9c9c0` et `tests/support/broker_runtime.rs` `65d3d338132add11678c908feaa13faf25e5933dce2dcc505b91dc905ef263b6`. L’orchestrateur rapporte sa compilation --no-run réussie ; le reviewer n’a exécuté aucun Cargo. Deux faiblesses d’oracle ont été transmises avant effet : cause de mort du broker non conservée, et terminal moteur sans contrôle OOM/issue/durée. Root a également relevé que Binds=null ne prouvait pas l’ensemble des montages.
+
+**Gel final H4 effectivement relu :** `tests/broker_runtime.rs` SHA-256 `a68b863fd447e6cbd0df5b6fcbdaf7d3c1784b140b6fce42139d52805b56f800` ; helper `4e919795f00aa8db5f4720a5f0a5dd64f10f9b742ecc88c04f62e4f85d4b8d7d`. Source applicative inchangée par ce harnais.
+
+### Faiblesses d’oracle fermées dans H4
+
+- `OwnedProcess::kill_owned` rend désormais l’ExitStatus réellement récolté. La faute conserve le PID possédé, le statut et le signal ; SIGKILL est exigé, ainsi que sample natif après reap < deadline originale. Un broker mort autrement dans la course running→kill ne peut plus qualifier le scénario SIGKILL.
+- Le terminal exige désormais OOM=false, exit137, durée StartedAt→FinishedAt positive et strictement <20s. Observation native ≤ deadline+3s, même CID/StartedAt/restartcount et clock du gardien d’origine restent exigés. Cela exclut les résultats naturels/OOM du scénario ; ce n’est pas une preuve universelle de causalité face à tout acteur privilégié concurrent.
+- L’inspection projette Mounts Type/Name/Destination/RW/Driver sans Source/Env. `check_mounts` exige bind_count0, exactement le volume local attendu en RW à /workspace et seulement les tmpfs permis /tmp et /home/agent, destinations non dupliquées et aucun autre type/plugin. L’omission éventuelle des tmpfs par Docker Mounts est traitée explicitement. Ce contrôle ciblé ne qualifie pas G02 dans son ensemble.
+
+### Contrôles sûreté et portée retracés
+
+Opt-in explicite Docker/programme absolu/endpoint Unix/image ID lowercase/rootful et conservation du gardien ; pas de retour anticipé transformant l’absence d’opt-in en PASS. Racine keep() avant processus, courte/canonique/0700, fichiers privés, environnement nettoyé, aucune clé fournisseur/Jev ni pull. Les appels Docker du helper sont info/image inspect/container inspect uniquement ; pas de kill/rm/prune moteur du harnais. Les méthodes kill/Drop ne possèdent que leurs Child gateway/broker et attendent de façon bornée. Aucun signal de groupe, recherche de PID global ou ciblage du gardien.
+
+L’observer du gardien exige auth et unique announcement existantes, recoupe l’epoch et utilise un exécutable sentinelle absent : il ne peut pas remplacer silencieusement un child en panne. Ready/prepared et Running réel précèdent la faute ; protocole/tenant/namespace viennent du gateway neuf. La course de publication Quarantined est déjà traitée par polling borné, avec CID/image/StartedAt/FinishedAt recoupés, sans sleep arbitraire de succès.
+
+Le restart compare les faits worker et son Arm/deadline d’origine, la même instance Docker et les émissions worker uniques. FinalScan helper est compté séparément. Quota, allocation non facturable positive/idempotente et audit intègre proviennent des lectures réelles ; une erreur, un CID absent ou une réconciliation inachevée échoue. Le témoin original est re-hashé. La preuve complète PASS n’est écrite qu’après ces contrôles.
+
+**Conclusion avant effet : aucun P0/P1 restant identifié empêchant cette tentative unique et bornée dans le périmètre autorisé.** Le harnais conserve root/gardien sur succès et échec. Sur échec précoce, l’inventaire détaillé peut encore devoir être extrait du Store/journal conservé ; ne pas en déduire une liste vide ou un droit de nettoyer des cibles inconnues. L’orchestrateur doit rattacher le binaire/gel réellement exécutés et l’inventaire final aux preuves.
+
+Exécution réelle H4, échéance physique, reprise moteur et toutes observations runtime : **NOT_RUN par le reviewer au moment de cette conclusion**. La compilation H2 ne vaut pas résultat moteur H4. Cette revue avant effet ne clôture ni D5, ni G09 global, ni les autres gates ; elle ne qualifie pas un produit en production.
+
+## Revue incrémentale H5 — après le premier essai H4
+
+Résultat H4 communiqué par Root : échec avant observation WorkerRunning, avec état Created/StartIssued et claim durable ; aucune faute SIGKILL du broker n’a été injectée. Ce résultat reste **FAIL du parcours pré-Running**, pas preuve d’arrêt autonome. Une expiration ou une attente causée par les lectures du writer est plausible mais non établie par ces seuls faits ; ne pas transformer le changement d’observateur en diagnostic causal prouvé. Les ressources et preuves H4 restent conservées.
+
+Delta H4→H5 relu contre la capture `/private/tmp/ai-guard-runtime-h4.1Y3B4Z/sources/`. SHA H5 : `tests/broker_runtime.rs` `5e98a85ca40215cd591acd69ddefd7faa9e403c08c1ca4d97b0e65ff94db168c` ; helper `5ee0fbad8eae087c309031f3645754fca425de9ac9251ce0e9880b7bb82becd5`. Production toujours gelée à e7cc0bb, aucun changement applicatif dans ce delta.
+
+Le polling pré-Running utilise désormais seulement la liste authentifiée du gateway (`workers?limit=2`) toutes les200ms, au lieu de lectures complètes répétées du journal broker. Il refuse pagination/deuxième worker, changement d’identité, disparition d’un worker connu et état Terminal/Cancelled avant Running. Une seule RecoveryStatus après Running doit fournir exactement une Arm worker, reliée au worker/attempt observé. L’inspection Docker Running reste exigée après ces lectures. Les oracles SIGKILL réel/PID, kill avant deadline, montages exacts, OOM=false/exit137, durée<20s, epoch et reprise des mêmes faits restent présents et inchangés. Aucun délai ni Arm n’est allongé pour compenser le premier échec.
+
+Le nouveau probe ignoré `inspect_retained_guard_after_runtime_failure` lit une racine déjà existante, canonique/absolue et privée, ainsi qu’un Arm UUID explicitement choisi. Il appelle uniquement l’observer existant, status et slot_status ; aucun appel Docker, gateway ou Evidence::new. L’observer conserve l’exécutable sentinelle absent et les contrôles auth/announcement/epoch. La sortie contient seulement phase/prepared/stop_failures/clock/statut/CID, puis un fichier UUID neuf créé exclusivement en0600 ; pas d’écrasement ni nouveau répertoire. La borne de15s et le refus de slot d’une autre Arm sont explicites. Ce probe doit être sélectionné par son nom exact ; lancer toutes les entrées ignored n’est pas équivalent à l’autorisation du probe seul.
+
+**Conclusion sur H5 : aucun P0/P1 nouveau confirmé dans ce delta.** Le changement allège l’observation sans affaiblir l’oracle et le probe respecte son périmètre de lecture/une nouvelle preuve privée. Son GO spécifique ne vaut pas autorisation implicite d’une nouvelle session worker. Une seconde tentative runtime relève du GO distinct de Root ; aucun effet ni résultat H5 réel n’a été exécuté/attribué par le reviewer. Les FAIL antérieurs et les limites G09/D5/production demeurent.

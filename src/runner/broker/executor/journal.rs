@@ -120,7 +120,7 @@ impl<'a> Execution<'a> {
         Err(anyhow!("journal contention requires reconciliation"))
     }
 
-    pub(super) async fn failure(&self, phase: LocalFailurePhaseV1) {
+    pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
         // A transport/IO error is a local observation. It never fabricates a
         // terminal worker and never releases central quota.
         let _ = self
@@ -135,6 +135,19 @@ impl<'a> Execution<'a> {
                 },
             )
             .await;
+        if let Some(diagnostic) = diagnostics::classify(phase, error)
+            && self
+                .fact_event("broker.batch.failure", &diagnostic)
+                .await
+                .is_err()
+        {
+            // Enqueue may already be durable when HTTP/ACK delivery fails.
+            // Do not claim that it is absent, retry the start, or print the
+            // underlying error (which may carry a provider's private text).
+            eprintln!(
+                "broker batch diagnostic delivery incomplete; inspect pending journal events"
+            );
+        }
     }
 
     pub(super) async fn rpc(&self, pending: Operation) -> Result<(Operation, bool)> {

@@ -1,0 +1,5 @@
+{
+  "runtime_test": "FAIL",
+  "cleanup": "NOT_RUN: nonempty guard and exact resources retained; D5 unqualified",
+  "scope": "one native control host / selected Docker engine; no Podman, cloud, SIGSTOP or provider qualification"
+}

@@ -1,5 +1,6 @@
 //! Batch execution from a durable intention. Journal I/O is delegated to the
 //! bounded writer; the enforcer owns stop independently of that writer.
+mod diagnostics;
 mod helpers;
 mod journal;
 mod results;
@@ -178,8 +179,8 @@ impl BatchExecutor {
             .map_err(|_| BatchFailure)?;
         match execution.run().await {
             Ok(outcome) => Ok(outcome),
-            Err(_) => {
-                execution.failure(execution.phase()).await;
+            Err(error) => {
+                execution.failure(execution.phase(), &error).await;
                 Err(BatchFailure)
             }
         }
@@ -195,8 +196,8 @@ impl BatchExecutor {
             .map_err(|_| BatchFailure)?;
         match execution.export(target).await {
             Ok(outcome) => Ok(outcome),
-            Err(_) => {
-                execution.failure(LocalFailurePhaseV1::Export).await;
+            Err(error) => {
+                execution.failure(LocalFailurePhaseV1::Export, &error).await;
                 Err(BatchFailure)
             }
         }

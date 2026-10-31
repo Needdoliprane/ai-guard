@@ -24,6 +24,8 @@ Préférer les tests ciblés de contrats pour les nombreux refus et réserver le
 
 ## Vérifications logicielles
 
+La cible ignorée `tests/broker_runtime.rs` utilise un vrai gateway schéma3 neuf, le broker/gardien natifs et un moteur explicitement sélectionné. Elle n'appelle aucun fournisseur modèle. Les deux tentatives Docker Desktop ARM64 H4/H5 du31octobre échouent avant Running ; elles ne comptent ni comme test SIGKILL ni comme preuve de délai autonome. Le probe `inspect_retained_guard_after_runtime_failure` lit un gardien déjà présent, sans start/cancel et sans remplacer son processus. Son PASS ne qualifie pas la supervision d'un worker. Les commandes opt-in, ressources conservées, revues et logiciels ciblés du diagnostic sont dans les [preuves du lot](evidence/2026-10-31/broker-runtime/README.md). Un prochain essai doit exploiter le nouveau diagnostic avant toute répétition ; aucune augmentation de durée ni nouveau claim pour contourner un refus. D5/disarm ouvert interdit de présenter ces ressources retenues comme un cycle de nettoyage terminé.
+
 Avec Rust `1.99.1`, fixé dans `rust-toolchain.toml` :
 
 ```sh

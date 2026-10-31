@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 20.14s
+     Running tests/broker_runtime.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_runtime-0887fbc2c5518ee2)
+
+running 1 test
+{"cid":"a87643c3d8bcffff916f79807ecf7d09469c1b399ec8687951d6ff3b22d82ecb","clock":{"boot_id":"df920bcd-1409-46e1-844a-47ba7ceb0e6c","continuous_ns_decimal":"340416402917666","method":"darwin_mach_continuous_v1","observed_utc":null,"version":1},"observed_status":"created","phase":"stopping","prepared_once":true,"stop_failures":0}
+test inspect_retained_guard_after_runtime_failure ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.02s
+

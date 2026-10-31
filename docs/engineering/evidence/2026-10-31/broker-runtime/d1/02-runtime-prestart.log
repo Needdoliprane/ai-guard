@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 1 test
+test runtime::prestart::tests::stage_context_preserves_native_downcast_and_bounds_metadata ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 0.01s
+

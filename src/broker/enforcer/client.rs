@@ -1,3 +1,4 @@
+use super::diagnostics::{EnforcerFailureReason, EnforcerStage, arm_clock_rejection};
 use super::*;
 use crate::{
     broker::{
@@ -754,26 +755,67 @@ impl EnforcedSlot {
         permission: FreshStartPermission,
         expected_generation: u64,
     ) -> EnforcerResult<PrearmedStartControl> {
+        self.prepare_start_diagnosed(permission, expected_generation)
+            .await
+            .map_err(|failure| failure.wire_code())
+    }
+
+    pub(crate) async fn prepare_start_diagnosed(
+        &self,
+        permission: FreshStartPermission,
+        expected_generation: u64,
+    ) -> Result<PrearmedStartControl, EnforcerStageFailure> {
         let registration = &self.local.registration;
         let arm = &registration.arm;
+        let failure = |reason, sample: Option<&HostClockSampleV1>| {
+            EnforcerStageFailure::from_arm(arm, EnforcerStage::Prepare, reason, sample)
+        };
         if permission.arm_id() != arm.operation_id
             || permission.worker_id() != arm.worker_id
             || permission.attempt_id() != arm.attempt_id
             || permission.control_namespace() != registration.receipt.control_namespace_uuid
-            || permission.subject_key()
-                != arm.subject_key().map_err(|_| EnforcerError::InvalidInput)?
-            || permission.generation() != expected_generation
+        {
+            return Err(failure(
+                EnforcerFailureReason::PermissionBindingMismatch,
+                None,
+            ));
+        }
+        let subject_key = arm
+            .subject_key()
+            .map_err(|_| failure(EnforcerFailureReason::InvalidArm, None))?;
+        if permission.subject_key() != subject_key {
+            return Err(failure(
+                EnforcerFailureReason::PermissionBindingMismatch,
+                None,
+            ));
+        }
+        if permission.generation() != expected_generation
             || self.local.generation.current() != expected_generation
             || expected_generation == u64::MAX
-            || !valid_uuid(permission.emitter_id())
-            || !valid_uuid(permission.claim_operation_id())
         {
-            return Err(EnforcerError::Conflict);
+            return Err(failure(EnforcerFailureReason::GenerationChanged, None));
         }
-        self.client.0.check_health()?;
-        let clock = NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?;
-        arm.validate_clock_check(&clock.sample().map_err(|_| EnforcerError::Unhealthy)?)
-            .map_err(|_| EnforcerError::NotReady)?;
+        if !valid_uuid(permission.emitter_id()) || !valid_uuid(permission.claim_operation_id()) {
+            return Err(failure(
+                EnforcerFailureReason::PermissionBindingMismatch,
+                None,
+            ));
+        }
+        self.client
+            .0
+            .check_health()
+            .map_err(|_| failure(EnforcerFailureReason::HelperUnhealthy, None))?;
+        let clock = NativeHostClock::new()
+            .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+        let sample = clock
+            .sample()
+            .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+        arm.validate_clock_check(&sample).map_err(|_| {
+            failure(
+                arm_clock_rejection(&arm.clock, &arm.deadline_ns_decimal, &sample),
+                Some(&sample),
+            )
+        })?;
         let response = self
             .client
             .0
@@ -785,19 +827,40 @@ impl EnforcedSlot {
                 },
                 IO_TIMEOUT,
             )
-            .await?;
-        let Response::Prepared { value } = response else {
-            return Err(response_error(response));
+            .await
+            .map_err(|code| {
+                failure(
+                    EnforcerFailureReason::PrepareOutcomeUnknown(code),
+                    Some(&sample),
+                )
+            })?;
+        let value = match response {
+            Response::Prepared { value } => *value,
+            Response::Error { code } => {
+                return Err(failure(
+                    EnforcerFailureReason::RemoteRejected(code),
+                    Some(&sample),
+                ));
+            }
+            _ => {
+                return Err(failure(
+                    EnforcerFailureReason::ResponseMismatch,
+                    Some(&sample),
+                ));
+            }
         };
-        let value = *value;
         if value.arm_id != arm.operation_id || value.registration_hash != self.local.digest {
-            return Err(EnforcerError::Conflict);
+            return Err(failure(
+                EnforcerFailureReason::ResponseBindingMismatch,
+                Some(&sample),
+            ));
         }
         *self
             .local
             .status
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)? = (value, Instant::now());
+            .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, Some(&sample)))? =
+            (value, Instant::now());
         Ok(PrearmedStartControl::new(
             Box::new(SpawnGuard {
                 client: self.client.clone(),
@@ -844,53 +907,95 @@ struct SpawnGuard {
 }
 impl BeforeSpawnGuard for SpawnGuard {
     fn check_before_spawn(self: Box<Self>, target: &str) -> anyhow::Result<()> {
+        let arm = &self.local.registration.arm;
+        let failure = |reason, sample: Option<&HostClockSampleV1>| {
+            EnforcerStageFailure::from_arm(arm, EnforcerStage::BeforeSpawn, reason, sample)
+        };
         let _gate = self
             .local
             .generation
             .0
             .gate
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?;
-        self.client.0.check_health()?;
+            .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, None))?;
+        self.client
+            .0
+            .check_health()
+            .map_err(|_| failure(EnforcerFailureReason::HelperUnhealthy, None))?;
         let (status, received) = &*self
             .local
             .status
             .lock()
-            .map_err(|_| EnforcerError::Unhealthy)?;
-        if target != self.local.registration.owned.handle.id()
-            || self.local.generation.current() != self.expected_generation
-            || self.expected_generation == u64::MAX
-            || status.generation != self.expected_generation
-            || status.phase != SlotPhaseV1::Ready
-            || !status.prepared_once
-            || received.elapsed() > HEALTH_WINDOW
-            || *self.local.stop.borrow()
-        {
-            return Err(EnforcerError::NotReady.into());
+            .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, None))?;
+        if target != self.local.registration.owned.handle.id() {
+            return Err(failure(EnforcerFailureReason::TargetMismatch, None).into());
         }
-        let current = self.clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
-        let observed = status.clock.as_ref().ok_or(EnforcerError::Unhealthy)?;
+        if self.local.generation.current() != self.expected_generation
+            || self.expected_generation == u64::MAX
+        {
+            return Err(failure(EnforcerFailureReason::GenerationChanged, None).into());
+        }
+        if let Some(reason) = spawn_snapshot_failure(status, self.expected_generation, received) {
+            return Err(failure(reason, None).into());
+        }
+        if *self.local.stop.borrow() {
+            return Err(failure(EnforcerFailureReason::StopSignalled, None).into());
+        }
+        let current = self
+            .clock
+            .sample()
+            .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+        let observed = status
+            .clock
+            .as_ref()
+            .ok_or_else(|| failure(EnforcerFailureReason::ClockSnapshotMissing, Some(&current)))?;
         let current_ns = current
             .continuous_ns()
-            .map_err(|_| EnforcerError::Unhealthy)?;
+            .map_err(|_| failure(EnforcerFailureReason::NativeClockInvalid, Some(&current)))?;
         let observed_ns = observed
             .continuous_ns()
-            .map_err(|_| EnforcerError::Unhealthy)?;
-        if current.method != observed.method
-            || current.boot_id != observed.boot_id
-            || current_ns < observed_ns
-            || current_ns - observed_ns > HEALTH_WINDOW.as_nanos()
-        {
-            return Err(EnforcerError::Unhealthy.into());
+            .map_err(|_| failure(EnforcerFailureReason::SnapshotClockInvalid, Some(&current)))?;
+        if current.method != observed.method || current.boot_id != observed.boot_id {
+            return Err(failure(
+                EnforcerFailureReason::SnapshotClockIdentityMismatch,
+                Some(&current),
+            )
+            .into());
         }
-        self.local
-            .registration
-            .arm
-            .validate_clock_check(&current)
-            .map_err(|_| EnforcerError::NotReady)?;
+        if current_ns < observed_ns {
+            return Err(failure(EnforcerFailureReason::ClockRegressed, Some(&current)).into());
+        }
+        if current_ns - observed_ns > HEALTH_WINDOW.as_nanos() {
+            return Err(failure(EnforcerFailureReason::ClockSnapshotStale, Some(&current)).into());
+        }
+        arm.validate_clock_check(&current).map_err(|_| {
+            failure(
+                arm_clock_rejection(&arm.clock, &arm.deadline_ns_decimal, &current),
+                Some(&current),
+            )
+        })?;
         Ok(())
     }
 }
+
+fn spawn_snapshot_failure(
+    status: &EnforcerSlotStatusV1,
+    expected_generation: u64,
+    received: &Instant,
+) -> Option<EnforcerFailureReason> {
+    if status.generation != expected_generation {
+        Some(EnforcerFailureReason::GenerationChanged)
+    } else if status.phase != SlotPhaseV1::Ready {
+        Some(EnforcerFailureReason::SlotPhaseMismatch)
+    } else if !status.prepared_once {
+        Some(EnforcerFailureReason::SlotNotPrepared)
+    } else if received.elapsed() > HEALTH_WINDOW {
+        Some(EnforcerFailureReason::SlotSnapshotStale)
+    } else {
+        None
+    }
+}
+
 impl Client {
     fn check_health(&self) -> EnforcerResult<()> {
         let mut descriptor = libc::pollfd {
@@ -1211,4 +1316,46 @@ fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> Enforcer
         })
         .map_err(|_| EnforcerError::Unavailable)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod stage_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn final_spawn_snapshot_distinguishes_generation_phase_permit_and_freshness() {
+        let mut status = EnforcerSlotStatusV1 {
+            arm_id: "11111111-1111-4111-8111-111111111111".into(),
+            registration_hash: "1".repeat(64),
+            phase: SlotPhaseV1::Ready,
+            prepared_once: true,
+            generation: 7,
+            clock: None,
+            observation: None,
+            stop_failures: 0,
+        };
+        let received = Instant::now();
+        assert_eq!(spawn_snapshot_failure(&status, 7, &received), None);
+        assert_eq!(
+            spawn_snapshot_failure(&status, 8, &received),
+            Some(EnforcerFailureReason::GenerationChanged)
+        );
+        status.phase = SlotPhaseV1::Quarantined;
+        assert_eq!(
+            spawn_snapshot_failure(&status, 7, &received),
+            Some(EnforcerFailureReason::SlotPhaseMismatch)
+        );
+        status.phase = SlotPhaseV1::Ready;
+        status.prepared_once = false;
+        assert_eq!(
+            spawn_snapshot_failure(&status, 7, &received),
+            Some(EnforcerFailureReason::SlotNotPrepared)
+        );
+        status.prepared_once = true;
+        let stale = Instant::now() - HEALTH_WINDOW - Duration::from_nanos(1);
+        assert_eq!(
+            spawn_snapshot_failure(&status, 7, &stale),
+            Some(EnforcerFailureReason::SlotSnapshotStale)
+        );
+    }
 }

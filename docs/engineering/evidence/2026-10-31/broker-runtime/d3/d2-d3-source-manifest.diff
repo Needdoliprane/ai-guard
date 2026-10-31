@@ -1,0 +1,11 @@
+--- /private/tmp/ai-guard-d2-software.DkH0QN/SHA256SUMS	2026-10-31 19:39:17.011845559 +0100
++++ /private/tmp/ai-guard-d3-final.UPraQc/SHA256SUMS	2026-10-31 19:41:05.439076836 +0100
+@@ -92,7 +92,7 @@
+ a371631492665e8f593b1873f3136f3adac1dfad8fc1d5d61154c593625898c4  ./tests/broker_lifecycle.rs
+ f67977d1483feeadf3f67dc739279e69bb9589dfb91825280c471e09faad89ad  ./tests/broker_local_ipc.rs
+ 74eed5adb8932f3af94f2d6c75b0adce6b06abbee893ccc5db7aa4c6c73bd53e  ./tests/broker_outbox.rs
+-5e98a85ca40215cd591acd69ddefd7faa9e403c08c1ca4d97b0e65ff94db168c  ./tests/broker_runtime.rs
++70681753f75d8b3b9636f9377d0ca29beaab2a7b3f03f4d8725deb4132cbc73d  ./tests/broker_runtime.rs
+ e0a72cb11d6829b87ac789790a033840a32770ba660f167848e2e192d3a746c9  ./tests/broker_service.rs
+ 1b5b7b31d4bb37bc0de5c9ae272b7cd076d7b7cfda546d07a6c76c2a4579954f  ./tests/broker_submission.rs
+ 828bef17d84a3b8019ea233327d3f8fd05e99cf3afe0be1567331fefbd71311f  ./tests/broker_writer.rs

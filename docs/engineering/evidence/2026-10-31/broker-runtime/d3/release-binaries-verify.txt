@@ -1,0 +1,2 @@
+/private/tmp/ai-guard-d3-final.UPraQc/release-binaries/agentsandbox: OK
+/private/tmp/ai-guard-d3-final.UPraQc/release-binaries/ai-guard-provider: OK

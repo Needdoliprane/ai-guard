@@ -1,0 +1,19 @@
+{
+  "worker_id": "c252e676-d039-4c02-bcf4-18f6fdd92c36",
+  "state": "start_issued",
+  "revision": 5,
+  "attempt": {
+    "attempt_id": "d5a4d221-7a78-4c3b-a509-326f64961b12",
+    "container_id": "e22601834084d4cee79a4ffb0bc700656a4b420e2c7f89bc25c2eab64bd60db9",
+    "start_operation_id": "fd41987e-09ad-4165-b664-e8c4b6541412"
+  },
+  "last_observation": {
+    "status": null,
+    "running": null,
+    "exit_code": null,
+    "oom_killed": null,
+    "restart_count": null,
+    "container_id": null,
+    "runtime_kind": null
+  }
+}

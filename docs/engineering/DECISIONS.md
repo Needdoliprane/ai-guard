@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 31 octobre — diagnostic typé sans nouvelle autorité de lancement
+
+Les deux premières tentatives Docker du broker permanent échouent après claim durable mais avant Running ; `worker/unavailable` ne permet pas de distinguer Prepare, dernier garde et transport runtime. Ajouter des contextes typés privés aux points de refus existants et un payload version1 `broker.batch.failure`, livré par le chemin V4 de masquage/enqueue/HTTP/ACK déjà présent. Aucun texte arbitraire d'erreur, argv, credential ou configuration n'est sérialisé. Une erreur inconnue ne reçoit pas de cause inventée ; transport Prepare inconnu et refus explicite restent distincts. Le sample d'horloge est celui déjà lu par le contrôle, parfois absent, sans faux horodatage de l'erreur.
+
+Conserver le wire IPC et ses codes, les formats du journal, l'unique permission de start, l'Arm/deadline d'origine et l'adjacence garde→spawn. Aucune vérification, nouvelle lecture d'horloge, attente ou IO n'est ajoutée au chemin de succès. Le diagnostic est informatif, avec `runtime_effect=unknown` ; il ne certifie ni absence d'effet, ni arrêt, ni fencing et ne libère aucun quota. Une livraison incomplète reste signalée sans prétendre que l'événement est absent ou durable. Les tests logiciels et la revue sont distincts de l'émission réelle, encore NOT_RUN. [Résultats et limites](evidence/2026-10-31/broker-runtime/README.md).
+
 ## 31 octobre — acteur STOP restreint et diagnostic de reprise
 
 Conserver un seul acteur, une seule file bornée et le même FD de lease par profil. Son admission choisit une capacité métier complète ou une capacité STOP restreinte ; cette dernière ne permet ni chargement métier, ni réservation, ni permission de lancement, ni conversion publique vers le writer complet. La restauration transmet la lease retenue à cet acteur sans fenêtre de déverrouillage. Les planchers et identités déjà observés sont conservés, y compris le hash des rejets : le transfert sous la même lease ne réinitialise ni leur classe ni leur contenu accepté.

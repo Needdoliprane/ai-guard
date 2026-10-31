@@ -26,6 +26,29 @@ Base publiée `c4c4d2a7560d31768da08d8ad9335f4f08667344`, travail isolé dans `.
 
 - [x] Enregistrer le [cahier produit canonique](../sso.md) et sa [déclinaison technique OIDC/PKCE](SSO_OIDC.md), sans annoncer une implémentation. Le suivi détaillé unique est la section [fonctionnalités demandées](#fonctionnalités-demandées--identité-sso-et-découverte-31-octobre) ; elle conserve les critères d'identité, traçabilité, découverte et qualification.
 
+### Recette active — première verticale Docker du broker permanent
+
+**Objectif :** vérifier l'arrêt d'un vrai worker après SIGKILL du broker propriétaire, puis la reprise des mêmes faits. Base logicielle `e7cc0bb`, sans appel modèle. Le lot précédent est un progrès vérifié (code, revue, tests et push) ; cette recette ne réinterprète pas ses preuves comme des effets runtime.
+
+**Architecture :** vrais processus locaux gateway schéma3 neuf, broker et gardien existants ; seul le worker et ses helpers utilisent Docker. Aucun service OS installé, aucune infrastructure distante. Ce contrôle natif de test ne qualifie pas le déploiement conteneurisé du produit. Rust stable pour le harnais, frontend inchangé, aucune dépendance ajoutée.
+
+**Fichiers et propriétaires :** agent runtime pour `tests/broker_runtime.rs` et petits helpers de test nécessaires ; root pour contrats/documentation/intégration ; Luna pour toutes les exécutions ; revue indépendante avant effet puis après résultat. Les corrections applicatives éventuellement révélées recevront un périmètre exclusif avant édition.
+
+- [x] Revalider en lecture seule endpoint, version, image exacte et inventaire préexistant. Capture Luna `/private/tmp/ai-guard-runtime-preflight.9CD3lD` : Docker Desktop29.9.2 Linux ARM64, image locale `sha256:7c64760cc4a5f29a40685cae2451afed914ce81671601166792cd087beab9db6`. Les services QA antérieurs sont conservés.
+- [x] Écrire une entrée Cargo ignorée par défaut, opt-in explicite pour programme/endpoint/image/rootful ; racine neuve courte privée et canonique, source jetable disjointe, credentials de contrôle neufs, environnement nettoyé et preuves privées. Politique dédiée autorisant uniquement la commande bornée de l'essai, jamais modification de la politique utilisateur. H2 compilé avec `--no-run`, H4 compilé puis exécuté ;155 sources vérifiées pour chaque gel.
+- [x] Relire effets, bornes, processus possédés et oracles. Aucun kill par nom, prune, réutilisation de volume, suppression de claim ou affaiblissement d'authentification. La revue H4 fait corriger signal réel du broker, OOM/exit/runtime distinguant sleep20 et projection Mounts explicite. Un échec avant Ready/Running est un FAIL de parcours, pas un test moteur réussi.
+- [ ] Exécuter une seule session `/bin/sleep 20`, timeout5, réseau none, image locale épinglée. Exiger vraie identité et admission, Arm d'origine, slot Ready/prepared et CID Running avant de tuer uniquement le processus broker possédé. Distinguer échéance native et sortie naturelle de20s ; consigner l'écart de temps observé sans inventer une borne absolue.
+- [ ] Garder gateway/gardien vivants, vérifier arrêt du même CID, redémarrer le même broker et vérifier aucune nouvelle Arm/claim/start/deadline ; contrôler audit intègre, quota et usage idempotent seulement après faits terminaux admissibles. Une absence de lecture ou une réconciliation manquante reste inconnue/FAIL.
+- [ ] Préserver la racine et le gardien non vide tant que D5/disarm n'est pas qualifié. Nettoyage uniquement par voie runtime contrôlée sur ressources exactes avec preuve terminale ; aucun effacement pour obtenir un PASS. Vérifier source d'origine inchangée et absence de mutation des ressources QA préexistantes.
+- [ ] Reproduire/corriger le premier défaut réel s'il apparaît, conserver les échecs et rejouer seulement ce qui est nécessaire, puis revue, preuves, commit et push. G09 reste FAIL tant que ses critères ne sont pas établis ; A1/A2/B1, Podman/Linux, capacité100, TTY, SSO et autres gates restent obligatoires.
+
+Résultats : **H4 FAIL réel**,47,39s, et **H5 FAIL réel**,46,59s, tous deux avant faute. Worker `StartIssued`, CID `Created`, Arm/claim durables mais aucun Running. Les15 opérations de supervision de chaque demande sont ACKées, échec `worker/unavailable` après le claim. H5 retire le polling RecoveryStatus concurrent du writer, sans résoudre le défaut. Le probe natif H4 constate ensuite `stopping/prepared_once/created` ; la restauration peut elle-même établir prepared_once, donc cette observation ne localise pas le premier refus. Conserver les deux FAIL et leurs ressources. Aucun réarmement ou relèvement du timeout pour faire passer le test.
+
+- [x] Implémenter et relire des diagnostics typés Prepare/garde/runtime, sans sérialiser la chaîne d'erreur arbitraire, sans changer les codes IPC ni déplacer le dernier garde. Raccorder `broker.batch.failure` à l'outbox V4 existante, effet explicitement inconnu.
+- [x] Vérifier huit fonctions logicielles uniques, fmt, Clippy strict et release ; conserver les échecs Clippy intermédiaires et les deltas mécaniques. [Preuves H4/H5/D1–D3](evidence/2026-10-31/broker-runtime/README.md).
+- [ ] Exécuter une seule tentative réelle instrumentée sur le nouveau binaire ; vérifier la livraison réelle du diagnostic, identifier le point précis de refus puis corriger avec régression. Ni la fraîcheur750ms ni l'expiration5s ne sont une cause démontrée à ce stade.
+- [ ] Après démarrage obtenu, reprendre les critères SIGKILL/deadline/reprise ci-dessus, puis cycle terminal/disarm D5 et recette multi-client. SSO/Keycloak/PKCE et documentation découverte/entreprise demeurent un chantier obligatoire distinct, sans statut livré par ces preuves.
+
 ## Cycle actif : établir puis sécuriser la référence
 
 ### Lot P1 livré — authentification avant traitement HTTP

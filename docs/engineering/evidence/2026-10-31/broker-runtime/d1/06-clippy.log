@@ -1,0 +1,68 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: methods `stage` and `container_id` are never used
+  --> src/runtime/prestart.rs:34:19
+   |
+23 | impl RuntimePrestartStageFailure {
+   | -------------------------------- methods in this implementation
+...
+34 |     pub(crate) fn stage(&self) -> RuntimePrestartStage {
+   |                   ^^^^^
+...
+37 |     pub(crate) fn container_id(&self) -> Option<&str> {
+   |                   ^^^^^^^^^^^^
+   |
+   = note: `-D dead-code` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: the `Err`-variant returned from this function is very large
+   --> src/broker/enforcer/client.rs:767:10
+    |
+767 |     ) -> Result<PrearmedStartControl, EnforcerStageFailure> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the `Err`-variant is at least 136 bytes
+    |
+    = help: try reducing the size of `broker::enforcer::diagnostics::EnforcerStageFailure`, for example by boxing large elements or replacing it with `Box<broker::enforcer::diagnostics::EnforcerStageFailure>`
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#result_large_err
+    = note: `-D clippy::result-large-err` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::result_large_err)]`
+
+error: could not compile `agentsandbox` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: items after a test module
+    --> src/broker/enforcer/client.rs:1000:1
+     |
+1000 |   mod stage_diagnostic_tests {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1041 |   impl Client {
+     |   ^^^^^^^^^^^
+...
+1065 | / fn monitor(
+1066 | |     client: Weak<Client>,
+1067 | |     mut stream: UnixStream,
+1068 | | ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+     | |____________________________________________________________________^
+...
+1090 |   async fn monitor_once(client: &Client, stream: &mut UnixStream) -> EnforcerResult<()> {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1149 |   async fn recover_stops(client: Arc<Client>) {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1217 |   async fn restore_slot(client: &Arc<Client>, local: Arc<LocalSlot>) -> EnforcerResult<()> {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1271 |   fn response_error(response: Response) -> EnforcerError {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1277 |   fn valid_uuid(value: &str) -> bool {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+1282 |   fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> EnforcerResult<()> {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#items_after_test_module
+     = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+     = help: move the items to before the test module was defined
+
+error: could not compile `agentsandbox` (lib test) due to 2 previous errors

@@ -9,12 +9,14 @@ use tokio::{
 use uuid::Uuid;
 mod invocation;
 mod managed;
+mod prestart;
 pub mod terminal;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
 pub use managed::{
     ContainerHandle, ManagedPrearmedExecution, ManagedRetainedExecution, ManagedRuntime,
     ManagedRuntimeError, OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
 };
+pub(crate) use prestart::{RuntimePrestartStage, RuntimePrestartStageFailure};
 
 /// Last synchronous check by the trusted broker, after all awaited preparation.
 /// This consumes the permit; it does not make process spawn atomic with the engine.
@@ -1098,8 +1100,18 @@ impl Runtime {
         Fut: Future<Output = Result<()>>,
     {
         let (authority, _) = managed;
-        authority.verify_authority().await?;
-        let mut command = authority.command()?;
+        authority.verify_authority().await.with_context(|| {
+            RuntimePrestartStageFailure::new(
+                RuntimePrestartStage::AuthorityBeforeSpawn,
+                &instance.target,
+            )
+        })?;
+        let mut command = authority.command().with_context(|| {
+            RuntimePrestartStageFailure::new(
+                RuntimePrestartStage::InvocationBeforeSpawn,
+                &instance.target,
+            )
+        })?;
         command.arg("start").arg("--attach");
         if input.is_some() {
             command.arg("--interactive").stdin(Stdio::piped());
@@ -1110,13 +1122,27 @@ impl Runtime {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
         let PrearmedStartControl { guard, mut stop } = control;
-        ensure_prearmed_live(&stop)?;
+        ensure_prearmed_live(&stop).with_context(|| {
+            RuntimePrestartStageFailure::new(
+                RuntimePrestartStage::StopBeforeSpawn,
+                &instance.target,
+            )
+        })?;
+        // These closures allocate diagnostic metadata only on an error.
+        let guard_failure = || {
+            RuntimePrestartStageFailure::new(
+                RuntimePrestartStage::GuardBeforeSpawn,
+                &instance.target,
+            )
+        };
+        let spawn_failure =
+            || RuntimePrestartStageFailure::new(RuntimePrestartStage::Spawn, &instance.target);
         // Keep the final trusted check adjacent to spawn: no await, command
         // preparation, filesystem access or callback is permitted between them.
-        guard.check_before_spawn(&instance.target)?;
-        let mut child = command
-            .spawn()
-            .context("cannot attach to the prearmed session container")?;
+        guard
+            .check_before_spawn(&instance.target)
+            .with_context(guard_failure)?;
+        let mut child = command.spawn().with_context(spawn_failure)?;
         let mut tasks = TransportTasks::default();
         let stdout = tokio::spawn(capture_stream(
             child.stdout.take().context("missing stdout")?,
@@ -1150,9 +1176,20 @@ impl Runtime {
                     interval.tick().await;
                     let state = self
                         .execution_inspect(&instance.target, Some(managed))
-                        .await?;
+                        .await
+                        .with_context(|| {
+                            RuntimePrestartStageFailure::new(
+                                RuntimePrestartStage::StartedObservation,
+                                &instance.target,
+                            )
+                        })?;
                     if state.has_started() {
-                        on_started(state).await?;
+                        on_started(state).await.with_context(|| {
+                            RuntimePrestartStageFailure::new(
+                                RuntimePrestartStage::StartedObservation,
+                                &instance.target,
+                            )
+                        })?;
                         return Ok::<(), anyhow::Error>(());
                     }
                 }
@@ -1180,13 +1217,26 @@ impl Runtime {
                     stopped?;
                     bail!("independent stop signalled during observation; terminal reconciliation required");
                 }
-                state = self.execution_inspect(&instance.target, Some(managed)) => state?,
+                state = self.execution_inspect(&instance.target, Some(managed)) => state.with_context(|| {
+                    RuntimePrestartStageFailure::new(
+                        RuntimePrestartStage::StartedObservation,
+                        &instance.target,
+                    )
+                })?,
             };
-            ensure!(
-                state.has_started(),
-                "runtime never reported a StartedAt value; command start cannot be confirmed"
-            );
-            state.validate_terminal(self.kind)?;
+            (|| -> Result<()> {
+                ensure!(
+                    state.has_started(),
+                    "runtime never reported a StartedAt value; command start cannot be confirmed"
+                );
+                state.validate_terminal(self.kind)
+            })()
+            .with_context(|| {
+                RuntimePrestartStageFailure::new(
+                    RuntimePrestartStage::StartedObservation,
+                    &instance.target,
+                )
+            })?;
             if !observed_start {
                 // EOF may race a callback that has already sent its RPC. Keep
                 // that exact future alive: invoking the callback again could

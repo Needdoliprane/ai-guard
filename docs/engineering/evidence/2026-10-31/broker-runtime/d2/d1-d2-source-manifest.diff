@@ -1,0 +1,22 @@
+--- /private/tmp/ai-guard-d1-software.3ipHYm/SHA256SUMS	2026-10-31 19:33:55.708657794 +0100
++++ /private/tmp/ai-guard-d2-software.DkH0QN/SHA256SUMS	2026-10-31 19:39:17.011845559 +0100
+@@ -16,8 +16,8 @@
+ 849fc7d5f34c15fc82b6058480b7f471055670fdaa1cab32f944327e8d14dbec  ./src/broker/discovery.rs
+ f48e76fe93756961aab4965a959309158f319d7735ddd25d7e515aa758892ba8  ./src/broker/enforcer.rs
+ 3ec5fa8c397c8595bb7a669e3c7c270f8af06837aa6e33592fa4f2c1b5392feb  ./src/broker/enforcer/cancel_tests.rs
+-292136abc9d52374babf9c4df9d045610d40808ae61e092d716000f31223e38a  ./src/broker/enforcer/client.rs
+-f004546fc252f503f9417a85b960751f14d87dc195be5388041a9f07d0f76c3d  ./src/broker/enforcer/diagnostics.rs
++40cd3cde67a88d23f4c9d450d684e5b4c273af44b857a98b4fded6ebf40c9c49  ./src/broker/enforcer/client.rs
++ec9817f250b58a76dde5decee41afe902985cdc0c01210ab50a2b6ad2d01c988  ./src/broker/enforcer/diagnostics.rs
+ e141119af2c9e91c5023e6df57987629192a0bbd9e657cca1f845afd03e7fa9d  ./src/broker/enforcer/server.rs
+ 73078447289411744e410b8c2e7ee1db97444dde4cff4863c9455775795adbf3  ./src/broker/intent.rs
+ 894c4a2d71041c71b72f69ea5666673b023a9728e048cd2784b3c209c9ff247b  ./src/broker/journal.rs
+@@ -69,7 +69,7 @@
+ d730043a1562a94c117094a49dfd98cd4f48a251e2b84fdbfe9fa06620f4894a  ./src/runtime.rs
+ 1f775a5801edd99990882a8949bf59c4d60e75ed9f9e2be2b12b69fdc0d896a8  ./src/runtime/invocation.rs
+ a2a5be94e7cfec58b440195805ab006c80d50807a273e100b6d03c53265b703e  ./src/runtime/managed.rs
+-ea45e8c3b3ed2344508c37100e92c765a70fc06b0182c03bd198767a0f77a7d2  ./src/runtime/prestart.rs
++8617d24b52aa3972227fc419cc87e79a63336fe6d9d8b886347ee2fb661c91bd  ./src/runtime/prestart.rs
+ 5eef5abec5b351a079b7aa11badc46c8d46be4ff3c1e903772f75da7d847d823  ./src/runtime/terminal.rs
+ b9e9a8f68853ab0d99def3a20f0c9166dfbdc8042df69413368f55c3b5257ed8  ./src/tenancy.rs
+ 8bd9965ddf12c8519a4af7d5dda6775f3099f117f3645dd458bdacd0dab8c74c  ./src/workspace.rs

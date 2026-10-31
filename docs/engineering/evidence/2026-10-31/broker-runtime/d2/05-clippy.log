@@ -1,0 +1,27 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: this `if` statement can be collapsed
+   --> tests/broker_runtime.rs:665:9
+    |
+665 | /         if let BrokerReplyV1::Status { status } =
+666 | |             ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?
+667 | |         {
+668 | |             if worker.state == WorkerStateV1::Terminal
+...   |
+679 | |         }
+    | |_________^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#collapsible_if
+    = note: `-D clippy::collapsible-if` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+    |
+666 ~             ipc(evidence, runner, BrokerCommandV1::Status { operation_id }).await?
+667 ~             && worker.state == WorkerStateV1::Terminal
+668 |                 && !worker.quota_held
+...
+676 |                 return Ok(());
+677 ~             }
+    |
+
+error: could not compile `agentsandbox` (test "broker_runtime") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

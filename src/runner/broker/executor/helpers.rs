@@ -177,7 +177,8 @@ impl Execution<'_> {
             generation: self.generation,
         };
         Ok(PrearmedStartDirective::EmitOnce(
-            slot.prepare_start(permission, self.generation).await?,
+            slot.prepare_start_diagnosed(permission, self.generation)
+                .await?,
         ))
     }
 

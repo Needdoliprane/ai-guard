@@ -4,6 +4,7 @@
 //! that an earlier runtime start can no longer take effect (D5).
 
 mod client;
+mod diagnostics;
 mod server;
 
 use crate::{
@@ -23,6 +24,7 @@ use std::{
 use uuid::Uuid;
 
 pub use client::{EnforcedSlot, EnforcerClient};
+pub(crate) use diagnostics::EnforcerStageFailure;
 pub use server::run_internal_enforcer;
 
 const MAX_SLOTS: u32 = 1024;

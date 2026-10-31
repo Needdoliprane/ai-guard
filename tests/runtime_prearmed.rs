@@ -77,6 +77,15 @@ struct Guard {
     root: Option<std::path::PathBuf>,
 }
 
+#[derive(Debug)]
+struct GuardRefusal;
+impl std::fmt::Display for GuardRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("synthetic pre-start guard refusal")
+    }
+}
+impl std::error::Error for GuardRefusal {}
+
 impl BeforeSpawnGuard for Guard {
     fn check_before_spawn(self: Box<Self>, target: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
@@ -98,7 +107,9 @@ impl BeforeSpawnGuard for Guard {
                 "authority verification was not the last runtime operation before the guard"
             );
         }
-        anyhow::ensure!(!self.fail, "synthetic pre-start guard refusal");
+        if self.fail {
+            return Err(anyhow::Error::new(GuardRefusal));
+        }
         Ok(())
     }
 }
@@ -297,6 +308,14 @@ async fn prearmed_stop_interrupts_pending_started_callback_without_global_ctrl_c
                 )
                 .await;
             assert!(result.is_err(), "{case} must refuse a prearmed start");
+            if case == "guard_error" {
+                let error = result.unwrap_err();
+                assert!(
+                    error.downcast_ref::<GuardRefusal>().is_some(),
+                    "runtime stage and retained-instance contexts must preserve the typed guard refusal"
+                );
+                assert!(!format!("{error:#} {error:?}").contains("fixture-only-guard-marker"));
+            }
             let expected_checks = usize::from(case == "guard_error");
             assert_eq!(
                 checks.load(std::sync::atomic::Ordering::SeqCst),

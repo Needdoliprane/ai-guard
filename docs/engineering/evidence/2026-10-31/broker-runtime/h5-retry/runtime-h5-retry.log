@@ -1,0 +1,16 @@
+    Finished `release` profile [optimized] target(s) in 0.31s
+     Running tests/broker_runtime.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_runtime-0887fbc2c5518ee2)
+
+running 1 test
+retained broker runtime evidence: /private/tmp/br-NBcV3F
+Error: FAIL: worker never observed Running with Ready+prepared_once; inspect retained control/journal/stderr
+test broker_sigkill_preserves_original_deadline_without_second_start ... FAILED
+
+failures:
+
+failures:
+    broker_sigkill_preserves_original_deadline_without_second_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 46.59s
+
+error: test failed, to rerun pass `--test broker_runtime`

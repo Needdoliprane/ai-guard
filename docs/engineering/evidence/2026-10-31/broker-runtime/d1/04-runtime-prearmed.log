@@ -1,0 +1,24 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+warning: methods `stage` and `container_id` are never used
+  --> src/runtime/prestart.rs:34:19
+   |
+23 | impl RuntimePrestartStageFailure {
+   | -------------------------------- methods in this implementation
+...
+34 |     pub(crate) fn stage(&self) -> RuntimePrestartStage {
+   |                   ^^^^^
+...
+37 |     pub(crate) fn container_id(&self) -> Option<&str> {
+   |                   ^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `agentsandbox` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 48.59s
+     Running tests/runtime_prearmed.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/runtime_prearmed-e13b35325cb0edd4)
+
+running 1 test
+test prearmed_stop_interrupts_pending_started_callback_without_global_ctrl_c ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 15.79s
+
