@@ -6,9 +6,16 @@ ai-guard vise un produit open source destiné à la production. Sa qualification
 
 Ce parcours utilise le contrôle schéma2 par défaut. Le [bootstrap explicite d'un contrôle neuf en schéma3](operations.md#initialiser-un-contrôle-de-supervision-neuf) prépare le broker permanent en cours d'intégration ; il emploie des bases distinctes et ne remplace pas le démarrage ci-dessous.
 
-La [cible d'essai rapide et SSO](sso.md) prévoit un lancement Compose et une clé API du fournisseur choisi, avec une variante Keycloak préconfigurée pour le dashboard et le CLI. Environ cinq minutes est une cible à mesurer, sans promesse de durée. **Ce nouveau parcours est à livrer et qualifier** : les comptes de démonstration et une commande Compose SSO ne sont pas disponibles par leur seule description. Les étapes ci-dessous restent celles du fonctionnement actuellement documenté. Le futur guide distinguera démo locale et raccordement au SSO de l'entreprise ; le SSO restera facultatif.
+La [cible d'essai rapide et SSO](sso.md) prévoit un lancement Compose et une clé API du fournisseur choisi. Environ cinq minutes est une cible à mesurer, sans promesse de durée. **L'activation du SSO reste facultative ; son support et sa qualification font partie des exigences du produit.** Les étapes numérotées ci-dessous restent celles du fonctionnement actuellement documenté.
 
-Aujourd'hui, les commandes de ce guide et le dashboard utilisent les clés locales runner/viewer. Le [contrat technique OIDC/Keycloak et PKCE](engineering/SSO_OIDC.md) ne livre encore aucune commande de login SSO ni configuration utilisable ; Keycloak n'est pas un prérequis de ce quick start. L'authentification Codex/Claude reste distincte de celle d'ai-guard.
+| Parcours d'identité | Disponibilité dans ce checkout |
+|---|---|
+| Contrôle local actuel | Clés statiques `runner`/`viewer`, préparées à l'étape 2 ; le dashboard reçoit seulement `viewer` à l'étape 3. Elles ne prouvent pas l'identité d'une personne. |
+| Local nominatif hors ligne | **ABSENT / NOT_RUN** ; reste obligatoire, avec les mêmes permissions et audit individuel que le SSO. |
+| [Découverte Keycloak préconfigurée](sso.md#profil-keycloak-de-découverte) | **ABSENTE / NOT_RUN** ; aucun profil Compose, compte de démo actif ni commande de login SSO livré. |
+| Raccordement au SSO de l'entreprise | **ABSENT / NOT_RUN** ; les [exigences et la fiche opérateur](engineering/SSO_OIDC.md#fiche-opérateur-keycloak-à-renseigner) ne sont pas une configuration déjà utilisable. |
+
+La cible Web et CLI emploie OpenID Connect Authorization Code + PKCE S256, avec deux clients publics distincts et aucun secret client distribué. Le [contrat technique OIDC/Keycloak](engineering/SSO_OIDC.md) exige validation des tokens, tenants et permissions côté Rust. Keycloak n'est pas un prérequis des commandes ci-dessous ; saisir `user/user` dans **Jeton de lecture** ne remplace pas la clé `viewer`. Les comptes publics `admin/admin` et `user/user` sont réservés au futur profil local explicitement activé et ne doivent pas être appliqués aux credentials existants. L'authentification Codex/Claude et les commandes `providers init` et `providers status` restent distinctes du SSO ai-guard.
 
 ## 1. Préparer les outils
 
