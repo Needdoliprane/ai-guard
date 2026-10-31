@@ -132,19 +132,57 @@ impl Draft {
             .and_then(|m| m.worker.as_ref())
             .context("worker is not admitted")
     }
-    fn checkpoint(self, namespace: Uuid) -> Result<BrokerCheckpointV3> {
+    fn checkpoint(&self, namespace: Uuid) -> Result<BrokerCheckpointV3> {
         let runner = CheckpointPayloadV1(CheckpointDataV1 {
             version: 1,
-            current_request: self.run.plan.request,
-            managed: self.run.plan.managed,
+            current_request: self.run.plan.request.clone(),
+            managed: self.run.plan.managed.clone(),
         });
         Ok(BrokerCheckpointV3::new(
             BrokerCheckpointV2::new(
                 runner,
-                SupervisionCheckpointV1::new(namespace, self.helpers, self.operations)?,
+                SupervisionCheckpointV1::new(
+                    namespace,
+                    self.helpers.clone(),
+                    self.operations.clone(),
+                )?,
             )?,
-            self.commands,
+            self.commands.clone(),
         )?)
+    }
+}
+
+/// Confirmed runner data at this exact head, never a latest-state or start
+/// capability. V4 outbox data is deliberately absent from Draft.
+struct CommittedDraftAtHead {
+    operation: Uuid,
+    scope: JournalScopeV1,
+    head: crate::broker::journal::RevisionRefV1,
+    draft: Draft,
+}
+impl CommittedDraftAtHead {
+    fn require_context(&self, operation: Uuid, scope: &JournalScopeV1) -> Result<()> {
+        ensure!(
+            self.operation == operation
+                && self.draft.run.operation_id() == operation
+                && same(&self.scope, scope)?,
+            "confirmed draft context changed"
+        );
+        Ok(())
+    }
+    fn into_parts(
+        self: Box<Self>,
+        operation: Uuid,
+        scope: &JournalScopeV1,
+    ) -> Result<(crate::broker::journal::RevisionRefV1, Draft)> {
+        self.require_context(operation, scope)?;
+        let Self { head, draft, .. } = *self;
+        Ok((head, draft))
+    }
+}
+impl fmt::Debug for CommittedDraftAtHead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CommittedDraftAtHead(<private confirmed data>)")
     }
 }
 

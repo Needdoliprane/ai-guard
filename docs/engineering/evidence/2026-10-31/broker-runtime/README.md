@@ -1,6 +1,47 @@
 # Broker permanent — essais Docker et diagnostics, 31 octobre 2026
 
-**G09 FAIL ; aucun gate global fermé.** H4/H5 échouent après claim, H6 atteint la borne d'observation du harnais pendant la préparation, H7 enregistre une erreur préclaim. Aucun Running ni faute au point prévu. Le diagnostic D3 passe ses vérifications logicielles mais sa frontière typée n'a pas été atteinte ; son complément préclaim attend encore l'essai réel. Aucun fournisseur IA, SSO, frontend, cloud ou PKI utilisé par ce lot. Les revues indépendantes ne qualifient pas le produit.
+**G09 FAIL ; aucun gate global fermé.** H4/H5 échouent après claim ; H6/H8 atteignent leurs bornes d'observation ; H7 puis H9 refusent avant claim. H9 livre réellement un diagnostic durable, sans établir la cause du slot nonReady. Aucun Running ni faute au point prévu. S1/S2 est le complément logiciel suivant :20 fonctions ciblées et checks finaux PASS, effet runtime NOT_RUN. Aucun fournisseur IA, SSO, frontend, cloud ou PKI utilisé par ce lot. Les revues indépendantes ne qualifient pas le produit. Les résultats plus bas restent ceux de chaque gel historique.
+
+## H8/H9 — observation et premier refus codé
+
+Application `af4a8682edf1bfcb18dcd08113e86f9724e9bcc1`, binaire `ec99e7817efc53ccb912d99bd5d5130c24bc89c9e7a59ef5d24cfb782338e9f6`, même image Docker Desktop ARM64 que H4–H7. H8 utilise encore la coupure préRunning120s/global240s : **FAIL RC101,122,63s**, sans FailureObserved, événement diagnostic ou WorkerClaim. Arm ACK33 apparaît environ118,303s après Submit, seulement2,234s avant le résultat. Le retour Writer/Register n'est pas établi ; ce n'est pas une preuve de refus applicatif. [Rapport Core](h8/core-diagnostic.md), [sortie](h8/h8.log).
+
+Le harnais H9 supprime uniquement la coupure120s et consulte au plus une fois par seconde le premier `broker.batch.failure` via `events?kind=broker.batch.failure&limit=1&order=asc`. Une erreur durable fait échouer immédiatement le parcours nominal. Le marqueur garde huit métadonnées validées : UUID, seq positive, kind/phase/étapes fermées et effet inconnu ; ni corps, erreur libre, commande ou credential. La page vide ne prouve pas une absence globale. Un dernier GET est effectué avant de sortir de l'observation Running, toujours dans le budget global ; ses délais peuvent faire échouer l'oracle strict, sans lui donner de marge supplémentaire.
+
+**H9 FAIL RC101,232,70s :** événement SQLite seq17 `ed0b84a8-7c4d-48a1-bdfe-13710373b3dc`, `worker / readiness_before_claim / before_claim`, raison native **`slot_phase_mismatch`**. `native_sample=null`, deadline d'origine347579793810375ns, Arm5s ; aucune expiration native démontrée. Register et l'ancienne relecture caller ont terminé avant ce refus.14 opérations supervision ACKées, aucun WorkerClaim/start. Naissance du même événement V4 rev35 durable, `audit_seq=null` local au moment de la coupure après le GET : ACK pending, pas une perte d'événement. Worker Created rev4, quota retenu, aucune allocation ou durée inventée. [Marqueur fermé](h9/h9-marker-eight-fields.json), [rapport Core](h9/core-diagnostic.md), [sortie](h9/03-h9-runtime.log), [revue du harnais](h9/harness-review.md).
+
+| Essai | QA privée conservée | Nouveau CID Created/nonRunning |
+|---|---|---|
+| H8 | `/private/tmp/br-FV9BGW` | `800ec51a21e5cb8996a4f3de811fe447211408118e5c1bc5a561790c5d51381b` |
+| H9 | `/private/tmp/br-BSL68s` | `44788e90678f0e2e614e0a96ae5fa5be12124e4fe5195123b975cbe761a06c4f` |
+
+Les racines, gardiens non vides, CID et volumes restent conservés faute de disarm D5 qualifié. Zéro ID antérieur manquant dans les inventaires ; aucun ancien CID inspecté ou muté par H8/H9. Les seuls broker/gateway enfants du test sont arrêtés par son teardown ; aucun SIGKILL au point de faute prévu après Running. Les scalaires de ces deux CID ne donnent ni terminal ni fencing. Aucun service OS installé, appel modèle ou nettoyage de données existantes.
+
+Les trois tests purs `batch_failure_marker_*` ont été écrits avant le lecteur : stub initial compilé puis **RED RC101** à l'assertion de présence du marqueur, puis trois **GREEN**. La revue du harnais a conduit à un GET final, un refus des diagnostics sans origine et un message nommant la faute prévue ; les assertions privées restent inchangées. Les replays après corrections ne sont pas additionnés. L'API n'est pas simulée : ces tests ne qualifient que le parseur ; H9 vérifie séparément son raccord HTTP réel. Les bornes de harnais240s de H9 sont historiques : la suite S1 passe à600s sur instruction du mainteneur, Arm worker5s inchangée.
+
+## S1 — Draft acquitté et snapshot helper
+
+Deux changements internes après H9 : réutiliser le candidat exact acquitté au head du Writer pour retirer la seule relecture Full caller après Register ; enrichir les seuls refus de prédicats avec le snapshot helper déjà lu. Le Draft est privé, lié à son opération/scope/head, opaque en Debug et sans capacité de start. Erreur/Unknown ne retourne aucune projection, conflit recharge et conserve Cancel/outbox ; ACK historique reste `fresh=false`. Ce head n'est pas annoncé latest. Une révision centrale devenue obsolète peut refuser conservativement ; les contrôles Ready/génération/clock, pending/ACK, EmitOnce, Full pré/post, CAS et durabilité restent appliqués. Aucun changement du Journal/Writer, format persistant ou API publique dans S1.
+
+Le snapshot optionnel boxé a une source fermée `helper_slot` : phase, prepared_once, génération et clock validée de ce slot. Clock invalide omise avec flag ; absente inconnue. Il ne remplace jamais `native_sample`, qui reste absent lorsqu'aucun check local n'en a lu. Aucun nouvel échantillon, RPC, seuil ou travail externe sur succès. Son effet reste inconnu, sans preuve terminale/fencing ou libération de quota. Le producteur obsolète `load_after_registration` disparaît, le parseur conserve ce label pour les événements historiques.
+
+Les tests Core utilisent de vrais Journal/Writer/filesystem, conflit CAS avec Cancel/outbox et vrai gateway/Store SQLite : Decision réellement POSTée, rejeu sans deuxième HTTP, binding propre à la fixture déplacé avant la mutation et refus avant HTTP/projection. Le constructeur de contexte est uniquement cfg(test) et vérifie réellement l'identité gateway active/schema3/runner/tenant/namespace ; il ne qualifie pas l'admission registry/FS. Un processus natif IPC vide est possédé, arrêté par ShutdownIfIdle et attendu ; il n'invoque aucun moteur et son helper enfant ignoré n'ajoute pas un test. Le replay prouvé est celui de Decision sur le port partagé, pas un claim ou start physique. Les tests de snapshot/prédicats n'établissent pas la transition temporelle réelle Ready→nonReady.
+
+Luna a exécuté les cinq cibles S1 ci-dessous : **20 fonctions uniques PASS**, aucun test ignoré ou replay additionné. Fmt-check RC0. Clippy strict S1 échoue RC101 sur l'unique idiome `.err().expect()` du nouveau test Core ; aucun build release applicatif n'est alors lancé. S2 corrige uniquement cet idiome en `expect_err()` avec la même condition et le même message, sans source applicative modifiée. Les20 tests ne sont pas rejoués pour cette réécriture ; fmt/Clippy/build S2 **RC0**. [Sorties S1](s1/01-diagnostics.log), [deux tests Core](s1/03-executor-journal.log), [parseur](s1/05-parser.log), [FAIL Clippy conservé](s1/07-clippy.log), [delta S2](s2/s1-s2-journal-test.diff), [Clippy final](s2/02-clippy.log), [build final](s2/03-build-release.log).
+
+```sh
+cargo test --locked --lib diagnostics::tests -- --nocapture
+cargo test --locked --lib broker::enforcer::client::stage_diagnostic_tests -- --nocapture
+cargo test --locked --lib runner::broker::executor::journal::tests -- --nocapture --test-threads=1
+cargo test --locked --lib broker::journal::tests::full_writer_rechecks_binding_after_real_publication_before_ack -- --exact --nocapture
+cargo test --release --locked --test broker_runtime batch_failure_marker -- --nocapture
+```
+
+Le total20 correspond à12 diagnostics,2 prédicats natifs,2 tests Core,1 recontrôle postpublication et3 marqueurs. La compilation release de la cible parseur prend13min01s ; ses trois tests prennent0,00s. Elle ne compte ni comme essai moteur ni comme le `cargo build --release` final (RC0,0,54s). Les deux Core prennent72,05s. Aucun E2E global ou appel modèle n'est rejoué.
+
+Les [159 sources S2](s2/SHA256SUMS) sont vérifiées avant/après, puis root vérifie indépendamment [checkout](s2/s2-checkout-check.txt) et [archive extraite](s2/s2-extracted-check.txt). Manifeste SHA`d5e9b6a60442a8588ff26660b1513890747f68c7ea9768564e246f1fff5679a9`, archive privée`9af03ffa0296ac4ab95aff5ef69bcd313ac2e0ba3dfbf0ce0886e9694abb599c`. [Copies binaires](s2/release-binaries.sha256) hors cache en mode600, vérifiées par Luna et root : agentsandbox`eff5eae403294b8dc62af4644bcb1c3f0a6ddead704cbe6f82c2ce13f32d1769`, provider`f3c0380c12dbc27d32593d297bcdb4318cbea642b7f5abd41d8956d8ae99eb09`. Originaux privés : `/private/tmp/ai-guard-s1-20261031-220416` et `/private/tmp/ai-guard-s2-20261031-222447`. Archives/binaires restent hors Git ; aucune promesse de reconstruction byte-identique.
+
+La [revue indépendante finale](s2/independent-review.md) recoupe sources, delta S2, logs,159 sources et hashes des binaires ; aucun P0/P1 identifié dans son périmètre. Elle distingue le replay Decision, le gardien IPC vide, les prédicats logiciels et le runtime non qualifié. Les copies de données ont un coût ; aucun gain de durée mesuré, aucun correctif causal de H9, aucune émission du nouveau snapshot sur moteur ne sont revendiqués. Le prochain H10 utilisera global600s/worker5s sur ce gel validé. Aucun moteur supplémentaire n'est lancé pendant cette validation logicielle.
 
 ## Périmètre et gels
 
@@ -113,7 +154,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --release --locked
 ```
 
-Les deux essais réels utilisent la sélection suivante, **propre à cet hôte**, et conservent des ressources ; ce n'est pas une commande de quick start ordinaire :
+Les essais réels Docker utilisent la sélection suivante, **propre à cet hôte**, et conservent des ressources ; ce n'est pas une commande de quick start ordinaire :
 
 ```sh
 AGENTSANDBOX_TEST_RUNTIME=docker \
@@ -137,4 +178,4 @@ cargo test --release --locked --test broker_runtime inspect_retained_guard_after
 
 Les captures privées originales sont `/private/tmp/ai-guard-runtime-h4.1Y3B4Z`, `/private/tmp/ai-guard-runtime-h5.4pwJ7e`, `/private/tmp/ai-guard-runtime-h5-retry.fxob46`, `/private/tmp/ai-guard-d1-software.3ipHYm`, `/private/tmp/ai-guard-d2-software.DkH0QN` et `/private/tmp/ai-guard-d3-final.UPraQc`. Root vérifie indépendamment158 fichiers de l'archive finale extraite et158 fichiers du checkout contre le manifeste D3, plus les deux copies de binaires. SHA agentsandbox D3 : `709b70eee959fb23bb309164ae5e7f8e32a5dcc6dfd96fd91673aa8fef8221ae` ; provider : `2cb846f02db229a673c95b3c35d287db6f0d0d5f16029deb3d580df664483390`.
 
-Prochain critère : une seule tentative réelle H8 instrumentée sur PR4 pour livrer/lire le diagnostic préclaim complété, localiser l'erreur et corriger avec régression avant répétition. Puis établir Running, panne SIGKILL, arrêt sur deadline d'origine, reprise idempotente et cycle terminal/disarm. Les quatre racines et gardiens non vides H4–H7 restent conservés, aucun effacement pour obtenir un PASS. SSO/Keycloak/PKCE reste obligatoire mais absent, qualification NOT_RUN ; [contrat et documentation](../../../SSO_OIDC.md). Le rappel Daybreak Blue attend ces parcours réels stabilisés.
+Prochain critère courant : une seule tentative réelle H10 sur S1 après validation/revue, global600s/worker5s, pour lire le nouveau snapshot préclaim si le refus persiste. Aucun gain ni cause supposés avant ce résultat. Puis établir Running, panne SIGKILL, arrêt sur deadline d'origine, reprise idempotente et cycle terminal/disarm. Les racines et gardiens non vides H4–H9 restent conservés, aucun effacement pour obtenir un PASS. SSO/Keycloak/PKCE reste obligatoire mais absent, qualification NOT_RUN ; [contrat et documentation](../../../SSO_OIDC.md). Le rappel Daybreak Blue attend ces parcours réels stabilisés.

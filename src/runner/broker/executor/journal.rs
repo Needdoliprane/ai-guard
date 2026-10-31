@@ -1,6 +1,58 @@
 //! Private batch journal operations.
 use super::*;
 
+async fn load_draft(
+    writer: &WriterClient,
+    operation: Uuid,
+    scope: &JournalScopeV1,
+) -> Result<(AcceptedJobV1, Draft)> {
+    ensure!(same(writer.scope(), scope)?, "writer scope changed");
+    let job = writer.load(operation).await?.context("job disappeared")?;
+    ensure!(
+        job.operation_id() == operation && same(job.scope(), scope)?,
+        "job scope changed"
+    );
+    let draft = Draft::from_job(&job)?;
+    Ok((job, draft))
+}
+
+async fn commit_patch(
+    writer: &WriterClient,
+    operation: Uuid,
+    scope: &JournalScopeV1,
+    change: impl Fn(&mut Draft) -> Result<()>,
+) -> Result<Box<CommittedDraftAtHead>> {
+    for _ in 0..16 {
+        let (job, mut draft) = load_draft(writer, operation, scope).await?;
+        change(&mut draft)?;
+        let next = draft.checkpoint(scope.control_namespace_uuid())?;
+        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+        tests::before_commit()?;
+        match writer
+            .advance_lifecycle(operation, job.head().clone(), next)
+            .await
+        {
+            Ok(receipt) => {
+                ensure!(
+                    receipt.operation_id() == operation,
+                    "checkpoint receipt operation changed"
+                );
+                // Only an acknowledged exact input produces this value. An
+                // error, including an unknown publication, returns no Draft.
+                return Ok(Box::new(CommittedDraftAtHead {
+                    operation,
+                    scope: writer.scope().clone(),
+                    head: receipt.head().clone(),
+                    draft,
+                }));
+            }
+            Err(JournalError::Conflict) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(anyhow!("journal contention requires reconciliation"))
+}
+
 impl<'a> Execution<'a> {
     pub(super) async fn open(
         executor: &'a BatchExecutor,
@@ -47,18 +99,7 @@ impl<'a> Execution<'a> {
     }
 
     pub(super) async fn load(&self) -> Result<(AcceptedJobV1, Draft)> {
-        let job = self
-            .executor
-            .writer
-            .load(self.operation)
-            .await?
-            .context("job disappeared")?;
-        ensure!(
-            same(job.scope(), self.context.scope())?,
-            "job scope changed"
-        );
-        let draft = Draft::from_job(&job)?;
-        Ok((job, draft))
+        load_draft(&self.executor.writer, self.operation, self.context.scope()).await
     }
 
     pub(super) fn generation_current(&self) -> Result<()> {
@@ -102,22 +143,20 @@ impl<'a> Execution<'a> {
     }
 
     pub(super) async fn patch(&self, change: impl Fn(&mut Draft) -> Result<()>) -> Result<()> {
-        for _ in 0..16 {
-            let (job, mut draft) = self.load().await?;
-            change(&mut draft)?;
-            let next = draft.checkpoint(self.context.scope().control_namespace_uuid())?;
-            match self
-                .executor
-                .writer
-                .advance_lifecycle(self.operation, job.head().clone(), next)
-                .await
-            {
-                Ok(_) => return Ok(()),
-                Err(JournalError::Conflict) => continue,
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Err(anyhow!("journal contention requires reconciliation"))
+        self.patch_committed(change).await.map(drop)
+    }
+
+    async fn patch_committed(
+        &self,
+        change: impl Fn(&mut Draft) -> Result<()>,
+    ) -> Result<Box<CommittedDraftAtHead>> {
+        commit_patch(
+            &self.executor.writer,
+            self.operation,
+            self.context.scope(),
+            change,
+        )
+        .await
     }
 
     pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
@@ -159,8 +198,17 @@ impl<'a> Execution<'a> {
         pending: Operation,
         ready: Option<&EnforcedSlot>,
     ) -> Result<(Operation, bool)> {
+        let (completed, fresh, _) = self.rpc_checked_at_head(pending, ready).await?;
+        Ok((completed, fresh))
+    }
+
+    pub(super) async fn rpc_checked_at_head(
+        &self,
+        pending: Operation,
+        ready: Option<&EnforcedSlot>,
+    ) -> Result<(Operation, bool, Box<CommittedDraftAtHead>)> {
         let key = operation_key(&pending);
-        let (_, draft) = self.load().await?;
+        let (job, draft) = self.load().await?;
         let existing = draft
             .operations
             .iter()
@@ -173,7 +221,18 @@ impl<'a> Execution<'a> {
                 "operation identity conflicts"
             );
             if acknowledged(&existing) {
-                return Ok((existing, false));
+                // The strict Full load already confirmed this historical head.
+                // Its data does not become current if another mutation follows.
+                return Ok((
+                    existing,
+                    false,
+                    Box::new(CommittedDraftAtHead {
+                        operation: self.operation,
+                        scope: self.executor.writer.scope().clone(),
+                        head: job.head().clone(),
+                        draft,
+                    }),
+                ));
             }
             existing
         } else {
@@ -192,45 +251,48 @@ impl<'a> Execution<'a> {
             .await?;
             pending
         };
+        drop(job);
+        drop(draft);
         if let Some(slot) = ready {
             self.generation_current()?;
             slot.check_ready_for_claim_diagnosed(self.generation)
                 .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
         }
         let completed = self.call(input.clone()).await?;
-        self.patch(|draft| {
-            let existing = draft
-                .operations
-                .iter_mut()
-                .find(|op| operation_key(op) == key)
-                .context("pending request disappeared")?;
-            ensure!(
-                same(&without_response(existing), &input)?,
-                "pending request changed"
-            );
-            if acknowledged(existing) {
-                ensure!(same(existing, &completed)?, "acknowledgement changed");
-            }
-            *existing = completed.clone();
-            if let Some(worker) = response_worker(&completed) {
-                let managed = draft
-                    .run
-                    .plan
-                    .managed
-                    .as_mut()
-                    .context("worker without managed state")?;
-                if managed
-                    .worker
-                    .as_ref()
-                    .is_none_or(|old| old.revision <= worker.revision)
-                {
-                    managed.worker = Some(worker.clone());
+        let committed = self
+            .patch_committed(|draft| {
+                let existing = draft
+                    .operations
+                    .iter_mut()
+                    .find(|op| operation_key(op) == key)
+                    .context("pending request disappeared")?;
+                ensure!(
+                    same(&without_response(existing), &input)?,
+                    "pending request changed"
+                );
+                if acknowledged(existing) {
+                    ensure!(same(existing, &completed)?, "acknowledgement changed");
                 }
-            }
-            Ok(())
-        })
-        .await?;
-        Ok((completed, fresh))
+                *existing = completed.clone();
+                if let Some(worker) = response_worker(&completed) {
+                    let managed = draft
+                        .run
+                        .plan
+                        .managed
+                        .as_mut()
+                        .context("worker without managed state")?;
+                    if managed
+                        .worker
+                        .as_ref()
+                        .is_none_or(|old| old.revision <= worker.revision)
+                    {
+                        managed.worker = Some(worker.clone());
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        Ok((completed, fresh, committed))
     }
 
     pub(super) async fn call(&self, input: Operation) -> Result<Operation> {
@@ -472,3 +534,7 @@ pub(super) fn without_response(operation: &Operation) -> Operation {
     }
     operation
 }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "journal_tests.rs"]
+mod tests;

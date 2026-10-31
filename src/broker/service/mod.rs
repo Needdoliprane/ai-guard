@@ -44,6 +44,39 @@ impl fmt::Debug for AuthenticatedBatchContext {
     }
 }
 impl AuthenticatedBatchContext {
+    /// Test fixture for data/RPC contracts, using a real gateway identity check.
+    /// This does not qualify operator-registry or filesystem admission.
+    #[cfg(test)]
+    pub(crate) async fn for_executor_test(
+        client: AuditClient,
+        scope: JournalScopeV1,
+        config: Directory,
+        runtime: Runtime,
+    ) -> Result<Self> {
+        let identity = client.supervision_identity().await?;
+        ensure!(
+            identity.active
+                && identity.schema_version == 3
+                && identity.role == "runner"
+                && identity.tenant_id == scope.tenant_id()
+                && identity.control_namespace_uuid.as_deref()
+                    == Some(scope.control_namespace_uuid().to_string().as_str()),
+            "executor fixture requires the matching active gateway runner identity"
+        );
+        let cancel = CancelGeneration::new();
+        let expected_generation = cancel.current();
+        Ok(Self {
+            client,
+            scope,
+            config,
+            runtime,
+            cancel,
+            expected_generation,
+            source: None,
+            exclusions: Vec::new(),
+        })
+    }
+
     pub(crate) fn client(&self) -> &AuditClient {
         &self.client
     }

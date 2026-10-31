@@ -1,0 +1,19 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+     Running tests/broker_runtime.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_runtime-0887fbc2c5518ee2)
+
+running 1 test
+
+thread 'batch_failure_marker_keeps_only_validated_metadata' (13016921) panicked at tests/broker_runtime.rs:54:10:
+a real coded failure must be observed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test batch_failure_marker_keeps_only_validated_metadata ... FAILED
+
+failures:
+
+failures:
+    batch_failure_marker_keeps_only_validated_metadata
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test broker_runtime`

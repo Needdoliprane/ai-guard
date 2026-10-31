@@ -1,5 +1,6 @@
 //! Test-only process/inspection helpers. No create/start/stop/remove engine commands.
-use anyhow::{Context, Result, bail, ensure};
+use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::{
@@ -12,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{io::AsyncReadExt, process::Command as AsyncCommand};
+use uuid::Uuid;
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_agentsandbox");
 pub const CAPACITY: u32 = 8;
@@ -371,6 +373,102 @@ pub async fn audit(client: &reqwest::Client, origin: &str, token: &str) -> Resul
         .as_array()
         .cloned()
         .context("missing real audit items")
+}
+
+/// Test-only projection; arbitrary audit payloads must never enter test logs.
+pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
+    let items = page["items"]
+        .as_array()
+        .context("missing diagnostic items")?;
+    ensure!(items.len() <= 1, "diagnostic filter exceeded its limit");
+    let Some(event) = items.first() else {
+        return Ok(None);
+    };
+    ensure!(
+        event["kind"] == "broker.batch.failure" && event["source"] == "runner",
+        "unexpected diagnostic event identity"
+    );
+    let raw_id = event["id"]
+        .as_str()
+        .context("missing diagnostic event ID")?;
+    let event_id = Uuid::parse_str(raw_id).map_err(|_| anyhow!("invalid diagnostic event ID"))?;
+    ensure!(
+        !event_id.is_nil() && event_id.to_string() == raw_id,
+        "noncanonical diagnostic event ID"
+    );
+    let audit_seq = event["seq"]
+        .as_i64()
+        .context("missing diagnostic audit seq")?;
+    ensure!(audit_seq > 0, "invalid diagnostic audit seq");
+    let data = &event["data"];
+    ensure!(
+        data["version"].as_u64() == Some(1) && data["runtime_effect"] == "unknown",
+        "unsupported diagnostic evidence contract"
+    );
+    let phase: LocalFailurePhaseV1 = serde_json::from_value(data["phase"].clone())
+        .map_err(|_| anyhow!("invalid diagnostic phase"))?;
+    let broker_step = optional_failure_label(
+        data.get("broker_step"),
+        &[
+            "arm_exchange",
+            "registration",
+            "load_after_registration",
+            "readiness_before_claim",
+            "clock_before_claim",
+            "claim_exchange",
+            "generation_before_prepare",
+            "prepare",
+        ],
+    )?;
+    let enforcer_stage = nested_failure_stage(
+        data.get("enforcer"),
+        &["register", "before_claim", "prepare", "before_spawn"],
+    )?;
+    let runtime_stage = nested_failure_stage(
+        data.get("runtime"),
+        &[
+            "authority_before_spawn",
+            "invocation_before_spawn",
+            "stop_before_spawn",
+            "guard_before_spawn",
+            "spawn",
+            "started_observation",
+        ],
+    )?;
+    ensure!(
+        broker_step.is_some() || enforcer_stage.is_some() || runtime_stage.is_some(),
+        "missing coded diagnostic origin"
+    );
+    // Only this projection is persisted. Neither arbitrary data nor any error
+    // body/argv is copied. An outer exchange label is not evidence of an ACK.
+    Ok(Some(json!({
+        "event_id":event_id,"audit_seq":audit_seq,"kind":"broker.batch.failure",
+        "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
+        "runtime_stage":runtime_stage,"runtime_effect":"unknown"
+    })))
+}
+
+fn optional_failure_label<'a>(
+    value: Option<&'a Value>,
+    allowed: &[&str],
+) -> Result<Option<&'a str>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(label)) if allowed.contains(&label.as_str()) => Ok(Some(label)),
+        _ => bail!("invalid diagnostic stage label"),
+    }
+}
+
+fn nested_failure_stage<'a>(value: Option<&'a Value>, allowed: &[&str]) -> Result<Option<&'a str>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Object(fields)) => {
+            let stage = optional_failure_label(fields.get("stage"), allowed)?;
+            ensure!(stage.is_some(), "missing nested diagnostic stage");
+            Ok(stage)
+        }
+        _ => bail!("invalid nested diagnostic stage"),
+    }
 }
 
 pub async fn only_worker(

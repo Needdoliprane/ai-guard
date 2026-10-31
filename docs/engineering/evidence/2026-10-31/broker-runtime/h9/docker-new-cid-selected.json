@@ -1,0 +1,15 @@
+{
+  "Id": "44788e90678f0e2e614e0a96ae5fa5be12124e4fe5195123b975cbe761a06c4f",
+  "Name": "/aig-9fc2f189c8b74265953c7791f7b26cb4-afc09f4f99a14b10af44c8b9bcf64681",
+  "Created": "2026-10-31T20:09:34.76377326Z",
+  "Image": "sha256:7c64760cc4a5f29a40685cae2451afed914ce81671601166792cd087beab9db6",
+  "State": {
+    "Status": "created",
+    "Running": false,
+    "StartedAt": "0001-01-01T00:00:00Z",
+    "FinishedAt": "0001-01-01T00:00:00Z",
+    "ExitCode": 0,
+    "OOMKilled": false,
+    "RestartCount": 0
+  }
+}

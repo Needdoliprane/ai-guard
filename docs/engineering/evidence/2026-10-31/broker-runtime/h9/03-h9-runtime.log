@@ -1,0 +1,18 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `release` profile [optimized] target(s) in 1m 07s
+     Running tests/broker_runtime.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/release/deps/broker_runtime-0887fbc2c5518ee2)
+
+running 1 test
+retained broker runtime evidence: /private/tmp/br-BSL68s
+test broker_sigkill_preserves_original_deadline_without_second_start has been running for over 60 seconds
+Error: FAIL: broker reported a coded batch failure before the planned broker fault; inspect retained diagnostic event
+test broker_sigkill_preserves_original_deadline_without_second_start ... FAILED
+
+failures:
+
+failures:
+    broker_sigkill_preserves_original_deadline_without_second_start
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 232.70s
+
+error: test failed, to rerun pass `--test broker_runtime`

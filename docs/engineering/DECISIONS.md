@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 31 octobre — Draft acquitté et origine du snapshot préclaim
+
+H9 a réellement publié `slot_phase_mismatch` avant claim, sans sample local de l'erreur. L'expiration reste une hypothèse. Ajouter aux seuls retours d'échec concernés la phase, la génération, prepared_once et la clock validée du slot helper déjà lu. L'origine `helper_slot` reste distincte de `native_sample` ; une clock invalide est omise et signalée, une absence reste inconnue. Aucun nouveau sample, RPC ou travail externe sur succès, aucun texte arbitraire, terminal, fencing ou quota déduit de ces données.
+
+Le port privé de mutation du runner retourne un Draft lié à l'opération, au scope et au head du reçu Writer réussi, avec le candidat exact soumis. Une erreur ou un résultat inconnu ne retourne aucune donnée confirmée ; un conflit recharge et réapplique. Le replay ACK, chargé strictement, garde `fresh=false`. Vérifier le contexte avant Register puis réutiliser ces données retire seulement la relecture Full caller après Register. Le head est historique, sans garantie latest ni permission de start ; une révision devenue obsolète peut provoquer un refus conservateur. Les mutations ultérieures conservent Full/CAS, pending/ACK séparés, outbox, Cancel, planchers, bindings et synchronisations. Aucun cache de capacité ni changement persistant/public. Les copies ont un coût ; aucun gain temporel réel annoncé avant essai.
+
+À la demande du mainteneur, porter le budget global du harnais à600s pour préparation/reprise, sans modifier Arm worker5s, deadline d'origine et oracles de faute/arrêt. Le harnais consulte au plus une fois par seconde le premier diagnostic via le filtre API existant et ne conserve que huit métadonnées validées. Sa limite globale n'est jamais une rallonge d'exécution autorisée. [Preuves et limites](evidence/2026-10-31/broker-runtime/README.md).
+
 ## 31 octobre — préclaim diagnostiqué et adaptation lifecycle sous le verrou existant
 
 H7 atteint une Arm worker ACKée puis une erreur locale avant claim, hors de la couverture D3. Ajouter les étapes fermées `broker_step` et les diagnostics Register/BeforeClaim : aucune chaîne d'erreur arbitraire sérialisée, aucun sample inventé. La factory Register valide les métadonnées uniquement sur erreur ; `register` reste inchangé. Le Ready public partage le même corps et conserve ordre des gardes, codes, horloge, santé, génération, état et échéance. Ces données restent informatives avec effet inconnu et n'accordent aucune permission de start.

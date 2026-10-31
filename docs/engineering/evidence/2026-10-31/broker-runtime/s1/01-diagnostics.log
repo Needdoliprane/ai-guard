@@ -1,0 +1,20 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 05s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 12 tests
+test broker::enforcer::diagnostics::tests::rejected_arm_clock_classifies_deadline_identity_and_regression ... ok
+test broker::enforcer::diagnostics::tests::preclaim_failure_reasons_preserve_public_codes_without_inventing_a_sample ... ok
+test broker::enforcer::diagnostics::tests::missing_helper_clock_stays_unknown_and_legacy_diagnostics_keep_six_fields ... ok
+test broker::enforcer::diagnostics::tests::unknown_prepare_outcome_is_distinct_from_rejection_and_keeps_wire_codes ... ok
+test broker::enforcer::diagnostics::tests::helper_slot_snapshot_keeps_validated_helper_clock_distinct_from_native_sample ... ok
+test broker::enforcer::diagnostics::tests::registration_failure_rejects_noncanonical_or_invalid_arm_metadata ... ok
+test runner::broker::executor::diagnostics::tests::arbitrary_error_does_not_become_a_start_diagnostic ... ok
+test broker::enforcer::diagnostics::tests::opaque_diagnostic_survives_anyhow_context_without_free_form_data ... ok
+test runner::broker::executor::diagnostics::tests::coded_stage_survives_context_without_serializing_private_error_text ... ok
+test runner::broker::executor::diagnostics::tests::preclaim_context_reports_only_the_fixed_boundary ... ok
+test broker::enforcer::diagnostics::tests::helper_slot_snapshot_rejects_invalid_clock_without_copying_private_text ... ok
+test broker::enforcer::diagnostics::tests::registration_failure_keeps_only_validated_arm_metadata_and_closed_error_code ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 0.00s
+

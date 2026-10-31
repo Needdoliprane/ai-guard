@@ -1,0 +1,12 @@
+--- /private/tmp/ai-guard-s1-20261031-220416/post-format/src/runner/broker/executor/journal_tests.rs	2026-10-31 22:04:21.342978656 +0100
++++ /private/tmp/ai-guard-s2-20261031-222447/sources/src/runner/broker/executor/journal_tests.rs	2026-10-31 22:24:47.561363257 +0100
+@@ -457,8 +457,7 @@
+     let error = execution
+         .rpc_checked_at_head(pending, None)
+         .await
+-        .err()
+-        .expect("strict writer binding validation must refuse this pending mutation");
++        .expect_err("strict writer binding validation must refuse this pending mutation");
+     assert!(error.downcast_ref::<JournalError>().is_some());
+     assert!(MOVE_BINDING_ONCE.with(|slot| slot.borrow().is_none()));
+     assert!(preserved.is_file());

@@ -77,8 +77,8 @@ impl Execution<'_> {
                 response: None,
             }
         };
-        let (arm, _) = self
-            .rpc(pending)
+        let (arm, _, committed) = self
+            .rpc_checked_at_head(pending, None)
             .await
             .context(diagnostics::PreclaimStep::ArmExchange)?;
         let Operation::Arm {
@@ -93,6 +93,11 @@ impl Execution<'_> {
         response
             .receipt
             .validate_for_arm(&request)
+            .context(diagnostics::PreclaimStep::ArmExchange)?;
+        // The exact acknowledged head is data, not a latest-state or start
+        // capability. Reject any operation/profile mismatch before using it.
+        let (_confirmed_arm_head, current) = committed
+            .into_parts(self.operation, self.context.scope())
             .context(diagnostics::PreclaimStep::ArmExchange)?;
         let slot = self
             .executor
@@ -121,10 +126,7 @@ impl Execution<'_> {
                 }
             })
             .context(diagnostics::PreclaimStep::Registration)?;
-        let (_, current) = self
-            .load()
-            .await
-            .context(diagnostics::PreclaimStep::LoadAfterRegistration)?;
+        // Later mutations still reload and use the writer's strict CAS.
         if current.operations.iter().any(|op| match op {
             Operation::WorkerClaim { request: claim, .. } => {
                 claim.arm_receipt.arm_id == request.operation_id

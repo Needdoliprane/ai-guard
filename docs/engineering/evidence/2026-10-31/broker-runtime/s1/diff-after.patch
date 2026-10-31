@@ -1,0 +1,958 @@
+diff --git a/src/broker/enforcer/client.rs b/src/broker/enforcer/client.rs
+index 60a94e4..53f1698 100644
+--- a/src/broker/enforcer/client.rs
++++ b/src/broker/enforcer/client.rs
+@@ -754,7 +754,7 @@ impl EnforcedSlot {
+             &self.local.generation,
+             &self.local.stop,
+         ) {
+-            return Err(failure(reason, None));
++            return Err(failure(reason, None).with_slot_snapshot(status));
+         }
+         let clock = NativeHostClock::new()
+             .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
+@@ -955,7 +955,7 @@ impl BeforeSpawnGuard for SpawnGuard {
+             return Err(failure(EnforcerFailureReason::GenerationChanged, None).into());
+         }
+         if let Some(reason) = spawn_snapshot_failure(status, self.expected_generation, received) {
+-            return Err(failure(reason, None).into());
++            return Err(failure(reason, None).with_slot_snapshot(status).into());
+         }
+         if *self.local.stop.borrow() {
+             return Err(failure(EnforcerFailureReason::StopSignalled, None).into());
+diff --git a/src/broker/enforcer/diagnostics.rs b/src/broker/enforcer/diagnostics.rs
+index 5178c44..bf8ea5a 100644
+--- a/src/broker/enforcer/diagnostics.rs
++++ b/src/broker/enforcer/diagnostics.rs
+@@ -1,6 +1,6 @@
+ //! Emitted local failure facts, never a wire request or a start capability.
+ 
+-use super::EnforcerError;
++use super::{EnforcerError, EnforcerSlotStatusV1, SlotPhaseV1};
+ use crate::control::{ArmV1, HostClockSampleV1};
+ use serde::Serialize;
+ use std::fmt;
+@@ -47,6 +47,23 @@ pub(super) enum EnforcerFailureReason {
+     ClockSnapshotStale,
+ }
+ 
++#[derive(Clone, Copy, Serialize)]
++#[serde(rename_all = "snake_case")]
++enum SlotSnapshotSource {
++    HelperSlot,
++}
++
++/// Retained helper facts, not a fresh local clock or a runtime observation.
++#[derive(Clone, Serialize)]
++struct SlotFailureSnapshot {
++    source: SlotSnapshotSource,
++    phase: SlotPhaseV1,
++    prepared_once: bool,
++    generation: u64,
++    clock: Option<HostClockSampleV1>,
++    clock_rejected: bool,
++}
++
+ /// Local error provenance, deliberately not deserializable into authority.
+ /// A sample is the check's existing local native reading, not an error-time
+ /// timestamp. It is absent when that check had not reached its clock sample.
+@@ -59,6 +76,8 @@ pub(crate) struct EnforcerStageFailure {
+     reason: EnforcerFailureReason,
+     native_sample: Option<Box<HostClockSampleV1>>,
+     original_deadline_ns_decimal: String,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    slot_snapshot: Option<Box<SlotFailureSnapshot>>,
+ }
+ impl EnforcerStageFailure {
+     /// Called only on a failed registration, with the original durable Arm.
+@@ -92,9 +111,30 @@ impl EnforcerStageFailure {
+             reason,
+             native_sample: native_sample.cloned().map(Box::new),
+             original_deadline_ns_decimal: arm.deadline_ns_decimal.clone(),
++            slot_snapshot: None,
+         }
+     }
+ 
++    /// Called only after an existing slot predicate failed, while its status
++    /// mutex is retained. Invalid helper clock text is never copied, and an
++    /// absent clock remains unknown rather than a rejected or native reading.
++    pub(super) fn with_slot_snapshot(mut self, status: &EnforcerSlotStatusV1) -> Self {
++        let (clock, clock_rejected) = match status.clock.as_ref() {
++            Some(clock) if clock.validate().is_ok() => (Some(clock.clone()), false),
++            Some(_) => (None, true),
++            None => (None, false),
++        };
++        self.slot_snapshot = Some(Box::new(SlotFailureSnapshot {
++            source: SlotSnapshotSource::HelperSlot,
++            phase: status.phase,
++            prepared_once: status.prepared_once,
++            generation: status.generation,
++            clock,
++            clock_rejected,
++        }));
++        self
++    }
++
+     /// Preserve the exact pre-diagnostic public/IPC error classification.
+     pub(super) fn wire_code(&self) -> EnforcerError {
+         use EnforcerFailureReason as Reason;
+@@ -195,6 +235,7 @@ mod tests {
+             reason,
+             native_sample: Some(Box::new(sample(5))),
+             original_deadline_ns_decimal: "6".into(),
++            slot_snapshot: None,
+         }
+     }
+ 
+@@ -231,6 +272,122 @@ mod tests {
+         }
+     }
+ 
++    fn slot(clock: Option<HostClockSampleV1>) -> EnforcerSlotStatusV1 {
++        EnforcerSlotStatusV1 {
++            arm_id: "private-helper-arm-canary".into(),
++            registration_hash: "private-registration-hash-canary".into(),
++            phase: SlotPhaseV1::Quarantined,
++            prepared_once: false,
++            generation: 7,
++            clock,
++            observation: None,
++            stop_failures: 0,
++        }
++    }
++
++    #[test]
++    fn helper_slot_snapshot_keeps_validated_helper_clock_distinct_from_native_sample() {
++        let status = slot(Some(sample(17)));
++        for stage in [EnforcerStage::BeforeClaim, EnforcerStage::BeforeSpawn] {
++            let diagnostic = EnforcerStageFailure::from_arm(
++                &arm(),
++                stage,
++                EnforcerFailureReason::SlotPhaseMismatch,
++                None,
++            )
++            .with_slot_snapshot(&status);
++            assert_eq!(diagnostic.wire_code(), EnforcerError::NotReady);
++            let value = serde_json::to_value(&diagnostic).unwrap();
++            assert_eq!(value["reason"], "slot_phase_mismatch");
++            assert!(value["native_sample"].is_null());
++            assert_eq!(
++                value["slot_snapshot"],
++                serde_json::json!({
++                    "source": "helper_slot",
++                    "phase": "quarantined",
++                    "prepared_once": false,
++                    "generation": 7,
++                    "clock": sample(17),
++                    "clock_rejected": false,
++                })
++            );
++            assert_eq!(value.as_object().unwrap().len(), 7);
++            let serialized = serde_json::to_string(&diagnostic).unwrap();
++            assert!(!serialized.contains("private-helper-arm-canary"));
++            assert!(!serialized.contains("private-registration-hash-canary"));
++        }
++    }
++
++    #[test]
++    fn helper_slot_snapshot_rejects_invalid_clock_without_copying_private_text() {
++        let valid = sample(17);
++        let mut invalid_clocks = Vec::new();
++        for boot_id in [
++            "private-helper-clock-canary",
++            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
++            "00000000-0000-0000-0000-000000000000",
++        ] {
++            let mut invalid = valid.clone();
++            invalid.boot_id = boot_id.into();
++            invalid_clocks.push(invalid);
++        }
++        for decimal in [
++            "private-helper-clock-canary".into(),
++            "017".into(),
++            "1".repeat(40),
++        ] {
++            let mut invalid = valid.clone();
++            invalid.continuous_ns_decimal = decimal;
++            invalid_clocks.push(invalid);
++        }
++        let mut invalid = valid.clone();
++        invalid.observed_utc = Some("private-helper-clock-canary".into());
++        invalid_clocks.push(invalid);
++        let mut invalid = valid;
++        invalid.version = 2;
++        invalid_clocks.push(invalid);
++        for invalid in invalid_clocks {
++            let diagnostic = EnforcerStageFailure::from_arm(
++                &arm(),
++                EnforcerStage::BeforeClaim,
++                EnforcerFailureReason::SlotPhaseMismatch,
++                None,
++            )
++            .with_slot_snapshot(&slot(Some(invalid)));
++            let value = serde_json::to_value(&diagnostic).unwrap();
++            assert!(value["native_sample"].is_null());
++            assert!(value["slot_snapshot"]["clock"].is_null());
++            assert_eq!(value["slot_snapshot"]["clock_rejected"], true);
++            assert_eq!(value["slot_snapshot"]["phase"], "quarantined");
++            assert_eq!(diagnostic.wire_code(), EnforcerError::NotReady);
++            assert!(
++                !serde_json::to_string(&diagnostic)
++                    .unwrap()
++                    .contains("private-helper-clock-canary")
++            );
++        }
++    }
++
++    #[test]
++    fn missing_helper_clock_stays_unknown_and_legacy_diagnostics_keep_six_fields() {
++        let diagnostic = EnforcerStageFailure::from_arm(
++            &arm(),
++            EnforcerStage::BeforeClaim,
++            EnforcerFailureReason::SlotPhaseMismatch,
++            None,
++        );
++        let legacy = serde_json::to_value(&diagnostic).unwrap();
++        assert_eq!(legacy.as_object().unwrap().len(), 6);
++        assert!(legacy.get("slot_snapshot").is_none());
++        let retained = diagnostic.clone().with_slot_snapshot(&slot(None));
++        let value = serde_json::to_value(&retained).unwrap();
++        assert!(value["slot_snapshot"]["clock"].is_null());
++        assert_eq!(value["slot_snapshot"]["clock_rejected"], false);
++        assert!(value["native_sample"].is_null());
++        assert_eq!(retained.wire_code(), diagnostic.wire_code());
++        assert_eq!(serde_json::to_value(&diagnostic).unwrap(), legacy);
++    }
++
+     #[test]
+     fn registration_failure_keeps_only_validated_arm_metadata_and_closed_error_code() {
+         let arm = arm();
+diff --git a/src/broker/service/mod.rs b/src/broker/service/mod.rs
+index d12f64d..e250f7f 100644
+--- a/src/broker/service/mod.rs
++++ b/src/broker/service/mod.rs
+@@ -44,6 +44,39 @@ impl fmt::Debug for AuthenticatedBatchContext {
+     }
+ }
+ impl AuthenticatedBatchContext {
++    /// Test fixture for data/RPC contracts, using a real gateway identity check.
++    /// This does not qualify operator-registry or filesystem admission.
++    #[cfg(test)]
++    pub(crate) async fn for_executor_test(
++        client: AuditClient,
++        scope: JournalScopeV1,
++        config: Directory,
++        runtime: Runtime,
++    ) -> Result<Self> {
++        let identity = client.supervision_identity().await?;
++        ensure!(
++            identity.active
++                && identity.schema_version == 3
++                && identity.role == "runner"
++                && identity.tenant_id == scope.tenant_id()
++                && identity.control_namespace_uuid.as_deref()
++                    == Some(scope.control_namespace_uuid().to_string().as_str()),
++            "executor fixture requires the matching active gateway runner identity"
++        );
++        let cancel = CancelGeneration::new();
++        let expected_generation = cancel.current();
++        Ok(Self {
++            client,
++            scope,
++            config,
++            runtime,
++            cancel,
++            expected_generation,
++            source: None,
++            exclusions: Vec::new(),
++        })
++    }
++
+     pub(crate) fn client(&self) -> &AuditClient {
+         &self.client
+     }
+diff --git a/src/runner/broker/executor.rs b/src/runner/broker/executor.rs
+index e33a805..763cb20 100644
+--- a/src/runner/broker/executor.rs
++++ b/src/runner/broker/executor.rs
+@@ -132,22 +132,60 @@ impl Draft {
+             .and_then(|m| m.worker.as_ref())
+             .context("worker is not admitted")
+     }
+-    fn checkpoint(self, namespace: Uuid) -> Result<BrokerCheckpointV3> {
++    fn checkpoint(&self, namespace: Uuid) -> Result<BrokerCheckpointV3> {
+         let runner = CheckpointPayloadV1(CheckpointDataV1 {
+             version: 1,
+-            current_request: self.run.plan.request,
+-            managed: self.run.plan.managed,
++            current_request: self.run.plan.request.clone(),
++            managed: self.run.plan.managed.clone(),
+         });
+         Ok(BrokerCheckpointV3::new(
+             BrokerCheckpointV2::new(
+                 runner,
+-                SupervisionCheckpointV1::new(namespace, self.helpers, self.operations)?,
++                SupervisionCheckpointV1::new(
++                    namespace,
++                    self.helpers.clone(),
++                    self.operations.clone(),
++                )?,
+             )?,
+-            self.commands,
++            self.commands.clone(),
+         )?)
+     }
+ }
+ 
++/// Confirmed runner data at this exact head, never a latest-state or start
++/// capability. V4 outbox data is deliberately absent from Draft.
++struct CommittedDraftAtHead {
++    operation: Uuid,
++    scope: JournalScopeV1,
++    head: crate::broker::journal::RevisionRefV1,
++    draft: Draft,
++}
++impl CommittedDraftAtHead {
++    fn require_context(&self, operation: Uuid, scope: &JournalScopeV1) -> Result<()> {
++        ensure!(
++            self.operation == operation
++                && self.draft.run.operation_id() == operation
++                && same(&self.scope, scope)?,
++            "confirmed draft context changed"
++        );
++        Ok(())
++    }
++    fn into_parts(
++        self: Box<Self>,
++        operation: Uuid,
++        scope: &JournalScopeV1,
++    ) -> Result<(crate::broker::journal::RevisionRefV1, Draft)> {
++        self.require_context(operation, scope)?;
++        let Self { head, draft, .. } = *self;
++        Ok((head, draft))
++    }
++}
++impl fmt::Debug for CommittedDraftAtHead {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.write_str("CommittedDraftAtHead(<private confirmed data>)")
++    }
++}
++
+ struct Execution<'a> {
+     executor: &'a BatchExecutor,
+     context: &'a AuthenticatedBatchContext,
+diff --git a/src/runner/broker/executor/diagnostics.rs b/src/runner/broker/executor/diagnostics.rs
+index edd9942..4f33906 100644
+--- a/src/runner/broker/executor/diagnostics.rs
++++ b/src/runner/broker/executor/diagnostics.rs
+@@ -13,7 +13,6 @@ use std::fmt;
+ pub(super) enum PreclaimStep {
+     ArmExchange,
+     Registration,
+-    LoadAfterRegistration,
+     ReadinessBeforeClaim,
+     ClockBeforeClaim,
+     ClaimExchange,
+@@ -104,11 +103,11 @@ mod tests {
+     fn preclaim_context_reports_only_the_fixed_boundary() {
+         let private = "synthetic-private-journal-error-keep-out-of-audit";
+         let error = anyhow::anyhow!("{private}")
+-            .context(PreclaimStep::LoadAfterRegistration)
++            .context(PreclaimStep::ClaimExchange)
+             .context("private outer context");
+         let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
+         let value = serde_json::to_value(diagnostic).unwrap();
+-        assert_eq!(value["broker_step"], "load_after_registration");
++        assert_eq!(value["broker_step"], "claim_exchange");
+         assert_eq!(value["runtime_effect"], "unknown");
+         assert!(value["enforcer"].is_null());
+         assert!(value["runtime"].is_null());
+diff --git a/src/runner/broker/executor/helpers.rs b/src/runner/broker/executor/helpers.rs
+index d1d005b..5b16a36 100644
+--- a/src/runner/broker/executor/helpers.rs
++++ b/src/runner/broker/executor/helpers.rs
+@@ -77,8 +77,8 @@ impl Execution<'_> {
+                 response: None,
+             }
+         };
+-        let (arm, _) = self
+-            .rpc(pending)
++        let (arm, _, committed) = self
++            .rpc_checked_at_head(pending, None)
+             .await
+             .context(diagnostics::PreclaimStep::ArmExchange)?;
+         let Operation::Arm {
+@@ -94,6 +94,11 @@ impl Execution<'_> {
+             .receipt
+             .validate_for_arm(&request)
+             .context(diagnostics::PreclaimStep::ArmExchange)?;
++        // The exact acknowledged head is data, not a latest-state or start
++        // capability. Reject any operation/profile mismatch before using it.
++        let (_confirmed_arm_head, current) = committed
++            .into_parts(self.operation, self.context.scope())
++            .context(diagnostics::PreclaimStep::ArmExchange)?;
+         let slot = self
+             .executor
+             .enforcer
+@@ -121,10 +126,7 @@ impl Execution<'_> {
+                 }
+             })
+             .context(diagnostics::PreclaimStep::Registration)?;
+-        let (_, current) = self
+-            .load()
+-            .await
+-            .context(diagnostics::PreclaimStep::LoadAfterRegistration)?;
++        // Later mutations still reload and use the writer's strict CAS.
+         if current.operations.iter().any(|op| match op {
+             Operation::WorkerClaim { request: claim, .. } => {
+                 claim.arm_receipt.arm_id == request.operation_id
+diff --git a/src/runner/broker/executor/journal.rs b/src/runner/broker/executor/journal.rs
+index 2f944bd..137d646 100644
+--- a/src/runner/broker/executor/journal.rs
++++ b/src/runner/broker/executor/journal.rs
+@@ -1,6 +1,58 @@
+ //! Private batch journal operations.
+ use super::*;
+ 
++async fn load_draft(
++    writer: &WriterClient,
++    operation: Uuid,
++    scope: &JournalScopeV1,
++) -> Result<(AcceptedJobV1, Draft)> {
++    ensure!(same(writer.scope(), scope)?, "writer scope changed");
++    let job = writer.load(operation).await?.context("job disappeared")?;
++    ensure!(
++        job.operation_id() == operation && same(job.scope(), scope)?,
++        "job scope changed"
++    );
++    let draft = Draft::from_job(&job)?;
++    Ok((job, draft))
++}
++
++async fn commit_patch(
++    writer: &WriterClient,
++    operation: Uuid,
++    scope: &JournalScopeV1,
++    change: impl Fn(&mut Draft) -> Result<()>,
++) -> Result<Box<CommittedDraftAtHead>> {
++    for _ in 0..16 {
++        let (job, mut draft) = load_draft(writer, operation, scope).await?;
++        change(&mut draft)?;
++        let next = draft.checkpoint(scope.control_namespace_uuid())?;
++        #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
++        tests::before_commit()?;
++        match writer
++            .advance_lifecycle(operation, job.head().clone(), next)
++            .await
++        {
++            Ok(receipt) => {
++                ensure!(
++                    receipt.operation_id() == operation,
++                    "checkpoint receipt operation changed"
++                );
++                // Only an acknowledged exact input produces this value. An
++                // error, including an unknown publication, returns no Draft.
++                return Ok(Box::new(CommittedDraftAtHead {
++                    operation,
++                    scope: writer.scope().clone(),
++                    head: receipt.head().clone(),
++                    draft,
++                }));
++            }
++            Err(JournalError::Conflict) => continue,
++            Err(error) => return Err(error.into()),
++        }
++    }
++    Err(anyhow!("journal contention requires reconciliation"))
++}
++
+ impl<'a> Execution<'a> {
+     pub(super) async fn open(
+         executor: &'a BatchExecutor,
+@@ -47,18 +99,7 @@ impl<'a> Execution<'a> {
+     }
+ 
+     pub(super) async fn load(&self) -> Result<(AcceptedJobV1, Draft)> {
+-        let job = self
+-            .executor
+-            .writer
+-            .load(self.operation)
+-            .await?
+-            .context("job disappeared")?;
+-        ensure!(
+-            same(job.scope(), self.context.scope())?,
+-            "job scope changed"
+-        );
+-        let draft = Draft::from_job(&job)?;
+-        Ok((job, draft))
++        load_draft(&self.executor.writer, self.operation, self.context.scope()).await
+     }
+ 
+     pub(super) fn generation_current(&self) -> Result<()> {
+@@ -102,22 +143,20 @@ impl<'a> Execution<'a> {
+     }
+ 
+     pub(super) async fn patch(&self, change: impl Fn(&mut Draft) -> Result<()>) -> Result<()> {
+-        for _ in 0..16 {
+-            let (job, mut draft) = self.load().await?;
+-            change(&mut draft)?;
+-            let next = draft.checkpoint(self.context.scope().control_namespace_uuid())?;
+-            match self
+-                .executor
+-                .writer
+-                .advance_lifecycle(self.operation, job.head().clone(), next)
+-                .await
+-            {
+-                Ok(_) => return Ok(()),
+-                Err(JournalError::Conflict) => continue,
+-                Err(error) => return Err(error.into()),
+-            }
+-        }
+-        Err(anyhow!("journal contention requires reconciliation"))
++        self.patch_committed(change).await.map(drop)
++    }
++
++    async fn patch_committed(
++        &self,
++        change: impl Fn(&mut Draft) -> Result<()>,
++    ) -> Result<Box<CommittedDraftAtHead>> {
++        commit_patch(
++            &self.executor.writer,
++            self.operation,
++            self.context.scope(),
++            change,
++        )
++        .await
+     }
+ 
+     pub(super) async fn failure(&self, phase: LocalFailurePhaseV1, error: &anyhow::Error) {
+@@ -159,8 +198,17 @@ impl<'a> Execution<'a> {
+         pending: Operation,
+         ready: Option<&EnforcedSlot>,
+     ) -> Result<(Operation, bool)> {
++        let (completed, fresh, _) = self.rpc_checked_at_head(pending, ready).await?;
++        Ok((completed, fresh))
++    }
++
++    pub(super) async fn rpc_checked_at_head(
++        &self,
++        pending: Operation,
++        ready: Option<&EnforcedSlot>,
++    ) -> Result<(Operation, bool, Box<CommittedDraftAtHead>)> {
+         let key = operation_key(&pending);
+-        let (_, draft) = self.load().await?;
++        let (job, draft) = self.load().await?;
+         let existing = draft
+             .operations
+             .iter()
+@@ -173,7 +221,18 @@ impl<'a> Execution<'a> {
+                 "operation identity conflicts"
+             );
+             if acknowledged(&existing) {
+-                return Ok((existing, false));
++                // The strict Full load already confirmed this historical head.
++                // Its data does not become current if another mutation follows.
++                return Ok((
++                    existing,
++                    false,
++                    Box::new(CommittedDraftAtHead {
++                        operation: self.operation,
++                        scope: self.executor.writer.scope().clone(),
++                        head: job.head().clone(),
++                        draft,
++                    }),
++                ));
+             }
+             existing
+         } else {
+@@ -192,45 +251,48 @@ impl<'a> Execution<'a> {
+             .await?;
+             pending
+         };
++        drop(job);
++        drop(draft);
+         if let Some(slot) = ready {
+             self.generation_current()?;
+             slot.check_ready_for_claim_diagnosed(self.generation)
+                 .context(diagnostics::PreclaimStep::ReadinessBeforeClaim)?;
+         }
+         let completed = self.call(input.clone()).await?;
+-        self.patch(|draft| {
+-            let existing = draft
+-                .operations
+-                .iter_mut()
+-                .find(|op| operation_key(op) == key)
+-                .context("pending request disappeared")?;
+-            ensure!(
+-                same(&without_response(existing), &input)?,
+-                "pending request changed"
+-            );
+-            if acknowledged(existing) {
+-                ensure!(same(existing, &completed)?, "acknowledgement changed");
+-            }
+-            *existing = completed.clone();
+-            if let Some(worker) = response_worker(&completed) {
+-                let managed = draft
+-                    .run
+-                    .plan
+-                    .managed
+-                    .as_mut()
+-                    .context("worker without managed state")?;
+-                if managed
+-                    .worker
+-                    .as_ref()
+-                    .is_none_or(|old| old.revision <= worker.revision)
+-                {
+-                    managed.worker = Some(worker.clone());
++        let committed = self
++            .patch_committed(|draft| {
++                let existing = draft
++                    .operations
++                    .iter_mut()
++                    .find(|op| operation_key(op) == key)
++                    .context("pending request disappeared")?;
++                ensure!(
++                    same(&without_response(existing), &input)?,
++                    "pending request changed"
++                );
++                if acknowledged(existing) {
++                    ensure!(same(existing, &completed)?, "acknowledgement changed");
+                 }
+-            }
+-            Ok(())
+-        })
+-        .await?;
+-        Ok((completed, fresh))
++                *existing = completed.clone();
++                if let Some(worker) = response_worker(&completed) {
++                    let managed = draft
++                        .run
++                        .plan
++                        .managed
++                        .as_mut()
++                        .context("worker without managed state")?;
++                    if managed
++                        .worker
++                        .as_ref()
++                        .is_none_or(|old| old.revision <= worker.revision)
++                    {
++                        managed.worker = Some(worker.clone());
++                    }
++                }
++                Ok(())
++            })
++            .await?;
++        Ok((completed, fresh, committed))
+     }
+ 
+     pub(super) async fn call(&self, input: Operation) -> Result<Operation> {
+@@ -472,3 +534,7 @@ pub(super) fn without_response(operation: &Operation) -> Operation {
+     }
+     operation
+ }
++
++#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
++#[path = "journal_tests.rs"]
++mod tests;
+diff --git a/tests/broker_runtime.rs b/tests/broker_runtime.rs
+index bd520ae..df8a231 100644
+--- a/tests/broker_runtime.rs
++++ b/tests/broker_runtime.rs
+@@ -31,20 +31,87 @@ use harness::{CAPACITY, Evidence, Selection};
+ use serde_json::{Value, json};
+ use sha2::{Digest, Sha256};
+ use std::{fs, os::unix::process::ExitStatusExt, time::Duration};
+-use tokio::time::{Instant, sleep, timeout};
++use tokio::time::{Instant, sleep, sleep_until, timeout};
+ use uuid::Uuid;
+ 
+ const PROFILE: &str = "g09";
+ const NS: u128 = 1_000_000_000;
+ 
++#[test]
++fn batch_failure_marker_keeps_only_validated_metadata() {
++    let private = "synthetic-private-audit-body-do-not-persist";
++    let page = json!({"items":[{
++        "id":"11111111-1111-4111-8111-111111111111", "seq":17,
++        "kind":"broker.batch.failure", "source":"runner",
++        "command":{"argv":[private]},
++        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++            "broker_step":"readiness_before_claim",
++            "enforcer":{"stage":"before_claim","private":private},
++            "runtime":null,"extra":private}
++    }],"next_cursor":17});
++    let marker = harness::batch_failure_marker(&page)
++        .unwrap()
++        .expect("a real coded failure must be observed");
++    assert_eq!(marker["audit_seq"], 17);
++    assert_eq!(marker["broker_step"], "readiness_before_claim");
++    assert_eq!(marker["enforcer_stage"], "before_claim");
++    assert_eq!(marker["runtime_effect"], "unknown");
++    assert!(!serde_json::to_string(&marker).unwrap().contains(private));
++    assert_eq!(marker.as_object().unwrap().len(), 8);
++}
++
++#[test]
++fn batch_failure_marker_empty_page_is_not_a_failure() {
++    assert!(
++        harness::batch_failure_marker(&json!({"items":[],"next_cursor":null}))
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[test]
++fn batch_failure_marker_rejects_invalid_public_metadata() {
++    let private = "synthetic-private-invalid-label-do-not-print";
++    let valid = json!({"items":[{
++        "id":"11111111-1111-4111-8111-111111111111", "seq":1,
++        "kind":"broker.batch.failure", "source":"runner",
++        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++            "broker_step":"registration","enforcer":null,"runtime":null}
++    }]});
++    for pointer in [
++        "/items/0/id",
++        "/items/0/kind",
++        "/items/0/source",
++        "/items/0/data/phase",
++        "/items/0/data/broker_step",
++        "/items/0/data/enforcer",
++        "/items/0/data/runtime",
++    ] {
++        let mut invalid = valid.clone();
++        *invalid.pointer_mut(pointer).unwrap() = json!(private);
++        let error = harness::batch_failure_marker(&invalid).unwrap_err();
++        assert!(!error.to_string().contains(private));
++    }
++    for (pointer, value) in [
++        ("/items/0/seq", json!(0)),
++        ("/items/0/data/version", json!(2)),
++        ("/items/0/data/runtime_effect", json!("observed")),
++        ("/items/0/data/broker_step", Value::Null),
++    ] {
++        let mut invalid = valid.clone();
++        *invalid.pointer_mut(pointer).unwrap() = value;
++        assert!(harness::batch_failure_marker(&invalid).is_err());
++    }
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ #[ignore = "requires explicit Docker program/Unix endpoint/image/rootful opt-in; retains enforcer and QA resources"]
+ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
+     let selection = Selection::read()?;
+     let evidence = Evidence::new()?;
+-    let outcome = timeout(Duration::from_secs(240), run(&selection, &evidence))
++    let outcome = timeout(Duration::from_secs(600), run(&selection, &evidence))
+         .await
+-        .context("broker runtime qualification exceeded the 240-second global bound")
++        .context("broker runtime qualification exceeded the 600-second global bound")
+         .and_then(|result| result);
+     evidence.write("result.json", &json!({
+         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
+@@ -204,19 +271,17 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
+         _ => bail!("real submission did not produce fresh Accepted"),
+     }
+     let clock = NativeHostClock::new()?;
+-    // H6 reached a real helper claim and completed its process before the old
+-    // 45-second observation bound cut off preparation. This is only the test's
+-    // wait for Running: the worker's original five-second Arm is unchanged.
+-    let limit = Instant::now() + Duration::from_secs(120);
++    // H8 reached 120 seconds without Running or a coded failure; completion of
++    // its Arm reply was not established. Give the whole scenario 600 seconds,
++    // bound and stop on an explicit failure, not an intermediate timeout.
++    // The worker's original five-second Arm and every post-Running oracle stay
++    // unchanged. The HTTP query does not enqueue any writer/journal read.
++    let mut next_failure_poll = Instant::now();
+     let mut observed_worker: Option<(String, WorkerStateV1)> = None;
+     let worker = loop {
+         broker.running()?;
+         gateway.running()?;
+-        ensure!(
+-            Instant::now() < limit,
+-            "FAIL: worker never observed Running with Ready+prepared_once; inspect retained control/journal/stderr"
+-        );
+-        if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
++        let running = if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
+             if let Some((previous, _)) = &observed_worker {
+                 ensure!(
+                     previous == &worker.worker_id,
+@@ -229,20 +294,48 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
+                 observed_worker = Some(observed);
+             }
+             if worker.state == WorkerStateV1::Running {
+-                break worker;
++                Some(worker)
++            } else {
++                ensure!(
++                    !matches!(
++                        worker.state,
++                        WorkerStateV1::Terminal | WorkerStateV1::Cancelled
++                    ),
++                    "worker became terminal before Running was observed"
++                );
++                None
+             }
+-            ensure!(
+-                !matches!(
+-                    worker.state,
+-                    WorkerStateV1::Terminal | WorkerStateV1::Cancelled
+-                ),
+-                "worker became terminal before Running was observed"
+-            );
+         } else {
+             ensure!(
+                 observed_worker.is_none(),
+                 "previously observed worker disappeared"
+             );
++            None
++        };
++        // One final diagnostic read is required before leaving this phase.
++        // It obeys the same rate bound and can only fail the strict five-second
++        // oracle later; it never grants more execution time to the worker.
++        if running.is_some() && Instant::now() < next_failure_poll {
++            sleep_until(next_failure_poll).await;
++        }
++        if Instant::now() >= next_failure_poll {
++            let page: Value = harness::get(
++                &http,
++                &origin,
++                &runner,
++                "events?kind=broker.batch.failure&limit=1&order=asc",
++            )
++            .await?;
++            if let Some(marker) = harness::batch_failure_marker(&page)? {
++                evidence.write("reported-batch-failure.json", &marker)?;
++                bail!(
++                    "FAIL: broker reported a coded batch failure before the planned broker fault; inspect retained diagnostic event"
++                );
++            }
++            next_failure_poll = Instant::now() + Duration::from_secs(1);
++        }
++        if let Some(worker) = running {
++            break worker;
+         }
+         sleep(Duration::from_millis(200)).await;
+     };
+diff --git a/tests/support/broker_runtime.rs b/tests/support/broker_runtime.rs
+index 7203ed9..c3724c5 100644
+--- a/tests/support/broker_runtime.rs
++++ b/tests/support/broker_runtime.rs
+@@ -1,5 +1,6 @@
+ //! Test-only process/inspection helpers. No create/start/stop/remove engine commands.
+-use anyhow::{Context, Result, bail, ensure};
++use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
++use anyhow::{Context, Result, anyhow, bail, ensure};
+ use serde::de::DeserializeOwned;
+ use serde_json::{Value, json};
+ use std::{
+@@ -12,6 +13,7 @@ use std::{
+     time::{Duration, Instant},
+ };
+ use tokio::{io::AsyncReadExt, process::Command as AsyncCommand};
++use uuid::Uuid;
+ 
+ pub const BIN: &str = env!("CARGO_BIN_EXE_agentsandbox");
+ pub const CAPACITY: u32 = 8;
+@@ -373,6 +375,102 @@ pub async fn audit(client: &reqwest::Client, origin: &str, token: &str) -> Resul
+         .context("missing real audit items")
+ }
+ 
++/// Test-only projection; arbitrary audit payloads must never enter test logs.
++pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
++    let items = page["items"]
++        .as_array()
++        .context("missing diagnostic items")?;
++    ensure!(items.len() <= 1, "diagnostic filter exceeded its limit");
++    let Some(event) = items.first() else {
++        return Ok(None);
++    };
++    ensure!(
++        event["kind"] == "broker.batch.failure" && event["source"] == "runner",
++        "unexpected diagnostic event identity"
++    );
++    let raw_id = event["id"]
++        .as_str()
++        .context("missing diagnostic event ID")?;
++    let event_id = Uuid::parse_str(raw_id).map_err(|_| anyhow!("invalid diagnostic event ID"))?;
++    ensure!(
++        !event_id.is_nil() && event_id.to_string() == raw_id,
++        "noncanonical diagnostic event ID"
++    );
++    let audit_seq = event["seq"]
++        .as_i64()
++        .context("missing diagnostic audit seq")?;
++    ensure!(audit_seq > 0, "invalid diagnostic audit seq");
++    let data = &event["data"];
++    ensure!(
++        data["version"].as_u64() == Some(1) && data["runtime_effect"] == "unknown",
++        "unsupported diagnostic evidence contract"
++    );
++    let phase: LocalFailurePhaseV1 = serde_json::from_value(data["phase"].clone())
++        .map_err(|_| anyhow!("invalid diagnostic phase"))?;
++    let broker_step = optional_failure_label(
++        data.get("broker_step"),
++        &[
++            "arm_exchange",
++            "registration",
++            "load_after_registration",
++            "readiness_before_claim",
++            "clock_before_claim",
++            "claim_exchange",
++            "generation_before_prepare",
++            "prepare",
++        ],
++    )?;
++    let enforcer_stage = nested_failure_stage(
++        data.get("enforcer"),
++        &["register", "before_claim", "prepare", "before_spawn"],
++    )?;
++    let runtime_stage = nested_failure_stage(
++        data.get("runtime"),
++        &[
++            "authority_before_spawn",
++            "invocation_before_spawn",
++            "stop_before_spawn",
++            "guard_before_spawn",
++            "spawn",
++            "started_observation",
++        ],
++    )?;
++    ensure!(
++        broker_step.is_some() || enforcer_stage.is_some() || runtime_stage.is_some(),
++        "missing coded diagnostic origin"
++    );
++    // Only this projection is persisted. Neither arbitrary data nor any error
++    // body/argv is copied. An outer exchange label is not evidence of an ACK.
++    Ok(Some(json!({
++        "event_id":event_id,"audit_seq":audit_seq,"kind":"broker.batch.failure",
++        "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
++        "runtime_stage":runtime_stage,"runtime_effect":"unknown"
++    })))
++}
++
++fn optional_failure_label<'a>(
++    value: Option<&'a Value>,
++    allowed: &[&str],
++) -> Result<Option<&'a str>> {
++    match value {
++        None | Some(Value::Null) => Ok(None),
++        Some(Value::String(label)) if allowed.contains(&label.as_str()) => Ok(Some(label)),
++        _ => bail!("invalid diagnostic stage label"),
++    }
++}
++
++fn nested_failure_stage<'a>(value: Option<&'a Value>, allowed: &[&str]) -> Result<Option<&'a str>> {
++    match value {
++        None | Some(Value::Null) => Ok(None),
++        Some(Value::Object(fields)) => {
++            let stage = optional_failure_label(fields.get("stage"), allowed)?;
++            ensure!(stage.is_some(), "missing nested diagnostic stage");
++            Ok(stage)
++        }
++        _ => bail!("invalid nested diagnostic stage"),
++    }
++}
++
+ pub async fn only_worker(
+     client: &reqwest::Client,
+     origin: &str,

@@ -1,0 +1,15 @@
+    Checking agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+error: called `.err().expect()` on a `Result` value
+   --> src/runner/broker/executor/journal_tests.rs:460:10
+    |
+460 |           .err()
+    |  __________^
+461 | |         .expect("strict writer binding validation must refuse this pending mutation");
+    | |_______________^ help: try: `expect_err`
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.99.0/index.html#err_expect
+    = note: `-D clippy::err-expect` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::err_expect)]`
+
+error: could not compile `agentsandbox` (lib test) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

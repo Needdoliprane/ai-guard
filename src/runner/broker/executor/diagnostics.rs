@@ -13,7 +13,6 @@ use std::fmt;
 pub(super) enum PreclaimStep {
     ArmExchange,
     Registration,
-    LoadAfterRegistration,
     ReadinessBeforeClaim,
     ClockBeforeClaim,
     ClaimExchange,
@@ -104,11 +103,11 @@ mod tests {
     fn preclaim_context_reports_only_the_fixed_boundary() {
         let private = "synthetic-private-journal-error-keep-out-of-audit";
         let error = anyhow::anyhow!("{private}")
-            .context(PreclaimStep::LoadAfterRegistration)
+            .context(PreclaimStep::ClaimExchange)
             .context("private outer context");
         let diagnostic = classify(LocalFailurePhaseV1::Worker, &error).unwrap();
         let value = serde_json::to_value(diagnostic).unwrap();
-        assert_eq!(value["broker_step"], "load_after_registration");
+        assert_eq!(value["broker_step"], "claim_exchange");
         assert_eq!(value["runtime_effect"], "unknown");
         assert!(value["enforcer"].is_null());
         assert!(value["runtime"].is_null());

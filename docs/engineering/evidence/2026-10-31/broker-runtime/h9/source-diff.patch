@@ -1,0 +1,292 @@
+diff --git a/tests/broker_runtime.rs b/tests/broker_runtime.rs
+index bd520ae..15299e1 100644
+--- a/tests/broker_runtime.rs
++++ b/tests/broker_runtime.rs
+@@ -31,12 +31,79 @@ use harness::{CAPACITY, Evidence, Selection};
+ use serde_json::{Value, json};
+ use sha2::{Digest, Sha256};
+ use std::{fs, os::unix::process::ExitStatusExt, time::Duration};
+-use tokio::time::{Instant, sleep, timeout};
++use tokio::time::{Instant, sleep, sleep_until, timeout};
+ use uuid::Uuid;
+ 
+ const PROFILE: &str = "g09";
+ const NS: u128 = 1_000_000_000;
+ 
++#[test]
++fn batch_failure_marker_keeps_only_validated_metadata() {
++    let private = "synthetic-private-audit-body-do-not-persist";
++    let page = json!({"items":[{
++        "id":"11111111-1111-4111-8111-111111111111", "seq":17,
++        "kind":"broker.batch.failure", "source":"runner",
++        "command":{"argv":[private]},
++        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++            "broker_step":"readiness_before_claim",
++            "enforcer":{"stage":"before_claim","private":private},
++            "runtime":null,"extra":private}
++    }],"next_cursor":17});
++    let marker = harness::batch_failure_marker(&page)
++        .unwrap()
++        .expect("a real coded failure must be observed");
++    assert_eq!(marker["audit_seq"], 17);
++    assert_eq!(marker["broker_step"], "readiness_before_claim");
++    assert_eq!(marker["enforcer_stage"], "before_claim");
++    assert_eq!(marker["runtime_effect"], "unknown");
++    assert!(!serde_json::to_string(&marker).unwrap().contains(private));
++    assert_eq!(marker.as_object().unwrap().len(), 8);
++}
++
++#[test]
++fn batch_failure_marker_empty_page_is_not_a_failure() {
++    assert!(
++        harness::batch_failure_marker(&json!({"items":[],"next_cursor":null}))
++            .unwrap()
++            .is_none()
++    );
++}
++
++#[test]
++fn batch_failure_marker_rejects_invalid_public_metadata() {
++    let private = "synthetic-private-invalid-label-do-not-print";
++    let valid = json!({"items":[{
++        "id":"11111111-1111-4111-8111-111111111111", "seq":1,
++        "kind":"broker.batch.failure", "source":"runner",
++        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
++            "broker_step":"registration","enforcer":null,"runtime":null}
++    }]});
++    for pointer in [
++        "/items/0/id",
++        "/items/0/kind",
++        "/items/0/source",
++        "/items/0/data/phase",
++        "/items/0/data/broker_step",
++        "/items/0/data/enforcer",
++        "/items/0/data/runtime",
++    ] {
++        let mut invalid = valid.clone();
++        *invalid.pointer_mut(pointer).unwrap() = json!(private);
++        let error = harness::batch_failure_marker(&invalid).unwrap_err();
++        assert!(!error.to_string().contains(private));
++    }
++    for (pointer, value) in [
++        ("/items/0/seq", json!(0)),
++        ("/items/0/data/version", json!(2)),
++        ("/items/0/data/runtime_effect", json!("observed")),
++        ("/items/0/data/broker_step", Value::Null),
++    ] {
++        let mut invalid = valid.clone();
++        *invalid.pointer_mut(pointer).unwrap() = value;
++        assert!(harness::batch_failure_marker(&invalid).is_err());
++    }
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ #[ignore = "requires explicit Docker program/Unix endpoint/image/rootful opt-in; retains enforcer and QA resources"]
+ async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
+@@ -204,19 +271,17 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
+         _ => bail!("real submission did not produce fresh Accepted"),
+     }
+     let clock = NativeHostClock::new()?;
+-    // H6 reached a real helper claim and completed its process before the old
+-    // 45-second observation bound cut off preparation. This is only the test's
+-    // wait for Running: the worker's original five-second Arm is unchanged.
+-    let limit = Instant::now() + Duration::from_secs(120);
++    // H8 reached 120 seconds without Running or a coded failure; completion of
++    // its Arm reply was not established. Use the existing 240-second GLOBAL
++    // bound and stop on an explicit failure, not an intermediate timeout.
++    // The worker's original five-second Arm and every post-Running oracle stay
++    // unchanged. The HTTP query does not enqueue any writer/journal read.
++    let mut next_failure_poll = Instant::now();
+     let mut observed_worker: Option<(String, WorkerStateV1)> = None;
+     let worker = loop {
+         broker.running()?;
+         gateway.running()?;
+-        ensure!(
+-            Instant::now() < limit,
+-            "FAIL: worker never observed Running with Ready+prepared_once; inspect retained control/journal/stderr"
+-        );
+-        if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
++        let running = if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
+             if let Some((previous, _)) = &observed_worker {
+                 ensure!(
+                     previous == &worker.worker_id,
+@@ -229,20 +294,48 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
+                 observed_worker = Some(observed);
+             }
+             if worker.state == WorkerStateV1::Running {
+-                break worker;
++                Some(worker)
++            } else {
++                ensure!(
++                    !matches!(
++                        worker.state,
++                        WorkerStateV1::Terminal | WorkerStateV1::Cancelled
++                    ),
++                    "worker became terminal before Running was observed"
++                );
++                None
+             }
+-            ensure!(
+-                !matches!(
+-                    worker.state,
+-                    WorkerStateV1::Terminal | WorkerStateV1::Cancelled
+-                ),
+-                "worker became terminal before Running was observed"
+-            );
+         } else {
+             ensure!(
+                 observed_worker.is_none(),
+                 "previously observed worker disappeared"
+             );
++            None
++        };
++        // One final diagnostic read is required before leaving this phase.
++        // It obeys the same rate bound and can only fail the strict five-second
++        // oracle later; it never grants more execution time to the worker.
++        if running.is_some() && Instant::now() < next_failure_poll {
++            sleep_until(next_failure_poll).await;
++        }
++        if Instant::now() >= next_failure_poll {
++            let page: Value = harness::get(
++                &http,
++                &origin,
++                &runner,
++                "events?kind=broker.batch.failure&limit=1&order=asc",
++            )
++            .await?;
++            if let Some(marker) = harness::batch_failure_marker(&page)? {
++                evidence.write("reported-batch-failure.json", &marker)?;
++                bail!(
++                    "FAIL: broker reported a coded batch failure before the planned broker fault; inspect retained diagnostic event"
++                );
++            }
++            next_failure_poll = Instant::now() + Duration::from_secs(1);
++        }
++        if let Some(worker) = running {
++            break worker;
+         }
+         sleep(Duration::from_millis(200)).await;
+     };
+diff --git a/tests/support/broker_runtime.rs b/tests/support/broker_runtime.rs
+index 7203ed9..c3724c5 100644
+--- a/tests/support/broker_runtime.rs
++++ b/tests/support/broker_runtime.rs
+@@ -1,5 +1,6 @@
+ //! Test-only process/inspection helpers. No create/start/stop/remove engine commands.
+-use anyhow::{Context, Result, bail, ensure};
++use agentsandbox::broker::lifecycle::LocalFailurePhaseV1;
++use anyhow::{Context, Result, anyhow, bail, ensure};
+ use serde::de::DeserializeOwned;
+ use serde_json::{Value, json};
+ use std::{
+@@ -12,6 +13,7 @@ use std::{
+     time::{Duration, Instant},
+ };
+ use tokio::{io::AsyncReadExt, process::Command as AsyncCommand};
++use uuid::Uuid;
+ 
+ pub const BIN: &str = env!("CARGO_BIN_EXE_agentsandbox");
+ pub const CAPACITY: u32 = 8;
+@@ -373,6 +375,102 @@ pub async fn audit(client: &reqwest::Client, origin: &str, token: &str) -> Resul
+         .context("missing real audit items")
+ }
+ 
++/// Test-only projection; arbitrary audit payloads must never enter test logs.
++pub fn batch_failure_marker(page: &Value) -> Result<Option<Value>> {
++    let items = page["items"]
++        .as_array()
++        .context("missing diagnostic items")?;
++    ensure!(items.len() <= 1, "diagnostic filter exceeded its limit");
++    let Some(event) = items.first() else {
++        return Ok(None);
++    };
++    ensure!(
++        event["kind"] == "broker.batch.failure" && event["source"] == "runner",
++        "unexpected diagnostic event identity"
++    );
++    let raw_id = event["id"]
++        .as_str()
++        .context("missing diagnostic event ID")?;
++    let event_id = Uuid::parse_str(raw_id).map_err(|_| anyhow!("invalid diagnostic event ID"))?;
++    ensure!(
++        !event_id.is_nil() && event_id.to_string() == raw_id,
++        "noncanonical diagnostic event ID"
++    );
++    let audit_seq = event["seq"]
++        .as_i64()
++        .context("missing diagnostic audit seq")?;
++    ensure!(audit_seq > 0, "invalid diagnostic audit seq");
++    let data = &event["data"];
++    ensure!(
++        data["version"].as_u64() == Some(1) && data["runtime_effect"] == "unknown",
++        "unsupported diagnostic evidence contract"
++    );
++    let phase: LocalFailurePhaseV1 = serde_json::from_value(data["phase"].clone())
++        .map_err(|_| anyhow!("invalid diagnostic phase"))?;
++    let broker_step = optional_failure_label(
++        data.get("broker_step"),
++        &[
++            "arm_exchange",
++            "registration",
++            "load_after_registration",
++            "readiness_before_claim",
++            "clock_before_claim",
++            "claim_exchange",
++            "generation_before_prepare",
++            "prepare",
++        ],
++    )?;
++    let enforcer_stage = nested_failure_stage(
++        data.get("enforcer"),
++        &["register", "before_claim", "prepare", "before_spawn"],
++    )?;
++    let runtime_stage = nested_failure_stage(
++        data.get("runtime"),
++        &[
++            "authority_before_spawn",
++            "invocation_before_spawn",
++            "stop_before_spawn",
++            "guard_before_spawn",
++            "spawn",
++            "started_observation",
++        ],
++    )?;
++    ensure!(
++        broker_step.is_some() || enforcer_stage.is_some() || runtime_stage.is_some(),
++        "missing coded diagnostic origin"
++    );
++    // Only this projection is persisted. Neither arbitrary data nor any error
++    // body/argv is copied. An outer exchange label is not evidence of an ACK.
++    Ok(Some(json!({
++        "event_id":event_id,"audit_seq":audit_seq,"kind":"broker.batch.failure",
++        "phase":phase,"broker_step":broker_step,"enforcer_stage":enforcer_stage,
++        "runtime_stage":runtime_stage,"runtime_effect":"unknown"
++    })))
++}
++
++fn optional_failure_label<'a>(
++    value: Option<&'a Value>,
++    allowed: &[&str],
++) -> Result<Option<&'a str>> {
++    match value {
++        None | Some(Value::Null) => Ok(None),
++        Some(Value::String(label)) if allowed.contains(&label.as_str()) => Ok(Some(label)),
++        _ => bail!("invalid diagnostic stage label"),
++    }
++}
++
++fn nested_failure_stage<'a>(value: Option<&'a Value>, allowed: &[&str]) -> Result<Option<&'a str>> {
++    match value {
++        None | Some(Value::Null) => Ok(None),
++        Some(Value::Object(fields)) => {
++            let stage = optional_failure_label(fields.get("stage"), allowed)?;
++            ensure!(stage.is_some(), "missing nested diagnostic stage");
++            Ok(stage)
++        }
++        _ => bail!("invalid nested diagnostic stage"),
++    }
++}
++
+ pub async fn only_worker(
+     client: &reqwest::Client,
+     origin: &str,

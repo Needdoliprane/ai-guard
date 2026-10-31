@@ -754,7 +754,7 @@ impl EnforcedSlot {
             &self.local.generation,
             &self.local.stop,
         ) {
-            return Err(failure(reason, None));
+            return Err(failure(reason, None).with_slot_snapshot(status));
         }
         let clock = NativeHostClock::new()
             .map_err(|_| failure(EnforcerFailureReason::ClockUnavailable, None))?;
@@ -955,7 +955,7 @@ impl BeforeSpawnGuard for SpawnGuard {
             return Err(failure(EnforcerFailureReason::GenerationChanged, None).into());
         }
         if let Some(reason) = spawn_snapshot_failure(status, self.expected_generation, received) {
-            return Err(failure(reason, None).into());
+            return Err(failure(reason, None).with_slot_snapshot(status).into());
         }
         if *self.local.stop.borrow() {
             return Err(failure(EnforcerFailureReason::StopSignalled, None).into());

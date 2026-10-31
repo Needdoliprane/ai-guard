@@ -1,6 +1,6 @@
 //! Emitted local failure facts, never a wire request or a start capability.
 
-use super::EnforcerError;
+use super::{EnforcerError, EnforcerSlotStatusV1, SlotPhaseV1};
 use crate::control::{ArmV1, HostClockSampleV1};
 use serde::Serialize;
 use std::fmt;
@@ -47,6 +47,23 @@ pub(super) enum EnforcerFailureReason {
     ClockSnapshotStale,
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SlotSnapshotSource {
+    HelperSlot,
+}
+
+/// Retained helper facts, not a fresh local clock or a runtime observation.
+#[derive(Clone, Serialize)]
+struct SlotFailureSnapshot {
+    source: SlotSnapshotSource,
+    phase: SlotPhaseV1,
+    prepared_once: bool,
+    generation: u64,
+    clock: Option<HostClockSampleV1>,
+    clock_rejected: bool,
+}
+
 /// Local error provenance, deliberately not deserializable into authority.
 /// A sample is the check's existing local native reading, not an error-time
 /// timestamp. It is absent when that check had not reached its clock sample.
@@ -59,6 +76,8 @@ pub(crate) struct EnforcerStageFailure {
     reason: EnforcerFailureReason,
     native_sample: Option<Box<HostClockSampleV1>>,
     original_deadline_ns_decimal: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot_snapshot: Option<Box<SlotFailureSnapshot>>,
 }
 impl EnforcerStageFailure {
     /// Called only on a failed registration, with the original durable Arm.
@@ -92,7 +111,28 @@ impl EnforcerStageFailure {
             reason,
             native_sample: native_sample.cloned().map(Box::new),
             original_deadline_ns_decimal: arm.deadline_ns_decimal.clone(),
+            slot_snapshot: None,
         }
+    }
+
+    /// Called only after an existing slot predicate failed, while its status
+    /// mutex is retained. Invalid helper clock text is never copied, and an
+    /// absent clock remains unknown rather than a rejected or native reading.
+    pub(super) fn with_slot_snapshot(mut self, status: &EnforcerSlotStatusV1) -> Self {
+        let (clock, clock_rejected) = match status.clock.as_ref() {
+            Some(clock) if clock.validate().is_ok() => (Some(clock.clone()), false),
+            Some(_) => (None, true),
+            None => (None, false),
+        };
+        self.slot_snapshot = Some(Box::new(SlotFailureSnapshot {
+            source: SlotSnapshotSource::HelperSlot,
+            phase: status.phase,
+            prepared_once: status.prepared_once,
+            generation: status.generation,
+            clock,
+            clock_rejected,
+        }));
+        self
     }
 
     /// Preserve the exact pre-diagnostic public/IPC error classification.
@@ -195,6 +235,7 @@ mod tests {
             reason,
             native_sample: Some(Box::new(sample(5))),
             original_deadline_ns_decimal: "6".into(),
+            slot_snapshot: None,
         }
     }
 
@@ -229,6 +270,122 @@ mod tests {
             timeout_seconds: 1,
             deadline_ns_decimal: "1000000010".into(),
         }
+    }
+
+    fn slot(clock: Option<HostClockSampleV1>) -> EnforcerSlotStatusV1 {
+        EnforcerSlotStatusV1 {
+            arm_id: "private-helper-arm-canary".into(),
+            registration_hash: "private-registration-hash-canary".into(),
+            phase: SlotPhaseV1::Quarantined,
+            prepared_once: false,
+            generation: 7,
+            clock,
+            observation: None,
+            stop_failures: 0,
+        }
+    }
+
+    #[test]
+    fn helper_slot_snapshot_keeps_validated_helper_clock_distinct_from_native_sample() {
+        let status = slot(Some(sample(17)));
+        for stage in [EnforcerStage::BeforeClaim, EnforcerStage::BeforeSpawn] {
+            let diagnostic = EnforcerStageFailure::from_arm(
+                &arm(),
+                stage,
+                EnforcerFailureReason::SlotPhaseMismatch,
+                None,
+            )
+            .with_slot_snapshot(&status);
+            assert_eq!(diagnostic.wire_code(), EnforcerError::NotReady);
+            let value = serde_json::to_value(&diagnostic).unwrap();
+            assert_eq!(value["reason"], "slot_phase_mismatch");
+            assert!(value["native_sample"].is_null());
+            assert_eq!(
+                value["slot_snapshot"],
+                serde_json::json!({
+                    "source": "helper_slot",
+                    "phase": "quarantined",
+                    "prepared_once": false,
+                    "generation": 7,
+                    "clock": sample(17),
+                    "clock_rejected": false,
+                })
+            );
+            assert_eq!(value.as_object().unwrap().len(), 7);
+            let serialized = serde_json::to_string(&diagnostic).unwrap();
+            assert!(!serialized.contains("private-helper-arm-canary"));
+            assert!(!serialized.contains("private-registration-hash-canary"));
+        }
+    }
+
+    #[test]
+    fn helper_slot_snapshot_rejects_invalid_clock_without_copying_private_text() {
+        let valid = sample(17);
+        let mut invalid_clocks = Vec::new();
+        for boot_id in [
+            "private-helper-clock-canary",
+            "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            let mut invalid = valid.clone();
+            invalid.boot_id = boot_id.into();
+            invalid_clocks.push(invalid);
+        }
+        for decimal in [
+            "private-helper-clock-canary".into(),
+            "017".into(),
+            "1".repeat(40),
+        ] {
+            let mut invalid = valid.clone();
+            invalid.continuous_ns_decimal = decimal;
+            invalid_clocks.push(invalid);
+        }
+        let mut invalid = valid.clone();
+        invalid.observed_utc = Some("private-helper-clock-canary".into());
+        invalid_clocks.push(invalid);
+        let mut invalid = valid;
+        invalid.version = 2;
+        invalid_clocks.push(invalid);
+        for invalid in invalid_clocks {
+            let diagnostic = EnforcerStageFailure::from_arm(
+                &arm(),
+                EnforcerStage::BeforeClaim,
+                EnforcerFailureReason::SlotPhaseMismatch,
+                None,
+            )
+            .with_slot_snapshot(&slot(Some(invalid)));
+            let value = serde_json::to_value(&diagnostic).unwrap();
+            assert!(value["native_sample"].is_null());
+            assert!(value["slot_snapshot"]["clock"].is_null());
+            assert_eq!(value["slot_snapshot"]["clock_rejected"], true);
+            assert_eq!(value["slot_snapshot"]["phase"], "quarantined");
+            assert_eq!(diagnostic.wire_code(), EnforcerError::NotReady);
+            assert!(
+                !serde_json::to_string(&diagnostic)
+                    .unwrap()
+                    .contains("private-helper-clock-canary")
+            );
+        }
+    }
+
+    #[test]
+    fn missing_helper_clock_stays_unknown_and_legacy_diagnostics_keep_six_fields() {
+        let diagnostic = EnforcerStageFailure::from_arm(
+            &arm(),
+            EnforcerStage::BeforeClaim,
+            EnforcerFailureReason::SlotPhaseMismatch,
+            None,
+        );
+        let legacy = serde_json::to_value(&diagnostic).unwrap();
+        assert_eq!(legacy.as_object().unwrap().len(), 6);
+        assert!(legacy.get("slot_snapshot").is_none());
+        let retained = diagnostic.clone().with_slot_snapshot(&slot(None));
+        let value = serde_json::to_value(&retained).unwrap();
+        assert!(value["slot_snapshot"]["clock"].is_null());
+        assert_eq!(value["slot_snapshot"]["clock_rejected"], false);
+        assert!(value["native_sample"].is_null());
+        assert_eq!(retained.wire_code(), diagnostic.wire_code());
+        assert_eq!(serde_json::to_value(&diagnostic).unwrap(), legacy);
     }
 
     #[test]

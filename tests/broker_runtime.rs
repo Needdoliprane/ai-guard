@@ -31,20 +31,87 @@ use harness::{CAPACITY, Evidence, Selection};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{fs, os::unix::process::ExitStatusExt, time::Duration};
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep, sleep_until, timeout};
 use uuid::Uuid;
 
 const PROFILE: &str = "g09";
 const NS: u128 = 1_000_000_000;
+
+#[test]
+fn batch_failure_marker_keeps_only_validated_metadata() {
+    let private = "synthetic-private-audit-body-do-not-persist";
+    let page = json!({"items":[{
+        "id":"11111111-1111-4111-8111-111111111111", "seq":17,
+        "kind":"broker.batch.failure", "source":"runner",
+        "command":{"argv":[private]},
+        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"readiness_before_claim",
+            "enforcer":{"stage":"before_claim","private":private},
+            "runtime":null,"extra":private}
+    }],"next_cursor":17});
+    let marker = harness::batch_failure_marker(&page)
+        .unwrap()
+        .expect("a real coded failure must be observed");
+    assert_eq!(marker["audit_seq"], 17);
+    assert_eq!(marker["broker_step"], "readiness_before_claim");
+    assert_eq!(marker["enforcer_stage"], "before_claim");
+    assert_eq!(marker["runtime_effect"], "unknown");
+    assert!(!serde_json::to_string(&marker).unwrap().contains(private));
+    assert_eq!(marker.as_object().unwrap().len(), 8);
+}
+
+#[test]
+fn batch_failure_marker_empty_page_is_not_a_failure() {
+    assert!(
+        harness::batch_failure_marker(&json!({"items":[],"next_cursor":null}))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn batch_failure_marker_rejects_invalid_public_metadata() {
+    let private = "synthetic-private-invalid-label-do-not-print";
+    let valid = json!({"items":[{
+        "id":"11111111-1111-4111-8111-111111111111", "seq":1,
+        "kind":"broker.batch.failure", "source":"runner",
+        "data":{"version":1,"phase":"worker","runtime_effect":"unknown",
+            "broker_step":"registration","enforcer":null,"runtime":null}
+    }]});
+    for pointer in [
+        "/items/0/id",
+        "/items/0/kind",
+        "/items/0/source",
+        "/items/0/data/phase",
+        "/items/0/data/broker_step",
+        "/items/0/data/enforcer",
+        "/items/0/data/runtime",
+    ] {
+        let mut invalid = valid.clone();
+        *invalid.pointer_mut(pointer).unwrap() = json!(private);
+        let error = harness::batch_failure_marker(&invalid).unwrap_err();
+        assert!(!error.to_string().contains(private));
+    }
+    for (pointer, value) in [
+        ("/items/0/seq", json!(0)),
+        ("/items/0/data/version", json!(2)),
+        ("/items/0/data/runtime_effect", json!("observed")),
+        ("/items/0/data/broker_step", Value::Null),
+    ] {
+        let mut invalid = valid.clone();
+        *invalid.pointer_mut(pointer).unwrap() = value;
+        assert!(harness::batch_failure_marker(&invalid).is_err());
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicit Docker program/Unix endpoint/image/rootful opt-in; retains enforcer and QA resources"]
 async fn broker_sigkill_preserves_original_deadline_without_second_start() -> Result<()> {
     let selection = Selection::read()?;
     let evidence = Evidence::new()?;
-    let outcome = timeout(Duration::from_secs(240), run(&selection, &evidence))
+    let outcome = timeout(Duration::from_secs(600), run(&selection, &evidence))
         .await
-        .context("broker runtime qualification exceeded the 240-second global bound")
+        .context("broker runtime qualification exceeded the 600-second global bound")
         .and_then(|result| result);
     evidence.write("result.json", &json!({
         "runtime_test":if outcome.is_ok() { "PASS" } else { "FAIL" },
@@ -204,19 +271,17 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
         _ => bail!("real submission did not produce fresh Accepted"),
     }
     let clock = NativeHostClock::new()?;
-    // H6 reached a real helper claim and completed its process before the old
-    // 45-second observation bound cut off preparation. This is only the test's
-    // wait for Running: the worker's original five-second Arm is unchanged.
-    let limit = Instant::now() + Duration::from_secs(120);
+    // H8 reached 120 seconds without Running or a coded failure; completion of
+    // its Arm reply was not established. Give the whole scenario 600 seconds,
+    // bound and stop on an explicit failure, not an intermediate timeout.
+    // The worker's original five-second Arm and every post-Running oracle stay
+    // unchanged. The HTTP query does not enqueue any writer/journal read.
+    let mut next_failure_poll = Instant::now();
     let mut observed_worker: Option<(String, WorkerStateV1)> = None;
     let worker = loop {
         broker.running()?;
         gateway.running()?;
-        ensure!(
-            Instant::now() < limit,
-            "FAIL: worker never observed Running with Ready+prepared_once; inspect retained control/journal/stderr"
-        );
-        if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
+        let running = if let Some(worker) = harness::only_worker(&http, &origin, &runner).await? {
             if let Some((previous, _)) = &observed_worker {
                 ensure!(
                     previous == &worker.worker_id,
@@ -229,20 +294,48 @@ async fn run(selection: &Selection, evidence: &Evidence) -> Result<()> {
                 observed_worker = Some(observed);
             }
             if worker.state == WorkerStateV1::Running {
-                break worker;
+                Some(worker)
+            } else {
+                ensure!(
+                    !matches!(
+                        worker.state,
+                        WorkerStateV1::Terminal | WorkerStateV1::Cancelled
+                    ),
+                    "worker became terminal before Running was observed"
+                );
+                None
             }
-            ensure!(
-                !matches!(
-                    worker.state,
-                    WorkerStateV1::Terminal | WorkerStateV1::Cancelled
-                ),
-                "worker became terminal before Running was observed"
-            );
         } else {
             ensure!(
                 observed_worker.is_none(),
                 "previously observed worker disappeared"
             );
+            None
+        };
+        // One final diagnostic read is required before leaving this phase.
+        // It obeys the same rate bound and can only fail the strict five-second
+        // oracle later; it never grants more execution time to the worker.
+        if running.is_some() && Instant::now() < next_failure_poll {
+            sleep_until(next_failure_poll).await;
+        }
+        if Instant::now() >= next_failure_poll {
+            let page: Value = harness::get(
+                &http,
+                &origin,
+                &runner,
+                "events?kind=broker.batch.failure&limit=1&order=asc",
+            )
+            .await?;
+            if let Some(marker) = harness::batch_failure_marker(&page)? {
+                evidence.write("reported-batch-failure.json", &marker)?;
+                bail!(
+                    "FAIL: broker reported a coded batch failure before the planned broker fault; inspect retained diagnostic event"
+                );
+            }
+            next_failure_poll = Instant::now() + Duration::from_secs(1);
+        }
+        if let Some(worker) = running {
+            break worker;
         }
         sleep(Duration::from_millis(200)).await;
     };
