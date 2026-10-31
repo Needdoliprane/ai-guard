@@ -12,7 +12,7 @@ use crate::{
         },
         clock::{HostClock, checked_deadline},
         enforcer::{CancelGeneration, EnforcedSlot, EnforcerClient, RegistrationV1},
-        journal::{AcceptedJobV1, CancelStopProjectionV1, JournalError},
+        journal::{AcceptedJobV1, CancelStopProjectionV1, JournalError, JournalScopeV1},
         lifecycle::{
             BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1, LocalFailureCodeV1,
             LocalFailurePhaseV1,
@@ -201,70 +201,70 @@ impl BatchExecutor {
             }
         }
     }
-    /// The projection proves this exact durable Cancel's original arm prefix.
-    /// Replaying it never invalidates a job generation or selects later arms.
-    /// Success acknowledges delivery to known armed targets; it proves neither
-    /// runtime terminal/absence nor central quota release.
-    pub(crate) async fn cancel(
-        &self,
-        projection: CancelStopProjectionV1,
-        cancel: &CancelGeneration,
-    ) -> Result<()> {
-        ensure!(
-            same(projection.scope(), self.writer.scope())?,
-            "cancellation scope mismatch"
-        );
-        ensure!(
-            !projection.operation_id().is_nil()
-                && !projection.command_id().is_nil()
-                && projection.receipt().command_id() == projection.command_id(),
-            "invalid durable cancellation projection"
-        );
-        let origin = hex::encode(Sha256::digest(
-            projection.scope().gateway_origin().as_bytes(),
-        ));
-        let expires = tokio::time::Instant::now() + CANCEL_TOTAL_TIMEOUT;
-        let batches = projection.stops().len().div_ceil(CANCEL_FANOUT);
-        let mut failed = false;
-        for (index, stops) in projection.stops().chunks(CANCEL_FANOUT).enumerate() {
-            // Divide the remaining total deadline fairly between batches. An
-            // unavailable early target cannot consume every later attempt.
-            let budget = expires.saturating_duration_since(tokio::time::Instant::now())
-                / u32::try_from(batches - index)
-                    .context("cancellation inventory exceeds its bound")?;
-            let mut attempts = Vec::with_capacity(stops.len());
-            for stop in stops {
-                let registration = RegistrationV1::new(
-                    origin.clone(),
-                    projection.scope().tenant_id().into(),
-                    stop.arm().clone(),
-                    stop.receipt().clone(),
-                    stop.authority().clone(),
-                    stop.owned().clone(),
-                );
-                let registration = match registration {
-                    Ok(registration) => registration,
-                    Err(_) => {
-                        failed = true;
-                        continue;
-                    }
-                };
-                let enforcer = self.enforcer.clone();
-                let cancel = cancel.clone();
-                attempts.push(async move {
-                    tokio::time::timeout(budget, enforcer.cancel_retained(registration, cancel))
-                        .await
-                });
-            }
-            let outcomes = futures_util::future::join_all(attempts).await;
-            failed |= outcomes.iter().any(|result| !matches!(result, Ok(Ok(()))));
+}
+
+/// Stop-only delivery independent of a writer, execution context or host clock.
+/// The caller has authenticated the expected scope; the projection proves the
+/// immutable Cancel prefix. Known targets are attempted before partial coverage
+/// is reported, without changing a job generation, deadline or start permission.
+pub(crate) async fn deliver_cancellation(
+    enforcer: &EnforcerClient,
+    expected_scope: &JournalScopeV1,
+    projection: CancelStopProjectionV1,
+    cancel: &CancelGeneration,
+) -> Result<()> {
+    ensure!(
+        same(projection.scope(), expected_scope)?,
+        "cancellation scope mismatch"
+    );
+    ensure!(
+        !projection.operation_id().is_nil()
+            && !projection.command_id().is_nil()
+            && projection.receipt().command_id() == projection.command_id(),
+        "invalid durable cancellation projection"
+    );
+    let origin = hex::encode(Sha256::digest(
+        projection.scope().gateway_origin().as_bytes(),
+    ));
+    let expires = tokio::time::Instant::now() + CANCEL_TOTAL_TIMEOUT;
+    let batches = projection.stops().len().div_ceil(CANCEL_FANOUT);
+    let mut failed = false;
+    for (index, stops) in projection.stops().chunks(CANCEL_FANOUT).enumerate() {
+        // Divide the remaining total deadline fairly between batches. An
+        // unavailable early target cannot consume every later attempt.
+        let budget = expires.saturating_duration_since(tokio::time::Instant::now())
+            / u32::try_from(batches - index).context("cancellation inventory exceeds its bound")?;
+        let mut attempts = Vec::with_capacity(stops.len());
+        for stop in stops {
+            let registration = RegistrationV1::new(
+                origin.clone(),
+                projection.scope().tenant_id().into(),
+                stop.arm().clone(),
+                stop.receipt().clone(),
+                stop.authority().clone(),
+                stop.owned().clone(),
+            );
+            let registration = match registration {
+                Ok(registration) => registration,
+                Err(_) => {
+                    failed = true;
+                    continue;
+                }
+            };
+            let enforcer = enforcer.clone();
+            let cancel = cancel.clone();
+            attempts.push(async move {
+                tokio::time::timeout(budget, enforcer.cancel_retained(registration, cancel)).await
+            });
         }
-        ensure!(
-            !failed && !projection.incomplete(),
-            "cancellation delivery is incomplete; retained targets require reconciliation"
-        );
-        Ok(())
+        let outcomes = futures_util::future::join_all(attempts).await;
+        failed |= outcomes.iter().any(|result| !matches!(result, Ok(Ok(()))));
     }
+    ensure!(
+        !failed && !projection.incomplete(),
+        "cancellation delivery is incomplete; retained targets require reconciliation"
+    );
+    Ok(())
 }
 
 impl<'a> Execution<'a> {

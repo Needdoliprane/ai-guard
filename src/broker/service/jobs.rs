@@ -8,7 +8,7 @@ use crate::{
             AcceptedJobV1, JournalEntryKindV1, JournalEntryV1, JournalError, JournalStatusV1,
         },
         lifecycle::LocalCommandRequestV1,
-        writer::WriterClient,
+        writer::ProfileWriterCapabilities,
     },
     control::DecisionReceiptV1,
     model::Outcome,
@@ -29,7 +29,7 @@ use uuid::Uuid;
 const MAX_JOBS: usize = 256;
 
 pub(super) struct ProfileJobs {
-    pub(super) writer: OnceCell<WriterClient>,
+    pub(super) writer: OnceCell<ProfileWriterCapabilities>,
     identity: Arc<AsyncMutex<()>>,
     jobs: Mutex<BTreeMap<Uuid, Arc<Job>>>,
 }
@@ -87,10 +87,17 @@ pub(super) struct Job {
     gate: Arc<AsyncMutex<()>>,
     running: AtomicBool,
     cancelling: AtomicUsize,
-    cancel_commands: Mutex<BTreeMap<Uuid, bool>>,
+    cancel_commands: Mutex<BTreeMap<Uuid, CancelState>>,
     error: Mutex<Option<BrokerErrorCodeV1>>,
     source: Mutex<Option<Arc<AuthorizedSource>>>,
     reconciliation: Mutex<(u32, Option<Instant>)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CancelState {
+    Pending,
+    Unknown,
+    Confirmed,
 }
 impl Job {
     fn new() -> Self {
@@ -116,7 +123,7 @@ impl Job {
             .lock()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?
             .values()
-            .any(|acknowledged| !acknowledged)
+            .any(|state| *state != CancelState::Confirmed)
         {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
@@ -142,21 +149,24 @@ impl Job {
             .cancel_commands
             .lock()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        match commands.get(&command) {
-            Some(true) => return Ok(None),
-            Some(false) => return Err(BrokerErrorCodeV1::Busy),
-            None => {}
-        }
-        if commands.len() >= 64 {
+        let unknown = match commands.get(&command) {
+            Some(CancelState::Confirmed) => return Ok(None),
+            Some(CancelState::Pending) => return Err(BrokerErrorCodeV1::Busy),
+            Some(CancelState::Unknown) => true,
+            None => false,
+        };
+        if !unknown && commands.len() >= 64 {
             return Err(BrokerErrorCodeV1::LimitExceeded);
         }
-        commands.insert(command, false);
+        commands.insert(command, CancelState::Pending);
         self.cancelling.fetch_add(1, Ordering::SeqCst);
-        self.cancel.invalidate();
+        if !unknown {
+            self.cancel.invalidate();
+        }
         Ok(Some(CancellingJob {
             job: Arc::clone(self),
             command,
-            retain_pending: false,
+            retain_pending: unknown,
         }))
     }
     /// This cache records a durable request, never successful stop delivery.
@@ -167,7 +177,7 @@ impl Job {
             .lock()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?
             .get(&command)
-            == Some(&true))
+            == Some(&CancelState::Confirmed))
     }
     pub(super) fn remember_cancellations(&self, durable: &AcceptedJobV1) {
         let Some(checkpoint) = durable.broker_checkpoint_v3() else {
@@ -191,11 +201,12 @@ impl Job {
             .cancel_commands
             .lock()
             .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
-        if self.cancelling.load(Ordering::SeqCst) == 0 {
-            commands.retain(|id, acknowledged| *acknowledged || ids.contains(id));
+        let new_ids = ids.iter().filter(|id| !commands.contains_key(id)).count();
+        if commands.len().saturating_add(new_ids) > 64 {
+            return Err(BrokerErrorCodeV1::LimitExceeded);
         }
         for id in ids {
-            commands.insert(*id, true);
+            commands.insert(*id, CancelState::Confirmed);
         }
         Ok(())
     }
@@ -268,7 +279,7 @@ pub(super) struct CancellingJob {
 impl CancellingJob {
     pub(super) fn acknowledged(&mut self) {
         if let Ok(mut commands) = self.job.cancel_commands.lock() {
-            commands.insert(self.command, true);
+            commands.insert(self.command, CancelState::Confirmed);
         }
     }
     pub(super) fn unknown(&mut self) {
@@ -277,11 +288,14 @@ impl CancellingJob {
 }
 impl Drop for CancellingJob {
     fn drop(&mut self) {
-        if !self.retain_pending
-            && let Ok(mut commands) = self.job.cancel_commands.lock()
-            && commands.get(&self.command) == Some(&false)
+        if let Ok(mut commands) = self.job.cancel_commands.lock()
+            && commands.get(&self.command) == Some(&CancelState::Pending)
         {
-            commands.remove(&self.command);
+            if self.retain_pending {
+                commands.insert(self.command, CancelState::Unknown);
+            } else {
+                commands.remove(&self.command);
+            }
         }
         self.job.cancelling.fetch_sub(1, Ordering::SeqCst);
     }
@@ -543,5 +557,40 @@ mod tests {
         assert_eq!(export.generation(), cancelled_generation);
         assert!(job.begin_cancel(command).expect("replay").is_none());
         assert_eq!(job.cancel.current(), export.generation());
+    }
+
+    #[test]
+    fn unknown_cancel_can_be_retried_without_reinvalidating_or_forgetting_it() {
+        let job = Arc::new(Job::new());
+        let command = Uuid::new_v4();
+        let mut first = job.begin_cancel(command).unwrap().unwrap();
+        let generation = job.cancel.current();
+        first.unknown();
+        drop(first);
+        assert!(matches!(
+            job.enter(),
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ));
+        // A partial diagnostic cannot prove that an unknown write is absent.
+        job.remember_cancel_ids(&[Uuid::new_v4()]).unwrap();
+        assert!(matches!(
+            job.enter(),
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ));
+        let retry = job.begin_cancel(command).unwrap().unwrap();
+        assert_eq!(job.cancel.current(), generation);
+        drop(retry); // Even a not-queued retry retains the earlier unknown write.
+        assert!(matches!(
+            job.enter(),
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ));
+        let mut retry = job.begin_cancel(command).unwrap().unwrap();
+        retry.acknowledged();
+        drop(retry);
+        assert_eq!(job.enter().unwrap().generation(), generation);
+
+        let fresh = job.begin_cancel(Uuid::new_v4()).unwrap().unwrap();
+        drop(fresh); // A fresh not-queued write has no durable ambiguity.
+        assert!(job.enter().is_ok());
     }
 }

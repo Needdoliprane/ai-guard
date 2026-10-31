@@ -26,6 +26,10 @@ pub enum BrokerCommandV1 {
     Status {
         operation_id: Uuid,
     },
+    /// Confirmed metadata only; available independently of business loading.
+    RecoveryStatus {
+        operation_id: Uuid,
+    },
     List {
         after: Option<Uuid>,
         limit: u32,
@@ -138,6 +142,74 @@ pub struct JobStatusV1 {
     pub executor_error: Option<BrokerErrorCodeV1>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalModeV1 {
+    Full,
+    StopOnly,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryDataSourceV1 {
+    ConfirmedJournal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryRuntimeEvidenceV1 {
+    NotQueried,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryCommandV1 {
+    pub command_id: Uuid,
+    pub revision: u64,
+    pub checkpoint_hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RecoveryTargetKindV1 {
+    Worker,
+    Helper { helper_id: String },
+}
+
+/// Original acknowledged Arm facts, never a new runtime observation or permit.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryTargetV1 {
+    pub arm_id: String,
+    pub worker_id: String,
+    pub attempt_id: String,
+    pub subject: RecoveryTargetKindV1,
+    pub original_clock: crate::control::HostClockSampleV1,
+    pub original_timeout_seconds: u32,
+    pub original_deadline_ns_decimal: String,
+    pub cancel_command_id: Option<Uuid>,
+}
+
+/// A separate reply keeps existing Status/Page payloads unchanged. Its source
+/// and runtime evidence are explicit, including in degraded operation.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryStatusV1 {
+    pub version: u32,
+    pub operation_id: Uuid,
+    pub tenant_id: String,
+    pub journal_mode: JournalModeV1,
+    pub source: RecoveryDataSourceV1,
+    pub runtime_evidence: RecoveryRuntimeEvidenceV1,
+    pub head_revision: u64,
+    pub head_hash: String,
+    pub incomplete: bool,
+    pub reconciliation_required: bool,
+    pub cancel_commands: Vec<RecoveryCommandV1>,
+    pub known_arms: Vec<RecoveryTargetV1>,
+    pub pending_arms: usize,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReplyEnvelopeV1 {
@@ -166,6 +238,9 @@ pub enum BrokerReplyV1 {
     },
     Status {
         status: JobStatusV1,
+    },
+    RecoveryStatus {
+        status: RecoveryStatusV1,
     },
     Page {
         entries: Vec<JobStatusV1>,

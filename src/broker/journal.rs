@@ -20,7 +20,7 @@ use std::{
 use uuid::Uuid;
 mod confirmed;
 pub mod recovery;
-pub use recovery::CancelStopProjectionV1;
+pub use recovery::{CancelStopProjectionV1, StopJobSnapshotV1, StopJournal};
 mod types;
 pub use types::*;
 use types::{AcceptedData, BindingData, LoadedCheckpoint};
@@ -113,6 +113,16 @@ struct Writer {
     floors: HashMap<Uuid, RevisionRefV1>,
     rejected_floors: HashMap<Uuid, String>,
     observed_jobs: HashSet<Uuid>,
+}
+pub(super) enum ExistingProfileV1 {
+    Full(Journal),
+    Stops(StopJournal),
+}
+pub(super) fn admit_recovery_report(
+    report: &recovery::StopRecoveryReportV1,
+    force_stops: bool,
+) -> JournalResult<ExistingProfileV1> {
+    recovery::admit_report(report, force_stops)
 }
 pub struct ReservationTicket {
     owner: Arc<Inner>,
@@ -211,6 +221,138 @@ impl Usage {
         }
         Ok(())
     }
+}
+
+fn checked_core_record(core: &Inner, value: &impl Serialize, max: u64) -> JournalResult<Vec<u8>> {
+    let bytes = canonical(value)?;
+    if bytes.len() as u64 > max {
+        return Err(JournalError::TooLarge);
+    }
+    core.control.record(&bytes)?;
+    Ok(bytes)
+}
+
+fn encode_checkpoint(
+    core: &Inner,
+    operation_id: Uuid,
+    intent_hash: &str,
+    expected: &RevisionRefV1,
+    next: &LoadedCheckpoint,
+) -> JournalResult<(Vec<u8>, RevisionRefV1)> {
+    let revision = expected
+        .revision
+        .checked_add(1)
+        .ok_or(JournalError::LimitExceeded)?;
+    macro_rules! encode {
+        ($record:ident, $version:literal, $payload:expr, $domain:literal) => {{
+            let bytes = checked_core_record(
+                core,
+                &$record {
+                    version: $version,
+                    operation_id,
+                    intent_hash: intent_hash.to_owned(),
+                    revision,
+                    previous: Some(expected.clone()),
+                    payload: $payload.clone(),
+                },
+                CHECKPOINT,
+            )?;
+            let head = RevisionRefV1 {
+                revision,
+                hash: digest($domain, &bytes),
+            };
+            Ok((bytes, head))
+        }};
+    }
+    match next {
+        LoadedCheckpoint::V1(value) => {
+            encode!(Checkpoint, 1, value, "ai-guard:broker-checkpoint:v1")
+        }
+        LoadedCheckpoint::V2(value) => encode!(
+            SupervisedCheckpoint,
+            2,
+            value,
+            "ai-guard:broker-checkpoint:v2"
+        ),
+        LoadedCheckpoint::V3(value) => encode!(
+            LifecycleCheckpoint,
+            3,
+            value,
+            "ai-guard:broker-checkpoint:v3"
+        ),
+        LoadedCheckpoint::V4(value) => {
+            encode!(OutboxCheckpoint, 4, value, "ai-guard:broker-checkpoint:v4")
+        }
+    }
+}
+
+/// The sole filesystem publication algorithm. Both callers have already
+/// validated their typed transition and supplied a complete metadata budget.
+fn publish_revision(
+    core: &Inner,
+    operation_id: Uuid,
+    intent_hash: &str,
+    expected: &RevisionRefV1,
+    head: &RevisionRefV1,
+    bytes: &[u8],
+    mut usage: Usage,
+) -> JournalResult<()> {
+    if head.revision >= u64::from(core.limits.revisions) {
+        return Err(JournalError::LimitExceeded);
+    }
+    let job = fscheck(core.jobs.persistent_child(&operation_id.to_string(), false))?
+        .ok_or(JournalError::Interrupted)?;
+    if fscheck(job.persistent_read(
+        &revision_name(head.revision),
+        CHECKPOINT,
+        &core.exclusions.0,
+    ))?
+    .is_some()
+        || fscheck(job.persistent_read("current-next.json", SMALL, &core.exclusions.0))?.is_some()
+    {
+        return Err(JournalError::Interrupted);
+    }
+    let current = Current {
+        version: 1,
+        operation_id,
+        intent_hash: intent_hash.to_owned(),
+        head: head.clone(),
+    };
+    let pointer = checked_core_record(core, &current, SMALL)?;
+    usage.add(
+        bytes.len() as u64 + pointer.len() as u64,
+        2,
+        true,
+        &core.limits,
+    )?;
+    let file = io(job.persistent_create(&revision_name(head.revision), bytes))?;
+    stage!(RevisionWritten);
+    io(file.persistent_sync())?;
+    io(job.sync())?;
+    stage!(RevisionDurable);
+    let temporary = io(job.persistent_create("current-next.json", &pointer))?;
+    stage!(CurrentWritten);
+    io(temporary.persistent_sync())?;
+    let old = fscheck(job.persistent_read("current.json", SMALL, &core.exclusions.0))?
+        .ok_or(JournalError::Corrupt)?;
+    let old_current: Current = parse(old.bytes())?;
+    if old_current.head != *expected {
+        return Err(JournalError::Conflict);
+    }
+    io(job.persistent_publish(&temporary, &old, "current.json"))?;
+    stage!(CurrentPublished);
+    io(job.sync())?;
+    stage!(CurrentDurable);
+    Ok(())
+}
+
+#[cfg(test)]
+fn stop_before_ack() -> JournalResult<()> {
+    tests::checkpoint(FaultStage::BeforeAck)
+}
+#[cfg(test)]
+fn full_namespace_durable() -> JournalResult<()> {
+    tests::checkpoint(FaultStage::NamespaceDurable)
 }
 
 impl Journal {
@@ -890,72 +1032,13 @@ impl Journal {
             return Err(JournalError::Conflict);
         }
         self.context_checkpoint(&next, &loaded.0.intent, &loaded.0.binding)?;
-        let next_revision = expected
-            .revision
-            .checked_add(1)
-            .ok_or(JournalError::LimitExceeded)?;
-        let (bytes, domain) = match &next {
-            LoadedCheckpoint::V1(payload) => (
-                self.checked_record(
-                    &Checkpoint {
-                        version: 1,
-                        operation_id,
-                        intent_hash: loaded.0.intent_hash.clone(),
-                        revision: next_revision,
-                        previous: Some(expected.clone()),
-                        payload: payload.clone(),
-                    },
-                    CHECKPOINT,
-                )?,
-                "ai-guard:broker-checkpoint:v1",
-            ),
-            LoadedCheckpoint::V2(payload) => (
-                self.checked_record(
-                    &SupervisedCheckpoint {
-                        version: 2,
-                        operation_id,
-                        intent_hash: loaded.0.intent_hash.clone(),
-                        revision: next_revision,
-                        previous: Some(expected.clone()),
-                        payload: payload.clone(),
-                    },
-                    CHECKPOINT,
-                )?,
-                "ai-guard:broker-checkpoint:v2",
-            ),
-            LoadedCheckpoint::V3(payload) => (
-                self.checked_record(
-                    &LifecycleCheckpoint {
-                        version: 3,
-                        operation_id,
-                        intent_hash: loaded.0.intent_hash.clone(),
-                        revision: next_revision,
-                        previous: Some(expected.clone()),
-                        payload: payload.clone(),
-                    },
-                    CHECKPOINT,
-                )?,
-                "ai-guard:broker-checkpoint:v3",
-            ),
-            LoadedCheckpoint::V4(payload) => (
-                self.checked_record(
-                    &OutboxCheckpoint {
-                        version: 4,
-                        operation_id,
-                        intent_hash: loaded.0.intent_hash.clone(),
-                        revision: next_revision,
-                        previous: Some(expected.clone()),
-                        payload: payload.clone(),
-                    },
-                    CHECKPOINT,
-                )?,
-                "ai-guard:broker-checkpoint:v4",
-            ),
-        };
-        let head = RevisionRefV1 {
-            revision: next_revision,
-            hash: digest(domain, &bytes),
-        };
+        let (bytes, head) = encode_checkpoint(
+            &self.0,
+            operation_id,
+            &loaded.0.intent_hash,
+            &expected,
+            &next,
+        )?;
         if expected.revision < loaded.0.head.revision {
             let index = usize::try_from(expected.revision).map_err(|_| JournalError::Conflict)?;
             if loaded.0.chain.get(index) == Some(&expected)
@@ -975,48 +1058,20 @@ impl Journal {
             loaded.0.legacy_managed_seen,
             loaded.0.last_cancel_operations,
         )?;
-        if next_revision >= u64::from(self.0.limits.revisions) {
-            return Err(JournalError::LimitExceeded);
-        }
-        let job = self.job(operation_id)?;
-        if self
-            .read_file(&job, &revision_name(next_revision), CHECKPOINT)?
-            .is_some()
-            || self.read_file(&job, "current-next.json", SMALL)?.is_some()
-        {
-            return Err(JournalError::Interrupted);
-        }
-        let current = Current {
-            version: 1,
+        let usage = self.usage(Some(&operation_id.to_string()))?;
+        publish_revision(
+            &self.0,
             operation_id,
-            intent_hash: loaded.0.intent_hash.clone(),
-            head: head.clone(),
-        };
-        let pointer = self.checked_record(&current, SMALL)?;
-        self.budget(
-            &operation_id.to_string(),
-            bytes.len() as u64 + pointer.len() as u64,
-            2,
+            &loaded.0.intent_hash,
+            &expected,
+            &head,
+            &bytes,
+            usage,
         )?;
-        let file = io(job.persistent_create(&revision_name(next_revision), &bytes))?;
-        stage!(RevisionWritten);
-        io(file.persistent_sync())?;
-        io(job.sync())?;
-        stage!(RevisionDurable);
-        let temporary = io(job.persistent_create("current-next.json", &pointer))?;
-        stage!(CurrentWritten);
-        io(temporary.persistent_sync())?;
-        let old = self
-            .read_file(&job, "current.json", SMALL)?
-            .ok_or(JournalError::Corrupt)?;
-        let old_current: Current = parse(old.bytes())?;
-        if old_current.head != expected {
-            return Err(JournalError::Conflict);
-        }
-        io(job.persistent_publish(&temporary, &old, "current.json"))?;
-        stage!(CurrentPublished);
-        io(job.sync())?;
-        stage!(CurrentDurable);
+        // The CAS and directory barrier committed this head even when a later
+        // business credential recheck fails. Preserve the conservative floor.
+        writer.floors.insert(operation_id, head.clone());
+        writer.observed_jobs.insert(operation_id);
         let result = self
             .load_locked(operation_id, &mut writer)?
             .ok_or(JournalError::Corrupt)?;
@@ -1367,12 +1422,7 @@ impl Journal {
         self.0.control.record(scope.bytes())
     }
     fn checked_record(&self, value: &impl Serialize, max: u64) -> JournalResult<Vec<u8>> {
-        let bytes = canonical(value)?;
-        if bytes.len() as u64 > max {
-            return Err(JournalError::TooLarge);
-        }
-        self.0.control.record(&bytes)?;
-        Ok(bytes)
+        checked_core_record(&self.0, value, max)
     }
     fn write(&self, directory: &Directory, name: &str, bytes: &[u8]) -> JournalResult<()> {
         let file = io(directory.persistent_create(name, bytes))?;

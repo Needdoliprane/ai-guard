@@ -13,19 +13,25 @@ use crate::{
         discovery::RoleLease,
         enforcer::{CancelGeneration, EnforcerClient, RegistrationV1},
         journal::{
-            AcceptedJobV1, ControlSecrets, FsExclusions, Journal, JournalLimitsV1, JournalScopeV1,
-            JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReserveResult,
-            canonical,
+            AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
+            JournalLimitsV1, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
+            RejectionReceiptV1, ReserveResult, canonical,
             recovery::{StopRecoveryReaderV1, StopRecoveryReportV1},
         },
         lifecycle::{LocalCommandReceiptV1, LocalCommandRequestV1},
         local_ipc::{PrivateListener, read_frame, write_frame},
-        writer::{CompletionFailure, WriterClient},
+        writer::{
+            CancelInputV1, CompletionFailure, ProfileWriterCapabilities, StopWriterClient,
+            WriterClient,
+        },
     },
     control_fs::{Directory, PrivateFile},
     model::Event,
     redaction::Redactor,
-    runner::broker::{BatchExecutor, BatchOutcome, BrokerRunState, prepare_broker_submission},
+    runner::broker::{
+        BatchExecutor, BatchOutcome, BrokerRunState, deliver_cancellation,
+        prepare_broker_submission,
+    },
     workspace::AuthorizedSource,
 };
 use anyhow::{Result, anyhow, ensure};
@@ -402,6 +408,18 @@ impl Service {
         profile: &str,
         scope: &JournalScopeV1,
     ) -> Result<WriterClient, BrokerErrorCodeV1> {
+        self.profile_writers(profile, scope, true)
+            .await?
+            .full()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)
+    }
+
+    async fn profile_writers(
+        &self,
+        profile: &str,
+        scope: &JournalScopeV1,
+        allow_create: bool,
+    ) -> Result<ProfileWriterCapabilities, BrokerErrorCodeV1> {
         let jobs = self.profile_jobs(profile)?;
         let root = self.root.clone();
         let scope = scope.clone();
@@ -412,30 +430,138 @@ impl Service {
             .get_or_try_init(|| async {
                 self.filesystem(move || {
                     let journals = root
-                        .persistent_child("journals", true)?
-                        .ok_or_else(|| anyhow!("broker journal root is unavailable"))?;
+                        .persistent_child("journals", allow_create)?
+                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
                     let profile = journals
-                        .persistent_child(open_scope.profile_id(), true)?
-                        .ok_or_else(|| anyhow!("broker profile journal root is unavailable"))?;
+                        .persistent_child(open_scope.profile_id(), allow_create)?
+                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+                    let control = ControlSecrets::new(material.literals.clone())?;
+                    if let Some(existing) = ProfileWriterCapabilities::open_existing(
+                        &profile,
+                        open_scope.clone(),
+                        &material.exclusions,
+                        JournalLimitsV1::default(),
+                        control.clone(),
+                        64,
+                        WRITER_TIMEOUT,
+                    )? {
+                        return Ok(existing);
+                    }
+                    ensure!(allow_create, BrokerErrorCodeV1::InvalidInput);
                     let journal = Journal::open(
                         &profile,
                         open_scope,
                         &material.exclusions,
                         JournalLimitsV1::default(),
-                        ControlSecrets::new(material.literals.clone())?,
+                        control,
                     )?;
-                    Ok(WriterClient::start(journal, 64, WRITER_TIMEOUT)?)
+                    Ok(ProfileWriterCapabilities::from_full(WriterClient::start(
+                        journal,
+                        64,
+                        WRITER_TIMEOUT,
+                    )?))
                 })
                 .await
             })
             .await?;
-        if canonical(writer.scope()).map_err(jobs::journal_error)?
+        if canonical(writer.stops().scope()).map_err(jobs::journal_error)?
             != canonical(&scope).map_err(jobs::journal_error)?
         {
             return Err(BrokerErrorCodeV1::Conflict);
         }
+        if writer.is_stop_only() {
+            self.fenced.store(true, Ordering::SeqCst);
+        }
         Ok(writer.clone())
     }
+
+    async fn recovery_status_for_profile(
+        &self,
+        profile: &ControlProfileV1,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+    ) -> Result<Response, BrokerErrorCodeV1> {
+        if operation.is_nil() {
+            return Err(BrokerErrorCodeV1::InvalidInput);
+        }
+        let capabilities = self.profile_writers(&profile.id, scope, false).await?;
+        let snapshot = capabilities
+            .stops()
+            .recovery_status(operation)
+            .await
+            .map_err(jobs::journal_error)?
+            .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+        if snapshot.operation_id() != operation {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        if canonical(snapshot.scope()).map_err(jobs::journal_error)?
+            != canonical(scope).map_err(jobs::journal_error)?
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        if let Some(job) = self.profile_jobs(&profile.id)?.known(operation) {
+            let commands = snapshot
+                .cancel_receipts()
+                .iter()
+                .map(LocalCommandReceiptV1::command_id)
+                .collect::<Vec<_>>();
+            job.remember_cancel_ids(&commands)?;
+        }
+        let known_arms = snapshot
+            .stops()
+            .iter()
+            .map(|stop| {
+                let arm = stop.arm();
+                RecoveryTargetV1 {
+                    arm_id: arm.operation_id.clone(),
+                    worker_id: arm.worker_id.clone(),
+                    attempt_id: arm.attempt_id.clone(),
+                    subject: match &arm.subject {
+                        crate::control::ArmSubjectV1::Worker => RecoveryTargetKindV1::Worker,
+                        crate::control::ArmSubjectV1::Helper { helper_id, .. } => {
+                            RecoveryTargetKindV1::Helper {
+                                helper_id: helper_id.clone(),
+                            }
+                        }
+                    },
+                    original_clock: arm.clock.clone(),
+                    original_timeout_seconds: arm.timeout_seconds,
+                    original_deadline_ns_decimal: arm.deadline_ns_decimal.clone(),
+                    cancel_command_id: stop.cancel_after_arm(),
+                }
+            })
+            .collect();
+        Ok(Response::reply(BrokerReplyV1::RecoveryStatus {
+            status: RecoveryStatusV1 {
+                version: 1,
+                operation_id: operation,
+                tenant_id: snapshot.scope().tenant_id().to_owned(),
+                journal_mode: if capabilities.is_stop_only() {
+                    JournalModeV1::StopOnly
+                } else {
+                    JournalModeV1::Full
+                },
+                source: RecoveryDataSourceV1::ConfirmedJournal,
+                runtime_evidence: RecoveryRuntimeEvidenceV1::NotQueried,
+                head_revision: snapshot.head().revision(),
+                head_hash: snapshot.head().hash().to_owned(),
+                incomplete: snapshot.incomplete(),
+                reconciliation_required: capabilities.is_stop_only() || snapshot.incomplete(),
+                cancel_commands: snapshot
+                    .cancel_receipts()
+                    .iter()
+                    .map(|receipt| RecoveryCommandV1 {
+                        command_id: receipt.command_id(),
+                        revision: receipt.head().revision(),
+                        checkpoint_hash: receipt.head().hash().to_owned(),
+                    })
+                    .collect(),
+                known_arms,
+                pending_arms: snapshot.pending_arms(),
+            },
+        }))
+    }
+
     async fn context(
         &self,
         mut verified: VerifiedProfile,
@@ -514,13 +640,16 @@ impl Service {
         }
         let read_only = matches!(
             envelope.request,
-            BrokerCommandV1::Status { .. } | BrokerCommandV1::List { .. }
+            BrokerCommandV1::Status { .. }
+                | BrokerCommandV1::List { .. }
+                | BrokerCommandV1::RecoveryStatus { .. }
         );
+        let stop_only = matches!(envelope.request, BrokerCommandV1::Cancel { .. });
         let verified = VerifiedProfile::authenticate(
             &self.registry,
             &envelope.profile_id,
             &envelope.credential,
-            !read_only,
+            !read_only && !stop_only,
         )
         .await?;
         if read_only || matches!(envelope.request, BrokerCommandV1::Cancel { .. }) {
@@ -533,6 +662,26 @@ impl Service {
             .profile(&envelope.profile_id)
             .map_err(|_| BrokerErrorCodeV1::Forbidden)?
             .clone();
+        if let BrokerCommandV1::RecoveryStatus { operation_id } = &envelope.request {
+            return self
+                .recovery_status_for_profile(&profile, &verified.scope, *operation_id)
+                .await;
+        }
+        if let BrokerCommandV1::Cancel {
+            operation_id,
+            command_id,
+        } = &envelope.request
+        {
+            return self
+                .cancel_for_profile(
+                    &profile,
+                    &verified.scope,
+                    self.profile_jobs(&profile.id)?,
+                    *operation_id,
+                    *command_id,
+                )
+                .await;
+        }
         let writer = self.writer(&profile.id, &verified.scope).await?;
         let jobs = self.profile_jobs(&profile.id)?;
         if !read_only && self.stopping.load(Ordering::SeqCst) {
@@ -596,12 +745,8 @@ impl Service {
                 self.approve(request, operation_id, command_id, request_hash)
                     .await
             }
-            BrokerCommandV1::Cancel {
-                operation_id,
-                command_id,
-            } => {
-                self.cancel(request.writer, request.jobs, operation_id, command_id)
-                    .await
+            BrokerCommandV1::Cancel { .. } | BrokerCommandV1::RecoveryStatus { .. } => {
+                Err(BrokerErrorCodeV1::InvalidInput)
             }
             BrokerCommandV1::Resume {
                 operation_id,
@@ -912,9 +1057,26 @@ impl Service {
             }),
         })
     }
+    async fn cancel_for_profile(
+        &self,
+        profile: &ControlProfileV1,
+        scope: &JournalScopeV1,
+        jobs: Arc<ProfileJobs>,
+        operation: Uuid,
+        command: Uuid,
+    ) -> Result<Response, BrokerErrorCodeV1> {
+        let writer = self
+            .profile_writers(&profile.id, scope, false)
+            .await?
+            .stops();
+        if self.stopping.load(Ordering::SeqCst) {
+            return Err(BrokerErrorCodeV1::Unavailable);
+        }
+        self.cancel(writer, jobs, operation, command).await
+    }
     async fn cancel(
         &self,
-        writer: WriterClient,
+        writer: StopWriterClient,
         jobs: Arc<ProfileJobs>,
         operation: Uuid,
         command: Uuid,
@@ -929,57 +1091,54 @@ impl Service {
         } else {
             job.begin_cancel(command)?
         };
-        if let Some(cancellation) = cancellation.as_mut() {
+        let projection = if let Some(cancellation) = cancellation.as_mut() {
             let identity = jobs.identity_gate().await?;
-            let durable = match writer
-                .status(operation)
-                .await
-                .map_err(jobs::journal_error)?
-            {
-                Some(JournalStatusV1::Accepted(durable)) => durable,
-                Some(JournalStatusV1::ReservedInProcess) => return Err(BrokerErrorCodeV1::Busy),
-                Some(JournalStatusV1::Rejected(receipt)) => {
-                    return Ok(Response::reply(rejected(&receipt, true)));
-                }
-                Some(JournalStatusV1::Interrupted) => return Err(BrokerErrorCodeV1::Interrupted),
-                None => return Err(BrokerErrorCodeV1::InvalidInput),
-            };
-            reject_event_command_reuse(&durable, command)?;
-            self.reject_export_command_reuse(&durable, command).await?;
+            let root = self.root.clone();
+            let profile = writer.scope().profile_id().to_owned();
+            self.filesystem(move || {
+                targets::reject_reserved_id(&root, &profile, command).map_err(anyhow::Error::new)
+            })
+            .await?;
             // Never wait behind the live execution/export gate. The receipt
-            // returned below comes from its first confirmed revision.
-            if let Err(error) = writer
-                .append_command(operation, command, LocalCommandRequestV1::CancelRequested)
-                .await
-            {
-                if error == crate::broker::journal::JournalError::Io {
-                    cancellation.unknown();
+            // comes from its first confirmed revision. Only this typed command
+            // can mutate a STOP writer; it validates lifecycle/event/export
+            // collisions from metadata without opening provider bindings.
+            let input = CancelInputV1::new(operation, command).map_err(jobs::journal_error)?;
+            let projection = match writer.append_cancel(input).await {
+                Ok(projection) => projection,
+                Err(failure) => {
+                    if matches!(&failure, CompletionFailure::Unknown { .. }) {
+                        cancellation.unknown();
+                    }
+                    let code = jobs::journal_error(failure.error());
+                    job.result(Some(code));
+                    return Err(code);
                 }
-                let code = jobs::journal_error(error);
-                job.result(Some(code));
-                return Err(code);
-            }
+            };
             cancellation.acknowledged();
             drop(identity);
-        }
+            projection
+        } else {
+            writer
+                .cancel_stop_projection(operation, command)
+                .await
+                .map_err(jobs::journal_error)?
+                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?
+        };
         let acknowledgement = self
-            .deliver_cancel(writer, operation, command, &job.cancel)
+            .deliver_cancel(writer.scope(), projection, &job.cancel)
             .await
             .inspect_err(|code| job.result(Some(*code)))?;
         Ok(Response::reply(command_ack(operation, &acknowledgement)))
     }
     async fn deliver_cancel(
         &self,
-        writer: WriterClient,
-        operation: Uuid,
-        command: Uuid,
+        scope: &JournalScopeV1,
+        projection: CancelStopProjectionV1,
         cancel: &CancelGeneration,
     ) -> Result<LocalCommandReceiptV1, BrokerErrorCodeV1> {
-        let projection = writer
-            .cancel_stop_projection(operation, command)
-            .await
-            .map_err(jobs::journal_error)?
-            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        #[cfg(test)]
+        let operation = projection.operation_id();
         let receipt = projection.receipt().clone();
         let incomplete = projection.incomplete();
         async {
@@ -989,8 +1148,7 @@ impl Service {
             if let Some(result) = cancel_retry_tests::delivery(operation, cancel.current()) {
                 return result;
             }
-            self.executor(writer)?
-                .cancel(projection, cancel)
+            deliver_cancellation(&self.enforcer, scope, projection, cancel)
                 .await
                 .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
         }
@@ -1301,11 +1459,32 @@ impl Service {
             .filesystem(move || Ok(proof.revalidate()?))
             .await
             .is_err();
-        // Only the STOP reader owned the existing lease during restoration.
-        // Ordinary business loading remains strict, including sibling usage
-        // and credential bytes; its failure cannot discard restored stops.
+        // Transfer the existing lease into one actor, without an unlock/relock
+        // window. Partial recovery can only retain the STOP capability.
+        let proof = Arc::clone(&report);
+        match self
+            .filesystem(move || {
+                Ok(ProfileWriterCapabilities::from_recovery_report(
+                    &proof,
+                    partial,
+                    64,
+                    WRITER_TIMEOUT,
+                )?)
+            })
+            .await
+        {
+            Ok(capabilities) => {
+                partial |= capabilities.is_stop_only();
+                if canonical(capabilities.stops().scope()).map_err(jobs::journal_error)?
+                    != canonical(&scope).map_err(jobs::journal_error)?
+                    || jobs.writer.set(capabilities).is_err()
+                {
+                    partial = true;
+                }
+            }
+            Err(_) => partial = true,
+        }
         drop(report);
-        partial |= self.writer(&profile.id, &scope).await.is_err();
         if partial {
             self.fenced.store(true, Ordering::SeqCst);
         }
@@ -1329,7 +1508,8 @@ impl Service {
                 let Ok(jobs) = self.profile_jobs(&profile.id) else {
                     continue;
                 };
-                let Some(writer) = jobs.writer.get().cloned() else {
+                let Some(writer) = jobs.writer.get().and_then(ProfileWriterCapabilities::full)
+                else {
                     continue;
                 };
                 let credential = match self.material.reconciler(profile) {

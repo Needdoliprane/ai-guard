@@ -1,0 +1,1 @@
+Attempt 1 shell failure: tee not found because PATH omitted /usr/bin; cargo outcome was not captured and is not counted.

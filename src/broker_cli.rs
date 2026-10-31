@@ -28,6 +28,9 @@ enum BrokerCommand {
     Submit(SubmitArgs),
     /// Read cached journal/control facts for this identity's job.
     Status(OperationArgs),
+    /// Read confirmed recovery metadata, including when business loading fails.
+    /// Does not inspect the runtime or establish that a worker has stopped.
+    RecoveryStatus(OperationArgs),
     /// List this profile's journal without hiding incomplete or corrupt data.
     List {
         #[command(flatten)]
@@ -203,6 +206,15 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             send(
                 args.connection,
                 BrokerCommandV1::Status {
+                    operation_id: args.operation_id,
+                },
+            )
+            .await
+        }
+        BrokerCommand::RecoveryStatus(args) => {
+            send(
+                args.connection,
+                BrokerCommandV1::RecoveryStatus {
                     operation_id: args.operation_id,
                 },
             )

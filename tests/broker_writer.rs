@@ -5,12 +5,17 @@ use agentsandbox::{
         journal::{
             ControlSecrets, FsExclusions, Journal, JournalError, JournalLimitsV1, JournalScopeV1,
             JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, ReserveResult,
+            recovery::StopRecoveryReaderV1,
         },
-        writer::WriterClient,
+        writer::{ProfileWriterCapabilities, WriterClient},
     },
     control_fs::Directory,
 };
-use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    fs,
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    time::Duration,
+};
 use uuid::Uuid;
 
 fn private_journal() -> (tempfile::TempDir, Journal) {
@@ -36,6 +41,138 @@ fn private_journal() -> (tempfile::TempDir, Journal) {
     )
     .unwrap();
     (root, journal)
+}
+
+#[tokio::test]
+async fn recovery_report_admits_one_actor_and_retains_the_original_lease() {
+    let (root, journal) = private_journal();
+    let directory = Directory::open_existing(&root.path().canonicalize().unwrap()).unwrap();
+    let scope = journal.scope().clone();
+    let namespace = fs::read_dir(root.path().join("broker-journal-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let lock = namespace.join(".writer.lock");
+    let before = fs::metadata(&lock).unwrap();
+    drop(journal);
+    let report = StopRecoveryReaderV1::open_existing(
+        &directory,
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(vec![]).unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .scan();
+    assert!(!report.incomplete());
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, false, 4, Duration::from_secs(2))
+            .unwrap();
+    assert!(!capabilities.is_stop_only());
+    assert_eq!(
+        ProfileWriterCapabilities::from_recovery_report(&report, true, 4, Duration::from_secs(2))
+            .unwrap_err(),
+        JournalError::Busy
+    );
+    drop(report);
+    let stops = capabilities.stops();
+    drop(capabilities);
+    let reopen = || {
+        Journal::open(
+            &directory,
+            scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(vec![]).unwrap(),
+        )
+    };
+    assert!(matches!(reopen(), Err(JournalError::Busy)));
+    let after = fs::metadata(&lock).unwrap();
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    drop(stops);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match reopen() {
+            Ok(_) => break,
+            Err(JournalError::Busy) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!(
+                "final actor must release the same lease after bounded queue drain: {error:?}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn recovery_handoff_retains_the_hash_of_an_already_observed_rejection() {
+    let (root, journal) = private_journal();
+    let scope = journal.scope().clone();
+    let operation = Uuid::new_v4();
+    let ReserveResult::New(ticket) = journal
+        .reserve(operation, b"synthetic-rejection-floor")
+        .unwrap()
+    else {
+        panic!("fresh operation");
+    };
+    journal
+        .reject(
+            ticket,
+            RejectionPhaseV1::SubmissionPreparation,
+            RejectionCodeV1::PreparationFailed,
+        )
+        .unwrap();
+    drop(journal);
+    let directory = Directory::open_existing(&root.path().canonicalize().unwrap()).unwrap();
+    let report = StopRecoveryReaderV1::open_existing(
+        &directory,
+        scope,
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(vec![]).unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .scan();
+    assert!(!report.incomplete());
+    assert!(
+        report.jobs().is_empty(),
+        "the report has observed a rejection, not an accepted job"
+    );
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, false, 4, Duration::from_secs(2))
+            .unwrap();
+    let namespace = fs::read_dir(root.path().join("broker-journal-v1"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let rejection = namespace
+        .join("jobs")
+        .join(operation.to_string())
+        .join("rejected.json");
+    let original = fs::read(&rejection).unwrap();
+    let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    changed["code"] = serde_json::json!("cancelled_before_acceptance");
+    // Editing an existing field retains the original canonical key order.
+    let bytes = serde_json::to_vec(&changed).unwrap();
+    assert_ne!(bytes, original);
+    fs::write(&rejection, bytes).unwrap();
+    assert!(
+        matches!(
+            capabilities.full().unwrap().status(operation).await,
+            Err(JournalError::Conflict)
+        ),
+        "continuous lease must not forget a rejection hash during actor handoff"
+    );
+    assert!(matches!(
+        capabilities.stops().recovery_status(operation).await,
+        Err(JournalError::Conflict)
+    ));
 }
 
 #[tokio::test]

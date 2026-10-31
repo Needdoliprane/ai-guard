@@ -1,11 +1,14 @@
-//! Read-only recovery of confirmed stop data. This never constructs a business
-//! job, a start permission, a credential handoff or an enforcer registration.
+//! Confirmed STOP metadata and restricted cancellation capabilities. The reader
+//! is read-only; StopJournal can append only CancelRequested through the shared
+//! publisher. Neither opens credential blobs or constructs a business job,
+//! fresh-start permission, credential handoff or enforcer registration.
 use super::*;
 use crate::{
     broker::{checkpoint::SupervisionOperationV1, lifecycle::LocalCommandRequestV1},
     control::{ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerTransitionV1},
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct StopRecoveryReaderV1 {
     scope: JournalScopeV1,
@@ -19,13 +22,17 @@ pub struct StopRecoveryReaderV1 {
     control: ControlSecrets,
     synchronize_reads: bool,
 }
-/// Retains the existing exclusive journal lease until the report is dropped.
-/// Restore its stop data before attempting to open the ordinary writer.
+/// Retains the existing exclusive lease while stop targets are restored. One
+/// profile actor can then inherit that same FD before this report is dropped;
+/// admission never releases and reacquires the lease or grants a fresh start.
 pub struct StopRecoveryReportV1 {
     reader: StopRecoveryReaderV1,
     jobs: Vec<RecoveredJobV1>,
     issues: Vec<StopRecoveryIssueV1>,
     incomplete: bool,
+    observed_jobs: HashSet<Uuid>,
+    rejected_floors: HashMap<Uuid, String>,
+    actor_claimed: AtomicBool,
 }
 pub struct RecoveredJobV1 {
     operation_id: Uuid,
@@ -36,6 +43,15 @@ pub struct RecoveredJobV1 {
     chain: Vec<RevisionRefV1>,
     command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
     cancel_boundaries: HashMap<Uuid, usize>,
+    pending_arms: usize,
+    metadata: Option<StopMetadata>,
+}
+struct StopMetadata {
+    intent: ExecutionIntentV1,
+    binding: BindingManifestV1,
+    checkpoint: LoadedCheckpoint,
+    legacy_managed_seen: bool,
+    last_cancel_operations: Option<usize>,
 }
 pub struct RecoveredStopV1 {
     arm: ArmV1,
@@ -55,6 +71,23 @@ pub struct CancelStopProjectionV1 {
     command_id: Uuid,
     receipt: LocalCommandReceiptV1,
     stops: Vec<RecoveredStopV1>,
+    incomplete: bool,
+}
+
+/// An existing profile's metadata-only cancellation capability. No API can
+/// obtain a business journal, credential source, or fresh-start permission.
+#[derive(Clone)]
+pub struct StopJournal {
+    core: Arc<Inner>,
+    scope_incomplete: bool,
+}
+pub struct StopJobSnapshotV1 {
+    reader: StopRecoveryReaderV1,
+    operation_id: Uuid,
+    head: RevisionRefV1,
+    cancel_receipts: Vec<LocalCommandReceiptV1>,
+    stops: Vec<RecoveredStopV1>,
+    pending_arms: usize,
     incomplete: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,8 +114,34 @@ opaque!(
     RecoveredJobV1,
     RecoveredStopV1,
     StopRecoveryIssueV1,
-    CancelStopProjectionV1
+    CancelStopProjectionV1,
+    StopJournal,
+    StopJobSnapshotV1
 );
+
+impl StopJobSnapshotV1 {
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.reader.scope
+    }
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn head(&self) -> &RevisionRefV1 {
+        &self.head
+    }
+    pub fn cancel_receipts(&self) -> &[LocalCommandReceiptV1] {
+        &self.cancel_receipts
+    }
+    pub fn stops(&self) -> &[RecoveredStopV1] {
+        &self.stops
+    }
+    pub fn pending_arms(&self) -> usize {
+        self.pending_arms
+    }
+    pub fn incomplete(&self) -> bool {
+        self.incomplete
+    }
+}
 
 impl CancelStopProjectionV1 {
     pub fn scope(&self) -> &JournalScopeV1 {
@@ -100,8 +159,8 @@ impl CancelStopProjectionV1 {
     pub fn stops(&self) -> &[RecoveredStopV1] {
         &self.stops
     }
-    /// Diagnostics concern the selected job, not a global namespace inventory.
-    /// Known targets remain usable even when coverage cannot be proved complete.
+    /// Job or retained profile coverage could not be proved complete. Known
+    /// targets remain usable even when unrelated metadata is unavailable.
     pub fn incomplete(&self) -> bool {
         self.incomplete
     }
@@ -115,14 +174,39 @@ impl Journal {
         operation_id: Uuid,
         command_id: Uuid,
     ) -> JournalResult<Option<CancelStopProjectionV1>> {
-        if operation_id.is_nil() || command_id.is_nil() {
+        StopJournal::from_full(self).cancel_stop_projection(operation_id, command_id)
+    }
+}
+
+type StopRead = (StopRecoveryReaderV1, RecoveredJobV1, bool);
+
+impl StopJournal {
+    pub(crate) fn from_full(journal: &Journal) -> Self {
+        Self {
+            core: Arc::clone(&journal.0),
+            scope_incomplete: false,
+        }
+    }
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.core.scope
+    }
+
+    fn read_locked(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+    ) -> JournalResult<Option<StopRead>> {
+        if operation_id.is_nil() {
             return Err(JournalError::InvalidInput);
         }
-        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
-        self.check_writer()?;
-        fscheck(self.0.jobs.revalidate())?;
-        let name = operation_id.to_string();
-        if fscheck(self.0.jobs.persistent_child(&name, false))?.is_none() {
+        let reader = StopRecoveryReaderV1::from_core(&self.core)?;
+        if fscheck(
+            self.core
+                .jobs
+                .persistent_child(&operation_id.to_string(), false),
+        )?
+        .is_none()
+        {
             return if writer.observed_jobs.contains(&operation_id)
                 || writer.floors.contains_key(&operation_id)
                 || writer.rejected_floors.contains_key(&operation_id)
@@ -132,16 +216,34 @@ impl Journal {
                 Ok(None)
             };
         }
-        self.check_observation_capacity(operation_id, &writer)?;
-        let reader = StopRecoveryReaderV1::from_live_writer(self)?;
-        let (recovered, incomplete) = reader.read_job(operation_id, &mut Usage::default())?;
+        if !writer.observed_jobs.contains(&operation_id)
+            && writer.observed_jobs.len() >= self.core.limits.jobs as usize
+        {
+            return Err(JournalError::LimitExceeded);
+        }
+        // Existence itself is observed even when the accepted prefix is later
+        // found interrupted. A subsequent disappearance cannot become Absent.
+        writer.observed_jobs.insert(operation_id);
+        let (recovered, rejected_hash, partial) =
+            reader.read_job(operation_id, &mut Usage::default())?;
+        if writer
+            .rejected_floors
+            .get(&operation_id)
+            .is_some_and(|old| Some(old) != rejected_hash.as_ref())
+            || writer.floors.contains_key(&operation_id) && rejected_hash.is_some()
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(hash) = rejected_hash {
+            writer.rejected_floors.insert(operation_id, hash);
+            return Err(JournalError::Interrupted);
+        }
         let Some(recovered) = recovered else {
-            // A previously accepted job may never become a rejected prefix.
-            return if writer.floors.contains_key(&operation_id) {
-                Err(JournalError::Conflict)
+            return Err(if writer.floors.contains_key(&operation_id) {
+                JournalError::Conflict
             } else {
-                Err(JournalError::InvalidInput)
-            };
+                JournalError::Interrupted
+            });
         };
         if writer.rejected_floors.contains_key(&operation_id) {
             return Err(JournalError::Conflict);
@@ -152,40 +254,378 @@ impl Journal {
                 return Err(JournalError::Conflict);
             }
         }
-        let head = recovered.head.clone();
+        // Scope inventory is diagnostic here, never a reason to discard a
+        // selected job's proven stops. Mutation separately requires exact usage.
+        let scope_partial =
+            reader
+                .inventory_scopes(&mut Usage::default())
+                .map_or(true, |(entries, partial)| {
+                    partial
+                        || entries.iter().any(|entry| {
+                            !entry.directory
+                                || Uuid::parse_str(&entry.name)
+                                    .map_or(true, |id| id.is_nil() || id.to_string() != entry.name)
+                        })
+                });
         reader.check_shared()?;
-        writer.floors.insert(operation_id, head);
+        writer.floors.insert(operation_id, recovered.head.clone());
         writer.observed_jobs.insert(operation_id);
-        let Some(boundary) = recovered.cancel_boundaries.get(&command_id).copied() else {
-            return if recovered.command_receipts.contains_key(&command_id) {
-                Err(JournalError::Conflict)
-            } else {
-                Ok(None)
-            };
+        Ok(Some((
+            reader,
+            recovered,
+            partial || scope_partial || self.scope_incomplete,
+        )))
+    }
+
+    pub fn cancel_stop_projection(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<Option<CancelStopProjectionV1>> {
+        if command_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let Some((reader, recovered, incomplete)) = self.read_locked(operation_id, &mut writer)?
+        else {
+            return Ok(None);
         };
-        let receipt = recovered
-            .command_receipts
-            .get(&command_id)
-            .cloned()
-            .ok_or(JournalError::Corrupt)?;
-        let stops = recovered
-            .stops
-            .into_iter()
-            .filter(|stop| stop.birth_index < boundary)
-            .map(|mut stop| {
-                stop.cancel_after_arm = Some(command_id);
-                stop
+        project_cancel(reader, recovered, incomplete, command_id)
+    }
+
+    pub fn recovery_status(&self, operation_id: Uuid) -> JournalResult<Option<StopJobSnapshotV1>> {
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let Some((reader, recovered, incomplete)) = self.read_locked(operation_id, &mut writer)?
+        else {
+            return Ok(None);
+        };
+        let cancel_receipts = recovered
+            .cancel_command_ids
+            .iter()
+            .map(|id| {
+                recovered
+                    .command_receipts
+                    .get(id)
+                    .cloned()
+                    .ok_or(JournalError::Corrupt)
             })
-            .collect();
-        Ok(Some(CancelStopProjectionV1 {
+            .collect::<JournalResult<Vec<_>>>()?;
+        Ok(Some(StopJobSnapshotV1 {
             reader,
             operation_id,
-            command_id,
-            receipt,
-            stops,
+            head: recovered.head,
+            cancel_receipts,
+            stops: recovered.stops,
+            pending_arms: recovered.pending_arms,
             incomplete,
         }))
     }
+
+    pub fn append_cancel(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<CancelStopProjectionV1> {
+        if command_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let (reader, recovered, incomplete) = self
+            .read_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        if recovered.command_receipts.contains_key(&command_id) {
+            let result = project_cancel(reader, recovered, incomplete, command_id)?
+                .ok_or(JournalError::Conflict)?;
+            #[cfg(test)]
+            stop_before_ack()?;
+            return Ok(result);
+        }
+        let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let id = command_id.to_string();
+        if metadata.checkpoint.outbox().is_some_and(|cp| cp.events().iter().any(|event| event.event_id() == command_id))
+            || metadata.checkpoint.supervised().is_some_and(|cp| cp.supervision().operations().iter().any(|op| {
+                matches!(op, SupervisionOperationV1::Export { request, .. } if request.operation_id == id)
+            }))
+        { return Err(JournalError::Conflict); }
+        let command = crate::broker::lifecycle::LocalCommandV1::new(
+            operation_id,
+            &metadata
+                .intent
+                .intent_hash()
+                .map_err(|_| JournalError::Corrupt)?,
+            command_id,
+            LocalCommandRequestV1::CancelRequested,
+        )?;
+        let mut commands = metadata
+            .checkpoint
+            .lifecycle()
+            .map_or_else(Vec::new, |cp| cp.commands().to_vec());
+        commands.push(command);
+        let broker = metadata.checkpoint.supervised().cloned().map_or_else(
+            || {
+                BrokerCheckpointV2::new(
+                    metadata.checkpoint.runner().clone(),
+                    crate::broker::checkpoint::SupervisionCheckpointV1::new(
+                        self.core.scope.control_namespace_uuid(),
+                        Vec::new(),
+                        Vec::new(),
+                    )?,
+                )
+            },
+            Ok,
+        )?;
+        let lifecycle = BrokerCheckpointV3::new(broker, commands)?;
+        let next = match metadata.checkpoint.outbox() {
+            Some(cp) => {
+                LoadedCheckpoint::V4(BrokerCheckpointV4::new(lifecycle, cp.events().to_vec())?)
+            }
+            None => LoadedCheckpoint::V3(lifecycle),
+        };
+        // The only mutable field is the appended Cancel. Canonical inner data
+        // comparisons make this restriction explicit, including opaque events.
+        if canonical(metadata.checkpoint.runner())? != canonical(next.runner())? {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(cp) = metadata.checkpoint.supervised()
+            && canonical(cp)? != canonical(next.supervised().ok_or(JournalError::Corrupt)?)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        if let Some(cp) = metadata.checkpoint.outbox()
+            && canonical(&cp.events())?
+                != canonical(&next.outbox().ok_or(JournalError::Corrupt)?.events())?
+        {
+            return Err(JournalError::Conflict);
+        }
+        confirmed::context_checkpoint(
+            &self.core.scope,
+            &self.core.control,
+            &next,
+            &metadata.intent,
+            &metadata.binding,
+        )?;
+        confirmed::check_transition(
+            &metadata.checkpoint,
+            &next,
+            metadata.legacy_managed_seen,
+            metadata.last_cancel_operations,
+        )?;
+        let intent_hash = metadata
+            .intent
+            .intent_hash()
+            .map_err(|_| JournalError::Corrupt)?;
+        let (bytes, head) = encode_checkpoint(
+            &self.core,
+            operation_id,
+            &intent_hash,
+            &recovered.head,
+            &next,
+        )?;
+        let usage = stop_budget_usage(&self.core, operation_id)?;
+        reader.check_shared()?;
+        publish_revision(
+            &self.core,
+            operation_id,
+            &intent_hash,
+            &recovered.head,
+            &head,
+            &bytes,
+            usage,
+        )?;
+        writer.floors.insert(operation_id, head.clone());
+        writer.observed_jobs.insert(operation_id);
+        let (reader, confirmed, incomplete) = self
+            .read_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::Corrupt)?;
+        if confirmed.head != head {
+            return Err(JournalError::Corrupt);
+        }
+        let result = project_cancel(reader, confirmed, incomplete, command_id)?
+            .ok_or(JournalError::Corrupt)?;
+        #[cfg(test)]
+        stop_before_ack()?;
+        Ok(result)
+    }
+}
+
+fn project_cancel(
+    reader: StopRecoveryReaderV1,
+    recovered: RecoveredJobV1,
+    incomplete: bool,
+    command_id: Uuid,
+) -> JournalResult<Option<CancelStopProjectionV1>> {
+    let Some(boundary) = recovered.cancel_boundaries.get(&command_id).copied() else {
+        return if recovered.command_receipts.contains_key(&command_id) {
+            Err(JournalError::Conflict)
+        } else {
+            Ok(None)
+        };
+    };
+    let receipt = recovered
+        .command_receipts
+        .get(&command_id)
+        .cloned()
+        .ok_or(JournalError::Corrupt)?;
+    let stops = recovered
+        .stops
+        .into_iter()
+        .filter(|stop| stop.birth_index < boundary)
+        .map(|mut stop| {
+            stop.cancel_after_arm = Some(command_id);
+            stop
+        })
+        .collect();
+    Ok(Some(CancelStopProjectionV1 {
+        reader,
+        operation_id: recovered.operation_id,
+        command_id,
+        receipt,
+        stops,
+        incomplete,
+    }))
+}
+
+/// Count every safely inspected entry even when its schema/name is invalid.
+/// Failed metadata, truncation or unknown nested directories refuse mutation.
+fn stop_budget_usage(core: &Inner, operation_id: Uuid) -> JournalResult<Usage> {
+    let mut usage = Usage::default();
+    let selected_name = operation_id.to_string();
+    for entry in fscheck(core.directory.persistent_entries(core.limits.scope_entries))? {
+        if entry.directory && entry.name != "jobs" {
+            return Err(JournalError::UnsafeFilesystem);
+        }
+        usage.add(entry.bytes, 1, false, &core.limits)?;
+    }
+    for entry in fscheck(core.jobs.persistent_entries(core.limits.scope_entries))? {
+        let selected = entry.name == selected_name;
+        usage.add(entry.bytes, 1, selected, &core.limits)?;
+        if !entry.directory {
+            continue;
+        }
+        usage.jobs = usage
+            .jobs
+            .checked_add(1)
+            .ok_or(JournalError::LimitExceeded)?;
+        usage.add(0, 0, false, &core.limits)?;
+        let mut job_usage = Usage::default();
+        job_usage.add(0, 1, true, &core.limits)?;
+        let mut revisions = 0_u32;
+        let job = fscheck(core.jobs.persistent_child(&entry.name, false))?
+            .ok_or(JournalError::UnsafeFilesystem)?;
+        for file in fscheck(job.persistent_entries(core.limits.job_entries))? {
+            usage.add(file.bytes, 1, selected, &core.limits)?;
+            job_usage.add(file.bytes, 1, true, &core.limits)?;
+            if file.name.starts_with("rev-") && file.name.ends_with(".json") {
+                revisions = revisions
+                    .checked_add(1)
+                    .ok_or(JournalError::LimitExceeded)?;
+                if revisions > core.limits.revisions {
+                    return Err(JournalError::LimitExceeded);
+                }
+            }
+            if file.directory {
+                if file.name != "bindings" {
+                    return Err(JournalError::UnsafeFilesystem);
+                }
+                let bindings = fscheck(job.persistent_child("bindings", false))?
+                    .ok_or(JournalError::UnsafeFilesystem)?;
+                for binding in fscheck(bindings.persistent_entries(core.limits.job_entries))? {
+                    if binding.directory {
+                        return Err(JournalError::UnsafeFilesystem);
+                    }
+                    usage.add(binding.bytes, 1, selected, &core.limits)?;
+                    job_usage.add(binding.bytes, 1, true, &core.limits)?;
+                }
+            }
+        }
+    }
+    Ok(usage)
+}
+
+pub(super) fn admit_report(
+    report: &StopRecoveryReportV1,
+    force_stops: bool,
+) -> JournalResult<ExistingProfileV1> {
+    report.reader.check_shared()?;
+    if report
+        .actor_claimed
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(JournalError::Busy);
+    }
+    let result = admit_claimed_report(report, force_stops);
+    if result.is_err() {
+        // No core escaped failed admission. Success consumes this frame: a
+        // second factory cannot create another mutex/actor on the same FD.
+        report.actor_claimed.store(false, Ordering::SeqCst);
+    }
+    result
+}
+
+fn admit_claimed_report(
+    report: &StopRecoveryReportV1,
+    force_stops: bool,
+) -> JournalResult<ExistingProfileV1> {
+    let mut writer = Writer {
+        observed_jobs: report.observed_jobs.clone(),
+        rejected_floors: report.rejected_floors.clone(),
+        ..Writer::default()
+    };
+    for job in &report.jobs {
+        if writer
+            .floors
+            .insert(job.operation_id, job.head.clone())
+            .is_some()
+        {
+            return Err(JournalError::Corrupt);
+        }
+        writer.observed_jobs.insert(job.operation_id);
+    }
+    if writer.observed_jobs.len() > report.reader.limits.jobs as usize {
+        return Err(JournalError::LimitExceeded);
+    }
+    let core = Arc::new(Inner {
+        scope: report.reader.scope.clone(),
+        scope_hash: report.reader.scope_hash.clone(),
+        directory: report.reader.directory.clone(),
+        jobs: report.reader.jobs.clone(),
+        lock: report.reader.lock.clone(),
+        exclusions: report.reader.exclusions.clone(),
+        limits: report.reader.limits.clone(),
+        control: report.reader.control.clone(),
+        writer: Mutex::new(writer),
+    });
+    let mut stops = StopJournal {
+        core,
+        scope_incomplete: report.incomplete,
+    };
+    if !force_stops && !report.incomplete {
+        // The only internal factory creating a full facade from an existing
+        // frame. Its lease is the same retained Arc; no flock/open/create.
+        let full = Journal(Arc::clone(&stops.core));
+        full.check_writer()?;
+        if full.usage(None).is_ok() {
+            // Existing-only equivalents of Journal::open's durable admission
+            // barriers. The retained FD lease is never released or re-locked.
+            fscheck(report.reader.namespace.durable_bootstrap())?;
+            io(report.reader.lock.persistent_sync())?;
+            let scope = report
+                .reader
+                .read_file(&report.reader.directory, "scope.json", SMALL)?
+                .ok_or(JournalError::Corrupt)?;
+            io(scope.persistent_sync())?;
+            io(report.reader.directory.sync())?;
+            io(report.reader.jobs.sync())?;
+            io(report.reader.directory.sync())?;
+            report.reader.check_shared()?;
+            #[cfg(test)]
+            full_namespace_durable()?;
+            return Ok(ExistingProfileV1::Full(full));
+        }
+        stops.scope_incomplete = true;
+    }
+    Ok(ExistingProfileV1::Stops(stops))
 }
 
 impl StopRecoveryReportV1 {
@@ -272,26 +712,25 @@ impl StopRecoveryIssueV1 {
 }
 
 impl StopRecoveryReaderV1 {
-    fn from_live_writer(journal: &Journal) -> JournalResult<Self> {
+    fn from_core(core: &Inner) -> JournalResult<Self> {
         // This namespace FD is an observation only. Job reads use the original
         // retained directory capabilities, revalidated before and after reads.
-        let namespace_path = journal
-            .0
+        let namespace_path = core
             .directory
             .path()
             .parent()
             .ok_or(JournalError::Corrupt)?;
         let namespace = fscheck(Directory::open_existing(namespace_path))?;
         let reader = Self {
-            scope: journal.0.scope.clone(),
-            scope_hash: journal.0.scope_hash.clone(),
+            scope: core.scope.clone(),
+            scope_hash: core.scope_hash.clone(),
             namespace,
-            directory: journal.0.directory.clone(),
-            jobs: journal.0.jobs.clone(),
-            lock: journal.0.lock.clone(),
-            exclusions: journal.0.exclusions.clone(),
-            limits: journal.0.limits.clone(),
-            control: journal.0.control.clone(),
+            directory: core.directory.clone(),
+            jobs: core.jobs.clone(),
+            lock: core.lock.clone(),
+            exclusions: core.exclusions.clone(),
+            limits: core.limits.clone(),
+            control: core.control.clone(),
             synchronize_reads: true,
         };
         reader.check_shared()?;
@@ -366,6 +805,9 @@ impl StopRecoveryReaderV1 {
             jobs: Vec::new(),
             issues: Vec::new(),
             incomplete: false,
+            observed_jobs: HashSet::new(),
+            rejected_floors: HashMap::new(),
+            actor_claimed: AtomicBool::new(false),
         };
         if let Err(error) = report.reader.check_shared() {
             report.issue(None, StopRecoveryPhaseV1::SharedScope, error);
@@ -406,8 +848,12 @@ impl StopRecoveryReaderV1 {
             usage.jobs += 1;
             usage.job_bytes = 0;
             usage.job_entries = 0;
+            report.observed_jobs.insert(operation_id);
             match report.reader.read_job(operation_id, &mut usage) {
-                Ok((Some(job), partial)) => {
+                Ok((Some(mut job), None, partial)) => {
+                    // Startup reports retain stop facts, not an entire copy of
+                    // every job's prompts, outbox bodies and runner payload.
+                    job.metadata = None;
                     report.jobs.push(job);
                     if partial {
                         report.issue(
@@ -417,7 +863,10 @@ impl StopRecoveryReaderV1 {
                         );
                     }
                 }
-                Ok((None, partial)) => {
+                Ok((None, rejected_hash, partial)) => {
+                    if let Some(hash) = rejected_hash {
+                        report.rejected_floors.insert(operation_id, hash);
+                    }
                     if partial {
                         report.issue(
                             Some(operation_id),
@@ -425,6 +874,13 @@ impl StopRecoveryReaderV1 {
                             JournalError::Interrupted,
                         );
                     }
+                }
+                Ok((Some(_), Some(_), _)) => {
+                    report.issue(
+                        Some(operation_id),
+                        StopRecoveryPhaseV1::Job,
+                        JournalError::Corrupt,
+                    );
                 }
                 Err(error) => report.issue(Some(operation_id), StopRecoveryPhaseV1::Job, error),
             }
@@ -527,7 +983,7 @@ impl StopRecoveryReaderV1 {
         &self,
         operation_id: Uuid,
         usage: &mut Usage,
-    ) -> JournalResult<(Option<RecoveredJobV1>, bool)> {
+    ) -> JournalResult<(Option<RecoveredJobV1>, Option<String>, bool)> {
         self.check_shared()?;
         let job = fscheck(self.jobs.persistent_child(&operation_id.to_string(), false))?
             .ok_or(JournalError::Interrupted)?;
@@ -621,15 +1077,24 @@ impl StopRecoveryReaderV1 {
                 {
                     return Err(JournalError::Corrupt);
                 }
+                let rejected_hash = digest("ai-guard:broker-rejection:v1", file.bytes());
+                fscheck(job.revalidate())?;
+                if self.synchronize_reads {
+                    io(job.sync())?;
+                    io(self.jobs.sync())?;
+                    io(self.directory.sync())?;
+                }
+                self.check_shared()?;
                 return Ok((
                     None,
+                    Some(rejected_hash),
                     partial
                         || inventory.entries.iter().any(|entry| {
                             !matches!(entry.name.as_str(), "reservation.json" | "rejected.json")
                         }),
                 ));
             }
-            return Ok((None, true));
+            return Ok((None, None, true));
         };
         self.control.record(accepted_file.bytes())?;
         let accepted: Accepted = parse(accepted_file.bytes())?;
@@ -745,6 +1210,7 @@ impl StopRecoveryReaderV1 {
                     .collect::<Vec<_>>()
             });
         let mut stops = Vec::new();
+        let mut pending_arms = 0_usize;
         if let Some(value) = confirmed.payload.supervised() {
             for (index, operation) in value.supervision().operations().iter().enumerate() {
                 // WorkerClaim and HelperClaim already require a prior ACKed Arm
@@ -775,6 +1241,7 @@ impl StopRecoveryReaderV1 {
                     continue;
                 };
                 let Some(response) = response else {
+                    pending_arms += 1;
                     partial = true;
                     continue;
                 };
@@ -831,7 +1298,16 @@ impl StopRecoveryReaderV1 {
                 chain: confirmed.chain,
                 command_receipts: confirmed.command_receipts,
                 cancel_boundaries: confirmed.cancel_boundaries,
+                pending_arms,
+                metadata: Some(StopMetadata {
+                    intent,
+                    binding: bindings.binding,
+                    checkpoint: confirmed.payload,
+                    legacy_managed_seen: confirmed.legacy_managed_seen,
+                    last_cancel_operations: confirmed.last_cancel_operations,
+                }),
             }),
+            None,
             partial,
         ))
     }

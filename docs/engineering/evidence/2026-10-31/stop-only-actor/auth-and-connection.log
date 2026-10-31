@@ -1,0 +1,29 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.78s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 3 tests
+dispatch_future_bytes=107488 connection_future_bytes=107600
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+test broker::service::server::cancel_retry_tests::stop_auth_tests::empty_credential_is_refused_on_the_actual_connection_without_namespace_creation ... ok
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+test broker::service::server::cancel_retry_tests::stop_auth_tests::inactive_real_gateway_allows_fresh_stop_and_recovery_metadata_only ... ok
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+unboxed_dispatch_future_bytes=107488
+test broker::service::server::cancel_retry_tests::stop_auth_tests::fresh_gateway_guards_refuse_wrong_identity_or_start_before_namespace_creation ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.81s
+

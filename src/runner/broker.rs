@@ -20,7 +20,7 @@ use std::{fmt, path::Path};
 use uuid::Uuid;
 
 mod executor;
-pub(crate) use executor::{BatchExecutor, BatchOutcome};
+pub(crate) use executor::{BatchExecutor, BatchOutcome, deliver_cancellation};
 
 /// Live, single-use provenance from the executor's freshly acknowledged claim.
 /// There is deliberately no public constructor, Clone or serde implementation.

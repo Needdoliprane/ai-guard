@@ -3,14 +3,16 @@
 use super::{
     checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
     journal::{
-        AcceptedJobV1, CancelStopProjectionV1, CheckpointReceiptV1, Journal, JournalError,
-        JournalPageV1, JournalResult, JournalScopeV1, JournalStatusV1, RejectionCodeV1,
-        RejectionPhaseV1, RejectionReceiptV1, ReservationTicket, ReserveResult, RevisionRefV1,
+        AcceptedJobV1, CancelStopProjectionV1, CheckpointReceiptV1, ControlSecrets, FsExclusions,
+        Journal, JournalError, JournalLimitsV1, JournalPageV1, JournalResult, JournalScopeV1,
+        JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationTicket,
+        ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
+        recovery::{StopRecoveryReaderV1, StopRecoveryReportV1},
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
 };
-use crate::{model::Event, runner::broker::PreparedSubmission};
+use crate::{control_fs::Directory, model::Event, runner::broker::PreparedSubmission};
 use std::{
     collections::HashSet,
     fmt,
@@ -39,6 +41,28 @@ pub struct RejectInput {
 impl RejectInput {
     pub fn into_parts(self) -> (ReservationTicket, RejectionPhaseV1, RejectionCodeV1) {
         (self.ticket, self.phase, self.code)
+    }
+}
+/// A cancellation identity is data, never a business or start capability.
+pub struct CancelInputV1 {
+    operation_id: Uuid,
+    command_id: Uuid,
+}
+impl CancelInputV1 {
+    pub fn new(operation_id: Uuid, command_id: Uuid) -> JournalResult<Self> {
+        if operation_id.is_nil() || command_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        Ok(Self {
+            operation_id,
+            command_id,
+        })
+    }
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn command_id(&self) -> Uuid {
+        self.command_id
     }
 }
 /// Ownership is returned only when the completion never entered the queue.
@@ -88,6 +112,7 @@ macro_rules! opaque_input {
 }
 opaque_input!(AcceptInput);
 opaque_input!(RejectInput);
+opaque_input!(CancelInputV1);
 
 enum Command {
     Reserve {
@@ -133,6 +158,14 @@ enum Command {
         command_id: Uuid,
         reply: Reply<Option<CancelStopProjectionV1>>,
     },
+    AppendCancel {
+        input: CancelInputV1,
+        reply: Reply<CancelStopProjectionV1>,
+    },
+    RecoveryStatus {
+        operation_id: Uuid,
+        reply: Reply<Option<StopJobSnapshotV1>>,
+    },
     EnqueueEvents {
         operation_id: Uuid,
         events: Vec<Event>,
@@ -151,6 +184,214 @@ struct ClientState {
     timeout: Duration,
 }
 
+enum Backend {
+    Full(Journal),
+    Stops(StopJournal),
+}
+impl Backend {
+    fn scope(&self) -> &JournalScopeV1 {
+        match self {
+            Self::Full(journal) => journal.scope(),
+            Self::Stops(journal) => journal.scope(),
+        }
+    }
+    fn full(&self) -> JournalResult<&Journal> {
+        match self {
+            Self::Full(journal) => Ok(journal),
+            // Even an incorrectly routed private message cannot turn a
+            // retained cancellation lease into a business capability.
+            Self::Stops(_) => Err(JournalError::InvalidInput),
+        }
+    }
+}
+
+fn validate_queue(capacity: u32, timeout: Duration) -> JournalResult<()> {
+    if !(1..=256).contains(&capacity) || timeout.is_zero() || timeout > Duration::from_secs(60) {
+        return Err(JournalError::InvalidInput);
+    }
+    Ok(())
+}
+
+impl ClientState {
+    fn start(backend: Backend, capacity: u32, timeout: Duration) -> JournalResult<Arc<Self>> {
+        validate_queue(capacity, timeout)?;
+        let scope = backend.scope().clone();
+        let (sender, receiver) = mpsc::sync_channel(capacity as usize);
+        // Closing the queue is graceful. No client Drop joins a blocked fsync;
+        // the actor owns its exact existing lease until queued work drains.
+        let _thread = std::thread::Builder::new()
+            .name("ai-guard-journal-writer".into())
+            .spawn(move || serve_backend(backend, receiver))
+            .map_err(|_| JournalError::Io)?;
+        Ok(Arc::new(Self {
+            sender,
+            scope,
+            timeout,
+        }))
+    }
+    async fn call<T: Send + 'static>(
+        &self,
+        command: impl FnOnce(Reply<T>) -> Command + Send,
+    ) -> JournalResult<T> {
+        tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
+        let (reply, receive) = oneshot::channel();
+        match self.sender.try_send(command(reply)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
+            Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
+        }
+        // A lost reply never removes or cancels the actor's typed command.
+        self.receive(receive).await
+    }
+    async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
+        tokio::time::timeout(self.timeout, receive)
+            .await
+            .map_err(|_| JournalError::Io)?
+            .map_err(|_| JournalError::Io)?
+    }
+}
+
+/// A restricted facade over the same actor. It has no conversion to a full
+/// writer, no business load, and no arbitrary mutation entry point.
+#[derive(Clone)]
+pub struct StopWriterClient(Arc<ClientState>);
+opaque_input!(StopWriterClient);
+
+/// Profile admission chooses a capability once without releasing its lease.
+/// A stop-only profile never gains a full writer through this facade.
+#[derive(Clone)]
+pub struct ProfileWriterCapabilities {
+    full: Option<WriterClient>,
+    stops: StopWriterClient,
+}
+opaque_input!(ProfileWriterCapabilities);
+
+impl ProfileWriterCapabilities {
+    pub fn from_full(writer: WriterClient) -> Self {
+        let stops = writer.stops();
+        Self {
+            full: Some(writer),
+            stops,
+        }
+    }
+    pub fn open_existing(
+        root: &Directory,
+        scope: JournalScopeV1,
+        exclusions: &FsExclusions,
+        limits: JournalLimitsV1,
+        control: ControlSecrets,
+        capacity: u32,
+        timeout: Duration,
+    ) -> JournalResult<Option<Self>> {
+        validate_queue(capacity, timeout)?;
+        let Some(reader) =
+            StopRecoveryReaderV1::open_existing(root, scope, exclusions, limits, control)?
+        else {
+            return Ok(None);
+        };
+        let report = reader.scan();
+        Self::from_recovery_report(&report, false, capacity, timeout).map(Some)
+    }
+    pub fn from_recovery_report(
+        report: &StopRecoveryReportV1,
+        force_stops: bool,
+        capacity: u32,
+        timeout: Duration,
+    ) -> JournalResult<Self> {
+        validate_queue(capacity, timeout)?;
+        match super::journal::admit_recovery_report(report, force_stops)? {
+            super::journal::ExistingProfileV1::Full(journal) => {
+                WriterClient::start(journal, capacity, timeout).map(Self::from_full)
+            }
+            super::journal::ExistingProfileV1::Stops(journal) => Ok(Self {
+                full: None,
+                stops: StopWriterClient(ClientState::start(
+                    Backend::Stops(journal),
+                    capacity,
+                    timeout,
+                )?),
+            }),
+        }
+    }
+    pub fn full(&self) -> Option<WriterClient> {
+        self.full.clone()
+    }
+    pub fn stops(&self) -> StopWriterClient {
+        self.stops.clone()
+    }
+    pub fn is_stop_only(&self) -> bool {
+        self.full.is_none()
+    }
+}
+
+impl StopWriterClient {
+    pub fn scope(&self) -> &JournalScopeV1 {
+        &self.0.scope
+    }
+    pub async fn append_cancel(
+        &self,
+        input: CancelInputV1,
+    ) -> Result<CancelStopProjectionV1, CompletionFailure<CancelInputV1>> {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(CompletionFailure::NotQueued {
+                error: JournalError::Io,
+                input,
+            });
+        }
+        let (reply, receive) = oneshot::channel();
+        match self
+            .0
+            .sender
+            .try_send(Command::AppendCancel { input, reply })
+        {
+            Ok(()) => self
+                .0
+                .receive(receive)
+                .await
+                .map_err(|error| CompletionFailure::Unknown { error }),
+            Err(mpsc::TrySendError::Full(Command::AppendCancel { input, .. })) => {
+                Err(CompletionFailure::NotQueued {
+                    error: JournalError::Busy,
+                    input,
+                })
+            }
+            Err(mpsc::TrySendError::Disconnected(Command::AppendCancel { input, .. })) => {
+                Err(CompletionFailure::NotQueued {
+                    error: JournalError::Io,
+                    input,
+                })
+            }
+            Err(_) => Err(CompletionFailure::Unknown {
+                error: JournalError::Io,
+            }),
+        }
+    }
+    pub async fn cancel_stop_projection(
+        &self,
+        operation_id: Uuid,
+        command_id: Uuid,
+    ) -> JournalResult<Option<CancelStopProjectionV1>> {
+        self.0
+            .call(move |reply| Command::CancelStopProjection {
+                operation_id,
+                command_id,
+                reply,
+            })
+            .await
+    }
+    pub async fn recovery_status(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<StopJobSnapshotV1>> {
+        self.0
+            .call(move |reply| Command::RecoveryStatus {
+                operation_id,
+                reply,
+            })
+            .await
+    }
+}
+
 /// Clones share one queue and one thread. Dropping the final client closes the
 /// queue; the thread drains accepted commands before dropping its journal lease.
 /// No Drop waits for a possibly blocked filesystem operation.
@@ -165,52 +406,25 @@ impl fmt::Debug for WriterClient {
 
 impl WriterClient {
     pub fn start(journal: Journal, capacity: u32, timeout: Duration) -> JournalResult<Self> {
-        if !(1..=256).contains(&capacity) || timeout.is_zero() || timeout > Duration::from_secs(60)
-        {
-            return Err(JournalError::InvalidInput);
-        }
-        let scope = journal.scope().clone();
-        let (sender, receiver) = mpsc::sync_channel(capacity as usize);
-        // The detached handle is intentional: closing the queue is graceful,
-        // but neither client Drop nor an enforcer may join a blocked fsync.
-        let _thread = std::thread::Builder::new()
-            .name("ai-guard-journal-writer".into())
-            .spawn(move || serve(journal, receiver))
-            .map_err(|_| JournalError::Io)?;
-        Ok(Self(Arc::new(ClientState {
-            sender,
-            scope,
-            timeout,
-        })))
+        ClientState::start(Backend::Full(journal), capacity, timeout).map(Self)
     }
 
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.0.scope
+    }
+    pub fn stops(&self) -> StopWriterClient {
+        StopWriterClient(Arc::clone(&self.0))
     }
 
     async fn call<T: Send + 'static>(
         &self,
         command: impl FnOnce(Reply<T>) -> Command + Send,
     ) -> JournalResult<T> {
-        // The service uses Tokio with its time driver enabled. Refuse calls
-        // outside a runtime before transferring ownership into the queue.
-        tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
-        let (reply, receive) = oneshot::channel();
-        match self.0.sender.try_send(command(reply)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
-            Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
-        }
-        // Timeout/closed reply means UNKNOWN, not a rollback or a rejection.
-        // The typed command remains owned by the worker and must still run.
-        self.receive(receive).await
+        self.0.call(command).await
     }
 
     async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
-        tokio::time::timeout(self.0.timeout, receive)
-            .await
-            .map_err(|_| JournalError::Io)?
-            .map_err(|_| JournalError::Io)?
+        self.0.receive(receive).await
     }
 
     pub async fn reserve(
@@ -452,7 +666,12 @@ impl WriterClient {
     }
 }
 
+#[cfg(test)]
 fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
+    serve_backend(Backend::Full(journal), receiver);
+}
+
+fn serve_backend(backend: Backend, receiver: mpsc::Receiver<Command>) {
     while let Ok(command) = receiver.recv() {
         match command {
             Command::Reserve {
@@ -460,21 +679,30 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
                 submit,
                 reply,
             } => {
-                let _ = reply.send(journal.reserve(operation_id, &submit));
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| journal.reserve(operation_id, &submit)),
+                );
             }
             Command::Reject { input, reply } => {
-                let (ticket, phase, code) = input.into_parts();
-                let _ = reply.send(journal.reject(ticket, phase, code));
+                let result = backend.full().and_then(|journal| {
+                    let (ticket, phase, code) = input.into_parts();
+                    journal.reject(ticket, phase, code)
+                });
+                let _ = reply.send(result);
             }
             Command::AcceptPrepared { input, reply } => {
-                let (ticket, prepared) = input.into_parts();
-                let result = prepared.initial_checkpoint().and_then(|initial| {
-                    journal.accept(
-                        ticket,
-                        prepared.intent(),
-                        prepared.binding_inputs(),
-                        &initial,
-                    )
+                let result = backend.full().and_then(|journal| {
+                    let (ticket, prepared) = input.into_parts();
+                    prepared.initial_checkpoint().and_then(|initial| {
+                        journal.accept(
+                            ticket,
+                            prepared.intent(),
+                            prepared.binding_inputs(),
+                            &initial,
+                        )
+                    })
                 });
                 let _ = reply.send(result);
             }
@@ -482,20 +710,32 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
                 operation_id,
                 reply,
             } => {
-                let _ = reply.send(journal.load(operation_id));
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| journal.load(operation_id)),
+                );
             }
             Command::Status {
                 operation_id,
                 reply,
             } => {
-                let _ = reply.send(journal.status(operation_id));
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| journal.status(operation_id)),
+                );
             }
             Command::List {
                 after,
                 limit,
                 reply,
             } => {
-                let _ = reply.send(journal.list(after, limit));
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| journal.list(after, limit)),
+                );
             }
             Command::AdvanceLifecycle {
                 operation_id,
@@ -503,7 +743,10 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
                 next,
                 reply,
             } => {
-                let _ = reply.send(advance_lifecycle(&journal, operation_id, expected, &next));
+                let _ =
+                    reply.send(backend.full().and_then(|journal| {
+                        advance_lifecycle(journal, operation_id, expected, &next)
+                    }));
             }
             Command::AppendLocal {
                 operation_id,
@@ -511,28 +754,65 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
                 request,
                 reply,
             } => {
-                let _ = reply.send(append_command(&journal, operation_id, command_id, *request));
+                let _ = reply.send(backend.full().and_then(|journal| {
+                    append_command(journal, operation_id, command_id, *request)
+                }));
             }
             Command::CancelStopProjection {
                 operation_id,
                 command_id,
                 reply,
             } => {
-                let _ = reply.send(journal.cancel_stop_projection(operation_id, command_id));
+                let result = match &backend {
+                    Backend::Full(journal) => StopJournal::from_full(journal)
+                        .cancel_stop_projection(operation_id, command_id),
+                    Backend::Stops(journal) => {
+                        journal.cancel_stop_projection(operation_id, command_id)
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            Command::AppendCancel { input, reply } => {
+                let result = match &backend {
+                    Backend::Full(journal) => StopJournal::from_full(journal)
+                        .append_cancel(input.operation_id, input.command_id),
+                    Backend::Stops(journal) => {
+                        journal.append_cancel(input.operation_id, input.command_id)
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            Command::RecoveryStatus {
+                operation_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => {
+                        StopJournal::from_full(journal).recovery_status(operation_id)
+                    }
+                    Backend::Stops(journal) => journal.recovery_status(operation_id),
+                };
+                let _ = reply.send(result);
             }
             Command::EnqueueEvents {
                 operation_id,
                 events,
                 reply,
             } => {
-                let _ = reply.send(enqueue_events(&journal, operation_id, events));
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| enqueue_events(journal, operation_id, events)),
+                );
             }
             Command::AcknowledgeEvents {
                 operation_id,
                 acknowledgements,
                 reply,
             } => {
-                let _ = reply.send(acknowledge_events(&journal, operation_id, acknowledgements));
+                let _ = reply.send(backend.full().and_then(|journal| {
+                    acknowledge_events(journal, operation_id, acknowledgements)
+                }));
             }
         }
     }
@@ -900,6 +1180,179 @@ mod tests {
             super::super::journal::JournalEntryKindV1::Rejected
         );
 
+        drop(writer);
+        drop(recovered_writer);
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_append_unknown_retains_queued_identity_and_replays_once() {
+        use crate::{broker::intent::ExecutionIntentV1, runner::CheckpointPayloadV1};
+        use serde_json::{Value, json};
+
+        let (_root, journal) = private_journal();
+        let operation_id = Uuid::from_u128(0x33333333333343338333333333333333);
+        let mut plan: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/broker_intent-plan-v3.json"
+        )))
+        .unwrap();
+        plan["version"] = json!(1);
+        plan["operation_id"] = json!(operation_id.to_string());
+        plan["options"]["profile"] = json!("strict");
+        plan["options"]["network"] = json!("none");
+        plan["options"]["provider"] = json!("generic");
+        plan["options"]["argv"] = json!(["/usr/bin/id"]);
+        for field in [
+            "client",
+            "auth_mode",
+            "client_profile",
+            "providers_file",
+            "prompt",
+            "model",
+        ] {
+            plan["options"].as_object_mut().unwrap().remove(field);
+        }
+        plan["request"]["profile"] = json!("strict");
+        plan["request"]["agent_id"] = json!("generic-22222222-2222-4222-8222-222222222222");
+        plan["request"]["command"]["argv"] = json!(["/usr/bin/id"]);
+        plan["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_resolution");
+        plan["provider_input"] = Value::Null;
+        plan["provider_credential"] = Value::Null;
+        let intent =
+            ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+        let ticket = reserved_ticket(&journal, operation_id, br#"{"stop_queue_test":true}"#);
+        let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+        journal
+            .accept(
+                ticket,
+                &intent,
+                super::super::journal::BindingInputs::None,
+                &initial,
+            )
+            .unwrap();
+
+        let first = Uuid::from_u128(0x66666666666646668666666666666666);
+        let second = Uuid::from_u128(0x77777777777747778777777777777777);
+        let (writer, receiver) = paused_client(&journal, 1, Duration::from_millis(10));
+        let failure = writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation_id, first).unwrap())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure.error(), JournalError::Io);
+        assert!(matches!(&failure, CompletionFailure::Unknown { .. }));
+        assert!(failure.into_input().is_none());
+        let queued = receiver
+            .try_recv()
+            .expect("a timed-out append remains queued");
+        match &queued {
+            Command::AppendCancel { input, .. } => {
+                assert_eq!(input.operation_id(), operation_id);
+                assert_eq!(input.command_id(), first);
+            }
+            _ => panic!("the queue must retain the exact cancellation input"),
+        }
+        assert!(writer.0.sender.try_send(queued).is_ok());
+        let failure = writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation_id, second).unwrap())
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(failure.error(), JournalError::Busy);
+        assert!(matches!(&failure, CompletionFailure::NotQueued { .. }));
+        let retry = failure.into_input().unwrap();
+        assert_eq!(
+            (retry.operation_id(), retry.command_id()),
+            (operation_id, second)
+        );
+        assert_eq!(
+            journal
+                .load(operation_id)
+                .unwrap()
+                .unwrap()
+                .head()
+                .revision(),
+            0
+        );
+        assert!(
+            journal
+                .command_receipt(operation_id, first)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            journal
+                .command_receipt(operation_id, second)
+                .unwrap()
+                .is_none()
+        );
+
+        let recovered_writer = WriterClient(Arc::new(ClientState {
+            sender: writer.0.sender.clone(),
+            scope: writer.0.scope.clone(),
+            timeout: Duration::from_secs(2),
+        }));
+        let worker_journal = journal.clone();
+        let worker = std::thread::spawn(move || serve(worker_journal, receiver));
+        let (reply, result) = oneshot::channel();
+        assert!(
+            recovered_writer
+                .0
+                .sender
+                .send(Command::Status {
+                    operation_id,
+                    reply
+                })
+                .is_ok()
+        );
+        assert!(result.await.unwrap().unwrap().is_some());
+        let projection = recovered_writer
+            .stops()
+            .append_cancel(CancelInputV1::new(operation_id, first).unwrap())
+            .await
+            .unwrap();
+        let receipt = projection.receipt();
+        assert_eq!(receipt.command_id(), first);
+        assert_eq!(receipt.head().revision(), 1);
+        assert_eq!(
+            journal
+                .command_receipt(operation_id, first)
+                .unwrap()
+                .unwrap()
+                .head(),
+            receipt.head()
+        );
+        assert_eq!(
+            journal
+                .load(operation_id)
+                .unwrap()
+                .unwrap()
+                .broker_checkpoint_v3()
+                .unwrap()
+                .commands()
+                .len(),
+            1
+        );
+        let second_projection = recovered_writer.stops().append_cancel(retry).await.unwrap();
+        assert_eq!(second_projection.receipt().command_id(), second);
+        assert_eq!(second_projection.receipt().head().revision(), 2);
+        assert_eq!(
+            journal
+                .load(operation_id)
+                .unwrap()
+                .unwrap()
+                .broker_checkpoint_v3()
+                .unwrap()
+                .commands()
+                .len(),
+            2
+        );
         drop(writer);
         drop(recovered_writer);
         worker.join().unwrap();

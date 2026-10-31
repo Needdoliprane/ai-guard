@@ -163,6 +163,16 @@ Pour arrêter les services de contrôle, après la fin des sessions :
 
 Pour la sous-commande explicite `broker cancel`, encore en qualification distincte du parcours ci-dessus, conserver l'UUID de commande dès le premier appel : fournir `--command-id` avec un UUID neuf choisi, ou noter la ligne `Command: <UUID>` affichée avant l'envoi quand la CLI le génère. Passer ensuite cet UUID à `--command-id` pour un retry. Réutiliser le même identifiant retente cette annulation précise ; en choisir un nouveau exprime une nouvelle demande et peut inclure des exports plus récents. Un reçu durable ou une livraison au gardien ne prouve pas la fin du worker. Après `NeedsReconciliation`, consulter les preuves et l'état runtime avant toute conclusion sur le quota. [Portée et limites du rejeu](engineering/evidence/2026-10-31/cancel-retry/README.md).
 
+Sur le service permanent configuré explicitement, `broker recovery-status` fournit un diagnostic même si le chargement métier est indisponible. Fournir les mêmes root, profil, fichier de token runner et UUID d'opération que pour les autres commandes broker :
+
+```sh
+"$AIGUARD_BIN" broker recovery-status \
+  --root "$AIGUARD_BROKER_ROOT" --profile "$AIGUARD_BROKER_PROFILE" \
+  --token-file "$AIGUARD_RUNNER_TOKEN_FILE" --operation-id "$AIGUARD_OPERATION_ID"
+```
+
+Ces variables désignent votre configuration de broker existante ; cette commande ne l'initialise pas. La réponse distingue `journal_mode` (`full` ou `stop_only`), `source=confirmed_journal`, `runtime_evidence=not_queried` et `incomplete`. `full` décrit la capacité de l'acteur, pas la santé actuelle des credentials. `reconciliation_required` ne résume que ces métadonnées et le mode de l'acteur ; sa valeur `false` ne prouve ni la santé du gardien, ni la possibilité de lancer une action. Les armements et échéances sont ceux d'origine. Ni la présence d'un Cancel, ni un code zéro de consultation ne prouve un worker terminé ; conserver les preuves en cas de réconciliation requise. Un namespace absent est refusé sans création. Un ancien service refuse cette commande inconnue avec `InvalidInput`, sans diagnostic de version plus précis : mettre client et service à la version qui la fournit. [Validation et limites](engineering/evidence/2026-10-31/stop-only-actor/README.md).
+
 ## Configuration et données à conserver
 
 | Réglage ou donnée | Valeur / emplacement livré |

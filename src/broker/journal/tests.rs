@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    cell::Cell,
-    path::Path,
+    cell::{Cell, RefCell},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -33,9 +33,24 @@ impl Drop for ChildGuard {
 thread_local! {
     static FAIL_ONCE: Cell<Option<FaultStage>> = const { Cell::new(None) };
     static CRASH_ADVANCE_ARMED: Cell<bool> = const { Cell::new(false) };
+    static MOVE_BINDING_ONCE: RefCell<Option<(FaultStage, PathBuf, PathBuf)>> = const { RefCell::new(None) };
 }
 
 pub(super) fn checkpoint(stage: FaultStage) -> JournalResult<()> {
+    let move_binding = MOVE_BINDING_ONCE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(expected, _, _)| *expected == stage)
+        {
+            slot.take()
+        } else {
+            None
+        }
+    });
+    if let Some((_, source, backup)) = move_binding {
+        std::fs::rename(source, backup).map_err(|_| JournalError::Io)?;
+    }
     if stage == FaultStage::WriterLockAbsent
         && let (Ok(barrier), Ok(release)) = (
             std::env::var("AI_GUARD_JOURNAL_LOCK_BARRIER"),
@@ -191,7 +206,130 @@ fn injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers() {
     }
 }
 
+#[test]
+fn full_writer_rechecks_binding_after_real_publication_before_ack() {
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open(temporary.path());
+    let base = temporary.path().canonicalize().unwrap();
+    let source_path = base.join("manual-fixture.env");
+    std::fs::write(&source_path, b"FIXTURE_KEY=synthetic-canary-123\n").unwrap();
+    std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let source = crate::control_fs::PrivateFile::open(&source_path, 64 * 1024).unwrap();
+    let mut plan = plan_for(operation());
+    plan["options"]["profile"] = json!("observe");
+    plan["options"]["network"] = json!("bridge");
+    plan["options"]["secret_env_file"] = json!(source_path);
+    plan["request"]["profile"] = json!("observe");
+    let intent = ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+    let initial = CheckpointPayloadV1::initial(&intent).unwrap();
+    let ReserveResult::New(ticket) = journal.reserve(operation(), submit()).unwrap() else {
+        panic!("fresh canary");
+    };
+    let accepted = journal
+        .accept(
+            ticket,
+            &intent,
+            BindingInputs::Manual { source: &source },
+            &initial,
+        )
+        .unwrap();
+    let blob = accepted.binding_source().unwrap().path().to_path_buf();
+    let job_path = blob.parent().unwrap().parent().unwrap().to_path_buf();
+    let first = journal
+        .advance(operation(), accepted.head().clone(), &initial)
+        .unwrap();
+    assert_eq!(first.head().revision(), 1);
+    drop(accepted);
+    let backup = base.join("preserved-binding.bin");
+    MOVE_BINDING_ONCE.with(|slot| {
+        assert!(
+            slot.borrow_mut()
+                .replace((FaultStage::CurrentDurable, blob, backup.clone()))
+                .is_none()
+        );
+    });
+    assert!(
+        journal
+            .advance(operation(), first.head().clone(), &initial)
+            .is_err(),
+        "a published revision cannot be acknowledged without its strict post-load binding"
+    );
+    assert!(MOVE_BINDING_ONCE.with(|slot| slot.borrow().is_none()));
+    assert!(
+        backup.is_file(),
+        "fixture bytes are preserved outside the binding namespace"
+    );
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(job_path.join("current.json")).unwrap()).unwrap();
+    assert_eq!(
+        current["head"]["revision"],
+        json!(2),
+        "positive publication control"
+    );
+    assert!(journal.load(operation()).is_err());
+    let snapshot = super::StopJournal::from_full(&journal)
+        .recovery_status(operation())
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.head().revision(), 2);
+    assert!(snapshot.incomplete());
+}
+
+#[test]
+fn recovered_full_admission_retains_lease_and_fails_before_ack_on_durability_error() {
+    use crate::broker::writer::ProfileWriterCapabilities;
+    let temporary = tempfile::tempdir().unwrap();
+    let journal = open(temporary.path());
+    let scope = journal.scope().clone();
+    drop(journal);
+    let root = Directory::open_existing(&temporary.path().canonicalize().unwrap()).unwrap();
+    let report = super::recovery::StopRecoveryReaderV1::open_existing(
+        &root,
+        scope.clone(),
+        &FsExclusions::new(),
+        JournalLimitsV1::default(),
+        ControlSecrets::new(vec![]).unwrap(),
+    )
+    .unwrap()
+    .unwrap()
+    .scan();
+    assert!(!report.incomplete());
+    fail_once_at(FaultStage::NamespaceDurable);
+    assert!(matches!(
+        ProfileWriterCapabilities::from_recovery_report(&report, false, 4, Duration::from_secs(2)),
+        Err(JournalError::Io)
+    ));
+    assert!(
+        FAIL_ONCE.with(|slot| slot.get().is_none()),
+        "the post-sync admission barrier must have been reached"
+    );
+    assert!(
+        matches!(
+            Journal::open(
+                &root,
+                scope,
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(vec![]).unwrap()
+            ),
+            Err(JournalError::Busy)
+        ),
+        "failed admission must not release the report's lease"
+    );
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, false, 4, Duration::from_secs(2))
+            .unwrap();
+    assert!(
+        !capabilities.is_stop_only(),
+        "no facade escaped the failed attempt, so exact retry may admit once"
+    );
+}
+
 fn intent_for(operation: Uuid) -> ExecutionIntentV1 {
+    ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan_for(operation)).unwrap()).unwrap()
+}
+
+fn plan_for(operation: Uuid) -> Value {
     let mut plan: Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/broker_intent-plan-v3.json"
     ))
@@ -221,7 +359,7 @@ fn intent_for(operation: Uuid) -> ExecutionIntentV1 {
         .remove("provider_resolution");
     plan["provider_input"] = Value::Null;
     plan["provider_credential"] = Value::Null;
-    ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap()
+    plan
 }
 
 fn intent() -> ExecutionIntentV1 {

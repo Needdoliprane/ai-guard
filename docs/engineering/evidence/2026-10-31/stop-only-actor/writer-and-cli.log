@@ -1,0 +1,18 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.38s
+     Running tests/broker_service.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_service-ec06a709071bc125)
+
+running 1 test
+test broker_help_lists_the_approved_service_commands ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s
+
+     Running tests/broker_writer.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_writer-fd0f004c894afbba)
+
+running 3 tests
+test recovery_report_admits_one_actor_and_retains_the_original_lease ... ok
+test recovery_handoff_retains_the_hash_of_an_already_observed_rejection ... ok
+test bounded_writer_keeps_scope_private_and_persists_rejection_replay ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+

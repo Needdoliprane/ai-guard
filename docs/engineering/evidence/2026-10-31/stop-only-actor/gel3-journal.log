@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 9 tests
+test broker::journal::tests::crash_child_at_stage ... ignored, spawned only by the parent SIGKILL test
+test broker::journal::tests::writer_lock_race_child ... ignored, spawned by simultaneous_first_writer_creation_returns_busy
+test broker::journal::tests::fault_hook_dispatch_is_one_shot_and_thread_local ... ok
+
+running 1 test
+test broker::journal::tests::writer_lock_race_child ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 0.11s
+
+test broker::journal::tests::simultaneous_first_writer_creation_returns_busy ... ok
+test broker::journal::tests::recovered_full_admission_retains_lease_and_fails_before_ack_on_durability_error ... ok
+test broker::journal::tests::injected_rejection_io_errors_never_return_ack_and_exact_replay_recovers ... ok
+test broker::journal::tests::injected_journal_io_error_never_returns_ack_and_recovery_is_conservative ... ok
+test broker::journal::tests::full_writer_rechecks_binding_after_real_publication_before_ack ... ok
+test broker::journal::tests::sigkill_at_durable_boundaries_never_returns_a_fresh_ticket ... ok
+
+test result: ok. 7 passed; 0 failed; 2 ignored; 0 measured; 124 filtered out; finished in 1.18s
+

@@ -1,0 +1,154 @@
+diff -ru /private/tmp/ai-guard-stop-gel3.EIdieG/sources/src/broker/service/stop_auth_tests.rs /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/src/broker/service/stop_auth_tests.rs
+--- /private/tmp/ai-guard-stop-gel3.EIdieG/sources/src/broker/service/stop_auth_tests.rs	2026-10-31 18:17:35.370272551 +0100
++++ /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/src/broker/service/stop_auth_tests.rs	2026-10-31 18:21:43.795293115 +0100
+@@ -15,6 +15,7 @@
+     url: String,
+     namespace: Uuid,
+     requests: Arc<AtomicUsize>,
++    identities: Arc<AtomicUsize>,
+     task: tokio::task::JoinHandle<()>,
+ }
+ impl Drop for Gateway {
+@@ -75,12 +76,18 @@
+         )
+         .unwrap();
+         let requests = Arc::new(AtomicUsize::new(0));
++        let identities = Arc::new(AtomicUsize::new(0));
+         let observed = Arc::clone(&requests);
++        let observed_identity = Arc::clone(&identities);
+         let app = gateway_router(state).layer(axum::middleware::from_fn(
+             move |request: axum::extract::Request, next: axum::middleware::Next| {
+                 let observed = Arc::clone(&observed);
++                let observed_identity = Arc::clone(&observed_identity);
+                 async move {
+                     observed.fetch_add(1, Ordering::SeqCst);
++                    if request.uri().path() == "/api/v1/control/protocol" {
++                        observed_identity.fetch_add(1, Ordering::SeqCst);
++                    }
+                     next.run(request).await
+                 }
+             },
+@@ -95,6 +102,7 @@
+             url,
+             namespace,
+             requests,
++            identities,
+             task,
+         }
+     }
+@@ -106,7 +114,7 @@
+     credential: &str,
+     request: BrokerCommandV1,
+ ) -> Result<Response, BrokerErrorCodeV1> {
+-    let before = gateway.requests.load(Ordering::SeqCst);
++    let before = gateway.identities.load(Ordering::SeqCst);
+     let pending = service.dispatch(EnvelopeV1 {
+         version: 1,
+         profile_id: "cancel_retry_test".into(),
+@@ -120,8 +128,9 @@
+     // Keep the matrix's outer future bounded instead of embedding a copy of
+     // the complete dispatcher state at every await site in this debug test.
+     let result = Box::pin(pending).await;
+-    assert!(
+-        gateway.requests.load(Ordering::SeqCst) > before,
++    assert_eq!(
++        gateway.identities.load(Ordering::SeqCst),
++        before + 1,
+         "every request authenticates afresh against the actual gateway"
+     );
+     result
+@@ -288,3 +297,57 @@
+     )
+     .await;
+ }
++
++#[tokio::test(flavor = "current_thread")]
++async fn empty_credential_is_refused_on_the_actual_connection_without_namespace_creation() {
++    fn future_bytes<A, F>(_: impl FnOnce(A) -> F) -> usize {
++        std::mem::size_of::<F>()
++    }
++    let gateway = Gateway::inactive(true).await;
++    let fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
++    let root = fixture.service.root.path().to_owned();
++    let service = Arc::new(fixture.service);
++    // These factories are never invoked: measuring a type cannot overflow by
++    // first constructing that future. This is diagnostic, not a size limit.
++    eprintln!(
++        "dispatch_future_bytes={} connection_future_bytes={}",
++        future_bytes(|envelope: EnvelopeV1| service.dispatch(envelope)),
++        future_bytes(|stream: UnixStream| Arc::clone(&service).connection(stream))
++    );
++    let (mut client, server) = UnixStream::pair().unwrap();
++    // Exercise the production connection/frame/dispatch path in a real task,
++    // without boxing dispatch in the test or increasing the thread's stack.
++    let mut task = tokio::spawn(Arc::clone(&service).connection(server));
++    write_frame(
++        &mut client,
++        &EnvelopeV1 {
++            version: 1,
++            profile_id: "cancel_retry_test".into(),
++            credential: String::new(),
++            request: BrokerCommandV1::RecoveryStatus {
++                operation_id: Uuid::new_v4(),
++            },
++        },
++        FRAME_BYTES,
++        Duration::from_secs(2),
++    )
++    .await
++    .unwrap();
++    let reply: ReplyEnvelopeV1 = read_frame(&mut client, FRAME_BYTES, Duration::from_secs(2))
++        .await
++        .unwrap();
++    let joined = tokio::time::timeout(Duration::from_secs(2), &mut task).await;
++    if joined.is_err() {
++        task.abort();
++    }
++    joined.unwrap().unwrap();
++    assert_eq!(reply.version, 1);
++    assert!(matches!(
++        reply.reply,
++        BrokerReplyV1::Error {
++            code: BrokerErrorCodeV1::Unauthorized
++        }
++    ));
++    assert_eq!(gateway.requests.load(Ordering::SeqCst), 0);
++    assert_eq!(fs::read_dir(root).unwrap().count(), 0);
++}
+diff -ru /private/tmp/ai-guard-stop-gel3.EIdieG/sources/tests/broker_outbox.rs /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/tests/broker_outbox.rs
+--- /private/tmp/ai-guard-stop-gel3.EIdieG/sources/tests/broker_outbox.rs	2026-10-31 18:17:35.412715889 +0100
++++ /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/tests/broker_outbox.rs	2026-10-31 18:21:43.844211494 +0100
+@@ -563,7 +563,7 @@
+         1
+     );
+ 
+-    let before_events = agentsandbox::broker::journal::canonical(&current_v4.events()).unwrap();
++    let before_events = serde_json::to_vec(current_v4.events()).unwrap();
+     let stops = fixture.writer.stops();
+     let collision = stops
+         .append_cancel(
+@@ -605,10 +605,7 @@
+     let after_stop = fixture.journal.load(operation_id).unwrap().unwrap();
+     let v4 = after_stop.broker_checkpoint_v4().unwrap();
+     assert_eq!(v4.lifecycle().commands().len(), 2);
+-    assert_eq!(
+-        agentsandbox::broker::journal::canonical(&v4.events()).unwrap(),
+-        before_events
+-    );
++    assert_eq!(serde_json::to_vec(v4.events()).unwrap(), before_events);
+     let replay = stops
+         .append_cancel(
+             agentsandbox::broker::writer::CancelInputV1::new(operation_id, cancel_id).unwrap(),
+diff -ru /private/tmp/ai-guard-stop-gel3.EIdieG/sources/tests/broker_writer.rs /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/tests/broker_writer.rs
+--- /private/tmp/ai-guard-stop-gel3.EIdieG/sources/tests/broker_writer.rs	2026-10-31 18:17:35.422179306 +0100
++++ /private/tmp/ai-guard-stop-gel4.m2XvQt/sources/tests/broker_writer.rs	2026-10-31 18:21:43.852104828 +0100
+@@ -158,7 +158,8 @@
+     let original = fs::read(&rejection).unwrap();
+     let mut changed: serde_json::Value = serde_json::from_slice(&original).unwrap();
+     changed["code"] = serde_json::json!("cancelled_before_acceptance");
+-    let bytes = agentsandbox::broker::journal::canonical(&changed).unwrap();
++    // Editing an existing field retains the original canonical key order.
++    let bytes = serde_json::to_vec(&changed).unwrap();
+     assert_ne!(bytes, original);
+     fs::write(&rejection, bytes).unwrap();
+     assert!(

@@ -1,0 +1,27 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.47s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 3 tests
+test broker::service::server::cancel_retry_tests::acknowledged_cancel_retry_redelivers_without_revoking_later_execution ... ok
+
+thread 'broker::service::server::cancel_retry_tests::cold_cancel_route_survives_invalid_sibling_without_opening_full_writer' (6168348) panicked at src/broker/service/cancel_retry_tests.rs:805:5:
+assertion `left == right` failed: the cold Cancel route must persist and attempt known delivery despite an invalid sibling
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test broker::service::server::cancel_retry_tests::cold_cancel_route_survives_invalid_sibling_without_opening_full_writer ... FAILED
+
+thread 'broker::service::server::cancel_retry_tests::first_cancel_without_manual_blob_persists_before_delivery_and_replays' (6168349) panicked at src/broker/service/cancel_retry_tests.rs:648:10:
+first Cancel must become durable even when its provider blob is missing
+test broker::service::server::cancel_retry_tests::first_cancel_without_manual_blob_persists_before_delivery_and_replays ... FAILED
+
+failures:
+
+failures:
+    broker::service::server::cancel_retry_tests::cold_cancel_route_survives_invalid_sibling_without_opening_full_writer
+    broker::service::server::cancel_retry_tests::first_cancel_without_manual_blob_persists_before_delivery_and_replays
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 123 filtered out; finished in 2.32s
+
+error: test failed, to rerun pass `--lib`

@@ -562,6 +562,61 @@ async fn v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_re
         after_refusal.broker_checkpoint_v4().unwrap().events().len(),
         1
     );
+
+    let before_events = serde_json::to_vec(current_v4.events()).unwrap();
+    let stops = fixture.writer.stops();
+    let collision = stops
+        .append_cancel(
+            agentsandbox::broker::writer::CancelInputV1::new(
+                operation_id,
+                current_v4.events()[0].event_id(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(collision.error(), JournalError::Conflict);
+    let collision = stops
+        .append_cancel(
+            agentsandbox::broker::writer::CancelInputV1::new(
+                operation_id,
+                Uuid::from_u128(0x88888888888848888888888888888888),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(collision.error(), JournalError::Conflict);
+    assert_same_head(
+        fixture.journal.load(operation_id).unwrap().unwrap().head(),
+        &before_downgrade,
+    );
+    let cancel_id = Uuid::from_u128(0x99999999999949998999999999999999);
+    let cancel = stops
+        .append_cancel(
+            agentsandbox::broker::writer::CancelInputV1::new(operation_id, cancel_id).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cancel.receipt().head().revision(),
+        before_downgrade.revision() + 1
+    );
+    let after_stop = fixture.journal.load(operation_id).unwrap().unwrap();
+    let v4 = after_stop.broker_checkpoint_v4().unwrap();
+    assert_eq!(v4.lifecycle().commands().len(), 2);
+    assert_eq!(serde_json::to_vec(v4.events()).unwrap(), before_events);
+    let replay = stops
+        .append_cancel(
+            agentsandbox::broker::writer::CancelInputV1::new(operation_id, cancel_id).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_same_head(replay.receipt().head(), cancel.receipt().head());
+    assert_same_head(
+        fixture.journal.load(operation_id).unwrap().unwrap().head(),
+        after_stop.head(),
+    );
 }
 
 #[tokio::test]

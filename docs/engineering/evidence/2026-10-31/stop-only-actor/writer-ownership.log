@@ -1,0 +1,10 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/agentsandbox-31f20f78acafd423)
+
+running 3 tests
+test broker::writer::tests::full_queue_returns_reject_ticket_for_retry ... ok
+test broker::writer::tests::timed_out_queued_reject_keeps_unknown_input_and_replays_after_recovery ... ok
+test broker::writer::tests::stop_append_unknown_retains_queued_identity_and_replays_once ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.52s
+

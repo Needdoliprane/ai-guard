@@ -15,7 +15,15 @@ fn broker_help_lists_the_approved_service_commands() {
         output.status
     );
     for command in [
-        "serve", "submit", "status", "list", "approve", "cancel", "export",
+        "serve",
+        "submit",
+        "status",
+        "recovery-status",
+        "list",
+        "approve",
+        "cancel",
+        "resume",
+        "export",
     ] {
         assert!(
             stdout.split_whitespace().any(|word| word == command),

@@ -1,6 +1,18 @@
 # Décisions d'industrialisation
 
-## 31 octobre — rejeu causal des annulations, en intégration
+## 31 octobre — acteur STOP restreint et diagnostic de reprise
+
+Conserver un seul acteur, une seule file bornée et le même FD de lease par profil. Son admission choisit une capacité métier complète ou une capacité STOP restreinte ; cette dernière ne permet ni chargement métier, ni réservation, ni permission de lancement, ni conversion publique vers le writer complet. La restauration transmet la lease retenue à cet acteur sans fenêtre de déverrouillage. Les planchers et identités déjà observés sont conservés, y compris le hash des rejets : le transfert sous la même lease ne réinitialise ni leur classe ni leur contenu accepté.
+
+La seule nouvelle mutation admise par la capacité STOP est `CancelRequested`, construite depuis la chaîne confirmée et publiée par le mécanisme CAS/fsync commun. Les données du runner, la supervision, les événements et les reçus antérieurs restent inchangés. Les collisions de commandes, événements et inputs d'export sont refusées. Une anomalie de schéma dont les octets et entrées sont tous comptables peut conserver cette mutation ; une taille inconnue, un inventaire tronqué ou un parcours non sûr refuse la nouvelle publication. Un Cancel déjà durable garde sa possibilité de livraison aux seules cibles prouvées. La voie métier garde ses lectures strictes avant **et après** publication, y compris des bindings fournisseur.
+
+Un résultat après enqueue perdu reste inconnu : conserver son UUID et permettre sa résolution/reprise sans nouvelle invalidation de génération ni effacement par un diagnostic partiel. Le refus d'une nouvelle action métier reste appliqué pendant cette ambiguïté. L'authentification fraîche runner, tenant, namespace et protocole reste nécessaire avant tout accès au profil. Une autorité de supervision inactive ferme les actions métier, mais ne retire pas la possibilité d'enregistrer un arrêt authentifié ou de lire ses métadonnées.
+
+Le RPC local additif `RecoveryStatus` et le CLI `broker recovery-status` ont une réponse distincte de `Status`. Ils exposent le head confirmé, les identités des annulations et les armements d'origine, le mode de capacité, les inconnues et la provenance `confirmed_journal`. `runtime_evidence=not_queried` interdit de les interpréter comme une observation d'arrêt ou une libération de quota. Ils ne créent pas un namespace absent. Ils nécessitent cette version du service ; un ancien service refuse la commande inconnue. Aucun endpoint HTTP ni changement de format persistant n'est introduit. La [validation du lot](evidence/2026-10-31/stop-only-actor/README.md) sépare logiciel et qualification moteur.
+
+## 31 octobre — rejeu causal des annulations, checkpoint44324a7
+
+Cette décision décrit le checkpoint précédent. Les cas de premier Cancel et d'acteur dégradé alors ouverts sont traités en logiciel par le lot ci-dessus, avec qualification moteur toujours requise.
 
 La régression du handler reproduit un Cancel durable dont la première livraison échoue puis dont le rejeu ne retente rien. Corriger dans les composants existants : chaque commande conserve une frontière éphémère immuable, égale au nombre d'opérations de supervision à sa première apparition confirmée. Seules les Arms nées avant cette frontière et actuellement acquittées sont ciblées ; un ACK tardif d'une ancienne Arm reste inclus, un export postérieur reste exclu. Aucun nouveau champ JSON, domaine de hash, claim, Arm, permission de lancement, échéance ou quota n'est créé par ce rejeu.
 
