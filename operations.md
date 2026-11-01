@@ -68,7 +68,7 @@ La commande exige une source régulière existante, refuse une sauvegarde déjà
 
 Après redémarrage, vérifier l'intégrité, l'identité, le quota et l'absence d'erreur de migration avant une nouvelle admission. La restauration d'une sauvegarde v2 avec des claims déjà consommés **n'est pas qualifiée** : elle peut ressusciter un droit de démarrage si elle est employée sans inventaire/fencing/réconciliation. Ne pas relancer des sessions à partir d'une ancienne sauvegarde comme si les moteurs étaient vierges. La procédure complète reste un gate ouvert.
 
-Le mode local réserve par défaut trois workers, 6 000 milliCPU et 3 Gio au total, avec une durée admise maximale de 3 600 secondes. Les options gateway et la configuration par client sont dans [CLOUD_TENANCY.md](engineering/CLOUD_TENANCY.md). Le dashboard fixe reste inchangé à l'usage. Pour partager une présentation entre clients, lancer `dashboard --shared-tenants` vers le gateway configuré, sans `--viewer-token-file` ni secret monté dans ce dashboard ; les identités viewer sont vérifiées côté serveur. Les Compose livrés restent mono-client.
+Le mode local réserve par défaut trois workers, 6 000 milliCPU et 3 Gio au total, avec une durée admise maximale de 3 600 secondes. Les options gateway et la configuration par client sont dans [CLOUD_TENANCY.md](docs/engineering/CLOUD_TENANCY.md). Le dashboard fixe reste inchangé à l'usage. Pour partager une présentation entre clients, lancer `dashboard --shared-tenants` vers le gateway configuré, sans `--viewer-token-file` ni secret monté dans ce dashboard ; les identités viewer sont vérifiées côté serveur. Les Compose livrés restent mono-client.
 
 ## Première commande confinée
 
@@ -154,7 +154,7 @@ Le diff de fichiers compare les empreintes SHA-256 de contenu avant/après. Il �
 ./target/release/agentsandbox verify-audit
 ```
 
-Cette commande vérifie la chaîne locale via le gateway. Elle détecte une altération vérifiable de l'audit local, pas une réécriture intégrale par un administrateur capable de remplacer base et chaîne. Sauvegarde/restauration et rétention doivent être implémentées et qualifiées pour le périmètre annoncé. Signatures et ancrage externe sont des protections supplémentaires à évaluer selon la menace et les gates ; ils ne sont pas présentés comme actifs.
+Cette commande vérifie la chaîne locale via le gateway. Elle détecte une altération vérifiable de l'audit local, pas une réécriture intégrale par un administrateur capable de remplacer base et chaîne. Sauvegarde/restauration et rétention doivent être implémentées et qualifiées pour le périmètre annoncé. Les points de contrôle signés et l'export vérifiable du [contrat de traçabilité](docs/sso.md#chaîne-de-traçabilité-à-livrer) sont obligatoires, à implémenter et qualifier ; `verify-audit` ne les livre pas. Un ancrage externe éventuel reste à évaluer selon la menace et les gates ; aucune de ces protections n'est présentée comme active.
 
 ## Copie, bornes et export
 

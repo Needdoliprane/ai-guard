@@ -248,7 +248,7 @@ Le diff de fichiers compare les empreintes SHA-256 de contenu avant/après. Il �
 ./target/release/agentsandbox verify-audit
 ```
 
-Cette commande vérifie la chaîne locale via le gateway. Elle détecte une altération vérifiable de l'audit local, pas une réécriture intégrale par un administrateur capable de remplacer base et chaîne. Sauvegarde/restauration et rétention doivent être implémentées et qualifiées pour le périmètre annoncé. Signatures et ancrage externe sont des protections supplémentaires à évaluer selon la menace et les gates ; ils ne sont pas présentés comme actifs.
+Cette commande vérifie la chaîne locale via le gateway. Elle détecte une altération vérifiable de l'audit local, pas une réécriture intégrale par un administrateur capable de remplacer base et chaîne. Sauvegarde/restauration et rétention doivent être implémentées et qualifiées pour le périmètre annoncé. Les points de contrôle signés et l'export vérifiable du [contrat de traçabilité](sso.md#chaîne-de-traçabilité-à-livrer) sont obligatoires, à implémenter et qualifier ; `verify-audit` ne les livre pas. Un ancrage externe éventuel reste à évaluer selon la menace et les gates ; aucune de ces protections n'est présentée comme active.
 
 ## Copie, bornes et export
 

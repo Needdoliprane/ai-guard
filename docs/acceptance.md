@@ -69,7 +69,7 @@ Le smoke existant `runtime_smoke` est ignoré par défaut. Le lancer expliciteme
 | P08 — Cloud et capacité | Adaptateur Kubernetes effectif sur cluster autorisé, workload identity, chiffrement, politiques réseau appliquées, stockage/reprise et autorité du compteur ; charge 100 workers réels par client distincte de la recette locale. Aucun attribut de configuration ne remplace ces preuves. |
 | P09 — Publication et maintenance OSS | Licence Apache-2.0 présente, canal privé de vulnérabilités décidé, contribution et support expliqués, dépendances/artefacts vérifiés, compatibilité et limites publiées, gates applicables fermés. Aucun compte, contact ou engagement de service inventé. |
 
-Les extensions réellement facultatives, par exemple OTLP/Prometheus ou une administration UI, demandent une justification liée au besoin et aux gates. Une exigence du produit ou du périmètre de release ne devient pas facultative en étant déplacée dans une liste « V2 ». Un changement structurel, notamment microVM ou stockage, reste soumis à décision avant réalisation.
+Les vues utilisateur et l'administration unifiée de [ui.md](ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer), avec identité et permissions selon [sso.md](sso.md), sont obligatoires et restent à implémenter et qualifier. Les extensions réellement facultatives, par exemple OTLP/Prometheus, demandent une justification liée au besoin et aux gates. Une exigence du produit ou du périmètre de release ne devient pas facultative en étant déplacée dans une liste « V2 ». Un changement structurel, notamment microVM ou stockage, reste soumis à décision avant réalisation.
 
 ## Échecs à provoquer et revue
 
