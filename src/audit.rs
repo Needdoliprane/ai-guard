@@ -19,6 +19,7 @@ use std::{
 };
 
 mod control;
+mod identity;
 pub(crate) use control::expected_worker_transition;
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
@@ -217,7 +218,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        version == 1 || version == 2 || version == 3 || (allow_legacy && version == 0),
+        [1, 2, 3, 4].contains(&version) || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
@@ -240,8 +241,13 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     }
     let automatic = AUTO_INDEX_COUNTS
         .iter()
-        .chain(if version == 3 {
+        .chain(if matches!(version, 3 | 4) {
             control::supervision::AUTO_INDEX_COUNTS.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 4 {
+            identity::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
@@ -280,8 +286,13 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             } else {
                 [].iter()
             })
-            .chain(if version == 3 {
+            .chain(if matches!(version, 3 | 4) {
                 control::supervision::SCHEMA.iter()
+            } else {
+                [].iter()
+            })
+            .chain(if version == 4 {
+                identity::SCHEMA.iter()
             } else {
                 [].iter()
             })
@@ -299,6 +310,14 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                         "workers"
                     } else if name == "helper_observations_helper" {
                         "helper_observations"
+                    } else if name == "identity_credentials_principal" {
+                        "identity_credentials"
+                    } else if name == "identity_memberships_principal" {
+                        "identity_memberships"
+                    } else if name == "identity_resources_owner" {
+                        "identity_resources"
+                    } else if name == "identity_shares_principal" {
+                        "identity_shares"
                     } else {
                         "events"
                     },
@@ -312,8 +331,13 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         } else {
             [].iter()
         })
-        .chain(if version == 3 {
+        .chain(if matches!(version, 3 | 4) {
             control::supervision::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 4 {
+            identity::SCHEMA.iter()
         } else {
             [].iter()
         })

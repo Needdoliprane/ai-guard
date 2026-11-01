@@ -290,17 +290,18 @@ impl HostClockSampleV1 {
 
 impl SupervisionStateV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
-        invalid(self.version == 1 && (1..=3).contains(&self.schema_version))?;
+        invalid(self.version == 1 && [1, 2, 3, 4].contains(&self.schema_version))?;
         if let Some(namespace) = &self.control_namespace_uuid {
             uuid(namespace)?;
         }
-        invalid(
-            self.protocols.len() <= 1
-                && (!self.active
-                    || (self.schema_version == 3
-                        && self.control_namespace_uuid.is_some()
-                        && self.protocols == [SupervisionProtocolV1::BrokerSupervisionV1])),
-        )
+        if matches!(self.schema_version, 3 | 4) {
+            invalid(
+                self.control_namespace_uuid.is_some()
+                    && self.protocols == [SupervisionProtocolV1::BrokerSupervisionV1],
+            )
+        } else {
+            invalid(!self.active && self.protocols.is_empty())
+        }
     }
 }
 

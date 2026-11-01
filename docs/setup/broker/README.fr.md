@@ -29,7 +29,7 @@ Le fonctionnement rootless est l'exigence normale. `allow_rootful_runtime: true`
 
 ## Exiger un contrôle compatible et actif
 
-Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version: 3` et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
+Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, exactement `schema_version: 3` ou `4` et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
 
 Lire les vrais tenant, namespace, rôle et état de supervision avant de rédiger le registre. Remplacer le binaire, l'origine et le chemin de credential privé par les valeurs de l'installation :
 
@@ -43,9 +43,24 @@ Cette lecture ne nécessite ni registre ni broker démarré. Elle affiche les m�
 
 Ne pas deviner le namespace, recopier un UUID de test, choisir un autre tenant dans le registre ou coller un runner dans le dashboard. Le `runner_token_file` configuré sert à la réconciliation autonome du broker ; il ne remplace pas l'authentification d'une requête client. Le `--token-file` du client désigne le credential présenté pour cette requête.
 
-Les fichiers Compose locaux standards démarrent le contrôle schéma2. `/healthz` établit seulement la disponibilité du service. Ni une stack saine ni `init` n'établissent le protocole schéma3 ou une autorité d'exécution fraîche. Le [bootstrap exclusif existant pour des bases de contrôle supervisé neuves](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) utilise l'option gateway `--initialize-supervised-stores BACKUP_ROOT`, avec destinations de bases absentes, sauvegardes privées vérifiées et fichiers de credentials existants. Il doit être intégré au déploiement conteneurisé du contrôle par l'opérateur ; ce guide broker ne fournit pas de profil Compose schéma3.
+Les fichiers Compose locaux standards démarrent le contrôle schéma2. `/healthz` établit seulement la disponibilité du service. Ni une stack saine ni `init` n'établissent le protocole de supervision ou une autorité d'exécution fraîche. Le [bootstrap exclusif existant pour des bases de contrôle supervisé neuves](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) utilise l'option gateway `--initialize-supervised-stores BACKUP_ROOT`, avec destinations de bases absentes, sauvegardes privées vérifiées et fichiers de credentials existants. Il doit être intégré au déploiement conteneurisé du contrôle par l'opérateur ; ce guide broker ne fournit pas de profil Compose schéma3.
 
-Une limite essentielle concerne la reprise : une réouverture ordinaire d'une base schéma3 conserve son namespace en maintenance inactive. Réutiliser l'option de bootstrap sur cette base refuse le démarrage. Une procédure de réactivation sûre n'est pas actuellement livrée. Préserver bases, sauvegardes et preuves runtime ; ne pas supprimer une base, modifier les métadonnées d'activation ou créer des identités de remplacement pour contourner cet état. `broker resume` réconcilie un job et ne peut pas réactiver le contrôle. La CLI actuelle n'a pas de commande `broker init`, `broker doctor` ou d'installation de service OS.
+Une limite essentielle concerne la reprise : une réouverture ordinaire d'une base schéma3 ou4 conserve son namespace en maintenance inactive. Réutiliser l'option de bootstrap sur cette base refuse le démarrage. Une procédure de réactivation sûre n'est pas actuellement livrée. Préserver bases, sauvegardes et preuves runtime ; ne pas supprimer une base, modifier les métadonnées d'activation ou créer des identités de remplacement pour contourner cet état. `broker resume` réconcilie un job et ne peut pas réactiver le contrôle. La CLI actuelle n'a pas de commande `broker init`, `broker doctor` ou d'installation de service OS.
+
+### Mettre à jour le stockage explicitement
+
+Arrêter le gateway et tous les brokers/consommateurs de la base du tenant, y compris les redémarrages automatiques. `migrate-control --target-version` accepte la version suivante exacte2,3 ou4 ; son défaut reste2. Utiliser une sauvegarde neuve distincte pour chaque étape. Pour une source existante schéma3 :
+
+```sh
+"/absolute/path/to/agentsandbox" migrate-control \
+  --data "/absolute/private/ai-guard/audit.sqlite" \
+  --tenant-id "<configured-tenant-id>" \
+  --backup "/absolute/private/ai-guard/audit-before-identities-v4.sqlite" \
+  --target-version 4 \
+  --confirm-control-stopped
+```
+
+Mettre à jour ensemble les lecteurs gateway et broker avant d'ouvrir le schéma4. La sauvegarde vérifiée, les anciens événements, le namespace, la liaison tenant et les claims consommés sont préservés ; un ancien binaire refuse le nouveau schéma. Migration/réouverture n'activent pas une supervision inactive. Le schéma4 prépare le stockage d'identité humaine et de permissions ; il ne crée pas de compte, n'attribue pas les anciens événements à une personne, ne transforme pas une clé technique en credential humain et n'effectue pas de connexion OIDC. Conserver backups et rapports après un échec et enquêter avant de choisir une nouvelle destination. Voir la [maintenance hors ligne](../../operations.md#répertoire-sqlite-privé) pour la sauvegarde vérifiée et les limites de restauration.
 
 ## Écrire le registre opérateur privé
 

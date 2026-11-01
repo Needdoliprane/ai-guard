@@ -67,6 +67,7 @@ struct Fixture {
     viewer_a: String,
     runner_b: String,
     viewer_b: String,
+    runner_v2: String,
     viewer_v2: String,
 }
 
@@ -107,11 +108,12 @@ impl Fixture {
             )
             .unwrap(),
         );
-        let runner_a = "a".repeat(48);
-        let viewer_a = "b".repeat(48);
-        let runner_b = "c".repeat(48);
-        let viewer_b = "d".repeat(48);
-        let viewer_v2 = "e".repeat(48);
+        let runner_a = "fixture-control-runner-a".repeat(3);
+        let viewer_a = "fixture-control-viewer-a".repeat(3);
+        let runner_b = "fixture-control-runner-b".repeat(3);
+        let viewer_b = "fixture-control-viewer-b".repeat(3);
+        let viewer_v2 = "fixture-control-viewer-v2".repeat(3);
+        let runner_v2 = "fixture-control-runner-v2".repeat(3);
         let state = GatewayState::for_tenants(
             vec![
                 TenantGateway {
@@ -129,7 +131,7 @@ impl Fixture {
                 TenantGateway {
                     tenant_id: "tenant-v2".into(),
                     store: Arc::clone(&v2),
-                    runner_token: "f".repeat(48),
+                    runner_token: runner_v2.clone(),
                     viewer_token: viewer_v2.clone(),
                 },
             ],
@@ -148,6 +150,7 @@ impl Fixture {
             viewer_a,
             runner_b,
             viewer_b,
+            runner_v2,
             viewer_v2,
         }
     }
@@ -158,6 +161,23 @@ impl Fixture {
             self.b.head().unwrap(),
             self.v2.head().unwrap(),
         ]
+    }
+
+    fn assert_envelope_excludes_control_credentials<T: Serialize>(&self, envelope: &T) {
+        let serialized = serde_json::to_string(envelope).unwrap();
+        assert!(
+            [
+                &self.runner_a,
+                &self.viewer_a,
+                &self.runner_b,
+                &self.viewer_b,
+                &self.runner_v2,
+                &self.viewer_v2,
+            ]
+            .iter()
+            .all(|credential| !serialized.contains(credential.as_str())),
+            "fixture request envelope must exclude every configured control credential"
+        );
     }
 }
 
@@ -640,6 +660,9 @@ async fn control_protocol_reports_authenticated_tenant_role_namespace_and_inacti
 async fn supervised_api_arms_import_and_worker_claims_once_then_maintenance_blocks_new_effects() {
     let fixture = Fixture::new();
     let admission_a = supervised(admission(&fixture.a));
+    fixture.assert_envelope_excludes_control_credentials(
+        &json!({"action":"admission","request":&admission_a}),
+    );
     let response = json_request(
         &fixture.router,
         Method::POST,

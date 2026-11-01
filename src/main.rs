@@ -65,6 +65,9 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
+        /// Exact next schema version: 2 (legacy control), 3 (supervision), or 4 (human identity).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=4))]
+        target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
         confirm_control_stopped: bool,
@@ -605,6 +608,7 @@ async fn main() -> Result<()> {
             data,
             tenant_id,
             backup,
+            target_version,
             confirm_control_stopped,
             max_events,
         } => {
@@ -624,7 +628,12 @@ async fn main() -> Result<()> {
             );
             let store =
                 Store::open_for_tenant(&data, &tenant_id, Redactor::new(vec![]), max_events)?;
-            let report = store.migrate_control_v2(&backup)?;
+            let report = match target_version {
+                2 => store.migrate_control_v2(&backup)?,
+                3 => store.migrate_control_v3(&backup)?,
+                4 => store.migrate_identity_v4(&backup)?,
+                _ => anyhow::bail!("unsupported migration target"),
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Dashboard(args) => {

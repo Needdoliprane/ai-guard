@@ -1,4 +1,4 @@
-//! Audited schema3 supervision. No HTTP surface or automatic migration.
+//! Audited supervision for exact schema3 and schema4. No automatic migration.
 use super::*;
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
@@ -220,7 +220,7 @@ pub(super) fn operation_receipt(
 }
 fn require_v3(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 3 {
+    if matches!(version, 3 | 4) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -367,7 +367,7 @@ impl Replay {
         Ok(state)
     }
     pub(super) fn new(db: &Connection, version: i64, namespace: String) -> anyhow::Result<Self> {
-        let (genesis_seq, genesis_hash) = if version == 3 {
+        let (genesis_seq, genesis_hash) = if matches!(version, 3 | 4) {
             let row: (i64, String) = db.query_row(
                 "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                 [],
@@ -939,12 +939,12 @@ impl Store {
             } else {
                 None
             },
-            protocols: if schema_version == 3 {
+            protocols: if matches!(schema_version, 3 | 4) {
                 vec![SupervisionProtocolV1::BrokerSupervisionV1]
             } else {
                 vec![]
             },
-            active: schema_version == 3 && tx.lease.active,
+            active: matches!(schema_version, 3 | 4) && tx.lease.active,
         };
         state.validate()?;
         self.commit_checked(tx)?;
