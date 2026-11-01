@@ -1,5 +1,9 @@
 # Décisions d'industrialisation
 
+## 1er novembre — import TLS explicite vers des volumes de contrôle
+
+Le démarrage réel refuse les projections dont le filesystem n'a pas de sémantique ACL qualifiée ; aucun élargissement de la politique commune n'est retenu. Le [contrat d'import TLS](TLS_MATERIAL_PROVISIONING.md) conserve validation hôte par FD, reader strict et contrôle Rust existant, avec paquet stdin fermé et préparateur ponctuel non privilégié vers deux volumes neufs. CA seule pour gateway, identité pour relais ; aucun secret au modèle/worker. Pas de nouveau service ou stockage métier, d'émission PKI, d'adoption/rotation ou d'activation implicite. Implémentation, revue et qualification réelles restent à obtenir ; ce choix ne clôture G11 ni le parcours Jev intégré.
+
 ## 1er novembre — forme stricte des données historiques dans STOP3
 
 Le nouveau transport3 conserve les schémas et comportements2. Ses records propres sont fermés, Option explicitement null/valeur. Les V1 embarquées suivent exactement leur sérialiseur historique : chaque membre émis est requis, null compris ; les cinq `skip_serializing_if` restent omis lorsqu'ils valent None. Cette exception résout la contradiction du premier contrat entre uniformité des Option et conservation exacte de RestoreV1. Le premier gel R4 qui injectait des nulls sur des champs omis n'a pas été exécuté ; il est conservé NOT_RUN, remplacé par R4b avant toute reproduction.
