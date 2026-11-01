@@ -4,7 +4,7 @@ use crate::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         QuotaPolicyV1, WorkerMutationV1,
     },
-    jev::JevClient,
+    jev::{JevBackend, JevClient, SelectionSource},
     model::*,
     policy::{self, Policy},
     redaction::Redactor,
@@ -131,7 +131,7 @@ pub struct GatewayState {
     credential_index: Arc<CredentialIndex>,
     valid_credentials: bool,
     policy: Arc<Policy>,
-    jev: Option<Arc<JevClient>>,
+    jev: Option<Arc<JevBackend>>,
     redactor: Arc<Redactor>,
 }
 impl GatewayState {
@@ -165,11 +165,50 @@ impl GatewayState {
         jev: Option<JevClient>,
         redactor: Redactor,
     ) -> Self {
+        Self::new_with_backend(
+            store,
+            runner_token,
+            viewer_token,
+            policy,
+            jev.map(|client| JevBackend::typesafe(client, SelectionSource::Programmatic)),
+            redactor,
+        )
+    }
+    pub fn new_with_backend(
+        store: Arc<Store>,
+        runner_token: String,
+        viewer_token: String,
+        policy: Policy,
+        jev: Option<JevBackend>,
+        redactor: Redactor,
+    ) -> Self {
+        let redactor = redactor.union(&Redactor::new(vec![
+            runner_token.clone(),
+            viewer_token.clone(),
+        ]));
+        let redactor = jev
+            .as_ref()
+            .map_or_else(|| redactor.clone(), |backend| backend.redactor(&redactor));
+        let redactor = store.redactor_union(&redactor);
         let jev_separation = jev.as_ref().is_none_or(|client| {
             client
                 .validate_control_credentials([runner_token.as_str(), viewer_token.as_str()])
                 .is_ok()
+                && client.validate_redaction(&redactor).is_ok()
         });
+        let store = match store.with_additional_redaction(&redactor) {
+            Ok(store) => store,
+            Err(_) => {
+                return Self {
+                    tenants: Arc::new(Vec::new()),
+                    credential_index: Arc::new(CredentialIndex::default()),
+                    valid_credentials: false,
+                    policy: Arc::new(policy),
+                    jev: jev.map(Arc::new),
+                    redactor: Arc::new(redactor),
+                };
+            }
+        };
         let tenants = vec![TenantGateway {
             tenant_id: store.tenant_id().into(),
             store,
@@ -195,16 +234,42 @@ impl GatewayState {
         jev: Option<JevClient>,
         redactor: Redactor,
     ) -> anyhow::Result<Self> {
+        Self::for_tenants_with_backend(
+            tenants,
+            policy,
+            jev.map(|client| JevBackend::typesafe(client, SelectionSource::Programmatic)),
+            redactor,
+        )
+    }
+    pub fn for_tenants_with_backend(
+        mut tenants: Vec<TenantGateway>,
+        policy: Policy,
+        jev: Option<JevBackend>,
+        redactor: Redactor,
+    ) -> anyhow::Result<Self> {
         anyhow::ensure!(!tenants.is_empty(), "at least one tenant is required");
+        let redactor = redactor.union(&Redactor::new(
+            tenants
+                .iter()
+                .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
+                .collect(),
+        ));
+        let redactor = jev
+            .as_ref()
+            .map_or_else(|| redactor.clone(), |backend| backend.redactor(&redactor));
+        let redactor = tenants.iter().fold(redactor, |redactor, tenant| {
+            tenant.store.redactor_union(&redactor)
+        });
         if let Some(client) = &jev {
             client.validate_control_credentials(
                 tenants.iter().flat_map(|tenant| {
                     [tenant.runner_token.as_str(), tenant.viewer_token.as_str()]
                 }),
             )?;
+            client.validate_redaction(&redactor)?;
         }
         let mut identities = HashSet::new();
-        for tenant in &tenants {
+        for tenant in &mut tenants {
             validate_tenant_id(&tenant.tenant_id)?;
             anyhow::ensure!(
                 identities.insert(tenant.tenant_id.clone()),
@@ -214,6 +279,10 @@ impl GatewayState {
                 tenant.store.tenant_id() == tenant.tenant_id,
                 "database tenant binding mismatch"
             );
+            tenant.store = tenant
+                .store
+                .with_additional_redaction(&redactor)
+                .map_err(|_| anyhow::anyhow!("gateway audit redaction attachment failed"))?;
             anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
         }
         let credential_index = CredentialIndex::for_tenants(&tenants)?;
@@ -337,17 +406,31 @@ pub fn gateway_router(state: GatewayState) -> Router {
         .route("/quota", get(worker_quota))
         .route("/usage", get(worker_usage));
     Router::new()
-        .route(
-            "/healthz",
-            get(|| async {
-                Json(json!({"status":"ok","service":"gateway","version":env!("CARGO_PKG_VERSION")}))
-            }),
-        )
+        .route("/healthz", get(gateway_health))
         .nest("/api/v1", routes.clone().merge(supervision::routes()))
         .nest("/api", routes)
         .layer(DefaultBodyLimit::max(262_144))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+async fn gateway_health(State(state): State<GatewayState>) -> (StatusCode, Json<Value>) {
+    let available = state.valid_credentials
+        && !state.tenants.is_empty()
+        && state.tenants.iter().all(|tenant| tenant.store.healthy());
+    if available {
+        (
+            StatusCode::OK,
+            Json(json!({"status":"ok","service":"gateway","version":env!("CARGO_PKG_VERSION")})),
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(
+                json!({"status":"unavailable","service":"gateway","reason":"configuration_or_audit_unavailable","version":env!("CARGO_PKG_VERSION")}),
+            ),
+        )
+    }
 }
 
 async fn ingest(
@@ -406,36 +489,55 @@ async fn decide(
 
 async fn fresh_policy(s: &GatewayState, request: &DecisionRequest) -> (Decision, Value) {
     let mut decision = policy::evaluate(&s.policy, request);
-    let mut jev = Value::Null;
+    let mut jev = s.jev.as_ref().map_or(Value::Null, |backend| {
+        backend.metadata("skipped_local_policy")
+    });
     if decision.outcome == Outcome::Allow
         && let Some(client) = &s.jev
     {
-        match client.decide(request, &s.redactor).await {
+        match client.evaluate(request, &s.redactor).await {
             Ok(answer) => {
                 if answer.outcome != Outcome::Allow {
                     decision = Decision {
                         outcome: Outcome::Deny,
-                        engine: "jev".into(),
-                        rule: if answer.outcome == Outcome::Deny {
-                            "jev_deny"
+                        engine: if client.id() == "typesafe" {
+                            "jev"
                         } else {
-                            "jev_review_fail_closed"
+                            client.id()
                         }
                         .into(),
-                        reason: "Jev ne confirme pas l'autorisation ; refus sans exécution.".into(),
+                        rule: if client.id() == "typesafe" {
+                            if answer.outcome == Outcome::Deny { "jev_deny" } else { "jev_review_fail_closed" }.into()
+                        } else { format!("{}_{}", client.id(), if answer.outcome == Outcome::Deny { "deny" } else { "review_fail_closed" }) },
+                        reason: match client.id() {
+                            "rust_rules" if answer.outcome == Outcome::Deny => "Le catalogue Rust refuse cette invocation exacte ; aucune exécution.",
+                            "rust_rules" => "Invocation hors du catalogue Rust incomplet ; revue requise et refus sans exécution.",
+                            "local_openai" if answer.outcome == Outcome::Deny => "Le modèle local refuse cette demande ; aucune exécution.",
+                            "local_openai" => "Le modèle local n'est pas qualifié pour autoriser ; revue requise et refus sans exécution.",
+                            _ => "TypeSafe refuse ou ne confirme pas l'autorisation ; refus sans exécution.",
+                        }.into(),
                     };
                 }
-                jev = serde_json::to_value(answer).unwrap_or(Value::Null);
+                jev = answer.metadata;
             }
-            Err(_) => {
+            Err(failure) => {
                 decision = Decision {
                     outcome: Outcome::Deny,
-                    engine: "jev".into(),
-                    rule: "jev_unavailable_or_invalid".into(),
-                    reason: "Réponse Jev indisponible, invalide ou incertaine ; refus par défaut."
-                        .into(),
+                    engine: if client.id() == "typesafe" {
+                        "jev"
+                    } else {
+                        client.id()
+                    }
+                    .into(),
+                    rule: if client.id() == "typesafe" { "jev_unavailable_or_invalid" } else { "decision_backend_unavailable_or_invalid" }.into(),
+                    reason: match client.id() {
+                        "rust_rules" => "Catalogue Rust indisponible ou invalide ; vérifier sa configuration, refus par défaut.",
+                        "local_openai" => "Réponse du modèle local indisponible ou invalide ; vérifier le raccord local, refus par défaut.",
+                        _ => "Réponse TypeSafe indisponible, invalide ou incertaine ; refus par défaut.",
+                    }.into(),
                 };
-                jev = json!({"status":"unavailable_or_invalid"});
+                jev = client.metadata("unavailable_or_invalid");
+                jev["error"] = json!(failure);
             }
         }
     }
@@ -667,6 +769,15 @@ async fn overview(
         "configured"
     } else {
         "disabled"
+    });
+    value["health"]["jev_details"] = s.jev.as_ref().map_or(Value::Null, |backend| {
+        let mut metadata = backend.metadata("configured");
+        metadata["reachability"] = json!(if backend.id() == "rust_rules" {
+            "not_applicable"
+        } else {
+            "not_checked"
+        });
+        metadata
     });
     Ok(Json(value))
 }

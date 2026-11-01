@@ -70,6 +70,29 @@ Un profil d'inférence administré configure protocole exact, URL, modèle, réf
 
 Le profil local ne demande aucun credential API modèle sur le loopback. Ne pas publier ce port sur le LAN ni reprendre ce transport comme endpoint d'entreprise multi-utilisateur. Le raccord entreprise ajoute authentification, autorisation et TLS selon le [guide entreprise](../enterprise/README.fr.md).
 
+### Raccorder un juge local
+
+Choisir explicitement le backend `local-openai` du gateway ; son URL comprend `/v1/chat/completions`. Il accepte une réponse assistant non streamée contenant exactement `outcome` (`allow`, `deny`, `review` ou `unknown`) et `reason`. Réponses malformées, tronquées et appels d'outils sont refusés. Un Allow local reste consultatif et devient Review effectif : il ne peut autoriser une exécution. Le [guide du moteur de décision](../providers/README.fr.md#choisir-le-moteur-de-décision) explique décisions effectives et provenance.
+
+Pour un gateway sur le même hôte que la publication loopback du modèle, un contexte d'intégration isolé utilise son propre chemin d'audit privé et son port. Depuis la racine du dépôt, avec les variables `AIGUARD_BIN` et `AIGUARD_CONFIG` du guide local :
+
+```sh
+"$AIGUARD_BIN" gateway \
+  --listen 127.0.0.1:18787 \
+  --data "$AIGUARD_CONFIG/local-judge-audit.sqlite" \
+  --runner-token-file "$AIGUARD_CONFIG/secrets/runner" \
+  --viewer-token-file "$AIGUARD_CONFIG/secrets/viewer" \
+  --policy "$PWD/policies/default.json" \
+  --jev-backend local-openai \
+  --jev-local-url http://127.0.0.1:18090/v1/chat/completions \
+  --jev-local-model qwen2.5-0.5b-q4km \
+  --jev-allow-local-http
+```
+
+Utiliser l'URL gateway explicite de ce contexte pour les appelants ; son historique d'audit est distinct. Conserver base et services de la pile existante. Retirer les réglages des autres backends Jev de l'environnement avant ce lancement. Ce point d'entrée modèle n'a pas de clé : l'option de fichier de clé locale est inutile. Un endpoint HTTPS authentifié peut utiliser un fichier privé de clé brute distinct via `--jev-local-key-file`.
+
+Le loopback est relatif au processus appelant. Un gateway conteneurisé n'atteint pas la publication hôte avec son propre `127.0.0.1` ; ajouter le Compose modèle ne raccorde pas les applications. Un déploiement conteneurisé exige route explicitement approuvée et confiance HTTPS vérifiée. Ne pas ouvrir HTTP sans restriction ni désactiver TLS pour franchir cette frontière. Commandes hôte, contrats d'adaptateur, mesures du modèle et déploiement conteneurisé complet ont des preuves de qualification distinctes dans l'[état engineering](../../engineering/CURRENT_STATE.md).
+
 ## Remplacer le modèle et passer hors ligne
 
 Choisir un modèle génératif/instruct d'au plus 4 milliards de paramètres et mesurer sa mémoire réelle avec la quantification et le contexte choisis. Construire une image distincte avec runtime, révision de poids, checksum et licences applicables épinglés. Conserver l'entrypoint `/app/llama-server` et le fichier `/models/model.gguf` pour ce Compose, ou fournir un Compose relu pour un autre runtime.

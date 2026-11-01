@@ -3,6 +3,7 @@
 services:
   gateway:
     environment:
+      JEV_BACKEND: typesafe
       JEV_URL: ${JEV_URL:?Set an explicit HTTPS Jev endpoint}
       JEV_MODEL: ${JEV_MODEL:?Set an explicit supported model}
       JEV_API_KEY_FILE: /run/secrets/jev

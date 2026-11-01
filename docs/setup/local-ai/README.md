@@ -70,6 +70,29 @@ For a managed inference profile, configure the exact protocol, URL, model, crede
 
 The loopback endpoint has no model API credential in this local profile. Do not publish it on the LAN or reuse this transport as a multi-user enterprise endpoint. Enterprise routing adds the authentication, authorization and TLS settings described in the [enterprise guide](../enterprise/README.md).
 
+### Connect a local judge
+
+Select the gateway's `local-openai` backend explicitly; its URL includes `/v1/chat/completions`. It accepts one non-streamed assistant answer containing exactly `outcome` (`allow`, `deny`, `review` or `unknown`) and `reason`. Malformed, truncated and tool-call responses are refused. A local Allow is advisory and becomes effective Review, so it cannot authorize execution. The [decision-engine guide](../providers/README.md#choose-the-decision-engine) covers effective decisions and provenance.
+
+For a gateway on the same host as the model's loopback publication, an isolated integration context uses its own private audit path and port. From the repository root, with the local guide's `AIGUARD_BIN` and `AIGUARD_CONFIG` variables:
+
+```sh
+"$AIGUARD_BIN" gateway \
+  --listen 127.0.0.1:18787 \
+  --data "$AIGUARD_CONFIG/local-judge-audit.sqlite" \
+  --runner-token-file "$AIGUARD_CONFIG/secrets/runner" \
+  --viewer-token-file "$AIGUARD_CONFIG/secrets/viewer" \
+  --policy "$PWD/policies/default.json" \
+  --jev-backend local-openai \
+  --jev-local-url http://127.0.0.1:18090/v1/chat/completions \
+  --jev-local-model qwen2.5-0.5b-q4km \
+  --jev-allow-local-http
+```
+
+Use this context's explicit gateway URL for callers; it has a separate audit history. Keep the existing stack's database and services intact. Remove settings for other Jev backends from the process environment before starting it. This model endpoint has no key, so no local key-file option is needed. An authenticated HTTPS endpoint can use a separate private raw-key file through `--jev-local-key-file`.
+
+Loopback is relative to the calling process. A gateway container cannot reach the host publication using its own `127.0.0.1`; adding the model Compose file does not wire the applications together. A container deployment needs an explicitly approved route and verified HTTPS trust. Do not open unrestricted HTTP or disable TLS validation to bridge that gap. Host commands, adapter protocol checks, model resource measurements and a complete container deployment have separate qualification evidence in the [engineering state](../../engineering/CURRENT_STATE.md).
+
 ## Replace the model or move offline
 
 Select a text-generation/instruct model of at most 4 billion parameters and measure its actual memory with the chosen quantization/context. Build a separate image with pinned runtime, weight revision, checksum and applicable licenses. Keep the same `/app/llama-server` entrypoint and `/models/model.gguf` layout for this Compose profile, or provide a reviewed Compose definition for another runtime.

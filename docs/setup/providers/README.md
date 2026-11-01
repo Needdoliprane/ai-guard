@@ -141,6 +141,36 @@ Credential references are private control data. Only the selected credential is 
 
 Select and record the engine independently from Codex/Claude and ai-guard SSO. Do not change engines silently after a refusal, outage or timeout. All engines retain central authorization, tenant isolation, mandatory audit and runtime confinement. See [local AI](../local-ai/README.md) for model preparation and resource limits, and [enterprise](../enterprise/README.md) for internal inference and offline deployment.
 
+The gateway selector is `--jev-backend typesafe|rust-rules|local-openai`. An explicit flag takes precedence over `JEV_BACKEND`; the CLI does not read dotenv files. Without either selector, a legacy Jev URL selects TypeSafe, otherwise the mandatory Rust policy runs alone. The additional `rust-rules` backend is a finite veto catalogue after that policy. Parameters belonging to another backend are refused; clear stale Jev environment settings before changing modes.
+
+| Backend | Gateway options | Result and provenance |
+|---|---|---|
+| `typesafe` | `--jev-url`, `--jev-model`, `--jev-key-file`; optional `--jev-min-confidence` (default `0.85`) | Provider-reported score and model, separate requested model and token counts |
+| `rust-rules` | Optional `--jev-rules-catalog` for a private JSON file | Exact argv catalogue or validated managed-bootstrap structure; unknown input requires review; no confidence or token count |
+| `local-openai` | `--jev-local-url`, `--jev-local-model`; optional separate `--jev-local-key-file` | Structured advisory result; provider Allow remains effective Review and blocks execution; no calibrated confidence |
+
+The local URL is the complete **Chat Completions** route, for example `http://127.0.0.1:18090/v1/chat/completions`. `--jev-allow-local-http` explicitly permits loopback HTTP; other destinations require verified HTTPS. Masked requests and responses are capped at 65,536 serialized bytes, without silent input clipping. Connection and whole-request timeouts are 2 and 5 seconds; redirects and ambient proxies are disabled. Judge outages, invalid responses and uncertainty block the protected action.
+
+New decision records include the resolved backend, selection source and a non-secret configuration fingerprint. Historical replays retain their original decision and provenance. Scores, models and tokens remain provider-reported data. The [official TypeSafe response types](https://github.com/typesafe-ai/typesafe-sdk-js/blob/main/src/types.ts) permit null input/output token counts; unknown counts never become zero.
+
+For the built-in Rust catalogue, start the normal container stack with the [rules example](../../../.env.exemple.local-rules) and explicit override:
+
+```sh
+docker compose --env-file .env.exemple.local-rules -f deploy/docker/compose.yaml -f deploy/docker/compose.jev-rules.example.yaml up -d
+```
+
+Keep its configuration directory identical to the one passed to `init`. With Podman, use `podman compose` and `deploy/podman/compose.yaml`; retain the same rules override. It adds no model, credential mount or outbound network. The built-in exact commands are `/usr/bin/id`, `/usr/bin/true` and `/bin/pwd`, without arguments. Managed Codex/Claude bootstrap is recognized only after complete resolution/argv/mode/model validation and the mandatory policy. That validates invocation structure, not the prompt or transitive actions.
+
+Choose one judge override. When switching between Rust rules and TypeSafe, replace that file in the Compose command; combining both retains incompatible parameters and is refused.
+
+A custom catalogue has this versioned shape:
+
+```json
+{"version":1,"allow_argv":[["/usr/bin/id"],["/usr/bin/true"],["/bin/pwd"]],"deny_argv":[]}
+```
+
+Use a private existing file (`0600`, with safe ancestors) and pass its path explicitly with `--jev-rules-catalog`. It is retained and revalidated. Keep entries non-secret: at most 128 entries, 32 arguments and 8,192 bytes per entry, within a 65,536-byte file. Unknown fields, duplicate/conflicting entries, relative executables and control characters are refused. Matching is exact, without shell expansion, prefix matching or semantic understanding. No match overrides the mandatory policy.
+
 For real Jev, create a new private raw-key file `<config-dir>/secrets/jev`, mode `0600`. Enter **only the raw key** in an editor, without `JEV_API_KEY=`. Do not place it in `providers.env`. Refresh the control projection:
 
 ```sh

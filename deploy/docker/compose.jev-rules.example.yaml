@@ -1,0 +1,7 @@
+# Explicit optional exact-rule veto after the mandatory Rust policy.
+# No model credential or outbound network is added to the base stack.
+# Also usable with deploy/podman/compose.yaml.
+services:
+  gateway:
+    environment:
+      JEV_BACKEND: rust-rules

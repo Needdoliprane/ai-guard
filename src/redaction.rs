@@ -73,6 +73,28 @@ impl Redactor {
     pub fn with_secrets(&self, values: impl IntoIterator<Item = String>) -> Self {
         Self::new(self.secrets.iter().cloned().chain(values).collect())
     }
+    /// Combine literal dictionaries without changing either source. Longer
+    /// values precede their prefixes so masking cannot expose a secret suffix.
+    pub fn union(&self, other: &Self) -> Self {
+        let mut combined = self.with_secrets(other.secrets.iter().cloned());
+        combined
+            .secrets
+            .sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+        combined.secrets.dedup();
+        combined
+    }
+    /// Require exact membership for every known literal secret in `other`.
+    /// Conservatively require descending lengths to mask longer secrets first;
+    /// overlapping values do not imply coverage of another dictionary.
+    pub fn covers(&self, other: &Self) -> bool {
+        self.secrets
+            .windows(2)
+            .all(|pair| pair[0].len() >= pair[1].len())
+            && other
+                .secrets
+                .iter()
+                .all(|secret| self.secrets.contains(secret))
+    }
     pub fn text(&self, input: &str) -> String {
         let mut s = input.to_string();
         for secret in &self.secrets {
@@ -146,8 +168,22 @@ impl Redactor {
         self.text(&String::from_utf8_lossy(&bytes))
     }
     pub fn value(&self, input: &Value) -> Value {
+        self.value_with_string_limit(input, Some(32_768))
+    }
+    /// Mask structured values without truncating strings. Callers must enforce
+    /// their own serialized size limit before persistence or transport.
+    pub fn value_unclipped(&self, input: &Value) -> Value {
+        self.value_with_string_limit(input, None)
+    }
+    fn value_with_string_limit(&self, input: &Value, max_string_bytes: Option<usize>) -> Value {
         match input {
-            Value::String(s) => Value::String(clip(&self.text(s), 32_768)),
+            Value::String(s) => {
+                let masked = self.text(s);
+                Value::String(match max_string_bytes {
+                    Some(max) => clip(&masked, max),
+                    None => masked,
+                })
+            }
             Value::Object(map) => Value::Object(
                 map.iter()
                     .map(|(k, v)| {
@@ -156,7 +192,7 @@ impl Redactor {
                             if sensitive_key(k) {
                                 Value::String("[REDACTED]".into())
                             } else {
-                                self.value(v)
+                                self.value_with_string_limit(v, max_string_bytes)
                             },
                         )
                     })
@@ -175,7 +211,7 @@ impl Redactor {
                             if hide {
                                 Value::String("[REDACTED]".into())
                             } else {
-                                self.value(v)
+                                self.value_with_string_limit(v, max_string_bytes)
                             }
                         })
                         .collect(),
@@ -239,6 +275,70 @@ mod tests {
         let v=r.value(&json!({"nested":{"api_key":"never-log-this"},"argv":["tool","--token","very-private-value"]}));
         assert!(!v.to_string().contains("never-log-this"));
         assert!(!v.to_string().contains("very-private-value"));
+    }
+    #[test]
+    fn unclipped_values_preserve_long_strings_and_share_structured_masking() {
+        let r = Redactor::new(vec!["fixture-known-secret".into()]);
+        let long = "x".repeat(40_000);
+        let input = json!({"entries":[{
+            "body":long,
+            "literal":"fixture-known-secret",
+            "api_key":"fixture-key-value",
+            "argv":["tool","--token","fixture-argument-value"]
+        }]});
+        let mut expected = json!({"entries":[{
+            "body":long,
+            "literal":"[REDACTED]",
+            "api_key":"[REDACTED]",
+            "argv":["tool","--token","[REDACTED]"]
+        }]});
+        assert_eq!(r.value_unclipped(&input), expected);
+        expected["entries"][0]["body"] =
+            Value::String(format!("{}…[truncated]", "x".repeat(32_768)));
+        assert_eq!(r.value(&input), expected);
+    }
+    #[test]
+    fn union_covers_exact_filtered_dictionaries_without_mutating_sources() {
+        let left = Redactor::new(vec!["fixture-shared-long".into(), "fixture-left".into()]);
+        let right = Redactor::new(vec![
+            "fixture-shared-long".into(),
+            "fixture-right".into(),
+            "abc".into(),
+        ]);
+        let original_left = left.secrets.clone();
+        let original_right = right.secrets.clone();
+        let combined = left.union(&right);
+        assert!(combined.covers(&left) && combined.covers(&right));
+        assert!(!left.covers(&right) && !right.covers(&left));
+        assert!(
+            !Redactor::new(vec!["fixture-shared".into()])
+                .covers(&Redactor::new(vec!["fixture-shared-long".into()]))
+        );
+        assert!(Redactor::new(vec![]).covers(&Redactor::new(vec!["abc".into()])));
+        assert_eq!(
+            combined.text("fixture-left fixture-right fixture-shared-long"),
+            "[REDACTED] [REDACTED] [REDACTED]"
+        );
+        assert_eq!(left.secrets, original_left);
+        assert_eq!(right.secrets, original_right);
+    }
+    #[test]
+    fn union_masks_longer_secrets_before_known_prefixes_and_deduplicates() {
+        let prefix = Redactor::new(vec!["fixture-prefix".into()]);
+        let longer = Redactor::new(vec!["fixture-prefix-canary-tail".into()]);
+        let legacy_order = Redactor::new(vec![
+            "fixture-prefix".into(),
+            "fixture-prefix-canary-tail".into(),
+        ]);
+        assert!(!legacy_order.covers(&longer));
+        let combined = prefix.union(&longer);
+        assert_eq!(
+            combined.text("fixture-prefix-canary-tail fixture-prefix"),
+            "[REDACTED] [REDACTED]"
+        );
+        assert_eq!(combined.union(&longer).secrets, combined.secrets);
+        assert!(combined.covers(&prefix) && combined.covers(&longer));
+        assert!(combined.covers(&legacy_order));
     }
     #[test]
     fn leaves_readable_safe_text_and_utf8() {

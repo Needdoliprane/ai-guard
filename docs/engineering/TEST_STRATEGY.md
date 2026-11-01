@@ -2,6 +2,12 @@
 
 Les résultats nouveaux sont dans [VALIDATION.md](VALIDATION.md). Les résultats historiques de [../validation.md](../validation.md) ne qualifient pas ce checkout sur macOS ARM64. Les critères détaillés existants sont dans [../acceptance.md](../acceptance.md) ; leur ancien découpage MVP/V2 ne réduit pas la mission production.
 
+## Jev — sélection et frontières de données
+
+Le [lot logiciel J3b](VALIDATION.md#1er-novembre--jev-j2j3b-corrections-et-validation-ciblée) possède62 fonctions ciblées réellement passées, avec ses gels et limites. Les six cibles `jev_backends`, `jev_request_bounds`, `jev_masking`, `jev_typesafe_ambiguity`, `jev_store_redaction` et `jev_protocol` vérifient protocole HTTP contrôlé, API/Store réels, catalogue exact, avis local, bornes, doublons, masquage et replay. Les canaris d'authentification, décision et supervision sont sélectionnés selon ces risques ; aucun appel fournisseur ni moteur n'est requis pour ces régressions.
+
+Les filtres des deux unités CLI exigent le préfixe `tests::` avec `--exact`. Un RC0 avec zéro fonction ne compte pas PASS. Le corpus ne qualifie ni jugement Qwen, ni consommation réelle du modèle, ni TLS privé conteneurisé ; conserver ces campagnes séparées. Un cas de dictionnaires Store A/B distincts et de replay après changement de backend reste une extension de preuve ciblée, pas un PASS déduit des tests mono-Store.
+
 ## Identité individuelle, SSO et découverte — à qualifier
 
 Exigences approuvées le 31 octobre, détaillées dans [le contrat canonique d'identité et de configuration](../sso.md). Cette matrice fixe les preuves d'acceptation ; ses libellés ne sont pas des noms de suites déjà disponibles. Les cas sont **NOT_RUN pour ce nouveau périmètre**. Le SSO facultatif à l'installation ne dispense pas le produit de qualifier son connecteur et sa documentation. Les comptes préconfigurés servent à l'environnement explicite de découverte ; les événements d'exécution doivent être réels.

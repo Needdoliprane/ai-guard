@@ -1,5 +1,39 @@
 # Validation courante
 
+## 1er novembre — Jev J2/J3b, corrections et validation ciblée
+
+Base PRIMARY `3106b6b217a6d8fdd7ed214a34d90e4a73aea18c`. J1/J1b ci-dessous conservent les trois premiers RED. J2 ajoute deux tests compatibles avec les API anciennes, sans fournisseur réel. Compilation unique `--locked --offline --test jev_typesafe_ambiguity --test jev_store_redaction --no-run` **RC0,8,45s**, copies exactes avant exécution, puis une fonction par binaire :
+
+- TypeSafe **RED RC101**,0,02s : positif,6POST et cleanup établis ; diagnostics fermés `duplicate_choice=false duplicate_confidence=false duplicate_usage=false oversize=true redirect=true`. L'oracle échoue sur le premier choix dupliqué ; les trois observations d'ambiguïté sont collectées, pas trois exécutions séparées.
+- Store/API **RED RC101**,0,04s : helper terminé, owners supprimés, listener fournisseur non contacté, ingestion/liste200 ; le premier scan trouve un fragment canari dans la réponse d'ingestion. Les scans suivants de liste/persistance ne sont pas atteints au RED. Aucune clé réelle utilisée.
+
+Capture J2 privée `j2-jev-security-red-3106b6b` sous `/private/tmp/ai-guard-primary-provider-eof-20261101T041000Z`, archive avant/après identique SHA `7a7250f367dc3d7ae6258ebdb255161ad7293187442c3e30a304a8c58b2fd0dc`. Binaires copiés `40a76a4a9fddb299d49133d667d13a89d660241061cd0b374d52b85f6eaf367b` et `c9969eae04b42d5b0629ebab1979173d44067ab3f127857731d69d53e2aed076`. Sources et lock inchangés ; logs lus par Root.
+
+**Correctif J3b.** Cinq fichiers Rust existants, quatre modules Jev et six cibles de test. Union immuable de tous les masques Store/contrôle/backend avant transport/persistance ; sibling du même backing/origin, fastpath Arc si déjà couvert. Parsing réseau TypeSafe à doublons connus refusés ; compteurs entiers non négatifs/null. Catalogue fini et bootstrap structurel validé, modèle local consultatif sans pouvoir d'autorisation, configurations explicites et bornes partagées. Aucun format de stockage, hash métier, quota, permission runtime ou dépendance modifié. Les APIs publiques historiques restent présentes ; l'usage réseau TypeSafe est normalisé aux deux compteurs connus, sans garantie de restitution d'extensions opaques. Le helper public Value ne récupère pas les doublons qu'un parseur externe aurait déjà perdus.
+
+La revue source indépendante `/tmp/ai-guard-jev-j3-independent-review-20261101.md` ne conserve aucun blocage dans J3b. Son P3 de fixture URL est corrigé avant compilation : ancienne clé3octets invalide remplacée par une clé valide, positifs HTTPS/loopback et refus sans opt-in, sans requête. Le manifeste J3 historique SHA `1a42622ab3f18c7be511ff915ca3089ea85ad10a99783d37e8fee16307c67b32` reste conservé ; J3b change seulement `src/jev.rs`, SHA `7c48ff750ef145ae77aedf045599266d600efe10305da30af3f7d3292fdd6715`. Les14 autres sources correspondent au manifeste.
+
+| Validation Luna | Résultat constaté |
+|---|---|
+| `cargo fmt --all -- --check` | PASS RC0,6,22s |
+| Une compilation `test --locked --offline --lib --bin agentsandbox` avec les12 cibles d'intégration sélectionnées et `--no-run` | PASS RC0,5min55 ; binaires exacts copiés avant exécution |
+| Six cibles Jev (`jev_backends`, `jev_request_bounds`, `jev_masking`, `jev_typesafe_ambiguity`, `jev_store_redaction`, `jev_protocol`) | PASS11 fonctions, dont les5 RED et6 nouveaux scénarios ; aucune ignorée |
+| Canaris `jev_contract`, `jev_credentials`, `api_auth_boundary`, `decision_idempotence`, `audit_security` | PASS respectivement2/14/6/9/3 fonctions |
+| `supervision_store` | PASS uniquement les deux exacts admission atomique/idempotente et watermark de rollback entre siblings ; chaque filtre laisse8 autres fonctions non exécutées |
+| Libtest, filtres `jev::`, `redaction::tests::`, `audit::redaction_attachment_tests::` | PASS6/6/1 fonctions ; aucune autre fonction lib lancée |
+| Deux premiers filtres CLI sans préfixe `tests::` | RC0 mais zéro test ; sélection incorrecte, NOT_RUN pour ces fonctions |
+| Même copie CLI, noms exacts qualifiés `tests::jev_selection_is_explicit_and_mixed_options_fail_before_assembly` et `tests::gateway_cli_can_select_each_decision_backend_explicitly` | PASS1/1 chacun,0,07/0,01s ; aucune recompilation ni reprise des60 fonctions précédentes |
+| `clippy --locked --offline --all-targets -- -D warnings` | PASS RC0,126,08s |
+| Une compilation `build --locked --offline --release` par le lanceur dédié | PASS RC0,754,35s ; trois exécutables réels copiés et rehashés |
+
+**Total62 fonctions uniques PASS.** Captures privées `j3b-jev-green-3106b6b`, `j3b-cli-qualified-3106b6b` et `j3b-static-release-3106b6b` sous le même parent. Lanceurs Rust fixes PRIMARY/target dédiés, aucune compilation du donneur ou nettoyage. Variables Jev/fournisseur retirées par nom, sans lecture ni capture de l'environnement complet.184 inputs suivis/non suivis et fixtures JSON/JSONL/policy, avec sidecar privé du `tests/demo_pki.rs` ignoré réellement examiné par all-targets, ont leurs hashes avant/après identiques. Les hooks/tests R9 présents dans ce snapshot ne sont pas exécutés ni qualifiés par ce lot et ne font pas partie du commit Jev. Archive portable avant/après SHA `ef7c378022b22134d6c1ad1b966469b77d9f37b6fd50ac6e94a5709fc7187911`, sans membre lien/AppleDouble. Cargo.lock inchangé. Root lit les logs et recoupe les copies.
+
+Binaires release : `agentsandbox` SHA `344b8bcb9687c527e65b8393bd98e6cf776a05dbb3ecde2e95f63b8c5c9b9e60` ; `ai-guard-provider` `95af1b54cbbd83bfdbb900a8c0cd89e7abd6dd82601acdce0c24b80a5d9f87ec` ; `ai-guard-demo-pki` `e3315deca2eb48fb105ede40085399ac19859ccd249d54a5fada56f1ff1b1b72`. Ce sont des artefacts de compilation, pas une release qualifiée ou un déploiement.
+
+**Configuration et CLI PASS ciblé :** quatre rendus JSON par Docker Compose5.6.1, catalogue Rust ou TypeSafe explicite sur chacun des socles Docker/Podman, tous RC0. Catalogue : seuls secrets runner/viewer et réseau control au gateway. TypeSafe : backend/URL/modèle explicites, secret Jev et egress limités au gateway. Les deux ports d'entrée restent sur127.0.0.1. Le rendu du fichier Podman par Docker Compose ne qualifie pas Podman. Endpoint moteur inexistant, configuration Docker vide privée, valeurs publiques et chemins placeholders ; aucun daemon, credential utilisateur ou service utilisé. L'avertissement HOME absent du template public est conservé ; le chemin de configuration explicitement fourni est bien retenu. La copie release vérifiée exécute `gateway --help` RC0 en1,74s, sans bind ni accès aux clés. Captures privées `/private/tmp/ai-guard-jev-compose-config-3106b6b-20261101` ; HEAD, lock, cinq inputs et binaire inchangés. Ce contrôle ne rajoute aucune fonction au total62.
+
+Limites : vraies couches Rust/SQLite/HTTP loopback et CLI de fixtures, aucun modèle/fournisseur réel ni moteur ; qualifications Qwen sémantique/mémoire, assemblage conteneurisé du juge, TLS privé, SSO, workers A1/A2/B1 et capacité100 non exécutés ici. La revue propose un cas supplémentaire avec dictionnaires Store A/B distincts et un replay antérieur au changement de backend ; ces variantes dédiées ne sont pas revendiquées comme exécutées. Tests/runtime de D5 ouverts, G09 FAIL,0/12 gates clos.
+
 ## 1er novembre — dashboard, refus de session et intégration
 
 Base `9054183c5e06b5b1eb491fdff98f62e27de7ddda`, correctif intégré sans conflit par fast-forward `d1164bf4d9673be7c518c47687ab1e769341f66d`. Quatre fichiers : `front/src/api.ts`, `front/src/main.ts`, `front/tests/api.test.mjs`, `front/tests/browser_identity.mjs`. Le premier401/403 ferme et notifie le client avant l'annulation du corps ; le callback de connexion ne déconnecte que l'instance courante. Aucun changement Rust, CSS ou endpoint.

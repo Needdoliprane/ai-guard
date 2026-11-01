@@ -562,6 +562,25 @@ impl Store {
     /// Another connection to this live origin; no caller-selected identity or path.
     /// An independent open remains maintenance-only even for this same pathname.
     pub fn sibling(&self) -> anyhow::Result<Self> {
+        self.sibling_with_redactor(self.redactor.clone())
+    }
+    /// An immutable masking union attached to this same backing and live origin.
+    /// The caller's view and the shared supervision capability remain unchanged.
+    pub fn with_additional_redaction(
+        self: &Arc<Self>,
+        additional: &Redactor,
+    ) -> anyhow::Result<Arc<Self>> {
+        if self.redactor.covers(additional) {
+            return Ok(Arc::clone(self));
+        }
+        Ok(Arc::new(
+            self.sibling_with_redactor(self.redactor_union(additional))?,
+        ))
+    }
+    pub(crate) fn redactor_union(&self, additional: &Redactor) -> Redactor {
+        self.redactor.union(additional)
+    }
+    fn sibling_with_redactor(&self, redactor: Redactor) -> anyhow::Result<Self> {
         anyhow::ensure!(
             self.healthy(),
             "cannot share an unhealthy supervision origin"
@@ -570,7 +589,7 @@ impl Store {
         let mut sibling = Self::open_for_tenant(
             self.backing.path(),
             &self.tenant_id,
-            self.redactor.clone(),
+            redactor,
             self.max_events,
         )?;
         anyhow::ensure!(
@@ -1313,5 +1332,52 @@ impl Store {
         Ok(
             json!({"counts":{"agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed").count(),"subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed" && !a["parent_id"].is_null()).count(),"declared_agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared").count(),"declared_subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared" && !a["parent_id"].is_null()).count(),"sandboxes":sandboxes.len(),"commands":count("kind='command.requested'")?,"allowed":count("kind='security.decision' AND decision='allow'")?,"denied":count("kind='security.decision' AND decision='deny'")?,"pending":pending,"security":count("kind LIKE 'security.%'")?},"health":{"collector":if self.healthy(){"ok"}else{"degraded"},"engine":"unknown","jev":"disabled"},"resources":{"cpu_percent":null,"memory_bytes":null},"coverage":"observed","timestamp":chrono::Utc::now().to_rfc3339(),"sequence":db.query_row("SELECT COALESCE(MAX(seq),0) FROM events",[],|r|r.get::<_,i64>(0))?}),
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod redaction_attachment_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn additional_redaction_reuses_the_live_origin_and_a_covering_view() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let original = Arc::new(
+            Store::open(
+                &directory.path().join("audit.sqlite"),
+                Redactor::new(vec![]),
+                100,
+            )
+            .unwrap(),
+        );
+        let requested = Redactor::new(vec!["PrivateCanaryGHIJKLMNOPQRSTUVWXYZ".into()]);
+        let attached = original.with_additional_redaction(&requested).unwrap();
+        assert!(!Arc::ptr_eq(&original, &attached));
+        assert!(Arc::ptr_eq(
+            &original.supervision_lease,
+            &attached.supervision_lease
+        ));
+        assert!(original.backing.identity_key() == attached.backing.identity_key());
+        assert!(!original.redactor.covers(&requested));
+        assert!(attached.redactor.covers(&requested));
+        assert!(Arc::ptr_eq(
+            &attached,
+            &attached.with_additional_redaction(&requested).unwrap()
+        ));
+        let mut event = Event::new("fixture.redaction");
+        event.data = json!({"text":"PrivateCanaryGHIJKLMNOPQRSTUVWXYZ"});
+        let stored = attached.append(event).unwrap();
+        let queried = original
+            .events(&EventQuery {
+                order: Some("asc".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(queried.last().unwrap().hash, stored.hash);
+        assert_eq!(stored.event.data["text"], "[REDACTED]");
     }
 }

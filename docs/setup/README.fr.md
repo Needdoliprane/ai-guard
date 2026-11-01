@@ -22,6 +22,7 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 | Fichier | Lecteur et usage |
 |---|---|
 | `.env.exemple.local` | Option Compose `--env-file`, socle Docker ou Podman. |
+| `.env.exemple.local-rules` | Socle avec `deploy/docker/compose.jev-rules.example.yaml`, catalogue de décision Rust fini sans service modèle. |
 | `.env.exemple.local-keycloak` | Compose du socle et projet Keycloak séparé. |
 | `.env.exemple.local-qwen` | Compose du socle et projet IA locale séparé. |
 | `.env.exemple.local-keycloak-qwen` | Réglages combinés ; utiliser les commandes séparées ci-dessous. |

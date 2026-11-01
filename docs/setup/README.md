@@ -22,6 +22,7 @@ Each guide contains prerequisites, configuration, startup, expected endpoints, d
 | File | Reader and use |
 |---|---|
 | `.env.exemple.local` | Compose `--env-file`, base Docker or Podman stack. |
+| `.env.exemple.local-rules` | Base stack plus `deploy/docker/compose.jev-rules.example.yaml`, finite Rust decision catalogue without a model service. |
 | `.env.exemple.local-keycloak` | Base Compose and the separate Keycloak project. |
 | `.env.exemple.local-qwen` | Base Compose and the separate local-AI project. |
 | `.env.exemple.local-keycloak-qwen` | Same settings combined; use the separate commands below. |

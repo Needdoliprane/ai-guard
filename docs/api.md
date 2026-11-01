@@ -14,7 +14,7 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 
 | Méthode et route | Identité | Résultat |
 |---|---|---|
-| `GET /healthz` | Aucune | État du processus, service et version lorsqu'exposée |
+| `GET /healthz` | Aucune | État du composant ; le gateway refuse aussi les configurations invalides et les échecs d'audit déjà constatés |
 | `POST /api/events` | Runner | Événement normalisé, expurgé puis stocké ; séquence et hashes |
 | `POST /api/decide` | Runner | Décision tracée, hash de demande et `audit_seq` |
 | `GET /api/events` | Viewer ou runner | Historique paginé et `next_cursor` |
@@ -33,6 +33,30 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 | `GET /api/usage` | Viewer ou runner | Page `{items,next_cursor}` d'allocations terminales, `billable=false` |
 
 Le dashboard ne relaie que les lectures de sa liste explicite, dont les workers, quotas et allocations ; il n'expose pas la consultation des reçus d'opérations du broker ni les mutations. Les lectures paginées workers/usage acceptent uniquement `cursor` (UUID canonique) et `limit` (1 à 100, 50 par défaut). Le curseur est le dernier worker ou la dernière tentative de la page. Un paramètre inconnu est refusé `400` ; le client ne choisit pas le tenant.
+
+### Santé et provenance du juge / Health and judge provenance
+
+Le gateway conserve la réponse saine `200 {status:"ok",service:"gateway",version:...}`. Il renvoie `503` avec `status:"unavailable"` et `reason:"configuration_or_audit_unavailable"` si ses credentials sont invalides, aucun Store n'est utilisable ou un échec d'intégrité a déjà été verrouillé. Ce contrôle mémoire ne lance ni requête Jev ni vérification complète du stockage. Un juge configuré n'est pas déclaré joignable par cette sonde.
+
+The gateway preserves its healthy `200` response. Invalid credentials, no usable Store or an already latched audit failure produce `503` with the fixed reason above. This in-memory probe does not contact a judge or perform a fresh durability/integrity scan; configured does not mean reachable.
+
+Le gateway attache à ses Stores une vue immuable réunissant les masques du contrôle, du backend et des Stores configurés. Le Store original fourni par l'appelant n'est pas modifié ; les événements déjà persistés ne sont ni remasqués ni réécrits. The gateway uses immutable Store siblings with the combined redaction dictionary; caller-owned Store instances and previously persisted events remain unchanged.
+
+La réponse de décision et son événement durable portent une métadonnée `jev` additive, ou `null` sans juge supplémentaire. Les replays rendent l'ancienne métadonnée, sans réévaluation ni réattribution. Les nouvelles évaluations distinguent :
+
+| Champ / Field | Contrat / Contract |
+|---|---|
+| `backend` | `typesafe`, `rust_rules`, `local_openai` ; les sélecteurs CLI des deux derniers utilisent des tirets |
+| `selection_source` | `cli`, `environment`, `legacy` ou `programmatic` |
+| `status` | `configured`, `skipped_local_policy`, `evaluated` ou `unavailable_or_invalid` ; aucune preuve d'effet runtime |
+| `config_sha256`, `configuration` | Empreinte et paramètres non secrets résolus ; aucun chemin de credential ni valeur de clé |
+| `requested_model`, `model` | Modèle demandé et modèle déclaré par la réponse, distincts ; `null` lorsque non disponible |
+| `confidence`, `usage` | Données fournisseur validées ou `null` ; Rust/local n'inventent aucun score, une inconnue ne devient pas zéro |
+| `provider_outcome`, `outcome` | Pour le modèle local, avis fourni et résultat effectif distincts ; Allow consultatif devient Review, puis refus API |
+
+Decision responses and their durable events carry the additive metadata above; historical replays preserve the original record. Provider-reported scores/tokens do not become observed resource consumption or a bill. The mandatory Rust policy runs first. Unknown Rust-catalogue input, local advisory uncertainty and judge errors cannot authorize execution.
+
+Le transport TypeSafe valide les doublons de champs décisionnels/score/usage avant conversion en JSON générique. Son usage réseau est normalisé aux compteurs connus entrée/sortie, chacun entier non négatif ou `null` ; les extensions non utilisées ne sont pas restituées. Le type public Rust `JevAnswer.usage` reste un `Value`. Le helper historique `parse_answer(Value)` conserve cette valeur fournie par l'appelant, mais ne peut retrouver des doublons déjà éliminés en amont. Pour la configuration et les limites, voir [le guide FR](setup/providers/README.fr.md#choisir-le-moteur-de-décision) et [the English guide](setup/providers/README.md#choose-the-decision-engine).
 
 L'ingestion `POST /api/events` (et son alias `/api/v1/events`) refuse avec `403` les racines `security.decision`, `control`, `worker` et `usage.allocation`, ainsi que leurs descendants séparés par un point. Les décisions centrales sont produites par `/decide` ; un événement fourni par le runner ne peut créer une autorisation en cache. Les déclarations fournisseurs telles que `usage.reported` restent admises. Ce contrôle s'applique aux nouvelles ingestions : il ne permet pas d'authentifier rétroactivement un événement usurpé dans une ancienne base. L'historique n'est ni supprimé ni réécrit automatiquement ; une future admission d'exécution ne doit pas convertir ces anciens événements en droits de lancement.
 

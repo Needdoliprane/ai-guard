@@ -2,7 +2,7 @@ use agentsandbox::{
     api::{self, GatewayState, TenantGateway},
     audit::Store,
     control_fs::{Directory, absolute_path},
-    jev::{JevClient, validate_credential_separation},
+    jev::{JevBackend, JevClient, RuleCatalog, SelectionSource, validate_credential_separation},
     operations::{self, OperatorCommand},
     policy::Policy,
     redaction::Redactor,
@@ -104,16 +104,90 @@ struct GatewayArgs {
     worker_memory_bytes: u64,
     #[arg(long, default_value_t = 3600)]
     worker_max_seconds: u32,
+    /// Decision veto: typesafe, rust-rules or local-openai. JEV_BACKEND is the fallback.
+    #[arg(long)]
+    jev_backend: Option<String>,
     #[arg(long, env = "JEV_URL")]
     jev_url: Option<String>,
     #[arg(long, env = "JEV_API_KEY_FILE")]
     jev_key_file: Option<PathBuf>,
     #[arg(long, env = "JEV_MODEL")]
     jev_model: Option<String>,
-    #[arg(long, default_value_t = 0.85)]
-    jev_min_confidence: f64,
+    /// TypeSafe confidence threshold (default 0.85); invalid for other backends.
+    #[arg(long)]
+    jev_min_confidence: Option<f64>,
     #[arg(long)]
     jev_allow_local_http: bool,
+    /// Local compatible OpenAI chat URL; HTTP requires explicit loopback permission.
+    #[arg(long)]
+    jev_local_url: Option<String>,
+    #[arg(long)]
+    jev_local_model: Option<String>,
+    /// Optional local inference credential, separate from every control role.
+    #[arg(long)]
+    jev_local_key_file: Option<PathBuf>,
+    /// Version 1 exact argv catalogue in an existing private file; otherwise built-in.
+    #[arg(long)]
+    jev_rules_catalog: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+enum SelectedJev {
+    Disabled,
+    TypeSafe(SelectionSource),
+    RustRules(SelectionSource),
+    Local(SelectionSource),
+}
+
+/// Pure selection validation precedes opening any credential or making any request.
+fn select_jev(args: &GatewayArgs, environment: Option<&str>) -> Result<SelectedJev> {
+    let selection = args
+        .jev_backend
+        .as_deref()
+        .map(|value| (value, SelectionSource::Cli))
+        .or_else(|| environment.map(|value| (value, SelectionSource::Environment)));
+    let typesafe = args.jev_url.is_some()
+        || args.jev_key_file.is_some()
+        || args.jev_model.is_some()
+        || args.jev_min_confidence.is_some();
+    let local = args.jev_local_url.is_some()
+        || args.jev_local_model.is_some()
+        || args.jev_local_key_file.is_some();
+    let selected = match selection {
+        Some(("typesafe", source)) => SelectedJev::TypeSafe(source),
+        Some(("rust-rules", source)) => SelectedJev::RustRules(source),
+        Some(("local-openai", source)) => SelectedJev::Local(source),
+        Some(_) => anyhow::bail!("Invalid Jev backend selection"),
+        None if args.jev_url.is_some() => SelectedJev::TypeSafe(SelectionSource::Legacy),
+        None => SelectedJev::Disabled,
+    };
+    let valid = match selected {
+        SelectedJev::Disabled => {
+            !typesafe && !local && args.jev_rules_catalog.is_none() && !args.jev_allow_local_http
+        }
+        SelectedJev::TypeSafe(_) => {
+            !local
+                && args.jev_rules_catalog.is_none()
+                && args.jev_url.is_some()
+                && args.jev_key_file.is_some()
+                && args.jev_model.is_some()
+                && args
+                    .jev_min_confidence
+                    .is_none_or(|value| (0.0..=1.0).contains(&value))
+        }
+        SelectedJev::RustRules(_) => !typesafe && !local && !args.jev_allow_local_http,
+        SelectedJev::Local(_) => {
+            !typesafe
+                && args.jev_rules_catalog.is_none()
+                && args.jev_local_url.is_some()
+                && args.jev_local_model.is_some()
+        }
+    };
+    anyhow::ensure!(
+        valid,
+        "Incomplete or mixed Jev backend configuration; use only the selected backend's options"
+    );
+    Ok(selected)
 }
 #[derive(Args)]
 struct DashboardArgs {
@@ -282,6 +356,16 @@ async fn main() -> Result<()> {
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Gateway(args) => {
             validate_bind(args.listen, args.container_listen)?;
+            let backend_environment = if args.jev_backend.is_none() {
+                match std::env::var("JEV_BACKEND") {
+                    Ok(value) => Some(value),
+                    Err(std::env::VarError::NotPresent) => None,
+                    Err(_) => anyhow::bail!("Invalid Jev backend selection"),
+                }
+            } else {
+                None
+            };
+            let selected_jev = select_jev(&args, backend_environment.as_deref())?;
             let tenants = if let Some(path) = &args.tenants_file {
                 gateway_config::load(path)?
             } else {
@@ -305,29 +389,65 @@ async fn main() -> Result<()> {
                 .iter()
                 .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
                 .collect();
-            let jev = if let Some(url) = args.jev_url {
-                let key = read_token(
-                    args.jev_key_file
+            let jev = match selected_jev {
+                SelectedJev::Disabled => None,
+                SelectedJev::TypeSafe(source) => {
+                    let key = read_token(
+                        args.jev_key_file
+                            .as_deref()
+                            .context("TypeSafe key file required")?,
+                    )?;
+                    validate_credential_separation(&key, secrets.iter().map(String::as_str))?;
+                    secrets.push(key.clone());
+                    Some(JevBackend::typesafe(
+                        JevClient::new(
+                            args.jev_url.as_deref().context("TypeSafe URL required")?,
+                            key,
+                            args.jev_model
+                                .clone()
+                                .context("TypeSafe requested model required")?,
+                            args.jev_min_confidence.unwrap_or(0.85),
+                            args.jev_allow_local_http,
+                        )?,
+                        source,
+                    ))
+                }
+                SelectedJev::RustRules(source) => {
+                    let catalogue = args
+                        .jev_rules_catalog
                         .as_deref()
-                        .context("--jev-key-file requis lorsque Jev est activé")?,
-                )?;
-                validate_credential_separation(&key, secrets.iter().map(String::as_str))?;
-                secrets.push(key.clone());
-                Some(JevClient::new(
-                    &url,
-                    key,
-                    args.jev_model.context("--jev-model explicite requis")?,
-                    args.jev_min_confidence,
-                    args.jev_allow_local_http,
-                )?)
-            } else {
-                anyhow::ensure!(
-                    args.jev_key_file.is_none() && args.jev_model.is_none(),
-                    "Configuration Jev incomplète : fournir --jev-url"
-                );
-                None
+                        .map(RuleCatalog::from_private_file)
+                        .transpose()?
+                        .unwrap_or_default();
+                    Some(JevBackend::rust_rules(catalogue, source))
+                }
+                SelectedJev::Local(source) => {
+                    let key = args
+                        .jev_local_key_file
+                        .as_deref()
+                        .map(read_token)
+                        .transpose()?;
+                    if let Some(key) = &key {
+                        validate_credential_separation(key, secrets.iter().map(String::as_str))?;
+                        secrets.push(key.clone());
+                    }
+                    Some(JevBackend::local_openai(
+                        args.jev_local_url
+                            .as_deref()
+                            .context("Local Jev URL required")?,
+                        key,
+                        args.jev_local_model
+                            .clone()
+                            .context("Local requested model required")?,
+                        args.jev_allow_local_http,
+                        source,
+                    )?)
+                }
             };
-            let redactor = Redactor::new(secrets);
+            let redactor = Redactor::new(vec![]).union(&Redactor::new(secrets));
+            if let Some(backend) = &jev {
+                backend.validate_redaction(&redactor)?;
+            }
             let policy: Policy = serde_json::from_slice(
                 &std::fs::read(&args.policy).context("Politique locale manquante")?,
             )
@@ -347,6 +467,12 @@ async fn main() -> Result<()> {
                     })
                     .collect();
                 if let Some(path) = args.jev_key_file.as_deref() {
+                    credential_files.push(path);
+                }
+                if let Some(path) = args.jev_local_key_file.as_deref() {
+                    credential_files.push(path);
+                }
+                if let Some(path) = args.jev_rules_catalog.as_deref() {
                     credential_files.push(path);
                 }
                 Some(prepare_supervised_backups(root, &credential_files)?)
@@ -400,7 +526,7 @@ async fn main() -> Result<()> {
             }
             let tenant_count = gateways.len();
             let router = api::gateway_router(
-                GatewayState::for_tenants(gateways, policy, jev, redactor)?
+                GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?
                     .with_worker_quotas(quotas)?,
             );
             let shutdown = shutdown_signal()?;
@@ -577,6 +703,82 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gateway_arguments(arguments: &[&str]) -> GatewayArgs {
+        let cli = Cli::try_parse_from(
+            ["agentsandbox", "gateway"]
+                .into_iter()
+                .chain(arguments.iter().copied()),
+        )
+        .unwrap();
+        match cli.command {
+            Command::Gateway(args) => args,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn jev_selection_is_explicit_and_mixed_options_fail_before_assembly() {
+        let rules = gateway_arguments(&["--jev-backend", "rust-rules"]);
+        assert!(matches!(
+            select_jev(&rules, Some("invalid-secret-value")),
+            Ok(SelectedJev::RustRules(SelectionSource::Cli))
+        ));
+        let none = gateway_arguments(&[]);
+        assert!(matches!(select_jev(&none, None), Ok(SelectedJev::Disabled)));
+        assert!(matches!(
+            select_jev(&none, Some("rust-rules")),
+            Ok(SelectedJev::RustRules(SelectionSource::Environment))
+        ));
+        let error = select_jev(&none, Some("private-invalid-value"))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(!error.contains("private-invalid-value"));
+        for arguments in [
+            vec!["--jev-backend", "rust-rules", "--jev-model", "fixture"],
+            vec!["--jev-backend", "rust-rules", "--jev-min-confidence", "0.9"],
+            vec![
+                "--jev-backend",
+                "local-openai",
+                "--jev-url",
+                "https://example.invalid",
+            ],
+            vec![
+                "--jev-local-url",
+                "http://127.0.0.1:18090/v1/chat/completions",
+            ],
+            vec!["--jev-key-file", "/nonexistent-fixture/key"],
+        ] {
+            assert!(select_jev(&gateway_arguments(&arguments), None).is_err());
+        }
+        let legacy = gateway_arguments(&[
+            "--jev-url",
+            "https://example.invalid/v1/systemone",
+            "--jev-model",
+            "fixture",
+            "--jev-key-file",
+            "/nonexistent-fixture/key",
+        ]);
+        assert!(matches!(
+            select_jev(&legacy, None),
+            Ok(SelectedJev::TypeSafe(SelectionSource::Legacy))
+        ));
+    }
+
+    #[test]
+    fn gateway_cli_can_select_each_decision_backend_explicitly() {
+        // Parsing the existing CLI opens no configuration/credential files.
+        // This first absence test uses no future Rust field or backend type;
+        // complete per-backend configuration is validated during assembly.
+        for backend in ["typesafe", "rust-rules", "local-openai"] {
+            let parsed = Cli::try_parse_from(["agentsandbox", "gateway", "--jev-backend", backend]);
+            assert!(
+                parsed.is_ok(),
+                "the gateway CLI must accept each explicit decision backend selection"
+            );
+        }
+    }
 
     #[test]
     fn enforcer_recovery_requires_an_explicit_internal_mode() {
