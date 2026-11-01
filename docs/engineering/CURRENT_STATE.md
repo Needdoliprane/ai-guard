@@ -4,6 +4,8 @@ Ce fichier rassemble les constats datés et leurs limites. Chaque résultat rest
 
 ## Transport d'arrêt restreint — chantier en validation, 1er novembre
 
+Le lot logiciel R8 est intégré et poussé dans `codex/broker-service`, commit `9054183c5e06b5b1eb491fdff98f62e27de7ddda`, référence distante identique vérifiée. Le worktree est propre à ce checkpoint ; les travaux D5 suivants sont isolés et leurs résultats ne lui sont pas attribués.
+
 Le checkpoint WIP R5 `5f77f160f0fc5de33412a766e52474ecb51f2f36`, poussé sur `codex/broker-service` avec référence distante vérifiée, reste conservé. Ses 24 fichiers reprennent les sources exactes du gel R5 et leurs statuts ; les gels suivants sont séparés ci-dessous. Contrôle avant ce push : aucun binaire, chemin interdit, motif suspect ou secret connu détecté. Cette sauvegarde n'est ni une release ni une validation supplémentaire du comportement.
 
 Le gel logiciel R1 ajoute une voie explicite RecoveryV2/StopsOnly, distincte du Full legacy, ainsi que `broker serve --recovery-only`. Compilation macOS native et cinq fonctions ciblées PASS : authentification/rôle, refus des commandes Full, challenge et restauration de deux cibles avec vrais Journal/Writer/IPC après remplacement du seul child de test. Ces deux cibles ne constituent pas deux tenants, et les runtimes volontairement indisponibles ne prouvent aucun arrêt moteur. Après le RED FS-01, le retrait des seules trois bornes de longueur du transport passe le test sparse au gel R2 ; les contrôles structurels restent conservés.
@@ -13,6 +15,29 @@ Les quatre défauts R1 sont corrigés au gel R3 : retry dans le même epoch, rel
 Le P2 multi-Arm R3-01 est reproduit par les deux scénarios R6c, projection et reprise du journal : après confirmation réelle du Cancel et abandon du waiter pendant A tenue, B ne progresse pas. Les deux mêmes tests passent au gel R7 après rétention groupée possédée, respectivement en 88,18 s et 90,25 s, puis huit canaris couplés passent. Aucun oracle ni délai produit n'est changé. Les échecs antérieurs de PATH et de marqueur partiellement écrit restent des défauts de harnais, sans faux RED. La revue R7 ne trouve aucun défaut applicatif confirmé ; elle recommande un test supplémentaire du résultat public lors d'un changement d'epoch/révision entre les confirmations de A et B. Clippy R7 refuse une enum volumineuse et deux conditions imbriquées ; les tests CLI et la release sont donc NOT_RUN à ce gel. R8 ajoute seulement une indirection privée et les conditions équivalentes : quatre canaris, deux intégrations CLI natives, fmt, Clippy strict et compilation release passent, avec revue traitée. Trois exécutables release et les sources exactes sont conservés et rehashés ; aucun déploiement ni effet moteur n'est déduit de ce lot logiciel.
 
 Le silence Watch est borné par le timeout de trame de 3 s, distinct des 750 ms de stagnation sur frames reçues ; la concurrence CAS réelle reste à compléter dans les tests. Ledger/retraite/V5, drainage d'un ancien start et qualification moteur demeurent ouverts. Le contrat de retrait est consolidé et relu dans BROKER_SUPERVISION.md, sans capacités fictives livrées. Les commandes, gels et limites sont dans [VALIDATION.md](VALIDATION.md). G09 FAIL, D5 ouvert, aucun gate fermé.
+
+La couture suivante conserve les échanges2 exacts et prévoit une négociation3 authentifiée avant tout accord de rôle. Après correction de deux défauts de cleanup avant lancement, le premier test R9 atteint réellement son oracle RED : le serveur courant ne fournit pas Challenge3 après Negotiate3. Les positifs Journal/Cancel/Restore2 et le nettoyage du child possédé précèdent cet oracle. Le brouillon coverage3-sur-Status2 n'a jamais été exécuté ; aucune modification applicative, négociation3 complète ou ledger n'est livrée par cette reproduction. La qualification D5 reste ouverte.
+
+## Dashboard — refus de session, 1er novembre
+
+Le correctif `d1164bf4d9673be7c518c47687ab1e769341f66d` est intégré dans `codex/broker-service`. Chaque réponse401/403 du client actif ferme désormais la session avant les gardes d'affichage : un500 simultané ne masque plus le refus, un détail déjà fermé ne peut plus l'ignorer, et une ancienne session ne déconnecte pas la suivante. Le rappel SSE historique reste compatible, sans double notification. Aucun style, thème, endpoint ni droit serveur n'est modifié.
+
+Trois RED logiciels sont conservés : API, notification SSE et navigateur sur ancien bundle. Sur le gel corrigé, onze tests API, build et navigateur ciblé PASS ; après intégration sans conflit, les onze tests API et le build repassent. Revue indépendante sans défaut confirmé. Node25.6.1, npm11.13.0 et Chrome156/Playwright1.65.0-alpha ont réellement servi ; Node24 reste NOT_RUN. Le navigateur emploie des fixtures HTTP explicites, sans qualifier l'authentification Rust, OIDC ou les workers. [Détails et limites](VALIDATION.md#1er-novembre--dashboard-refus-de-session-et-intégration).
+
+Le cycle complet des worktrees est désormais une règle explicite d'AGENTS.md. Pour ce lot, intégration, validation ciblée et push de `d1164bf` sont vérifiés. Le checkout `dashboard-session-isolation` est retiré par `git worktree remove`, sans force, après inventaire propre : aucun fichier non suivi non ignoré,367 artefacts générés identifiés, preuves/captures conservées hors checkout et aucun consommateur visible. La branche reste disponible. Les worktrees actifs ou consommés par un gardien ne sont pas des caches jetables : `broker-supervision` reste notamment retenu par sept processus utilisant encore son binaire.
+
+### Cycle des worktrees — inventaire du 1er novembre
+
+| Checkout secondaire | État et condition de fermeture |
+|---|---|
+| `dashboard-session-isolation` | Fermé : correctif intégré, tests ciblés/revue/push vérifiés, preuves et branche conservées |
+| `docker-launch-profile` | Fermé : ses19 contenus correspondent exactement au lot déjà intégré `0f7c403` ; sauvegarde de branche `427c9ba` poussée/vérifiée avant retrait Git propre |
+| `jev-backends` | Actif : implémentation des trois backends et corrections des RED Jev ; validation/intégration encore ouvertes |
+| `d5-ledger-red` | Actif : delta R9 présent aussi dans PRIMARY mais non committé ; D5 non livré |
+| `keycloak-sso` | À réconcilier avant fermeture : variantes Cargo/README et deux tests auxiliaires à conserver hors distribution ; aucune suppression autorisée par leur seul statut ignoré |
+| `broker-supervision` | Retenu : sept gardiens vivants utilisent des anciens inodes de son binaire et leurs ancres ; le binaire courant n'est pas une sauvegarde de ces exécutables chargés |
+
+`broker-service` reste le checkout de contrôle actif ; le checkout principal et ses brouillons utilisateur restent intacts. Les fermetures n'arrêtent aucun gardien, ne retirent aucun volume et ne changent aucun statut de qualification.
 
 ## Authentification du gardien — 1er novembre
 

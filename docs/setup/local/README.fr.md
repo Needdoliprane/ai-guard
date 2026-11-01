@@ -84,6 +84,8 @@ Séparer les credentials techniques de cette identité : `viewer` donne son pér
 
 Le dashboard présente provenance des sessions, décisions, observations runtime et changements. Connexion périmée, couverture partielle, refus et résultat vide sont des états distincts. Utiliser la dernière observation et le périmètre affichés pour choisir entre actualisation, reconnexion et demande d'accès.
 
+Un refus 401/403 d'une lecture active ferme la session viewer et retire ses données, y compris les détails ouverts. Se reconnecter avec un credential autorisé ; des actualisations répétées ne rétablissent pas un credential refusé. Une erreur du service est affichée explicitement. Les vues workers, quotas et allocations conservent leurs dernières données réussies avec un avertissement de péremption, dans la même session et le même périmètre, jusqu'à une actualisation réussie.
+
 ## Exécuter une première commande
 
 Commencer par une petite commande hors ligne. Elle utilise la politique stricte et coupe le réseau du worker :

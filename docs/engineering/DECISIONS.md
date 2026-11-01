@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 1er novembre — compatibilité du futur protocole de retrait
+
+R8 exige la forme exacte de Challenge/Auth/Grant/Status/Watch2, avec StopsOnly et Unverified(recovery_transport_only). Ajouter directement Verified, coverage ou Full à ces records fermés casserait le vrai client2. Root retient une négociation V3 authentifiée sur une connexion non encore accordée, après une préface2 inchangée, dans le même IPC et le même binaire. La solution alternative de versions appariées est plus simple mais ne fournit pas cette continuité. Aucun second listener ni migration implicite n'est ajouté.
+
+Le [contrat de supervision](BROKER_SUPERVISION.md) fixe le premier message Negotiate3, le transcript exact et son domaine HMAC distinct. Les échanges2 ne gagnent ni champ3 ni permission Full. Après tout Grant, version et rôle restent immuables ; un refus3 ne devient pas une authentification2 compensatoire sur ce flux. Full3 exigera un ledger Complete et sa propre connexion explicitement authentifiée, sans conversion Stops→Full.
+
+Le premier brouillon de test qui attendait coverage3 dans Status2 n'a jamais été exécuté ; il est corrigé avant Cargo. Le nouveau test vise seulement la négociation3 absente, tout en conservant les positifs Stop2. Auth3/Grant3/Status3, diagnostics Partial et retraite restent à implémenter et qualifier ; une Challenge3 seule ne livrera pas ces capacités. Les défauts de harnais relevés avant exécution sont traités séparément, sans modifier le comportement applicatif R8.
+
 ## 1er novembre — reprise STOP distincte de l'admission
 
 La reprise des arrêts autorisés doit fonctionner lorsque l'admission ou le ledger de retrait est dégradé, sous réserve d'une racine, d'une authentification et d'une lease encore vérifiables. La première verticale ajoute un canal IPC explicitement limité aux arrêts, avant le scan lourd et la demande Full. Son authentification lie le rôle demandé ; restauration et reconnexion ne passent plus par un Register métier ou une permission Prepare. Le protocole2 annonce `offered_roles=["stops_only"]` lorsque l'admission est fermée. Un secret IPC absent dans une ancienne autorité n'est pas régénéré comme réparation.

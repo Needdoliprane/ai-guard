@@ -173,13 +173,50 @@ Le ledger est toujours `Unverified` : aucun sceau/floor/delta/tombstone, Closing
 ou port de finalisation de retrait n'est livré. Une lease O_RDWR et un thread démarré ne constituent pas ces preuves.
 Dans R8, LedgerState n'admet que Unverified et ChallengeV2 est fermé (`deny_unknown_fields`). Ajouter Verified/coverage/Full
 ne garantit donc aucune compatibilité avec ces clients : stratégie de versionnement/mise à jour explicite et testée requise avant raccord.
-Cette couture reste ouverte, sans version nouvelle décidée ici ; préserver refus fermé et STOP connus, sans conversion d'anciennes connexions.
+La direction de raccord retenue est la négociation V3 explicite avant tout accord, décrite ci-dessous ; son implémentation reste absente.
+Préserver refus fermé et STOP connus, sans conversion d'anciennes connexions ; Auth/Grant/Status3 complets restent à figer avant leur code.
 R7 passe dix fonctions ciblées, dont les deux reprises multi-Arm après abandon du waiter, puis échoue à Clippy strict.
-R8 corrige seulement une indirection privée et deux conditions équivalentes ; fmt, Clippy stricts, quatre canaris complémentaires
-et deux tests CLI passent ; seule la release reste en validation au point documentaire présent.
+R8 corrige seulement une indirection privée et deux conditions équivalentes ; fmt, Clippy strict, quatre canaris complémentaires,
+deux tests CLI et une compilation release passent. Les sources et trois exécutables release exacts sont conservés.
 Les [résultats par gel](VALIDATION.md#r7--correctif-groupé-vérifié-clippy-refuse-trois-diagnostics) font autorité sur les preuves,
 avec [l'état constaté](CURRENT_STATE.md), les [décisions](DECISIONS.md#1er-novembre--reprise-stop-distincte-de-ladmission)
 et les [gates](PRODUCTION_READINESS.md). **G09 reste FAIL, D5 ouvert ; aucun gate ni effet moteur n'est qualifié ici.**
+
+### Négociation V3 avant tout accord — contrat du premier test
+
+Choix technique de Root : conserver la préface et les échanges V2, puis permettre une négociation authentifiée V3
+avant tout Grant. Une mise à jour appariée annonçant directement V3 serait plus simple, mais ne fournirait pas la continuité
+du vrai client2 vers le serveur étendu. Aucun deuxième listener, service ou changement de root n'est décidé.
+Challenge/Auth/Grant/Status/Watch2 gardent leurs schémas, domaines et valeurs actuels ; les nonces restent frais.
+La vue2 conserve StopsOnly, Unverified(recovery_transport_only) et admission_available=false, sans champ coverage3 ni Full implicite.
+Auth2 Full reste refusé ; une connexion déjà accordée ne renégocie jamais sa version ou son rôle.
+
+Après lecture et validation de la vraie préface2, sur une connexion non encore accordée, le nouveau message cible est fermé :
+`{kind:"negotiate_v3", protocol:3, requested_role:"stops_only"|"full", client_nonce:UUID, proof:Hash64}`.
+Le nonce client est canonique, frais, non nul et distinct du nonce serveur2. La preuve est HMAC-SHA256 avec la capability IPC existante,
+sur `b"ai-guard:enforcer-client-negotiate:v3\0"` suivi de la sérialisation JSON du tuple exact :
+`(challenge2.protocol, challenge2.role, challenge2.epoch, challenge2.nonce, challenge2.root_binding, challenge2.offered_roles, challenge2.ledger_state, 3_u32, requested_role, client_nonce)`.
+Les sept premières valeurs viennent de la préface effectivement reçue et recoupée, sans valeurs par défaut ni clé nouvelle.
+proof est du hex minuscule sur 64 caractères ; la clé n'est ni changée ni exposée.
+
+La sélection de première authentification distinguera directement les deux schémas fermés Auth2/Negotiate3 sur les bytes bornés.
+Refuser doublons, formes mixtes, champs inconnus, mauvais types, trailing JSON et nonce/proof non canoniques ;
+ne pas classifier via Value→from_value ou un repli permissif perdant des clés. Le cap handshake reste 4096 bytes.
+V3 aura une échéance monotone globale de 6 s depuis l'entrée du handshake et les timeouts de trame de 3 s,
+avec au plus deux allers-retours après la préface2 ; la voie2 garde ses sémantiques actuelles.
+Un refus3 ferme cette connexion, sans Auth2 compensatoire ; un besoin explicite STOP2 emploie une autre connexion,
+sans satisfaire une demande Full3 par une capacité STOP.
+
+Le premier test demande stops_only et attend une trame distincte kind=challenge_v3, protocol=3, role=enforcer,
+epoch et root_binding inchangés, client_nonce corrélé et champ unique server_nonce frais, non nul et distinct des deux nonces précédents.
+Aucun alias nonce n'est admis. Cette trame seule ne constitue ni Grant3, ni ledger vérifié, ni effet STOP ou pouvoir Full.
+La suite Auth3/Grant3 et Status/Watch3 exigera ses DTO, domaines client/serveur, identités et couverture propres avant code applicatif.
+Full3 exigera Complete ; Partial/Unverified refusera Full sans Grant STOP implicite.
+
+Le brouillon qui attendait coverage3 dans Status2 n'a jamais été exécuté et est corrigé avant Cargo.
+Le premier RED R9 garde les positifs Journal/Cancel/Restore V2 et atteint l'oracle de négociation3 absente sur une autre connexion,
+après correction du cleanup du harnais avant exécution. Diagnostics Partial et handshake3 complet restent NOT_RUN ;
+aucun simple message ne clôture la verticale D5.
 
 ### Deux preuves initiales fermées
 

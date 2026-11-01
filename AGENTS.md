@@ -167,6 +167,17 @@ Attribuer des propriétaires de fichiers clairs et des worktrees distincts lorsq
 
 Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance externe manque, marquer la qualification concernée `BLOCKED` ou `NOT_RUN`, continuer les travaux indépendants et indiquer précisément ce qui manque. Une fonctionnalité factice, un mock permanent ou une exception qui transforme le blocage en succès ne clôture pas le lot.
 
+### Cycle de vie complet des worktrees
+
+Le mainteneur demande de gérer les worktrees de leur création à leur suppression. Un checkout secondaire n'est pas une archive permanente.
+
+- À la création, relever propriétaire, objectif, branche/base, périmètre de fichiers, cible de compilation et emplacement des preuves. Utiliser l'isolation existante et des noms explicites ; préserver le checkout principal et les travaux de l'utilisateur.
+- Pendant le travail, garder des propriétaires de fichiers clairs. Une cible Cargo appartient à un seul checkout ; ne pas partager un cache de compilation entre worktrees de contenus différents. Les validations restent attachées à leurs sources et environnements réels.
+- Avant fermeture, vérifier l'intégration des changements, leurs validations et la référence distante après push. Inventorier les fichiers suivis, non suivis **et ignorés**, ainsi que les processus ou configurations qui utilisent encore ce chemin.
+- Conserver hors du checkout toute preuve, configuration privée, credential, certificat ou donnée persistante nécessaire. Un binaire encore utilisé par un gardien et ses ancres ne sont pas des fichiers jetables. Une suppression de worktree n'autorise ni suppression de volume ni arrêt d'une ressource non attribuée.
+- Supprimer le worktree secondaire devenu inutile après ces contrôles, de préférence propre et avec la commande Git prévue à cet effet. Ne pas utiliser `--force`, `reset` ou `clean` pour masquer des données ou changements non intégrés ; traiter leur conservation et leur intégration d'abord. Ne pas supprimer le checkout principal ou un worktree de contrôle actif.
+- Rendre compte de la fermeture et des éléments conservés. Si elle reste impossible, nommer le consommateur, les fichiers ou la preuve manquante et garder cette étape ouverte ; ne pas annoncer le cycle terminé.
+
 ## Documentation et exemples de configuration
 
 Le mainteneur demande un manuel utilisateur du produit complet, en **anglais et français**, organisé en guides par contexte : local, fournisseurs IA, Keycloak, inférence locale et entreprise. `README.md` est la version anglaise ; `README.fr.md` est sa version française. Les deux versions proposent les mêmes contrats, exemples et commandes. L'index du manuel explicite son périmètre de produit cible ; l'avancement réel, les preuves et les écarts d'implémentation restent dans `docs/engineering/`, sans être transformés en réussite.

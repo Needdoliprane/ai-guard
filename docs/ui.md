@@ -64,7 +64,7 @@ Fonctionnement livré du parcours `viewer`, distinct de l'identité nominative l
 
 - Le formulaire demande le jeton **viewer**. Le champ est immédiatement vidé lorsqu’une tentative commence.
 - Le jeton vit seulement dans une instance JavaScript en mémoire. Aucun cookie, paramètre d’URL, `localStorage`, `sessionStorage` ou IndexedDB ne le conserve.
-- Les requêtes utilisent `Authorization: Bearer …`, `credentials: omit`, `cache: no-store` et `redirect: error`. Un refus 401/403 de la session ferme le client et réaffiche la connexion.
+- Les requêtes utilisent `Authorization: Bearer …`, `credentials: omit`, `cache: no-store` et `redirect: error`. Un refus 401/403 du client actif ferme la session, efface les données et détails, puis réaffiche la connexion, même si une autre lecture échoue simultanément ou si le détail a déjà été fermé. Une réponse tardive d'un ancien client ne déconnecte pas la nouvelle session.
 - Le client n’accepte que les routes de lecture connues, sous `/api/` sur la même origine. Il ne contient aucune fonction de lancement, d’arrêt, de validation de politique ou d’écriture.
 - Une actualisation de la page déconnecte la session. Le thème suit initialement le système, puis le bouton clair/sombre agit uniquement sur la page courante.
 - Les commandes, noms d’agents, sorties et objets JSON sont traités comme du texte. Le DOM utilise `textContent`, `createTextNode` et des nœuds construits explicitement, sans `innerHTML`, `eval`, gestionnaire inline ou URL fournie par un agent.

@@ -84,6 +84,8 @@ Keep technical credentials separate from that identity: `viewer` grants its conf
 
 The dashboard presents session provenance, decisions, runtime observations and changes. A stale connection, partial coverage, denied request and empty result are different states. Use the displayed last observation and scope when deciding whether to refresh, reconnect or request access.
 
+A 401/403 refusal on an active read closes the viewer session and removes its data, including open details. Reconnect with an authorized credential; repeated refreshes cannot restore a refused credential. A service error is shown explicitly. In the worker, quota and allocation views, the last successful data remains marked stale within the same session and scope until a successful refresh.
+
 ## Execute a first command
 
 Start with a small offline command. It uses the strict policy and disables worker networking:
