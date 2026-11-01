@@ -35,6 +35,8 @@ Compléments explicites du mainteneur,30octobre : G07 exige Codex CLI et Claude 
 
 Trois approches Jev exigées : API réelle, règles Rust explicitement incomplètes, petit modèle local configurable Docker/Podman ≤4B et cible 500 Mo–1 Go. Le premier essai local 0,5B respecte 1 Go sur Docker Desktop (pic 777 912 320 octets) mais échoue sémantiquement sur une suppression ; candidat refusé pour autoriser des actions. Cela ne clôture ni G04 ni G07/G10. Sélection commune et adaptateur local restent à livrer ; refus impératifs et confinement indépendants. [Preuves et limites](evidence/2026-10-30/local-judge/README.md).
 
+Le [smoke de réutilisation du1er novembre](evidence/2026-11-01/local-inference/README.md) confirme un seul appel Chat Completions et un pic788877312 octets sans OOM, après correction du probe fragmenté et refus tronqué/silence. Le serveur est arrêté ; le jugement de sécurité reste FAIL. Aucun adaptateur produit, client Codex/Claude, transport TLS ou déploiement entreprise n'est qualifié par ce résultat ; aucun gate clos.
+
 Compléments du 31 octobre : le [contrat canonique d'identité et de configuration](../sso.md) et les [vues selon les permissions](../ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer) s'ajoutent aux critères ci-dessus. **À implémenter et qualifier**, sans modification des résultats historiques :
 
 | Gates concernés | Preuves obligatoires supplémentaires |

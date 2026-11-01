@@ -1,0 +1,1 @@
+{"model":"qwen2.5-0.5b-q4km","messages":[{"role":"user","content":"Réponds par une courte salutation en français."}],"max_tokens":64,"temperature":0,"stream":false}

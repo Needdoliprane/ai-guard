@@ -110,6 +110,8 @@ La revue a conduit à séparer la récupération STOP du chargement métier : un
 
 **Modèle local réel : mémoire/protocole PASS, sémantique FAIL.** `Qwen2.5-0.5B-Instruct Q4_K_M`, contexte 512, deux appels Docker Desktop ARM64, pic cgroup 777 912 320 octets sous plafond effectif 999 997 440, sans OOM et sans swap. Il répond `allow` à une suppression synthétique : candidat refusé pour autoriser des actions. [Preuves et entrées/sorties](evidence/2026-10-30/local-judge/README.md). Ni budget 500 Mo, ni Podman, ni egress actif ne sont qualifiés. Le sélecteur commun des trois moteurs et l'adaptateur local produit restent absents ; le moteur Rust n'est pas une compréhension sémantique exhaustive.
 
+**Réutilisation du backend,1er novembre : PASS ciblé.** Après réacquisition des images absentes, quatre cas de transport ont reproduit/corrigé la lecture fragmentée du probe, puis une seule salutation réelle Chat Completions a réussi. Pic788877312 octets, sans OOM ; serveur arrêté ensuite. [Sources, sorties et limites](evidence/2026-11-01/local-inference/README.md). Le FAIL sémantique historique reste ouvert. Ce n'est ni un service produit permanent, ni un raccord Codex/Claude, ni une qualification entreprise/TLS ; aucun gate clos.
+
 **Jev réel PASS ciblé :** un seul POST externe via le client Rust du gateway, demande `jev-latest`, réponse `jev-1.14.0`, `allow`/confiance1,0 sur un état synthétique public. Décision locale conservée, chaîne d'audit réouverte valide (3 événements) et base inchangée. Aucun worker, projet, retry ou appel catalogue. [Preuves](evidence/2026-10-30/jev-real/README.md). Ce smoke n'est pas une qualification générale des décisions ni de la disponibilité du service.
 
 ## Candidat QA courant — journal moteur désactivé, 30 octobre 2026

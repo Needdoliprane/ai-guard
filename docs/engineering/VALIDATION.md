@@ -4,6 +4,12 @@ Les sections sont chronologiques : conserver les FAIL/BLOCKED de chaque tentativ
 
 Dernier point courant : [coût durable et gardien retenu](#1er-novembre--coût-durable-et-gardien-retenu-gels-s5s6). Les mentions NOT_RUN des paragraphes précédant ce point restent celles de leur gel historique.
 
+## 1er novembre — réutilisation réelle du backend local d'inférence
+
+Luna : ancien probe RC2 sur réponse chunked fragmentée, correction RC0 sur le même corps, puis refus bornés du corps tronqué et du serveur silencieux (RC2/2). Premier choix d'image erroné RC127 conservé et exclu du RED. Une seule inférence synthétique réelle sur Qwen0,5B Q4_K_M : HTTP200, JSON et modèle vérifiés indépendamment ; compteurs40/3/43 déclarés par le serveur. Pic cgroup788877312 sous999997440, pas d'OOM/swap ; arrêt du même serveur RC0 et état final `exited 0`. Sources/captures choisies, incidents, limites du validateur et provenance dans le [dossier](evidence/2026-11-01/local-inference/README.md). Aucun second appel pour obtenir un vert.
+
+PASS limité à ces comportements transport/mémoire et à cet échantillon. FAIL historique du jugement de sécurité inchangé. Adaptateurs produit, protocoles Codex/Claude, TLS, identité entreprise, Podman et charge NOT_RUN ;0/12 gates clos. Aucun changement de code applicatif ou de dépendance dans ce lot de preuve.
+
 ## Référence initiale — 29 octobre 2026
 
 Hôte constaté : Darwin ARM64. `rustc` initial disponible par chemin absolu : 1.94.1 ; la version demandée par le projet est 1.99.1.
