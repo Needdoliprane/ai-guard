@@ -261,6 +261,25 @@ struct RetainedRestore {
     request: RestoreRequiredStopV1,
     owner: StopOwner,
 }
+type RetainedBatch = Vec<EnforcerResult<RetainedRestore>>;
+#[derive(Default)]
+struct RestoreBatchResult {
+    confirmed: usize,
+    failure: Option<EnforcerError>,
+}
+impl RestoreBatchResult {
+    fn failed(error: EnforcerError) -> Self {
+        Self {
+            confirmed: 0,
+            failure: Some(error),
+        }
+    }
+    fn record(&mut self, result: EnforcerResult<()>) {
+        if let Err(error) = result {
+            self.failure.get_or_insert(error);
+        }
+    }
+}
 fn retained_restore(
     owner: StopOwner,
     scope: &JournalScopeV1,
@@ -959,7 +978,7 @@ struct RestoreAttempt {
 enum Claim {
     Acknowledged,
     Busy,
-    Attempt(RestoreAttempt),
+    Attempt(Box<RestoreAttempt>),
 }
 struct StopConnection {
     stream: UnixStream,
@@ -1286,8 +1305,11 @@ impl EnforcerStopClient {
             _ => Err(EnforcerError::Conflict),
         }
     }
-    fn retain(&self, mut retained: RetainedRestore) -> EnforcerResult<String> {
-        let mut cache = self.0.cache.lock().map_err(|_| EnforcerError::Unhealthy)?;
+    fn retain_in(
+        cache: &mut StopCache,
+        max_slots: u32,
+        mut retained: RetainedRestore,
+    ) -> EnforcerResult<String> {
         let key = retained.request.registration.arm.operation_id.clone();
         if let Some(previous) = cache.entries.get_mut(&key) {
             if previous.retained.request.identity()? != retained.request.identity()? {
@@ -1318,7 +1340,7 @@ impl EnforcerStopClient {
                 // its eventual ACK cannot clear this new desired revision.
             }
         } else {
-            if cache.entries.len() >= self.0.max_slots as usize {
+            if cache.entries.len() >= max_slots as usize {
                 return Err(EnforcerError::Capacity);
             }
             cache.entries.insert(
@@ -1333,8 +1355,32 @@ impl EnforcerStopClient {
                 },
             );
         }
-        self.0.changed.notify_one();
         Ok(key)
+    }
+    fn retain_batch(&self, prepared: RetainedBatch) -> (Vec<String>, RestoreBatchResult) {
+        let mut outcome = RestoreBatchResult::default();
+        let mut keys = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        {
+            let Ok(mut cache) = self.0.cache.lock() else {
+                return (keys, RestoreBatchResult::failed(EnforcerError::Unhealthy));
+            };
+            // Memory-only publication of the whole known set. The monitor
+            // cannot claim A before B/C have also been considered and retained.
+            for target in prepared {
+                match target
+                    .and_then(|target| Self::retain_in(&mut cache, self.0.max_slots, target))
+                {
+                    Ok(key) if seen.insert(key.clone()) => keys.push(key),
+                    Ok(_) => {}
+                    Err(error) => {
+                        outcome.failure.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        self.0.changed.notify_one();
+        (keys, outcome)
     }
     fn claim(&self, key: &str) -> EnforcerResult<Claim> {
         let mut cache = self.0.cache.lock().map_err(|_| EnforcerError::Unhealthy)?;
@@ -1358,13 +1404,13 @@ impl EnforcerStopClient {
         let token = cache.next_attempt;
         let entry = cache.entries.get_mut(key).ok_or(EnforcerError::Conflict)?;
         entry.in_flight = Some(token);
-        Ok(Claim::Attempt(RestoreAttempt {
+        Ok(Claim::Attempt(Box::new(RestoreAttempt {
             key: key.into(),
             revision: entry.revision,
             token,
             retained: entry.retained.clone(),
             _capacity: capacity,
-        }))
+        })))
     }
     fn finish_attempt(
         &self,
@@ -1401,7 +1447,7 @@ impl EnforcerStopClient {
     }
     fn spawn_attempt(
         &self,
-        attempt: RestoreAttempt,
+        attempt: Box<RestoreAttempt>,
     ) -> tokio::sync::oneshot::Receiver<EnforcerResult<()>> {
         let client = self.clone();
         let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -1415,29 +1461,93 @@ impl EnforcerStopClient {
         });
         receiver
     }
-    async fn restore_retained(&self, retained: RetainedRestore) -> EnforcerResult<()> {
-        let key = self.retain(retained)?;
-        // Verify the currently announced epoch before trusting any cached ACK.
-        // No cache mutex is held while filesystem/transport checks run.
-        self.ensure_open().await?;
+    async fn wait_retained_key(&self, key: String) -> EnforcerResult<()> {
         let expires = Instant::now() + REGISTER_TIMEOUT;
         loop {
+            if Instant::now() >= expires {
+                return Err(EnforcerError::Unavailable);
+            }
             match self.claim(&key)? {
                 Claim::Acknowledged => return Ok(()),
                 Claim::Attempt(attempt) => {
-                    return self
-                        .spawn_attempt(attempt)
+                    self.spawn_attempt(attempt)
                         .await
-                        .map_err(|_| EnforcerError::Unavailable)?;
+                        .map_err(|_| EnforcerError::Unavailable)??;
+                    // A successful RPC can now be historical (or a newer
+                    // desired revision can exist). Count only the current
+                    // epoch/revision ACK on the next claim, never that RPC alone.
                 }
                 Claim::Busy => {
-                    if Instant::now() >= expires {
-                        return Err(EnforcerError::Unavailable);
-                    }
                     let _ = tokio::time::timeout(POLL, self.0.changed.notified()).await;
                 }
             }
         }
+    }
+    fn start_owned_batch(
+        &self,
+        prepare: impl FnOnce() -> RetainedBatch + Send + 'static,
+    ) -> tokio::sync::oneshot::Receiver<RestoreBatchResult> {
+        let client = self.clone();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        // This task owns preparation, every proof and every internal waiter.
+        // Dropping the public receiver does not cancel the remaining B/C work.
+        tokio::spawn(async move {
+            let result = match tokio::task::spawn_blocking(prepare).await {
+                Ok(prepared) => client.restore_prepared_batch(prepared).await,
+                Err(_) => RestoreBatchResult::failed(EnforcerError::Unavailable),
+            };
+            let _ = sender.send(result);
+        });
+        receiver
+    }
+    async fn restore_prepared_batch(&self, prepared: RetainedBatch) -> RestoreBatchResult {
+        let (keys, mut outcome) = self.retain_batch(prepared);
+        if keys.is_empty() {
+            return outcome;
+        }
+        // Authenticate the current announcement before reusing any cached ACK.
+        // All targets are already retained; no FS/network IO holds their map.
+        if let Err(error) = self.ensure_open().await {
+            outcome.failure.get_or_insert(error);
+            return outcome;
+        }
+        let mut waiters = tokio::task::JoinSet::new();
+        let confirmation_keys = keys.clone();
+        for key in keys {
+            if waiters.len() >= MAX_PENDING_ATTEMPTS
+                && let Some(result) = waiters.join_next().await
+            {
+                outcome.record(result.unwrap_or(Err(EnforcerError::Unavailable)));
+            }
+            let client = self.clone();
+            waiters.spawn(async move { client.wait_retained_key(key).await });
+        }
+        while let Some(result) = waiters.join_next().await {
+            outcome.record(result.unwrap_or(Err(EnforcerError::Unavailable)));
+        }
+        // Take one current-epoch view for the result as well: E2 may have been
+        // observed after one waiter returned its valid but now historical ACK.
+        match self.0.cache.lock() {
+            Ok(cache) => {
+                outcome.confirmed = confirmation_keys
+                    .iter()
+                    .filter(|key| {
+                        cache.entries.get(*key).is_some_and(|entry| {
+                            cache.epoch.is_some_and(|epoch| {
+                                entry.acknowledged == Some((epoch, entry.revision))
+                            })
+                        })
+                    })
+                    .count();
+                if outcome.confirmed != confirmation_keys.len() {
+                    outcome.failure.get_or_insert(EnforcerError::Unavailable);
+                }
+            }
+            Err(_) => {
+                outcome.failure.get_or_insert(EnforcerError::Unhealthy);
+            }
+        }
+        outcome
     }
     async fn perform_attempt(&self, mut retained: RetainedRestore) -> EnforcerResult<Uuid> {
         let owner = retained.owner.clone();
@@ -1478,87 +1588,76 @@ impl EnforcerStopClient {
             _ => Err(EnforcerError::Conflict),
         }
     }
-    pub(crate) async fn restore_report_target(
+    pub(crate) async fn restore_report_job(
         &self,
         report: Arc<StopRecoveryReportV1>,
         job_index: usize,
-        target_index: usize,
         generation: u64,
-    ) -> EnforcerResult<()> {
-        let retained = tokio::task::spawn_blocking(move || {
-            let job = report
-                .jobs()
-                .get(job_index)
-                .ok_or(EnforcerError::InvalidInput)?;
-            let target = job
-                .stops()
-                .get(target_index)
-                .ok_or(EnforcerError::InvalidInput)?;
-            let cancel = target
-                .cancel_after_arm()
-                .map(|command| {
-                    job.cancel_receipt(command)
-                        .ok_or(EnforcerError::InvalidInput)
+    ) -> (usize, bool) {
+        let receiver = self.start_owned_batch(move || {
+            let Some(job) = report.jobs().get(job_index) else {
+                return vec![Err(EnforcerError::InvalidInput)];
+            };
+            job.stops()
+                .iter()
+                .enumerate()
+                .map(|(index, target)| {
+                    let cancel = target
+                        .cancel_after_arm()
+                        .map(|command| {
+                            job.cancel_receipt(command)
+                                .ok_or(EnforcerError::InvalidInput)
+                        })
+                        .transpose()?;
+                    let prefix = job
+                        .cancel_prefix_for_stop(index)
+                        .map_err(|_| EnforcerError::InvalidInput)?;
+                    retained_restore(
+                        StopOwner::Report(Arc::clone(&report)),
+                        report.scope(),
+                        job.operation_id(),
+                        &prefix,
+                        target,
+                        cancel,
+                        generation,
+                    )
                 })
-                .transpose()?;
-            let prefix = job
-                .cancel_prefix_for_stop(target_index)
-                .map_err(|_| EnforcerError::InvalidInput)?;
-            retained_restore(
-                StopOwner::Report(Arc::clone(&report)),
-                report.scope(),
-                job.operation_id(),
-                &prefix,
-                target,
-                cancel,
-                generation,
-            )
-        })
-        .await
-        .map_err(|_| EnforcerError::Unavailable)??;
-        self.restore_retained(retained).await.map(|_| ())
+                .collect()
+        });
+        let outcome = receiver
+            .await
+            .unwrap_or_else(|_| RestoreBatchResult::failed(EnforcerError::Unavailable));
+        // These are control confirmations, never observed stopped workers.
+        (outcome.confirmed, outcome.failure.is_some())
     }
     pub(crate) async fn deliver_projection(
         &self,
         projection: Arc<CancelStopProjectionV1>,
         generation: u64,
     ) -> EnforcerResult<()> {
-        let count = projection.stops().len();
-        let mut failure = None;
-        for index in 0..count {
-            let projection = Arc::clone(&projection);
-            let retained = tokio::task::spawn_blocking(move || {
-                let target = projection
-                    .stops()
-                    .get(index)
-                    .ok_or(EnforcerError::InvalidInput)?;
-                let prefix = projection
-                    .cancel_prefix_for_stop(index)
-                    .ok_or(EnforcerError::InvalidInput)?;
-                retained_restore(
-                    StopOwner::Cancel(Arc::clone(&projection)),
-                    projection.scope(),
-                    projection.operation_id(),
-                    prefix,
-                    target,
-                    Some(projection.receipt()),
-                    generation,
-                )
-            })
-            .await
-            .map_err(|_| EnforcerError::Unavailable)?;
-            match retained {
-                Ok(retained) => {
-                    if let Err(error) = self.restore_retained(retained).await {
-                        failure.get_or_insert(error);
-                    }
-                }
-                Err(error) => {
-                    failure.get_or_insert(error);
-                }
-            }
-        }
-        failure.map_or(Ok(()), Err)
+        let receiver = self.start_owned_batch(move || {
+            projection
+                .stops()
+                .iter()
+                .enumerate()
+                .map(|(index, target)| {
+                    let prefix = projection
+                        .cancel_prefix_for_stop(index)
+                        .ok_or(EnforcerError::InvalidInput)?;
+                    retained_restore(
+                        StopOwner::Cancel(Arc::clone(&projection)),
+                        projection.scope(),
+                        projection.operation_id(),
+                        prefix,
+                        target,
+                        Some(projection.receipt()),
+                        generation,
+                    )
+                })
+                .collect()
+        });
+        let outcome = receiver.await.map_err(|_| EnforcerError::Unavailable)?;
+        outcome.failure.map_or(Ok(()), Err)
     }
 }
 type WatchReader = (
@@ -1582,8 +1681,8 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
         };
         let client = EnforcerStopClient(inner);
         if watch.is_none() {
-            if let Ok(mut connection) = client.ensure_open().await {
-                if write_frame(
+            if let Ok(mut connection) = client.ensure_open().await
+                && write_frame(
                     &mut connection.stream,
                     &StopRequest::WatchStops {},
                     MAX_FRAME,
@@ -1591,24 +1690,23 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
                 )
                 .await
                 .is_ok()
-                {
-                    let epoch = connection.epoch;
-                    let (sender, receiver) = tokio::sync::mpsc::channel(4);
-                    let task = tokio::spawn(async move {
-                        loop {
-                            // This dedicated reader is never cancelled by a
-                            // Notify/timer while part-way through a frame.
-                            let frame = read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT)
-                                .await
-                                .map_err(EnforcerError::from);
-                            let terminal = frame.is_err();
-                            if sender.send(frame).await.is_err() || terminal {
-                                return;
-                            }
+            {
+                let epoch = connection.epoch;
+                let (sender, receiver) = tokio::sync::mpsc::channel(4);
+                let task = tokio::spawn(async move {
+                    loop {
+                        // This dedicated reader is never cancelled by a
+                        // Notify/timer while part-way through a frame.
+                        let frame = read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT)
+                            .await
+                            .map_err(EnforcerError::from);
+                        let terminal = frame.is_err();
+                        if sender.send(frame).await.is_err() || terminal {
+                            return;
                         }
-                    });
-                    watch = Some((epoch, receiver, task));
-                }
+                    }
+                });
+                watch = Some((epoch, receiver, task));
             }
             if watch.is_none() {
                 client.0.watch_failed.store(true, Ordering::SeqCst);

@@ -4,6 +4,49 @@
 use super::*;
 use crate::broker::journal::recovery::{RecoveredStopV1, StopRecoveryReportV1};
 
+const SETUP_OBSERVATION_BUDGET: Duration = Duration::from_secs(60);
+
+/// A failed/panicking/unfinished observer must not delete files still owned by
+/// an accepted writer command. Only a validated terminal result releases this
+/// guard back to the normal test fixture lifecycle.
+struct ObservationFixture(Option<Fixture>);
+impl ObservationFixture {
+    fn fixture(&self) -> &Fixture {
+        self.0.as_ref().expect("owned setup observation fixture")
+    }
+    fn into_fixture(mut self) -> Fixture {
+        self.0.take().expect("validated setup observation fixture")
+    }
+}
+impl Drop for ObservationFixture {
+    fn drop(&mut self) {
+        if let Some(Fixture {
+            _temp,
+            service,
+            jobs,
+            journal,
+            writer,
+            ..
+        }) = self.0.take()
+        {
+            let _preserved_directory = _temp.keep();
+            // Dropping senders closes the queue gracefully. Its own backend
+            // keeps the exact Journal/lease until accepted commands drain.
+            drop((service, jobs, journal, writer));
+        }
+    }
+}
+struct SetupObservation {
+    fixture: ObservationFixture,
+    result: crate::broker::journal::JournalResult<Option<CancelStopProjectionV1>>,
+    elapsed: Duration,
+}
+// Deliberately retain ownership on a budget failure instead of joining an
+// unbounded filesystem operation or dropping its result/fixture on a channel.
+// This test-only registry is bounded by the two multi-Arm setup invocations.
+static PRESERVED_SETUP_OBSERVERS: std::sync::Mutex<Vec<std::thread::JoinHandle<SetupObservation>>> =
+    std::sync::Mutex::new(Vec::new());
+
 struct TargetBinding {
     arm: String,
     registration_hash: String,
@@ -73,7 +116,8 @@ async fn abandon_waiter_while_a_is_blocked<T>(
     epoch: Uuid,
 ) -> AbandonmentObservations {
     let expires = std::time::Instant::now() + Duration::from_secs(3);
-    while !barrier.join("reserved").exists() {
+    let expected_marker = b"fixture-reserved\n";
+    loop {
         assert!(
             !waiter.is_finished(),
             "the caller must reach the real post-Reserve barrier before failing"
@@ -82,12 +126,15 @@ async fn abandon_waiter_while_a_is_blocked<T>(
             std::time::Instant::now() < expires,
             "Arm A did not reach its authenticated post-Reserve barrier"
         );
+        match fs::read(barrier.join("reserved")) {
+            Ok(bytes) if bytes == expected_marker => break,
+            Ok(bytes) if expected_marker.starts_with(&bytes) => {}
+            Ok(_) => panic!("post-Reserve fixture marker contains divergent bytes"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => panic!("post-Reserve fixture marker cannot be read"),
+        }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        fs::read(barrier.join("reserved")).unwrap(),
-        b"fixture-reserved\n"
-    );
     assert!(
         !waiter.is_finished(),
         "the abandoned waiter must still be waiting on Arm A"
@@ -187,26 +234,165 @@ async fn append_multi_arm_setup_once(
     let elapsed_ms = started.elapsed().as_millis();
     match result {
         Ok(projection) => (fixture, projection),
+        Err(CompletionFailure::Unknown {
+            error: crate::broker::journal::JournalError::Io,
+        }) => observe_unknown_setup_once(fixture, command, elapsed_ms).await,
         Err(failure) => {
             let error = failure.error();
-            let Fixture {
-                _temp,
-                service,
-                jobs,
-                journal,
-                writer,
-                ..
-            } = fixture;
-            // Unknown can still be executing. Keep the fixture's files rather
-            // than deleting them during unwind; the queued writer owns its
-            // exact Journal/lease until accepted commands have drained.
-            let _preserved_directory = _temp.keep();
-            let _owners = (service, jobs, journal, writer);
+            let _preserve = ObservationFixture(Some(fixture));
             panic!(
                 "multi-Arm setup append_cancel failed: error={error:?}; append_elapsed_ms={elapsed_ms}"
             );
         }
     }
+}
+
+fn validate_confirmed_setup(
+    fixture: &Fixture,
+    command: Uuid,
+    projection: &CancelStopProjectionV1,
+) -> Result<(), &'static str> {
+    let expected_scope =
+        canonical(fixture.journal.scope()).map_err(|_| "expected_scope_invalid")?;
+    let observed_scope = canonical(projection.scope()).map_err(|_| "observed_scope_invalid")?;
+    if expected_scope != observed_scope {
+        return Err("scope_mismatch");
+    }
+    if projection.operation_id() != fixture.operation
+        || projection.command_id() != command
+        || projection.receipt().command_id() != command
+    {
+        return Err("command_identity_mismatch");
+    }
+    if projection.incomplete() || projection.stops().len() != 2 {
+        return Err("incomplete_multi_arm_projection");
+    }
+    let intent = &projection.stops()[0].arm().intent_hash;
+    let expected = crate::broker::lifecycle::LocalCommandV1::new(
+        fixture.operation,
+        intent,
+        command,
+        crate::broker::lifecycle::LocalCommandRequestV1::CancelRequested,
+    )
+    .map_err(|_| "expected_cancel_identity_invalid")?;
+    if projection.receipt().input_hash() != expected.input_hash() {
+        return Err("cancel_input_hash_mismatch");
+    }
+    for (index, stop) in projection.stops().iter().enumerate() {
+        if &stop.arm().intent_hash != intent
+            || stop.cancel_after_arm() != Some(command)
+            || stop.receipt().validate_for_arm(stop.arm()).is_err()
+        {
+            return Err("arm_binding_mismatch");
+        }
+        let prefix = projection
+            .cancel_prefix_for_stop(index)
+            .ok_or("verified_prefix_missing")?;
+        if !prefix.receipts().iter().any(|receipt| {
+            receipt.command_id() == command
+                && receipt.input_hash() == projection.receipt().input_hash()
+                && receipt.head() == projection.receipt().head()
+        }) {
+            return Err("receipt_not_in_verified_prefix");
+        }
+    }
+    Ok(())
+}
+
+async fn observe_unknown_setup_once(
+    fixture: Fixture,
+    command: Uuid,
+    append_elapsed_ms: u128,
+) -> (Fixture, CancelStopProjectionV1) {
+    let owned = ObservationFixture(Some(fixture));
+    let started = std::time::Instant::now();
+    let worker = std::thread::Builder::new()
+        .name("multi-arm-setup-observer".into())
+        .spawn(move || {
+            let operation = owned.fixture().operation;
+            // One direct confirmed read, after the same writer mutex becomes
+            // available. Never enqueue/replay the mutating Cancel command.
+            let result = owned
+                .fixture()
+                .journal
+                .cancel_stop_projection(operation, command)
+                .and_then(|projection| {
+                    if let Some(projection) = &projection {
+                        projection.revalidate()?;
+                    }
+                    Ok(projection)
+                });
+            SetupObservation {
+                fixture: owned,
+                result,
+                elapsed: started.elapsed(),
+            }
+        });
+    let worker = match worker {
+        Ok(worker) => worker,
+        Err(_) => panic!(
+            "multi-Arm setup observation failed: observation_spawn_failed; append_error=Io; append_elapsed_ms={append_elapsed_ms}"
+        ),
+    };
+    loop {
+        if worker.is_finished() {
+            break;
+        }
+        if started.elapsed() >= SETUP_OBSERVATION_BUDGET {
+            // is_finished is sampled explicitly before conservative failure.
+            // A later completion does not turn this failed setup into PASS.
+            let worker_nonterminal = !worker.is_finished();
+            if !worker_nonterminal {
+                break;
+            }
+            PRESERVED_SETUP_OBSERVERS
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(worker);
+            panic!(
+                "multi-Arm setup observation failed: worker_nonterminal=true; append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_budget_ms={}",
+                SETUP_OBSERVATION_BUDGET.as_millis()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let observed = match worker.join() {
+        Ok(observed) => observed,
+        Err(_) => panic!(
+            "multi-Arm setup observation failed: worker_panicked; append_error=Io; append_elapsed_ms={append_elapsed_ms}"
+        ),
+    };
+    if observed.elapsed > SETUP_OBSERVATION_BUDGET {
+        panic!(
+            "multi-Arm setup observation failed: terminal_after_budget; append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_elapsed_ms={}; observation_budget_ms={}",
+            observed.elapsed.as_millis(),
+            SETUP_OBSERVATION_BUDGET.as_millis()
+        );
+    }
+    let projection = match observed.result {
+        Ok(Some(projection)) => projection,
+        Ok(None) => panic!(
+            "multi-Arm setup observation failed: confirmed_cancel_absent; append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_elapsed_ms={}",
+            observed.elapsed.as_millis()
+        ),
+        Err(error) => panic!(
+            "multi-Arm setup observation failed: confirming_read_error={error:?}; append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_elapsed_ms={}",
+            observed.elapsed.as_millis()
+        ),
+    };
+    if let Err(reason) = validate_confirmed_setup(observed.fixture.fixture(), command, &projection)
+    {
+        panic!(
+            "multi-Arm setup observation failed: {reason}; append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_elapsed_ms={}",
+            observed.elapsed.as_millis()
+        );
+    }
+    eprintln!(
+        "multi-Arm setup confirmed by one exact read: append_error=Io; append_elapsed_ms={append_elapsed_ms}; observation_elapsed_ms={}; observation_budget_ms={}",
+        observed.elapsed.as_millis(),
+        SETUP_OBSERVATION_BUDGET.as_millis()
+    );
+    (observed.fixture.into_fixture(), projection)
 }
 
 #[tokio::test(flavor = "current_thread")]

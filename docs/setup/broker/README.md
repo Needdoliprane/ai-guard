@@ -149,6 +149,8 @@ This mode requires the existing private roots, role locks, IPC authentication an
 
 The service requests protocol 2's `StopsOnly` capability explicitly. It restores only targets proved by retained journal readers, keeps their original container identity and deadline, and retains durable cancellations for replay after reconnection. Start admission remains closed for the lifetime of this service: Submit, approve, resume and export cannot acquire a Full capability. Status, list, recovery-status and cancel retain their normal authentication and data dependencies; this mode does not reactivate an inactive gateway.
 
+For each recovery batch, the broker retains validated targets within its configured capacity before waiting for their individual control confirmations. Losing the client waiting for that request does not discard these targets while the broker remains running. Independent targets continue after a target fails; the result reports partial coverage. A confirmation refers to the guardian instance and target revision acknowledged at that point, not to a worker observed stopped. After a broker crash, recovery still requires the retained durable journal.
+
 An accepted stop reservation or cancellation confirms neither a runtime effect nor a terminal result. Partial journal coverage remains partial. The recovery transport does not prove that an older start is drained, finalise a retirement or permit a new worker to replace an ambiguous one. Missing or unsafe roots, authentication, locks or sockets require controlled recovery of those exact anchors; a new root or credential is not a substitute.
 
 ## Submit and inspect a job

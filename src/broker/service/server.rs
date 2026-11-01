@@ -1782,26 +1782,15 @@ async fn restore_recovered_job(
         return (0, true);
     };
     if let Some(enforcer) = stop_enforcer {
-        let mut restored = 0;
-        let mut partial = false;
         // There are no retirement P/Q records in this transport version. No
         // old Q/R+ is admitted or manufactured. Once retirement is connected,
         // its metadata-only reconciliation must precede Restore of that Arm;
         // an unrelated failure must keep this per-job sweep advancing.
-        for target_index in 0..recovered.stops().len() {
-            match enforcer
-                .restore_report_target(
-                    Arc::clone(&report),
-                    index,
-                    target_index,
-                    job.cancel.current(),
-                )
-                .await
-            {
-                Ok(()) => restored += 1,
-                Err(_) => partial = true,
-            }
-        }
+        // The client owns retention and control confirmations for the whole
+        // job independently of this waiter; the count is not a runtime effect.
+        let (restored, partial) = enforcer
+            .restore_report_job(Arc::clone(&report), index, job.cancel.current())
+            .await;
         if partial || !recovered.managed_workspace() {
             job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
         }

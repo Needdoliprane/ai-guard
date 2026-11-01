@@ -155,3 +155,184 @@ Le child continue après SIGKILL/SIGSTOP du seul broker et accepte une reconnexi
 **Désarmement : condition non présumée.** Un `ManagedPrearmedExecution` Ok, la fin du client ou un code de sortie seul ne prouvent pas que le start RPC n'est plus en vol. Il faut une provenance vivante de complétion normale de l'emitter/claim exact, le terminal admissible du même snapshot et son ACK central vérifié ; un nonzero n'est pas universellement une erreur transport. Sans témoin établi par l'adaptateur et ses tests, ne pas fournir de constructeur de preuve ni désarmer. Perte de preuve au restart, Created, absence ou timeout restent inconnus avec slot/ressources retenus et D5 ouvert. Aucun faux booléen persistant n'est un substitut.
 
 Deux erreurs de préparation restent à traiter explicitement : archive créée avant managed durable (reprise bornée depuis l'archive seule figée ou NeedsReconciliation, jamais nouvelle copie silencieuse de la source), et export dont l'original n'est plus identifiable par `extract_workspace`. Elles ne disparaissent pas sous l'étiquette batch livré. Préparer/cancel sans CID ni terminal admissible peut encore retenir quota ; aucun faux Cancelled ou usage0.
+
+## Contrat de retrait du gardien — conception à implémenter, 1er novembre
+
+Cette section consolide le contrat D5 V2, ses correctifs V3 et la revue V3 ; elle ne change pas l'architecture approuvée.
+Les notes privées sources sont `ai-guard-d5-retirement-contract-v2.md`, `ai-guard-d5-contract-v2-review.md`,
+`ai-guard-d5-retirement-contract-v3.md`, `ai-guard-d5-contract-v3-review.md` et `ai-guard-d5-ledger-next-vertical.md`.
+Leurs décisions utiles sont portées ci-dessous ; ces fichiers locaux ne sont pas requis pour lire le contrat distribué.
+Les sections et résultats datés précédents conservent leur périmètre historique.
+
+### État du code et portée
+
+StopRecovery apporte un transport RecoveryV2 explicite, authentifié avec HMAC-SHA256 et rôle demandé lié au challenge,
+des cibles STOP issues de rapports/projections propriétaires, leurs identités et échéances originales, et des tentatives bornées.
+V1 et son `EnforcerClient` Full legacy restent distincts. StopsOnly ne se convertit pas en Full ; FullV2 est indisponible.
+Le ledger est toujours `Unverified` : aucun sceau/floor/delta/tombstone, Closing, reçu de quiescence, Pending/Final V5
+ou port de finalisation de retrait n'est livré. Une lease O_RDWR et un thread démarré ne constituent pas ces preuves.
+Dans R8, LedgerState n'admet que Unverified et ChallengeV2 est fermé (`deny_unknown_fields`). Ajouter Verified/coverage/Full
+ne garantit donc aucune compatibilité avec ces clients : stratégie de versionnement/mise à jour explicite et testée requise avant raccord.
+Cette couture reste ouverte, sans version nouvelle décidée ici ; préserver refus fermé et STOP connus, sans conversion d'anciennes connexions.
+R7 passe dix fonctions ciblées, dont les deux reprises multi-Arm après abandon du waiter, puis échoue à Clippy strict.
+R8 corrige seulement une indirection privée et deux conditions équivalentes ; fmt, Clippy stricts, quatre canaris complémentaires
+et deux tests CLI passent ; seule la release reste en validation au point documentaire présent.
+Les [résultats par gel](VALIDATION.md#r7--correctif-groupé-vérifié-clippy-refuse-trois-diagnostics) font autorité sur les preuves,
+avec [l'état constaté](CURRENT_STATE.md), les [décisions](DECISIONS.md#1er-novembre--reprise-stop-distincte-de-ladmission)
+et les [gates](PRODUCTION_READINESS.md). **G09 reste FAIL, D5 ouvert ; aucun gate ni effet moteur n'est qualifié ici.**
+
+### Deux preuves initiales fermées
+
+`UnusedPrepareRevoked` exige le même acteur original vivant, jamais restauré ou ObserveOnly, Prepare jamais consommé
+et aucune réservation d'émission commencée. Révoquer Prepare sous son mutex ; Prepare gagné, même ACK perdu, interdit ce motif.
+Le writer vérifie l'absence de claim dans le head confirmé, pas seulement `prepared_once=false`.
+Un latch propre au LocalSlot révoque aussi tous ses anciens handles/guards, sans invalider le CancelGeneration partagé du job.
+La route productive qui rend ce slot abandonnable avant claim manque encore : `arm_and_claim` enchaîne register puis claim.
+Un échec, un Drop ou un retour ObserveOnly ne crée pas cette route ni sa preuve.
+
+`DockerNormalCompletion` exige un contexte frais privé, non Clone/non Serde, de PrepareBound : même Arm/claim/emitter,
+génération/nonce, garde passée, child CLI exact créé puis attendu normalement, invocation/profil/binaire qualifiés.
+Stop, drain, timeout, EOF anormal ou transport perdu interdisent ce témoin. Une première politique peut limiter la branche normale à 0,
+mais sortie 0 seule, résultat public, détachement ou `ManagedPrearmedExecution` Ok ne suffisent jamais.
+Le writer recoupe le terminal frais du même OwnedContainerSnapshot et la paire requête/réponse centrale ACKée exacte,
+pour le worker ou le helper concerné. Terminal chargé ou quota déjà libre ne remplace pas cet échange.
+Le runtime doit produire un témoin privé consommé une seule fois ; ce constructeur et la qualification Docker restent absents.
+Podman et un programme fixture n'héritent pas de cette preuve Docker ; le fencing général des starts ambigus reste obligatoire.
+
+### Identité, engagements et domaines cibles
+
+Les nouveaux records seront fermés, versionnés et bornés, avec JSON canonique et UUID/hashes complets vérifiés.
+L'identité lie scope/installation/job/intention, contrôle/origin/tenant/namespace, Arm/reçu et registration complète,
+epoch original/génération, sujet/worker/attempt, CID, autorité, invocation/profil et empreinte de configuration.
+Elle porte retirement_id et motif fermés ; le motif normal ajoute claim_operation_id/emitter_id exacts, sans secret/env/sortie brute.
+Les noms suivants décrivent des **formats cibles**, pas des types ou des API disponibles :
+
+| Record cible | Domaine distinct |
+|---|---|
+| Identité / engagement de preuve | `ai-guard:broker-retirement-identity:v1` / `ai-guard:broker-retirement-evidence:v1` |
+| GenesisCore / sceau du rôle | `ai-guard:enforcer-retirement-genesis:v1` / `ai-guard:enforcer-role-seal:v2` |
+| Floor / delta / entrée projetée | `ai-guard:enforcer-ledger-floor:v1` / `ai-guard:enforcer-retirement-delta:v1` / `ai-guard:enforcer-retirement-entry:v1` |
+| ClosingAcceptance / tombstone | `ai-guard:enforcer-closing-acceptance:v1` / `ai-guard:enforcer-retired-tombstone:v1` |
+| FinalizationCore / reçu | `ai-guard:enforcer-finalization-core:v1` / `ai-guard:enforcer-retired-receipt:v1` |
+| Join réel / quiescence récupérée distincte | `ai-guard:enforcer-joined-quiescence:v1` / `ai-guard:enforcer-recovered-quiescence:v1` |
+| Checkpoint V5 encapsulant V4 | `ai-guard:broker-checkpoint:v5` |
+
+Graphe sans cycle : GenesisCore→genesis_hash/sceau ; ClosingAcceptance→tombstone→FinalizationCore→reçu→entrée/head.
+ClosingAcceptance ne contient pas le hash de sa future tombstone ; core et reçu ne contiennent pas le hash de leur futur head.
+Le head accompagne séparément la réponse authentifiée. Un digest n'authentifie pas un reçu : seul le client privé ayant vérifié
+session/rôle, epoch et corrélation Arm/retirement_id, identité du ledger et engagements exacts peut produire son wrapper vérifié.
+Ni JSON isolé ni Pending chargé ne reconstitue une permission vivante. Plans1–3, checkpoints V1–V4 et domaines historiques restent inchangés.
+
+V5 encapsule V4 sans réencoder les anciennes révisions. Une chaîne ayant rencontré V5 ne peut plus produire de successeur V1–V4 ;
+les anciens binaires refusent V5 sans interprétation permissive. Les entrées de retrait broker ont un ordre stable append-only :
+une seule entrée par Arm, retirement_id unique dans le job, aucune disparition ni réattribution.
+Pending→Final est monotone et conserve l'identité, la preuve engagée et le même Pending ; aucun passage direct à Final
+ni Final d'un autre retirement_id n'est admissible. L'ACK d'audit final ajouté ultérieurement ne change pas le reçu gardien.
+
+### Ordre vivant et capacité retenue
+
+Notation : P = Pending avec intention audit-ACKée ; C = ClosingAccepted ; T = TombstoneCommitted ; Q = Finalized gardien ; F = Final V5.
+Les états T/Q et leurs reçus ne sont pas des terminaux moteur ; un Pending sans ACK d'intention ne permet aucune acceptation gardien.
+
+Le budget broker est distinct du budget ledger gardien : appliquer JournalLimitsV1 et les caps outbox/checkpoint existants à V5.
+Le nombre de retraits par job reste borné par ses Arms ACKées et ses limites de bytes/entrées/révisions.
+Avant de committer un nouveau Pending, réserver la place bornée de son Final et de l'événement final, en comptant la croissance réelle
+et le pire cas des tailles fermées. Cumuler les réservations des retraits déjà promis ; un budget inconnu ou insuffisant refuse
+ce nouveau Pending. Les Cancel conservent leur budget et leurs invariants existants.
+
+1. Fermer les permissions locales du slot et vérifier/consommer la preuve initiale. Committer Pending V5 et l'intention d'audit
+   dans l'outbox ; obtenir et persister le vrai ACK du même event_id/input_hash. Inconnu/absence d'ACK interdit Closing.
+2. Le writer rend une AuthorizedRetirement privée single-use liée à ce Pending audité et à cette preuve consommée.
+   Le gardien revalide rôle, epoch, registration, génération, motif et identité ; un vieux Pending sérialisé ne suffit pas.
+3. Sous le même mutex que Prepare et toute réservation STOP mutative, Closing ne gagne que si aucune mutation STOP n'a **jamais été réservée**,
+   sans effet mutatif en vol/inconnu et sans preuve dégradée. Un stop terminé n'efface pas sa réservation antérieure.
+   Closing interdit irréversiblement Prepare, nouvel effet et reopen mutatif ; aucun IO, moteur, HTTP, fsync ou join sous ce mutex.
+4. Hors acteur STOP, publier BeginClosing avec l'acceptation et le hash de tombstone attendu ; créer exclusivement les bytes engagés,
+   synchroniser fichier/parents puis publier CommitTombstone. Résultat inconnu garde la même identité, la capacité et le fence.
+5. Réveiller/sortir la boucle, attendre inspections/reopen possédés puis le **retour réel du JoinHandle retenu**.
+   T/join bloqué n'autorise aucun reçu final ni capacité libre ; les autres STOP continuent. Annuler un futur n'est pas un join.
+6. Après join, publier Finalize/Q durable et le même reçu rejouable ; seulement ensuite sortir l'acteur actif et décrémenter une fois.
+   Q/ACK perdu se consulte/rejoue sans nouveau thread. Le statut Ready/actor_failed ne peut jamais effacer Closing.
+7. Le broker commit Final V5 et l'événement final au head compatible courant, puis retire LocalSlot sous recovery_gate.
+   Ses anciens handles restent révoqués ; audit final non ACKé reste visible et rejoue le même event_id, sans second événement logique.
+
+Les event_id d'intention/final sont fixés dès Pending ; le payload final et son input_hash sont figés au commit Final avec le reçu réel.
+Aucun reçu gardien ne libère un quota central, ne fabrique usage 0/terminal, ni ne remplace Cleanup et son autorisation/ACK distincts.
+Closing gagné en mémoire puis FS inconnu ne revient pas Active et ne prouve pas une finalisation ; après perte de ce fait non engagé,
+la reprise garde seulement STOP/fence, sans reconstruire le témoin initial depuis Pending. Cette convergence reste un écart ouvert.
+
+### Lease, ledger engagé et indépendance des arrêts
+
+La lease gardien spécialisée conserve **le même FD O_RDWR et la même description/flock/inode** jusqu'au dernier acteur/opération.
+Pas de dup d'O_RDONLY pour écrire, de réouverture par chemin, replace/unlink du lock ou unlock/relock pendant append.
+Owner/euid, mode 0600, nlink=1, ACL, parents et identité native restent vérifiés ; la factory neuve exige une preuve opaque de création exclusive.
+Un répertoire apparemment vide ou `persistent_child(...,true)` sur existant ne produit pas cette preuve ; reprise ne régénère jamais auth/genesis.
+La factory fixe role_id/init_id une fois, synchronise genesis/current puis sceau/Floor0 et parents avant toute Arm acceptée.
+Initialisation interrompue : finir seulement la même init_id et les bytes exacts sous preuve retenue ; preuve perdue ⇒ diagnostic/migration,
+jamais nouvelle initialisation automatique. Les anciens fichiers et l'autorité existante restent conservés.
+La migration legacy exige inventaire quiescent, absence de starts/autorités inconnus et sauvegarde privée vérifiée, jamais un cutover implicite.
+
+Le cache spécialisé partagé retiendra bytes bornés, metadata/digest, floors et état Parsed/Tainted ; PrivateFile général reste immuable.
+Append sous mutex FS : revalider préfixe/longueur/identité, écrire à EOF attendu sans écraser, fsync, relire/adopter par ce même FD.
+Write partiel/fsync inconnu ⇒ Tainted, suffixe/FD/flock conservés, Full/finalisation/append fermés ; aucun nettoyage vers un lock vide.
+Les acteurs STOP ne prennent pas ce mutex. Listener/auth/transport restent disponibles sur leurs seules ancres structurelles vérifiées,
+avant et pendant le scan isolé, même ledger/horloge malades ; horloge inconnue rend exigible le STOP original sans renouveler sa deadline.
+Auth/racine/pair/socket/lease invérifiables restent de vrais blocages, sans nouvelle clé, takeover ni abandon déclaré sûr.
+Full exige ledger Complete et une nouvelle connexion demandant explicitement Full ; aucune connexion StopsOnly ne gagne ces droits.
+StopsOnly refuse Register frais/Prepare/claim/retrait initial/finalisation gardien/start/export/Cleanup ; le port Final V5 reste interne au writer.
+Une erreur ledger ferme Full pour cet epoch ; aucune réouverture automatique après réparation, ni fallback V1 pour contourner ce refus.
+
+Le sceau V2 non vide et Floor0/floors suivants seront cadrés BE32 dans ce même lock ; le legacy max_bytes=0 doit refuser ce rôle.
+Genesis vide puis deltas contigus par Arm reconstruisent l'inventaire complet engagé, jamais le seul listage des tombstones présentes.
+Chaque delta lie rôle/genesis/révision/prédécesseur/Arm/ancienne entrée attendue et une transition fermée BeginClosing, CommitTombstone ou Finalize.
+Identité, preuve, ACK et retirement_id sont immuables ; trou, recul, ancien hash divergent ou transition arrière ferme Full.
+Ordre durable : delta exclusif+sync fichier/parent → floor du delta+sync même lock → current-next/CAS current+sync parent → ACK.
+Un floor en avance n'autorise que le CAS exact préparé ; suffixe complet exact se resynchronise, partiel/divergent se conserve et bloque.
+Après T/Q, tombstone manquante/divergente est B1 : aucune reconstruction silencieuse ni nouvelle admission ; les STOP connus indépendants demeurent.
+À C seulement, une tombstone encore absente peut être créée aux seuls bytes déjà engagés. Orphelin, floor déchiré et inventaire incomplet sont diagnostiqués.
+Le rollback du seul ledger est détectable par le floor retenu ; le rollback cohérent de toute l'autorité exige un ancrage externe absent.
+
+Caps cibles : 1024 Arms de retrait, 1 Gio logique cumulé, 4096 révisions, 8 Mio/record ; lock : 4096 floors, 2 Kio/frame, 8 Mio cumulés.
+Compter les bytes réels de tous records, BE32, pointeurs, suffixes et lock ; ces maxima ne sont pas simultanément garantis.
+Avant BeginClosing, réserver aussi les deux deltas restants, tombstone/floors/pointeurs de toutes les finalisations déjà promises.
+Budget inconnu/saturé refuse le nouveau retrait avant Closing, sans éviction d'un retrait accepté ; ENOSPC/EIO ne devient pas un succès.
+Pas de prune/compaction/suppression automatique. La borne cumulative ne qualifie ni 100 workers ni une durée d'exploitation ; rétention coordonnée reste obligatoire.
+
+### Reprise metadata-only et quiescence entre epochs
+
+La projection cible classe chaque Arm RequiredStop, RetirementPending ou RetirementFinal sous le reader/lease déjà retenus.
+Si ledger Complete, interroger/vérifier Q puis réaliser **P/Q→F avant Restore de cette même Arm**, recharger son head/projection,
+restaurer seulement les RequiredStop restants, puis consommer une seule factory Full/Stops. Les autres Arms/jobs/profils avancent indépendamment.
+Le port crate-private ne peut finaliser que le même Pending déjà audit-ACKé, sans binding secret/blob fournisseur/AcceptedJob métier.
+Il conserve Cancel et V4 courants, reconnaît le replay exact ; CAS conflict recharge metadata et fusionne seulement ce résultat, sans refaire un effet.
+Il n'ajoute aucun Pending/claim/start/export/Cleanup et ne convertit pas Stops en Full. Le backend Stops **doit** garder le port tardif exact,
+indépendant de `require_starts()` ; un ACK tardif ne doit pas créer l'impasse B2 ni une seconde factory/mutex sur la même lease.
+
+Ledger Partial : Full/finalisations fermés, couverture/phase/erreur explicites, inconnus≠0 ; les RequiredStop prouvés restent restaurables.
+Closing/Q vérifié de cette Arm interdit un nouvel acteur de contournement ; un défaut B ne retire pas le canal de A/C.
+Si fermeture invérifiable et STOP restauré, l'ancien Q ne peut pas ensuite justifier l'oubli de ce nouvel effet potentiel.
+**E1 Closing/Q → E2 Partial avec Restore ou STOP possible → E3 Complete : ancien Q/R+ interdit si l'intervention n'est pas exclue.**
+RecoveredPriorEpoch est une preuve distincte de Joined, jamais un join historique inventé : même lease scellée, Closing positif et exclusion
+de tout détenteur/effet mutatif orphelin ou intervalle intermédiaire requis. Flock libre, PID absent, epoch différent et annonces ne prouvent aucun drainage.
+Sans cette preuve, `InterveningStopNotExcluded` reste une finalisation BLOCKED à résoudre ; ne pas ajouter de constructeur récupéré permissif.
+
+### Acceptation du chemin complet
+
+| Régression exigée, à réaliser avec vrais producteurs/owners et IPC | Résultat attendu |
+|---|---|
+| Sceau/floor déchiré, Journal/Cancel A prouvé | Diagnostic Partial/identité Unverified, Full/final refusés, STOP A conservé ; pas de type futur requis au premier RED. |
+| Unused original, Prepare perdu/rejoué, acteur restauré, claim présent/inconnu | Seul le vrai original éligible peut fermer ; aucun témoin depuis statut/JSON/ACK perdu. Route productive avant claim nécessaire. |
+| Courses Prepare↔Closing et réserve STOP↔Closing | Un seul gagnant, latch irréversible ; aucune IO sous mutex ni retrait après STOP potentiellement réservé. |
+| T avec join/inspection/reopen bloqué, Q puis ACK perdu | Capacité retenue avant vrai join/Q ; autres STOP progressent ; même reçu et un seul décrément au replay. |
+| B1 : Q réellement produit puis seule tombstone B retirée ; rollback seul ledger | Défaut détecté avant Full, floor respecté ; A/C lisibles restaurées, pas de genesis de remplacement ni omission silencieuse. |
+| B2 : broker mort après Q avant F ; blob absent, Cancel concurrent, ACK tardif | Même F/reçu/event_id avant Restore de l'Arm ; Cancel/head préservés, port tardif sous Stops/fence, pas de second writer. |
+| E1/E2/E3, autre inode/role/genesis ou détenteur encore vivant | Aucun R+ depuis flock/annonce ; effet intervenu non exclu reste BLOCKED, autres cibles continuent. |
+| Même FD/cache, fautes append/fsync, suffixes exacts/divergents, budgets | Tainted conservé sans remplacement ; STOP indépendant ; reprise exacte seule, bytes/réservations réellement comptés. |
+| Journal/Writer/outbox proches des caps, plusieurs Pending et Cancel concurrents | Finals/événements déjà réservés restent publiables ; nouveau Pending refusé avant acceptation si budget inconnu/insuffisant, budget Cancel préservé. |
+| V5→V1–V4, entrée disparue/dupliquée/réattribuée, Final sans le même Pending | Rejets de chaîne ; Cancel concurrent conserve les entrées V5 et les bytes/domaines historiques ; ACK d'audit final ne change pas le reçu gardien. |
+| 400 retraits/1200 deltas, compatibilité V1–V4/plans1–3, vrai CLI et ancien binaire | Format/budget et refus du rôle scellé vérifiés ; ni preuve 100 workers ni qualification Docker déduite du libtest. |
+
+Tests confiés à Luna après gels et revue indépendante des frontières sûreté/audit/lancement ; programmes Rust fixtures nommés comme tels.
+Le premier motif utilisable exige tous les maillons unused→Closing→join→Q→F et sa reprise, pas seulement un parseur ou un nouveau type.
+DockerNormalCompletion qualifiée, fencing général, migration/restauration active, stockage/powerloss, rétention et matrice production restent obligatoires.
+Ce contrat n'autorise ni installation OS/infrastructure ni arrêt d'anciennes ressources ; préserver leurs données, preuves, clés, gardiens et volumes.
