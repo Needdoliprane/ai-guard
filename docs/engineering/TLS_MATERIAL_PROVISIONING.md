@@ -28,6 +28,11 @@ d'une installation, rotation, adoption de volume existant ou fallback caché.
 son programme/endpoint et l'accord rootful suivent les options de contrôle
 existantes ; aucun moteur n'est résolu depuis un PATH non approuvé.
 
+Le nom serveur est un alias DNS ASCII minuscule (labels1–63, total≤253), sans
+IP, label vide ou tiret terminal. Les noms de services `model`, `gateway`,
+`dashboard`, `ingress`, `local-ai-ingress`, ainsi que `localhost` et ses
+sous-domaines, sont réservés pour éviter les collisions sur ces réseaux.
+
 Le résultat est un manifeste privé immuable et un fichier `volumes.env` de
 sélection publique : génération, noms des deux volumes, image et nom serveur.
 Les exemples Compose concernés consomment réellement ces mêmes valeurs.
