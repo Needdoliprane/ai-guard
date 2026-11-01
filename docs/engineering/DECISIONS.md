@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 1er novembre — propriété SSO approuvée par le mainteneur
+
+Le mainteneur choisit explicitement le gateway Rust comme propriétaire des transactions PKCE et de la validation OIDC. Le dashboard relaie uniquement des routes d'authentification fixes ; seul le gateway rejoint le réseau interne Keycloak lorsque le profil de découverte est activé. Aucun nouveau service, secret client distribué, accès cloud ou changement DNS implicite n'est autorisé par cette décision. Elle remplace la proposition ancienne de propriété PKCE dans le dashboard, sans annoncer de connexion SSO livrée.
+
+Le [contrat OIDC](SSO_OIDC.md#propriété-de-la-transaction) conserve clients publics Web/CLI distincts, stockage éphémère borné, protections du callback et audit obligatoire avant remise. Les durées, le renouvellement, la révocation et le stockage privé de l'audit de connexion doivent être figés avec l'implémentation ; aucune identité non rattachée ne choisit un tenant pour son audit. Le propriétaire et le raccord sont approuvés ; leurs effets restent NOT_RUN.
+
+Le mainteneur demande aussi d'examiner le token exchange. La [RFC8693](https://www.rfc-editor.org/rfc/rfc8693.html) distingue sujet et acteur délégué ; elle n'accorde pas elle-même de permission métier. L'échange standard [Keycloak](https://www.keycloak.org/securing-apps/token-exchange) exige actuellement un client confidentiel demandeur, ne fournit pas une chaîne de révocation des access tokens et présente sa délégation comme preview. Il reste une option à évaluer pour les déploiements compatibles, sans dépendance obligatoire en local. Une session applicative opaque et une capacité d'exécution interne sont des contrats distincts d'un échange RFC8693. Aucun jeton humain ou credential runner ne rejoint un worker ; aucune de ces alternatives n'est déclarée implémentée par cette note.
+
 ## 1er novembre — diagnostic Jev compatible et masque effectif
 
 Conserver le code d'erreur public et le downcast Rust existants ; transporter les observations dans un échec interne possédé par la requête, jamais dans un dernier résultat mutable partagé. L'API ajoute seulement un diagnostic fermé optionnel, limité à l'endpoint configuré. Aucune observation de relais ne devient une preuve du modèle ; corps et détails de transport restent exclus. La configuration décrit les paramètres fixes et le prompt réellement admis : un builder commun et un contrôle du masque sur toute la trame fixe avant POST refusent les collisions, sans retirer les masques utilisateur. Pas de nouvelle dépendance, migration, service, retry ou délai augmenté.
