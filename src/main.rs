@@ -2,7 +2,10 @@ use agentsandbox::{
     api::{self, GatewayState, TenantGateway},
     audit::Store,
     control_fs::{Directory, absolute_path},
-    jev::{JevBackend, JevClient, RuleCatalog, SelectionSource, validate_credential_separation},
+    jev::{
+        JevBackend, JevClient, JevTrust, RuleCatalog, SelectionSource,
+        validate_credential_separation, validate_transport_configuration,
+    },
     operations::{self, OperatorCommand},
     policy::Policy,
     redaction::Redactor,
@@ -52,6 +55,8 @@ enum Command {
     Dashboard(DashboardArgs),
     /// Relais de confiance sans secrets vers les deux services internes.
     Ingress(IngressArgs),
+    /// Isolated model TLS transport; fixed model:8080 upstream, no control credentials.
+    ModelIngress(ModelIngressArgs),
     /// Migrate an offline audit database, preserving a verified new backup.
     MigrateControl {
         #[arg(long)]
@@ -70,6 +75,9 @@ enum Command {
     Healthcheck {
         #[arg(long, required = true)]
         url: Vec<String>,
+        /// Explicit public CA bundle, valid only when every destination is HTTPS.
+        #[arg(long)]
+        ca_file: Option<PathBuf>,
     },
     #[command(flatten)]
     Operator(OperatorCommand),
@@ -129,6 +137,9 @@ struct GatewayArgs {
     /// Version 1 exact argv catalogue in an existing private file; otherwise built-in.
     #[arg(long)]
     jev_rules_catalog: Option<PathBuf>,
+    /// Explicit public CA bundle; replaces embedded roots for this backend only.
+    #[arg(long, env = "JEV_CA_FILE", hide_env_values = true)]
+    jev_ca_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy)]
@@ -163,7 +174,11 @@ fn select_jev(args: &GatewayArgs, environment: Option<&str>) -> Result<SelectedJ
     };
     let valid = match selected {
         SelectedJev::Disabled => {
-            !typesafe && !local && args.jev_rules_catalog.is_none() && !args.jev_allow_local_http
+            !typesafe
+                && !local
+                && args.jev_rules_catalog.is_none()
+                && !args.jev_allow_local_http
+                && args.jev_ca_file.is_none()
         }
         SelectedJev::TypeSafe(_) => {
             !local
@@ -175,7 +190,9 @@ fn select_jev(args: &GatewayArgs, environment: Option<&str>) -> Result<SelectedJ
                     .jev_min_confidence
                     .is_none_or(|value| (0.0..=1.0).contains(&value))
         }
-        SelectedJev::RustRules(_) => !typesafe && !local && !args.jev_allow_local_http,
+        SelectedJev::RustRules(_) => {
+            !typesafe && !local && !args.jev_allow_local_http && args.jev_ca_file.is_none()
+        }
         SelectedJev::Local(_) => {
             !typesafe
                 && args.jev_rules_catalog.is_none()
@@ -188,6 +205,37 @@ fn select_jev(args: &GatewayArgs, environment: Option<&str>) -> Result<SelectedJ
         "Incomplete or mixed Jev backend configuration; use only the selected backend's options"
     );
     Ok(selected)
+}
+
+/// No credential file, tenant registry, audit database or network is opened here.
+fn preflight_jev(args: &GatewayArgs, selected: SelectedJev) -> Result<JevTrust> {
+    let trust = args
+        .jev_ca_file
+        .as_deref()
+        .map(JevTrust::from_ca_file)
+        .transpose()?
+        .unwrap_or_default();
+    let configuration = match selected {
+        SelectedJev::TypeSafe(_) => Some((args.jev_url.as_deref(), args.jev_model.as_deref())),
+        SelectedJev::Local(_) => Some((
+            args.jev_local_url.as_deref(),
+            args.jev_local_model.as_deref(),
+        )),
+        SelectedJev::Disabled | SelectedJev::RustRules(_) => None,
+    };
+    if let Some((endpoint, model)) = configuration {
+        let model = model.context("Jev requested model required")?;
+        anyhow::ensure!(
+            !model.trim().is_empty() && model.len() <= 128 && !model.chars().any(char::is_control),
+            "Jev configuration is invalid"
+        );
+        validate_transport_configuration(
+            endpoint.context("Jev URL required")?,
+            args.jev_allow_local_http,
+            &trust,
+        )?;
+    }
+    Ok(trust)
 }
 #[derive(Args)]
 struct DashboardArgs {
@@ -219,6 +267,17 @@ struct IngressArgs {
     gateway_upstream: String,
     #[arg(long, default_value = "http://dashboard:4000")]
     dashboard_upstream: String,
+}
+#[derive(Args)]
+struct ModelIngressArgs {
+    #[arg(long, default_value = "127.0.0.1:8443")]
+    listen: SocketAddr,
+    #[arg(long)]
+    container_listen: bool,
+    #[arg(long)]
+    tls_cert_file: PathBuf,
+    #[arg(long)]
+    tls_key_file: PathBuf,
 }
 fn read_token(path: &Path) -> Result<String> {
     let mut options = std::fs::OpenOptions::new();
@@ -366,6 +425,7 @@ async fn main() -> Result<()> {
                 None
             };
             let selected_jev = select_jev(&args, backend_environment.as_deref())?;
+            let jev_trust = preflight_jev(&args, selected_jev)?;
             let tenants = if let Some(path) = &args.tenants_file {
                 gateway_config::load(path)?
             } else {
@@ -400,7 +460,7 @@ async fn main() -> Result<()> {
                     validate_credential_separation(&key, secrets.iter().map(String::as_str))?;
                     secrets.push(key.clone());
                     Some(JevBackend::typesafe(
-                        JevClient::new(
+                        JevClient::new_with_trust(
                             args.jev_url.as_deref().context("TypeSafe URL required")?,
                             key,
                             args.jev_model
@@ -408,6 +468,7 @@ async fn main() -> Result<()> {
                                 .context("TypeSafe requested model required")?,
                             args.jev_min_confidence.unwrap_or(0.85),
                             args.jev_allow_local_http,
+                            jev_trust.clone(),
                         )?,
                         source,
                     ))
@@ -431,7 +492,7 @@ async fn main() -> Result<()> {
                         validate_credential_separation(key, secrets.iter().map(String::as_str))?;
                         secrets.push(key.clone());
                     }
-                    Some(JevBackend::local_openai(
+                    Some(JevBackend::local_openai_with_trust(
                         args.jev_local_url
                             .as_deref()
                             .context("Local Jev URL required")?,
@@ -441,6 +502,7 @@ async fn main() -> Result<()> {
                             .context("Local requested model required")?,
                         args.jev_allow_local_http,
                         source,
+                        jev_trust.clone(),
                     )?)
                 }
             };
@@ -628,7 +690,22 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Command::Healthcheck { url: urls } => {
+        Command::ModelIngress(args) => {
+            validate_bind(args.listen, args.container_listen)?;
+            let identity = agentsandbox::tls::ServerIdentity::from_files(
+                &args.tls_cert_file,
+                &args.tls_key_file,
+            )?;
+            let router = agentsandbox::model_ingress::model_ingress_router()?;
+            let shutdown = shutdown_signal()?;
+            let listener = tokio::net::TcpListener::bind(args.listen).await?;
+            eprintln!(
+                "Model ingress {} — TLS; TCP32, handshakes8/2s, idle30s, drain5s; fixed model upstream, inference1, health4, body65536/2s, exchange5s",
+                listener.local_addr()?
+            );
+            agentsandbox::tls::serve(listener, router, identity, shutdown).await?;
+        }
+        Command::Healthcheck { url: urls, ca_file } => {
             anyhow::ensure!(urls.len() <= 8, "Healthcheck limité à huit destinations");
             let destinations = urls
                 .into_iter()
@@ -646,10 +723,23 @@ async fn main() -> Result<()> {
                     Ok(url)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let http = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
+            anyhow::ensure!(
+                ca_file.is_none() || destinations.iter().all(|url| url.scheme() == "https"),
+                "Healthcheck CA requires HTTPS destinations"
+            );
+            let trust = ca_file
+                .as_deref()
+                .map(JevTrust::from_ca_file)
+                .transpose()?
+                .unwrap_or_default();
+            let http = trust
+                .apply_to_client(
+                    reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(3))
+                        .redirect(reqwest::redirect::Policy::none())
+                        .retry(reqwest::retry::never())
+                        .no_proxy(),
+                )?
                 .build()?;
             futures_util::future::try_join_all(destinations.into_iter().map(|url| {
                 let http = &http;
@@ -778,6 +868,61 @@ mod tests {
                 "the gateway CLI must accept each explicit decision backend selection"
             );
         }
+    }
+
+    #[test]
+    fn jev_transport_preflight_and_model_tls_cli_are_explicit() {
+        for args in [
+            vec![
+                "--jev-backend",
+                "rust-rules",
+                "--jev-ca-file",
+                "/missing-public-ca",
+            ],
+            vec!["--jev-ca-file", "/missing-public-ca"],
+        ] {
+            assert!(select_jev(&gateway_arguments(&args), None).is_err());
+        }
+        let args = gateway_arguments(&[
+            "--jev-backend",
+            "local-openai",
+            "--jev-local-url",
+            "file:///not-http",
+            "--jev-local-model",
+            "fixture",
+        ]);
+        let selected = select_jev(&args, None).unwrap();
+        assert!(
+            preflight_jev(&args, selected)
+                .err()
+                .unwrap()
+                .is::<agentsandbox::jev::JevError>()
+        );
+        assert!(Cli::try_parse_from(["agentsandbox", "model-ingress"]).is_err());
+        assert!(matches!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "model-ingress",
+                "--tls-cert-file",
+                "/chain",
+                "--tls-key-file",
+                "/key"
+            ])
+            .unwrap()
+            .command,
+            Command::ModelIngress(_)
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "healthcheck",
+                "--ca-file",
+                "/public-ca",
+                "--url",
+                "https://localhost/health"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

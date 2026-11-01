@@ -778,6 +778,60 @@ fn same_file_state(left: &Metadata, right: &Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
+/// Read an explicitly projected TLS file without weakening private-file rules.
+/// The namespace is protected from unrelated UIDs; root and the control UID
+/// remain trusted. Returned bytes are a snapshot, not an immutable pathname.
+pub(crate) fn read_trusted_projected_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    ensure!(
+        max_bytes <= MAX_PRIVATE_FILE_BYTES,
+        "projected file limit invalid"
+    );
+    let path = absolute_path(path)?;
+    let parent = walk(
+        path.parent().context("projected file needs a parent")?,
+        false,
+        false,
+    )?;
+    let name = child_name(path.file_name().context("projected file needs a name")?)?;
+    let check = |file: &File| -> Result<Metadata> {
+        let facts = file.metadata()?;
+        ensure!(
+            facts.is_file()
+                && facts.nlink() == 1
+                && (facts.uid() == 0 || facts.uid() == effective_uid())
+                && facts.mode() & 0o7022 == 0,
+            "projected file requires a trusted regular single-link, non-writable projection"
+        );
+        validate_filesystem_permissions(file)?;
+        check_acl(file, false)?;
+        Ok(facts)
+    };
+    let mut file = open_file(&parent.file, &name)?;
+    let before = check(&file)?;
+    #[cfg(test)]
+    projected_tests::after_open(&path);
+    ensure!(before.len() <= max_bytes, "projected file exceeds limit");
+    let mut bytes = Vec::new();
+    Read::by_ref(&mut file)
+        .take(max_bytes + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "projected file grew beyond limit"
+    );
+    parent.revalidate()?;
+    let named = open_file(&parent.file, &name)?;
+    ensure!(
+        same_file_state(&before, &check(&file)?) && same_file_state(&before, &check(&named)?),
+        "projected file identity or content metadata changed"
+    );
+    parent.revalidate()?;
+    Ok(bytes)
+}
+
+#[cfg(test)]
+mod projected_tests;
+
 fn unlink_created(parent: &File, name: &OsStr, identity: Identity) {
     let Ok(name) = child_name(name) else {
         return;

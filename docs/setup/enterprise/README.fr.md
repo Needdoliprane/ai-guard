@@ -125,6 +125,8 @@ Utiliser des identités de service/workload distinctes pour brokers→contrôle 
 
 ## Configurer l'IA interne et les services de décision
 
+Pour un juge local d'une seule installation, le [profil conteneurisé avec AC privée](../local-ai/TLS.fr.md) relie le gateway par un relais TLS Rust fixe au petit modèle existant. Seule l'AC publique atteint le gateway ; aucune clé privée d'AC n'entre dans un conteneur. Le dernier saut HTTP relais→modèle reste sur son réseau interne séparé. Ce profil ne livre ni mTLS workload, ni autorisation d'inférence d'entreprise, ni qualification des transports cloud. Configurer ces exigences séparément pour un service partagé.
+
 Pour un modèle de développement interne, consigner URL, modèle/révision exacts, format d'échange, client/adaptateur compatible, **référence** du credential, chaîne publique d'AC et destinations approuvées. Lier les réglages résolus à l'autorisation lorsqu'ils influencent l'exécution. Séparer identité, fournisseur et modèle. Utiliser les [profils fournisseurs](../providers/README.fr.md) pour l'authentification Codex/Claude abonnement/API prise en charge ; ne pas réutiliser un credential modèle comme connexion utilisateur ai-guard.
 
 « Compatible OpenAI » exige un protocole précis : Chat Completions, Responses, streaming/événements et outils ont des contrats distincts. Une réponse Chat Completions ne démontre ni Responses ni Claude Messages. Choisir explicitement l'adaptateur pris en charge et refuser les fonctions incompatibles. Ne pas déduire un changement de routage de variables `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` arbitraires dans un dotenv.

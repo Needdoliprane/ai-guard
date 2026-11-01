@@ -1,0 +1,16 @@
+# Use with exactly one base (Docker or Podman), never a second judge override.
+# Start the separate deploy/local-ai/compose.tls.yaml project first.
+services:
+  gateway:
+    command: ["gateway", "--listen", "0.0.0.0:8787", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json", "--jev-backend", "local-openai", "--jev-local-url", "https://llm.ai-guard.test:8443/v1/chat/completions", "--jev-local-model", "${AI_GUARD_LOCAL_AI_MODEL:-qwen2.5-0.5b-q4km}", "--jev-ca-file", "/run/ai-guard-trust/local-judge-ca.pem"]
+    volumes:
+      - type: bind
+        source: ${AI_GUARD_LOCAL_AI_TLS_MATERIAL_DIR:?Prepare the private TLS projections}/root-ca.pem
+        target: /run/ai-guard-trust/local-judge-ca.pem
+        read_only: true
+        bind: {create_host_path: false}
+    networks: [control, judge_link]
+networks:
+  judge_link:
+    external: true
+    name: ${AI_GUARD_LOCAL_AI_TLS_NETWORK:-ai-guard-local-judge-tls}

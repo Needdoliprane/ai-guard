@@ -1,4 +1,4 @@
-use super::{JevError, masked_state, transport::JsonTransport};
+use super::{JevError, JevTrust, masked_state, transport::JsonTransport};
 use crate::{
     model::{DecisionRequest, Outcome},
     redaction::Redactor,
@@ -58,12 +58,13 @@ impl LocalClient {
         key: Option<String>,
         model: String,
         local_http: bool,
+        trust: JevTrust,
     ) -> Result<Self, JevError> {
         if model.trim().is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
             return Err(JevError::InvalidConfiguration);
         }
         Ok(Self {
-            transport: JsonTransport::new(endpoint, key, local_http)?,
+            transport: JsonTransport::new(endpoint, key, local_http, trust)?,
             model,
         })
     }

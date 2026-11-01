@@ -28,12 +28,12 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 tower-http = { version = "0.6", features = ["fs", "limit", "set-header"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 
 [dev-dependencies]
-tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

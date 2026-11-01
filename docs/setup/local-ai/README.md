@@ -16,6 +16,7 @@ Prepare the [local ai-guard stack](../local/README.md), including `agentsandbox-
 | [`deploy/local-ai/compose.yaml`](../../../deploy/local-ai/compose.yaml) | Model and fixed-destination Rust ingress. |
 | [`deploy/local-ai/Dockerfile`](../../../deploy/local-ai/Dockerfile) | Pinned llama.cpp runtime and checksum-verified GGUF weight. |
 | [Combined example](../../../.env.exemple.local-keycloak-qwen) | Same model settings plus the local Keycloak settings. |
+| [TLS example](../../../.env.exemple.local-qwen-tls) | Internal HTTPS route for the containerized judge; follow the [TLS guide](TLS.md). |
 
 The first image build downloads the public runtime and the weight of 491,400,032 bytes. The weight revision and SHA256 are fixed in the Dockerfile. Building requires support for `ADD --checksum` (Dockerfile frontend 1.6+); see [Docker's reference](https://docs.docker.com/reference/dockerfile/#add---checksum). Prepare the resulting image on a connected build machine, then transfer it with your normal image distribution process for offline use. Runtime startup does not download a model.
 
@@ -94,6 +95,8 @@ Use this context's explicit gateway URL for callers; it has a separate audit his
 Loopback is relative to the calling process. A gateway container cannot reach the host publication using its own `127.0.0.1`; adding the model Compose file does not wire the applications together. A container deployment needs an explicitly approved route and verified HTTPS trust. Do not open unrestricted HTTP or disable TLS validation to bridge that gap. Host commands, adapter protocol checks, model resource measurements and a complete container deployment have separate qualification evidence in the [engineering state](../../engineering/CURRENT_STATE.md).
 
 ## Replace the model or move offline
+
+For a gateway container, the [local TLS profile](TLS.md) supplies a private-CA route, with startup, renewal and recovery instructions. It replaces the HTTP model project rather than starting a second model.
 
 Select a text-generation/instruct model of at most 4 billion parameters and measure its actual memory with the chosen quantization/context. Build a separate image with pinned runtime, weight revision, checksum and applicable licenses. Keep the same `/app/llama-server` entrypoint and `/models/model.gguf` layout for this Compose profile, or provide a reviewed Compose definition for another runtime.
 

@@ -16,6 +16,7 @@ Préparer le [socle local ai-guard](../local/README.fr.md), dont `agentsandbox-c
 | [`deploy/local-ai/compose.yaml`](../../../deploy/local-ai/compose.yaml) | Modèle et relais Rust à destination fixe. |
 | [`deploy/local-ai/Dockerfile`](../../../deploy/local-ai/Dockerfile) | Runtime llama.cpp épinglé et poids GGUF vérifié par checksum. |
 | [Exemple combiné](../../../.env.exemple.local-keycloak-qwen) | Mêmes réglages modèle avec ceux de Keycloak local. |
+| [Exemple TLS](../../../.env.exemple.local-qwen-tls) | Route HTTPS interne du juge conteneurisé ; suivre le [guide TLS](TLS.fr.md). |
 
 La première construction télécharge le runtime public et le poids de 491 400 032 octets. Révision et SHA256 sont fixés dans le Dockerfile. La construction demande `ADD --checksum` (frontend Dockerfile 1.6+) ; voir la [référence Docker](https://docs.docker.com/reference/dockerfile/#add---checksum). Préparer l'image sur une machine connectée, puis la transférer par le circuit habituel de distribution pour un usage hors ligne. Le démarrage du runtime ne télécharge aucun modèle.
 
@@ -94,6 +95,8 @@ Utiliser l'URL gateway explicite de ce contexte pour les appelants ; son histori
 Le loopback est relatif au processus appelant. Un gateway conteneurisé n'atteint pas la publication hôte avec son propre `127.0.0.1` ; ajouter le Compose modèle ne raccorde pas les applications. Un déploiement conteneurisé exige route explicitement approuvée et confiance HTTPS vérifiée. Ne pas ouvrir HTTP sans restriction ni désactiver TLS pour franchir cette frontière. Commandes hôte, contrats d'adaptateur, mesures du modèle et déploiement conteneurisé complet ont des preuves de qualification distinctes dans l'[état engineering](../../engineering/CURRENT_STATE.md).
 
 ## Remplacer le modèle et passer hors ligne
+
+Pour un gateway conteneurisé, le [profil TLS local](TLS.fr.md) fournit une route avec AC privée, lancement, renouvellement et reprise. Il remplace le projet modèle HTTP sans lancer un deuxième modèle.
 
 Choisir un modèle génératif/instruct d'au plus 4 milliards de paramètres et mesurer sa mémoire réelle avec la quantification et le contexte choisis. Construire une image distincte avec runtime, révision de poids, checksum et licences applicables épinglés. Conserver l'entrypoint `/app/llama-server` et le fichier `/models/model.gguf` pour ce Compose, ou fournir un Compose relu pour un autre runtime.
 

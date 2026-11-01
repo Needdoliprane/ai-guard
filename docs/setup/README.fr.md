@@ -25,6 +25,7 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 | `.env.exemple.local-rules` | Socle avec `deploy/docker/compose.jev-rules.example.yaml`, catalogue de décision Rust fini sans service modèle. |
 | `.env.exemple.local-keycloak` | Compose du socle et projet Keycloak séparé. |
 | `.env.exemple.local-qwen` | Compose du socle et projet IA locale séparé. |
+| `.env.exemple.local-qwen-tls` | Alternative projet modèle TLS et surcharge gateway ; suivre [la configuration AC privée](local-ai/TLS.fr.md). |
 | `.env.exemple.local-keycloak-qwen` | Réglages combinés ; utiliser les commandes séparées ci-dessous. |
 | `.env.exemple.providers` | Modèle d'une **nouvelle entrée fournisseur privée** ; suivre son guide pour l'import explicite. Ni configuration Compose ni SSO. |
 | `.env.exemple.entreprise` | Transport Compose du socle et override Jev optionnel ; identités, tenants et politiques d'inférence utilisent leurs configurations typées distinctes. |

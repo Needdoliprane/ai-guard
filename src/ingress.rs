@@ -153,7 +153,7 @@ fn failure(status: StatusCode, message: &'static str) -> Response {
 
 /// Parse all Connection values before deleting the header itself. A caller may
 /// nominate any field as hop-by-hop, including fields unknown to this program.
-fn end_to_end_headers(headers: &HeaderMap, request: bool) -> Result<HeaderMap, ()> {
+pub(crate) fn end_to_end_headers(headers: &HeaderMap, request: bool) -> Result<HeaderMap, ()> {
     let mut nominated = Vec::new();
     for connection in headers.get_all(header::CONNECTION) {
         for token in connection.to_str().map_err(|_| ())?.split(',') {

@@ -125,6 +125,8 @@ Use separate service/workload identities for broker-to-control and worker relay 
 
 ## Configure internal AI and decision services
 
+For a local single-installation judge, the [private-CA container profile](../local-ai/TLS.md) connects the gateway through a fixed Rust TLS relay to the existing small model. Only the public CA reaches the gateway; no CA private key enters a container. The final relay-to-model HTTP hop stays on its separate internal network. This profile does not deliver workload mTLS, enterprise inference authorization or cloud transport qualification. Configure those independently for a shared service.
+
 For an internal coding model, record the endpoint URL, exact model/revision, wire format, compatible client/adapter, credential **reference**, public CA chain and approved destinations. Bind the resolved settings to the authorization whenever they affect execution. Keep identity settings separate from provider and model settings. Use the [provider profiles](../providers/README.md) for supported Codex/Claude subscription/API authentication; do not repurpose a model credential as an ai-guard user login.
 
 “OpenAI-compatible” needs a precise protocol: Chat Completions, Responses, streaming/events and tool calls have different contracts. A Chat Completions response does not establish Responses support or Claude Messages compatibility. Select the supported adapter explicitly and refuse incompatible features. Do not infer a routing change from arbitrary `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` entries in a dotenv file.

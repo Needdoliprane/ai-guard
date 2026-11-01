@@ -1,4 +1,4 @@
-use super::JevError;
+use super::{JevError, JevTrust};
 use serde_json::Value;
 use std::io::Write;
 
@@ -10,42 +10,66 @@ pub(super) struct JsonTransport {
     endpoint: reqwest::Url,
     key: Option<String>,
     local_http: bool,
+    trust: JevTrust,
+}
+pub fn validate_transport_configuration(
+    endpoint: &str,
+    allow_local_http: bool,
+    trust: &JevTrust,
+) -> Result<(), JevError> {
+    validate_endpoint(endpoint, allow_local_http, trust).map(|_| ())
+}
+fn validate_endpoint(
+    endpoint: &str,
+    local_http: bool,
+    trust: &JevTrust,
+) -> Result<reqwest::Url, JevError> {
+    if endpoint.len() > 4096 || (trust.is_explicit() && local_http) {
+        return Err(JevError::InvalidConfiguration);
+    }
+    let endpoint = reqwest::Url::parse(endpoint).map_err(|_| JevError::InvalidConfiguration)?;
+    let loopback = endpoint.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+        || !(endpoint.scheme() == "https"
+            || (local_http && endpoint.scheme() == "http" && loopback && !trust.is_explicit()))
+    {
+        return Err(JevError::InvalidConfiguration);
+    }
+    Ok(endpoint)
 }
 impl JsonTransport {
     pub(super) fn new(
         endpoint: &str,
         key: Option<String>,
         local_http: bool,
+        trust: JevTrust,
     ) -> Result<Self, JevError> {
         let key = key.map(|value| value.trim().to_owned());
-        if endpoint.len() > 4096 {
+        let endpoint = validate_endpoint(endpoint, local_http, &trust)?;
+        if key.as_ref().is_some_and(|key| {
+            key.len() < 4 || key.len() > 4096 || key.chars().any(char::is_control)
+        }) {
             return Err(JevError::InvalidConfiguration);
         }
-        let endpoint = reqwest::Url::parse(endpoint).map_err(|_| JevError::InvalidConfiguration)?;
-        let loopback = endpoint.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host
-                    .trim_matches(['[', ']'])
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|address| address.is_loopback())
-        });
-        if !endpoint.username().is_empty()
-            || endpoint.password().is_some()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-            || !(endpoint.scheme() == "https"
-                || (local_http && endpoint.scheme() == "http" && loopback))
-            || key.as_ref().is_some_and(|key| {
-                key.len() < 4 || key.len() > 4096 || key.chars().any(char::is_control)
-            })
-        {
-            return Err(JevError::InvalidConfiguration);
-        }
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .connect_timeout(std::time::Duration::from_secs(2))
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
+        let client = trust
+            .apply_to_client(
+                reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
+                    .no_proxy(),
+            )?
             .build()
             .map_err(|_| JevError::InvalidConfiguration)?;
         Ok(Self {
@@ -53,13 +77,15 @@ impl JsonTransport {
             endpoint,
             key,
             local_http,
+            trust,
         })
     }
     pub(super) fn configuration(&self) -> Value {
         serde_json::json!({
             "endpoint": self.endpoint.as_str(), "credential_present": self.key.is_some(),
             "allow_loopback_http": self.local_http, "timeout_seconds": 5,
-            "connect_timeout_seconds": 2, "request_bytes": MAX_BODY, "response_bytes": MAX_BODY
+            "connect_timeout_seconds": 2, "request_bytes": MAX_BODY, "response_bytes": MAX_BODY,
+            "trust":self.trust.configuration(), "automatic_retry":false
         })
     }
     pub(super) fn key(&self) -> Option<&str> {

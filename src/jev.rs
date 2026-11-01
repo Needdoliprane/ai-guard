@@ -8,8 +8,11 @@ mod backend;
 mod local;
 mod rules;
 mod transport;
+mod trust;
 pub use backend::{JevBackend, SelectionSource};
 pub use rules::RuleCatalog;
+pub use transport::validate_transport_configuration;
+pub use trust::JevTrust;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +99,23 @@ impl JevClient {
         min_confidence: f64,
         allow_local_http: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_trust(
+            endpoint,
+            key,
+            model,
+            min_confidence,
+            allow_local_http,
+            JevTrust::default(),
+        )
+    }
+    pub fn new_with_trust(
+        endpoint: &str,
+        key: String,
+        model: String,
+        min_confidence: f64,
+        allow_local_http: bool,
+        trust: JevTrust,
+    ) -> anyhow::Result<Self> {
         let key = key.trim().to_owned();
         anyhow::ensure!(
             !key.is_empty()
@@ -108,7 +128,8 @@ impl JevClient {
             (0.0..=1.0).contains(&min_confidence),
             "invalid Jev confidence threshold"
         );
-        let transport = transport::JsonTransport::new(endpoint, Some(key), allow_local_http)?;
+        let transport =
+            transport::JsonTransport::new(endpoint, Some(key), allow_local_http, trust)?;
         Ok(Self {
             transport,
             model,

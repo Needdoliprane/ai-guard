@@ -1,4 +1,6 @@
-use super::{JevClient, JevError, RuleCatalog, local::LocalClient, transport::bounded_json};
+use super::{
+    JevClient, JevError, JevTrust, RuleCatalog, local::LocalClient, transport::bounded_json,
+};
 use crate::{
     model::{DecisionRequest, Outcome},
     redaction::Redactor,
@@ -51,8 +53,31 @@ impl JevBackend {
         allow_local_http: bool,
         source: SelectionSource,
     ) -> Result<Self, JevError> {
+        Self::local_openai_with_trust(
+            endpoint,
+            key,
+            model,
+            allow_local_http,
+            source,
+            JevTrust::default(),
+        )
+    }
+    pub fn local_openai_with_trust(
+        endpoint: &str,
+        key: Option<String>,
+        model: String,
+        allow_local_http: bool,
+        source: SelectionSource,
+        trust: JevTrust,
+    ) -> Result<Self, JevError> {
         Ok(Self {
-            engine: Engine::LocalOpenAI(LocalClient::new(endpoint, key, model, allow_local_http)?),
+            engine: Engine::LocalOpenAI(LocalClient::new(
+                endpoint,
+                key,
+                model,
+                allow_local_http,
+                trust,
+            )?),
             source,
         })
     }

@@ -25,6 +25,7 @@ Each guide contains prerequisites, configuration, startup, expected endpoints, d
 | `.env.exemple.local-rules` | Base stack plus `deploy/docker/compose.jev-rules.example.yaml`, finite Rust decision catalogue without a model service. |
 | `.env.exemple.local-keycloak` | Base Compose and the separate Keycloak project. |
 | `.env.exemple.local-qwen` | Base Compose and the separate local-AI project. |
+| `.env.exemple.local-qwen-tls` | Alternative TLS model project plus gateway override; follow [private-CA setup](local-ai/TLS.md). |
 | `.env.exemple.local-keycloak-qwen` | Same settings combined; use the separate commands below. |
 | `.env.exemple.providers` | Template for a **new private provider input**; follow the provider guide for explicit import. Not a Compose or SSO configuration. |
 | `.env.exemple.entreprise` | Base Compose transport and optional Jev override; identities, tenants and inference policies have separate typed configuration. |
