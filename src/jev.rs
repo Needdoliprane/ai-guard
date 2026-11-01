@@ -38,6 +38,61 @@ impl std::fmt::Display for JevError {
 }
 impl std::error::Error for JevError {}
 
+/// Request-local transport observations. The configured endpoint may be a relay;
+/// its status does not establish the status or cause at an upstream model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct TransportDiagnostic {
+    hop: DiagnosticHop,
+    phase: TransportPhase,
+    kind: TransportKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DiagnosticHop {
+    ConfiguredEndpoint,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransportPhase {
+    Send,
+    ResponseBody,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum TransportKind {
+    Timeout,
+    ConnectionError,
+    HttpStatus,
+    TransportError,
+}
+/// Keeps the historic error code serialization and carries only closed metadata.
+/// No reqwest error, URL, header or response body is retained in this value.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BackendFailure {
+    error: JevError,
+    diagnostic: Option<TransportDiagnostic>,
+}
+impl BackendFailure {
+    pub(crate) fn diagnostic(&self) -> Option<TransportDiagnostic> {
+        self.diagnostic
+    }
+}
+impl From<JevError> for BackendFailure {
+    fn from(error: JevError) -> Self {
+        Self {
+            error,
+            diagnostic: None,
+        }
+    }
+}
+impl Serialize for BackendFailure {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.error.serialize(serializer)
+    }
+}
+
 /// A third-party key must not confer any authenticated control role.
 pub fn validate_credential_separation<'a>(
     key: &str,
@@ -180,6 +235,28 @@ impl JevClient {
         request: &DecisionRequest,
         redactor: &Redactor,
     ) -> anyhow::Result<JevAnswer> {
+        // Public callers retain the existing JevError downcast and code contract.
+        let response = self
+            .fetch_response(request, redactor)
+            .await
+            .map_err(|failure| anyhow::Error::new(failure.error))?;
+        Self::parse_answer(&serde_json::to_value(response)?, self.min_confidence)
+    }
+    async fn decide_with_diagnostic(
+        &self,
+        request: &DecisionRequest,
+        redactor: &Redactor,
+    ) -> Result<JevAnswer, BackendFailure> {
+        let response = self.fetch_response(request, redactor).await?;
+        let value = serde_json::to_value(response).map_err(|_| JevError::InvalidResponse)?;
+        Self::parse_answer(&value, self.min_confidence)
+            .map_err(|_| JevError::InvalidResponse.into())
+    }
+    async fn fetch_response(
+        &self,
+        request: &DecisionRequest,
+        redactor: &Redactor,
+    ) -> Result<TypeSafeResponse, BackendFailure> {
         let redactor = redactor.union(&Redactor::new(
             self.transport
                 .key()
@@ -193,9 +270,7 @@ impl JevClient {
             .transport
             .post(&redactor.value_unclipped(&body))
             .await?;
-        let response: TypeSafeResponse =
-            serde_json::from_slice(&bytes).map_err(|_| JevError::InvalidResponse)?;
-        Self::parse_answer(&serde_json::to_value(response)?, self.min_confidence)
+        serde_json::from_slice(&bytes).map_err(|_| JevError::InvalidResponse.into())
     }
 }
 

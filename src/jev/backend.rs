@@ -1,5 +1,6 @@
 use super::{
-    JevClient, JevError, JevTrust, RuleCatalog, local::LocalClient, transport::bounded_json,
+    BackendFailure, JevClient, JevError, JevTrust, RuleCatalog, local::LocalClient,
+    transport::bounded_json,
 };
 use crate::{
     model::{DecisionRequest, Outcome},
@@ -116,9 +117,7 @@ impl JevBackend {
                 json!({"transport":client.transport.configuration(),"requested_model":client.model,"min_confidence":client.min_confidence})
             }
             Engine::RustRules(catalogue) => catalogue.configuration(),
-            Engine::LocalOpenAI(client) => {
-                json!({"transport":client.transport.configuration(),"requested_model":client.model,"decision_policy":"advisory_fail_closed"})
-            }
+            Engine::LocalOpenAI(client) => client.configuration(),
         }
     }
     pub fn validate_redaction(&self, redactor: &Redactor) -> Result<(), JevError> {
@@ -147,17 +146,12 @@ impl JevBackend {
         &self,
         request: &DecisionRequest,
         redactor: &Redactor,
-    ) -> Result<BackendEvaluation, JevError> {
+    ) -> Result<BackendEvaluation, BackendFailure> {
         let redactor = self.redactor(redactor);
         self.validate_redaction(&redactor)?;
         let (outcome, details) = match &self.engine {
             Engine::TypeSafe(client) => {
-                let answer = client.decide(request, &redactor).await.map_err(|error| {
-                    error
-                        .downcast_ref::<JevError>()
-                        .copied()
-                        .unwrap_or(JevError::InvalidResponse)
-                })?;
+                let answer = client.decide_with_diagnostic(request, &redactor).await?;
                 let outcome = answer.outcome.clone();
                 let mut details = redactor.value_unclipped(
                     &serde_json::to_value(answer).map_err(|_| JevError::InvalidResponse)?,
@@ -170,7 +164,7 @@ impl JevBackend {
                 details["confidence_provenance"] = json!("provider_declared_not_calibrated");
                 // The durable store's historic redactor must not silently clip judge metadata.
                 if redactor.value(&details) != details {
-                    return Err(JevError::InvalidResponse);
+                    return Err(JevError::InvalidResponse.into());
                 }
                 (outcome, details)
             }
@@ -196,7 +190,7 @@ impl JevBackend {
                     .clone(),
             );
         if redactor.value(&metadata) != metadata {
-            return Err(JevError::InvalidResponse);
+            return Err(JevError::InvalidResponse.into());
         }
         bounded_json(&metadata).map_err(|_| JevError::ResponseTooLarge)?;
         Ok(BackendEvaluation { outcome, metadata })

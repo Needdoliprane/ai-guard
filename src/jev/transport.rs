@@ -1,4 +1,7 @@
-use super::{JevError, JevTrust};
+use super::{
+    BackendFailure, DiagnosticHop, JevError, JevTrust, TransportDiagnostic, TransportKind,
+    TransportPhase,
+};
 use serde_json::Value;
 use std::io::Write;
 
@@ -92,7 +95,7 @@ impl JsonTransport {
         self.key.as_deref()
     }
 
-    pub(super) async fn post(&self, body: &Value) -> Result<Vec<u8>, JevError> {
+    pub(super) async fn post(&self, body: &Value) -> Result<Vec<u8>, BackendFailure> {
         let bytes = bounded_json(body)?;
         let mut request = self
             .client
@@ -105,32 +108,62 @@ impl JsonTransport {
         let mut response = request
             .send()
             .await
-            .map_err(|_| JevError::TransportUnavailable)?;
+            .map_err(|error| transport_failure(&error, TransportPhase::Send, None))?;
+        let status = response.status();
         if !response.status().is_success() {
-            return Err(JevError::TransportUnavailable);
+            return Err(BackendFailure {
+                error: JevError::TransportUnavailable,
+                diagnostic: Some(TransportDiagnostic {
+                    hop: DiagnosticHop::ConfiguredEndpoint,
+                    phase: TransportPhase::Send,
+                    kind: TransportKind::HttpStatus,
+                    http_status: Some(status.as_u16()),
+                }),
+            });
         }
         if response
             .content_length()
             .is_some_and(|bytes| bytes > MAX_BODY as u64)
         {
-            return Err(JevError::ResponseTooLarge);
+            return Err(JevError::ResponseTooLarge.into());
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| JevError::TransportUnavailable)?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            transport_failure(&error, TransportPhase::ResponseBody, Some(status.as_u16()))
+        })? {
             if bytes
                 .len()
                 .checked_add(chunk.len())
                 .is_none_or(|length| length > MAX_BODY)
             {
-                return Err(JevError::ResponseTooLarge);
+                return Err(JevError::ResponseTooLarge.into());
             }
             bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
+    }
+}
+
+fn transport_failure(
+    error: &reqwest::Error,
+    phase: TransportPhase,
+    http_status: Option<u16>,
+) -> BackendFailure {
+    let kind = if error.is_timeout() {
+        TransportKind::Timeout
+    } else if error.is_connect() {
+        TransportKind::ConnectionError
+    } else {
+        TransportKind::TransportError
+    };
+    BackendFailure {
+        error: JevError::TransportUnavailable,
+        diagnostic: Some(TransportDiagnostic {
+            hop: DiagnosticHop::ConfiguredEndpoint,
+            phase,
+            kind,
+            http_status,
+        }),
     }
 }
 
