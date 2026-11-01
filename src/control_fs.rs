@@ -580,6 +580,79 @@ fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// A host utility in a namespace protected from unrelated local writers.
+/// Revalidation detects replacement; root and the control UID remain trusted.
+/// This is not a runtime invocation approval, worker capability or audit receipt.
+pub struct TrustedExecutable {
+    parent: Directory,
+    name: OsString,
+    file: File,
+    facts: Metadata,
+    path: PathBuf,
+}
+
+impl TrustedExecutable {
+    pub fn open(path: &Path) -> Result<Self> {
+        ensure!(
+            path.is_absolute(),
+            "trusted executable needs an absolute path"
+        );
+        let path = absolute_path(path)?;
+        let name = path
+            .file_name()
+            .context("trusted executable needs a basename")?
+            .to_owned();
+        let parent = Directory(Arc::new(walk(
+            path.parent().context("trusted executable needs a parent")?,
+            false,
+            false,
+        )?));
+        let file = open_file(&parent.0.file, &child_name(&name)?)?;
+        let facts = check_executable(&file)?;
+        let value = Self {
+            parent,
+            name,
+            file,
+            facts,
+            path,
+        };
+        value.revalidate()?;
+        Ok(value)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn revalidate(&self) -> Result<()> {
+        self.parent.revalidate()?;
+        let current = open_file(&self.parent.0.file, &child_name(&self.name)?)?;
+        ensure!(
+            same_file_state(&self.facts, &check_executable(&self.file)?)
+                && same_file_state(&self.facts, &check_executable(&current)?),
+            "trusted executable identity, content metadata or permissions changed"
+        );
+        Ok(())
+    }
+}
+
+fn check_executable(file: &File) -> Result<Metadata> {
+    let facts = file
+        .metadata()
+        .context("trusted executable metadata unavailable")?;
+    ensure!(
+        facts.is_file()
+            && (facts.uid() == 0 || facts.uid() == effective_uid())
+            && facts.mode() & 0o022 == 0
+            && facts.mode() & 0o111 != 0
+            && facts.mode() & 0o6000 == 0,
+        "trusted executable needs root/control ownership, execute permission and no group/other writes or set-ID"
+    );
+    validate_filesystem_permissions(file)?;
+    check_acl(file, false)?;
+    Ok(facts)
+}
+
 /// Check an export namespace component without imposing private-control modes
 /// or changing existing permissions. Callers retain and validate the complete
 /// ancestry; this does not authorize a new pathname or distrust source content.

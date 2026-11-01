@@ -1,0 +1,2 @@
+Local test PKI created. Client trust: root-ca.pem. Server: server-chain.pem + server.key.
+Keep both CA keys private. No trust store or DNS changed.

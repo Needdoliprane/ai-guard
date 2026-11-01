@@ -1,0 +1,7 @@
+cwd=/Users/louis/Documents/ai-guard/.worktrees/broker-service
+PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target
+CARGO_INCREMENTAL=0
+TMPDIR=<private capture>/tmp
+command=CARGO_INCREMENTAL=0 cargo test --offline --test demo_pki -- --test-threads=1
+lock_before=dump retained separately; inspect edge-only delta after command

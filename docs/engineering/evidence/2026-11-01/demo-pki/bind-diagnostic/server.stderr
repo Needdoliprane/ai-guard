@@ -1,0 +1,96 @@
+getservbyname failure for 127.0.0.1:39471
+usage: s_server [-accept port] [-alpn protocols] [-bugs] [-CAfile file]
+    [-CApath directory] [-cert file] [-cert2 file]
+    [-certform der | pem] [-cipher cipherlist]
+    [-context id] [-crl_check] [-crl_check_all] [-crlf]
+    [-dcert file] [-dcertform der | pem] [-debug]
+    [-dhparam file] [-dkey file] [-dkeyform der | pem]
+    [-dpass arg] [-dtls] [-dtls1] [-dtls1_2] [-groups list] [-HTTP]
+    [-id_prefix arg] [-key keyfile] [-key2 keyfile]
+    [-keyform der | pem] [-keymatexport label]
+    [-keymatexportlen len] [-msg] [-mtu mtu]
+    [-named_curve arg] [-nbio] [-nbio_test] [-no_cache]
+    [-no_dhe] [-no_ecdhe] [-no_ticket] [-no_tls1]
+    [-no_tls1_1] [-no_tls1_2] [-no_tls1_3] [-no_tmp_rsa]
+    [-nocert] [-pass arg] [-quiet] [-servername name]
+    [-servername_fatal] [-serverpref] [-state] [-status]
+    [-status_timeout nsec] [-status_url url]
+    [-status_verbose] [-timeout] [-tls1] [-tls1_1]
+    [-tls1_2] [-tls1_3] [-tlsextdebug] [-use_srtp profiles]
+    [-Verify depth] [-verify depth] [-verify_return_error]
+    [-WWW] [-www]
+
+ -accept port       Port to accept on (default is 4433)
+ -alpn protocols    Set the advertised protocols for the ALPN extension (comma-separated list)
+ -bugs              Turn on SSL bug compatibility
+ -CAfile file       PEM format file of CA certificates
+ -CApath directory  PEM format directory of CA certificates
+ -cert file         Certificate file to use
+                    (default is server.pem)
+ -cert2 file        Certificate file to use for servername
+                    (default is server2.pem)
+ -certform fmt      Certificate format (PEM or DER) PEM default
+ -cipher list       List of ciphers to enable (see `openssl ciphers`)
+ -context id        Set session ID context
+ -crlf              Convert LF from terminal into CRLF
+ -dcert file        Second certificate file to use (usually for DSA)
+ -dcertform fmt     Second certificate format (PEM or DER) PEM default
+ -debug             Print more output
+ -dhparam file      DH parameter file to use, in cert file if not specified
+ -dkey file         Second private key file to use (usually for DSA)
+ -dkeyform fmt      Second key format (PEM or DER) PEM default
+ -dpass arg         Second private key file pass phrase source
+ -dtls              Use any version of DTLS
+ -dtls1             Just use DTLSv1
+ -dtls1_2           Just use DTLSv1.2
+ -groups list       Specify EC groups (colon-separated list)
+ -HTTP              Respond to a 'GET /<path> HTTP/1.0' with file ./<path>
+ -id_prefix arg     Generate SSL/TLS session IDs prefixed by 'arg'
+ -key file          Private Key file to use, in cert file if
+                    not specified (default is server.pem)
+ -key2 file         Private Key file to use for servername, in cert file if
+                    not specified (default is server2.pem)
+ -keyform fmt       Key format (PEM or DER) PEM default
+ -keymatexport label
+                    Export keying material using label
+ -keymatexportlen len
+                    Export len bytes of keying material (default 20)
+ -msg               Show protocol messages
+ -mtu mtu           Set link layer MTU
+ -nbio              Run with non-blocking I/O
+ -nbio_test         Test with the non-blocking test bio
+ -no_cache          Disable session cache
+ -no_comp           Disable SSL/TLS compression
+ -no_dhe            Disable ephemeral DH
+ -no_ecdhe          Disable ephemeral ECDH
+ -no_ticket         Disable use of RFC4507bis session tickets
+ -no_tls1           Just disable TLSv1
+ -no_tls1_1         Just disable TLSv1.1
+ -no_tls1_2         Just disable TLSv1.2
+ -no_tls1_3         Just disable TLSv1.3
+ -nocert            Don't use any certificates (Anon-DH)
+ -pass arg          Private key file pass phrase source
+ -quiet             Inhibit printing of session and certificate information
+ -servername name   Servername for HostName TLS extension
+ -servername_fatal  On mismatch send fatal alert (default warning alert)
+ -serverpref        Use server's cipher preferences
+ -state             Print the SSL states
+ -status            Respond to certificate status requests
+ -status_timeout nsec
+                    Status request responder timeout
+ -status_url url    Status request fallback URL
+ -status_verbose    Enable status request verbose printout
+ -timeout           Enable timeouts
+ -tls1              Just talk TLSv1
+ -tls1_1            Just talk TLSv1.1
+ -tls1_2            Just talk TLSv1.2
+ -tls1_3            Just talk TLSv1.3
+ -tlsextdebug       Hex dump of all TLS extensions received
+ -use_srtp profiles Offer SRTP key management with a colon-separated profile list
+ -Verify depth      Turn on peer certificate verification, must have a cert
+ -verify depth      Turn on peer certificate verification
+ -verify_return_error 
+                    Return verification error
+ -WWW               Respond to a 'GET /<path> HTTP/1.0' with file ./<path>
+ -www               Respond to a 'GET /' with a status page
+

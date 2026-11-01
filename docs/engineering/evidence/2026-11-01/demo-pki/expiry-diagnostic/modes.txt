@@ -1,0 +1,2 @@
+/private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z mode=700 owner=louis:wheel
+/private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z/work mode=700 owner=louis:wheel

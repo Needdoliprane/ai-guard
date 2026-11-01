@@ -32,6 +32,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 walkdir = "2"
 
 [dev-dependencies]
+tokio-rustls = { version = "=0.26.6", default-features = false, features = ["ring", "tls12"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 

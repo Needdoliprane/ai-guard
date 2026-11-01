@@ -1,0 +1,8 @@
+--- /private/tmp/ai-guard-demo-pki-rustls-green-20261101T021116Z/SHA256SUMS.before	2026-11-01 03:11:16
++++ /private/tmp/ai-guard-demo-pki-rustls-green-20261101T021116Z/SHA256SUMS.after-tests	2026-11-01 03:11:37
+@@ -1,4 +1,4 @@
+-dc513f61ee7fb60d6a37d936da5818af2d4101586410d1e89b10b53c830ec37f  Cargo.lock
++94d1d5968189288e002b1fe6ebb32eb04c37804602336d3e6d9d42de006a4641  Cargo.lock
+ 1f305a754a6a47d69b6c15f6a49104ee632d56a4b3bfc43e0732c3b79c642395  Cargo.toml
+ db3b607ccf72b3e27636406390ef994cb10bf39c0ae9f7100261ca8f35067161  docs/demo-pki.md
+ d13306be0ecda81ce779baa290ffb417380d525928477f16200884b5169cca33  rust-toolchain.toml

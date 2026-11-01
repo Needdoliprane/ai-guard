@@ -2,7 +2,13 @@
 
 Ce fichier rassemble les constats datés et leurs limites. Chaque résultat reste attaché au gel, au checkout et à l'environnement nommés ; il ne qualifie pas automatiquement la branche courante, un autre worktree ou la pile QA. Aucun commit initial n'existait au début du chantier ; les fichiers préexistants étaient non suivis et le travail a commencé en place avec périmètres exclusifs. Le30octobre, à la demande du mainteneur, le checkpoint initial `fa75d6ef34ee506a4d5facdc9e50fc515f79cf7b` est poussé sur `origin/main` du dépôt privé configuré, référence distante vérifiée. Secrets, `.env`, caches, bases et volumes restent hors Git ; seules les preuves assainies de documentation sont partagées. Branches et worktrees sont désormais possibles. La copie initiale `/tmp/ai-guard-baseline.KqN9Hi` reste une archive temporaire, pas une release.
 
-## Dernier lot logiciel vérifié — journal et contrats canoniques
+## Dernier lot vérifié — générateur PKI local
+
+Le [générateur de certificats de test](../demo-pki.md) est implémenté en Rust : sortie neuve privée, AC racine/intermédiaire et chaîne serveur, exécutable de confiance revalidé, aucune réparation de l'existant ni modification de confiance/DNS. [Trois fonctions uniques et vraie connexion TLS](evidence/2026-11-01/demo-pki/README.md) passent, ainsi que fmt/Clippy strict. Le test a aligné hors ligne une seule arête du lock, sans nouveau paquet/version. Quatre FAIL de leurs gels restent conservés avec leurs diagnostics ; aucune qualification production/SSO/G11 n'en découle.
+
+163 contenus source concordent ; les tar originaux privés comportent aussi des métadonnées AppleDouble non manifestées. Une copie portable distincte est vérifiée indépendamment :163 membres réguliers, mêmes noms et bytes, sans AppleDouble/PAX/liens, sans réécrire l'historique. Build release et autres plateformes non exécutés pour cet outil. **G09 reste FAIL, D5 ouvert et0/12 gates clos.**
+
+## Lot précédent — journal et contrats canoniques
 
 Le [diagnostic sur copie privée du graphe riche](evidence/2026-11-01/journal-cost/README.md#s7--mesure-sur-copie-privée-du-graphe-riche) passe :31 révisions, aucun moteur ou modèle nouveau, origine sans demande de sync/création, vrai Writer et vrai vérificateur en mémoire. Les temps sont muraux debug, sans exclusivité de charge ni preuve de latence release ou de cause H10. La factorisation canonique V2/V3/V4 conserve contrôles et formats ; trois empreintes publiques observées avant correction sont figées dans les tests.
 

@@ -25,6 +25,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http",
  "uuid",

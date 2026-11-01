@@ -1,0 +1,21 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 50s
+     Running tests/demo_pki.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/demo_pki-43e90b5526f941c3)
+
+running 3 tests
+test invalid_names_and_symlink_output_are_refused_without_overwriting ... ok
+test real_demo_chain_is_private_and_tls_rejects_untrusted_name_and_expiry ... FAILED
+test trusted_executable_revalidates_replacement_and_refuses_links_or_unsafe_modes ... ok
+
+failures:
+
+---- real_demo_chain_is_private_and_tls_rejects_untrusted_name_and_expiry stdout ----
+Error: generation failed
+
+
+failures:
+    real_demo_chain_is_private_and_tls_rejects_untrusted_name_and_expiry
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.53s
+
+error: test failed, to rerun pass `--test demo_pki`

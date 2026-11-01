@@ -1,0 +1,4 @@
+Expected RED observed: selected test compiles and starts, then fails at the first real generation assertion with `Error: generation failed`.
+Selected test: real_demo_chain_is_private_and_tls_rejects_untrusted_name_and_expiry; RC 101; 0 passed, 1 failed, 1 filtered; 0.24 s.
+The stub generation subprocess fails, so the test exits before OpenSSL, local TLS server, or any other external process path.
+Source snapshot and current checkout verify 162/162 files; source archive is private and excludes TMPDIR runtime artifacts.

@@ -1,0 +1,1 @@
+test PKI creation refused: private control directory requires effective-UID ownership and mode 0700; use a new private destination, existing paths are never repaired

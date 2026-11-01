@@ -1,0 +1,12 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 0905112..3320ea0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -25,6 +25,7 @@ dependencies = [
+  "tar",
+  "tempfile",
+  "tokio",
++ "tokio-rustls",
+  "tower",
+  "tower-http",
+  "uuid",

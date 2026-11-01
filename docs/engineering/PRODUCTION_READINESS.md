@@ -1,5 +1,7 @@
 # Gates de qualification production
 
+Le [générateur PKI local](evidence/2026-11-01/demo-pki/README.md) a ses trois tests ciblés, TLS réel et checks statiques PASS. Il fournit des certificats de test ; G11 reste BLOCKED pour les identités/transports et le cycle PKI des déploiements. Aucun gate n'est clos par ce lot.
+
 Complément du1er novembre : [mesures du journal et factorisation canonique](evidence/2026-11-01/journal-cost/README.md#résultats-finaux-du-lot), neuf fonctions uniques et fmt/Clippy strict/release PASS, revue traitée,160 sources et binaires vérifiés. Deux FAIL de caller outbox sont conservés ; seule l'attente du test fonctionnel512 change, aucun délai produit. Le probe avant/après sur31 révisions ne démontre aucun gain de latence, performance CPU release, capacité100 ou cause H10 ; FS exact NOT_RECORDED. Les contrôles et compteurs de durabilité restent inchangés. L'observation passive précédente d'un gardien ne donne ni coût global ni permission de disarm. G09 reste FAIL, D5 ouvert et0/12 gates clos ; aucun résultat ci-dessous n'est élargi.
 
 Les exigences détaillées G01–G12 sont conservées dans le [document racine](../../PRODUCTION_READINESS.md). Ses anciennes affirmations d'implémentation multi-client ont été contredites par l'inventaire du checkout ; elles ne constituent pas des preuves. L'[état courant](CURRENT_STATE.md) et les [résultats exécutés](VALIDATION.md) font autorité sur l'avancement.

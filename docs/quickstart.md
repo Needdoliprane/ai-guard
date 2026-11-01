@@ -24,6 +24,8 @@ Les [parcours d'identité et leur état](sso.md#état-livré-et-parcours-disponi
 
 Le contrôle nécessite Unix. Les plateformes et versions effectivement essayées figurent dans la [validation](engineering/VALIDATION.md). Les ports **127.0.0.1:4000** et **127.0.0.1:8787** doivent être libres. La pile locale n'est pas un déploiement distant avec TLS.
 
+Pour préparer des essais de certificats, le [générateur local de PKI](demo-pki.md) fournit racine, intermédiaire et chaîne serveur avec une commande Rust. Il crée un dossier privé neuf, sans modifier la confiance système ni le DNS. Le démarrage HTTP ci-dessous n'en dépend pas ; générer les fichiers ne configure pas automatiquement HTTPS.
+
 Depuis la racine du checkout, dans le même terminal pour la suite :
 
 ```sh

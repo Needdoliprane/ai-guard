@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 1er novembre — une commande Rust de PKI de test
+
+Le [générateur local](../demo-pki.md) répond au choix du mainteneur sans nouveau service ni dépendance NAS. OpenSSL/LibreSSL est appelé par chemin absolu sous environnement vidé, avec arguments séparés et délais ; son namespace, propriétaire, ACL et identité sont contrôlés avant chaque appel. Sortie exclusive0700 et fichiers0600, clés d'AC conservées privées, aucune installation de confiance/DNS. La table constante de sorties et sa collecte complète portent l'invariant des deux accès positionnels ; une évolution doit conserver cette correspondance.
+
+Le TLS du test utilise Rustls sur une socket loopback retenue, après constat de l'incompatibilité de bind du s_server LibreSSL hôte. `tokio-rustls` reste seulement une dépendance directe de test, déjà transitive/verrouillée ; le lock n'ajoute qu'une arête, pas un composant ou paquet. [Preuves, quatre FAIL, revue et limites](evidence/2026-11-01/demo-pki/README.md). Aucun endpoint HTTPS produit ou cycle PKI de production n'est livré par ce générateur.
+
 ## 1er novembre — Keycloak, PKI de test simple et backend local partagé
 
 Le mainteneur demande davantage de parallélisme, notamment la mise en place et les essais Keycloak pendant le chantier du broker, et confirme que toute occasion utile de déléguer des tâches indépendantes doit être saisie sans nouvelle relance. Cette obligation est inscrite dans [AGENTS.md](../../AGENTS.md), avec périmètres de fichiers, coordination des dépendances et économie des tests. Le profil reste une découverte explicitement activée, isolée des tenants et credentials existants, avec les quatre comptes du [contrat SSO](../sso.md). Le DNS local nécessaire peut être configuré en préservant les entrées existantes ; sur ce Mac, la résolution relève de `/etc/hosts`. Aucun changement de nom de machine n'est nécessaire à ce seul besoin.

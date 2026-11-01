@@ -8,6 +8,9 @@ Lecture du plan : le [cycle broker permanent](#cycle-actif--broker-permanent-et-
 
 ## Point de reprise — raccord permanent du 31 octobre, en cours
 
+- [x] Générateur local PKI en une commande Rust : chaîne neuve, protections de fichiers/programme, refus et TLS réellement testés ; [preuves et limites](evidence/2026-11-01/demo-pki/README.md). Ce lot ne qualifie pas G11 ni le raccord HTTPS des services.
+- [ ] Poursuivre indépendamment le profil Docker/reprise STOP et le raccord identité/SSO ; ni la PKI de test ni le profil Keycloak de découverte ne livrent ces parcours complets.
+
 Base publiée `c4c4d2a7560d31768da08d8ad9335f4f08667344`, travail isolé dans `.worktrees/broker-service`. Service/CLI explicite, IPC, writer, outbox V4, capacités de source/export et gardien natif sont raccordés. Les premiers tests ciblés passent ; la nouvelle verticale n'est pas encore qualifiée sur moteur et aucun cutover du CLI n'est autorisé par ces résultats.
 
 - [x] Compilation all-targets d'un gel intermédiaire sans avertissement ; tests IPC/CLI/writer, ownership de la queue et états/identités du service exécutés. Les échecs de compilation de fixtures sont conservés.
