@@ -104,6 +104,10 @@ Régler `AI_GUARD_LOCAL_AI_IMAGE` sur l'image préparée et `AI_GUARD_LOCAL_AI_M
 
 ## Diagnostiquer et exploiter
 
+Examiner `jev.error` et, lorsqu'il existe, `jev.diagnostic` dans la décision ou son contenu d'audit autorisé. Ce diagnostic décrit la phase `send`/`response_body` de l'endpoint configuré, une catégorie fermée et un statut HTTP observé. Un502 de relais ne prouve pas le statut initial du modèle. Ce diagnostic ne contient ni corps amont, URL, header ou credential ; la configuration de transport préexistante reste inchangée ; l'absence de diagnostic ne signifie pas une évaluation réussie. Voir le [contrat API](../../api.md#diagnostic-de-transport-jev--jev-transport-diagnostics).
+
+L'adaptateur local demande au maximum256tokens de sortie, température0, sans streaming et formatJSON ; `--predict` reste le défaut serveur pour les appels sans limite explicite. Le fingerprint comprend ces paramètres fixes et le hash du prompt système. Un masque de secret qui modifierait le prompt fixe ou la structure JSON provoque `invalid_configuration` avant POST ; le contenu utilisateur reste masquable. Ces diagnostics ne changent ni délai5s, ni règles de retry/repli et ne qualifient pas le jugement du modèle. Préserver l'échec initial et diagnostiquer avant un nouvel essai explicite.
+
 - **Image absente ou échec poids/construction :** préparer l'image exacte. Un checksum incorrect doit rester un refus.
 - **OOM ou serveur non sain :** examiner état et limites mémoire ; réduire contexte/sortie/concurrence ou choisir un modèle plus petit. Augmenter la RAM est un choix explicite.
 - **Protocole incompatible :** choisir adaptateur/modèle compatible ; aucun repli silencieux vers un fournisseur cloud.

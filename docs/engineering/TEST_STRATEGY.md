@@ -1,5 +1,11 @@
 # Stratégie de qualification
 
+## Diagnostic Jev — ciblage et absence d'appel modèle
+
+`cargo test --locked --test jev_diagnostics` exécute dix intégrations contrôlées TCP loopback/SQLite ; l'unité exacte `jev::local::tests::final_local_checkpoint_rejects_late_masks_of_the_whole_fixed_frame_without_connecting` couvre les masques introduits après construction. Deux attentes testent le vrai budget5s, sans le modifier. Canaris retenus : `jev_contract`, `jev_backends`, `jev_store_redaction`, `decision_idempotence`, soit13 fonctions existantes ; fmt/Clippy strict complètent ce périmètre. Les24 fonctions passent sur le gel composé documenté, sans rejouer humains/navigateur ni appeler un modèle/fournisseur. [Résultats et limites](VALIDATION.md#1er-novembre--diagnostic-jev-fermé-et-trame-locale).
+
+Les réponses des serveurs de test vérifient protocole et refus du produit ; elles ne qualifient pas TypeSafe ou le jugement Qwen. Toute nouvelle génération réelle relève d'un essai explicite distinct, avec ses limites et preuves. Le FAIL_MODEL antérieur ne devient pas PASS parce que les diagnostics natifs passent.
+
 ## Accès humain local — ciblage du 1er novembre
 
 Les cibles Rust pertinentes sont `api::human_state::tests`, `human_access`, `human_access_migration`, `human_cli` et `human_redaction`. Elles utilisent de vrais fichiers/SQLite/routeurs et sous-processus CLI avec entrées de test explicites. `human_access` inclut70batches SSE : réponse66 perdue/rejouée, snapshot drainé, deux nouvelles arrivées et73 reçus comparés à l'audit durable. Cette couverture est distincte de la pagination REST72pages et de la recette Docker3workers.

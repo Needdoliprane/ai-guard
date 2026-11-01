@@ -551,6 +551,9 @@ async fn fresh_policy(s: &GatewayState, request: &DecisionRequest) -> (Decision,
                 };
                 jev = client.metadata("unavailable_or_invalid");
                 jev["error"] = json!(failure);
+                if let Some(diagnostic) = failure.diagnostic() {
+                    jev["diagnostic"] = json!(diagnostic);
+                }
             }
         }
     }

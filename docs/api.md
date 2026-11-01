@@ -87,6 +87,14 @@ Le transport TypeSafe valide les doublons de champs décisionnels/score/usage av
 
 L'ingestion `POST /api/events` (et son alias `/api/v1/events`) refuse avec `403` les racines `security.decision`, `control`, `worker` et `usage.allocation`, ainsi que leurs descendants séparés par un point. Les décisions centrales sont produites par `/decide` ; un événement fourni par le runner ne peut créer une autorisation en cache. Les déclarations fournisseurs telles que `usage.reported` restent admises. Ce contrôle s'applique aux nouvelles ingestions : il ne permet pas d'authentifier rétroactivement un événement usurpé dans une ancienne base. L'historique n'est ni supprimé ni réécrit automatiquement ; une future admission d'exécution ne doit pas convertir ces anciens événements en droits de lancement.
 
+## Diagnostic de transport Jev / Jev transport diagnostics
+
+Le champ historique `jev.error` reste inchangé. Certains refus `transport_unavailable` ajoutent `jev.diagnostic` : `hop:"configured_endpoint"`, `phase:"send"|"response_body"`, `kind:"timeout"|"connection_error"|"http_status"|"transport_error"` et, si observé, `http_status`. Aucun corps, URL, header ou erreur reqwest brute n'y est conservé. Un502 reçu d'un relais décrit ce relais, pas nécessairement le statut ou la cause du modèle derrière lui. L'absence de diagnostic n'autorise aucune conclusion de succès.
+
+The legacy error code is preserved. Optional diagnostics report only the configured endpoint's observed failure phase/category/status, without upstream bodies or secret-bearing details. They do not establish a model's hidden cause, successful evaluation, or resource usage. Existing decision replays retain their original metadata; they are not diagnosed again.
+
+Pour le backend local, configuration/fingerprint incluent les paramètres fixes effectivement envoyés (256tokens maximum, température0, sans streaming, formatJSON) et le hash du prompt. Une collision de masque avec une clé/rôle/prompt/paramètre fixe refuse avec `invalid_configuration` avant POST. Les données utilisateur restent masquées normalement. Délais5s/connexion2s, absence de retry/repli et plafond consultatif Review restent inchangés. For an admitted local call, the fixed-frame mask check keeps the recorded prompt hash consistent with the sent prompt; it never disables redaction to obtain a response.
+
 ## Demande de décision
 
 ```json

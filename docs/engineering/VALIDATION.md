@@ -1,5 +1,15 @@
 # Validation courante
 
+## 1er novembre — diagnostic Jev fermé et trame locale
+
+Lot distinct après66c1bcd, six fichiers de code/tests : erreurs publiques `JevError`/downcast et code JSON historique conservés ; observation privée par requête, ajout optionnel `jev.diagnostic` au seul raccord de trois lignes de `fresh_policy`. Hop endpoint configuré, phase/catégorie/statut fermés, aucun corps/URL/header/erreur reqwest persisté dans ce diagnostic, configuration de transport préexistante inchangée. Un statut de relais n'est pas une preuve de cause du modèle. Aucun délai, retry, prompt, décision ou relais modifié ; paramètres fixes et hash du prompt rendent la configuration locale explicite.
+
+RevueR1 : P2 de provenance, une clé fictive `only` ou `role` peut masquer le prompt ou une clé JSON après calcul du hash. CorrectionR2 relue : builder unique, comparaison de la trame fixe complète avec content utilisateur vide contre le masque effectif juste avant POST ; collision → InvalidConfiguration sans connexion. Le state utilisateur reste normalement masqué. Quatre oracles supplémentaires distinguent refus fixe, union appelant/Store, positif state masqué et dix masques tardifs au chemin direct. Les archives/revuesR1 sont conservées ; aucune cause du live précédent n'est déduite.
+
+**Luna, gel composé66c1bcd+R2 — PASS :** fmt6,97s ; unité exacte1/1 (254 filtrés) ; `jev_diagnostics`10/10,10,49s de tests dont deux délais5s réels ; canaris `decision_idempotence`9, `jev_backends`1, `jev_contract`2, `jev_store_redaction`1 ; Clippy strict `--locked --offline --all-targets -- -D warnings`102,58s. Total24 fonctions exécutées dans cette portée, pas24 appels fournisseur.213 sources Rust, six candidats, Cargo3, front9, six fixtures statiques et runner inchangés avant/après. Capture privée `ai-guard-primary-cargo.RGMWbS/jev-diagnostics-run-66c1bcd-20261101/RESULT.md`, donneur/revues sous `ai-guard-jev-diagnostics-20261101.gskj4Q/candidate2`.
+
+Vrais TCP loopback/SQLite pour les tests, aucune nouvelle génération ni requête fournisseur/IdP/runtime. Release/image de ce complément NOT_RUN. Le précédent modèle reste FAIL_MODEL et sa cause fine reste inconnue ; ni service TypeSafe réel, ni disponibilité/qualité du modèle, ni cloud ne sont qualifiés. G09 FAIL et aucun gate clos.
+
 ## 1er novembre — accès humain local, API/CLI et dashboard
 
 Composition sur022c4e1,212 sources Rust et Cargo/runner/six fixtures statiques capturés. Authentification locale nominative distincte des clés techniques, résolution des tenants depuis les bindings durables, contextes personnels/administratifs et grants explicites. Projection metadata sans contenu/position/révision globale ; contenu/export exigent leurs droits, reçu nominatif durable avant chaque lot. Provisioning offline prépare les fichiers privés avant transaction et reprend les mêmes opérations. Migration4→5 explicite avec backup/head/marker, aucune réactivation de supervision ni attribution historique automatique.

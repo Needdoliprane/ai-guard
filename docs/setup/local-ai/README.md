@@ -104,6 +104,10 @@ Set `AI_GUARD_LOCAL_AI_IMAGE` to that prepared image and `AI_GUARD_LOCAL_AI_MODE
 
 ## Diagnose and operate
 
+Inspect `jev.error` and, when present, `jev.diagnostic` in the decision response or its authorized audit content. The diagnostic identifies the configured endpoint's `send`/`response_body` phase, a closed failure category and an observed HTTP status. A relay502 does not establish the model's original status. The diagnostic contains no upstream error body, URL, header or credential; existing transport configuration metadata is unchanged; an absent diagnostic is not a successful model result. See the [API contract](../../api.md#diagnostic-de-transport-jev--jev-transport-diagnostics).
+
+The local adapter requests at most256 output tokens, temperature0, no streaming and JSON output; the server's `--predict` value remains its default for callers that do not set a request limit. The configuration fingerprint includes these fixed parameters and the system prompt hash. If a configured secret mask would alter the fixed prompt or JSON structure, the call fails as `invalid_configuration` before POST. User content remains maskable. These diagnostics do not change the five-second timeout, authorize retries/fallbacks or qualify model accuracy. Preserve the original failed request and investigate before a new explicit attempt.
+
 - **Missing image or weight/build failure:** prepare the exact image first. A checksum mismatch is a refusal, not permission to skip integrity checks.
 - **OOM or unhealthy server:** inspect the service state and memory limits, lower context/output/concurrency, or choose a smaller model. Raising memory is an explicit operator choice.
 - **Unsupported protocol:** choose a compatible adapter/model; do not silently call a cloud provider.

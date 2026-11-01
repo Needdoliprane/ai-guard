@@ -1,5 +1,9 @@
 # Décisions d'industrialisation
 
+## 1er novembre — diagnostic Jev compatible et masque effectif
+
+Conserver le code d'erreur public et le downcast Rust existants ; transporter les observations dans un échec interne possédé par la requête, jamais dans un dernier résultat mutable partagé. L'API ajoute seulement un diagnostic fermé optionnel, limité à l'endpoint configuré. Aucune observation de relais ne devient une preuve du modèle ; corps et détails de transport restent exclus. La configuration décrit les paramètres fixes et le prompt réellement admis : un builder commun et un contrôle du masque sur toute la trame fixe avant POST refusent les collisions, sans retirer les masques utilisateur. Pas de nouvelle dépendance, migration, service, retry ou délai augmenté.
+
 ## 1er novembre — protocole durable des lectures humaines
 
 Le vocabulaire `control.identity.access` reçoit un schéma5 explicite et le marqueur unique `control.identity.human_access.genesis`, lié au namespace, au genesis identité4 et à la tête précédente. Le SQL ne change pas ; les anciennes versions refusent5. Migration4→5 avec backup/head contrôlés, aucun downgrade ni démarrage automatique. Le défaut CLI de migration reste2 ; les opérations humaines offline conservent4 ou5 pour le vocabulaire de mutation inchangé, tandis que la lecture humaine auditée exige5.
