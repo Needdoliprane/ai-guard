@@ -1,5 +1,9 @@
 # Validation courante
 
+## 1er novembre — statuts documentaires Keycloak et inférence locale
+
+Le tableau de [sso.md](../sso.md) distingue désormais les Dockerfiles/Compose, exemples et guides EN/FR distribués des raccordements applicatifs OIDC et inférence interne encore absents. L'image Qwen construite et conservée localement n'est pas annoncée publiée. Relecture indépendante ciblée et contrôle des liens relatifs/diff ; aucun code, service, credential ou test runtime modifié par cette correction. Les preuves historiques et les gates restent inchangés.
+
 ## 1er novembre — préserver l'authentification d'un rôle gardien existant
 
 **RED réel**, `/private/tmp/ai-guard-recovery-auth-red-20261101T060000Z/` : `cargo test --locked --offline --lib recovery_auth_ -- --test-threads=1` exécute trois fonctions,1 PASS/2 FAIL attendus en0,05s,167 filtrées. Le négatif auth possède une vraie Directory0700 et une vraie RoleLease flock retenue ; absence d'auth/endpoint et seconde acquisition Conflict sont vérifiées avant l'appel public. Le code crée pourtant auth avant le refus de lease : l'assertion « recovery must not mint authentication » échoue. Le spawn est situé après cette acquisition, donc aucun child n'est créé par ce négatif. Le positif de bootstrap/lecture sans réécriture passe. Le second RED constate le protocole2 manquant sur le vrai challenge Unix, après horloge et admission fermée vérifiées ; la tâche est annulée et jointe avant l'oracle. Aucun type futur inexistant ou erreur de compilation n'est compté comme reproduction.

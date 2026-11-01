@@ -2,7 +2,7 @@
 
 Décisions du mainteneur, 31 octobre 2026. **Contrat produit canonique, cible à implémenter et qualifier.** Il fixe l'identité individuelle, les axes de configuration, le SSO, l'inférence interne et la découverte ; [AGENTS.md](../AGENTS.md) et le [contrat d'architecture](engineering/ARCHITECTURE_CONTRACT.md) en conservent les invariants. Les exigences de vues sont dans [ui.md](ui.md#vues-utilisateur-et-administration-unifiée--cible-à-livrer), les lots dans le [plan](engineering/IMPLEMENTATION_PLAN.md) et les preuves attendues dans la [stratégie de tests](engineering/TEST_STRATEGY.md#identité-individuelle-sso-et-découverte--à-qualifier).
 
-Le [quick start existant](quickstart.md) documente le parcours actuel avec clés `runner`/`viewer`. Il ne livre pas une authentification locale nominative, une connexion OIDC ou l'administration humaine décrites ici. Aucun profil Keycloak ni profil d'inférence interne qualifié n'est annoncé disponible. Les preuves datées dans [VALIDATION.md](engineering/VALIDATION.md) gardent leur périmètre ; cette spécification ne les étend pas.
+Le [quick start existant](quickstart.md) documente le parcours actuel avec clés `runner`/`viewer`. Il ne livre pas une authentification locale nominative, une connexion OIDC ou l'administration humaine décrites ici. Les configurations locales Keycloak et Qwen sont distribuées avec leurs guides [anglais](setup/README.md) et [français](setup/README.fr.md) ; elles ne livrent pas à elles seules leur raccordement au produit. Les preuves datées dans [VALIDATION.md](engineering/VALIDATION.md) gardent leur périmètre ; cette spécification ne les étend pas.
 
 ## État livré et parcours disponibles
 
@@ -11,8 +11,10 @@ Le [quick start existant](quickstart.md) documente le parcours actuel avec clés
 | Clés locales `runner` / `viewer` | Présentes : le contrôle Rust associe chaque clé à un tenant et un rôle. Ces clés ne prouvent pas l'identité d'une personne. |
 | Authentification locale nominative hors ligne | **ABSENTE / NOT_RUN** ; les clés statiques ne clôturent pas cette exigence. |
 | Connexion OIDC du dashboard et du CLI, PKCE et autorisation humaine | **ABSENTE / NOT_RUN** ; aucun login SSO ni format de configuration OIDC utilisable n'est livré. |
-| Profil Keycloak préconfiguré et raccordement entreprise exécutable | **ABSENTS / NOT_RUN** ; les procédures ci-dessous décrivent la cible, sans commande d'activation disponible. |
-| Profil administré d'inférence interne | **À implémenter / NOT_RUN** ; les essais API fournisseurs ne qualifient pas ce profil. |
+| Profil Keycloak préconfiguré | **Configuration distribuée, qualification partielle** : Dockerfile épinglé, realm et Compose isolé dans [`deploy/keycloak-demo/`](../deploy/keycloak-demo/README.md), exemples `.env` et commandes dans les guides [EN](setup/keycloak/README.md) / [FR](setup/keycloak/README.fr.md). Le contrôle de configuration Compose ne qualifie pas le login Web/CLI ai-guard. |
+| Raccordement OIDC entreprise exécutable | **ABSENT / NOT_RUN** ; le profil de fournisseur local ne remplace pas le connecteur, les memberships ni les permissions côté Rust. |
+| Backend local d'inférence | **Configuration et Dockerfile distribués, build ARM64 vérifié** : [`deploy/local-ai/`](../deploy/local-ai/README.md) et guides [EN](setup/local-ai/README.md) / [FR](setup/local-ai/README.fr.md). L'image de ce build avec poids vérifiés est conservée localement, sans publication d'image ni nouveau lancement modèle dans cette preuve. |
+| Profil administré d'inférence interne dans ai-guard | **À implémenter / NOT_RUN** ; ni le backend disponible ni les essais API fournisseurs ne qualifient son adaptation aux clients et à la politique entreprise. |
 
 Le fonctionnement actuel est vérifiable dans [l'authentification Rust](../src/api/auth.rs), le [registre de tenants](../src/gateway_config.rs) et le [client du dashboard](../front/src/api.ts). `init` avec `--config-dir` prépare les clés locales ; la saisie **Jeton de lecture** utilise la clé `viewer`. Les commandes exactes, chemins privés et diagnostics restent ceux du [quick start](quickstart.md). Ni cette initialisation ni les commandes `providers init` et `providers status`, réservées à Codex/Claude, ne configurent le SSO ai-guard. La [déclinaison technique OIDC/PKCE](engineering/SSO_OIDC.md) précise les contrats et écarts ; elle ne fournit pas une configuration déjà acceptée par le programme.
 
@@ -94,7 +96,7 @@ La résolution du profil est versionnée et liée à l'autorisation : URL, modè
 
 ## Profil Keycloak de découverte
 
-Fournir un profil Compose explicitement activé, avec version de Keycloak épinglée et configuration de realm importée automatiquement. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le nom des fichiers, les ports et les commandes seront fixés par l'implémentation vérifiée ; aucun exemple de nom donné en conversation n'est un contrat existant.
+Le [profil distribué](../deploy/keycloak-demo/README.md) fournit un Compose explicitement activé, une version de Keycloak épinglée et l'import du realm initial. Les guides [anglais](setup/keycloak/README.md) et [français](setup/keycloak/README.fr.md) fixent ses fichiers, ports, commandes et contraintes de reprise. Keycloak est un service tiers de démonstration, sans ajout de logique métier ai-guard dans un autre langage. Le parcours applicatif d'acceptation ci-dessous reste à implémenter et qualifier ; les comptes et clients du realm ne constituent pas des identités autorisées par le contrôle ai-guard.
 
 | Compte préconfiguré | Identifiants publics de démonstration | Usage |
 |---|---|---|
@@ -111,7 +113,7 @@ La recette réelle devra démontrer l'interopérabilité et faciliter l'évaluat
 
 ## Raccorder le SSO de l'entreprise
 
-**Procédure cible — ABSENTE / NOT_RUN.** Ce parcours utilise le fournisseur approuvé de l'opérateur, sans comptes publics de démonstration ni import implicite d'un realm existant. Il reste distinct du profil de découverte :
+**Raccordement applicatif — ABSENT / NOT_RUN.** Les guides d'installation [anglais](setup/keycloak/README.md) et [français](setup/keycloak/README.fr.md) sont distribués ; le connecteur produit décrit ici reste à implémenter et qualifier. Ce parcours utilise le fournisseur approuvé de l'opérateur, sans comptes publics de démonstration ni import implicite d'un realm existant. Il reste distinct du profil de découverte :
 
 1. Renseigner la [fiche opérateur](engineering/SSO_OIDC.md#fiche-opérateur-keycloak-à-renseigner) : issuer exact, clients publics Web/CLI, redirections et origines exactes, audience/profil d'access token, clés de confiance, durées et politique de révocation. Cette fiche n'est pas un format de configuration du programme actuel.
 2. Préparer les appartenances et permissions côté contrôle Rust, puis vérifier la connexion Web/CLI et les refus avec deux tenants. Un rôle d'administration du fournisseur n'accorde aucun privilège ai-guard implicite.
