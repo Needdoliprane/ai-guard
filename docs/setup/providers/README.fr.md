@@ -113,7 +113,7 @@ Créer un **nouveau** fichier privé `<config-dir>/providers-subscriptions.json`
 }
 ```
 
-Garder aussi cette configuration en `0600`. Les références relatives partent de son parent, pas du projet ou du répertoire courant. Utiliser des chemins ordinaires sans lien ni traversée. Examiner explicitement ce fichier, puis lancer la session abonnement souhaitée :
+Garder aussi cette configuration en `0600`. Les références relatives partent de son parent, pas du projet ou du répertoire courant. Utiliser des chemins ordinaires sans lien ni traversée. Le nom canonique de la source Claude est `claude_oauth_env_file` ; l'ancienne graphie `claude_o_auth_env_file` reste acceptée et le chargement ne réécrit pas le fichier. Les anciens binaires peuvent refuser un fichier écrit avec le nom canonique. Examiner explicitement ce fichier, puis lancer la session abonnement souhaitée :
 
 ```sh
 "$AIGUARD_BIN" providers status --config-dir "$AIGUARD_CONFIG" --providers-file "$AIGUARD_CONFIG/providers-subscriptions.json" --json

@@ -113,7 +113,7 @@ Create a **new** private `<config-dir>/providers-subscriptions.json`, leaving ex
 }
 ```
 
-Keep the configuration `0600` as well. Relative references resolve against its parent, not the project or working directory. Use normal file paths without links or traversal. Inspect this selected file explicitly, then start the desired subscription session:
+Keep the configuration `0600` as well. Relative references resolve against its parent, not the project or working directory. Use normal file paths without links or traversal. The canonical Claude source name is `claude_oauth_env_file`; the previous spelling `claude_o_auth_env_file` remains accepted, and loading a configuration does not rewrite its file. Older binaries may reject files written with the canonical name. Inspect this selected file explicitly, then start the desired subscription session:
 
 ```sh
 "$AIGUARD_BIN" providers status --config-dir "$AIGUARD_CONFIG" --providers-file "$AIGUARD_CONFIG/providers-subscriptions.json" --json

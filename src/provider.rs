@@ -91,6 +91,7 @@ pub enum CredentialSourceV1 {
     CodexAuthFile {
         path: PathBuf,
     },
+    #[serde(rename = "claude_oauth_env_file", alias = "claude_o_auth_env_file")]
     ClaudeOAuthEnvFile {
         path: PathBuf,
     },

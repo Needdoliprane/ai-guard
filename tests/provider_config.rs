@@ -64,6 +64,48 @@ fn selection(client: Option<ClientKind>, auth_mode: AuthPreference) -> ProviderS
 }
 
 #[test]
+fn claude_oauth_source_accepts_documented_and_legacy_names_without_rewriting() {
+    let documented = serde_json::json!({
+        "kind": "claude_oauth_env_file", "path": "/not-opened/claude.env"
+    });
+    let legacy = serde_json::json!({
+        "kind": "claude_o_auth_env_file", "path": "/not-opened/claude.env"
+    });
+    let parsed: CredentialSourceV1 = serde_json::from_value(documented.clone())
+        .expect("the documented subscription credential name must be accepted");
+    let previous: CredentialSourceV1 = serde_json::from_value(legacy)
+        .expect("existing generated configurations must remain readable");
+    assert_eq!(parsed, previous);
+    assert_eq!(serde_json::to_value(parsed).unwrap(), documented);
+    let root = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let path = root.path().join("providers.json");
+    let legacy_config = serde_json::json!({
+        "version": 1,
+        "profiles": [{
+            "id": "claude-subscription", "revision": 1,
+            "client": "claude_code", "auth_mode": "subscription",
+            "credential": {"kind": "claude_o_auth_env_file", "path": "/not-opened/claude.env"}
+        }]
+    })
+    .to_string();
+    private(&path, &legacy_config);
+    let loaded =
+        load_config(&path).expect("legacy source should load without accessing its credential");
+    assert_eq!(loaded.profiles[0].credential, previous);
+    assert_eq!(fs::read_to_string(&path).unwrap(), legacy_config);
+    assert!(
+        serde_json::from_value::<CredentialSourceV1>(serde_json::json!({
+            "kind": "claude_oauth_env_file", "path": "/not-opened/claude.env", "unknown": true
+        }))
+        .is_err(),
+        "accepting the documented name must preserve the closed schema"
+    );
+}
+
+#[test]
 fn all_eight_combinations_prepare_one_private_handoff_without_other_keys() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
