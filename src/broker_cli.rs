@@ -5,6 +5,8 @@ use agentsandbox::{
     },
     control_fs::{PrivateFile, absolute_path},
     provider::AuthPreference,
+    redaction::Redactor,
+    runner::AuditClient,
 };
 use anyhow::{Result, anyhow, ensure};
 use clap::{Args, Subcommand};
@@ -19,6 +21,13 @@ pub struct BrokerArgs {
 
 #[derive(Subcommand)]
 enum BrokerCommand {
+    /// Read authenticated control metadata without starting or activating a broker.
+    ControlInfo {
+        #[arg(long)]
+        gateway: String,
+        #[arg(long)]
+        token_file: PathBuf,
+    },
     /// Run the explicitly configured trusted local broker in the foreground.
     Serve {
         #[arg(long)]
@@ -116,6 +125,37 @@ fn command_id(value: Option<Uuid>) -> Result<Uuid> {
     Ok(value)
 }
 
+async fn control_info(gateway: String, token_file: PathBuf) -> Result<()> {
+    let file = PrivateFile::open(&token_file, 4096)
+        .map_err(|_| anyhow!("private control credential file is unavailable or unsafe"))?;
+    let credential = std::str::from_utf8(file.bytes())
+        .map_err(|_| anyhow!("invalid control credential file"))?
+        .trim();
+    file.revalidate()
+        .map_err(|_| anyhow!("control credential file changed"))?;
+    let client = AuditClient::new(&gateway, credential)
+        .map_err(|_| anyhow!("control gateway origin or credential is invalid"))?;
+    let protocol = client.supervision_identity().await?;
+    file.revalidate()
+        .map_err(|_| anyhow!("control credential file changed"))?;
+    let value = serde_json::to_value(&protocol)
+        .map_err(|_| anyhow!("control identity cannot be rendered"))?;
+    ensure!(
+        Redactor::new(vec![credential.into()]).value(&value) == value,
+        "control identity contains sensitive data and cannot be displayed"
+    );
+    let rendered = serde_json::to_string_pretty(&protocol)
+        .map_err(|_| anyhow!("control identity cannot be rendered"))?;
+    // Redactor's literal dictionary excludes credentials shorter than four
+    // bytes; the final output must not expose those credentials either.
+    ensure!(
+        !rendered.contains(credential),
+        "control identity contains sensitive data and cannot be displayed"
+    );
+    println!("{rendered}");
+    Ok(())
+}
+
 async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()> {
     let file = PrivateFile::open(&connection.token_file, 4096)
         .map_err(|_| anyhow!("private broker credential file is unavailable or unsafe"))?;
@@ -155,6 +195,10 @@ async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()
 
 pub async fn execute(args: BrokerArgs) -> Result<()> {
     match args.command {
+        BrokerCommand::ControlInfo {
+            gateway,
+            token_file,
+        } => control_info(gateway, token_file).await,
         BrokerCommand::Serve { config } => service::serve(&config).await,
         BrokerCommand::Submit(args) => {
             let operation_id = args.operation_id.unwrap_or_else(Uuid::new_v4);

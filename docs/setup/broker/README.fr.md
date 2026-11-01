@@ -31,7 +31,17 @@ Le fonctionnement rootless est l'exigence normale. `allow_rootful_runtime: true`
 
 Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version: 3` et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
 
-Obtenir les vrais tenant et namespace par une intégration authentifiée du contrôle exploitée dans le périmètre de confiance. Ne pas deviner le namespace, recopier un UUID de test, choisir un autre tenant dans le registre ou coller un runner dans le dashboard. Le `runner_token_file` configuré sert à la réconciliation autonome du broker ; il ne remplace pas l'authentification d'une requête client. Le `--token-file` du client désigne le credential présenté pour cette requête.
+Lire les vrais tenant, namespace, rôle et état de supervision avant de rédiger le registre. Remplacer le binaire, l'origine et le chemin de credential privé par les valeurs de l'installation :
+
+```sh
+"/absolute/path/to/agentsandbox" broker control-info \
+  --gateway "http://127.0.0.1:8787" \
+  --token-file "/absolute/private/ai-guard/credentials/runner"
+```
+
+Cette lecture ne nécessite ni registre ni broker démarré. Elle affiche les métadonnées validées du contrôle en JSON, dont `schema_version`, `active` et les `protocols` disponibles. Un succès confirme une lecture authentifiée des métadonnées ; vérifier séparément les prérequis de contrôle actif ci-dessus. Un credential viewer peut lire les métadonnées de son tenant avec le rôle `viewer`, tandis que le broker exige `runner`. Le schéma2 possède déjà un namespace et est annoncé inactif. Authentification, fichier de credential non sûr et réponse incompatible/indisponible produisent un code non nul ; le credential n'est jamais affiché. Si une métadonnée contient ce credential, la commande refuse la sortie au lieu de réécrire l'identité.
+
+Ne pas deviner le namespace, recopier un UUID de test, choisir un autre tenant dans le registre ou coller un runner dans le dashboard. Le `runner_token_file` configuré sert à la réconciliation autonome du broker ; il ne remplace pas l'authentification d'une requête client. Le `--token-file` du client désigne le credential présenté pour cette requête.
 
 Les fichiers Compose locaux standards démarrent le contrôle schéma2. `/healthz` établit seulement la disponibilité du service. Ni une stack saine ni `init` n'établissent le protocole schéma3 ou une autorité d'exécution fraîche. Le [bootstrap exclusif existant pour des bases de contrôle supervisé neuves](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) utilise l'option gateway `--initialize-supervised-stores BACKUP_ROOT`, avec destinations de bases absentes, sauvegardes privées vérifiées et fichiers de credentials existants. Il doit être intégré au déploiement conteneurisé du contrôle par l'opérateur ; ce guide broker ne fournit pas de profil Compose schéma3.
 

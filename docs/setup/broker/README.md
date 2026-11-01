@@ -31,7 +31,17 @@ Rootless operation is the normal requirement. `allow_rootful_runtime: true` is a
 
 Every request authenticates its **presented** credential afresh against `GET /api/v1/control/protocol`. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version: 3` and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
 
-Obtain the real tenant and namespace through an authenticated control integration operated in the trusted environment. Do not guess the namespace, copy a test UUID, choose another tenant in the registry, or paste a runner into the dashboard. The configured `runner_token_file` serves the broker's autonomous reconciliation; it does not replace authentication of a client request. The client `--token-file` identifies the credential presented for that request.
+Read the real tenant, namespace, role and supervision state before writing the registry. Replace the binary, origin and private credential path with your installation values:
+
+```sh
+"/absolute/path/to/agentsandbox" broker control-info \
+  --gateway "http://127.0.0.1:8787" \
+  --token-file "/absolute/private/ai-guard/credentials/runner"
+```
+
+This read needs neither a broker registry nor a running broker. It prints the validated control metadata as JSON, including `schema_version`, `active` and available `protocols`. A successful exit confirms an authenticated metadata read; check the active-control requirements above separately. A viewer credential can read its own tenant metadata with role `viewer`, while the broker requires `runner`. Schema2 already has a namespace and is reported inactive. Authentication, unsafe credential files and incompatible/unavailable responses fail with a nonzero exit; the credential is never printed. If a metadata value contains that credential, the command refuses output instead of rewriting the identity.
+
+Do not guess the namespace, copy a test UUID, choose another tenant in the registry, or paste a runner into the dashboard. The configured `runner_token_file` serves the broker's autonomous reconciliation; it does not replace authentication of a client request. The client `--token-file` identifies the credential presented for that request.
 
 The standard local Compose files start schema2 control. `/healthz` only establishes service availability. Neither a healthy stack nor `init` establishes the schema3 protocol or fresh execution authority. The existing [exclusive bootstrap for new supervised control stores](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) uses the gateway option `--initialize-supervised-stores BACKUP_ROOT`, with absent database destinations, private verified backups and the existing credential files. It must be integrated into the operator's containerized control deployment; this broker guide does not supply a schema3 Compose profile.
 
