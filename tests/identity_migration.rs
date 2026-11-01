@@ -932,6 +932,20 @@ fn migration_preserves_consumed_legacy_start_claim_and_inactive_supervision() {
             .is_err()
     );
     assert!(store.integrity().unwrap().valid);
+    store
+        .migrate_human_access_v5(&files.path().join("before-v5.sqlite"))
+        .unwrap();
+    assert_eq!(store.supervision_state().unwrap().schema_version, 5);
+    assert!(!store.supervision_state().unwrap().active);
+    assert_eq!(
+        store.mutate_worker(&claim).unwrap().disposition,
+        Some(ClaimDispositionV1::AlreadyConsumed)
+    );
+    assert_eq!(
+        serde_json::to_value(store.worker(&worker.worker_id).unwrap()).unwrap(),
+        before
+    );
+    assert!(store.integrity().unwrap().valid);
     drop(store);
     let reopened = Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap();
     assert_eq!(
@@ -1030,7 +1044,7 @@ async fn schema_four_protocol_preserves_legacy_roles_and_rejects_unknown_capabil
             [SupervisionProtocolV1::BrokerSupervisionV1]
         );
         protocol.validate().unwrap();
-        protocol.schema_version = 5;
+        protocol.schema_version = 6;
         assert!(protocol.validate().is_err());
         protocol.schema_version = 4;
         protocol.protocols.clear();

@@ -88,7 +88,7 @@ async fn reserve(
         )
     } else {
         let state = tenant.store.supervision_state().map_err(control_error)?;
-        if !matches!(state.schema_version, 3 | 4) {
+        if ![3, 4, 5].contains(&state.schema_version) {
             return Err(control_error(ControlFailure::MigrationRequired.into()));
         }
         if !state.active {

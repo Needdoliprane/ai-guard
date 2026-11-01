@@ -19,8 +19,10 @@ use std::{
 };
 
 mod control;
+mod human;
 mod identity;
 pub(crate) use control::expected_worker_transition;
+pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
 
@@ -218,7 +220,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        [1, 2, 3, 4].contains(&version) || (allow_legacy && version == 0),
+        [1, 2, 3, 4, 5].contains(&version) || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
@@ -241,12 +243,12 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     }
     let automatic = AUTO_INDEX_COUNTS
         .iter()
-        .chain(if matches!(version, 3 | 4) {
+        .chain(if [3, 4, 5].contains(&version) {
             control::supervision::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if version == 4 {
+        .chain(if [4, 5].contains(&version) {
             identity::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
@@ -286,12 +288,12 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             } else {
                 [].iter()
             })
-            .chain(if matches!(version, 3 | 4) {
+            .chain(if [3, 4, 5].contains(&version) {
                 control::supervision::SCHEMA.iter()
             } else {
                 [].iter()
             })
-            .chain(if version == 4 {
+            .chain(if [4, 5].contains(&version) {
                 identity::SCHEMA.iter()
             } else {
                 [].iter()
@@ -331,12 +333,12 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         } else {
             [].iter()
         })
-        .chain(if matches!(version, 3 | 4) {
+        .chain(if [3, 4, 5].contains(&version) {
             control::supervision::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if version == 4 {
+        .chain(if [4, 5].contains(&version) {
             identity::SCHEMA.iter()
         } else {
             [].iter()
@@ -362,6 +364,9 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                     && sql.is_none()),
             "internal audit schema index is missing"
         );
+    }
+    if [4, 5].contains(&version) {
+        identity::validate_human_access_capability(db, version)?;
     }
     Ok(false)
 }
@@ -426,7 +431,21 @@ impl Store {
             tenant_id,
             redactor,
             max_events,
+            true,
         )
+    }
+    /// Open maintenance data without creating a missing database, initializing
+    /// an empty file or adopting an unversioned audit.
+    pub fn open_existing_for_tenant(
+        path: &Path,
+        tenant_id: &str,
+        redactor: Redactor,
+        max_events: u64,
+    ) -> anyhow::Result<Self> {
+        validate_tenant_id(tenant_id)?;
+        anyhow::ensure!(max_events <= i64::MAX as u64, "invalid audit capacity");
+        let (backing, guard) = StoreStorage::open_existing(path)?;
+        Self::open_prepared_for_tenant(backing, guard, tenant_id, redactor, max_events, false)
     }
     /// Create a new audit origin and its exclusive pre-supervision backup.
     /// Existing databases and sidecars are refused before any SQLite open.
@@ -454,6 +473,7 @@ impl Store {
             tenant_id,
             redactor,
             max_events,
+            true,
         )?;
         // The prepared-open guard has now been released. The backup may use
         // the same parent and must acquire its own initialization guard.
@@ -478,24 +498,26 @@ impl Store {
         tenant_id: &str,
         redactor: Redactor,
         max_events: u64,
+        allow_initialization: bool,
     ) -> anyhow::Result<Self> {
-        let mut db = Connection::open_with_flags(
-            backing.path(),
-            OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
+        let mut flags = OpenFlags::default() | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        if !allow_initialization {
+            flags.remove(OpenFlags::SQLITE_OPEN_CREATE);
+        }
+        let mut db = Connection::open_with_flags(backing.path(), flags)?;
         backing.verify(&db)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA trusted_schema=OFF;")?;
         // Unknown schemas are inspected without even changing journal mode.
         // Revalidate below while holding the write transaction to close races.
-        validate_schema(&db, true)?;
+        validate_schema(&db, allow_initialization)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;
             PRAGMA wal_autocheckpoint=256; PRAGMA journal_size_limit=16777216;")?;
         // A transaction serializes first-open binding across concurrent processes.
         // A preexisting audit can only be adopted by the historical local identity.
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         backing.verify(&tx)?;
-        let empty = validate_schema(&tx, true)?;
+        let empty = validate_schema(&tx, allow_initialization)?;
         let initial_version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if empty {
             for (_, _, sql) in SCHEMA {
@@ -524,6 +546,10 @@ impl Store {
                 "database tenant binding mismatch or unsupported schema"
             );
         } else {
+            anyhow::ensure!(
+                allow_initialization,
+                "existing audit tenant binding is missing"
+            );
             let existing: bool =
                 tx.query_row("SELECT EXISTS(SELECT 1 FROM events)", [], |row| row.get(0))?;
             anyhow::ensure!(
