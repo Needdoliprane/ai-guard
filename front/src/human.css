@@ -1,0 +1,35 @@
+.human-shell { --dock-height: 86px; }
+.human-toolbar { position: fixed; inset: var(--header-height) 0 auto; height: var(--dock-height); z-index: 35; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px var(--gutter); background: var(--nav); color: var(--nav-text); border-bottom: 1px solid var(--nav-line); }
+.human-toolbar .button { background: transparent; border-color: var(--nav-outline); color: var(--nav-text); }
+.human-toolbar .button:hover:enabled { background: var(--nav-hover); }
+.human-toolbar .button[aria-current] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.human-toolbar :focus-visible { outline-color: #fff; }
+.human-nav { display: flex; gap: 10px; min-width: 0; }
+.human-page { overflow-wrap: anywhere; }
+.human-contexts { display: grid; gap: 20px; }
+.human-context-card { padding: 24px; display: grid; gap: 14px; }
+.human-context-card .button { justify-self: start; white-space: normal; text-align: left; }
+.human-context-summary { align-items: flex-start; }
+.human-context-summary p { margin-top: 8px; }
+.human-resource-row, .human-event-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding: 24px; border-top: 1px solid var(--line); }
+.human-resource-row > div, .human-event-row > div { min-width: 0; }
+.human-resource-row p, .human-event-row p { margin-top: 8px; font-size: 13px; }
+.human-resource-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; max-width: 480px; }
+.human-resource-actions .badge, .human-page .control-status .badge, .human-page .detail-badges .badge { white-space: normal; }
+.human-resource-panel > .control-status, .human-event-panel > .control-status { padding: 0 24px; }
+.human-export { border-top: 1px solid var(--line); padding: 24px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.human-export h3, .human-export > p { flex-basis: 100%; }
+.human-export p { font-size: 13px; line-height: 1.7; }
+.human-page .button { max-width: 100%; white-space: normal; }
+.human-page .control-page-summary { overflow-wrap: anywhere; }
+.login-access { font-size: 14px; }
+@media (max-width: 740px) {
+  .human-shell { --dock-height: 124px; }
+  .human-toolbar { display: grid; grid-template-columns: 1fr; gap: 8px; padding: 12px var(--gutter); }
+  .human-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .human-toolbar .button { padding: 8px 6px; font-size: 11px; min-width: 0; }
+  .human-shell .stream-pill { white-space: normal; max-width: 44%; text-align: right; }
+  .human-resource-row, .human-event-row { flex-direction: column; padding: 18px; gap: 16px; }
+  .human-context-card, .human-export { padding: 18px; }
+  .human-resource-panel > .control-status, .human-event-panel > .control-status { padding: 0 18px; }
+}

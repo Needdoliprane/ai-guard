@@ -3,6 +3,9 @@ import { ApiClient, ApiError, IdentityError, eventUrl } from "./api.ts";
 import type { StreamStatus } from "./api.ts";
 import { el, button, icon } from "./dom.ts";
 import { ControlDashboard } from "./control-view.ts";
+import { HumanDashboard } from "./human-view.ts";
+import { HumanApiError } from "./human-api.ts";
+import { HumanContractError } from "./human-model.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import type { WorkerRecord } from "./control.ts";
 import {
@@ -99,6 +102,7 @@ const navItems: {
 let client: ApiClient | null = null;
 let identity: ViewerIdentity | null = null;
 let control: ControlDashboard | null = null;
+let humanSession: HumanDashboard | null = null;
 let overview: Overview | null = null;
 let agents: Agent[] = [];
 let sandboxes: Sandbox[] = [];
@@ -268,7 +272,7 @@ function setNotice(message = "", kind: "error" | "info" = "error", summaryClient
   );
 }
 function errorMessage(error: unknown): string {
-  return error instanceof ApiError || error instanceof IdentityError ||
+  return error instanceof ApiError || error instanceof IdentityError || error instanceof HumanApiError || error instanceof HumanContractError ||
     error instanceof Error && error.message === "Contrat de liste d’identités incomplet ou incompatible."
     ? error.message
     : "Connexion au collecteur impossible. Vérifiez le service local puis réessayez.";
@@ -283,8 +287,12 @@ function onError(error: unknown, summaryClient: ApiClient | null = null) {
   }
   setNotice(errorMessage(error), "error", summaryClient);
 }
-function login(message = "") {
+function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
   document.title = "ai-guard · Supervision locale";
+  const access = el("select", "text-input login-access"); access.id = "access-mode";
+  const technical = el("option", "", "Lecture technique (viewer)"); technical.value = "viewer";
+  const personal = el("option", "", "Compte personnel local"); personal.value = "human";
+  access.append(technical, personal); access.value = preferredAccess;
   const token = el("input", "text-input");
   token.id = "viewer-token";
   token.type = "password";
@@ -317,13 +325,40 @@ function login(message = "") {
   );
   form.querySelector("label")!.htmlFor = token.id;
   form.querySelector("p")!.id = "token-help";
+  const describeAccess = () => {
+    const personal = access.value === "human";
+    token.value = ""; token.id = personal ? "human-token" : "viewer-token";
+    const label = form.querySelector("label")!;
+    label.htmlFor = token.id; label.textContent = personal ? "Credential personnel local" : "Jeton de lecture";
+    form.querySelector("p")!.textContent = personal ?
+      "Utilisez le credential nominatif préparé par l’opérateur. Le contrôle établit votre identité et vos accès." :
+      "Utilisez le jeton viewer configuré pour votre collecteur.";
+    submit.replaceChildren(personal ? "Ouvrir mon espace" : "Ouvrir la supervision", icon("arrow"));
+  };
+  access.addEventListener("change", () => { describeAccess(); error.hidden = true; });
+  describeAccess();
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const value = token.value.trim();
     if (!value) return;
     submit.disabled = true;
+    access.disabled = true;
     submit.textContent = "Connexion…";
     error.hidden = true;
+    if (access.value === "human") {
+      token.value = "";
+      const candidate = new HumanDashboard(root, value, { brand, themeButton }, (message) => {
+        if (humanSession !== candidate) return;
+        humanSession = null; login(message, "human");
+      });
+      humanSession = candidate;
+      try { await candidate.start(); }
+      catch (cause) {
+        if (humanSession !== candidate) return;
+        candidate.close(); humanSession = null; login(errorMessage(cause), "human");
+      }
+      return;
+    }
     const candidate = new ApiClient(value, fetch, () => {
       if (client === candidate)
         disconnect("Votre session a expiré ou le jeton a été refusé.");
@@ -343,6 +378,7 @@ function login(message = "") {
       error.textContent = errorMessage(cause);
       error.hidden = false;
       submit.disabled = false;
+      access.disabled = false;
       submit.replaceChildren("Ouvrir la supervision", icon("arrow"));
       token.focus();
     }
@@ -365,7 +401,9 @@ function login(message = "") {
           "section",
           "login-card",
           el("p", "eyebrow", "SESSION DE CONSULTATION"),
-          el("h2", "", "Accéder à la supervision"),
+          el("h2", "sr-only", "Accéder à la supervision"),
+          el("label", "sr-only", "Type d’accès"),
+          access,
           form,
           el(
             "p",
@@ -399,6 +437,7 @@ function login(message = "") {
       ),
     ),
   );
+  root.querySelector<HTMLLabelElement>('label.sr-only')!.htmlFor = access.id;
 }
 
 function shell() {
@@ -2123,5 +2162,5 @@ async function exportJournal(button: HTMLButtonElement) {
     button.disabled = false;
   }
 }
-window.addEventListener("beforeunload", () => client?.close());
+window.addEventListener("beforeunload", () => { client?.close(); humanSession?.close(); });
 login();
