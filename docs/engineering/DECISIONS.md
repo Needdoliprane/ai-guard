@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 1er novembre — identité humaine indexée et version de stockage explicite
+
+Choix d'implémentation de l'orchestrateur dans la base SQLite par tenant existante : domaine humain distinct de `runner`/`viewer`, permissions personnelles/administratives explicites et projections indexées, avec audit atomique. Le lot en cours prépare un schéma4 exact et une migration3→4 explicite avec sauvegarde vérifiée ; aucun objet ni nouveau domaine métier n'est dissimulé sous le schéma3. Les lecteurs de supervision ne reconnaissent4 qu'avec les capacités et invariants effectivement conservés ; ni comparaison `>=3` ni réactivation lors d'une ouverture/migration. Les formats des plans fournisseurs restent distincts et inchangés.
+
+Un journal d'identité reconstruit à chaque accès a été écarté : son coût croîtrait avec l'historique et un plafond arbitraire pourrait bloquer des installations valides. Les scopes devront être revalidés à la lecture, y compris après révocation ; aucune ancienne session ou clé technique ne devient implicitement une identité humaine. Le registre broker aura ses propres bindings authentifiés, sa migration coordonnée et son producteur réel ; une identité moteur ne permet aucune attribution rétroactive. Ces décisions organisent les lots, sans livrer OIDC/PKCE, le lancement humain délégué ou la fédération par leur rédaction.
+
 ## 1er novembre — propriété native indépendante du listener
 
 Le RED S0 montre qu'une lease locale au futur serveur peut être relâchée avant ses owners IPC/natifs. La même Arc/FD est désormais retenue par State/acteurs et un owner natif borné qui possède les handles. Progression Weak, garde de sortie et vrai join avant toute attente STOP ; fin idle/NotStarted connue, Cancel conservé. Les erreurs ou handles consommés par join échoué restent inconnus : lease et owners restants retenus jusqu'à fin du processus, sans nouvelle autorité, éviction ou preuve de retraite. Le support non mutatif est détaché à l'abandon, distinct des handles acteur/progression qu'il continue à posséder. [Sept fonctions ciblées, checks et limites](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Cette correction du même binaire ne modifie ni architecture réseau, protocole, ledger, deadline ou installation OS ; D5 demeure ouvert.
