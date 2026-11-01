@@ -2,6 +2,14 @@
 
 Les résultats nouveaux sont dans [VALIDATION.md](VALIDATION.md). Les résultats historiques de [../validation.md](../validation.md) ne qualifient pas ce checkout sur macOS ARM64. Les critères détaillés existants sont dans [../acceptance.md](../acceptance.md) ; leur ancien découpage MVP/V2 ne réduit pas la mission production.
 
+## Transports STOP3 et TLS — vérifications ciblées du 1er novembre
+
+STOP3 candidat1 :21 fonctions V3 (14 initiales,4 régressions et3 groupes hardening),6 de compatibilité2,1 auth-binding et4 canaris de service passent, sans moteur. Les tests ancrent vraiment leurs sockets/leases ; les cas numériques partent des bytes originaux et les vecteurs MAC utilisent des littéraux indépendants des serializers. La fragmentation exerce un budget restant positif, sans prétendre couvrir tout le slowloris6s. Les longues fixtures de service ne définissent pas la latence du protocole. Ledger/Closing/join/retraite/fencing restent hors de ces preuves.
+
+TLS T1 :34 fonctions ciblées passent (10 nouvelles et24 canaris), puis deux fonctions séparées reproduisent PEM imbriqué et rétention du shutdown après abandon. Elles nettoient leurs fixtures avant les oracles ; ne pas transformer les sous-cas en nombre de tests ou prendre T1 pour une clôture. Les correctifs suivants doivent vérifier ces deux fonctions et les chemins TLS/PEM/shutdown effectivement touchés, sans rejouer par défaut toute la matrice Jev ou les longs canaris D5 inchangés. [Résultats par gel](VALIDATION.md).
+
+T2 ferme ces deux RED avec sept fonctions pertinentes (les cinq intégrations TLS, deux unités PEM/clé), sans rejouer34 T1 ni32 D5. Fmt, Clippy strict et une release composée passent ensuite ; les résultats/limites du sidecar ignoré sont explicités dans VALIDATION. Les certificats éphémères et serveurs TLS/HTTP sont des fixtures de comportement **produit**, pas les essais auxiliaires AC/Qwen/Keycloak exclus du dépôt. Docker/Podman, lecteur réel UID1000, réseaux et modèle exigent leurs preuves distinctes ; le probe stat UID1000/0444 ne les remplace pas. Ne pas relancer les campagnes globales à chaque RED.
+
 ## Jev — sélection et frontières de données
 
 Le [lot logiciel J3b](VALIDATION.md#1er-novembre--jev-j2j3b-corrections-et-validation-ciblée) possède62 fonctions ciblées réellement passées, avec ses gels et limites. Les six cibles `jev_backends`, `jev_request_bounds`, `jev_masking`, `jev_typesafe_ambiguity`, `jev_store_redaction` et `jev_protocol` vérifient protocole HTTP contrôlé, API/Store réels, catalogue exact, avis local, bornes, doublons, masquage et replay. Les canaris d'authentification, décision et supervision sont sélectionnés selon ces risques ; aucun appel fournisseur ni moteur n'est requis pour ces régressions.
