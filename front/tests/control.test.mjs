@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   parseWorkerPage, parseAllocationPage, parseQuota, formatExactDecimal,
-  allocationDuration, relatedWorkers, controlPageUrl,
+  allocationDuration, relatedWorkers, relatedAgents, relatedSandboxes, workerRelation, controlPageUrl,
 } from "../src/control.ts";
 
 const id = "00000000-0000-4000-8000-000000000001";
@@ -74,6 +74,23 @@ test("le lien agent-worker utilise uniquement la session ou l’identité runtim
   assert.deepEqual(relatedWorkers({ id: "agent", sandbox_id: "worker-known" }, [worker]), [worker]);
   assert.deepEqual(relatedWorkers({ id: "agent", name: "worker-known", provider: "generic" }, [worker]), []);
   assert.deepEqual(relatedWorkers({ id: "agent", session_id: "autre" }, [worker]), []);
+});
+
+test("les liens worker-sandbox-agent distinguent chaque identifiant explicite des noms ressemblants", () => {
+  const observed = { ...worker, attempt: { ...worker.attempt, container_id: "runtime-container" } };
+  const sandbox = { id: "runtime-container", engine: "docker" };
+  const sessionSandbox = { id: "other-container", session_id: id };
+  const runtimeAgent = { id: "agent", sandbox_id: "runtime-container", provenance: "declared" };
+  const sessionAgent = { id: "session-agent", session_id: id };
+  assert.deepEqual(relatedSandboxes(observed, [sandbox, sessionSandbox,
+    { id: "runtime", image: "runtime-container" }, { id: "agent", engine: "generic" }]), [sandbox, sessionSandbox]);
+  assert.deepEqual(relatedAgents(observed, [runtimeAgent, sessionAgent,
+    { id: "runtime-container", name: "worker-known", provider: "generic" }]), [runtimeAgent, sessionAgent]);
+  assert.deepEqual(workerRelation({ session_id: id, sandbox_id: "runtime-container" }, observed),
+    ["Session identique", "Identité runtime identique"]);
+  assert.deepEqual(workerRelation({ sandbox_id: "runtime" }, observed), []);
+  assert.deepEqual(workerRelation({ session_id: "", sandbox_id: "" }, observed), []);
+  assert.equal(runtimeAgent.provenance, "declared", "Une jointure ne requalifie pas un agent déclaré en observation");
 });
 
 test("la pagination ne transporte qu’un curseur UUID et une taille bornée", () => {

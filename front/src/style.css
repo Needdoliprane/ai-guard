@@ -291,6 +291,17 @@ svg.icon { width: 19px; height: 19px; flex-shrink: 0; vertical-align: middle; }
 .quota-row dd strong { font-size: 24px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .agent-worker-links { margin-bottom: 24px; overflow-wrap: anywhere; }
 .agent-worker-links .button { white-space: normal; text-align: left; }
+.entity-link-source, .agent-worker-links { border-top: 1px solid var(--line); padding-top: 20px; margin-top: 24px; }
+.entity-link-source p, .agent-worker-links > p { font-size: 13px; line-height: 1.7; margin: 12px 0; }
+.resource-link-list { list-style: none; margin: 16px 0; padding: 0; }
+.resource-link-list li { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.resource-link, .resource-link-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.resource-link-evidence { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.resource-link-evidence .badge { white-space: normal; }
+.resource-link .button, .resource-link-list .button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.worker-related-resources { overflow-wrap: anywhere; margin: 28px 0; }
+.entity-link-source .control-status, .agent-worker-links .control-status { margin-bottom: 12px; }
+.agent-worker-links .control-pagination { gap: 12px; padding: 16px 0; }
 @media (min-width: 1800px) {
   .notice { margin-left: auto; margin-right: auto; }
 }

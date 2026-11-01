@@ -8,7 +8,18 @@ import {
   eventSummary,
   mergeEventPage,
   periodFilters,
+  parseEntityCollection,
 } from "../src/model.ts";
+
+test("une liste d’identités invalide ne devient pas une absence de liens", () => {
+  assert.deepEqual(parseEntityCollection({ items: [] }), []);
+  const agent = { id: "agent", session_id: "session", sandbox_id: null, provenance: "declared" };
+  assert.deepEqual(parseEntityCollection({ items: [agent] }), [agent]);
+  for (const invalid of [null, {}, { items: null }, { items: [null] }, { items: [{ name: "agent" }] },
+    { items: [{ id: "" }] }, { items: [{ id: "agent", session_id: 42 }] },
+    { items: [{ id: "sandbox", sandbox_id: { id: "other" } }] }])
+    assert.throws(() => parseEntityCollection(invalid), /Contrat de liste/);
+});
 
 test("les périodes fixent le début au moment du choix sans borner les événements futurs", () => {
   const chosenAt = Date.parse("2026-10-29T12:00:00.000Z");

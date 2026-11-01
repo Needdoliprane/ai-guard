@@ -7,7 +7,7 @@ Objectif : satisfaire les exigences complètes local-first/cloud et produire des
 ### Répartition active — identité, supervision et unification
 
 - Identité : domaine humain et ACL réelles, projections indexées et migration4 explicite, sauvegarde et compatibilité exacte des capacités supervision3/4. Ne pas étendre silencieusement le vocabulaire/schema3 pour contourner une migration. Le raccordement HTTP/CLI, OIDC public PKCE Web/CLI et le lancement humain délégué restent obligatoires et ouverts.
-- Dashboard : liens exacts sandbox/agent/worker depuis les API existantes, périmètre paginé et fraîcheur visibles, refus/erreurs distincts du vide. Aucun écran SSO factice ni compteur global fabriqué.
+- Dashboard : liens exacts sandbox/agent/worker depuis les API existantes implémentés ; pagination/fraîcheur/provenance visibles et reprises vérifiées, trois défauts de revue corrigés après leurs RED. Build, unités et navigateur ciblés PASS sur leurs gels documentés. Aucun écran SSO factice ni compteur global fabriqué ; déploiement du bundle, vues humaines/admin et fédération restent ouverts.
 - Registre : credential de broker distinct et lié au tenant côté serveur, ownership et heartbeat audités, fraîcheur observée distincte de liveness déclarée. Contrat coordonné avec la migration identité avant implémentation des coutures partagées ; pas d'assimilation d'une autorité moteur à un broker.
 - Les tests produit ciblés sont exécutés par Luna après gel ; revues et intégration précèdent tout statut livré. Les trois worktrees dédiés sont suivis jusqu'à leur retrait contrôlé après publication, sans suppression de données privées ou de ressources vivantes.
 

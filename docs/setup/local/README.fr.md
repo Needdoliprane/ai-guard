@@ -84,6 +84,8 @@ Séparer les credentials techniques de cette identité : `viewer` donne son pér
 
 Le dashboard présente provenance des sessions, décisions, observations runtime et changements. Connexion périmée, couverture partielle, refus et résultat vide sont des états distincts. Utiliser la dernière observation et le périmètre affichés pour choisir entre actualisation, reconnexion et demande d'accès.
 
+Ouvrir un agent ou une sandbox pour consulter ses workers explicitement liés, puis un worker pour retrouver ses agents et sandboxes correspondants. Les liens utilisent les identifiants exacts de session ou de runtime reçus pour le tenant authentifié ; leur provenance est affichée et une session identique ne prouve ni exécution ni délégation. Le registre workers est paginé : parcourir ses pages avant de conclure qu'aucun enregistrement correspondant n'a été reçu. Une lecture échouée conserve un résultat périmé avec une action de reprise ; ce n'est pas un inventaire vide. Les liens rapprochent projections d'audit et registre, sans interroger le moteur ni découvrir des brokers distants.
+
 Un refus 401/403 d'une lecture active ferme la session viewer et retire ses données, y compris les détails ouverts. Se reconnecter avec un credential autorisé ; des actualisations répétées ne rétablissent pas un credential refusé. Une erreur du service est affichée explicitement. Les vues workers, quotas et allocations conservent leurs dernières données réussies avec un avertissement de péremption, dans la même session et le même périmètre, jusqu'à une actualisation réussie.
 
 ## Exécuter une première commande

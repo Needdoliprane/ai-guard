@@ -29,6 +29,12 @@ Pour ai-guard, les titres structurent les vues, les actions essentielles se rep�
 
 La revue d'un changement visuel compare les vues principales à cette référence et vérifie desktop/mobile, thèmes clair/sombre, navigation clavier, focus, contrastes, mouvement réduit et activité dense. Elle inclut les états chargement, vide, partiel, périmé, déconnecté, interdit et erreur. Les captures complètent les parcours fonctionnels avec données réelles ; les preuves de l'interface livrée restent dans [VALIDATION.md](engineering/VALIDATION.md).
 
+## Navigation entre ressources du tenant
+
+Les détails agent/sandbox chargent réellement le registre workers et permettent d'en parcourir les pages ; un détail worker présente les agents et sandboxes correspondants. Les relations reposent sur les identifiants exacts de session ou de runtime reçus, avec provenance explicite ou inconnue. Elles ne prouvent ni délégation ni exécution et n'attribuent aucune identité de broker. Chaque source indique lecture, fraîcheur, périmètre et erreur éventuelle ; l'absence de correspondance dans une page ne signifie pas absence du tenant. La reprise d'une source retire son erreur résolue sans masquer une erreur indépendante. Le focus reste dans le dialogue lors des changements de liens et des reprises.
+
+Cette navigation utilise les API de lecture existantes du tenant `viewer`, sans nouvel endpoint ni accès moteur. Les vues humaines/administratives, l'identité des brokers et la fédération restent les exigences distinctes ci-dessous. [Validation ciblée et limites](engineering/VALIDATION.md#1er-novembre--navigation-liée-du-dashboard-et-reprises).
+
 ## Vues utilisateur et administration unifiée — cible à livrer
 
 Complément du mainteneur, 31 octobre 2026 : l'IHM doit refléter les [axes de configuration](sso.md#configuration-par-axes-indépendants), l'identité, les permissions effectives et le périmètre autorisé. **À implémenter et qualifier.** Le front actuel ne prend en charge que l'identité `viewer` d'un tenant dans [ses types](../front/src/types.ts) et [son client API](../front/src/api.ts). Les preuves des neuf vues existantes ne qualifient pas les parcours administrateur ci-dessous.

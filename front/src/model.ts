@@ -7,6 +7,19 @@ import type {
   View,
 } from "./types.ts";
 
+export function parseEntityCollection<T extends { id: string }>(input: unknown): T[] {
+  if (!input || typeof input !== "object" || !Array.isArray((input as { items?: unknown }).items))
+    throw new Error("Contrat de liste d’identités incomplet ou incompatible.");
+  const items = (input as { items: unknown[] }).items;
+  if (items.some((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return true;
+    const entity = item as Record<string, unknown>;
+    return typeof entity.id !== "string" || !entity.id ||
+      [entity.session_id, entity.sandbox_id].some((id) => id != null && typeof id !== "string");
+  })) throw new Error("Contrat de liste d’identités incomplet ou incompatible.");
+  return items as T[];
+}
+
 export function periodFilters(
   period: EventPeriod,
   chosenAt = Date.now(),

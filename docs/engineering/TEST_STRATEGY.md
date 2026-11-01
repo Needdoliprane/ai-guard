@@ -4,6 +4,10 @@ S0,1er novembre : RED natif de lease après abandon listener, puis sept fonction
 
 Les résultats nouveaux sont dans [VALIDATION.md](VALIDATION.md). Les résultats historiques de [../validation.md](../validation.md) ne qualifient pas ce checkout sur macOS ARM64. Les critères détaillés existants sont dans [../acceptance.md](../acceptance.md) ; leur ancien découpage MVP/V2 ne réduit pas la mission production.
 
+## Navigation liée du dashboard
+
+Le script frontend `node tests/browser_unified.mjs`, avec les prérequis Playwright du navigateur existant, cible les liens sandbox/agent/worker, pages du registre, sources en erreur/périmées, provenance et réponses tardives/changement de client. Les sélections `AI_GUARD_UNIFIED_SCENARIO=usage-links`, `retry-focus`, `removed-link-focus` et `summary-notice` isolent leurs régressions ; la variable absente lance le parcours lié et ses captures. Utiliser un dossier privé `AI_GUARD_UNIFIED_ARTIFACTS` pour les images. Ces fixtures restent dans les tests et ne remplacent aucune recette du gateway Rust ou du runtime réel. Rejouer seulement les groupes touchés par un changement ; [gels et résultats](VALIDATION.md#1er-novembre--navigation-liée-du-dashboard-et-reprises).
+
 ## Transports STOP3 et TLS — vérifications ciblées du 1er novembre
 
 STOP3 candidat1 :21 fonctions V3 (14 initiales,4 régressions et3 groupes hardening),6 de compatibilité2,1 auth-binding et4 canaris de service passent, sans moteur. Les tests ancrent vraiment leurs sockets/leases ; les cas numériques partent des bytes originaux et les vecteurs MAC utilisent des littéraux indépendants des serializers. La fragmentation exerce un budget restant positif, sans prétendre couvrir tout le slowloris6s. Les longues fixtures de service ne définissent pas la latence du protocole. Ledger/Closing/join/retraite/fencing restent hors de ces preuves.

@@ -3,10 +3,10 @@ import { button, el, icon } from "./dom.ts";
 import { asText, formatBytes, formatDate, formatMetric } from "./model.ts";
 import {
   allocationDuration, controlPageUrl, formatExactDecimal, parseAllocationPage,
-  parseQuota, parseWorker, parseWorkerPage, relatedWorkers, workerUrl,
+  parseQuota, parseWorker, parseWorkerPage, relatedWorkers, workerRelation, workerUrl,
 } from "./control.ts";
 import type { AllocationRecord, ControlPage, ControlView, QuotaRecord, WorkerRecord } from "./control.ts";
-import type { Agent } from "./types.ts";
+import type { Agent, Sandbox } from "./types.ts";
 
 interface Resource<T> {
   value: T | null;
@@ -77,12 +77,17 @@ export class ControlDashboard {
   #connected = false;
   #generation = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #workerLinks: { slot: HTMLElement; entity: Pick<Agent, "session_id" | "sandbox_id" | "field_provenance"> } | null = null;
+  #workerEntities: { slot: HTMLElement; worker: WorkerRecord } | null = null;
+  #relatedEntities: (worker: WorkerRecord) => HTMLElement;
 
   constructor(client: ApiClient, onAuthError: () => void,
-    openDialog: (title: string, eyebrow: string) => { dialog: HTMLDialogElement; body: HTMLElement }) {
+    openDialog: (title: string, eyebrow: string) => { dialog: HTMLDialogElement; body: HTMLElement },
+    relatedEntities: (worker: WorkerRecord) => HTMLElement) {
     this.#client = client;
     this.#onAuthError = onAuthError;
     this.#openDialog = openDialog;
+    this.#relatedEntities = relatedEntities;
   }
   close() {
     this.#closed = true;
@@ -91,6 +96,8 @@ export class ControlDashboard {
     this.#workers = collection();
     this.#usage = collection();
     this.#quota = resource();
+    this.#workerLinks = null;
+    this.#workerEntities = null;
   }
   unmount() { this.#slot = null; this.#view = null; }
   mount(slot: HTMLElement, view: ControlView) {
@@ -109,29 +116,36 @@ export class ControlDashboard {
     if (reconnected) this.invalidate();
   }
   invalidate() {
-    const alreadyStale = this.#current().stale;
+    const alreadyStale = this.#current().stale && (!this.#hasWorkerLinks() || this.#workers.stale);
     this.#generation++;
     for (const item of [this.#workers, this.#usage, this.#quota]) item.stale = true;
     if (!alreadyStale) this.#render();
     this.#schedule();
   }
+  relationshipsChanged() { this.#render(); }
+  #hasWorkerLinks() {
+    return !!this.#workerLinks?.slot.isConnected && !!this.#workerLinks.slot.closest("dialog")?.open;
+  }
   #schedule() {
-    if (this.#timer !== undefined || this.#closed || !this.#view) return;
+    if (this.#timer !== undefined || this.#closed || (!this.#view && !this.#hasWorkerLinks())) return;
     // A sustained event stream cannot postpone a refresh or issue one request per event.
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
-      if (this.#closed || !this.#view) return;
-      if (this.#current().loading) this.#schedule();
-      else void this.refresh();
+      if (this.#closed || (!this.#view && !this.#hasWorkerLinks())) return;
+      void this.refresh();
     }, 1000);
   }
   #current(): Resource<unknown> {
-    return this.#view === "workers" ? this.#workers : this.#view === "usage" ? this.#usage : this.#quota;
+    return this.#view === "workers" || (!this.#view && this.#hasWorkerLinks()) ? this.#workers : this.#view === "usage" ? this.#usage : this.#quota;
   }
   async refresh() {
-    if (this.#view === "workers") await this.#load(this.#workers, this.#workers.cursor, this.#workers.history, "workers", parseWorkerPage);
-    else if (this.#view === "usage") await this.#load(this.#usage, this.#usage.cursor, this.#usage.history, "usage", parseAllocationPage);
-    else if (this.#view === "quota") await this.#read(this.#quota, "/api/v1/quota", parseQuota);
+    const reads: Promise<void>[] = [];
+    // The modal registry has its own page and loading guard, independent of the view behind it.
+    if (this.#view === "workers" || this.#hasWorkerLinks())
+      reads.push(this.#load(this.#workers, this.#workers.cursor, this.#workers.history, "workers", parseWorkerPage));
+    if (this.#view === "usage") reads.push(this.#load(this.#usage, this.#usage.cursor, this.#usage.history, "usage", parseAllocationPage));
+    if (this.#view === "quota") reads.push(this.#read(this.#quota, "/api/v1/quota", parseQuota));
+    await Promise.all(reads);
   }
   async #load<T>(target: Collection<T>, cursor: string | null, history: (string | null)[],
     kind: "workers" | "usage", parse: (input: unknown) => ControlPage<T>) {
@@ -194,7 +208,7 @@ export class ControlDashboard {
   }
   #pagination<T>(target: Collection<T>, kind: "workers" | "usage", parse: (input: unknown) => ControlPage<T>) {
     const summary = el("span", "control-page-summary", target.value ?
-      `${target.value.items.length} résultat${target.value.items.length === 1 ? "" : "s"} sur cette page · ${target.history.length ? "lecture partielle" : "première page"}` : "Périmètre : client du jeton de lecture");
+      `${target.value.items.length} résultat${target.value.items.length === 1 ? "" : "s"} sur cette page · page ${target.history.length + 1}${target.history.length || target.value.next_cursor ? " · lecture partielle" : ""}` : "Périmètre : client du jeton de lecture");
     summary.tabIndex = -1;
     summary.dataset.focusKey = `page-summary-${kind}`;
     return el("div", "table-footer control-pagination", summary,
@@ -210,6 +224,21 @@ export class ControlDashboard {
         }, target.loading) : target.value ? el("span", "muted", "Fin des résultats à cette lecture") : null));
   }
   #render() {
+    if (this.#closed) return;
+    if (this.#hasWorkerLinks()) this.#renderWorkerLinks();
+    if (this.#workerEntities?.slot.isConnected && this.#workerEntities.slot.closest("dialog")?.open) {
+      const { slot, worker } = this.#workerEntities;
+      const focused = slot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+      const key = focused?.dataset.focusKey;
+      slot.replaceChildren(this.#relatedEntities(worker));
+      if (focused) {
+        const replacement = key ? [...slot.querySelectorAll<HTMLElement>("[data-focus-key]")]
+          .find((node) => node.dataset.focusKey === key && node.isConnected && !node.matches(":disabled") &&
+            !node.closest("[hidden], [inert]") && node.getClientRects().length > 0) : null;
+        const fallback = slot.closest("dialog")?.querySelector<HTMLElement>(".detail-header button:not(:disabled)");
+        (replacement ?? fallback)?.focus({ preventScroll: true });
+      }
+    }
     if (!this.#slot || !this.#view || this.#closed) return;
     const slot = this.#slot;
     const focused = slot.contains(document.activeElement) ?
@@ -287,11 +316,57 @@ export class ControlDashboard {
       this.#pagination(this.#usage, "usage", parseAllocationPage));
   }
   agentWorkers(agent: Agent): HTMLElement {
-    const workers = relatedWorkers(agent, this.#workers.value?.items ?? []);
-    return el("section", "agent-worker-links", el("h3", "", "Workers liés explicitement"),
-      ...workers.map((worker) => action(worker.worker_id, `agent-worker-${worker.worker_id}`, () => { void this.showWorker(worker.worker_id); })),
-      el("p", "muted", workers.length ? "Correspondance exacte de session ou d’identité runtime dans la page du registre chargée." :
-        "Aucun lien établi dans la page du registre chargée. Les noms et fournisseurs ne permettent pas de déduire un worker."));
+    return this.#entityWorkers(agent);
+  }
+  sandboxWorkers(sandbox: Sandbox): HTMLElement {
+    return this.#entityWorkers({ session_id: sandbox.session_id, sandbox_id: sandbox.id });
+  }
+  #entityWorkers(entity: Pick<Agent, "session_id" | "sandbox_id" | "field_provenance">): HTMLElement {
+    const slot = el("section", "agent-worker-links");
+    slot.setAttribute("aria-label", "Workers liés explicitement");
+    this.#workerLinks = { slot, entity };
+    this.#renderWorkerLinks();
+    // The caller inserts the section in its modal before a request can re-render it.
+    queueMicrotask(() => {
+      if (this.#closed || !this.#hasWorkerLinks()) return;
+      if (!this.#workers.value || this.#workers.stale || this.#workers.error ||
+        Date.now() - Date.parse(this.#workers.loadedAt ?? "") > 30000)
+        void this.#load(this.#workers, this.#workers.cursor, this.#workers.history, "workers", parseWorkerPage);
+    });
+    return slot;
+  }
+  #renderWorkerLinks() {
+    const current = this.#workerLinks;
+    if (!current) return;
+    const { slot, entity } = current;
+    const focused = slot.contains(document.activeElement) ? (document.activeElement as HTMLElement).dataset.focusKey : undefined;
+    const page = this.#workers.value;
+    const workers = relatedWorkers(entity, page?.items ?? []);
+    const error = this.#workers.error ? el("div", "control-error", el("p", "", this.#workers.error),
+      action("Réessayer le registre", "retry-related-workers", () => {
+        void this.#load(this.#workers, this.#workers.cursor, this.#workers.history, "workers", parseWorkerPage);
+      }, this.#workers.loading)) : null;
+    error?.setAttribute("role", "alert");
+    slot.replaceChildren(el("h3", "", "Workers liés explicitement"), this.#status(this.#workers),
+      el("p", "muted", "Source : registre durable /api/v1/workers du client authentifié. Recherche limitée à la page chargée ; aucun total du client n’est déduit. Une session identique ne prouve pas l’exécution d’un agent."),
+      error ?? "",
+      !page ? el("p", "muted", this.#workers.loading ? "Chargement des liens du registre…" : "Les liens restent inconnus tant que le registre n’a pas été lu.") :
+        workers.length ? el("ul", "resource-link-list", ...workers.map((worker) => el("li", "",
+          action(worker.worker_id, `agent-worker-${worker.worker_id}`, () => { void this.showWorker(worker.worker_id); }),
+          ...workerRelation(entity, worker).map((reason) => {
+            const provenance = entity.field_provenance?.[reason === "Session identique" ? "session_id" : "sandbox_id"];
+            return el("span", "resource-link-evidence", el("span", "muted", reason),
+              badge(provenance === "declared" ? "Identifiant déclaré" : provenance === "observed" ? "Identifiant observé" :
+                provenance === "inferred" ? "Identifiant inféré" : "Provenance de l’identifiant non fournie"));
+          }), state(worker)))) :
+          el("p", "muted", "Aucune correspondance sur cette page du registre. D’autres pages ou des observations absentes peuvent contenir des liens."),
+      this.#pagination(this.#workers, "workers", parseWorkerPage));
+    slot.setAttribute("aria-busy", String(this.#workers.loading));
+    if (focused) {
+      const replacement = [...slot.querySelectorAll<HTMLElement>("[data-focus-key]")]
+        .find((node) => node.dataset.focusKey === focused && !(node as HTMLButtonElement).disabled);
+      (replacement ?? slot.querySelector<HTMLElement>(".control-page-summary"))?.focus({ preventScroll: true });
+    }
   }
   async showWorker(id: string) {
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -316,6 +391,9 @@ export class ControlDashboard {
         const yesNo = (input: boolean | null | undefined) => input == null ? "Inconnu" : input ? "Oui" : "Non";
         const raw = el("pre", "code-block");
         raw.textContent = JSON.stringify(worker, null, 2);
+        const entities = el("div", "worker-entity-links");
+        this.#workerEntities = { slot: entities, worker };
+        entities.append(this.#relatedEntities(worker));
         body.replaceChildren(el("div", "detail-badges", state(worker),
           badge(worker.quota_held ? "Quota retenu" : "Quota libéré")),
           el("p", "muted", `État lu le ${formatDate(new Date().toISOString(), true)}. Dernière observation runtime datée ci-dessous.`),
@@ -339,7 +417,7 @@ export class ControlDashboard {
               value("Code de sortie", observation.exit_code), value("Arrêt mémoire (OOM)", yesNo(observation.oom_killed)),
               value("Redémarrages observés", observation.restart_count)),
           el("h3", "", "Nettoyage"), el("dl", "detail-grid", value("Retrait constaté", yesNo(worker.cleanup_removed)), value("Erreur de nettoyage", worker.cleanup_error)),
-          el("h3", "", "Champs de consultation reçus"), raw);
+          entities, el("h3", "", "Champs de consultation reçus"), raw);
       } catch (error) {
         if (this.#closed || !dialog.open || !dialog.isConnected) return;
         if (error instanceof ApiError && (error.status === 401 || error.status === 403)) { this.#onAuthError(); return; }

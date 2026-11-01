@@ -468,6 +468,9 @@ try {
       .count(),
     1,
   );
+  // Opening an agent now reads the same paginated worker registry used by its view.
+  let releaseControlRead;
+  controlReadBarrier = new Promise((resolve) => { releaseControlRead = resolve; });
   await page
     .getByRole("button", { name: "Détails", exact: true })
     .first()
@@ -483,8 +486,6 @@ try {
     "La provenance du modèle est distincte de celle de l’identité",
   );
   await page.keyboard.press("Escape");
-  let releaseControlRead;
-  controlReadBarrier = new Promise((resolve) => { releaseControlRead = resolve; });
   await page.getByRole("link", { name: "Workers", exact: true }).click();
   await page.getByText("Chargement des workers…", { exact: true }).waitFor();
   await capture("workers-loading-1440-light");

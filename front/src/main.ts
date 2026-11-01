@@ -3,6 +3,8 @@ import { ApiClient, ApiError, IdentityError, eventUrl } from "./api.ts";
 import type { StreamStatus } from "./api.ts";
 import { el, button, icon } from "./dom.ts";
 import { ControlDashboard } from "./control-view.ts";
+import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
+import type { WorkerRecord } from "./control.ts";
 import {
   asText,
   brokerFailureDetails,
@@ -15,6 +17,7 @@ import {
   matchesFilters,
   mergeEventPage,
   periodFilters,
+  parseEntityCollection,
   projectEvents,
 } from "./model.ts";
 import type {
@@ -110,6 +113,12 @@ let loadingEvents = false;
 let eventsError = "";
 let agentsAvailable: boolean | null = null;
 let sandboxesAvailable: boolean | null = null;
+let agentsLoadedAt: string | null = null;
+let sandboxesLoadedAt: string | null = null;
+let agentsError = "";
+let sandboxesError = "";
+let summaryLoading = false;
+let summaryRequest = 0;
 let eventRequest = 0;
 let refreshedAt: string | null = null;
 let streamStatus: StreamStatus = "closed";
@@ -125,11 +134,13 @@ let nextView: HTMLButtonElement;
 let journalExport: HTMLButtonElement;
 let streamPill: HTMLElement;
 let notice: HTMLElement;
+let summaryNoticeClient: ApiClient | null = null;
 let eventSlot: HTMLElement | null = null;
 let statSlot: HTMLElement | null = null;
 let sideSlot: HTMLElement | null = null;
 let collectionSlot: HTMLElement | null = null;
 let dialog: HTMLDialogElement | null = null;
+let detailEntityLinks: { slot: HTMLElement; render: () => HTMLElement }[] = [];
 let dark = matchMedia("(prefers-color-scheme: dark)").matches;
 document.documentElement.dataset.theme = dark ? "dark" : "light";
 
@@ -246,8 +257,9 @@ function empty(
     el("p", "", description),
   );
 }
-function setNotice(message = "", kind: "error" | "info" = "error") {
+function setNotice(message = "", kind: "error" | "info" = "error", summaryClient: ApiClient | null = null) {
   if (!notice) return;
+  summaryNoticeClient = message ? summaryClient : null;
   notice.hidden = !message;
   notice.className = `notice notice-${kind}`;
   notice.replaceChildren(
@@ -256,11 +268,12 @@ function setNotice(message = "", kind: "error" | "info" = "error") {
   );
 }
 function errorMessage(error: unknown): string {
-  return error instanceof ApiError || error instanceof IdentityError
+  return error instanceof ApiError || error instanceof IdentityError ||
+    error instanceof Error && error.message === "Contrat de liste d’identités incomplet ou incompatible."
     ? error.message
     : "Connexion au collecteur impossible. Vérifiez le service local puis réessayez.";
 }
-function onError(error: unknown) {
+function onError(error: unknown, summaryClient: ApiClient | null = null) {
   if (
     error instanceof ApiError &&
     (error.status === 401 || error.status === 403)
@@ -268,7 +281,7 @@ function onError(error: unknown) {
     disconnect("Votre session a expiré ou le jeton a été refusé.");
     return;
   }
-  setNotice(errorMessage(error));
+  setNotice(errorMessage(error), "error", summaryClient);
 }
 function login(message = "") {
   document.title = "ai-guard · Supervision locale";
@@ -321,7 +334,7 @@ function login(message = "") {
       client = candidate;
       identity = authenticated;
       control = new ControlDashboard(candidate, () =>
-        disconnect("Votre session a expiré ou le jeton a été refusé."), openDialog);
+        disconnect("Votre session a expiré ou le jeton a été refusé."), openDialog, workerEntities);
       view = "overview";
       shell();
       await loadInitial();
@@ -420,7 +433,6 @@ function shell() {
   previousView = button("", "view-step view-previous", () => stepView(-1));
   nextView = button("", "view-step view-next", () => stepView(1));
   const refresh = button("Actualiser", "button dock-refresh", () => {
-    setNotice();
     if (view === "workers" || view === "quota" || view === "usage") void control?.refresh();
     else { void refreshSummary(); void loadEvents(); }
   }, "refresh");
@@ -497,6 +509,13 @@ function disconnect(message = "") {
   eventsError = "";
   agentsAvailable = null;
   sandboxesAvailable = null;
+  agentsLoadedAt = null;
+  sandboxesLoadedAt = null;
+  agentsError = "";
+  sandboxesError = "";
+  summaryLoading = false;
+  summaryRequest++;
+  summaryNoticeClient = null;
   dialog?.close();
   dialog?.remove();
   dialog = null;
@@ -506,6 +525,7 @@ function disconnect(message = "") {
 function updateStream(state: StreamStatus) {
   streamStatus = state;
   control?.stream(state === "live");
+  updateDetailEntityLinks();
   if (!streamPill) return;
   const labels = {
     connecting: "Connexion au flux",
@@ -576,13 +596,18 @@ async function loadInitial() {
 async function refreshSummary() {
   const current = client;
   if (!current) return;
+  const request = ++summaryRequest;
+  summaryLoading = true;
+  control?.relationshipsChanged();
+  updateDetailEntityLinks();
   const result = await Promise.allSettled([
     current.get<Overview>("/api/overview"),
-    current.get<{ items: Agent[] }>("/api/agents"),
-    current.get<{ items: Sandbox[] }>("/api/sandboxes"),
+    current.get<unknown>("/api/agents").then(parseEntityCollection<Agent>),
+    current.get<unknown>("/api/sandboxes").then(parseEntityCollection<Sandbox>),
     current.get<Integrity>("/api/integrity"),
   ]);
-  if (current !== client) return;
+  if (current !== client || request !== summaryRequest) return;
+  summaryLoading = false;
   const [o, a, s, i] = result;
   if (o.status === "fulfilled") {
     overview = o.value;
@@ -593,14 +618,23 @@ async function refreshSummary() {
   }
   agentsAvailable = a.status === "fulfilled";
   sandboxesAvailable = s.status === "fulfilled";
-  if (a.status === "fulfilled")
-    agents = Array.isArray(a.value.items) ? a.value.items : [];
-  if (s.status === "fulfilled")
-    sandboxes = Array.isArray(s.value.items) ? s.value.items : [];
+  agentsError = a.status === "rejected" ? errorMessage(a.reason) : "";
+  sandboxesError = s.status === "rejected" ? errorMessage(s.reason) : "";
+  if (a.status === "fulfilled") {
+    agents = a.value;
+    agentsLoadedAt = new Date().toISOString();
+  }
+  if (s.status === "fulfilled") {
+    sandboxes = s.value;
+    sandboxesLoadedAt = new Date().toISOString();
+  }
   integrity = i.status === "fulfilled" ? i.value : null;
   const failed = result.find((entry) => entry.status === "rejected");
-  if (failed?.status === "rejected") onError(failed.reason);
+  if (failed?.status === "rejected") onError(failed.reason, current);
+  else if (summaryNoticeClient === current) setNotice();
   if (current !== client) return;
+  control?.relationshipsChanged();
+  updateDetailEntityLinks();
   renderStats();
   renderSupport();
   updateFilterChoices();
@@ -1630,7 +1664,9 @@ function openDialog(
   title: string,
   eyebrow: string,
 ): { dialog: HTMLDialogElement; body: HTMLElement } {
+  const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialog?.remove();
+  detailEntityLinks = [];
   dialog = el("dialog", "detail-dialog");
   dialog.setAttribute("aria-labelledby", "detail-title");
   const heading = el("h2", "", title);
@@ -1649,6 +1685,11 @@ function openDialog(
   );
   const currentDialog = dialog;
   document.body.append(currentDialog);
+  currentDialog.addEventListener("close", () => {
+    if (document.querySelector("dialog[open]") || !client) return;
+    const fallback = document.querySelector<HTMLElement>("#main-content h1");
+    (trigger?.isConnected ? trigger : fallback)?.focus({ preventScroll: true });
+  }, { once: true });
   currentDialog.addEventListener("click", (event) => {
     if (event.target === currentDialog) {
       const bounds = currentDialog.getBoundingClientRect();
@@ -1673,6 +1714,82 @@ function textBlock(value: unknown): HTMLElement {
   const block = el("pre", "code-block");
   block.textContent = asText(value);
   return block;
+}
+function entityLinks<T extends Agent | Sandbox>(kind: "agents" | "sandboxes", items: T[],
+  render: (item: T) => HTMLElement): HTMLElement {
+  const loadedAt = kind === "agents" ? agentsLoadedAt : sandboxesLoadedAt;
+  const error = kind === "agents" ? agentsError : sandboxesError;
+  const section = el("section", "entity-link-source");
+  section.setAttribute("aria-label", kind === "agents" ? "Agents correspondants" : "Sandboxes correspondantes");
+  const status = el("div", "control-status", badge(summaryLoading ? "Actualisation des liens…" :
+    error ? loadedAt ? "Liens périmés · dernière lecture conservée" : "Liens indisponibles" : loadedAt ? "Lecture des liens réussie" : "Liens inconnus",
+    error ? "amber" : "neutral"),
+    el("span", "muted", loadedAt ? `Lu le ${formatDate(loadedAt, true)}` : "Aucune lecture réussie"));
+  status.setAttribute("role", "status");
+  const warning = error ? el("p", "control-warning", error) : null;
+  warning?.setAttribute("role", "alert");
+  section.append(el("h3", "", kind === "agents" ? "Agents correspondants" : "Sandboxes correspondantes"),
+    status, el("p", "muted", `Source : /api/${kind}, projection du journal du client authentifié. Les observations absentes du journal restent inconnues ; ces liens ne constituent pas un inventaire runtime.`),
+    streamStatus !== "live" ? badge("Flux déconnecté · lectures ponctuelles seulement", "amber") : "",
+    warning ?? "",
+    !loadedAt ? el("p", "muted", "Les correspondances restent inconnues tant que cette source n’a pas été lue.") :
+      items.length ? el("ul", "resource-link-list", ...items.map((item) => el("li", "", render(item)))) :
+        el("p", "muted", "Aucune correspondance dans les données reçues de cette source. L’absence de trace ne prouve pas l’absence de ressource."));
+  if (error) {
+    const retry = entityLink("Réessayer la source du journal", `retry-source-${kind}`, () => { void refreshSummary(); });
+    retry.disabled = summaryLoading;
+    section.append(retry);
+  }
+  return section;
+}
+function entityLink(label: string, key: string, open: () => void) {
+  const node = button(label, "button button-quiet", open);
+  node.dataset.focusKey = key;
+  return node;
+}
+function workerEntities(worker: WorkerRecord): HTMLElement {
+  const section = el("section", "worker-related-resources",
+    el("p", "muted", "Les correspondances utilisent uniquement les identifiants de session ou de runtime reçus. Une session partagée ne prouve ni délégation ni exécution."),
+    entityLinks("sandboxes", relatedSandboxes(worker, sandboxes), (sandbox) => el("div", "resource-link",
+      entityLink(sandbox.id, `worker-sandbox-${sandbox.id}`, () => showSandbox(sandbox)),
+      el("span", "muted", workerRelation({ session_id: sandbox.session_id, sandbox_id: sandbox.id }, worker).join(" · ")))),
+    entityLinks("agents", relatedAgents(worker, agents), (agent) => el("div", "resource-link",
+      entityLink(asText(agent.name, agent.id), `worker-agent-${agent.id}`, () => showAgent(agent)),
+      ...workerRelation(agent, worker).map((reason) => el("span", "resource-link-evidence", el("span", "muted", reason),
+        provenance(agent.field_provenance?.[reason === "Session identique" ? "session_id" : "sandbox_id"]))))),
+    entityLink(summaryLoading ? "Actualisation des sources…" : "Actualiser les sources du journal", "refresh-worker-entities", () => { void refreshSummary(); }));
+  return section;
+}
+function agentSandbox(agent: Agent): HTMLElement {
+  return trackedEntityLinks(() => entityLinks("sandboxes", sandboxes.filter((sandbox) => sandbox.id === agent.sandbox_id), (sandbox) =>
+    el("div", "resource-link", entityLink(sandbox.id, `agent-sandbox-${sandbox.id}`, () => showSandbox(sandbox)),
+      el("span", "muted", "Identifiant sandbox identique"))));
+}
+function sandboxAgents(sandbox: Sandbox): HTMLElement {
+  return trackedEntityLinks(() => entityLinks("agents", agents.filter((agent) => agent.sandbox_id === sandbox.id), (agent) =>
+    el("div", "resource-link", entityLink(asText(agent.name, agent.id), `sandbox-agent-${agent.id}`, () => showAgent(agent)),
+      el("span", "muted", "Identifiant sandbox identique"), provenance(agent.field_provenance?.sandbox_id))));
+}
+function trackedEntityLinks(render: () => HTMLElement): HTMLElement {
+  const slot = el("div", "detail-entity-links", render());
+  detailEntityLinks.push({ slot, render });
+  return slot;
+}
+function updateDetailEntityLinks() {
+  if (!dialog?.open) return;
+  for (const { slot, render } of detailEntityLinks) {
+    if (!slot.isConnected) continue;
+    const focused = slot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+    const key = focused?.dataset.focusKey;
+    slot.replaceChildren(render());
+    if (focused) {
+      const replacement = key ? [...slot.querySelectorAll<HTMLElement>("[data-focus-key]")]
+        .find((node) => node.dataset.focusKey === key && node.isConnected && !node.matches(":disabled") &&
+          !node.closest("[hidden], [inert]") && node.getClientRects().length > 0) : null;
+      const fallback = slot.closest("dialog")?.querySelector<HTMLElement>(".detail-header button:not(:disabled)");
+      (replacement ?? fallback)?.focus({ preventScroll: true });
+    }
+  }
 }
 function showAgent(agent: Agent) {
   const { body } = openDialog(asText(agent.name, agent.id), "AGENT");
@@ -1748,6 +1865,7 @@ function showAgent(agent: Agent) {
         : null,
     ),
     el("p", "detail-task", asText(agent.task)),
+    agentSandbox(agent),
     control?.agentWorkers(agent) ?? "",
     button(
       "Voir ses événements",
@@ -1791,6 +1909,8 @@ function showSandbox(sandbox: Sandbox) {
     ),
     el("h3", "", "Montages reçus"),
     rawBlock(sandbox.mounts ?? null),
+    sandboxAgents(sandbox),
+    control?.sandboxWorkers(sandbox) ?? "",
     button(
       "Voir ses événements",
       "button button-primary",

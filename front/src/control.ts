@@ -1,4 +1,4 @@
-import type { Agent } from "./types.ts";
+import type { Agent, Sandbox } from "./types.ts";
 
 export type ControlView = "workers" | "quota" | "usage";
 export type WorkerState = "reserved" | "preparing" | "created" | "start_issued" |
@@ -205,8 +205,19 @@ export function formatExactDecimal(value: unknown, scale = 0): string {
 export function allocationDuration(value: AllocationRecord | null | undefined): string {
   return value ? `${formatExactDecimal(value.duration_ns, 9)} s` : "Inconnue · aucune observation terminale";
 }
-export function relatedWorkers(agent: Agent, workers: WorkerRecord[]): WorkerRecord[] {
-  return workers.filter((worker) =>
-    !!agent.session_id && worker.launch.session_id === agent.session_id ||
-    !!agent.sandbox_id && [worker.attempt.container_id, worker.attempt.stable_name].includes(agent.sandbox_id));
+export function workerRelation(entity: Pick<Agent, "session_id" | "sandbox_id">, worker: WorkerRecord): string[] {
+  const reasons: string[] = [];
+  if (entity.session_id && worker.launch.session_id === entity.session_id) reasons.push("Session identique");
+  if (entity.sandbox_id && [worker.attempt.container_id, worker.attempt.stable_name].includes(entity.sandbox_id))
+    reasons.push("Identité runtime identique");
+  return reasons;
+}
+export function relatedWorkers(agent: Pick<Agent, "session_id" | "sandbox_id">, workers: WorkerRecord[]): WorkerRecord[] {
+  return workers.filter((worker) => workerRelation(agent, worker).length > 0);
+}
+export function relatedSandboxes(worker: WorkerRecord, sandboxes: Sandbox[]): Sandbox[] {
+  return sandboxes.filter((sandbox) => workerRelation({ session_id: sandbox.session_id, sandbox_id: sandbox.id }, worker).length > 0);
+}
+export function relatedAgents(worker: WorkerRecord, agents: Agent[]): Agent[] {
+  return agents.filter((agent) => workerRelation(agent, worker).length > 0);
 }

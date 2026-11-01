@@ -84,6 +84,8 @@ Keep technical credentials separate from that identity: `viewer` grants its conf
 
 The dashboard presents session provenance, decisions, runtime observations and changes. A stale connection, partial coverage, denied request and empty result are different states. Use the displayed last observation and scope when deciding whether to refresh, reconnect or request access.
 
+Open an agent or sandbox to inspect its explicitly linked workers, then open a worker to return to its related agents and sandboxes. Links use exact session or runtime identifiers from the authenticated tenant's data; their provenance is displayed, and a matching session does not prove execution or delegation. The worker registry is paginated: navigate its pages before concluding that no matching record was received. A failed read retains a stale result with a retry action; it is not an empty inventory. The links combine audit projections and registry records, rather than querying an engine or discovering remote brokers.
+
 A 401/403 refusal on an active read closes the viewer session and removes its data, including open details. Reconnect with an authorized credential; repeated refreshes cannot restore a refused credential. A service error is shown explicitly. In the worker, quota and allocation views, the last successful data remains marked stale within the same session and scope until a successful refresh.
 
 ## Execute a first command
