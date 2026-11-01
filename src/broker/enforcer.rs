@@ -7,6 +7,9 @@ mod client;
 mod diagnostics;
 mod server;
 
+#[cfg(test)]
+mod auth_bootstrap_tests;
+
 use crate::{
     control::{ArmReceiptV1, ArmV1, HostClockSampleV1, RuntimeKindV1},
     runtime::{ContainerObservation, OwnedContainerSnapshot, RuntimeAuthority, RuntimeKind},

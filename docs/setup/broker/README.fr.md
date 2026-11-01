@@ -135,6 +135,8 @@ AIGUARD_PROJECT="/absolute/data/projects/your-project"
 
 Cette commande n'installe aucune unité systemd ou tâche launchd et ne revendique aucune qualification après logout, reboot, gel vivant ou pour les échéances autonomes. Un endpoint périmé ou une lease occupée n'autorise pas de takeover. Le [contrat de supervision](../../engineering/BROKER_SUPERVISION.md) distingue ces obligations de la commande au premier plan implémentée.
 
+L'authentification IPC privée du gardien appartient à l'état du broker et reste distincte des credentials runner/viewer. Une authentification existante est lue sans réécriture. Si elle manque dans un rôle possédant déjà un état, le démarrage refuse d'en générer une autre. Préserver la racine du rôle, son historique et les sauvegardes privées cohérentes ; récupérer l'authentification originale sous maintenance contrôlée. Effacer l'historique pour obtenir une racine apparemment vide n'est pas une procédure de reprise.
+
 ## Soumettre et consulter un job
 
 Dans le terminal client, renseigner les mêmes variables de chemins. Choisir **une seule fois** un UUID d'opération neuf non nul, le conserver et garder les mêmes entrées lors d'un retry. La valeur ci-dessous doit être remplacée avant exécution.

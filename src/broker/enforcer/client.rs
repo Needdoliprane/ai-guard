@@ -6,7 +6,7 @@ use crate::{
         discovery::{RoleLease, load_endpoint},
         local_ipc::{EndpointRecordV1, read_frame, write_frame},
     },
-    control_fs::Directory,
+    control_fs::{Directory, persistent::PersistentLimit},
     runner::broker::FreshStartPermission,
     runtime::{BeforeSpawnGuard, PrearmedStartControl},
 };
@@ -84,7 +84,29 @@ impl EnforcerClient {
         }
         root.revalidate()
             .map_err(|_| EnforcerError::UnsafeFilesystem)?;
-        let secret = capability(root, true)?;
+        let secret = match capability(root, false) {
+            Ok(secret) => secret,
+            Err(EnforcerError::Unauthorized) => {
+                // Enumeration duplicates its retained FD and shares that
+                // cursor. Use an independent root for concurrent bootstraps.
+                let bootstrap_root = Directory::open_existing(root.path())
+                    .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+                let empty = match bootstrap_root.persistent_entries(0) {
+                    Ok(entries) => entries.is_empty(),
+                    Err(error) if error.is::<PersistentLimit>() => false,
+                    Err(_) => return Err(EnforcerError::UnsafeFilesystem),
+                };
+                root.revalidate()
+                    .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+                // This legacy empty-root bootstrap cannot detect complete
+                // removal of role history. A recovery-only connection must
+                // always read existing auth, including in an empty root.
+                // An entry may also be a concurrent bootstrap's winning auth:
+                // reread it without creating when the inventory was nonempty.
+                capability(root, empty)?
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(endpoint) = load_endpoint(root)? {
             match Self::connect(root, executable, endpoint, secret, max_slots, auto_recovery).await
             {

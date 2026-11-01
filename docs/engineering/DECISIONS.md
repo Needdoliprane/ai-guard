@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 1er novembre — reprise STOP distincte de l'admission
+
+La reprise des arrêts autorisés doit fonctionner lorsque l'admission ou le ledger de retrait est dégradé, sous réserve d'une racine, d'une authentification et d'une lease encore vérifiables. La première verticale ajoute un canal IPC explicitement limité aux arrêts, avant le scan lourd et la demande Full. Son authentification lie le rôle demandé ; restauration et reconnexion ne passent plus par un Register métier ou une permission Prepare. Le protocole2 annonce `offered_roles=["stops_only"]` lorsque l'admission est fermée. Un secret IPC absent dans une ancienne autorité n'est pas régénéré comme réparation.
+
+Les revues imposent un ordre par Arm : classer la projection, rapprocher un Pending/final exact avant toute restauration de cette même cible, puis restaurer les RequiredStop restantes. Les cibles indépendantes continuent pendant le défaut d'un autre job. Après un epoch de reprise partielle ayant pu émettre un STOP, l'ancien Q ou le certificat Closing ne prouve pas le drainage du nouveau RPC : refuser la finalisation récupérée si cette intervention ne peut être exclue. Ce refus conserve la sûreté mais laisse la convergence à résoudre ; une annonce de transport n'est pas une observation d'effet.
+
+Le ledger proposé utilise des deltas engagés par Arm, avec inventaire reconstruit et tombstones attendues, plutôt que des snapshots complets répétés. La lease gardien spécialisée doit ouvrir son lock en O_RDWR dès l'origine, conserver la même description/flock et un cache propre ; PrivateFile général reste immuable. Les formats, la rétention, la quiescence et leurs preuves restent à implémenter. Les premiers RED portent sur les API existantes et les vraies primitives Unix, sans moteur ni types futurs fictifs. Aucun G09/D5 ou gate n'est fermé par cette direction ; les chemins historiques ne sont pas convertis silencieusement.
+
 ## 1er novembre — provenance des builds et intégration du profil Docker
 
 Les validations destinées à publication utilisent une cible Cargo dédiée au checkout, réutilisable pour ses changements suivants, sans partage entre worktrees de contenus différents. Une incohérence source/bibliothèque dans l'ancienne cible partagée est conservée sans attribution rétrospective ; une compilation neuve isolée établit seulement les résultats de son propre gel. Aucun clean, effacement de preuve ou relèvement de délai produit n'est utilisé comme correction. Les modes privés des captures ne doivent pas retirer le bit de traversée aux répertoires ni le bit d'exécution aux binaires.

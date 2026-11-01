@@ -135,6 +135,8 @@ AIGUARD_PROJECT="/absolute/data/projects/your-project"
 
 This command installs no systemd unit or launchd job and makes no logout, reboot, live-freeze recovery or autonomous-deadline qualification claim. A stale endpoint or occupied lease does not authorize takeover. The [supervision contract](../../engineering/BROKER_SUPERVISION.md) separates these obligations from the implemented foreground command.
 
+The enforcer's private IPC authentication belongs to the broker state and is separate from runner/viewer credentials. Existing authentication is read without rewriting it. If it is missing from a role that already has state, startup refuses to generate a replacement. Preserve the role root, its history and coherent private backups; recover the original authentication through controlled maintenance. Erasing history to obtain an apparently empty root is not a recovery procedure.
+
 ## Submit and inspect a job
 
 In the client terminal, set the same path variables. Choose a fresh non-nil operation UUID **once**, record it and keep the same inputs for a retry. The value below must be replaced before execution.
