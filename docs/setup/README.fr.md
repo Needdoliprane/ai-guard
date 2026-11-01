@@ -25,14 +25,15 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 | `.env.exemple.local-rules` | Socle avec `deploy/docker/compose.jev-rules.example.yaml`, catalogue de décision Rust fini sans service modèle. |
 | `.env.exemple.local-keycloak` | Compose du socle et projet Keycloak séparé. |
 | `.env.exemple.local-qwen` | Compose du socle et projet IA locale séparé. |
-| `.env.exemple.local-qwen-tls` | Alternative projet modèle TLS et surcharge gateway ; suivre [la configuration AC privée](local-ai/TLS.fr.md). |
+| `.env.exemple.local-qwen-tls-volumes` + `volumes.env` publié | Projet modèle TLS à volumes neufs et surcharge gateway ; suivre [la préparation explicite](local-ai/TLS.fr.md). |
+| `.env.exemple.local-qwen-tls` | Alternative bind TLS explicite, seulement sur filesystem réellement supporté ; suivre [le guide TLS](local-ai/TLS.fr.md). |
 | `.env.exemple.local-keycloak-qwen` | Réglages combinés ; utiliser les commandes séparées ci-dessous. |
 | `.env.exemple.providers` | Modèle d'une **nouvelle entrée fournisseur privée** ; suivre son guide pour l'import explicite. Ni configuration Compose ni SSO. |
 | `.env.exemple.entreprise` | Transport Compose du socle et override Jev optionnel ; identités, tenants et politiques d'inférence utilisent leurs configurations typées distinctes. |
 | `<config-dir>/providers.json` | Sélection fournisseur Rust, créée/examinée avec `providers init/status` ; choix explicite via `--providers-file`. |
 | Fichiers privés runner/viewer/Jev | Références explicites du contrôle Rust, jamais environnement global des workers. |
 
-La CLI Rust ne source pas dotenv. Compose développe `${HOME}` et lit ces exemples seulement avec `--env-file`. L'environnement du poste peut remplacer des valeurs d'interpolation Compose ; examiner la configuration du terminal si une valeur diffère. Une option CLI configure le composant nommé, pas tous les services.
+Le profil volumes exige d’abord `model-tls provision` : passer son fichier de base puis le `volumes.env` publié avec deux options `--env-file`. Il ne fonctionne pas avec le seul exemple public ; ne pas inventer les sélecteurs. La CLI Rust ne source pas dotenv. Compose développe `${HOME}` et lit ces exemples seulement avec `--env-file`. L'environnement du poste peut remplacer des valeurs d'interpolation Compose ; examiner la configuration du terminal si une valeur diffère. Une option CLI configure le composant nommé, pas tous les services.
 
 Les exemples publics s'utilisent directement pour les défauts locaux documentés. Pour personnaliser, créer un nouveau fichier privé sous un autre nom et réutiliser ce chemin partout. Ne jamais écraser `.env`, credentials ou base existants. Une entrée fournisseur privée doit être0600 et son parent0700. Ne pas `source` une configuration téléchargée ou fournie par un projet.
 

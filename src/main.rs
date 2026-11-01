@@ -57,6 +57,10 @@ enum Command {
     Ingress(IngressArgs),
     /// Isolated model TLS transport; fixed model:8080 upstream, no control credentials.
     ModelIngress(ModelIngressArgs),
+    /// Provision local TLS volumes explicitly, without starting model/gateway.
+    ModelTls(agentsandbox::model_tls::ModelTlsArgs),
+    #[command(name = "__model-tls-import", hide = true)]
+    InternalModelTlsImport,
     /// Migrate an offline audit database, preserving a verified new backup.
     MigrateControl {
         #[arg(long)]
@@ -413,6 +417,12 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Broker(args) => broker_cli::execute(args).await?,
+        Command::ModelTls(args) => {
+            agentsandbox::model_tls::execute(args, shutdown_signal()?).await?
+        }
+        Command::InternalModelTlsImport => agentsandbox::model_tls::internal_import()
+            .await
+            .map_err(|_| anyhow::anyhow!("model TLS import refused"))?,
         Command::Gateway(args) => {
             validate_bind(args.listen, args.container_listen)?;
             let backend_environment = if args.jev_backend.is_none() {

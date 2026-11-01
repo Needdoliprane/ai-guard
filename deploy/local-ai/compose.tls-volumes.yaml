@@ -1,0 +1,92 @@
+# Explicit volume alternative to compose.tls.yaml: one model, no host publication.
+# Prepare fresh external TLS volumes with agentsandbox model-tls provision first.
+name: ai-guard-local-ai-tls-volumes
+services:
+  model:
+    image: ${AI_GUARD_LOCAL_AI_IMAGE:?Set the inspected model image ID in the base env}
+    command:
+      - --model
+      - /models/model.gguf
+      - --ctx-size
+      - "${AI_GUARD_LOCAL_AI_CONTEXT:-512}"
+      - --batch-size
+      - "32"
+      - --ubatch-size
+      - "32"
+      - --parallel
+      - "1"
+      - --n-gpu-layers
+      - "0"
+      - --predict
+      - "${AI_GUARD_LOCAL_AI_DEFAULT_TOKENS:-64}"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --alias
+      - "${AI_GUARD_LOCAL_AI_MODEL:-qwen2.5-0.5b-q4km}"
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "${AI_GUARD_LOCAL_AI_CPUS:-2.0}"
+    mem_limit: ${AI_GUARD_LOCAL_AI_MEMORY_BYTES:-1000000000}
+    memswap_limit: ${AI_GUARD_LOCAL_AI_MEMORY_BYTES:-1000000000}
+    pids_limit: 64
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777"]
+    networks: [inference]
+    healthcheck:
+      disable: true
+    logging:
+      driver: none
+    restart: "no"
+  local-ai-ingress:
+    image: ${AI_GUARD_CONTROL_IMAGE:?Use the inspected image ID from volumes.env}
+    command: ["model-ingress", "--listen", "0.0.0.0:8443", "--container-listen", "--tls-cert-file", "/run/ai-guard-tls/server-chain.pem", "--tls-key-file", "/run/ai-guard-tls/server.key"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: "0.5"
+    mem_limit: 192m
+    memswap_limit: 192m
+    pids_limit: 128
+    tmpfs: ["/tmp:rw,noexec,nosuid,nodev,size=16m,mode=1777"]
+    networks:
+      inference: {}
+      judge_link:
+        aliases: ["${AI_GUARD_LOCAL_AI_TLS_SERVER_NAME:?Use volumes.env}"]
+    volumes:
+      - type: volume
+        source: local_judge_ca
+        target: /run/ai-guard-trust
+        read_only: true
+        volume: {nocopy: true}
+      - type: volume
+        source: local_judge_identity
+        target: /run/ai-guard-tls
+        read_only: true
+        volume: {nocopy: true}
+    depends_on: [model]
+    healthcheck:
+      test: ["CMD", "agentsandbox", "healthcheck", "--ca-file", "/run/ai-guard-trust/root-ca.pem", "--url", "https://${AI_GUARD_LOCAL_AI_TLS_SERVER_NAME:?Use volumes.env}:8443/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 120s
+    logging:
+      driver: none
+    restart: "no"
+networks:
+  inference:
+    internal: true
+  judge_link:
+    name: ${AI_GUARD_LOCAL_AI_TLS_NETWORK:?Use volumes.env}
+    internal: true
+volumes:
+  local_judge_ca:
+    external: true
+    name: ${AI_GUARD_LOCAL_AI_TLS_CA_VOLUME:?Run model-tls provision first}
+  local_judge_identity:
+    external: true
+    name: ${AI_GUARD_LOCAL_AI_TLS_IDENTITY_VOLUME:?Run model-tls provision first}

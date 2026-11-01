@@ -16,6 +16,7 @@ The user manual describes the **complete product contract**. Implementation prog
 | Codex / Claude Code, subscription or API | [AI providers](docs/setup/providers/README.md) | [.env.exemple.providers](.env.exemple.providers) |
 | Local Keycloak, Web and CLI identity | [Keycloak and OIDC](docs/setup/keycloak/README.md) | [.env.exemple.local-keycloak](.env.exemple.local-keycloak) |
 | Small local model, offline inference | [Local AI](docs/setup/local-ai/README.md) | [.env.exemple.local-qwen](.env.exemple.local-qwen) |
+| Local judge over verified TLS | [TLS setup](docs/setup/local-ai/TLS.md) | [.env.exemple.local-qwen-tls-volumes](.env.exemple.local-qwen-tls-volumes) + published `volumes.env` |
 | Local Keycloak and Qwen together | [Combine contexts](docs/setup/README.md#combine-local-contexts) | [.env.exemple.local-keycloak-qwen](.env.exemple.local-keycloak-qwen) |
 | Managed installation, private CA and internal inference | [Enterprise configuration](docs/setup/enterprise/README.md) | [.env.exemple.entreprise](.env.exemple.entreprise) |
 

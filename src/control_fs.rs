@@ -28,6 +28,7 @@ macro_rules! measure_control_fs {
 #[cfg(test)]
 pub(crate) mod cost_probe;
 pub(crate) mod persistent;
+pub(crate) mod publication;
 
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};

@@ -12,7 +12,7 @@ Le RED S0 montre qu'une lease locale au futur serveur peut être relâchée avan
 
 ## 1er novembre — import TLS explicite vers des volumes de contrôle
 
-Le démarrage réel refuse les projections dont le filesystem n'a pas de sémantique ACL qualifiée ; aucun élargissement de la politique commune n'est retenu. Le [contrat d'import TLS](TLS_MATERIAL_PROVISIONING.md) conserve validation hôte par FD, reader strict et contrôle Rust existant, avec paquet stdin fermé et préparateur ponctuel non privilégié vers deux volumes neufs. CA seule pour gateway, identité pour relais ; aucun secret au modèle/worker. Pas de nouveau service ou stockage métier, d'émission PKI, d'adoption/rotation ou d'activation implicite. Implémentation, revue et qualification réelles restent à obtenir ; ce choix ne clôture G11 ni le parcours Jev intégré.
+Le démarrage réel refuse les projections dont le filesystem n'a pas de sémantique ACL qualifiée ; aucun élargissement de la politique commune n'est retenu. Le [contrat d'import TLS](TLS_MATERIAL_PROVISIONING.md) conserve validation hôte par FD, reader strict et contrôle Rust existant, avec paquet stdin fermé et préparateur ponctuel non privilégié vers deux volumes neufs. CA seule pour gateway, identité pour relais ; aucun secret au modèle/worker. Pas de nouveau service ou stockage métier, d'émission PKI, d'adoption/rotation ou d'activation implicite. Implémentation, tests ciblés et revues source sont depuis vérifiés ; la qualification runtime reste distincte et ouverte. Ce choix ne clôture G11 ni le parcours Jev intégré.
 
 ## 1er novembre — forme stricte des données historiques dans STOP3
 

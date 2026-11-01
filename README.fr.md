@@ -16,6 +16,7 @@ Le manuel utilisateur décrit le **contrat du produit complet**. L'avancement, l
 | Codex / Claude Code, abonnement ou API | [Fournisseurs IA](docs/setup/providers/README.fr.md) | [.env.exemple.providers](.env.exemple.providers) |
 | Keycloak local, identité Web et CLI | [Keycloak et OIDC](docs/setup/keycloak/README.fr.md) | [.env.exemple.local-keycloak](.env.exemple.local-keycloak) |
 | Petit modèle local, inférence hors ligne | [IA locale](docs/setup/local-ai/README.fr.md) | [.env.exemple.local-qwen](.env.exemple.local-qwen) |
+| Juge local en TLS vérifié | [Configuration TLS](docs/setup/local-ai/TLS.fr.md) | [.env.exemple.local-qwen-tls-volumes](.env.exemple.local-qwen-tls-volumes) + `volumes.env` publié |
 | Keycloak et Qwen locaux ensemble | [Combiner les contextes](docs/setup/README.fr.md#combiner-les-contextes-locaux) | [.env.exemple.local-keycloak-qwen](.env.exemple.local-keycloak-qwen) |
 | Installation administrée, AC privée et inférence interne | [Configuration entreprise](docs/setup/enterprise/README.fr.md) | [.env.exemple.entreprise](.env.exemple.entreprise) |
 
