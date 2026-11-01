@@ -1,5 +1,17 @@
 # Décisions d'industrialisation
 
+## 1er novembre — forme stricte des données historiques dans STOP3
+
+Le nouveau transport3 conserve les schémas et comportements2. Ses records propres sont fermés, Option explicitement null/valeur. Les V1 embarquées suivent exactement leur sérialiseur historique : chaque membre émis est requis, null compris ; les cinq `skip_serializing_if` restent omis lorsqu'ils valent None. Cette exception résout la contradiction du premier contrat entre uniformité des Option et conservation exacte de RestoreV1. Le premier gel R4 qui injectait des nulls sur des champs omis n'a pas été exécuté ; il est conservé NOT_RUN, remplacé par R4b avant toute reproduction.
+
+Le [contrat STOP3](BROKER_SUPERVISION.md#transport-stop3-complet--contrat-du-candidat-r4b-non-qualifié) exige refus récursif des clés dupliquées avant insertion en map, décodage typé depuis les octets originaux, témoin de forme comparé à Serialize(T), puis validateurs/MAC. Les nombres/lexèmes ne sont pas normalisés par une Value préalable. La feature `serde_json/raw_value` est autorisée seulement si nécessaire, sans nouveau paquet/version et avec lock à recouper. Cette décision ne valide pas le candidat, ses quatre écarts de revue, le ledger ou Full ; les tests restent des preuves à obtenir.
+
+## 1er novembre — liaison TLS explicite du juge local
+
+Le profil HTTP hôte reste disponible. Un profil TLS distinct réutilise le même modèle et le même relais Rust, dans deux réseaux internes : gateway↔relais sur judge_link, relais↔modèle sur inference. Aucun port modèle TLS publié, réseau de worker ajouté ou montage TLS sur le relais d'entrée du contrôle. Seule l'ancre publique atteint le gateway ; chaîne et clé leaf restent sur le relais modèle, clés privées d'AC chez l'opérateur. Le dernier saut HTTP interne n'est pas annoncé chiffré. Aucun DNS ou magasin de confiance OS n'est modifié.
+
+La confiance Jev devient une configuration typée additive, conservant les anciennes API et la vérification chaîne/SAN/validité, sans proxy, redirect, retry ou repli permissif. Le lecteur de projections0444 root/euid est un port étroit distinct de PrivateFile0600, sans relâcher ses contrôles. Ce lot a un worktree dédié depuis58309ed ; implémentation, tests TLS négatifs, bornes/shutdown et revue restent à établir. Une connexion TLS ne qualifie ni le modèle à autoriser ni le cloud ; Allow local reste Review. Aucune nouvelle architecture métier n'est introduite.
+
 ## 1er novembre — compatibilité du futur protocole de retrait
 
 R8 exige la forme exacte de Challenge/Auth/Grant/Status/Watch2, avec StopsOnly et Unverified(recovery_transport_only). Ajouter directement Verified, coverage ou Full à ces records fermés casserait le vrai client2. Root retient une négociation V3 authentifiée sur une connexion non encore accordée, après une préface2 inchangée, dans le même IPC et le même binaire. La solution alternative de versions appariées est plus simple mais ne fournit pas cette continuité. Aucun second listener ni migration implicite n'est ajouté.

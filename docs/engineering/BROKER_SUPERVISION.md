@@ -173,8 +173,8 @@ Le ledger est toujours `Unverified` : aucun sceau/floor/delta/tombstone, Closing
 ou port de finalisation de retrait n'est livré. Une lease O_RDWR et un thread démarré ne constituent pas ces preuves.
 Dans R8, LedgerState n'admet que Unverified et ChallengeV2 est fermé (`deny_unknown_fields`). Ajouter Verified/coverage/Full
 ne garantit donc aucune compatibilité avec ces clients : stratégie de versionnement/mise à jour explicite et testée requise avant raccord.
-La direction de raccord retenue est la négociation V3 explicite avant tout accord, décrite ci-dessous ; son implémentation reste absente.
-Préserver refus fermé et STOP connus, sans conversion d'anciennes connexions ; Auth/Grant/Status3 complets restent à figer avant leur code.
+La direction retenue est la négociation V3 explicite avant tout accord, décrite ci-dessous. Un candidat logiciel existe depuis le gel R4b du1er novembre ; sa revue conserve quatre écarts P2 et ses tests restent à exécuter. Ce candidat n'est pas encore le protocole livré ni une preuve du ledger.
+Préserver refus fermé et STOP connus, sans conversion d'anciennes connexions ; le contrat complet3 et sa règle de forme embarquée sont précisés plus bas.
 R7 passe dix fonctions ciblées, dont les deux reprises multi-Arm après abandon du waiter, puis échoue à Clippy strict.
 R8 corrige seulement une indirection privée et deux conditions équivalentes ; fmt, Clippy strict, quatre canaris complémentaires,
 deux tests CLI et une compilation release passent. Les sources et trois exécutables release exacts sont conservés.
@@ -210,13 +210,51 @@ sans satisfaire une demande Full3 par une capacité STOP.
 Le premier test demande stops_only et attend une trame distincte kind=challenge_v3, protocol=3, role=enforcer,
 epoch et root_binding inchangés, client_nonce corrélé et champ unique server_nonce frais, non nul et distinct des deux nonces précédents.
 Aucun alias nonce n'est admis. Cette trame seule ne constitue ni Grant3, ni ledger vérifié, ni effet STOP ou pouvoir Full.
-La suite Auth3/Grant3 et Status/Watch3 exigera ses DTO, domaines client/serveur, identités et couverture propres avant code applicatif.
+La suite Auth3/Grant3 et Status/Watch3 suit le contrat ci-dessous ; sa présence dans un candidat ne prouve pas sa validation.
 Full3 exigera Complete ; Partial/Unverified refusera Full sans Grant STOP implicite.
 
 Le brouillon qui attendait coverage3 dans Status2 n'a jamais été exécuté et est corrigé avant Cargo.
 Le premier RED R9 garde les positifs Journal/Cancel/Restore V2 et atteint l'oracle de négociation3 absente sur une autre connexion,
 après correction du cleanup du harnais avant exécution. Diagnostics Partial et handshake3 complet restent NOT_RUN ;
 aucun simple message ne clôture la verticale D5.
+
+### Transport STOP3 complet — contrat du candidat R4b, non qualifié
+
+Le contrat ci-dessous est décidé avant les corrections et tests du candidat. Le gel privé R4b conserve les14 tests initiaux et ajoute quatre régressions de revue ; il préserve R9. R4, non exécuté, reste archivé : son positif de présence null contredisait les cinq omissions historiques ; aucune exécution ni RED ne lui est attribué.
+
+Les records propres à3 sont fermés, sans défaut implicite, avec chaque Option explicitement null ou valeur. UUID :36 caractères canoniques minuscules et non nul ; digests/proofs :64 caractères hex minuscules. Les données V1 embarquées suivent **exactement la forme de leur sérialiseur historique** : tout membre émis est requis, null compris ; tout membre omis par `skip_serializing_if` reste absent lorsque None. Les cinq exceptions sont `RuntimeAuthority.invocation`, `RuntimeAuthority.docker_launch_profile`, `InvocationBindingV1.executable_directory`, `ContainerHandle.configuration_fingerprint_version` et `ContainerObservation.configuration_fingerprint_version`. Cette règle ne modifie pas leurs sérialiseurs ni le décodeur2.
+
+Une visite récursive bornée refuse chaque clé JSON décodée dupliquée avant insertion dans une map, y compris dans une branche inconnue. Le décodage typé part des octets originaux, jamais d'une Value qui aurait normalisé nombres ou doublons. Le témoin structurel est comparé à `Serialize(T)` : mêmes membres, indices/longueurs de tableaux, positions null et catégories scalaires ; ordre des clés sans autorité. Les validateurs typés et MAC restent obligatoires. Retirer un null émis, injecter un null omis, mélanger les formes ou ajouter une valeur JSON après la trame ferme le canal avant dispatch/publication. Une capture `RawValue` est autorisée si nécessaire, sans nouveau paquet/version ; elle ne choisit ni rôle ni protocole.
+
+Pour les preuves suivantes, N désigne le tuple Negotiate3 déjà défini, C/A/G/F les tuples des cores ci-dessous dans l'ordre écrit, sans leur proof. `J` est le helper canonique du journal appliqué à ces valeurs typées : clés triées récursivement, tableaux conservés. Le transcript N historique conserve **`serde_json::to_vec(N)`**, distinct de J. Tous les préfixes de domaines se terminent par un NUL. `sid=SHA256(b"ai-guard:enforcer-session:v3\0" || J((N,C)))` ; même capability IPC, HMAC-SHA256 vérifiée sans comparaison textuelle précoce.
+
+| Record3 | Core dans l'ordre ; chaque message porte aussi proof |
+|---|---|
+| Challenge | `kind=challenge_v3, protocol=3, role=enforcer, epoch, root_binding, requested_role, client_nonce, server_nonce, offered_roles, ledger_state` ; le message ajoute le champ `session_id=sid` avant proof |
+| Auth | `kind=auth_v3, protocol=3, session_id, requested_role, epoch, root_binding, client_nonce, server_nonce` |
+| Grant | `kind=granted_v3, protocol=3, session_id, granted_role, epoch, root_binding, client_nonce, server_nonce, ledger_state, admission_available` ; ce lot impose `granted_role=stops_only`, `admission_available=false`, ledger Unverified |
+| Refusal | `kind=refused_v3, protocol=3, stage=negotiate\|authenticate, requested_role, epoch, root_binding, client_nonce, server_nonce, session_id, code, ledger_state` |
+
+| Preuve3 | Domaine après le préfixe commun `ai-guard:enforcer-`, puis projection |
+|---|---|
+| Challenge | `server-challenge:v3\0` + `J((N,C,sid))` |
+| Auth | `client-auth:v3\0` + `J((N,C,sid,A))` |
+| Grant | `server-grant:v3\0` + `J((N,C,sid,A,G))` |
+| Refusal | `server-refusal:v3\0` + `J((N,Option<C>,Option<A>,F))` |
+
+Le client vérifie Challenge avant Auth, puis Grant et toutes les corrélations. Epoch/root correspondent à la préface et aux ancres retenues ; les trois nonces sont frais, non nuls et distincts. La préface2 est contrôlée lexicalement par le seul client3 avant N3, sans durcir rétroactivement le vrai client2. Aucun alias nonce, réemploi de session, mélange de domaine ou changement de rôle après accord.
+
+Full3 valide est refusé immédiatement après N3 authentifié, avec code `full_unavailable`, C/A/sid null et nouveau nonce serveur ; pas de Challenge ni Grant STOP compensatoire. Les autres codes fermés sont `ledger_changed`, `transport_unavailable`, `protocol_unavailable`. MAC invalide, timeout ou ancre invérifiable ferment sans prétendre produire un refus authentifié. Après Auth valide, un refus corrèle C/A/sid et le nonce de C. Aucun fallback2 sur cette socket ni client Full3 fictif.
+
+Le contexte de session est privé et issu du handshake vérifié. Une seule commande par connexion, sauf Watch sortant continu. `Request3Core=(kind=request_v3,protocol=3,session_id,epoch,request_id,command)` ; `Reply3Core=(kind=reply_v3,protocol=3,session_id,epoch,request_id,sequence=0,result)` ; `Watch3Core=(kind=watch_v3,protocol=3,session_id,epoch,request_id,sequence,value)` ; chacun ajoute proof. Domaines : `client-command:v3\0`+`J((sid,RequestCore))`, `server-reply:v3\0`+`J((sid,RequestCore,ReplyCore))`, `server-watch:v3\0`+`J((sid,RequestCore,WatchCore))`, avec le même préfixe commun ci-dessus. request_id est frais par tentative, sans changer les identités métier restaurées. Watch commence à0 puis incrémente exactement ; overflow, trou, doublon, ancien epoch ou mauvaise corrélation ferment avant publication.
+
+Seules opérations : `StatusStops`, `WatchStops`, `RestoreRequiredStop`, `QueryStop`, `DeliverDurableStop`, avec les wire tags snake_case existants. Les Restore/slots/codes EnforcerError conservent DTO, identité, validation, propriétaire et échéance V1. Résultats : StatusStops, StopReserved avec replayed, StopStatus, StopAccepted ou Error ; aucun Register/Prepare/claim/start/export/cleanup/retrait/finalisation. Abandonner le waiter ne détruit pas les preuves et tentatives R8 déjà retenues.
+
+Status3 est fermé : `epoch,root_binding,granted_role=stops_only,known_stop_slots,max_slots,progress,transport_health=healthy|degraded,clock_healthy,admission_available=false,ledger_state,retirement_count`. max_slots égale le cap attendu, y compris avant publication Watch. Le seul ledger produit est `Unverified{reason:recovery_transport_only}` ; le nombre de retraits est `Unknown{reason:ledger_unverified}`, jamais0 inventé. known_stop_slots est la taille de la map STOP, pas un inventaire du ledger ni un compte de workers terminés. Aucune projection Complete/Partial productive n'est approuvée par ce transport ; leurs engagements futurs restent à confronter au vrai ledger.
+
+Le serveur retient racine/endpoint/socket/lease et revalide avant préface, après N3, avant Grant, avant dispatch puis pendant Watch ; une substitution coupe le canal sans abandonner les STOP connus. Le client recoupe annonce/epoch/root après Grant avant publication du cache, sans écraser un epoch plus récent. Deadline3 monotone6s depuis l'entrée handshake ; chaque IO3 reste bornée à3s et au budget restant, sans reset. Le temps de la préface commune est inclus dès classement N3 ; les timings2 restent inchangés. Framing BE32,4096 octets handshake et512KiB total opération, enveloppe incluse ; aucun scan/fsync/join dans handshake ni promesse de préemption d'un syscall synchrone. Watch garde poll100ms, silence3s, stagnation750ms sur frames reçues et canal lecteur4 ; ces limites ne prouvent aucun terminal moteur.
+
+Le client Stop3 a sa version fixée à la construction et partage seulement les algorithmes privés STOP autorisés. Aucun upgrade ou conversion Stop→Full. Les écarts de revue à reproduire/corriger sont les ancres après accept, la forme V1 embarquée, les UUID de préface3 et le cap Watch. Vecteurs MAC indépendants, slowloris, compatibilité client2, R9 et reprises multi-Arm restent des vérifications distinctes. Ledger/Closing/join/retraite/fencing et G09 restent ouverts.
 
 ### Deux preuves initiales fermées
 

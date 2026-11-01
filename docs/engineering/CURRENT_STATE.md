@@ -10,6 +10,8 @@ Cinq régressions de défaut passent après leurs RED conservés : provenance ab
 
 **PASS logiciel ciblé :62 fonctions**, formatage, Clippy strict all-targets et une compilation release, avec revue indépendante traitée. La première sélection de deux tests CLI avait exécuté zéro fonction ; elle n'est pas comptée PASS. Seuls ces deux filtres corrigés sont rejoués, sans recompilation ni reprise des60 précédentes. Les sources/fixtures/lock et trois binaires release exacts sont conservés hors checkout. [Commandes, preuves et limites](VALIDATION.md#1er-novembre--jev-j2j3b-corrections-et-validation-ciblée).
 
+**Intégration et fermeture :** commit `58309ed765cabf35af0b0eada8ac53e3a0fe1c46` poussé sur `codex/broker-service`, SHA distant vérifié. Les15 contenus identiques sont indexés dans le donneur, puis son fast-forward vers ce commit réussit sans reset/force. Inventaire propre, aucun ignoré/non-suivi ni consommateur visible au contrôle final ; retrait normal Git RC0, branche conservée. Preuves et artefacts restent hors checkout. Un nouveau worktree TLS part de58309ed et possède son périmètre ; les anciens gardiens interdisent toujours le retrait de `broker-supervision`.
+
 Les guides EN/FR, contrat API, exemple local-rules et surcharge Compose évoluent ensemble. Le raccord HTTP hôte du juge et le loopback du gateway conteneurisé restent distincts ; la liaison conteneurisée HTTPS/AC privée est le chantier suivant. Aucun appel réel TypeSafe/Qwen/Codex/Claude, moteur, SSO ou matrice100 n'est qualifié par ces fixtures. Le modèle historique reste non qualifié sémantiquement ; G09 FAIL, D5 ouvert,0/12 gates clos.
 
 ## Transport d'arrêt restreint — chantier en validation, 1er novembre
