@@ -1,5 +1,7 @@
 # Plan d'industrialisation
 
+Le complément humain local est intégré et vérifié dans ses périmètres logiciels : API/CLI/SQLite, migration5 et front nominatif. Les échecs de préparation et statiques sont conservés avec leurs corrections dans [VALIDATION](VALIDATION.md#1er-novembre--accès-humain-local-apicli-et-dashboard). Restent nouvelle release/image et parcours humain contre le contrôle conteneurisé, puis OIDC/PKCE et lancement délégué. En parallèle, le diagnostic Jev séparé est relu mais ses tests restent à exécuter ; l'unique essai modèle réel demeure FAIL. D5 doit livrer un retrait complet avec vrai join/capacité, reprise avant Restore et protocoles durables explicites ; le cadrage n'est pas une implémentation. Aucun de ces lots ne clôture G09 ou la qualification cloud.
+
 > Exécution autonome demandée par le mainteneur, avec agents spécialisés, périmètres exclusifs et revue indépendante. Les exigences sont dans AGENTS.md et ARCHITECTURE_CONTRACT.md ; aucune validation intermédiaire de plan n'est requise par la mission.
 
 Objectif : satisfaire les exigences complètes local-first/cloud et produire des preuves reproductibles, sans assimiler un lot à une qualification du produit. Rust/SQLite et frontend TypeScript existants sont conservés. Les décisions structurelles restent soumises au mainteneur.

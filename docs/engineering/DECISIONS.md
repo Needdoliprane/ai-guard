@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 1er novembre — protocole durable des lectures humaines
+
+Le vocabulaire `control.identity.access` reçoit un schéma5 explicite et le marqueur unique `control.identity.human_access.genesis`, lié au namespace, au genesis identité4 et à la tête précédente. Le SQL ne change pas ; les anciennes versions refusent5. Migration4→5 avec backup/head contrôlés, aucun downgrade ni démarrage automatique. Le défaut CLI de migration reste2 ; les opérations humaines offline conservent4 ou5 pour le vocabulaire de mutation inchangé, tandis que la lecture humaine auditée exige5.
+
+Les credentials humains sont séparés de runner/viewer et des authentifications fournisseurs IA. Le provisioning prépare d'abord les fichiers privés/reçus, puis compte, binding et membership dans une transaction auditée idempotente. L'acteur de maintenance vient du filesystem/UID effectif ; un `actor` JSON est refusé. Permissions et tenant sont relus depuis l'identité authentifiée, sans conversion en clé de lecture tenant entier. OIDC/PKCE et délégation restent des contrats obligatoires distincts, sans prétendre à un SSO livré.
+
 ## 1er novembre — pagination humaine et version d'autorisation opaque
 
 Le candidat de lecture humaine doit permettre les précédents et les retries pendant son contexte, sans exposer de compteur global. La revue a constaté que retirer les ancêtres de curseurs cassait la navigation après trois pages. Le contrat de ce lot non publié remplace ce cache de pages par des curseurs AEAD au sein d'un registre borné de contextes :4096 au total,64 par credential/principal, durée absolue300s, saturation explicite sans éviction vivante. Chaque contexte possède une clé CSPRNG et un compteur de nonce partagés uniques, sans wrap ni réinitialisation ; aucune position d'audit n'est publique. La dépendance directe prévue `ring = "=0.17.14"` est déjà transitive et verrouillée ; le wrapper reste à implémenter, tester et relire.

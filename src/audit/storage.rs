@@ -62,14 +62,22 @@ impl InitializationGuard {
 
 impl StoreStorage {
     pub(super) fn open(path: &Path) -> Result<(Self, InitializationGuard)> {
-        Self::prepare(path, false)
+        Self::prepare(path, false, false)
     }
 
     pub(super) fn create_new(path: &Path) -> Result<(Self, InitializationGuard)> {
-        Self::prepare(path, true)
+        Self::prepare(path, true, false)
     }
 
-    fn prepare(path: &Path, new_only: bool) -> Result<(Self, InitializationGuard)> {
+    pub(super) fn open_existing(path: &Path) -> Result<(Self, InitializationGuard)> {
+        Self::prepare(path, false, true)
+    }
+
+    fn prepare(
+        path: &Path,
+        new_only: bool,
+        existing_only: bool,
+    ) -> Result<(Self, InitializationGuard)> {
         let path = absolute_path(path)?;
         let name = path
             .file_name()
@@ -90,10 +98,18 @@ impl StoreStorage {
                     .any(|suffix| lower.ends_with(suffix)),
             "audit database filename uses a reserved SQLite sidecar or initialization-lock name"
         );
-        let parent =
-            Directory::open_or_create(path.parent().context("audit database parent is missing")?)?;
+        let parent_path = path.parent().context("audit database parent is missing")?;
+        let parent = if existing_only {
+            Directory::open_existing(parent_path)?
+        } else {
+            Directory::open_or_create(parent_path)?
+        };
         // Inspect every existing entry before creating even the lock file.
         let existing = parent.private_entry(&name)?;
+        ensure!(
+            !existing_only || existing.is_some(),
+            "existing audit database is required"
+        );
         let sidecars = Self::check_sidecars(&parent, &name)?;
         ensure!(
             !new_only || (existing.is_none() && !sidecars),
@@ -105,6 +121,10 @@ impl StoreStorage {
         );
         let guard = InitializationGuard::acquire(&parent)?;
         let existing = parent.private_entry(&name)?;
+        ensure!(
+            !existing_only || existing.is_some(),
+            "existing audit database disappeared before open"
+        );
         let sidecars = Self::check_sidecars(&parent, &name)?;
         ensure!(
             !new_only || (existing.is_none() && !sidecars),

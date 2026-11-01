@@ -38,6 +38,8 @@ use std::{
 };
 
 mod auth;
+mod human;
+mod human_state;
 mod supervision;
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 
@@ -133,6 +135,7 @@ pub struct GatewayState {
     policy: Arc<Policy>,
     jev: Option<Arc<JevBackend>>,
     redactor: Arc<Redactor>,
+    human: Arc<human::HumanAccessState>,
 }
 impl GatewayState {
     /// Quotas come only from trusted server configuration, never request data.
@@ -206,6 +209,7 @@ impl GatewayState {
                     policy: Arc::new(policy),
                     jev: jev.map(Arc::new),
                     redactor: Arc::new(redactor),
+                    human: Arc::new(human::HumanAccessState::new()),
                 };
             }
         };
@@ -226,6 +230,7 @@ impl GatewayState {
             policy: Arc::new(policy),
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
+            human: Arc::new(human::HumanAccessState::new()),
         }
     }
     pub fn for_tenants(
@@ -293,6 +298,7 @@ impl GatewayState {
             policy: Arc::new(policy),
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
+            human: Arc::new(human::HumanAccessState::new()),
         })
     }
     fn authorize(
@@ -324,6 +330,7 @@ impl GatewayState {
                 "Cette identité est en lecture seule.",
             ));
         }
+        human::reject_control_collision(self, token)?;
         Ok((tenant.clone(), binding.role.as_str()))
     }
 }
@@ -407,7 +414,13 @@ pub fn gateway_router(state: GatewayState) -> Router {
         .route("/usage", get(worker_usage));
     Router::new()
         .route("/healthz", get(gateway_health))
-        .nest("/api/v1", routes.clone().merge(supervision::routes()))
+        .nest(
+            "/api/v1",
+            routes
+                .clone()
+                .merge(supervision::routes())
+                .merge(human::routes()),
+        )
         .nest("/api", routes)
         .layer(DefaultBodyLimit::max(262_144))
         .layer(middleware::from_fn(security_headers))
@@ -951,21 +964,35 @@ fn dashboard_router_with_auth(
         .with_state(s))
 }
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
-    let token = bearer(request.headers())
-        .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton de lecture requis."))?
-        .to_owned();
-    if s.viewer_token
-        .as_ref()
-        .is_some_and(|expected| !token_matches(&token, expected))
-    {
-        return Err(error(StatusCode::UNAUTHORIZED, "Jeton invalide."));
-    }
     let canonical_path = request
         .uri()
         .path()
         .strip_prefix("/api/v1/")
         .map(|suffix| format!("/api/{suffix}"))
         .unwrap_or_else(|| request.uri().path().to_owned());
+    let human_path =
+        request.uri().path().starts_with("/api/v1/human/") && human_dashboard_path(&canonical_path);
+    let token = bearer(request.headers())
+        .ok_or_else(|| {
+            if human_path {
+                human::failure(
+                    StatusCode::UNAUTHORIZED,
+                    "authentication_required",
+                    "A local human bearer credential is required.",
+                    "authenticate",
+                )
+            } else {
+                error(StatusCode::UNAUTHORIZED, "Jeton de lecture requis.")
+            }
+        })?
+        .to_owned();
+    if !human_path
+        && s.viewer_token
+            .as_ref()
+            .is_some_and(|expected| !token_matches(&token, expected))
+    {
+        return Err(error(StatusCode::UNAUTHORIZED, "Jeton invalide."));
+    }
     if ![
         "/api/events",
         "/api/overview",
@@ -980,6 +1007,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         "/api/usage",
     ]
     .contains(&canonical_path.as_str())
+        && !human_path
         && !canonical_path
             .strip_prefix("/api/workers/")
             .is_some_and(|id| {
@@ -988,18 +1016,53 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     {
         return Err(error(StatusCode::NOT_FOUND, "Route de lecture inconnue."));
     }
-    verify_dashboard_viewer(&s, &token).await?;
+    if human_path {
+        if canonical_path != "/api/human/identity" {
+            verify_dashboard_human(&s, &token).await?;
+        }
+    } else {
+        verify_dashboard_viewer(&s, &token).await?;
+    }
     let mut url = s.upstream.clone();
     url.set_path(request.uri().path());
     url.set_query(request.uri().query());
     let mut call = s.client.get(url).bearer_auth(&token);
+    if human_path {
+        call = call.timeout(Duration::from_secs(
+            if canonical_path == "/api/human/stream" {
+                305
+            } else {
+                15
+            },
+        ));
+        let mut contexts = request.headers().get_all("x-aiguard-context").iter();
+        if let Some(context) = contexts.next() {
+            if contexts.next().is_some() || context.as_bytes().len() > 4096 {
+                return Err(human::failure(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "The context header is ambiguous or exceeds its bound.",
+                    "select_context",
+                ));
+            }
+            call = call.header("x-aiguard-context", context);
+        }
+    }
     if let Some(cursor) = request.headers().get("last-event-id") {
         call = call.header("last-event-id", cursor);
     }
-    let upstream = call
-        .send()
-        .await
-        .map_err(|_| error(StatusCode::BAD_GATEWAY, "Collecteur indisponible."))?;
+    let upstream = call.send().await.map_err(|_| {
+        if human_path {
+            human::failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "The human gateway is unavailable.",
+                "retry",
+            )
+        } else {
+            error(StatusCode::BAD_GATEWAY, "Collecteur indisponible.")
+        }
+    })?;
     let status = upstream.status();
     let headers = upstream.headers().clone();
     let mut response = Response::new(Body::from_stream(
@@ -1018,6 +1081,103 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         }
     }
     Ok(response)
+}
+
+fn human_dashboard_path(path: &str) -> bool {
+    [
+        "/api/human/identity",
+        "/api/human/resources",
+        "/api/human/events",
+        "/api/human/export",
+        "/api/human/stream",
+    ]
+    .contains(&path)
+        || path.strip_prefix("/api/human/events/").is_some_and(|id| {
+            uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id)
+        })
+}
+
+async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResult<()> {
+    let mut url = state.upstream.clone();
+    url.set_path("/api/v1/human/identity");
+    let mut response = state
+        .client
+        .get(url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|_| {
+            human::failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "Human identity verification is unavailable.",
+                "retry",
+            )
+        })?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(human::failure(
+            StatusCode::UNAUTHORIZED,
+            "credential_invalid",
+            "The human credential is invalid, revoked or expired.",
+            "authenticate",
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(human::failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_unavailable",
+            "Human identity verification was refused.",
+            "retry",
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| {
+        human::failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_unavailable",
+            "Human identity verification is incomplete.",
+            "retry",
+        )
+    })? {
+        if bytes
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|size| size > crate::identity::HUMAN_MAX_PAGE_BYTES)
+        {
+            return Err(human::failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "The human identity response exceeds its bound.",
+                "contact_operator",
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let identity: crate::identity::HumanIdentityV1 =
+        serde_json::from_slice(&bytes).map_err(|_| {
+            human::failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "The human identity response is invalid.",
+                "contact_operator",
+            )
+        })?;
+    if identity.version != 1
+        || identity.authentication.method != "local_credential"
+        || !matches!(
+            identity.principal,
+            crate::identity::PrincipalRefV1::HumanLocal { .. }
+        )
+    {
+        return Err(human::failure(
+            StatusCode::FORBIDDEN,
+            "permission_denied",
+            "A local human identity is required.",
+            "review_permissions",
+        ));
+    }
+    Ok(())
 }
 
 async fn verify_dashboard_viewer(s: &DashboardState, token: &str) -> ApiResult<()> {

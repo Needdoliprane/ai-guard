@@ -1,0 +1,150 @@
+export type HumanView = "metadata" | "content";
+export type ResourceKind = "session" | "sandbox" | "agent" | "project";
+export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants";
+export interface Principal { kind: "human_local"; installation_id: string; account_id: string }
+export interface HumanContext {
+  id: string; tenant_id: string; organization_scope: string; mode: "personal" | "administration";
+  capabilities: Capability[]; membership_revision: string; authorization_version: string; expires_at: string;
+}
+export interface HumanIdentity {
+  version: 1; principal: Principal; display_name: string;
+  authentication: { method: "local_credential"; credential_id: string; expires_at: string | null };
+  contexts: HumanContext[];
+}
+export interface ResourceRef { kind: ResourceKind; resource_id: string }
+export interface HumanResource {
+  resource: ResourceRef; owner: Principal; revision: string;
+  permissions: { metadata: boolean; content: boolean; export: boolean };
+}
+export interface ReadReceipt { request_id: string; audit_event_id: string; received_at: string }
+export interface HumanPage<T> {
+  version: 1; context_id: string; authorization_version: string; items: T[];
+  next_cursor: string | null; has_more: boolean; coverage: "authorized_selection"; read_receipt: ReadReceipt;
+}
+export interface HumanEvent {
+  metadata: { id: string; timestamp: string; received_at: string; kind: string; source: string;
+    provenance: "observed" | "declared" | "inferred"; coverage: "native" | "observed" | "generic" | "partial";
+    resource: ResourceRef; decision: "allow" | "deny" | "review" | null };
+  content: { command: unknown; decision: unknown; result: unknown; data: unknown } | null;
+}
+export interface HumanEventPage extends HumanPage<HumanEvent> { view: HumanView; selection_complete?: boolean }
+export interface HumanSelection { view: HumanView; resource?: ResourceRef; cursor?: string | null }
+
+export class HumanContractError extends Error {
+  constructor() { super("Contrat de consultation humaine incomplet ou incompatible. Vérifiez les versions du contrôle et du dashboard."); }
+}
+export function object(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function requireContract(condition: unknown): asserts condition { if (!condition) throw new HumanContractError(); }
+export function boundedText(value: unknown, max = 4096): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+}
+export function opaque(value: unknown): value is string {
+  return typeof value === "string" && /^[\x21-\x7e]{1,8192}$/.test(value) && !/^\d+$/.test(value);
+}
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function uuid(value: unknown): value is string { return typeof value === "string" && uuidPattern.test(value); }
+function timestamp(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d\d-\d\dT.+(?:Z|[+-]\d\d:\d\d)$/.test(value) && Number.isFinite(Date.parse(value));
+}
+function revision(value: unknown): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]{0,19})$/.test(value) && BigInt(value) <= 18446744073709551615n;
+}
+function authorizationVersion(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{64}$/.test(value); }
+function principal(value: unknown): Principal {
+  requireContract(object(value) && value.kind === "human_local" && uuid(value.installation_id) && uuid(value.account_id));
+  return { kind: "human_local", installation_id: value.installation_id, account_id: value.account_id };
+}
+function resource(value: unknown): ResourceRef {
+  requireContract(object(value) && ["session", "sandbox", "agent", "project"].includes(String(value.kind)) && boundedText(value.resource_id));
+  return { kind: value.kind as ResourceKind, resource_id: value.resource_id };
+}
+export function parseHumanIdentity(value: unknown): HumanIdentity {
+  requireContract(object(value) && value.version === 1 && boundedText(value.display_name, 256) && object(value.authentication) &&
+    value.authentication.method === "local_credential" && uuid(value.authentication.credential_id) &&
+    (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000);
+  const seen = new Set<string>();
+  const contexts = value.contexts.map((item): HumanContext => {
+    requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
+      boundedText(item.organization_scope, 1024) && ["personal", "administration"].includes(String(item.mode)) &&
+      revision(item.membership_revision) && authorizationVersion(item.authorization_version) && timestamp(item.expires_at) &&
+      Array.isArray(item.capabilities) && item.capabilities.length <= 6 && item.capabilities.every((capability) =>
+        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants"].includes(String(capability))));
+    seen.add(item.id);
+    return { id: item.id, tenant_id: item.tenant_id, organization_scope: item.organization_scope,
+      mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,
+      authorization_version: item.authorization_version, expires_at: item.expires_at, capabilities: item.capabilities as Capability[] };
+  });
+  return { version: 1, principal: principal(value.principal), display_name: value.display_name,
+    authentication: { method: "local_credential", credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null }, contexts };
+}
+function page<T>(value: unknown, parse: (item: unknown) => T, streaming = false): HumanPage<T> {
+  requireContract(object(value) && value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
+    value.coverage === "authorized_selection" && Array.isArray(value.items) && value.items.length <= 100 &&
+    typeof value.has_more === "boolean" && (value.next_cursor === null || opaque(value.next_cursor)) &&
+    (streaming ? value.next_cursor === null : value.has_more === (value.next_cursor !== null)) && object(value.read_receipt) &&
+    uuid(value.read_receipt.request_id) && uuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  return { version: 1, context_id: value.context_id, authorization_version: value.authorization_version,
+    coverage: "authorized_selection", items: value.items.map(parse), next_cursor: value.next_cursor as string | null,
+    has_more: value.has_more, read_receipt: { request_id: value.read_receipt.request_id,
+      audit_event_id: value.read_receipt.audit_event_id, received_at: value.read_receipt.received_at } };
+}
+export function parseResourcePage(value: unknown): HumanPage<HumanResource> {
+  return page(value, (item) => {
+    requireContract(object(item) && revision(item.revision) && object(item.permissions) &&
+      [item.permissions.metadata, item.permissions.content, item.permissions.export].every((permission) => typeof permission === "boolean"));
+    return { resource: resource(item.resource), owner: principal(item.owner), revision: item.revision,
+      permissions: { metadata: item.permissions.metadata as boolean, content: item.permissions.content as boolean, export: item.permissions.export as boolean } };
+  });
+}
+function boundedJson(value: unknown) {
+  const pending: { value: unknown; depth: number }[] = [{ value, depth: 0 }]; let nodes = 0;
+  while (pending.length) {
+    const item = pending.pop()!;
+    requireContract(++nodes <= 20000 && item.depth <= 32);
+    if (item.value === null || ["string", "boolean", "number"].includes(typeof item.value)) continue;
+    requireContract(typeof item.value === "object");
+    const values = Array.isArray(item.value) ? item.value : Object.values(item.value as object);
+    requireContract(values.length <= 10000);
+    for (const child of values) pending.push({ value: child, depth: item.depth + 1 });
+  }
+}
+export function parseHumanEvent(value: unknown, view: HumanView): HumanEvent {
+  requireContract(object(value) && object(value.metadata));
+  const metadata = value.metadata;
+  requireContract(Object.keys(metadata).every((key) => ["id", "timestamp", "received_at", "kind", "source", "provenance", "coverage", "resource", "decision"].includes(key)) &&
+    uuid(metadata.id) && timestamp(metadata.timestamp) && timestamp(metadata.received_at) && boundedText(metadata.kind, 256) &&
+    !metadata.kind.startsWith("control.identity.") && boundedText(metadata.source, 1024) &&
+    ["observed", "declared", "inferred"].includes(String(metadata.provenance)) &&
+    ["native", "observed", "generic", "partial"].includes(String(metadata.coverage)) &&
+    (metadata.decision === null || ["allow", "deny", "review"].includes(String(metadata.decision))));
+  const content = value.content;
+  requireContract(content === null || (view === "content" && object(content) &&
+    ["command", "decision", "result", "data"].every((key) => Object.hasOwn(content, key))));
+  if (content !== null) boundedJson(content);
+  return { metadata: { id: metadata.id, timestamp: metadata.timestamp, received_at: metadata.received_at,
+    kind: metadata.kind, source: metadata.source, provenance: metadata.provenance as HumanEvent["metadata"]["provenance"],
+    coverage: metadata.coverage as HumanEvent["metadata"]["coverage"], resource: resource(metadata.resource), decision: metadata.decision as HumanEvent["metadata"]["decision"] },
+    content: content === null ? null : { command: (content as Record<string, unknown>).command,
+      decision: (content as Record<string, unknown>).decision, result: (content as Record<string, unknown>).result, data: (content as Record<string, unknown>).data } };
+}
+export function parseHumanEventPage(value: unknown, exporting = false, transport: "rest" | "stream" = "rest"): HumanEventPage {
+  requireContract(object(value) && ["metadata", "content"].includes(String(value.view)));
+  const view = value.view as HumanView;
+  const parsed = page(value, (item) => parseHumanEvent(item, view), transport === "stream");
+  if (exporting) requireContract(typeof value.selection_complete === "boolean" && value.selection_complete === !parsed.has_more);
+  return { ...parsed, view, ...(exporting ? { selection_complete: value.selection_complete as boolean } : {}) };
+}
+export function humanUrl(endpoint: "resources" | "events" | "export" | "stream", selection?: HumanSelection): string {
+  requireContract(["resources", "events", "export", "stream"].includes(endpoint) &&
+    (selection === undefined || ["metadata", "content"].includes(selection.view)));
+  const query = new URLSearchParams({ limit: "25" });
+  if (endpoint !== "resources") query.set("view", selection?.view ?? "metadata");
+  if (selection?.resource) {
+    const ref = resource(selection.resource);
+    query.set("resource_kind", ref.kind); query.set("resource_id", ref.resource_id);
+  }
+  if (selection?.cursor != null) { requireContract(opaque(selection.cursor)); query.set("cursor", selection.cursor); }
+  return `/api/v1/human/${endpoint}?${query}`;
+}

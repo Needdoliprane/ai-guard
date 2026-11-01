@@ -6,7 +6,7 @@ Gateway par défaut : `http://127.0.0.1:8787`. Le dashboard utilise les mêmes r
 
 ## Identités
 
-Toutes les routes `/api/` exigent `Authorization: Bearer <secret>`. Le secret viewer donne accès aux lectures. Le secret runner permet les écritures et les lectures côté gateway. Le dashboard vérifie le rôle `viewer` auprès du gateway avant chaque requête relayée, même lorsqu'un fichier de clé a été mal configuré. Par défaut, il accepte seulement le viewer configuré ; `dashboard --shared-tenants` accepte les viewers des tenants configurés par le gateway, chacun dans son propre périmètre. Cette option exclut `--viewer-token-file`. Aucun paramètre d'URL ne transporte un jeton.
+Toutes les routes `/api/` exigent `Authorization: Bearer <secret>`. Sur les routes techniques, le secret viewer donne accès aux lectures et le secret runner aux écritures/lectures gateway. Le dashboard vérifie le rôle `viewer` avant chaque lecture technique relayée, même si son fichier de clé a été mal configuré. Par défaut, il accepte seulement le viewer configuré ; `dashboard --shared-tenants` accepte les viewers des tenants configurés par le gateway, chacun dans son périmètre. Cette option exclut `--viewer-token-file`. Les routes humaines `/api/v1/human/` ont leur authentification nominative séparée décrite ci-dessous, sans conversion en viewer. Aucun paramètre d'URL ne transporte un jeton.
 
 Sur une route protégée reconnue, l'identité est extraite avant `Path`, `Query` et `Json` : Bearer absent/invalide →401, viewer sur mutation →403, même si son corps ou ses paramètres sont malformés. Ces refus n'imposent pas de lecture/désérialisation applicative du corps. Les erreurs d'une entrée authentifiée invalide restent celles de son contrat. Routage, transport et protections Origin/URI restent en amont : cette règle ne prétend pas empêcher toute réception d'octets réseau. [Preuves](engineering/evidence/2026-10-30/api-auth/README.md) et [ordre des extracteurs Axum](https://docs.rs/axum/latest/axum/extract/index.html#the-order-of-extractors).
 
@@ -31,6 +31,33 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 | `GET /api/workers/operations/{id}` | Viewer ou runner, gateway uniquement | Reçu durable d'une opération du tenant |
 | `GET /api/quota` | Viewer ou runner | Politique et réservations CPU/RAM/workers tenues |
 | `GET /api/usage` | Viewer ou runner | Page `{items,next_cursor}` d'allocations terminales, `billable=false` |
+
+## Consultation humaine nominative / Named human reads
+
+Le [guide local](setup/identity/README.fr.md) et son [équivalent anglais](setup/identity/README.md) décrivent provisioning, fichiers privés, migration explicite vers5 et reprise. Le credential humain est vérifié à chaque requête/lot ; il ne donne aucun rôle runner/worker/viewer. Le contrôle propose les contextes issus des memberships durables. Hors `/identity`, fournir un unique `X-AiGuard-Context` proposé ; aucun tenant libre ne choisit le périmètre. Le dashboard ne relaie que ces GET humains exacts, sans repli technique.
+
+Human credentials are verified on every request/batch and never become runner/worker/viewer authority. The control offers contexts from durable memberships; all routes except identity require one offered `X-AiGuard-Context`. The dashboard forwards only the exact human GET allowlist. No caller-supplied tenant chooses scope and no failed human login falls back to technical reads.
+
+| GET `/api/v1/human/…` | Paramètres / Parameters | Résultat / Result |
+|---|---|---|
+| `identity` | Aucun / None | Principal, authentification et contextes proposés / Principal, authentication and offered contexts. |
+| `resources` | `limit`, `cursor` | Ressources explicitement autorisées, propriétaire et droits distincts / Explicitly authorized resources, owner and separate permissions. |
+| `events` | `view`, `resource_kind`, `resource_id`, `limit`, `cursor` | Événements de la sélection autorisée / Events from the authorized selection. |
+| `events/{event_id}` | `view` | Événement autorisé ou404 uniforme / Authorized event or uniform404. |
+| `export` | Mêmes paramètres que events / Same as events | Page autorisée, droit export supplémentaire / Authorized page requiring additional export rights. |
+| `stream` | Mêmes filtres et curseur opaque / Same filters and opaque cursor | SSE `human_audit`, page JSON, reprise opaque dans `id` / JSON pages with opaque resumption IDs. |
+
+`view` vaut `metadata|content` et `resource_kind` vaut `session|sandbox|agent|project`. Une page contient `version:1`, `context_id`, `authorization_version` opaque64hex, `items`, `next_cursor`, `has_more`, `coverage:"authorized_selection"` et `read_receipt`. Les pages événements ajoutent `view`, l'export ajoute `selection_complete`. Les révisions d'objets autorisés sont des chaînes décimales ; la version d'autorisation est opaque et ne publie pas le compteur global. Aucun total ni position globale n'est déduit de la pagination.
+
+Resource kinds and views are closed enums. Pages contain the fields above; event pages add their view and export adds `selection_complete`. Revisions of authorized objects are decimal strings, while `authorization_version` is an opaque64hex value, never a global revision counter. Metadata excludes commands, result/data and free-text decision reasons. Content requires content permission; export additionally requires export permission. The typed DTOs are in [identity/access.rs](../src/identity/access.rs).
+
+Les limites sont1–100 éléments et256KiB pour l'enveloppe complète ; export serveur16MiB/1000pages/300s par branche. Les clients CLI/Web appliquent aussi25pages/4MiB/60s. Le registre est limité à4096 contextes,64 par credential/principal, durée absolue300s sans éviction vivante. Les curseurs AEAD conservent précédents/retries pendant leur contexte, sans corps mis en cache ; ils restent liés à la sélection, à la limite, à l'identité et aux droits. Un retry peut produire un autre curseur et un nouveau reçu d'audit. Ces budgets ne sont pas un quota contre les relectures.
+
+Limits apply to the complete envelope, not just items. Contexts and cursor positions expire or are revoked; restarting the gateway invalidates them. SSE advances its resumption ID only after a complete validated frame. Retries may duplicate events; possession proves neither receipt nor download. Each returned batch requires durable nominative audit before restitution. Revocation does not retract bytes already emitted. A stream error is terminal; an empty poll invents no business receipt.
+
+Les erreurs humaines sont `{error:{code,message,retry_action}}`.401 ferme la session humaine, même après changement local de contexte ;403 de contexte retire ses données/curseurs et exige une nouvelle sélection ; un refus de ressource ne déconnecte pas toute la session.404 ne distingue pas objet absent et inaccessible.400 refuse entrée/curseur,429 indique capacité,503 contrôle/audit indisponible ; `migration_required`503 demande `contact_operator`, sans repli viewer. Les actions sont `authenticate|select_context|review_permissions|reduce_page|retry|contact_operator`.
+
+Human errors use the envelope above.401 closes the human session independently of a previous context change or an unreadable response body. Context revocation/expiry clears that context; an individual resource refusal does not log out the whole session.404 hides absence versus inaccessibility. Capacity and storage/migration failures remain explicit; neither is an empty result or a viewer fallback.
 
 Le dashboard ne relaie que les lectures de sa liste explicite, dont les workers, quotas et allocations ; il n'expose pas la consultation des reçus d'opérations du broker ni les mutations. Les lectures paginées workers/usage acceptent uniquement `cursor` (UUID canonique) et `limit` (1 à 100, 50 par défaut). Le curseur est le dernier worker ou la dernière tentative de la page. Un paramètre inconnu est refusé `400` ; le client ne choisit pas le tenant.
 
@@ -200,6 +227,8 @@ La clé Jev est un secret du contrôle, distinct des credentials runner/viewer e
 
 ## Événements
 
+Le format brut de cette section est réservé aux routes techniques. Les routes humaines projettent seulement les champs autorisés de leur DTO et n'exposent ni `seq`, ni hashes de chaîne globale. This raw event format applies to technical routes only; human DTOs do not expose global sequence or chain hashes.
+
 Le schéma d'ingestion est dans `schemas/event.schema.json`. Les champs optionnels sont absents ou `null`. Le stockage ajoute :
 
 | Champ | Sens |
@@ -215,6 +244,8 @@ Le schéma d'ingestion est dans `schemas/event.schema.json`. Les champs optionne
 
 ## Recherche, filtres, reprise
 
+Cette section concerne uniquement les lectures techniques `/api/events`, `/api/stream`, `/api/export` et leurs alias versionnés techniques. Elle ne s'applique pas à `/api/v1/human/*`, qui utilise ses DTO filtrés, limites et curseurs opaques décrits plus haut. This section applies only to technical reads and their technical versioned aliases, not human routes.
+
 Paramètres de lecture : `q`, `project_id`, `sandbox_id`, `agent_id`, `kind`, `decision`, `before`, `after`, `from`, `to`, `limit`, `order`. `before` et `after` sont exclusifs ; `from` et `to` s'appliquent au temps de réception et doivent être RFC3339. Ordre par défaut décroissant, `order=asc` pour l'ordre croissant. `limit` est borné entre1 et1000. La recherche texte est une recherche littérale, pas une expression SQL ou regex.
 
 Le flux SSE accepte `Last-Event-ID` ou `after`. Sans curseur, il commence après la tête actuelle. Un client charge d'abord l'historique, conserve son dernier `seq`, puis se connecte avec ce curseur. Au maximum32 flux par gateway ; le navigateur doit reconnecter avec temporisation et dédoublonner par séquence.
@@ -223,6 +254,8 @@ L'export accepte les mêmes filtres et `format=jsonl` ou `format=json`. Il fixe 
 
 ## Erreurs et limites
 
+Les codes et la rotation ci-dessous décrivent les routes/clés techniques. Le contrat d'erreur typé, l'expiration et la révocation des accès humains sont définis dans leur section dédiée. The following legacy errors/key lifecycle do not replace the typed human error and expiry contract above.
+
 `401` : jeton absent/invalide. `403` : rôle insuffisant, origine refusée ou approbation sans revue/hash valable. `400/422` : paramètres ou JSON invalides. `409` : contenu divergent pour une identité de demande, ou historique ambigu. `413` : corps de plus de256Kio. `429` : débit d'écriture ou nombre de flux dépassé. `503` : audit indisponible, plein pour une nouvelle écriture ou déclaré incohérent. Le dashboard renvoie `502` si son collecteur est inaccessible. Le contenu renvoyé ne doit pas être rendu comme HTML.
 
-Les tokens actuels n'ont pas d'expiration automatique ; c'est une limite à traiter selon le profil d'identité annoncé, particulièrement pour une exposition distante. La rotation est une opération explicite sur les fichiers de secrets, suivie du redémarrage des services concernés. Ne pas mélanger rotation et suppression de l'audit. Cette limite ne dispense pas des exigences d'identité, de révocation et de transport des [gates de qualification](engineering/PRODUCTION_READINESS.md).
+Les clés techniques runner/viewer actuelles n'ont pas d'expiration automatique ; c'est une limite à traiter selon le profil annoncé, particulièrement pour une exposition distante. Leur rotation est explicite sur les fichiers de secrets, suivie du redémarrage des services concernés. Les credentials humains ont leur propre état/expiration et leurs contextes une durée bornée : ne pas leur appliquer cette règle des clés techniques. Ne pas mélanger rotation et suppression de l'audit. Cette limite ne dispense pas des exigences d'identité, de révocation et de transport des [gates de qualification](engineering/PRODUCTION_READINESS.md). Technical runner/viewer keys have no automatic expiry; human credential expiry/revocation and bounded contexts are separate.

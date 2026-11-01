@@ -45,11 +45,11 @@ Do not guess the namespace, copy a test UUID, choose another tenant in the regis
 
 The standard local Compose files start schema2 control. `/healthz` only establishes service availability. Neither a healthy stack nor `init` establishes the supervision protocol or fresh execution authority. The existing [exclusive bootstrap for new supervised control stores](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) uses the gateway option `--initialize-supervised-stores BACKUP_ROOT`, with absent database destinations, private verified backups and the existing credential files. It must be integrated into the operator's containerized control deployment; this broker guide does not supply a schema3 Compose profile.
 
-There is an essential recovery limit: an ordinary reopen of a schema3 or schema4 store preserves its namespace in inactive maintenance. Reusing the bootstrap option on that database refuses startup. A safe reactivation procedure is not currently delivered. Preserve databases, backups and runtime evidence; do not delete a database, edit activation metadata or create replacement identities to bypass this condition. `broker resume` reconciles a job and cannot reactivate the control. There is no `broker init`, `broker doctor` or OS-service installation command in the current CLI.
+There is an essential recovery limit: an ordinary reopen of a schema3, schema4 or schema5 store preserves its namespace in inactive maintenance. Reusing the bootstrap option on that database refuses startup. A safe reactivation procedure is not currently delivered. Preserve databases, backups and runtime evidence; do not delete a database, edit activation metadata or create replacement identities to bypass this condition. `broker resume` reconciles a job and cannot reactivate the control. There is no `broker init`, `broker doctor` or OS-service installation command in the current CLI.
 
 ### Upgrade storage explicitly
 
-Stop the gateway and every broker/consumer of the tenant database, including automatic restarts. `migrate-control --target-version` accepts the exact next version2,3 or4; its default remains2. Use a distinct new backup for every step. For an existing schema3 source:
+Stop the gateway and every broker/consumer of the tenant database, including automatic restarts. `migrate-control --target-version` accepts the exact next version2,3,4 or5; its default remains2. Use a distinct new backup for every step. Schema5 adds mandatory nominative read audit, as described in [named local access](../identity/README.md). For an existing schema3 source:
 
 ```sh
 "/absolute/path/to/agentsandbox" migrate-control \

@@ -1,5 +1,13 @@
 # Stratégie de qualification
 
+## Accès humain local — ciblage du 1er novembre
+
+Les cibles Rust pertinentes sont `api::human_state::tests`, `human_access`, `human_access_migration`, `human_cli` et `human_redaction`. Elles utilisent de vrais fichiers/SQLite/routeurs et sous-processus CLI avec entrées de test explicites. `human_access` inclut70batches SSE : réponse66 perdue/rejouée, snapshot drainé, deux nouvelles arrivées et73 reçus comparés à l'audit durable. Cette couverture est distincte de la pagination REST72pages et de la recette Docker3workers.
+
+Exécuter les cibles touchées, puis canaris/statiques appropriés. Les résultats couvrent plusieurs gels : assertion expiry mal préparée, fixture CLI accordée avant fait connu et correction Clippy sont conservées dans la [chronologie](VALIDATION.md#1er-novembre--accès-humain-local-apicli-et-dashboard), sans compter les rejeux comme nouvelles fonctions. La modification finale du prédicat d'expiration ne rejoue que son test exact et fmt/Clippy ; aucune suite globale n'est déduite.
+
+Dans `front/`, `node --test --test-isolation=none tests/human-model.test.mjs tests/human-api.test.mjs` cible les17 unités humaines. Le navigateur ciblé utilise `AI_GUARD_HUMAN_SCENARIO=focus node tests/browser_human.mjs` ou `AI_GUARD_HUMAN_SCENARIO=access-modes node tests/browser_human.mjs` ; variable absente pour le parcours humain et ses captures. Ces fixtures front ne qualifient pas le backend/runtime. Ne pas relancer ces parcours automatiquement pour une correction sans effet sur eux. Source composée/build vérifiés sur Node25.6.1 ; tests Node24 et parcours humain5 en vrais conteneurs encore NOT_RUN.
+
 S0,1er novembre : RED natif de lease après abandon listener, puis sept fonctions ciblées PASS (parent IPC/acteur/idle inchangé, trois cas owner, deux intégrations du vrai binaire et retained Cancel). Fmt/Clippy strict/release arm64 PASS et revue source traitée. Deux fences Unknown de test conservées ; marqueur payload≠join, aucun crash processus/OS ou moteur qualifié. Sources auxiliaires/ignorées hachées avant Clippy, sans réussite PKI/fournisseur attribuée au lot. [Gels, commandes et limites](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Ledger/retrait durable, G09 et recette Docker/Podman restent ouverts ; pas de répétition des32STOP3 ou d'E2E global pour ce correctif.
 
 Les résultats nouveaux sont dans [VALIDATION.md](VALIDATION.md). Les résultats historiques de [../validation.md](../validation.md) ne qualifient pas ce checkout sur macOS ARM64. Les critères détaillés existants sont dans [../acceptance.md](../acceptance.md) ; leur ancien découpage MVP/V2 ne réduit pas la mission production.

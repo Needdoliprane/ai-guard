@@ -15,7 +15,7 @@ static FLAG_SECRET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(--(?:[a-z0-9]+[-_])*(?:api[-_]?key|token|password|passwd|secret|credential))\s+(?:"[^"]*"|'[^']*'|[^\s,;]+)"#).unwrap()
 });
 static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|AKIA[A-Z0-9]{16})\b").unwrap()
+    Regex::new(r"\b(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|AIza[A-Za-z0-9_-]{25,}|AKIA[A-Z0-9]{16})\b|aigh1_[A-Fa-f0-9]{64}").unwrap()
 });
 static URL_AUTH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@").unwrap());

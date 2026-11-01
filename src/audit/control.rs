@@ -239,7 +239,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     if version == 1 {
         return Ok(());
     }
-    anyhow::ensure!([2, 3, 4].contains(&version), "unsupported control schema");
+    anyhow::ensure!(
+        [2, 3, 4, 5].contains(&version),
+        "unsupported control schema"
+    );
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
         "SELECT namespace_uuid,genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
         [],
@@ -287,7 +290,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
         if stored.event.kind.starts_with("control.identity.") {
-            anyhow::ensure!(version == 4, "identity event requires schema4");
+            anyhow::ensure!(
+                [4, 5].contains(&version),
+                "identity event requires schema4 or5"
+            );
             continue;
         }
         if stored.event.kind == "control.supervision.genesis" {
@@ -528,7 +534,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4].contains(&version) {
+    if [2, 3, 4, 5].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -1147,6 +1153,7 @@ impl Store {
             2 => initialize(&tx, self.max_events, &self.redactor)?,
             3 => self.initialize_supervision(&tx)?,
             4 => self.initialize_identity(&tx)?,
+            5 => self.initialize_human_access(&tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1162,6 +1169,9 @@ impl Store {
                 2 => "SELECT genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
                 3 => "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                 4 => "SELECT genesis_seq,genesis_hash FROM identity_meta WHERE singleton=1",
+                5 => {
+                    "SELECT seq,hash FROM events WHERE kind='control.identity.human_access.genesis'"
+                }
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1221,7 +1231,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if matches!(version, 3 | 4) {
+        if [3, 4, 5].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,

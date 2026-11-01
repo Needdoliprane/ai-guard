@@ -40,6 +40,8 @@ struct Cli {
 enum Command {
     /// Explicit durable local broker, jobs and controlled exports.
     Broker(broker_cli::BrokerArgs),
+    /// Named local accounts, authorized human reads and filtered audit export.
+    Human(agentsandbox::identity_cli::HumanArgs),
     #[command(name = "__broker-enforcer", hide = true)]
     InternalBrokerEnforcer {
         #[arg(long)]
@@ -69,8 +71,8 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next schema version: 2 (legacy control), 3 (supervision), or 4 (human identity).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=4))]
+        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=5))]
         target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -420,6 +422,7 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
 async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Broker(args) => broker_cli::execute(args).await?,
+        Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
         Command::ModelTls(args) => {
             agentsandbox::model_tls::execute(args, shutdown_signal()?).await?
         }
@@ -636,12 +639,17 @@ async fn main() -> Result<()> {
                 metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() > 0,
                 "Migration requires an existing regular audit database"
             );
-            let store =
-                Store::open_for_tenant(&data, &tenant_id, Redactor::new(vec![]), max_events)?;
+            let store = Store::open_existing_for_tenant(
+                &data,
+                &tenant_id,
+                Redactor::new(vec![]),
+                max_events,
+            )?;
             let report = match target_version {
                 2 => store.migrate_control_v2(&backup)?,
                 3 => store.migrate_control_v3(&backup)?,
                 4 => store.migrate_identity_v4(&backup)?,
+                5 => store.migrate_human_access_v5(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);

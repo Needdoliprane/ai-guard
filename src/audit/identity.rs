@@ -1,4 +1,4 @@
-//! Schema4 identity projections: indexed reads, atomic audit, explicit migration.
+//! Identity projections4 and explicit human-audit capability5, with atomic audit.
 use super::*;
 use crate::control::MigrationReportV1;
 use crate::identity::*;
@@ -108,6 +108,18 @@ struct Genesis {
     previous_seq: i64,
     previous_hash: String,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HumanAccessGenesis {
+    version: u32,
+    protocol: String,
+    control_namespace_uuid: String,
+    identity_genesis_seq: i64,
+    identity_genesis_hash: String,
+    authorization_revision: u64,
+    previous_seq: i64,
+    previous_hash: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
@@ -142,9 +154,17 @@ fn conflict(ok: bool) -> anyhow::Result<()> {
         Err(IdentityFailureV1::Conflict.into())
     }
 }
-fn require_identity(db: &Connection) -> anyhow::Result<()> {
+pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 4 {
+    if [4, 5].contains(&version) {
+        Ok(())
+    } else {
+        Err(IdentityFailureV1::MigrationRequired.into())
+    }
+}
+pub(super) fn require_human_access(db: &Connection) -> anyhow::Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version == 5 {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -154,7 +174,7 @@ fn revision(previous: Option<u64>, expected: u64, next: u64) -> anyhow::Result<(
     conflict(previous.unwrap_or(0) == expected)?;
     invalid(expected.checked_add(1) == Some(next))
 }
-fn authorization_revision(db: &Connection) -> anyhow::Result<u64> {
+pub(super) fn authorization_revision(db: &Connection) -> anyhow::Result<u64> {
     let revision: i64 = db.query_row(
         "SELECT authorization_revision FROM identity_meta WHERE singleton=1",
         [],
@@ -455,10 +475,53 @@ fn receipt(stored: &StoredEvent, record: &Record) -> IdentityReceiptV1 {
     }
 }
 
+fn human_access_genesis(db: &Connection) -> anyhow::Result<(StoredEvent, HumanAccessGenesis)> {
+    let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind='control.identity.human_access.genesis' ORDER BY seq LIMIT 2")?;
+    let mut records = statement
+        .query_map([], row_event)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    invalid(records.len() == 1)?;
+    let stored = records.remove(0);
+    let marker: HumanAccessGenesis = serde_json::from_value(stored.event.data.clone())?;
+    let identity = genesis(db)?;
+    let namespace: String = db.query_row(
+        "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    invalid(
+        marker.version == 5
+            && marker.protocol == "local_human_access_v1"
+            && marker.control_namespace_uuid == namespace
+            && marker.identity_genesis_seq == identity.seq
+            && marker.identity_genesis_hash == identity.hash
+            && marker.previous_seq == stored.seq - 1
+            && marker.previous_hash == stored.prev_hash
+            && stored.seq > identity.seq
+            && i64::try_from(marker.authorization_revision).is_ok()
+            && stored.event.source == "gateway"
+            && stored.event.provenance == "observed"
+            && stored.event.coverage == "observed",
+    )?;
+    Ok((stored, marker))
+}
+pub(super) fn validate_human_access_capability(
+    db: &Connection,
+    version: i64,
+) -> anyhow::Result<()> {
+    if version == 5 {
+        human_access_genesis(db)?;
+    } else {
+        let forbidden:bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind IN ('control.identity.access','control.identity.human_access.genesis'))",[],|r|r.get(0))?;
+        invalid(!forbidden)?;
+    }
+    Ok(())
+}
+
 /// Full replay is an integrity/startup operation, never a human read query.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 4 {
+    if ![4, 5].contains(&version) {
         return Ok(());
     }
     let genesis = genesis(db)?;
@@ -470,11 +533,59 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let mut projection = Projection::default();
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind GLOB 'control.identity.*' ORDER BY seq")?;
     let mut seen_genesis = false;
+    let mut seen_human_access = false;
     for row in statement.query_map([], row_event)? {
         let stored = row?;
         if stored.event.kind == "control.identity.genesis" {
             invalid(!seen_genesis && stored.seq == genesis.seq && stored.hash == genesis.hash)?;
             seen_genesis = true;
+            continue;
+        }
+        if stored.event.kind == "control.identity.human_access.genesis" {
+            let (expected, marker) = human_access_genesis(db)?;
+            invalid(
+                version == 5
+                    && seen_genesis
+                    && !seen_human_access
+                    && stored.seq == expected.seq
+                    && stored.hash == expected.hash
+                    && marker.authorization_revision == projection.revision,
+            )?;
+            seen_human_access = true;
+            continue;
+        }
+        if stored.event.kind == "control.identity.access" {
+            invalid(
+                version == 5
+                    && seen_genesis
+                    && seen_human_access
+                    && stored.event.source == "gateway"
+                    && stored.event.provenance == "observed"
+                    && stored.event.coverage == "observed",
+            )?;
+            let record: super::human::HumanReadAuditV1 =
+                serde_json::from_value(stored.event.data.clone())?;
+            super::human::validate_read(&record)?;
+            invalid(record.authorization_revision == projection.revision)?;
+            let account = projection
+                .accounts
+                .get(&record.principal.key()?)
+                .ok_or(IdentityFailureV1::IdentityRevoked)?;
+            invalid(account.0.active)?;
+            if let Some(id) = record.membership_id.as_ref() {
+                let member = projection
+                    .memberships
+                    .get(id)
+                    .ok_or(IdentityFailureV1::ContextRevoked)?;
+                crate::identity::authorize_context(
+                    &record.principal,
+                    &member.0,
+                    record.mode.ok_or(IdentityFailureV1::InvalidRequest)?,
+                    record
+                        .membership_revision
+                        .ok_or(IdentityFailureV1::InvalidRequest)?,
+                )?;
+            }
             continue;
         }
         invalid(
@@ -491,6 +602,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         invalid(record.authorization_revision == projection.revision)?;
     }
     invalid(seen_genesis)?;
+    invalid((version == 5) == seen_human_access)?;
     let mut expected = projection.rows(&genesis)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
@@ -650,6 +762,36 @@ fn ensure_resource_known(
 }
 
 impl Store {
+    /// Explicit offline capability migration; no runtime lease activation.
+    pub fn migrate_human_access_v5(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
+        self.migrate_control_version(backup_path, 4, 5)
+    }
+    pub(super) fn initialize_human_access(&self, tx: &Transaction<'_>) -> anyhow::Result<()> {
+        let identity = genesis(tx)?;
+        let (previous_seq, previous_hash) = audit_head(tx)?;
+        let namespace: String = tx.query_row(
+            "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let marker = HumanAccessGenesis {
+            version: 5,
+            protocol: "local_human_access_v1".into(),
+            control_namespace_uuid: namespace,
+            identity_genesis_seq: identity.seq,
+            identity_genesis_hash: identity.hash,
+            authorization_revision: authorization_revision(tx)?,
+            previous_seq,
+            previous_hash,
+        };
+        let mut event = Event::new("control.identity.human_access.genesis");
+        event.data = serde_json::to_value(marker)?;
+        let original = serde_json::to_value(&event)?;
+        let (event, payload) = self.prepare_event(event)?;
+        invalid(original == serde_json::to_value(&event)?)?;
+        self.append_in_transaction(tx, event, payload)?;
+        Ok(())
+    }
     /// Offline maintenance only, with an exclusive verified schema3 backup.
     pub fn migrate_identity_v4(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 3, 4)
@@ -685,28 +827,65 @@ impl Store {
         mutation: &IdentityMutationV1,
     ) -> anyhow::Result<IdentityReceiptV1> {
         mutation.validate()?;
-        let value = serde_json::to_value(mutation)?;
-        invalid(self.redactor.value(&value) == value)?;
-        let hash = mutation.input_hash()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         require_identity(&tx)?;
-        if let Some((stored, record)) = recorded(&tx, &mutation.operation_id)? {
+        let result = self.persist_identity_mutation(&tx, mutation)?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    /// Atomically activate a prepared local account, credential and membership.
+    /// Exact replay requires all three retained operation identities; partial
+    /// overlap is a conflict and never an adoption of an existing account.
+    pub fn provision_local_human(
+        &self,
+        provision: &LocalHumanProvisionV1,
+    ) -> anyhow::Result<Vec<IdentityReceiptV1>> {
+        provision.validate()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        require_identity(&tx)?;
+        let existing = provision
+            .mutations
+            .iter()
+            .map(|m| recorded(&tx, &m.operation_id))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let count = existing.iter().filter(|value| value.is_some()).count();
+        conflict(count == 0 || count == 3)?;
+        let receipts = provision
+            .mutations
+            .iter()
+            .map(|mutation| self.persist_identity_mutation(&tx, mutation))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.commit_checked(tx)?;
+        Ok(receipts)
+    }
+    fn persist_identity_mutation(
+        &self,
+        tx: &Transaction<'_>,
+        mutation: &IdentityMutationV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        mutation.validate()?;
+        let value = serde_json::to_value(mutation)?;
+        invalid(self.redactor.value(&value) == value)?;
+        let hash = mutation.input_hash()?;
+        if let Some((stored, record)) = recorded(tx, &mutation.operation_id)? {
             conflict(record.input_hash == hash && record.mutation == *mutation)?;
-            let receipt = receipt(&stored, &record);
-            self.commit_checked(tx)?;
-            return Ok(receipt);
+            return Ok(receipt(&stored, &record));
         }
-        let next_seq = audit_head(&tx)?
+        let next_seq = audit_head(tx)?
             .0
             .checked_add(1)
             .context("audit sequence exhausted")?;
-        let mut projection = load_projection(&tx, mutation)?;
+        let mut projection = load_projection(tx, mutation)?;
         projection.apply(mutation, &self.tenant_id, next_seq)?;
-        ensure_resource_known(&tx, mutation, next_seq)?;
+        ensure_resource_known(tx, mutation, next_seq)?;
         let record = Record {
             version: 1,
             authorization_revision: projection.revision,
@@ -718,9 +897,9 @@ impl Store {
         let original = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         invalid(serde_json::to_value(&event)? == original)?;
-        let stored = self.append_in_transaction(&tx, event, payload)?;
+        let stored = self.append_in_transaction(tx, event, payload)?;
         conflict(stored.seq == next_seq)?;
-        persist_change(&tx, mutation, stored.seq)?;
+        persist_change(tx, mutation, stored.seq)?;
         tx.execute(
             "INSERT INTO identity_operations(operation_id,input_hash,event_seq) VALUES(?1,?2,?3)",
             params![mutation.operation_id, record.input_hash, stored.seq],
@@ -732,9 +911,7 @@ impl Store {
             .context("identity authorization revision has no predecessor")?;
         let updated = tx.execute("UPDATE identity_meta SET authorization_revision=?1 WHERE singleton=1 AND authorization_revision=?2",params![next_revision,previous_revision])?;
         conflict(updated == 1)?;
-        let result = receipt(&stored, &record);
-        self.commit_checked(tx)?;
-        Ok(result)
+        Ok(receipt(&stored, &record))
     }
     pub fn human_account(
         &self,
@@ -842,42 +1019,13 @@ impl Store {
         resource: &ResourceRefV1,
         permission: ResourcePermissionV1,
     ) -> anyhow::Result<Option<ResourceGrantV1>> {
-        let key = scope.principal().key()?;
         let resource_key = resource.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
-        if scope.tenant_id() != self.tenant_id {
-            return Err(IdentityFailureV1::ContextRevoked.into());
-        }
-        let authorization_revision = authorization_revision(&tx)?;
-        if authorization_revision != scope.authorization_revision() {
-            return Err(IdentityFailureV1::ContextRevoked.into());
-        }
-        let account: HumanAccountV1 = json_row(
-            &tx,
-            "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
-            &key,
-        )?
-        .ok_or(IdentityFailureV1::IdentityRevoked)?;
-        if !account.active {
-            return Err(IdentityFailureV1::IdentityRevoked.into());
-        }
-        let member: MembershipV1 = json_row(
-            &tx,
-            "SELECT payload_json FROM identity_memberships WHERE membership_id=?1",
-            scope.membership_id(),
-        )?
-        .ok_or(IdentityFailureV1::ContextRevoked)?;
-        let current = crate::identity::authorize_context(
-            scope.principal(),
-            &member,
-            scope.mode(),
-            scope.membership_revision(),
-        )?;
+        let current = revalidate_scope(&tx, scope, &self.tenant_id)?;
         let result: Option<ResourceGrantV1> = json_row(
             &tx,
             "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
@@ -900,7 +1048,41 @@ impl Store {
     }
 }
 
-fn json_row<T: serde::de::DeserializeOwned>(
+pub(super) fn revalidate_scope(
+    db: &Connection,
+    scope: &AuthorizedScopeV1,
+    tenant: &str,
+) -> anyhow::Result<AuthorizedScopeV1> {
+    require_identity(db)?;
+    if scope.tenant_id() != tenant || authorization_revision(db)? != scope.authorization_revision()
+    {
+        return Err(IdentityFailureV1::ContextRevoked.into());
+    }
+    let account: HumanAccountV1 = json_row(
+        db,
+        "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
+        &scope.principal().key()?,
+    )?
+    .ok_or(IdentityFailureV1::IdentityRevoked)?;
+    if !account.active {
+        return Err(IdentityFailureV1::IdentityRevoked.into());
+    }
+    let member: MembershipV1 = json_row(
+        db,
+        "SELECT payload_json FROM identity_memberships WHERE membership_id=?1",
+        scope.membership_id(),
+    )?
+    .ok_or(IdentityFailureV1::ContextRevoked)?;
+    Ok(crate::identity::authorize_context(
+        scope.principal(),
+        &member,
+        scope.mode(),
+        scope.membership_revision(),
+    )?
+    .at_authorization_revision(scope.authorization_revision()))
+}
+
+pub(super) fn json_row<T: serde::de::DeserializeOwned>(
     db: &Connection,
     sql: &str,
     key: &str,
