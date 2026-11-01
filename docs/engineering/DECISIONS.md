@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 2 novembre — sessions OIDC durables et portée de l'audit
+
+Choix d'implémentation de l'orchestrateur dans la frontière SSO approuvée : audit privé d'authentification distinct des bases métiers, empreintes de tokens séparées par domaine, générations positives sans wrap et transitions admission/refresh pending/rotation/fermeture atomiques avec leur audit. Une intention est consommable une seule fois ; son replay ne déclenche aucun nouvel échange fournisseur. Le CLI conserve son PKCE natif mais demande un ACK d'intention durable avant ses échanges : le gateway observe la demande et valide le token remis, sans prétendre avoir observé le nonce ou l'échange CLI. Aucun bearer, refresh token ou ID token brut n'est persisté.
+
+Une lecture métier vérifie la session exacte active/non expirée et l'intégrité de l'audit d'authentification, puis persiste son reçu obligatoire dans le Store du tenant. Elle n'ajoute pas une écriture d'authentification redondante. La saturation du quota d'append d'authentification bloque les nouvelles mutations concernées, sans invalider à elle seule une session existante ; indisponibilité/intégrité invalide ou échec d'audit métier refusent la lecture. Logout efface toujours l'état mémoire local et distingue les résultats d'audit et d'IdP.
+
+Après redémarrage, le registre mémoire vide n'admet ni anciennes sessions ni contextes implicitement ; les empreintes persistantes interdisent la réadmission du même access token déjà vu. Un rollback complet du journal à travers un redémarrage ne peut pas être détecté par ce seul journal : aucune garantie anti-rollback externe n'est annoncée. Restauration/reprise et véritable parcours IdP restent des qualifications ouvertes. Ces décisions décrivent le lot en cours, pas un SSO terminé.
+
 ## 1er novembre — propriété SSO approuvée par le mainteneur
 
 Le mainteneur choisit explicitement le gateway Rust comme propriétaire des transactions PKCE et de la validation OIDC. Le dashboard relaie uniquement des routes d'authentification fixes ; seul le gateway rejoint le réseau interne Keycloak lorsque le profil de découverte est activé. Aucun nouveau service, secret client distribué, accès cloud ou changement DNS implicite n'est autorisé par cette décision. Elle remplace la proposition ancienne de propriété PKCE dans le dashboard, sans annoncer de connexion SSO livrée.
