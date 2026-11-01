@@ -15,7 +15,17 @@ use std::{
 };
 use tokio::{net::UnixStream, sync::watch};
 
+#[path = "server_lifetime.rs"]
+mod lifetime;
+use lifetime::{ListenerOwner, NativeOwners};
+
+#[cfg(test)]
+#[path = "server_lifetime_tests.rs"]
+mod lifetime_tests;
+
 struct State {
+    _lease: Arc<RoleLease>,
+    owners: NativeOwners,
     epoch: Uuid,
     max_slots: u32,
     capability: [u8; 32],
@@ -27,6 +37,7 @@ struct State {
     shutdown: watch::Sender<bool>,
 }
 struct Actor {
+    _lease: Arc<RoleLease>,
     registration: RegistrationV1,
     digest: String,
     state: Mutex<EnforcerSlotStatusV1>,
@@ -40,14 +51,19 @@ pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> Enforcer
     if !(1..=MAX_SLOTS).contains(&max_slots) {
         return Err(EnforcerError::InvalidInput);
     }
-    let lease = RoleLease::acquire(root)?;
+    let lease = Arc::new(RoleLease::acquire(root)?);
     let secret = capability(root, false)?;
     let listener_root = lease.listener_root()?;
     let listener = PrivateListener::bind_new(&listener_root)?;
     let clock = Arc::new(NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?);
     clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
     let (shutdown, mut shutdown_receiver) = watch::channel(false);
+    let progress_done = Arc::new(AtomicBool::new(false));
+    let (owners, joiner) =
+        NativeOwners::start(Arc::clone(&lease), Arc::clone(&progress_done), max_slots)?;
     let state = Arc::new(State {
+        _lease: Arc::clone(&lease),
+        owners: owners.clone(),
         epoch: listener.endpoint().epoch(),
         max_slots,
         capability: secret,
@@ -58,15 +74,26 @@ pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> Enforcer
         progress: AtomicU64::new(1),
         shutdown,
     });
-    let progress_done = Arc::new(AtomicBool::new(false));
+    let mut listener_owner = Some(ListenerOwner::new(
+        owners,
+        Arc::clone(&progress_done),
+        Arc::downgrade(&state),
+        joiner,
+    ));
+    #[cfg(test)]
+    lifetime_tests::observe_state(&state);
     start_progress(Arc::clone(&state), Arc::clone(&progress_done))?;
     lease.publish_endpoint(listener.endpoint())?;
     let connections = Arc::new(tokio::sync::Semaphore::new(32));
     loop {
         tokio::select! {
             changed = shutdown_receiver.changed() => {
-                if changed.is_err() || *shutdown_receiver.borrow() {
-                    progress_done.store(true, Ordering::SeqCst);
+                if changed.is_err() {
+                    return Err(EnforcerError::Unavailable);
+                }
+                if *shutdown_receiver.borrow() {
+                    listener_owner.take().ok_or(EnforcerError::Unhealthy)?
+                        .finish_idle().await?;
                     return Ok(());
                 }
             }
@@ -99,13 +126,25 @@ pub async fn run_internal_enforcer(root: &Directory, max_slots: u32) -> Enforcer
 }
 
 fn start_progress(state: Arc<State>, done: Arc<AtomicBool>) -> EnforcerResult<()> {
-    std::thread::Builder::new()
+    let owners = state.owners.clone();
+    let lease = Arc::clone(&state._lease);
+    let clock = Arc::clone(&state.clock);
+    let weak_state = Arc::downgrade(&state);
+    let progress_owners = owners.clone();
+    let handle = std::thread::Builder::new()
         .name("enforcer-clock".into())
         .stack_size(256 * 1024)
         .spawn(move || {
+            let _lease = lease;
+            let _done = lifetime::ProgressDone(Arc::clone(&done), progress_owners);
+            #[cfg(test)]
+            let _lifetime_progress = lifetime_tests::ProgressObservation::enter();
             let mut last = None;
             while !done.load(Ordering::SeqCst) {
-                match state.clock.sample().and_then(|sample| {
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                match clock.sample().and_then(|sample| {
                     sample
                         .continuous_ns()
                         .map_err(|_| crate::broker::clock::ClockError::InvalidReading)
@@ -122,17 +161,26 @@ fn start_progress(state: Arc<State>, done: Arc<AtomicBool>) -> EnforcerResult<()
                             state.healthy.store(false, Ordering::SeqCst);
                             return;
                         }
+                        #[cfg(test)]
+                        lifetime_tests::progress_tick();
                     }
                     _ => {
                         state.healthy.store(false, Ordering::SeqCst);
                         return;
                     }
                 }
+                // Do not retain State through a sleep or native termination.
+                drop(state);
                 std::thread::sleep(Duration::from_millis(25));
             }
-        })
-        .map_err(|_| EnforcerError::Unavailable)?;
-    Ok(())
+        });
+    match handle {
+        Ok(handle) => owners.progress(Some(handle)),
+        Err(_) => {
+            owners.progress(None)?;
+            Err(EnforcerError::Unavailable)
+        }
+    }
 }
 
 async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> EnforcerResult<()> {
@@ -155,6 +203,8 @@ async fn serve_connection(mut stream: UnixStream, state: Arc<State>) -> Enforcer
     {
         return Err(EnforcerError::Unauthorized);
     }
+    #[cfg(test)]
+    let _lifetime_ipc = lifetime_tests::authenticated_owner().await;
     let request: Request = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
     if matches!(request, Request::Watch {}) {
         loop {
@@ -187,8 +237,7 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
                     slot_count: slots.len(),
                     max_slots: state.max_slots,
                     progress: state.progress.load(Ordering::SeqCst),
-                    healthy: state.healthy.load(Ordering::SeqCst)
-                        && !state.closing.load(Ordering::SeqCst),
+                    healthy: state.admission_healthy() && !state.closing.load(Ordering::SeqCst),
                 },
             })
         }
@@ -218,7 +267,7 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
             registration_hash,
             generation,
         } => {
-            if !state.healthy.load(Ordering::SeqCst) {
+            if !state.admission_healthy() {
                 return Err(EnforcerError::Unhealthy);
             }
             let actor = state.actor(&arm_id, &registration_hash)?;
@@ -273,6 +322,10 @@ async fn dispatch(state: &Arc<State>, request: Request) -> EnforcerResult<Respon
 }
 
 impl State {
+    fn admission_healthy(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst) && !self.owners.failed()
+    }
+
     fn actor(&self, arm_id: &str, digest: &str) -> EnforcerResult<Arc<Actor>> {
         let slots = self.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
         let actor = slots.get(arm_id).ok_or(EnforcerError::Conflict)?;
@@ -297,7 +350,7 @@ async fn register(
     generation: u64,
     observe_only: bool,
 ) -> EnforcerResult<Response> {
-    if (generation == u64::MAX && !observe_only) || !state.healthy.load(Ordering::SeqCst) {
+    if (generation == u64::MAX && !observe_only) || !state.admission_healthy() {
         return Err(EnforcerError::Unhealthy);
     }
     let digest = registration.digest()?;
@@ -323,6 +376,7 @@ async fn register(
                 return Err(EnforcerError::Capacity);
             }
             let actor = Arc::new(Actor {
+                _lease: Arc::clone(&state._lease),
                 state: Mutex::new(EnforcerSlotStatusV1 {
                     arm_id: registration.arm.operation_id.clone(),
                     registration_hash: digest.clone(),
@@ -344,12 +398,29 @@ async fn register(
                 actor.registration.arm.operation_id.clone(),
                 Arc::clone(&actor),
             );
-            if start_actor(Arc::clone(&actor), Arc::clone(&state.clock)).is_err() {
-                actor_failed(&actor);
-            }
             (actor, false)
         }
     };
+    if !replayed {
+        // The reservation is retained, but thread creation and ownership
+        // handoff take place after releasing the slot map.
+        let handle = start_actor(
+            Arc::clone(&actor),
+            Arc::clone(&state.clock),
+            state.owners.clone(),
+        );
+        match handle {
+            Ok(handle) => {
+                if state.owners.actor(Some(handle)).is_err() {
+                    actor_failed(&actor);
+                }
+            }
+            Err(_) => {
+                let _ = state.owners.actor(None);
+                actor_failed(&actor);
+            }
+        }
+    }
     // A recovery sweep must reserve every target even if one authority is
     // unavailable. Short replies let the client continue its bounded sweep;
     // actors already reserved here keep working independently.
@@ -371,11 +442,18 @@ async fn register(
     })
 }
 
-fn start_actor(actor: Arc<Actor>, clock: Arc<NativeHostClock>) -> EnforcerResult<()> {
+fn start_actor(
+    actor: Arc<Actor>,
+    clock: Arc<NativeHostClock>,
+    owners: NativeOwners,
+) -> EnforcerResult<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("enforcer-stop".into())
         .stack_size(1024 * 1024)
         .spawn(move || {
+            let _exit = lifetime::ActorExit(owners);
+            #[cfg(test)]
+            let _lifetime_actor = lifetime_tests::actor_before_reopen(&actor);
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -400,8 +478,7 @@ fn start_actor(actor: Arc<Actor>, clock: Arc<NativeHostClock>) -> EnforcerResult
             // event dispatcher, writer or HTTP is used by the remaining loop.
             run_actor(actor, clock, runtime, managed);
         })
-        .map_err(|_| EnforcerError::Unavailable)?;
-    Ok(())
+        .map_err(|_| EnforcerError::Unavailable)
 }
 
 fn actor_failed(actor: &Actor) {

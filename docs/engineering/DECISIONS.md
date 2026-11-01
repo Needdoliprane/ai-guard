@@ -1,5 +1,9 @@
 # Décisions d'industrialisation
 
+## 1er novembre — propriété native indépendante du listener
+
+Le RED S0 montre qu'une lease locale au futur serveur peut être relâchée avant ses owners IPC/natifs. La même Arc/FD est désormais retenue par State/acteurs et un owner natif borné qui possède les handles. Progression Weak, garde de sortie et vrai join avant toute attente STOP ; fin idle/NotStarted connue, Cancel conservé. Les erreurs ou handles consommés par join échoué restent inconnus : lease et owners restants retenus jusqu'à fin du processus, sans nouvelle autorité, éviction ou preuve de retraite. Le support non mutatif est détaché à l'abandon, distinct des handles acteur/progression qu'il continue à posséder. [Sept fonctions ciblées, checks et limites](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Cette correction du même binaire ne modifie ni architecture réseau, protocole, ledger, deadline ou installation OS ; D5 demeure ouvert.
+
 ## 1er novembre — import TLS explicite vers des volumes de contrôle
 
 Le démarrage réel refuse les projections dont le filesystem n'a pas de sémantique ACL qualifiée ; aucun élargissement de la politique commune n'est retenu. Le [contrat d'import TLS](TLS_MATERIAL_PROVISIONING.md) conserve validation hôte par FD, reader strict et contrôle Rust existant, avec paquet stdin fermé et préparateur ponctuel non privilégié vers deux volumes neufs. CA seule pour gateway, identité pour relais ; aucun secret au modèle/worker. Pas de nouveau service ou stockage métier, d'émission PKI, d'adoption/rotation ou d'activation implicite. Implémentation, revue et qualification réelles restent à obtenir ; ce choix ne clôture G11 ni le parcours Jev intégré.

@@ -4,6 +4,8 @@
 
 ## Besoin et référence du code
 
+**Actualisation S0,1er novembre :** la lease ne dépend plus du seul futur listener : même Arc/FD dans les owners IPC/acteurs et un propriétaire natif borné des handles. Progression Weak, arrêt sur toute sortie et vrai join avant d'attendre les STOP ; idle/NotStarted connu libère après fin des owners. Inconnu conserve l'autorité jusqu'à fin du processus. Aucun slot retiré, ledger produit ou reçu de quiescence inventé. [RED, sept fonctions PASS, revue et release natives](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Le paragraphe suivant conserve le constat initial du30octobre ; retraite complète et fencing restent obligatoires.
+
 La mort du CLI ne doit pas abandonner l'échéance d'un worker. Aujourd'hui `runner::managed::launch_worker` et `runtime::execute_created` portent l'exécution et sa limite dans le processus appelant. Le registre, les claims irréversibles, les checkpoints privés, les verrous par tentative et la réconciliation existent ; aucun superviseur indépendant n'est livré. `in_doubt` et quota retenu protègent l'intégrité mais ne prouvent pas un arrêt.
 
 Les contrats à conserver sont [architecture](ARCHITECTURE_CONTRACT.md), [tenants](CLOUD_TENANCY.md), [usage](USAGE_METERING.md) et [fournisseurs](PROVIDER_AUTH.md). Le code de référence est [runner.rs](../../src/runner.rs), [managed.rs](../../src/runner/managed.rs), [runtime.rs](../../src/runtime.rs) et [control.rs](../../src/control.rs).

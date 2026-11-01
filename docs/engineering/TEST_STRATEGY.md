@@ -1,5 +1,7 @@
 # Stratégie de qualification
 
+S0,1er novembre : RED natif de lease après abandon listener, puis sept fonctions ciblées PASS (parent IPC/acteur/idle inchangé, trois cas owner, deux intégrations du vrai binaire et retained Cancel). Fmt/Clippy strict/release arm64 PASS et revue source traitée. Deux fences Unknown de test conservées ; marqueur payload≠join, aucun crash processus/OS ou moteur qualifié. Sources auxiliaires/ignorées hachées avant Clippy, sans réussite PKI/fournisseur attribuée au lot. [Gels, commandes et limites](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Ledger/retrait durable, G09 et recette Docker/Podman restent ouverts ; pas de répétition des32STOP3 ou d'E2E global pour ce correctif.
+
 Les résultats nouveaux sont dans [VALIDATION.md](VALIDATION.md). Les résultats historiques de [../validation.md](../validation.md) ne qualifient pas ce checkout sur macOS ARM64. Les critères détaillés existants sont dans [../acceptance.md](../acceptance.md) ; leur ancien découpage MVP/V2 ne réduit pas la mission production.
 
 ## Transports STOP3 et TLS — vérifications ciblées du 1er novembre
