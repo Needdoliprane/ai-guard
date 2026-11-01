@@ -5,6 +5,7 @@ pub mod broker;
 pub mod control;
 pub mod control_fs;
 pub mod declared_agents;
+pub mod identity;
 pub mod ingress;
 pub mod jev;
 pub mod model;

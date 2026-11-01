@@ -22,6 +22,12 @@ Le [lot logiciel J3b](VALIDATION.md#1er-novembre--jev-j2j3b-corrections-et-valid
 
 Les filtres des deux unités CLI exigent le préfixe `tests::` avec `--exact`. Un RC0 avec zéro fonction ne compte pas PASS. Le corpus ne qualifie ni jugement Qwen, ni consommation réelle du modèle, ni TLS privé conteneurisé ; conserver ces campagnes séparées. Un cas de dictionnaires Store A/B distincts et de replay après changement de backend reste une extension de preuve ciblée, pas un PASS déduit des tests mono-Store.
 
+## Domaine d'identité et stockage4
+
+`tests/identity_migration.rs` vérifie les données réelles SQLite/migrations/backup et les scopes/grants ; `identity::tests::` contient six unités de domaine et `audit::identity::tests::` la panne SQLite FULL. Attention au filtre sous-chaîne Rust : `identity::tests::` sélectionne aussi cette dernière ; ne pas compter deux fois le même test ni le rejouer ensuite par automatisme. Les canaris de migration/bootstrap/protocole/CLI sont choisis selon les coutures touchées, et le fixture API ne doit contenir aucun de ses credentials dans l'enveloppe métier positive. [Gels et26 fonctions uniques constatées](VALIDATION.md#1er-novembre--domaine-identité-et-migration4).
+
+Cette couverture ne remplace pas les requêtes humaines réellement authentifiées, l'ACL avant pagination/SSE/export, la révocation pendant flux, le provisioning local ou OIDC ci-dessous. Les méthodes Store exigent un appelant de contrôle déjà authentifié ; sérialiser un principal ne le prouve pas. Le prochain lot doit livrer le parcours productif avec ses tests HTTP/CLI/UI, sans fausse connexion ni promotion en runner/viewer global.
+
 ## Identité individuelle, SSO et découverte — à qualifier
 
 Exigences approuvées le 31 octobre, détaillées dans [le contrat canonique d'identité et de configuration](../sso.md). Cette matrice fixe les preuves d'acceptation ; ses libellés ne sont pas des noms de suites déjà disponibles. Les cas sont **NOT_RUN pour ce nouveau périmètre**. Le SSO facultatif à l'installation ne dispense pas le produit de qualifier son connecteur et sa documentation. Les comptes préconfigurés servent à l'environnement explicite de découverte ; les événements d'exécution doivent être réels.

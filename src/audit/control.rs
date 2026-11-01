@@ -239,7 +239,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     if version == 1 {
         return Ok(());
     }
-    anyhow::ensure!(version == 2 || version == 3, "unsupported control schema");
+    anyhow::ensure!([2, 3, 4].contains(&version), "unsupported control schema");
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
         "SELECT namespace_uuid,genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
         [],
@@ -286,6 +286,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .query_map([genesis_seq], row_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
+        if stored.event.kind.starts_with("control.identity.") {
+            anyhow::ensure!(version == 4, "identity event requires schema4");
+            continue;
+        }
         if stored.event.kind == "control.supervision.genesis" {
             overlay.genesis(&stored)?;
             continue;
@@ -498,6 +502,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
     }
     overlay.finish(db)?;
+    super::identity::validate(db)?;
     for (table, query) in TABLE_QUERIES {
         let mut statement = db.prepare(query)?;
         let count = statement.column_count();
@@ -523,7 +528,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 2 || version == 3 {
+    if [2, 3, 4].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -1059,7 +1064,7 @@ impl Store {
     pub fn migrate_control_v3(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 2, 3)
     }
-    fn migrate_control_version(
+    pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
         from_version: u32,
@@ -1141,6 +1146,7 @@ impl Store {
         match to_version {
             2 => initialize(&tx, self.max_events, &self.redactor)?,
             3 => self.initialize_supervision(&tx)?,
+            4 => self.initialize_identity(&tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1152,10 +1158,11 @@ impl Store {
             "post-migration audit integrity failure"
         );
         let (seq, hash): (i64, String) = tx.query_row(
-            if to_version == 2 {
-                "SELECT genesis_seq,genesis_hash FROM control_meta WHERE singleton=1"
-            } else {
-                "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1"
+            match to_version {
+                2 => "SELECT genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
+                3 => "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
+                4 => "SELECT genesis_seq,genesis_hash FROM identity_meta WHERE singleton=1",
+                _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -1214,7 +1221,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == 3 {
+        if matches!(version, 3 | 4) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,
