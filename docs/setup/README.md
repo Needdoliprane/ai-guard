@@ -1,0 +1,74 @@
+# Configure ai-guard
+
+[English](README.md) · [Français](README.fr.md) · [Project](../../README.md)
+
+This manual describes the complete product contract. The implementation and qualification ledger is maintained in [engineering](../engineering/CURRENT_STATE.md). Choose the environment that matches your identity and inference needs; local topology, ai-guard identity and AI-provider authentication are independent settings.
+
+## Installation guides
+
+| Guide | What it configures |
+|---|---|
+| [Local workstation](local/README.md) | Rust CLI, Docker/Podman, control services, first worker, permissions, workspace/export, data and recovery. |
+| [AI providers](providers/README.md) | Codex and Claude Code with subscription or API, explicit selection, private credentials and optional Jev. |
+| [Keycloak and OIDC](keycloak/README.md) | Local identity provider, public Web/CLI clients, PKCE, claims, memberships and enterprise IdP setup. |
+| [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |
+| [Enterprise](enterprise/README.md) | Shared control services, tenant boundaries, private CAs, internal inference and operations. |
+
+Each guide contains prerequisites, configuration, startup, expected endpoints, diagnosis, stopping and data preservation. English/French versions and configuration examples change together when a contract changes.
+
+## Files and consumers
+
+| File | Reader and use |
+|---|---|
+| `.env.exemple.local` | Compose `--env-file`, base Docker or Podman stack. |
+| `.env.exemple.local-keycloak` | Base Compose and the separate Keycloak project. |
+| `.env.exemple.local-qwen` | Base Compose and the separate local-AI project. |
+| `.env.exemple.local-keycloak-qwen` | Same settings combined; use the separate commands below. |
+| `.env.exemple.providers` | Template for a **new private provider input**; follow the provider guide for explicit import. Not a Compose or SSO configuration. |
+| `.env.exemple.entreprise` | Base Compose transport and optional Jev override; identities, tenants and inference policies have separate typed configuration. |
+| `<config-dir>/providers.json` | Rust provider selection, created/inspected with `providers init/status`; override through `--providers-file`. |
+| Private runner/viewer/Jev files | Explicit Rust/control credential references, never global worker environment. |
+
+The Rust CLI does not source dotenv. Compose expands `${HOME}` and reads these examples only when `--env-file` names one. Host environment variables may override Compose interpolation; inspect your shell configuration when values differ. CLI flags configure their named component, not every service.
+
+Public examples can be used directly for the documented local defaults. To customize, create a new private file with a different name and use that path consistently. Never overwrite an existing `.env`, credential directory or database. A private provider file should be0600; its parent should be0700. Do not `source` a downloaded or project-supplied configuration.
+
+## Combine local contexts
+
+First build ai-guard and initialize the same private configuration directory as the [local guide](local/README.md). Then, from the repository root:
+
+```sh
+docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local -f deploy/docker/compose.yaml up -d
+docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-keycloak -f deploy/keycloak-demo/compose.yaml --profile keycloak-demo-http up --build -d
+docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local-ai -f deploy/local-ai/compose.yaml up --build -d
+```
+
+These are three Compose projects with one ai-guard dashboard. Keeping project names explicit preserves separate data and networks. Do not merge their Compose files as overrides. Initial builds acquire public images and the pinned model; prepare them beforehand for offline use.
+
+| Access | Local default |
+|---|---|
+| Dashboard | `http://127.0.0.1:4000` |
+| Gateway | `http://127.0.0.1:8787` |
+| Keycloak issuer | `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo` |
+| Local model health | `http://127.0.0.1:18090/health` |
+| Local Chat Completions base | `http://127.0.0.1:18090/v1` |
+
+Configure the Keycloak hostname as explained in its guide. Published ports are bound to loopback. The gateway, dashboard and model keep fixed container ports when their host ports change; update CLI gateway URLs and Keycloak's registered Web origin accordingly. Keycloak is different: `AI_GUARD_DEMO_IDP_PORT` changes both its internal and published ports, and the complete issuer must remain identical for browser, CLI and control. Rootless remains the default engine requirement.
+
+## Stop and resume
+
+Use the **same env file, project name and Compose path** for `ps`, `stop`, `start` and `logs`. For example:
+
+```sh
+docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local-ai -f deploy/local-ai/compose.yaml stop
+```
+
+Repeat for the projects you intend to stop. Stop active workers through the broker before stopping their control services. `stop` preserves containers and named data volumes; restarting an IdP does not re-import or replace an existing realm. An updated model requires a deliberate image change, not deletion of identity or audit data.
+
+The CLI `up/down` workflow uses its own fixed project/default ports. Use the direct Compose workflow consistently when choosing the configurable examples above; do not mix lifecycle commands for different project names.
+
+## Secrets, TLS and responsibilities
+
+Generate local ai-guard credentials with `init`; obtain enterprise identity and AI credentials through the chosen operator/provider flow. A Keycloak administrator is not automatically an ai-guard administrator. Each tenant and permission mapping is administered by the control plane. A model backend may be shared only through distinct authenticated scopes, permissions and quotas.
+
+For local certificate preparation, see [the Rust CA generator](../demo-pki.md). Keep CA private keys in the trusted control environment; clients receive only the appropriate public CA chain. Configure SAN/issuer names consistently and preserve TLS verification. The local HTTP examples use public demonstration accounts and are not enterprise transport settings.

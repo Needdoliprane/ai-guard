@@ -1,5 +1,13 @@
 # Décisions d'industrialisation
 
+## 1er novembre — manuel bilingue du produit complet et essais auxiliaires locaux
+
+Le mainteneur demande un manuel du produit complet, organisé par contexte avec exemples de configuration : local, fournisseurs IA, Keycloak, Qwen local, combinaison locale et entreprise. La rédaction adopte cette cible complète ; preuves de fonctionnement et écarts du code restent dans les documents d'ingénierie. L'hypothèse éditoriale ne constitue ni une implémentation ni une qualification de production.
+
+`README.md` est l'entrée anglaise et `README.fr.md` son équivalent français ; les guides de `docs/setup/` suivent la même paire. Un changement de contrat modifie dans le même lot les deux langues, exemples et commandes concernés. Les `.env.exemple.*` indiquent leur consommateur : Compose via `--env-file`, ou entrée privée importée explicitement pour les fournisseurs. La CLI ne source pas ces fichiers. Contrôle, IdP et inférence utilisent des projets Compose distincts dont les noms sont conservés sur tout le cycle de vie.
+
+Les essais auxiliaires Keycloak, Qwen et générateur d'AC ne sont plus distribués. Les fichiers déjà suivis sont retirés de l'index et ignorés, avec conservation de chaque copie locale et de l'historique. Les synthèses datées restent dans les dossiers de preuves ; captures/instruments détaillés demeurent locaux. Les tests de sécurité, API, broker/runtime et autres comportements du produit restent suivis. Secrets et données existants ne sont ni remplacés ni supprimés.
+
 ## 1er novembre — une commande Rust de PKI de test
 
 Le [générateur local](../demo-pki.md) répond au choix du mainteneur sans nouveau service ni dépendance NAS. OpenSSL/LibreSSL est appelé par chemin absolu sous environnement vidé, avec arguments séparés et délais ; son namespace, propriétaire, ACL et identité sont contrôlés avant chaque appel. Sortie exclusive0700 et fichiers0600, clés d'AC conservées privées, aucune installation de confiance/DNS. La table constante de sorties et sa collecte complète portent l'invariant des deux accès positionnels ; une évolution doit conserver cette correspondance.

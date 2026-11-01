@@ -1,5 +1,0 @@
-cwd=/private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z/work
-PATH=/usr/bin:/bin; clean environment via env -i
-parent mode=0700 (modes.txt)
-binary=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/ai-guard-demo-pki
-command=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/ai-guard-demo-pki --out /private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z/work/pki

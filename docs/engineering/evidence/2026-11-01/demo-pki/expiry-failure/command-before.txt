@@ -1,7 +1,0 @@
-cwd=/Users/louis/Documents/ai-guard/.worktrees/broker-service
-PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
-CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target
-CARGO_INCREMENTAL=0
-TMPDIR=<private capture>/tmp
-command=CARGO_INCREMENTAL=0 cargo test --locked --test demo_pki -- --test-threads=1
-scope=three demo_pki integration tests; no engine/provider/runtime service

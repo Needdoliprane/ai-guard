@@ -1,3 +1,0 @@
-/private/tmp/ai-guard-demo-pki-parent-diag-20261101T015518Z mode=700 owner=louis:wheel
-/private/tmp/ai-guard-demo-pki-parent-diag-20261101T015518Z/tmp mode=700 owner=louis:wheel
-/private/tmp/ai-guard-demo-pki-parent-diag-20261101T015518Z/tmp/tempdir-default-mode mode=755 owner=louis:wheel

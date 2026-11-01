@@ -1,5 +1,0 @@
-Command and metadata recorded before execution; one exact test only.
-cwd: /Users/louis/Documents/ai-guard/.worktrees/broker-service
-login=false; PATH includes /usr/sbin and /sbin; yield_time_ms=1000.
-TMPDIR is a new private directory; output is captured to private log and RC files.
-export PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; proof=/private/tmp/ai-guard-demo-pki-red-20261101-024154; CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target TMPDIR="$proof/fixtures/tmp" cargo test --locked --test demo_pki real_demo_chain_is_private_and_tls_rejects_untrusted_name_and_expiry -- --exact

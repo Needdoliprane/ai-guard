@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "tenants": [
+    {
+      "tenant_id": "tenant-a",
+      "data": "/data/tenant-a.sqlite",
+      "runner_token_file": "/run/secrets/tenant-a-runner",
+      "viewer_token_file": "/run/secrets/tenant-a-viewer",
+      "worker_quota": {
+        "version": 1,
+        "max_active_workers": 3,
+        "max_cpu_millis": 6000,
+        "max_memory_bytes": 3221225472,
+        "max_timeout_seconds": 3600
+      }
+    },
+    {
+      "tenant_id": "tenant-b",
+      "data": "/data/tenant-b.sqlite",
+      "runner_token_file": "/run/secrets/tenant-b-runner",
+      "viewer_token_file": "/run/secrets/tenant-b-viewer",
+      "worker_quota": {
+        "version": 1,
+        "max_active_workers": 3,
+        "max_cpu_millis": 6000,
+        "max_memory_bytes": 3221225472,
+        "max_timeout_seconds": 3600
+      }
+    }
+  ]
+}

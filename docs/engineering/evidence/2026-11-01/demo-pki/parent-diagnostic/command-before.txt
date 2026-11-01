@@ -1,7 +1,0 @@
-cwd=/Users/louis/Documents/ai-guard/.worktrees/broker-service
-PATH=/usr/bin:/bin
-TMPDIR=/private/tmp/ai-guard-demo-pki-parent-diag-20261101T015518Z/tmp
-umask=022
-parent-created-with-mkdir-default-mode; see parent-modes.txt
-command=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/ai-guard-demo-pki --out /private/tmp/ai-guard-demo-pki-parent-diag-20261101T015518Z/tmp/tempdir-default-mode/pki
-stdout/stderr redirected privately; no OpenSSL subprocess output forwarded by application

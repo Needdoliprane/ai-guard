@@ -11,3 +11,16 @@
 .env.*
 !.env.example
 !.env.*.example
+!.env.exemple.*
+
+# Local interoperability experiments are not distributed product tests.
+/tests/keycloak_demo_config.rs
+/tests/keycloak_demo_real.rs
+/tests/demo_pki.rs
+/.local-tests/
+/docs/engineering/evidence/**/demo-pki/**
+!/docs/engineering/evidence/**/demo-pki/README.md
+/docs/engineering/evidence/**/local-inference/**
+!/docs/engineering/evidence/**/local-inference/README.md
+/docs/engineering/evidence/**/local-judge/**
+!/docs/engineering/evidence/**/local-judge/README.md

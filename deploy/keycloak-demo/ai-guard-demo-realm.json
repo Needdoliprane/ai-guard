@@ -1,0 +1,197 @@
+{
+  "realm": "ai-guard-demo",
+  "displayName": "ai-guard — DÉMONSTRATION LOCALE",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "rememberMe": false,
+  "loginWithEmailAllowed": false,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 120,
+  "accessCodeLifespan": 30,
+  "ssoSessionIdleTimeout": 900,
+  "ssoSessionMaxLifespan": 3600,
+  "revokeRefreshToken": true,
+  "refreshTokenMaxReuse": 0,
+  "defaultSignatureAlgorithm": "RS256",
+  "eventsEnabled": false,
+  "adminEventsEnabled": false,
+  "adminEventsDetailsEnabled": false,
+  "eventsListeners": [],
+  "roles": {
+    "client": {
+      "ai-guard-demo-api": [
+        {
+          "name": "admin-ai-guard",
+          "description": "DÉMONSTRATION : candidat au mapping administrateur du seul périmètre ai-guard explicitement rattaché côté contrôle. Aucun droit realm, runner ou tenant implicite.",
+          "composite": false
+        }
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "ai-guard-demo-api",
+      "name": "ai-guard API — DÉMONSTRATION",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "bearerOnly": true,
+      "publicClient": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": [],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "ai-guard-demo-web",
+      "name": "ai-guard Web — DÉMONSTRATION",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback"],
+      "webOrigins": ["${AI_GUARD_DEMO_WEB_ORIGIN}"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "${AI_GUARD_DEMO_WEB_ORIGIN}/",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "standard.token.exchange.enabled": "false"
+      },
+      "defaultClientScopes": ["basic", "profile"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "ai-guard-demo-api audience (access token only)",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ai-guard-demo-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "false"
+          }
+        },
+        {
+          "name": "ai-guard-demo-api client roles (access token only)",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "ai-guard-demo-api",
+            "claim.name": "resource_access.ai-guard-demo-api.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "false"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "ai-guard-demo-cli",
+      "name": "ai-guard CLI — DÉMONSTRATION",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "consentRequired": false,
+      "fullScopeAllowed": false,
+      "redirectUris": ["http://127.0.0.1:80/oidc/callback"],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "standard.token.exchange.enabled": "false"
+      },
+      "defaultClientScopes": ["basic", "profile"],
+      "optionalClientScopes": [],
+      "protocolMappers": [
+        {
+          "name": "ai-guard-demo-api audience (access token only)",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "ai-guard-demo-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "introspection.token.claim": "false"
+          }
+        },
+        {
+          "name": "ai-guard-demo-api client roles (access token only)",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "ai-guard-demo-api",
+            "claim.name": "resource_access.ai-guard-demo-api.roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "clientScopeMappings": {
+    "ai-guard-demo-api": [
+      {"client": "ai-guard-demo-web", "roles": ["admin-ai-guard"]},
+      {"client": "ai-guard-demo-cli", "roles": ["admin-ai-guard"]}
+    ]
+  },
+  "users": [
+    {
+      "username": "admin-ai-guard",
+      "firstName": "Administrateur ai-guard — DÉMONSTRATION",
+      "lastName": "Démonstration",
+      "email": "admin-ai-guard@ai-guard.test",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "credentials": [{"type": "password", "value": "admin-ai-guard", "temporary": false}],
+      "clientRoles": {"ai-guard-demo-api": ["admin-ai-guard"]}
+    },
+    {
+      "username": "user-1",
+      "firstName": "Utilisateur 1 — DÉMONSTRATION",
+      "lastName": "Démonstration",
+      "email": "user-1@ai-guard.test",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "credentials": [{"type": "password", "value": "user-1", "temporary": false}],
+      "clientRoles": {}
+    },
+    {
+      "username": "user-2",
+      "firstName": "Utilisateur 2 — DÉMONSTRATION",
+      "lastName": "Démonstration",
+      "email": "user-2@ai-guard.test",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [],
+      "credentials": [{"type": "password", "value": "user-2", "temporary": false}],
+      "clientRoles": {}
+    }
+  ]
+}

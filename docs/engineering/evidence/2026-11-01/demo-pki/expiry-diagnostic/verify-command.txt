@@ -1,3 +1,0 @@
-cwd=/private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z/work/pki
-PATH=/usr/bin:/bin; clean environment via env -i
-command=/usr/bin/openssl verify -purpose sslserver -attime 1796176676 -CAfile root-ca.pem -untrusted intermediate-ca.pem server.pem

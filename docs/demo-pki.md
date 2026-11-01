@@ -1,42 +1,53 @@
-# Une PKI locale pour les essais
+# A local certificate chain
 
-Créer une chaîne de test demande une seule commande depuis le dépôt :
+[English](demo-pki.md) · [Français](demo-pki.fr.md) · [Configuration](setup/README.md)
+
+Create a new local test root CA, intermediate CA and server certificate in one command:
 
 ```sh
 cargo run --locked --bin ai-guard-demo-pki -- --out .agentsandbox/demo-pki
 ```
 
-Prérequis : la toolchain Rust du dépôt et un exécutable OpenSSL/LibreSSL de confiance à `/usr/bin/openssl`. `--openssl /chemin/absolu/openssl` permet d'en sélectionner un autre explicitement. Aucun programme n'est recherché dans le `PATH`. La commande ne contacte aucun service de CA et n'installe rien dans les magasins de confiance.
+Use the repository Rust toolchain and a trusted OpenSSL/LibreSSL executable. The default is `/usr/bin/openssl`; select another absolute path with `--openssl /absolute/path/openssl`. The tool does not search the ambient PATH, contact an issuer or install system trust.
 
-Le dossier de sortie doit être **nouveau**, même si un ancien dossier est vide. Les parents sont contrôlés avec les règles du stockage privé ; les liens et traversées sont refusés. La sortie est privée (`0700`), ses fichiers sont `0600`. Une erreur conserve la sortie partielle : examiner le diagnostic puis choisir un autre dossier, sans effacer les clés existantes.
+## Configure names and validity
 
-La configuration par défaut couvre `keycloak.ai-guard.test`, `llm.ai-guard.test`, `localhost`, `127.0.0.1` et `::1`. Pour remplacer les noms DNS et choisir la durée du certificat serveur :
+The default SANs cover `keycloak.ai-guard.test`, `llm.ai-guard.test`, `localhost`, `127.0.0.1` and `::1`. Replace the DNS names and choose server validity explicitly:
 
 ```sh
 cargo run --locked --bin ai-guard-demo-pki -- \
-  --out .agentsandbox/demo-pki-autre \
+  --out .agentsandbox/demo-pki-other \
   --dns keycloak.ai-guard.test --dns llm.ai-guard.test --days 14
 ```
 
-Au maximum huit noms DNS ASCII, sans wildcard, et une durée serveur de 1 à 30 jours sont admis. Les IP loopback restent présentes. La racine dure 90 jours, l'intermédiaire 60 ; le certificat serveur dure 7 jours par défaut. Les clés RSA 2048 et les signatures SHA-256 servent exclusivement à cet environnement de test.
+At most eight ASCII DNS names are accepted, without wildcards; loopback IP SANs remain present. Server validity is 1–30 days, 7 by default. The root lasts 90 days and the intermediate 60. Keys use RSA 2048 and signatures SHA-256 for this local test environment.
 
-| Fichier | Destination |
+The output directory must be **new**, including when an existing directory is empty. Parent directories are checked under the private-storage rules. Links and path traversal are refused. The directory is 0700 and files 0600. A failure preserves partial output: inspect the closed diagnostic and choose a new destination; do not delete existing keys to retry.
+
+## Use the generated files
+
+| File | Use |
 |---|---|
-| `root-ca.pem` | AC publique à approuver explicitement dans le client de test |
-| `server-chain.pem` | Chaîne servie : certificat serveur puis intermédiaire |
-| `server.key` | Clé privée du serveur de test concerné uniquement |
-| `root-ca.key`, `intermediate-ca.key` | Clés privées des AC, à conserver dans ce dossier privé |
-| `intermediate-ca.pem`, CSR et `pki.cnf` | Éléments locaux de génération et de diagnostic |
-| `READY` | Marqueur final ; vérifier aussi que la commande s'est terminée avec succès |
+| `root-ca.pem` | Public trust anchor explicitly configured in test clients. |
+| `server-chain.pem` | Server certificate followed by its intermediate, served by the TLS endpoint. |
+| `server.key` | Private key of that test server only. |
+| `root-ca.key`, `intermediate-ca.key` | Private CA keys; retain in the trusted private directory. |
+| `intermediate-ca.pem`, CSR files, `pki.cnf` | Local generation/diagnostic material. |
+| `READY` | Final marker; also require a successful command exit. |
 
-Ne monter que la clé serveur et sa chaîne dans le service destinataire ; un conteneur d'un autre UID aura besoin d'une projection privée préparée avec les droits appropriés. Aucune clé d'AC ne va dans une image, un worker ou un rapport. Les clients ne reçoivent que la racine publique. Le dossier `.agentsandbox/` est exclu de Git et de la copie de travail des agents.
+Mount only the server key and chain into the intended trusted server. A different container UID requires a separate private projection with the appropriate ownership; do not make the CA directory generally readable. Clients receive the public root, never a CA private key. No CA key belongs in an image, worker, report or repository. `.agentsandbox/` is ignored and excluded from agent workspace copies.
 
-Cette commande ne change pas le DNS. Pour les noms locaux, une entrée loopback dans `/etc/hosts` doit correspondre au certificat et à l'issuer configuré, en préservant les entrées existantes. Le profil [Keycloak de découverte](sso.md#profil-keycloak-de-découverte) HTTP et les services existants ne passent pas automatiquement à HTTPS après génération : les points TLS et la confiance de chaque client se configurent et se vérifient séparément.
-
-Le test ciblé utilise les vrais OpenSSL/LibreSSL et TLS loopback avec un client Rust : chaîne acceptée avec sa racine, refus du mauvais nom, de l'AC inconnue et du certificat expiré. Il ne contacte ni moteur ni fournisseur IA.
+Inspect the public certificate and verify its chain:
 
 ```sh
-cargo test --locked --test demo_pki
+/usr/bin/openssl x509 -in .agentsandbox/demo-pki/server.pem -noout -subject -issuer -dates
+/usr/bin/openssl verify -CAfile .agentsandbox/demo-pki/root-ca.pem -untrusted .agentsandbox/demo-pki/intermediate-ca.pem .agentsandbox/demo-pki/server.pem
 ```
 
-Les résultats exécutés et versions testées sont consignés dans [VALIDATION.md](engineering/VALIDATION.md). Ce générateur ne fournit ni renouvellement, ni révocation, ni PKI de production ; le [contrat d'infrastructure](engineering/INFRASTRUCTURE_PKI.md) reste applicable.
+Then configure TLS at the actual Keycloak/inference endpoint and the public CA chain in each client. Keep certificate SAN, endpoint hostname and OIDC issuer consistent. DNS/hosts configuration and system trust installation are separate operator actions; preserve existing entries. Generating files does not automatically enable HTTPS on running services. Never disable TLS verification to compensate for a name or chain error.
+
+## Rotation and operations
+
+Generate replacement material in another new private directory, validate it, project only the required files to the server/client and follow the service's explicit reload procedure. Keep the previous material until the transition is verified. Protect and retain CA keys independently of application volumes.
+
+This helper does not operate a production CA or provide automated renewal/revocation. Enterprise PKI requirements are described in the [enterprise guide](setup/enterprise/README.md) and [infrastructure contract](engineering/INFRASTRUCTURE_PKI.md). Auxiliary verification instruments stay local and ignored; recorded engineering results are in [VALIDATION.md](engineering/VALIDATION.md).

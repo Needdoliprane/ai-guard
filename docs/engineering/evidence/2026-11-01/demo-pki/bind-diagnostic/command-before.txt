@@ -1,4 +1,0 @@
-cwd=/private/tmp/ai-guard-demo-pki-expiry-diag-20261101T015753Z/work/pki
-PATH=/usr/bin:/bin via env -i
-command=/usr/bin/openssl s_server -accept 127.0.0.1:39471 -cert server-chain.pem -CAfile intermediate-ca.pem -key server.key -www -quiet
-no client connection/TLS request is made; child stopped after startup observation if still running

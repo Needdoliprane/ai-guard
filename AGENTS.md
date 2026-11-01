@@ -167,6 +167,14 @@ Attribuer des propriétaires de fichiers clairs et des worktrees distincts lorsq
 
 Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance externe manque, marquer la qualification concernée `BLOCKED` ou `NOT_RUN`, continuer les travaux indépendants et indiquer précisément ce qui manque. Une fonctionnalité factice, un mock permanent ou une exception qui transforme le blocage en succès ne clôture pas le lot.
 
+## Documentation et exemples de configuration
+
+Le mainteneur demande un manuel utilisateur du produit complet, en **anglais et français**, organisé en guides par contexte : local, fournisseurs IA, Keycloak, inférence locale et entreprise. `README.md` est la version anglaise ; `README.fr.md` est sa version française. Les deux versions proposent les mêmes contrats, exemples et commandes. L'index du manuel explicite son périmètre de produit cible ; l'avancement réel, les preuves et les écarts d'implémentation restent dans `docs/engineering/`, sans être transformés en réussite.
+
+**Un changement de contrat met à jour dans le même lot les guides anglais/français, les fichiers de configuration et les commandes concernés.** Les exemples `.env.exemple.*` et leurs équivalents typés doivent désigner leur consommateur, leurs priorités et leurs valeurs publiques ; aucun secret réel, option silencieusement ignorée ou endpoint supposé livré. La documentation est un contrat à implémenter, pas une preuve de fonctionnement.
+
+Seuls les tests pertinents du produit sont distribués. Les essais auxiliaires Keycloak, Qwen et du générateur d'AC restent locaux, exclus du suivi par `.gitignore`, avec leurs preuves conservées hors de la distribution. Ne plus les ajouter ou les pousser. Les régressions de sécurité, API, broker, runtime et autres comportements du produit restent suivies. Une instruction d'exclusion Git n'autorise pas l'effacement des fichiers, preuves, volumes ou de l'historique existants.
+
 Le mainteneur demande des commits et push réguliers après les lots cohérents, validés et relus. Utiliser le dépôt distant configuré, préserver son historique et exclure secrets, configurations privées, bases, volumes et artefacts locaux sensibles. Un checkpoint de développement ne constitue pas une release qualifiée.
 
 ## Commandes existantes

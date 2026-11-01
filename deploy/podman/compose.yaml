@@ -1,7 +1,7 @@
 name: agentsandbox
 services:
   gateway:
-    image: agentsandbox-control:local
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
     command: ["gateway", "--listen", "0.0.0.0:8787", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json"]
     user: "1000:1000"
     read_only: true
@@ -22,7 +22,7 @@ services:
       retries: 3
       start_period: 10s
   dashboard:
-    image: agentsandbox-control:local
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
     command: ["dashboard", "--listen", "0.0.0.0:4000", "--container-listen", "--upstream", "http://gateway:8787", "--viewer-token-file", "/run/secrets/viewer", "--front-dir", "/app/front"]
     user: "1000:1000"
     read_only: true
@@ -45,7 +45,7 @@ services:
       retries: 3
       start_period: 10s
   ingress:
-    image: agentsandbox-control:local
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
     command: ["ingress", "--gateway-listen", "0.0.0.0:8787", "--dashboard-listen", "0.0.0.0:4000", "--container-listen", "--gateway-upstream", "http://gateway:8787", "--dashboard-upstream", "http://dashboard:4000"]
     user: "1000:1000"
     read_only: true
@@ -55,7 +55,7 @@ services:
     mem_limit: 192m
     cpus: "0.5"
     tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
-    ports: ["127.0.0.1:8787:8787", "127.0.0.1:4000:4000"]
+    ports: ["127.0.0.1:${AI_GUARD_GATEWAY_PORT:-8787}:8787", "127.0.0.1:${AI_GUARD_DASHBOARD_PORT:-4000}:4000"]
     networks: [control, publication]
     depends_on:
       gateway:

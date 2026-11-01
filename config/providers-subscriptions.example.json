@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "auto_priority": ["codex-subscription", "claude-subscription"],
+  "profiles": [
+    {
+      "id": "codex-subscription",
+      "revision": 1,
+      "client": "codex",
+      "auth_mode": "subscription",
+      "credential": {
+        "kind": "codex_auth_file",
+        "path": "secrets/codex-subscription/auth.json"
+      }
+    },
+    {
+      "id": "claude-subscription",
+      "revision": 1,
+      "client": "claude_code",
+      "auth_mode": "subscription",
+      "credential": {
+        "kind": "claude_oauth_env_file",
+        "path": "secrets/claude-subscription.env"
+      }
+    }
+  ]
+}

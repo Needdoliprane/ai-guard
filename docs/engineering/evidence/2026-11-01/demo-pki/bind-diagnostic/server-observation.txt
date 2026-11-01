@@ -1,2 +1,0 @@
-alive_at_1s=false
-exit_status=1

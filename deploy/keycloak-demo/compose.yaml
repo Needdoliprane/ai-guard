@@ -1,0 +1,76 @@
+# Explicit HTTP discovery only. This is a separate project, not an override of
+# deploy/{docker,podman}/compose.yaml. No existing ai-guard data or secrets enter.
+name: ai-guard-keycloak-demo
+services:
+  keycloak-demo:
+    profiles: [keycloak-demo-http]
+    image: ai-guard-keycloak-demo:26.8.1-3f3c5f8e
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["start", "--optimized", "--import-realm"]
+    environment:
+      KC_DB: dev-file
+      KC_CACHE: local
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: ${AI_GUARD_DEMO_IDP_PORT:-18080}
+      KC_HOSTNAME: http://${AI_GUARD_DEMO_IDP_HOST:-keycloak.ai-guard.test}:${AI_GUARD_DEMO_IDP_PORT:-18080}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "false"
+      KC_HOSTNAME_STRICT: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_ACCESS_LOG_ENABLED: "false"
+      KC_LOG_LEVEL: warn
+      JAVA_OPTS_KC_HEAP: "-XX:InitialRAMPercentage=25 -XX:MaxRAMPercentage=50"
+      AI_GUARD_DEMO_WEB_ORIGIN: ${AI_GUARD_DEMO_WEB_ORIGIN:-http://127.0.0.1:4000}
+    user: "1000:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: "2.0"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777"]
+    volumes: ["demo_identity_data:/opt/keycloak/data"]
+    networks:
+      identity_demo:
+        aliases: ["${AI_GUARD_DEMO_IDP_HOST:-keycloak.ai-guard.test}"]
+    restart: "no"
+    logging:
+      driver: local
+      options: {max-size: "5m", max-file: "2"}
+  keycloak-demo-ingress:
+    profiles: [keycloak-demo-http]
+    image: ${AI_GUARD_DEMO_CONTROL_IMAGE:-agentsandbox-control:local}
+    command:
+      - ingress
+      - --gateway-listen
+      - 0.0.0.0:${AI_GUARD_DEMO_IDP_PORT:-18080}
+      - --dashboard-listen
+      - 127.0.0.1:18081
+      - --container-listen
+      - --gateway-upstream
+      - http://keycloak-demo:${AI_GUARD_DEMO_IDP_PORT:-18080}
+      - --dashboard-upstream
+      - http://keycloak-demo:${AI_GUARD_DEMO_IDP_PORT:-18080}
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 192m
+    cpus: "0.5"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    ports: ["127.0.0.1:${AI_GUARD_DEMO_IDP_PORT:-18080}:${AI_GUARD_DEMO_IDP_PORT:-18080}"]
+    networks: [identity_demo, publication_demo]
+    depends_on: [keycloak-demo]
+    restart: "no"
+    logging:
+      driver: local
+      options: {max-size: "5m", max-file: "2"}
+networks:
+  identity_demo:
+    internal: true
+  publication_demo: {}
+volumes:
+  demo_identity_data:
