@@ -1,5 +1,34 @@
 # Validation courante
 
+## 1er novembre — configuration du raccord TLS du juge local
+
+Worktree isolé `local-judge-tls`, base58309ed. Code/tests TLS en préparation, **non compilés et NOT_RUN** ; Root possède les profils et guides EN/FR. Luna exécute seulement les rendus publics via Docker Compose5.6.1 : modèle TLS autonome, socle contrôle Docker+surcharge, socle contrôle Podman+surcharge. Trois RC0 et assertions JSON PASS ; les premières sorties résolvent `build.context` sous le scratch choisi pour isoler dotenv et ne qualifient pas son chemin réel. Un seul rendu correctif du modèle autonome, conservé séparément, utilise cwd scratch, project-directory réel, env-file public absolu et `COMPOSE_DISABLE_ENV_FILE=1` : RC0,0,06s, contexte `deploy/local-ai` et Dockerfile présent. Les deux contrôles ne sont pas répétés.
+
+Comparaison source exacte du bloc model HTTP/TLS : mêmes image/argv/alias/contexte/tokens/CPU/RAM/swap/PID et restrictions. Assertions : modèle seulement inference, aucun port/volume/secret ; relais inference+judge_link internes, alias llm.ai-guard.test, chaîne/clé leaf et CA du seul diagnostic, aucun port ; gateway seulement control+judge_link, CA publique ajoutée et runner/viewer habituels ; relais d'entrée contrôle sans montage/secret, ports loopback conservés. Docker/Podman diffèrent seulement sur journalisation du socle. Ce parse Podman par Docker Compose ne qualifie pas Podman.
+
+Capture privée `/private/tmp/ai-guard-local-judge-tls-compose-20261101`, fichiers config et sorties originaux inchangés. Env allowlist public, chemins placeholders, matériaux vides, endpoint moteur inexistant et config Docker privée vide. Aucun daemon/build/up/inspect/pull, certificat réel, modèle ou credential utilisateur ; aucun binaire TLS exécuté. Root lit résumé/assertions. Propriétés réseau réelles, permissions montées, CA/SAN/validité, handshake, shutdown, disponibilité image et jugement modèle restent à vérifier. Ces profils sont dans le donneur, pas encore intégrés/poussés ; G09/D5 et tous gates inchangés.
+
+## 1er novembre — STOP3 R4c, quatre régressions comportementales
+
+Base PRIMARY7390e0d, trois sources R4c importées après lecture du diff : seulement onze calculs de proof dans des locals, puis affectation après fin de l'emprunt ; domaines, tuples, validation et oracles inchangés. Les14 tests initiaux ont deux modifications de construction de preuve mécaniques, sans changement de leurs scénarios. Une compilation lib `--locked --offline --no-run` **PASS RC0,195,98s**, puis copie exacte du binaire SHA `31023c5b3d0a1ae94607852fd1f8c27a256910c170e473d274f1c3c046f6f431` avant exécution.
+
+Préfixe exact des quatre fonctions : `broker::enforcer::recovery::recovery_v3::tests::review_regressions::`. Chacune lancée une fois, un test réel, RC101/0PASS/1FAIL/213filtered :
+
+| Suffixe | Oracle atteint, résultat RED |
+|---|---|
+| `v3_revalidates_owned_endpoint_and_socket_at_each_connection_checkpoint` | Ancres substituées ne ferment pas toujours avant accord/dispatch/Watch ;2,66s |
+| `embedded_v1_canonical_shape_is_required_in_signed_restore_and_slot_replies` | Cinq nulls Request retirés, deux nulls Reply retirés et deux injections de champs omis encore acceptés sans nouvelle proof ;0,31s |
+| `client3_rejects_noncanonical_preface_uuids_before_any_authentication` | Epoch/nonce non canoniques ne ferment pas avant N3/Auth3 ;0,43s |
+| `watch3_rejects_signed_wrong_capacity_before_healthy_publication_and_keeps_stops` | Frame signée cap16/known9 publiée healthy par client cap8 ;0,18s |
+
+Root lit les quatre logs et confirme les assertions terminales prévues, pas un échec de compilation/setup. Pas de retry ni autre test ; quatorze tests initiaux et R9 non exécutés dans cette campagne. Capture privée `r4c-d5-v3-red-7390e0d` sous `/private/tmp/ai-guard-primary-provider-eof-20261101T041000Z`. Collecte corrigée255 inputs suivis/non suivis, dont les trois recovery_v3 et R9, Cargo/toolchain et fixtures ; sidecar ignoré demo_pki séparé. HEAD/lock/empreintes et archive avant/après identiques, SHA `b053cc982092d300984f9c08fa0ed5a0e1f15a910c701a7321c9244c7d4784d8`. Le sidecar ajouté après R4b conserve ses trois sources omises et leur gel, sans devenir une attestation avant sa compilation. Les correctifs comportementaux suivants restent à tester/revoir. Aucun effet moteur, ledger Complete, Full, Closing/join/retraite ou gate qualifié.
+
+## 1er novembre — fermeture du vieux worktree Keycloak
+
+Inventaire indépendant : quatre configurations publiques identiques aux blobs7390e0d ; cinq variantes Cargo/README/essais auxiliaires distinctes,168799 octets, copiées par allowlist sous parents0700/fichiers0600. Sources/copies SHA identiques, source et Git inchangés lors de cette sauvegarde. Dossier privé `/private/tmp/ai-guard-keycloak-sso-preserved-20261101.JoGlTG`, manifeste SHA `c5a5af122af29edf74c84a8d1902499e042cc96ecce62177319b3cef8d5df6bc` ; Root lit rapport/manifeste et confirme cinq comparaisons.
+
+Après contrôle externe sans consommateur visible, Root déplace les trois originaux non suivis README/tests dans ce dossier privé et le target entier dans `target-preserved` (3216724KiB conservés). Deux variantes Cargo restaurées depuis le HEAD du seul donneur après conservation vérifiée. Indexation des seules quatre configurations identiques puis fast-forward vers7390e0d RC0 ; aucun test auxiliaire ni dépendance de démo intégré/poussé. Status propre, zéro non-suivi/ignoré, nouvelle lecture lsof externe sans consommateur ; retrait Git normal RC0, checkout absent et branche conservée à7390e0d. Aucun force/reset/clean ni effacement de cache, volume, credential ou preuve. `CLOSURE.md` dans le dossier privé décrit ces opérations ; pas de nouvelle qualification SSO/Keycloak.
+
 ## 1er novembre — candidat STOP3 R4b, compilation avant reproduction
 
 Après le premier RED R9, le candidat complet3 est importé par cinq chemins explicites depuis le donneur ; les deux autres sources R9 sont identiques et préservées. Le contrat R4b arbitre avant exécution la forme canonique V1 embarquée. R4 reste archivé et non exécuté, son positif null contredisant les omissions historiques ; aucun résultat ne lui est attribué.
