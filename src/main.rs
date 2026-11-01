@@ -43,6 +43,8 @@ enum Command {
         root: PathBuf,
         #[arg(long)]
         max_slots: u32,
+        #[arg(long)]
+        recovery_only: bool,
     },
     /// Collecteur d'audit et moteur de décisions ; normalement lancé dans un conteneur.
     Gateway(GatewayArgs),
@@ -552,11 +554,20 @@ async fn main() -> Result<()> {
             }))
             .await?;
         }
-        Command::InternalBrokerEnforcer { root, max_slots } => {
+        Command::InternalBrokerEnforcer {
+            root,
+            max_slots,
+            recovery_only,
+        } => {
             let root = absolute_path(&root)
                 .and_then(|root| Directory::open_existing(&root))
                 .map_err(|_| anyhow::anyhow!("private enforcer root validation failed"))?;
-            agentsandbox::broker::enforcer::run_internal_enforcer(&root, max_slots).await?;
+            if recovery_only {
+                agentsandbox::broker::enforcer::run_internal_recovery_enforcer(&root, max_slots)
+                    .await?;
+            } else {
+                agentsandbox::broker::enforcer::run_internal_enforcer(&root, max_slots).await?;
+            }
         }
         Command::Operator(command) => operations::execute(command).await?,
     }
@@ -566,6 +577,43 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enforcer_recovery_requires_an_explicit_internal_mode() {
+        let recovery = Cli::try_parse_from([
+            "agentsandbox",
+            "__broker-enforcer",
+            "--root",
+            "/private/fixture",
+            "--max-slots",
+            "8",
+            "--recovery-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            recovery.command,
+            Command::InternalBrokerEnforcer {
+                recovery_only: true,
+                ..
+            }
+        ));
+        let legacy = Cli::try_parse_from([
+            "agentsandbox",
+            "__broker-enforcer",
+            "--root",
+            "/private/fixture",
+            "--max-slots",
+            "8",
+        ])
+        .unwrap();
+        assert!(matches!(
+            legacy.command,
+            Command::InternalBrokerEnforcer {
+                recovery_only: false,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn shared_dashboard_is_explicit_and_excludes_a_fixed_identity() {

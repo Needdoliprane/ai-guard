@@ -7,7 +7,7 @@ mod server;
 mod targets;
 pub use client::{encode_submit, request};
 pub use profile::{RequestedExecutionV1, SubmitV1};
-pub use server::serve;
+pub use server::{serve, serve_recovery};
 
 use super::{enforcer::CancelGeneration, journal::JournalScopeV1};
 use crate::{

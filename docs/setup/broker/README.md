@@ -137,6 +137,20 @@ This command installs no systemd unit or launchd job and makes no logout, reboot
 
 The enforcer's private IPC authentication belongs to the broker state and is separate from runner/viewer credentials. Existing authentication is read without rewriting it. If it is missing from a role that already has state, startup refuses to generate a replacement. Preserve the role root, its history and coherent private backups; recover the original authentication through controlled maintenance. Erasing history to obtain an apparently empty root is not a recovery procedure.
 
+### Recover authorised stops with admission closed
+
+For an existing installation that needs only to restore its proved stop targets, start the explicit restricted service:
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only
+```
+
+This mode requires the existing private roots, role locks, IPC authentication and discovery namespaces. It does not initialise a new installation or regenerate missing authentication. An occupied lease or an incompatible live enforcer remains a refusal; this command never takes over or stops an existing process. Keep its state and use the supported connection to that process where available.
+
+The service requests protocol 2's `StopsOnly` capability explicitly. It restores only targets proved by retained journal readers, keeps their original container identity and deadline, and retains durable cancellations for replay after reconnection. Start admission remains closed for the lifetime of this service: Submit, approve, resume and export cannot acquire a Full capability. Status, list, recovery-status and cancel retain their normal authentication and data dependencies; this mode does not reactivate an inactive gateway.
+
+An accepted stop reservation or cancellation confirms neither a runtime effect nor a terminal result. Partial journal coverage remains partial. The recovery transport does not prove that an older start is drained, finalise a retirement or permit a new worker to replace an ambiguous one. Missing or unsafe roots, authentication, locks or sockets require controlled recovery of those exact anchors; a new root or credential is not a substitute.
+
 ## Submit and inspect a job
 
 In the client terminal, set the same path variables. Choose a fresh non-nil operation UUID **once**, record it and keep the same inputs for a retry. The value below must be replaced before execution.

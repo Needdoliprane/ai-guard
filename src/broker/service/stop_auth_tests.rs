@@ -24,6 +24,68 @@ impl Drop for Gateway {
     }
 }
 impl Gateway {
+    async fn active() -> Self {
+        let root = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let store = Arc::new(
+            Store::create_supervised_for_tenant(
+                &root.path().join("a.sqlite"),
+                TENANT,
+                Redactor::new(vec![]),
+                1000,
+                &root.path().join("a-before-v3.sqlite"),
+            )
+            .unwrap(),
+        );
+        let state = store.supervision_state().unwrap();
+        assert!(state.active);
+        let namespace = Uuid::parse_str(state.control_namespace_uuid.as_deref().unwrap()).unwrap();
+        let state = GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: TENANT.into(),
+                store,
+                runner_token: A_RUNNER.into(),
+                viewer_token: A_VIEWER.into(),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let identities = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&requests);
+        let observed_identity = Arc::clone(&identities);
+        let app = gateway_router(state).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let observed = Arc::clone(&observed);
+                let observed_identity = Arc::clone(&observed_identity);
+                async move {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    if request.uri().path() == "/api/v1/control/protocol" {
+                        observed_identity.fetch_add(1, Ordering::SeqCst);
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            _root: root,
+            url,
+            namespace,
+            requests,
+            identities,
+            task,
+        }
+    }
+
     async fn inactive(schema3: bool) -> Self {
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
@@ -153,6 +215,173 @@ fn fresh_namespace_fixture(gateway: &Gateway, namespace: Uuid) -> Fixture {
     fixture.service.profiles =
         BTreeMap::from([("cancel_retry_test".into(), Arc::new(ProfileJobs::new()))]);
     fixture
+}
+
+fn namespace_inventory(root: &Path) -> Vec<PathBuf> {
+    fn visit(root: &Path, current: &Path, entries: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(current).unwrap() {
+            let entry = entry.unwrap();
+            entries.push(entry.path().strip_prefix(root).unwrap().to_owned());
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &entry.path(), entries);
+            }
+        }
+    }
+    let mut entries = Vec::new();
+    visit(root, root, &mut entries);
+    entries.sort();
+    entries
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_fresh_profile_reads_and_submit_do_not_initialize_a_journal_or_full_writer() {
+    use crate::broker::service::{RequestedExecutionV1, encode_submit};
+    let gateway = Gateway::active().await;
+    let mut fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+    let project = fixture._temp.path().canonicalize().unwrap().join("sources");
+    let root = fixture.service.root.path().to_owned();
+    assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+    let (_role_temp, role) = recovery_role_fixture();
+    let child = recovery_child(&role, None);
+    let client = warmed_recovery_client(&role).await;
+    fixture.service.enforcer = None;
+    fixture.service.stop_enforcer = Some(client.clone());
+    fixture.service.fenced.store(true, Ordering::SeqCst);
+    let service = Arc::new(fixture.service);
+    let jobs = service.profile_jobs("cancel_retry_test").unwrap();
+    assert!(jobs.writer.get().is_none());
+    let payload = encode_submit(&SubmitV1 {
+        version: 1,
+        operation_id: Uuid::new_v4(),
+        project,
+        execution: RequestedExecutionV1::Command {
+            argv: vec!["/usr/bin/id".into()],
+        },
+        timeout_seconds: None,
+        capture_output: false,
+    })
+    .unwrap();
+    let mut refused_requests = Vec::new();
+    for (name, request) in [
+        (
+            "Status",
+            BrokerCommandV1::Status {
+                operation_id: Uuid::new_v4(),
+            },
+        ),
+        (
+            "List",
+            BrokerCommandV1::List {
+                after: None,
+                limit: 20,
+            },
+        ),
+        ("Submit", BrokerCommandV1::Submit { payload }),
+    ] {
+        let result = dispatch(&service, &gateway, A_RUNNER, request).await;
+        refused_requests.push((name, result));
+    }
+    let entries = fs::read_dir(&root).unwrap().count();
+    let full = jobs
+        .writer
+        .get()
+        .is_some_and(|capabilities| capabilities.full().is_some());
+    let still_fenced = service.fenced.load(Ordering::SeqCst);
+
+    // The original fixture also owns an existing, valid journal outside the
+    // fresh namespace. First keep its old owners/lease alive while the new
+    // empty profile cell tries to open it, then close those old owners and
+    // require a successful lazy retry through the same STOP-only service.
+    let base = fixture._temp.path().canonicalize().unwrap();
+    let existing_root = base.join("root");
+    let existing_inventory = namespace_inventory(&existing_root);
+    let scope = fixture.writer.scope().clone();
+    let operation = fixture.operation;
+    drop(jobs);
+    let mut service = Arc::try_unwrap(service)
+        .unwrap_or_else(|_| panic!("completed fixture dispatch must release its service Arc"));
+    service.registry = Arc::new(Registry::load(&base.join("registry.json")).unwrap());
+    service.root = Directory::open_existing(&existing_root).unwrap();
+    service.profiles = BTreeMap::from([("cancel_retry_test".into(), Arc::new(ProfileJobs::new()))]);
+    let service = Arc::new(service);
+    let first_open = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryStatus {
+            operation_id: operation,
+        },
+    )
+    .await;
+    let first_cell_empty = service
+        .profile_jobs(scope.profile_id())
+        .unwrap()
+        .writer
+        .get()
+        .is_none();
+    // Independent persistent_read opens get separate file descriptions. The
+    // original Journal/Writer above still hold LOCK_EX, so the first open's
+    // Busy maps through filesystem() to NeedsReconciliation. Only now close
+    // those exact fixture owners; never unlock or replace their lock inode.
+    drop((fixture.jobs, fixture.writer, fixture.journal));
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    let existing_status = loop {
+        let result = dispatch(
+            &service,
+            &gateway,
+            A_RUNNER,
+            BrokerCommandV1::RecoveryStatus {
+                operation_id: operation,
+            },
+        )
+        .await;
+        if result.is_ok() || std::time::Instant::now() >= expires {
+            break result;
+        }
+        // The old writer closes its queue gracefully and retains its lease
+        // until it drains. Do not force-release or replace its retained lock.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let existing_jobs = service.profile_jobs(scope.profile_id()).unwrap();
+    let existing_stops_only = existing_jobs
+        .writer
+        .get()
+        .is_some_and(|capabilities| capabilities.is_stop_only());
+    let existing_inventory_after = namespace_inventory(&existing_root);
+    drop((existing_jobs, service, client));
+    drop(child);
+    assert!(still_fenced);
+    for (name, result) in refused_requests {
+        assert!(
+            matches!(result, Err(BrokerErrorCodeV1::NeedsReconciliation)),
+            "authenticated {name} must refuse explicitly before a Full factory"
+        );
+    }
+    assert_eq!(
+        entries, 0,
+        "read/Submit in existing-only recovery must preserve the fresh profile inventory"
+    );
+    assert!(
+        !full,
+        "no lazy path may promote recovery into a Full writer"
+    );
+    assert!(
+        matches!(first_open, Err(BrokerErrorCodeV1::NeedsReconciliation)),
+        "the first reopen must refuse while the original fixture owners hold the lease"
+    );
+    assert!(
+        first_cell_empty,
+        "a refused open must leave the writer cell empty"
+    );
+    assert!(
+        matches!(existing_status, Ok(Response { reply: BrokerReplyV1::RecoveryStatus { status }, .. }) if status.operation_id == operation),
+        "lazy reopen must keep the existing job's recovery metadata usable"
+    );
+    assert!(
+        existing_stops_only,
+        "lazy reopen must retain only the STOP facade"
+    );
+    assert_eq!(existing_inventory_after, existing_inventory);
 }
 
 #[tokio::test(flavor = "current_thread")]

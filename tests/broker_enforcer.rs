@@ -2,7 +2,7 @@
 
 use agentsandbox::{
     broker::{
-        enforcer::EnforcerClient,
+        enforcer::{EnforcerClient, EnforcerStopClient},
         local_ipc::{EndpointRecordV1, IpcError},
     },
     control_fs::Directory,
@@ -24,6 +24,148 @@ const PRIVATE_TMP: &str = "/private/tmp";
 const PRIVATE_TMP: &str = "/tmp";
 
 const POLL: Duration = Duration::from_millis(20);
+
+#[tokio::test]
+async fn explicit_recovery_cli_uses_existing_auth_and_keeps_full_closed() {
+    let fixture = tempfile::Builder::new()
+        .prefix("erv-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(PRIVATE_TMP)
+        .unwrap();
+    let base = fixture.path().canonicalize().unwrap();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_agentsandbox"))
+        .canonicalize()
+        .unwrap();
+    let missing = base.join("missing-role");
+    let mut refused = Command::new(&executable)
+        .args([
+            "__broker-enforcer",
+            "--recovery-only",
+            "--max-slots",
+            "8",
+            "--root",
+        ])
+        .arg(&missing)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        !wait_for_exit(&mut refused, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !missing.exists(),
+        "recovery CLI must not create a role root"
+    );
+
+    let role = base.join("enforcer");
+    fs::create_dir(&role).unwrap();
+    fs::set_permissions(&role, fs::Permissions::from_mode(0o700)).unwrap();
+    for directory in ["endpoints", "announcements"] {
+        fs::create_dir(role.join(directory)).unwrap();
+        fs::set_permissions(role.join(directory), fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(role.join(".owner.lock"))
+        .unwrap();
+    let mut no_auth = Command::new(&executable)
+        .args([
+            "__broker-enforcer",
+            "--recovery-only",
+            "--max-slots",
+            "8",
+            "--root",
+        ])
+        .arg(&role)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        !wait_for_exit(&mut no_auth, Duration::from_secs(5))
+            .await
+            .unwrap()
+            .success()
+    );
+    assert!(
+        !role.join("auth").exists(),
+        "recovery CLI must never initialize auth"
+    );
+    assert!(announcement_names(&role).unwrap().is_empty());
+    let mut auth = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(role.join("auth"))
+        .unwrap();
+    auth.write_all(&[0x5a; 32]).unwrap();
+    auth.sync_all().unwrap();
+    drop(auth);
+    let auth_before = fs::read(role.join("auth")).unwrap();
+    let lock_before = fs::metadata(role.join(".owner.lock")).unwrap();
+    let mut child = Command::new(&executable)
+        .args([
+            "__broker-enforcer",
+            "--recovery-only",
+            "--max-slots",
+            "8",
+            "--root",
+        ])
+        .arg(&role)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    wait_for_announcement(&role, Duration::from_secs(5))
+        .await
+        .unwrap();
+    let root = Directory::open_existing(&role).unwrap();
+    let client = EnforcerStopClient::connect_or_spawn_for_recovery(&root, &executable, 8)
+        .await
+        .unwrap();
+    let first = client.status().await.unwrap();
+    assert!(first.transport_healthy());
+    assert!(!first.admission_available());
+    assert_eq!(first.slot_count(), 0);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(client.status().await.unwrap().progress() > first.progress());
+    assert!(
+        EnforcerClient::connect_or_spawn(&root, &executable, 8)
+            .await
+            .is_err(),
+        "V1 must not reinterpret the V2 challenge"
+    );
+    assert!(child.try_wait().unwrap().is_none());
+    assert_eq!(
+        announcement_names(&role).unwrap().len(),
+        1,
+        "Full refusal must not spawn a replacement"
+    );
+    assert_eq!(fs::read(role.join("auth")).unwrap(), auth_before);
+    let lock_after = fs::metadata(role.join(".owner.lock")).unwrap();
+    assert_eq!(
+        (lock_after.dev(), lock_after.ino()),
+        (lock_before.dev(), lock_before.ino())
+    );
+    drop(client);
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
 
 async fn wait_for_announcement(root: &Path, timeout: Duration) -> io::Result<PathBuf> {
     let deadline = Instant::now() + timeout;

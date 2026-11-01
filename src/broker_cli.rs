@@ -32,6 +32,9 @@ enum BrokerCommand {
     Serve {
         #[arg(long)]
         config: PathBuf,
+        /// Restore only proven STOP targets; never open admission or initialize auth.
+        #[arg(long)]
+        recovery_only: bool,
     },
     /// Persist a new batch job. The broker continues after this client exits.
     Submit(SubmitArgs),
@@ -199,7 +202,16 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             gateway,
             token_file,
         } => control_info(gateway, token_file).await,
-        BrokerCommand::Serve { config } => service::serve(&config).await,
+        BrokerCommand::Serve {
+            config,
+            recovery_only,
+        } => {
+            if recovery_only {
+                service::serve_recovery(&config).await
+            } else {
+                service::serve(&config).await
+            }
+        }
         BrokerCommand::Submit(args) => {
             let operation_id = args.operation_id.unwrap_or_else(Uuid::new_v4);
             ensure!(!operation_id.is_nil(), "operation identity must not be nil");
@@ -323,5 +335,46 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: BrokerArgs,
+    }
+
+    #[test]
+    fn broker_recovery_mode_is_selected_explicitly() {
+        let recovery = TestCli::try_parse_from([
+            "broker",
+            "serve",
+            "--config",
+            "/private/fixture.json",
+            "--recovery-only",
+        ])
+        .unwrap();
+        assert!(matches!(
+            recovery.args.command,
+            BrokerCommand::Serve {
+                recovery_only: true,
+                ..
+            }
+        ));
+        let legacy =
+            TestCli::try_parse_from(["broker", "serve", "--config", "/private/fixture.json"])
+                .unwrap();
+        assert!(matches!(
+            legacy.args.command,
+            BrokerCommand::Serve {
+                recovery_only: false,
+                ..
+            }
+        ));
     }
 }

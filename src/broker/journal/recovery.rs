@@ -72,7 +72,24 @@ pub struct CancelStopProjectionV1 {
     command_id: Uuid,
     receipt: LocalCommandReceiptV1,
     stops: Vec<RecoveredStopV1>,
+    cancel_prefixes: Vec<ConfirmedCancelPrefixV1>,
     incomplete: bool,
+}
+
+/// Metadata attested by the existing reader's verified revision chain. This
+/// type has no deserializer or caller constructor and grants no new mutation.
+#[derive(Clone)]
+pub(crate) struct ConfirmedCancelPrefixV1 {
+    head: RevisionRefV1,
+    receipts: Vec<LocalCommandReceiptV1>,
+}
+impl ConfirmedCancelPrefixV1 {
+    pub(crate) fn head(&self) -> &RevisionRefV1 {
+        &self.head
+    }
+    pub(crate) fn receipts(&self) -> &[LocalCommandReceiptV1] {
+        &self.receipts
+    }
 }
 
 /// An existing profile's metadata-only cancellation capability. No API can
@@ -145,6 +162,12 @@ impl StopJobSnapshotV1 {
 }
 
 impl CancelStopProjectionV1 {
+    pub(crate) fn cancel_prefix_for_stop(&self, index: usize) -> Option<&ConfirmedCancelPrefixV1> {
+        self.cancel_prefixes.get(index)
+    }
+    pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        self.reader.check_shared()
+    }
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.reader.scope
     }
@@ -506,6 +529,12 @@ fn project_cancel(
         .get(&command_id)
         .cloned()
         .ok_or(JournalError::Corrupt)?;
+    let cancel_prefixes = recovered
+        .stops
+        .iter()
+        .filter(|stop| stop.birth_index < boundary)
+        .map(|stop| recovered.cancel_prefix(stop))
+        .collect::<JournalResult<Vec<_>>>()?;
     let stops = recovered
         .stops
         .into_iter()
@@ -521,6 +550,7 @@ fn project_cancel(
         command_id,
         receipt,
         stops,
+        cancel_prefixes,
         incomplete,
     }))
 }
@@ -705,6 +735,57 @@ impl StopRecoveryReportV1 {
     }
 }
 impl RecoveredJobV1 {
+    pub(crate) fn cancel_prefix_for_stop(
+        &self,
+        index: usize,
+    ) -> JournalResult<ConfirmedCancelPrefixV1> {
+        self.cancel_prefix(self.stops.get(index).ok_or(JournalError::InvalidInput)?)
+    }
+    fn cancel_prefix(&self, stop: &RecoveredStopV1) -> JournalResult<ConfirmedCancelPrefixV1> {
+        let mut receipts = Vec::new();
+        // Order comes from exact references in the verified chain, never from
+        // comparing revision numbers supplied by a peer or caller.
+        let confirmed = self
+            .chain
+            .iter()
+            .map(|head| (head.revision(), head.hash()))
+            .collect::<HashSet<_>>();
+        // The lifecycle command order is itself preserved by verified replay,
+        // including two commands first confirmed in the same revision.
+        for command in &self.cancel_command_ids {
+            if self
+                .cancel_boundaries
+                .get(command)
+                .is_some_and(|boundary| stop.birth_index < *boundary)
+            {
+                let receipt = self
+                    .command_receipts
+                    .get(command)
+                    .ok_or(JournalError::Corrupt)?;
+                if !confirmed.contains(&(receipt.head().revision(), receipt.head().hash())) {
+                    return Err(JournalError::Corrupt);
+                }
+                receipts.push(receipt.clone());
+            }
+        }
+        if receipts.len() > 64
+            || receipts.len()
+                != self
+                    .cancel_boundaries
+                    .iter()
+                    .filter(|(_, boundary)| stop.birth_index < **boundary)
+                    .count()
+        {
+            return Err(JournalError::Corrupt);
+        }
+        Ok(ConfirmedCancelPrefixV1 {
+            head: self.head.clone(),
+            receipts,
+        })
+    }
+    pub(crate) fn cancel_receipt(&self, command: Uuid) -> Option<&LocalCommandReceiptV1> {
+        self.command_receipts.get(&command)
+    }
     pub fn operation_id(&self) -> Uuid {
         self.operation_id
     }
@@ -722,6 +803,9 @@ impl RecoveredJobV1 {
     }
 }
 impl RecoveredStopV1 {
+    pub(crate) fn birth_index(&self) -> usize {
+        self.birth_index
+    }
     pub fn arm(&self) -> &ArmV1 {
         &self.arm
     }

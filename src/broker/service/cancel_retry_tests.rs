@@ -12,11 +12,12 @@ use crate::{
         journal::{BindingInputs, RevisionRefV1},
     },
     control::{
-        AdmissionV1, ArmSubjectV1, ArmV1, DecisionPhaseV1, DecisionReceiptV1, HelperPermissionV1,
-        HelperPurposeV1, HostClockMethodV1, HostClockSampleV1, LaunchSpecV1, NetworkV1,
-        QuotaPolicyV1, RestartPolicyV1, RuntimeInspectionV1, RuntimeKindV1, SecurityPresetV1,
-        SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1, WorkerTransitionV1,
-        helper_execution_policy_v1,
+        AdmissionV1, ArmSubjectV1, ArmV1, DecisionPhaseV1, DecisionReceiptV1, HelperObservationV1,
+        HelperPermissionV1, HelperPurposeV1, HelperStartClaimV1, HostClockMethodV1,
+        HostClockSampleV1, LaunchSpecV1, NetworkV1, QuotaPolicyV1, RestartPolicyV1,
+        RuntimeInspectionV1, RuntimeKindV1, RuntimeObservationV1, RuntimeStatusV1,
+        SecurityPresetV1, SupervisedAdmissionV1, SupervisionProtocolV1, WorkerMutationV1,
+        WorkerTransitionV1, helper_execution_policy_v1,
     },
     model::{DecisionRequest, Outcome},
     policy::{self, Policy},
@@ -24,7 +25,13 @@ use crate::{
     runner::CheckpointPayloadV1,
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
-use std::{cell::RefCell, fs, ops::Deref, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{
+    cell::RefCell,
+    fs,
+    ops::Deref,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::PathBuf,
+};
 
 #[path = "stop_auth_tests.rs"]
 mod stop_auth_tests;
@@ -123,6 +130,20 @@ impl Fixture {
         Self::with_manual_arm_and_identity(manual, None)
     }
     fn with_manual_arm_and_identity(manual: bool, identity: Option<(&str, Uuid)>) -> Self {
+        Self::with_manual_arm_count_and_identity(usize::from(manual), identity)
+    }
+    fn with_manual_arm_count(arm_count: usize) -> Self {
+        Self::with_manual_arm_count_and_identity(arm_count, None)
+    }
+    fn with_manual_arm_count_and_identity(
+        arm_count: usize,
+        identity: Option<(&str, Uuid)>,
+    ) -> Self {
+        assert!(
+            arm_count <= 2,
+            "this fixture qualifies only zero, one or two Arms"
+        );
+        let manual = arm_count > 0;
         let temp = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -266,6 +287,7 @@ impl Fixture {
                 plan,
                 accepted.head(),
                 accepted.binding_manifest(),
+                arm_count,
             );
             let scope_root = fs::read_dir(journal_root.join("broker-journal-v1"))
                 .unwrap()
@@ -295,7 +317,8 @@ impl Fixture {
                 complete: true,
             }),
             profiles: BTreeMap::from([(scope.profile_id().into(), Arc::clone(&jobs))]),
-            enforcer: TestEnforcer::CancelDeliveryProbe,
+            enforcer: Some(TestEnforcer::CancelDeliveryProbe),
+            stop_enforcer: None,
             blocking: Arc::new(Semaphore::new(1)),
             preparation: Arc::new(Semaphore::new(1)),
             execution: Arc::new(Semaphore::new(1)),
@@ -356,6 +379,7 @@ fn prepare_manual_arm(
     mut plan: Value,
     initial_head: &RevisionRefV1,
     binding: &crate::broker::journal::BindingManifestV1,
+    arm_count: usize,
 ) {
     let request: DecisionRequest = serde_json::from_value(plan["request"].clone()).unwrap();
     let namespace = journal.scope().control_namespace_uuid();
@@ -569,16 +593,918 @@ fn prepare_manual_arm(
     append(&mut head, &runner, &helpers, &operations);
     let armed = store.arm_execution(&arm).unwrap();
     operations[index] = SupervisionOperationV1::Arm {
-        parent: worker,
+        parent: worker.clone(),
         owned,
-        request: arm,
-        response: Some(armed),
+        request: arm.clone(),
+        response: Some(armed.clone()),
     };
     append(&mut head, &runner, &helpers, &operations);
+    if arm_count == 2 {
+        // Import is unique per parent attempt. The second proven target is an
+        // ImportVerification helper, authorized by the first helper's actual
+        // Store claim/terminal receipts. Runtime observations remain explicit
+        // fixture data; no executable runtime or engine is made available.
+        let claim = HelperStartClaimV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            helper_id: helper_id.to_string(),
+            emitter_id: Uuid::new_v4().to_string(),
+            arm_receipt: armed.receipt.clone(),
+            clock_check: HostClockSampleV1 {
+                continuous_ns_decimal: "100000000001".into(),
+                ..arm.clock.clone()
+            },
+        };
+        let claim_index = operations.len();
+        operations.push(SupervisionOperationV1::HelperClaim {
+            request: claim.clone(),
+            response: None,
+        });
+        append(&mut head, &runner, &helpers, &operations);
+        let claimed = store.claim_helper_start(&claim).unwrap();
+        operations[claim_index] = SupervisionOperationV1::HelperClaim {
+            request: claim,
+            response: Some(claimed),
+        };
+        append(&mut head, &runner, &helpers, &operations);
+
+        let observation = HelperObservationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            helper_id: helper_id.to_string(),
+            arm_receipt: armed.receipt.clone(),
+            observation: RuntimeObservationV1 {
+                inspection: arm.inspection.clone(),
+                observed_at: "2026-10-30T12:00:02Z".into(),
+                status: RuntimeStatusV1::Exited,
+                running: Some(false),
+                started_at: Some("2026-10-30T12:00:00Z".into()),
+                finished_at: Some("2026-10-30T12:00:01Z".into()),
+                exit_code: Some(0),
+                oom_killed: Some(false),
+                restart_count: Some(0),
+            },
+            verification: None,
+        };
+        let observation_index = operations.len();
+        operations.push(SupervisionOperationV1::HelperObservation {
+            request: observation.clone(),
+            response: None,
+        });
+        append(&mut head, &runner, &helpers, &operations);
+        let terminal = store.observe_helper(&observation).unwrap();
+        operations[observation_index] = SupervisionOperationV1::HelperObservation {
+            request: observation,
+            response: Some(terminal.clone()),
+        };
+        append(&mut head, &runner, &helpers, &operations);
+
+        let verify_id = Uuid::new_v4();
+        let verify =
+            helper_execution_policy_v1(&worker, HelperPurposeV1::ImportVerification, verify_id)
+                .unwrap();
+        let verify_permission = HelperPermissionV1::ImportVerification {
+            import_helper_id: helper_id.to_string(),
+            import_arm: armed.receipt.clone(),
+            import_terminal: terminal,
+            manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+        };
+        let helper_index = helpers.len();
+        helpers.push(
+            HelperPreparationV1::new(verify.clone(), verify_permission.clone(), None).unwrap(),
+        );
+        append(&mut head, &runner, &helpers, &operations);
+        let inspection = RuntimeInspectionV1 {
+            authority_id: verify.authority_id.clone(),
+            runtime_kind: verify.runtime_kind,
+            container_id: format!("{:064x}", verify_id.as_u128()),
+            stable_name: verify.stable_name.clone(),
+            volume_name: verify.volume_name.clone(),
+            image_id: verify.image_id.clone(),
+            spec_hash: verify.spec_hash().unwrap(),
+            cpu_millis: verify.cpu_millis,
+            memory_bytes: verify.memory_bytes,
+            pids_limit: verify.pids_limit,
+            network: verify.network,
+            security_preset: verify.security_preset,
+            restart_policy: verify.restart_policy,
+        };
+        let verify_arm = ArmV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            subject: ArmSubjectV1::Helper {
+                helper_id: verify_id.to_string(),
+                purpose: HelperPurposeV1::ImportVerification,
+                policy_version: 1,
+                permission: Box::new(verify_permission.clone()),
+            },
+            inspection: inspection.clone(),
+            ..arm
+        };
+        let owned: OwnedContainerSnapshot = serde_json::from_value(json!({
+            "handle":{"authority_fingerprint":authority.fingerprint(),"session":intent.session(),"operation":verify_id,"id":inspection.container_id,"name":inspection.stable_name,"configuration_fingerprint_version":verify_arm.configuration_fingerprint_version},
+            "observation":{"id":inspection.container_id,"name":inspection.stable_name,"image_id":inspection.image_id,"restart_count":0,
+            "process":{"status":"running","running":true,"started_at":"2026-10-30T12:00:00Z","finished_at":null,"exit_code":null,"oom_killed":false},
+            "allocation":{"cpu":{"quota":u64::from(inspection.cpu_millis)*100,"period":100000},"memory_bytes":inspection.memory_bytes,"pids_limit":inspection.pids_limit},
+            "configuration_fingerprint":fingerprint,"configuration_fingerprint_version":verify_arm.configuration_fingerprint_version,"observed_at":"2026-10-30T12:00:00Z","diagnostics":[]}
+        })).unwrap();
+        helpers[helper_index] =
+            HelperPreparationV1::new(verify, verify_permission, Some(owned.clone())).unwrap();
+        let index = operations.len();
+        operations.push(SupervisionOperationV1::Arm {
+            parent: worker.clone(),
+            owned: owned.clone(),
+            request: verify_arm.clone(),
+            response: None,
+        });
+        append(&mut head, &runner, &helpers, &operations);
+        let armed = store.arm_execution(&verify_arm).unwrap();
+        operations[index] = SupervisionOperationV1::Arm {
+            parent: worker,
+            owned,
+            request: verify_arm,
+            response: Some(armed),
+        };
+        append(&mut head, &runner, &helpers, &operations);
+    }
     assert_eq!(
         journal.load(intent.operation_id()).unwrap().unwrap().head(),
         &head
     );
+}
+
+// This child owns only the explicitly named native recovery fixture. Its
+// unavailable invocation data cannot execute a host engine or qualify Docker.
+const RECOVERY_CHILD_ROOT: &str = "AI_GUARD_TEST_RECOVERY_ROOT";
+#[test]
+#[ignore = "internal native child, invoked only by the recovery transport parent"]
+fn native_recovery_server_child() {
+    let path = std::env::var_os(RECOVERY_CHILD_ROOT).expect("private recovery fixture root");
+    let root = Directory::open_existing(Path::new(&path)).unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(crate::broker::enforcer::run_internal_recovery_enforcer(
+            &root, 8,
+        ))
+        .unwrap();
+}
+
+struct RecoveryChild(std::process::Child);
+impl Drop for RecoveryChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+fn recovery_child(root: &Directory, previous: Option<Uuid>) -> RecoveryChild {
+    recovery_child_with_faults(root, previous, &RecoveryFaults::default())
+}
+#[derive(Default)]
+struct RecoveryFaults<'a> {
+    stage: Option<&'a str>,
+    arm_id: Option<&'a str>,
+    barrier: Option<(&'a str, &'a Path)>,
+    started_marker: Option<&'a Path>,
+    fault_marker: Option<&'a Path>,
+    repeat_barrier: bool,
+}
+fn recovery_child_with_faults(
+    root: &Directory,
+    previous: Option<Uuid>,
+    faults: &RecoveryFaults<'_>,
+) -> RecoveryChild {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "broker::service::server::cancel_retry_tests::native_recovery_server_child",
+            "--ignored",
+        ])
+        .env_clear()
+        .env(RECOVERY_CHILD_ROOT, root.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(stage) = faults.stage {
+        command.env("AI_GUARD_TEST_RECOVERY_FAULT", stage);
+    }
+    if let Some(arm) = faults.arm_id {
+        command.env("AI_GUARD_TEST_RECOVERY_FAULT_ARM", arm);
+    }
+    if let Some((arm, root)) = faults.barrier {
+        command
+            .env("AI_GUARD_TEST_RECOVERY_BARRIER_ARM", arm)
+            .env("AI_GUARD_TEST_RECOVERY_BARRIER_ROOT", root);
+    }
+    if let Some(marker) = faults.started_marker {
+        command.env("AI_GUARD_TEST_RECOVERY_STARTED_MARKER", marker);
+    }
+    if let Some(marker) = faults.fault_marker {
+        command.env("AI_GUARD_TEST_RECOVERY_FAULT_MARKER", marker);
+    }
+    if faults.repeat_barrier {
+        command.env("AI_GUARD_TEST_RECOVERY_REPEAT_BARRIER", "1");
+    }
+    let child = command.spawn().unwrap();
+    let mut child = RecoveryChild(child);
+    let expires = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            child.0.try_wait().unwrap().is_none(),
+            "owned recovery child exited"
+        );
+        let endpoint = crate::broker::discovery::load_endpoint(root).unwrap();
+        if endpoint
+            .as_ref()
+            .is_some_and(|endpoint| previous != Some(endpoint.epoch()))
+        {
+            return child;
+        }
+        assert!(
+            std::time::Instant::now() < expires,
+            "owned recovery child did not publish its endpoint"
+        );
+        // Deliberately wait synchronously before yielding the current-thread
+        // parent: only our replacement child can publish the next epoch.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+fn recovery_role_fixture() -> (tempfile::TempDir, Directory) {
+    #[cfg(target_os = "macos")]
+    let temporary_root = "/private/tmp";
+    #[cfg(not(target_os = "macos"))]
+    let temporary_root = "/tmp";
+    let temp = tempfile::Builder::new()
+        .prefix("srf-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(temporary_root)
+        .unwrap();
+    let root = Directory::open_existing(&temp.path().canonicalize().unwrap()).unwrap();
+    root.persistent_create("auth", &[0x5a; 32]).unwrap();
+    root.persistent_create(".owner.lock", &[]).unwrap();
+    root.persistent_child("endpoints", true).unwrap().unwrap();
+    root.persistent_child("announcements", true)
+        .unwrap()
+        .unwrap();
+    (temp, root)
+}
+async fn warmed_recovery_client(root: &Directory) -> EnforcerStopClient {
+    let client = EnforcerStopClient::connect_or_spawn_for_recovery(
+        root,
+        &std::env::current_exe().unwrap(),
+        8,
+    )
+    .await
+    .unwrap();
+    let epoch = crate::broker::discovery::load_endpoint(root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    while client.observed_watch_epoch() != Some(epoch) {
+        assert!(
+            std::time::Instant::now() < expires,
+            "real Watch did not acknowledge the initial epoch"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    client
+}
+async fn wait_for_cancel_without_business_retry(
+    client: &EnforcerStopClient,
+    arm: &str,
+    hash: &str,
+    command: Uuid,
+) -> bool {
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < expires {
+        if client
+            .query_stop(arm, hash)
+            .await
+            .is_ok_and(|slot| slot.cancel_command_id() == Some(command))
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+fn recovery_registration(
+    scope: &JournalScopeV1,
+    target: &crate::broker::journal::recovery::RecoveredStopV1,
+) -> (RegistrationV1, String) {
+    let registration = RegistrationV1::new(
+        hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
+        scope.tenant_id().into(),
+        target.arm().clone(),
+        target.receipt().clone(),
+        target.authority().clone(),
+        target.owned().clone(),
+    )
+    .unwrap();
+    let mut hash = Sha256::new();
+    hash.update(b"ai-guard:enforcer-registration:v1\0");
+    hash.update(serde_json::to_vec(&registration).unwrap());
+    (registration, hex::encode(hash.finalize()))
+}
+fn recovery_restore_value(projection: &CancelStopProjectionV1, generation: u64) -> Value {
+    let target = &projection.stops()[0];
+    let (registration, registration_hash) = recovery_registration(projection.scope(), target);
+    let prefix = projection.cancel_prefix_for_stop(0).unwrap();
+    let cancel_prefix = prefix.receipts().iter().map(|receipt| json!({
+        "command_id":receipt.command_id(), "input_hash":receipt.input_hash(), "confirmed_head":receipt.head(),
+    })).collect::<Vec<_>>();
+    json!({
+        "version": 1, "request_id": Uuid::new_v4(), "registration": registration,
+        "registration_hash": registration_hash,
+        "source": { "scope_hash": hex::encode(Sha256::digest(canonical(projection.scope()).unwrap())),
+            "job_id": projection.operation_id(), "intent_hash": target.arm().intent_hash,
+            "confirmed_head": prefix.head(), "arm_operation_index": target.birth_index() },
+        "cancel_generation": generation,
+        "durable_cancel": cancel_prefix.last(), "cancel_prefix": cancel_prefix,
+    })
+}
+async fn raw_recovery_request(root: &Directory, request: Value) -> Value {
+    use hmac::{Hmac, Mac};
+    #[derive(serde::Serialize)]
+    struct Ledger<'a> {
+        state: &'a str,
+        reason: &'a str,
+    }
+    let endpoint = crate::broker::discovery::load_endpoint(root)
+        .unwrap()
+        .unwrap();
+    let endpoints = root.persistent_child("endpoints", false).unwrap().unwrap();
+    let mut stream = endpoint.connect_checked(&endpoints).await.unwrap();
+    let challenge: Value = read_frame(&mut stream, 4096, Duration::from_secs(3))
+        .await
+        .unwrap();
+    let canonical = serde_json::to_vec(&(
+        2_u32,
+        "enforcer",
+        endpoint.epoch(),
+        Uuid::parse_str(challenge["nonce"].as_str().unwrap()).unwrap(),
+        challenge["root_binding"].as_str().unwrap(),
+        ["stops_only"],
+        Ledger {
+            state: "unverified",
+            reason: "recovery_transport_only",
+        },
+        "stops_only",
+    ))
+    .unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&[0x5a; 32]).unwrap();
+    mac.update(b"ai-guard:enforcer-client-auth:v2\0");
+    mac.update(&canonical);
+    let proof = hex::encode(mac.finalize().into_bytes());
+    write_frame(
+        &mut stream,
+        &json!({"requested_role":"stops_only","proof":proof}),
+        4096,
+        Duration::from_secs(3),
+    )
+    .await
+    .unwrap();
+    let grant: Value = read_frame(&mut stream, 4096, Duration::from_secs(3))
+        .await
+        .unwrap();
+    assert_eq!(grant["granted_role"], "stops_only");
+    write_frame(&mut stream, &request, FRAME_BYTES, Duration::from_secs(3))
+        .await
+        .unwrap();
+    read_frame(&mut stream, FRAME_BYTES, Duration::from_secs(3))
+        .await
+        .unwrap()
+}
+
+async fn same_epoch_failed_stop_is_retried(stage: &str) {
+    let fixture = Fixture::with_manual_arm(true);
+    let command = Uuid::new_v4();
+    let projection = Arc::new(
+        fixture
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(fixture.operation, command).unwrap())
+            .await
+            .unwrap(),
+    );
+    let target = &projection.stops()[0];
+    let arm = target.arm().operation_id.clone();
+    let (_, hash) = recovery_registration(projection.scope(), target);
+    let (_temp, root) = recovery_role_fixture();
+    let fault_marker = root.path().join("fixture-fault-consumed");
+    let child = recovery_child_with_faults(
+        &root,
+        None,
+        &RecoveryFaults {
+            stage: Some(stage),
+            arm_id: Some(&arm),
+            fault_marker: Some(&fault_marker),
+            ..RecoveryFaults::default()
+        },
+    );
+    let client = warmed_recovery_client(&root).await;
+    let epoch = client.observed_watch_epoch().unwrap();
+    let _initial_reply = client.deliver_projection(projection, 1).await;
+    // Causal positive control: the real pre-dispatch close was consumed. A
+    // correct background retry may already have completed before Query runs,
+    // or may even satisfy this same caller; absence-after-error is not valid.
+    assert_eq!(fs::read(&fault_marker).unwrap(), b"fault-consumed\n");
+    let recovered = wait_for_cancel_without_business_retry(&client, &arm, &hash, command).await;
+    let final_epoch = crate::broker::discovery::load_endpoint(&root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    let count = client.status().await.unwrap().slot_count();
+    drop(client);
+    drop(child);
+    assert_eq!(
+        final_epoch, epoch,
+        "the same authenticated guardian must survive the fault"
+    );
+    assert!(
+        recovered,
+        "pending durable STOP must retry automatically in the same epoch ({stage})"
+    );
+    assert_eq!(count, 1, "retry must reserve the same target exactly once");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_same_epoch_retries_connection_closed_before_reserve() {
+    Box::pin(same_epoch_failed_stop_is_retried("before_reserve")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_same_epoch_retries_connection_closed_before_deliver() {
+    Box::pin(same_epoch_failed_stop_is_retried("before_deliver")).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_replay_snapshot_cannot_ack_a_later_pending_target() {
+    let first = Fixture::with_manual_arm(true);
+    let second = Fixture::with_manual_arm(true);
+    let command_a = Uuid::new_v4();
+    let command_b = Uuid::new_v4();
+    let projection_a = Arc::new(
+        first
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(first.operation, command_a).unwrap())
+            .await
+            .unwrap(),
+    );
+    let projection_b = Arc::new(
+        second
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(second.operation, command_b).unwrap())
+            .await
+            .unwrap(),
+    );
+    let arm_a = projection_a.stops()[0].arm().operation_id.clone();
+    let arm_b = projection_b.stops()[0].arm().operation_id.clone();
+    let (_, hash_a) = recovery_registration(projection_a.scope(), &projection_a.stops()[0]);
+    let (_, hash_b) = recovery_registration(projection_b.scope(), &projection_b.stops()[0]);
+    let (_temp, root) = recovery_role_fixture();
+    let mut child = recovery_child(&root, None);
+    let client = warmed_recovery_client(&root).await;
+    client.deliver_projection(projection_a, 1).await.unwrap();
+    let old_epoch = client.observed_watch_epoch().unwrap();
+    let barrier = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let barrier_root = barrier.path().canonicalize().unwrap();
+    let fault_marker = root.path().join("fixture-fault-consumed");
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    child = recovery_child_with_faults(
+        &root,
+        Some(old_epoch),
+        &RecoveryFaults {
+            stage: Some("before_reserve"),
+            arm_id: Some(&arm_b),
+            barrier: Some((&arm_a, &barrier_root)),
+            fault_marker: Some(&fault_marker),
+            ..RecoveryFaults::default()
+        },
+    );
+    let epoch = crate::broker::discovery::load_endpoint(&root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    while !barrier_root.join("reserved").exists() {
+        assert!(
+            std::time::Instant::now() < expires,
+            "snapshot A did not reach the post-Reserve barrier"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // B is retained only after the worker captured A's replay snapshot. Its
+    // genuine connection is closed before dispatch, while the same E lives.
+    let _initial_reply = client.deliver_projection(projection_b, 2).await;
+    assert_eq!(fs::read(&fault_marker).unwrap(), b"fault-consumed\n");
+    let mut release = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(barrier_root.join("release"))
+        .unwrap();
+    use std::io::Write;
+    release.write_all(b"fixture-release\n").unwrap();
+    drop(release);
+    let a_recovered =
+        wait_for_cancel_without_business_retry(&client, &arm_a, &hash_a, command_a).await;
+    let b_recovered =
+        wait_for_cancel_without_business_retry(&client, &arm_b, &hash_b, command_b).await;
+    let final_epoch = crate::broker::discovery::load_endpoint(&root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    drop(client);
+    drop(child);
+    assert_eq!(final_epoch, epoch);
+    assert!(a_recovered, "original snapshot A must complete");
+    assert!(
+        b_recovered,
+        "A's old snapshot ACK must not clear B's newer pending state"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_replay_retries_a_failed_actor_spawn_without_duplicate_threads() {
+    let fixture = Fixture::with_manual_arm(true);
+    let command = Uuid::new_v4();
+    let projection = Arc::new(
+        fixture
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(fixture.operation, command).unwrap())
+            .await
+            .unwrap(),
+    );
+    let arm = projection.stops()[0].arm().operation_id.clone();
+    let (_, hash) = recovery_registration(projection.scope(), &projection.stops()[0]);
+    let (_temp, root) = recovery_role_fixture();
+    let marker = root.path().join("fixture-worker-starts");
+    let fault_marker = root.path().join("fixture-fault-consumed");
+    let spawned_marker = marker.with_extension("spawned");
+    let child = recovery_child_with_faults(
+        &root,
+        None,
+        &RecoveryFaults {
+            stage: Some("spawn_once"),
+            arm_id: Some(&arm),
+            started_marker: Some(&marker),
+            fault_marker: Some(&fault_marker),
+            ..RecoveryFaults::default()
+        },
+    );
+    let client = warmed_recovery_client(&root).await;
+    client
+        .deliver_projection(Arc::clone(&projection), 1)
+        .await
+        .unwrap();
+    assert_eq!(client.status().await.unwrap().slot_count(), 1);
+    assert_eq!(
+        fs::read(&fault_marker).unwrap(),
+        b"fault-consumed\n",
+        "positive control: the Err injected before OS spawn was consumed"
+    );
+    let (first, second) = tokio::join!(
+        client.deliver_projection(Arc::clone(&projection), 1),
+        client.deliver_projection(projection, 1),
+    );
+    first.unwrap();
+    second.unwrap();
+    let expires = std::time::Instant::now() + Duration::from_secs(3);
+    while (!marker.exists() || !spawned_marker.exists()) && std::time::Instant::now() < expires {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let starts = fs::read(&marker).unwrap_or_default().len();
+    // Success is recorded synchronously after spawn returns, before a Reserve
+    // ACK. Entry stays at a test barrier, so a not-yet-scheduled second thread
+    // cannot be hidden by reading the first entry then killing the child.
+    let slot = client.query_stop(&arm, &hash).await.unwrap();
+    let spawned = fs::read(&spawned_marker).unwrap_or_default().len();
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(marker.with_extension("release"))
+        .and_then(|mut file| std::io::Write::write_all(&mut file, b"fixture-release\n"))
+        .unwrap();
+    let count = client.status().await.unwrap().slot_count();
+    drop(client);
+    drop(child);
+    assert_eq!(
+        starts, 1,
+        "exact concurrent replays must start one previously absent worker thread"
+    );
+    assert_eq!(spawned, 1, "only one OS spawn may have succeeded");
+    assert_eq!(count, 1);
+    assert_eq!(slot.cancel_command_id(), Some(command));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_old_cancel_replay_preserves_the_newer_proven_cancel() {
+    let mut fixture = Fixture::with_manual_arm(true);
+    let command_one = Uuid::new_v4();
+    let command_two = Uuid::new_v4();
+    let first = fixture
+        .writer
+        .stops()
+        .append_cancel(CancelInputV1::new(fixture.operation, command_one).unwrap())
+        .await
+        .unwrap();
+    let first_zero = Arc::new(
+        fixture
+            .writer
+            .stops()
+            .cancel_stop_projection(fixture.operation, command_one)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let second = fixture
+        .writer
+        .stops()
+        .append_cancel(CancelInputV1::new(fixture.operation, command_two).unwrap())
+        .await
+        .unwrap();
+    let second_zero = Arc::new(
+        fixture
+            .writer
+            .stops()
+            .cancel_stop_projection(fixture.operation, command_two)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let receipt_one = first.receipt().clone();
+    assert!(first.receipt().head().revision() < second.receipt().head().revision());
+    let arm = first.stops()[0].arm().operation_id.clone();
+    assert_eq!(second.stops()[0].arm().operation_id, arm);
+    let (_, hash) = recovery_registration(first.scope(), &first.stops()[0]);
+    let (_temp, root) = recovery_role_fixture();
+    let mut child = recovery_child(&root, None);
+    let client = warmed_recovery_client(&root).await;
+    fixture.service.enforcer = None;
+    fixture.service.stop_enforcer = Some(client.clone());
+    fixture.service.fenced.store(true, Ordering::SeqCst);
+    let scope = fixture.writer.scope().clone();
+    let generation = CancelGeneration::new();
+    generation.invalidate();
+    fixture
+        .service
+        .deliver_cancel(&scope, first, &generation)
+        .await
+        .unwrap();
+    generation.invalidate();
+    fixture
+        .service
+        .deliver_cancel(&scope, second, &generation)
+        .await
+        .unwrap();
+    let first = fixture
+        .writer
+        .stops()
+        .cancel_stop_projection(fixture.operation, command_one)
+        .await
+        .unwrap()
+        .unwrap();
+    let replay = fixture
+        .service
+        .deliver_cancel(&scope, first, &generation)
+        .await;
+    let retained = client.query_stop(&arm, &hash).await.unwrap();
+    let count = client.status().await.unwrap().slot_count();
+    let current_generation = generation.current();
+    assert!(
+        replay.is_ok(),
+        "an exact old C1 replay must remain ACKable after C2: {replay:?}"
+    );
+    let replay = replay.unwrap();
+    assert_eq!(replay.command_id(), receipt_one.command_id());
+    assert_eq!(replay.input_hash(), receipt_one.input_hash());
+    assert_eq!(replay.head(), receipt_one.head());
+    assert_eq!(
+        current_generation, 2,
+        "replaying C1 must not invalidate another generation"
+    );
+    assert_eq!(retained.cancel_command_id(), Some(command_two));
+    assert_eq!(retained.generation(), 2);
+    assert_eq!(count, 1);
+    // A replacement guardian and a new local cancellation generation both
+    // start at zero. Two proven commands may share it; the verified prefix,
+    // not numeric generation, decides which durable Cancel is retained.
+    fixture.service.stop_enforcer = None;
+    drop(client);
+    let old_epoch = crate::broker::discovery::load_endpoint(&root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    child = recovery_child(&root, Some(old_epoch));
+    let client = warmed_recovery_client(&root).await;
+    client.deliver_projection(first_zero, 0).await.unwrap();
+    client.deliver_projection(second_zero, 0).await.unwrap();
+    fixture.service.stop_enforcer = Some(client.clone());
+    let zero = CancelGeneration::new();
+    let old = fixture
+        .writer
+        .stops()
+        .cancel_stop_projection(fixture.operation, command_one)
+        .await
+        .unwrap()
+        .unwrap();
+    let ack = fixture
+        .service
+        .deliver_cancel(&scope, old, &zero)
+        .await
+        .unwrap();
+    let retained = client.query_stop(&arm, &hash).await.unwrap();
+    let count = client.status().await.unwrap().slot_count();
+    assert_eq!(ack.command_id(), receipt_one.command_id());
+    assert_eq!(ack.input_hash(), receipt_one.input_hash());
+    assert_eq!(ack.head(), receipt_one.head());
+    assert_eq!(zero.current(), 0);
+    assert_eq!(retained.generation(), 0);
+    assert_eq!(retained.cancel_command_id(), Some(command_two));
+    assert_eq!(count, 1);
+    drop((client, fixture));
+    drop(child);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_two_durable_cancels_survive_epoch_replacement_without_full_admission() {
+    // Real Journal/Writer/Store receipts; runtime snapshots and the unavailable
+    // invocation remain explicit fixture data, never engine observations.
+    let first = Fixture::with_manual_arm(true);
+    let second = Fixture::with_manual_arm(true);
+    let command_a = Uuid::new_v4();
+    let command_b = Uuid::new_v4();
+    let projection_a = Arc::new(
+        first
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(first.operation, command_a).unwrap())
+            .await
+            .unwrap(),
+    );
+    let projection_b = Arc::new(
+        second
+            .writer
+            .stops()
+            .append_cancel(CancelInputV1::new(second.operation, command_b).unwrap())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(projection_a.stops().len(), 1);
+    assert_eq!(projection_b.stops().len(), 1);
+    #[cfg(target_os = "macos")]
+    let temporary_root = "/private/tmp";
+    #[cfg(not(target_os = "macos"))]
+    let temporary_root = "/tmp";
+    let temp = tempfile::Builder::new()
+        .prefix("sr-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(temporary_root)
+        .unwrap();
+    let path = temp.path().canonicalize().unwrap();
+    let root = Directory::open_existing(&path).unwrap();
+    root.persistent_create("auth", &[0x5a; 32]).unwrap();
+    root.persistent_create(".owner.lock", &[]).unwrap();
+    root.persistent_child("endpoints", true).unwrap().unwrap();
+    root.persistent_child("announcements", true)
+        .unwrap()
+        .unwrap();
+    let mut child = recovery_child(&root, None);
+    let client = EnforcerStopClient::connect_or_spawn_for_recovery(
+        &root,
+        &std::env::current_exe().unwrap(),
+        8,
+    )
+    .await
+    .unwrap();
+    client
+        .deliver_projection(Arc::clone(&projection_a), 3)
+        .await
+        .unwrap();
+    client
+        .deliver_projection(Arc::clone(&projection_b), 4)
+        .await
+        .unwrap();
+    // Lost ACK/retry is the exact same reservation, not another actor.
+    client
+        .deliver_projection(Arc::clone(&projection_a), 3)
+        .await
+        .unwrap();
+    assert_eq!(client.status().await.unwrap().slot_count(), 2);
+    assert!(!client.status().await.unwrap().admission_available());
+    let (_, hash_a) = recovery_registration(projection_a.scope(), &projection_a.stops()[0]);
+    let (_, hash_b) = recovery_registration(projection_b.scope(), &projection_b.stops()[0]);
+    let arm_a = projection_a.stops()[0].arm().operation_id.clone();
+    let arm_b = projection_b.stops()[0].arm().operation_id.clone();
+    assert_ne!(arm_a, arm_b);
+    assert_eq!(
+        client
+            .query_stop(&arm_a, &hash_a)
+            .await
+            .unwrap()
+            .cancel_command_id(),
+        Some(command_a)
+    );
+    assert_eq!(
+        client
+            .query_stop(&arm_b, &hash_b)
+            .await
+            .unwrap()
+            .cancel_command_id(),
+        Some(command_b)
+    );
+
+    // A new genuine StopWriter Cancel is valid even at the same generation.
+    // The negative must instead fork an already-seen identity/receipt without
+    // a verified prefix extension. Only this authenticated raw fixture does so.
+    let mut wire = recovery_restore_value(&projection_a, 3);
+    let divergent_hash = if wire["durable_cancel"]["input_hash"] == "0".repeat(64) {
+        "1".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    wire["durable_cancel"]["input_hash"] = json!(divergent_hash);
+    wire["cancel_prefix"][0]["input_hash"] = wire["durable_cancel"]["input_hash"].clone();
+    let refused =
+        raw_recovery_request(&root, json!({"kind":"deliver_durable_stop","value":wire})).await;
+    assert_eq!(refused, json!({"kind":"error","code":"conflict"}));
+    assert_eq!(
+        client
+            .query_stop(&arm_a, &hash_a)
+            .await
+            .unwrap()
+            .cancel_command_id(),
+        Some(command_a),
+        "divergence must preserve the first durable Cancel"
+    );
+    client
+        .deliver_projection(Arc::clone(&projection_a), 3)
+        .await
+        .unwrap();
+
+    let old = crate::broker::discovery::load_endpoint(&root)
+        .unwrap()
+        .unwrap()
+        .epoch();
+    child.0.kill().unwrap();
+    child.0.wait().unwrap();
+    child = recovery_child(&root, Some(old));
+    // Reconnection is triggered only by Status/Watch, not by resending A/B.
+    let expires = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(status) = client.status().await {
+            assert!(!status.admission_available());
+            if status.slot_count() == 2
+                && client
+                    .query_stop(&arm_a, &hash_a)
+                    .await
+                    .is_ok_and(|slot| slot.cancel_command_id() == Some(command_a))
+                && client
+                    .query_stop(&arm_b, &hash_b)
+                    .await
+                    .is_ok_and(|slot| slot.cancel_command_id() == Some(command_b))
+            {
+                break;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < expires,
+            "watch did not restore both known STOP targets"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    for (arm, hash, command, generation) in [
+        (&arm_a, &hash_a, command_a, 3),
+        (&arm_b, &hash_b, command_b, 4),
+    ] {
+        let slot = client.query_stop(arm, hash).await.unwrap();
+        assert_eq!(slot.cancel_command_id(), Some(command));
+        assert_eq!(slot.generation(), generation);
+        assert!(
+            !matches!(
+                slot.phase(),
+                crate::broker::enforcer::StopPhaseV1::StopReady
+            ),
+            "durable Cancel stays latched"
+        );
+    }
+    // Query accepted the retained registration hashes, binding the original
+    // CID/authority/Arm/deadline; no new registration or permission was sent.
+    drop(client);
+    drop(child);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1047,3 +1973,8 @@ async fn acknowledged_cancel_retry_redelivers_without_revoking_later_execution()
         "a durable Cancel ACK is not a delivered stop: replay must retry delivery after the first failure"
     );
 }
+
+#[path = "recovery_epoch_tests.rs"]
+mod recovery_epoch_tests;
+#[path = "recovery_multi_arm_tests.rs"]
+mod recovery_multi_arm_tests;

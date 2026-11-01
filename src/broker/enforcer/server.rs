@@ -466,3 +466,73 @@ fn run_actor(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::recovery::{RecoveryState, serve_connection as serve_recovery_connection};
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn recovery_auth_offers_stops_only_when_admission_closed() {
+        let epoch = Uuid::new_v4();
+        let clock = Arc::new(NativeHostClock::new().expect("native test clock"));
+        clock.sample().expect("native test clock sample");
+        // The original RED exercised the only available V1 handler. The
+        // explicit V2 handler now supplies recovery without changing V1 wire.
+        let state = Arc::new(RecoveryState::new(
+            epoch,
+            1,
+            [0x5a; 32],
+            "a".repeat(64),
+            Some(clock),
+            None,
+        ));
+        let value = state.status().expect("read admission state");
+        assert!(
+            !value.admission_available(),
+            "Full admission must be closed in this test"
+        );
+
+        let (server, mut client) = UnixStream::pair().expect("native Unix stream pair");
+        let connection = tokio::spawn(serve_recovery_connection(server, state));
+        let challenge = read_frame::<Value>(&mut client, 4096, IO_TIMEOUT).await;
+
+        // Join before checking the challenge so a failed oracle cannot leave
+        // the real connection task waiting for authentication.
+        connection.abort();
+        match connection.await {
+            Err(error) => assert!(error.is_cancelled(), "connection task panicked: {error}"),
+            Ok(result) => assert!(result.is_err(), "unauthenticated connection completed"),
+        }
+        drop(client);
+
+        let challenge = challenge.expect("read the real enforcer challenge frame");
+        let returned_epoch = challenge
+            .get("epoch")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        assert_eq!(
+            returned_epoch,
+            Some(epoch),
+            "challenge must bind this epoch"
+        );
+        let nonce = challenge
+            .get("nonce")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .expect("challenge must contain a UUID nonce");
+        assert!(!nonce.is_nil(), "challenge nonce must be non-nil");
+
+        assert_eq!(
+            challenge.get("protocol").and_then(Value::as_u64),
+            Some(2),
+            "recovery must negotiate protocol 2 while Full admission is closed"
+        );
+        assert_eq!(
+            challenge.get("offered_roles"),
+            Some(&json!(["stops_only"])),
+            "closed admission must offer StopsOnly and exclude Full"
+        );
+    }
+}

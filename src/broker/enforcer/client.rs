@@ -1308,6 +1308,23 @@ fn valid_uuid(value: &str) -> bool {
 }
 
 fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> EnforcerResult<()> {
+    spawn_helper_mode(root, executable, max_slots, false)
+}
+
+pub(super) fn spawn_recovery_helper(
+    root: &Directory,
+    executable: &Path,
+    max_slots: u32,
+) -> EnforcerResult<()> {
+    spawn_helper_mode(root, executable, max_slots, true)
+}
+
+fn spawn_helper_mode(
+    root: &Directory,
+    executable: &Path,
+    max_slots: u32,
+    recovery_only: bool,
+) -> EnforcerResult<()> {
     use std::os::unix::process::CommandExt;
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: read-only process resource query into writable ABI storage.
@@ -1340,6 +1357,9 @@ fn spawn_helper(root: &Directory, executable: &Path, max_slots: u32) -> Enforcer
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if recovery_only {
+        command.arg("--recovery-only");
+    }
     // SAFETY: only async-signal-safe syscalls; no parent lock, token, socket or
     // incidental inherited FD may survive exec. CLOEXEC preserves Command's
     // exec-error pipe until exec, unlike closing all descriptors in pre_exec.

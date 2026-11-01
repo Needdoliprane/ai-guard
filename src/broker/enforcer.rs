@@ -5,6 +5,7 @@
 
 mod client;
 mod diagnostics;
+mod recovery;
 mod server;
 
 #[cfg(test)]
@@ -28,6 +29,10 @@ use uuid::Uuid;
 
 pub use client::{EnforcedSlot, EnforcerClient};
 pub(crate) use diagnostics::EnforcerStageFailure;
+pub use recovery::{
+    EnforcerStopClient, EnforcerStopStatusV2, StopPhaseV1, StopSlotV1,
+    run_internal_recovery_enforcer,
+};
 pub use server::run_internal_enforcer;
 
 const MAX_SLOTS: u32 = 1024;

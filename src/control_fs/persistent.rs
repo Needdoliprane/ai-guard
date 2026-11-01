@@ -34,7 +34,134 @@ pub(crate) struct Inventory {
     pub incomplete: bool,
 }
 
+/// Lifetime of the existing enforcer lock for the explicit recovery transport.
+/// This owns one O_RDWR file description and never interprets, repairs or
+/// rewrites its contents. Ledger admission and a mutable ledger cache are not
+/// provided by this handle. Clones retain the same flock, including in actors.
+#[derive(Clone)]
+pub(crate) struct EnforcerLeaseFile(Arc<EnforcerLeaseInner>);
+
+struct EnforcerLeaseInner {
+    root: Directory,
+    file: File,
+    identity: PrivateEntryIdentity,
+}
+
+impl fmt::Debug for EnforcerLeaseFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EnforcerLeaseFile(<private recovery lease>)")
+    }
+}
+
+impl EnforcerLeaseFile {
+    /// Existing-only: a missing lock is not a factory request. None means a
+    /// different file description already owns this exact lock inode.
+    pub(crate) fn acquire_existing(root: &Directory) -> Result<Option<Self>> {
+        root.revalidate()?;
+        let expected = root
+            .private_entry(OsStr::new(".owner.lock"))?
+            .context("existing enforcer recovery lock is unavailable")?;
+        let encoded = persistent_name(".owner.lock")?;
+        // SAFETY: retained private parent and fixed leaf; no creation, truncate,
+        // replacement or pathname reopen after obtaining the flock.
+        let fd = unsafe {
+            libc::openat(
+                root.0.file.as_raw_fd(),
+                encoded.as_ptr(),
+                libc::O_RDWR | FILE_FLAGS,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("existing enforcer recovery lock cannot be opened read/write");
+        }
+        // SAFETY: successful openat transfers one newly owned descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let facts = check_private_file(&file)?;
+        ensure!(
+            entry_identity(&facts) == expected,
+            "existing enforcer recovery lock identity is invalid"
+        );
+        let retained = Self(Arc::new(EnforcerLeaseInner {
+            root: root.clone(),
+            file,
+            identity: expected,
+        }));
+        retained.revalidate()?;
+        // SAFETY: retained CLOEXEC descriptor, nonblocking whole-file flock.
+        if unsafe { libc::flock(retained.0.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).context("existing enforcer recovery lock acquisition failed");
+        }
+        retained.revalidate()?;
+        Ok(Some(retained))
+    }
+
+    /// Structural checks deliberately do not read ledger bytes or take a
+    /// ledger/cache mutex. A partial ledger cannot close this STOP transport.
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self.0.root.revalidate()?;
+        let facts = check_private_file(&self.0.file)?;
+        ensure!(
+            entry_identity(&facts) == self.0.identity
+                && self.0.root.private_entry(OsStr::new(".owner.lock"))? == Some(self.0.identity),
+            "retained enforcer recovery lock identity changed"
+        );
+        // SAFETY: read-only status query on the retained live descriptor.
+        let flags = unsafe { libc::fcntl(self.0.file.as_raw_fd(), libc::F_GETFL) };
+        ensure!(
+            flags >= 0 && flags & libc::O_ACCMODE == libc::O_RDWR,
+            "retained enforcer recovery lock is not read/write"
+        );
+        self.0.root.revalidate()
+    }
+
+    pub(crate) fn native_binding(&self) -> Result<[u64; 6]> {
+        self.revalidate()?;
+        let binding = self.0.root.enforcer_recovery_binding()?;
+        ensure!(
+            binding[3] == self.0.identity.device && binding[4] == self.0.identity.inode,
+            "enforcer recovery binding does not name the retained lock"
+        );
+        self.revalidate()?;
+        Ok(binding)
+    }
+}
+
 impl Directory {
+    /// Metadata-only peer expectation; this neither opens the lock file nor
+    /// acquires, creates or upgrades an authority. Native IDs are provenance,
+    /// never ledger identity or a permission to start.
+    pub(crate) fn enforcer_recovery_binding(&self) -> Result<[u64; 6]> {
+        self.revalidate()?;
+        let root = check_directory(&self.0.file, true)?;
+        let expected = self
+            .private_entry(OsStr::new(".owner.lock"))?
+            .context("existing enforcer recovery lock is unavailable")?;
+        let named = named_metadata(self, &persistent_name(".owner.lock")?)?
+            .context("existing enforcer recovery lock disappeared")?;
+        ensure!(
+            native_identity(&named) == expected,
+            "existing enforcer recovery lock identity changed"
+        );
+        ensure!(
+            self.private_entry(OsStr::new(".owner.lock"))? == Some(expected),
+            "existing enforcer recovery lock changed during binding"
+        );
+        self.revalidate()?;
+        Ok([
+            root.dev(),
+            root.ino(),
+            u64::from(root.uid()),
+            expected.device,
+            expected.inode,
+            u64::from(effective_uid()),
+        ])
+    }
+
     /// Synchronize this directory and all its retained, verified ancestors.
     /// `open_or_create` does not synchronize newly created ancestors. Keep the
     /// complete chain alive until every child and parent has been synchronized.

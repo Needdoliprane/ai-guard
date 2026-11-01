@@ -11,7 +11,7 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::RoleLease,
-        enforcer::{CancelGeneration, EnforcerClient, RegistrationV1},
+        enforcer::{CancelGeneration, EnforcerClient, EnforcerStopClient, RegistrationV1},
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
@@ -199,7 +199,8 @@ struct Service {
     root: Directory,
     material: Arc<Material>,
     profiles: BTreeMap<String, Arc<ProfileJobs>>,
-    enforcer: ServiceEnforcer,
+    enforcer: Option<ServiceEnforcer>,
+    stop_enforcer: Option<EnforcerStopClient>,
     blocking: Arc<Semaphore>,
     preparation: Arc<Semaphore>,
     execution: Arc<Semaphore>,
@@ -259,25 +260,62 @@ impl Response {
 /// is ever executed on the host. SIGINT/SIGTERM closes admissions; the distinct
 /// helper retains every armed stop and its original deadline.
 pub async fn serve(config_path: &Path) -> Result<()> {
+    serve_mode(config_path, false).await
+}
+
+/// Explicit existing-installation recovery. No Full capability is requested,
+/// no new control namespace is bootstrapped and admissions stay fenced.
+pub async fn serve_recovery(config_path: &Path) -> Result<()> {
+    serve_mode(config_path, true).await
+}
+
+async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
     let path = config_path.to_owned();
     let registry = Arc::new(tokio::task::spawn_blocking(move || Registry::load(&path)).await??);
-    let root = Directory::open_or_create(&registry.data.root)
-        .map_err(|_| anyhow!("private broker root is unavailable or unsafe"))?;
+    let root = if recovery_only {
+        Directory::open_existing(&registry.data.root)
+    } else {
+        Directory::open_or_create(&registry.data.root)
+    }
+    .map_err(|_| anyhow!("private broker root is unavailable or unsafe"))?;
     let broker_root = root
-        .persistent_child("broker", true)?
+        .persistent_child("broker", !recovery_only)?
         .ok_or_else(|| anyhow!("broker role root is unavailable"))?;
-    let lease = RoleLease::acquire(&broker_root)?;
+    let lease = if recovery_only {
+        RoleLease::acquire_existing(&broker_root)?
+    } else {
+        RoleLease::acquire(&broker_root)?
+    };
     let enforcer_root = root
-        .persistent_child("enforcer", true)?
+        .persistent_child("enforcer", !recovery_only)?
         .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
     let executable =
         std::env::current_exe().map_err(|_| anyhow!("broker executable is unavailable"))?;
-    let enforcer = EnforcerClient::connect_or_spawn(
-        &enforcer_root,
-        &executable,
-        registry.data.max_enforcer_slots,
-    )
-    .await?;
+    let (enforcer, stop_enforcer) = if recovery_only {
+        (
+            None,
+            Some(
+                EnforcerStopClient::connect_or_spawn_for_recovery(
+                    &enforcer_root,
+                    &executable,
+                    registry.data.max_enforcer_slots,
+                )
+                .await?,
+            ),
+        )
+    } else {
+        (
+            Some(
+                EnforcerClient::connect_or_spawn(
+                    &enforcer_root,
+                    &executable,
+                    registry.data.max_enforcer_slots,
+                )
+                .await?,
+            ),
+            None,
+        )
+    };
     let material_registry = Arc::clone(&registry);
     let material =
         Arc::new(tokio::task::spawn_blocking(move || Material::load(&material_registry)).await??);
@@ -294,17 +332,27 @@ pub async fn serve(config_path: &Path) -> Result<()> {
         material,
         profiles,
         #[cfg(test)]
-        enforcer: ServiceEnforcer::Native(enforcer),
+        enforcer: enforcer.map(ServiceEnforcer::Native),
         #[cfg(not(test))]
         enforcer,
+        stop_enforcer,
         blocking: Arc::new(Semaphore::new(8)),
         preparation: Arc::new(Semaphore::new(4)),
         stopping: Arc::new(AtomicBool::new(false)),
-        fenced: AtomicBool::new(false),
+        fenced: AtomicBool::new(recovery_only),
     });
     service.restore_stops().await;
-    let listener = PrivateListener::bind_new(&lease.listener_root()?)?;
-    lease.publish_endpoint(listener.endpoint())?;
+    let listener_root = if recovery_only {
+        lease.listener_root_existing()?
+    } else {
+        lease.listener_root()?
+    };
+    let listener = PrivateListener::bind_new(&listener_root)?;
+    if recovery_only {
+        lease.publish_endpoint_existing(listener.endpoint())?;
+    } else {
+        lease.publish_endpoint(listener.endpoint())?;
+    }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let connections = Arc::new(Semaphore::new(64));
@@ -354,6 +402,19 @@ pub async fn serve(config_path: &Path) -> Result<()> {
 }
 
 impl Service {
+    fn recovery_only(&self) -> bool {
+        self.stop_enforcer.is_some()
+    }
+    fn full_enforcer(&self) -> Result<&EnforcerClient, BrokerErrorCodeV1> {
+        if self.recovery_only() {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        let enforcer = self
+            .enforcer
+            .as_ref()
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        Ok(enforcer)
+    }
     fn profile_jobs(&self, profile: &str) -> Result<Arc<ProfileJobs>, BrokerErrorCodeV1> {
         self.profiles
             .get(profile)
@@ -408,6 +469,12 @@ impl Service {
         profile: &str,
         scope: &JournalScopeV1,
     ) -> Result<WriterClient, BrokerErrorCodeV1> {
+        // Status/List's full business view is unavailable in this explicitly
+        // restricted service. RecoveryStatus/Cancel use the STOP facade below.
+        // Refuse before the lazy initializer can acquire or create a Full actor.
+        if self.recovery_only() {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
         self.profile_writers(profile, scope, true)
             .await?
             .full()
@@ -420,6 +487,8 @@ impl Service {
         scope: &JournalScopeV1,
         allow_create: bool,
     ) -> Result<ProfileWriterCapabilities, BrokerErrorCodeV1> {
+        let recovery_only = self.recovery_only();
+        let allow_create = allow_create && !recovery_only;
         let jobs = self.profile_jobs(profile)?;
         let root = self.root.clone();
         let scope = scope.clone();
@@ -436,6 +505,23 @@ impl Service {
                         .persistent_child(open_scope.profile_id(), allow_create)?
                         .ok_or(BrokerErrorCodeV1::InvalidInput)?;
                     let control = ControlSecrets::new(material.literals.clone())?;
+                    if recovery_only {
+                        let reader = StopRecoveryReaderV1::open_existing(
+                            &profile,
+                            open_scope,
+                            &material.exclusions,
+                            JournalLimitsV1::default(),
+                            control,
+                        )?
+                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+                        let report = reader.scan();
+                        return Ok(ProfileWriterCapabilities::from_recovery_report(
+                            &report,
+                            true,
+                            64,
+                            WRITER_TIMEOUT,
+                        )?);
+                    }
                     if let Some(existing) = ProfileWriterCapabilities::open_existing(
                         &profile,
                         open_scope.clone(),
@@ -468,6 +554,10 @@ impl Service {
             != canonical(&scope).map_err(jobs::journal_error)?
         {
             return Err(BrokerErrorCodeV1::Conflict);
+        }
+        if recovery_only && !writer.is_stop_only() {
+            self.fenced.store(true, Ordering::SeqCst);
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
         if writer.is_stop_only() {
             self.fenced.store(true, Ordering::SeqCst);
@@ -600,7 +690,7 @@ impl Service {
         let clock = NativeHostClock::new().map_err(|_| BrokerErrorCodeV1::Unavailable)?;
         Ok(BatchExecutor::new(
             writer,
-            self.enforcer.clone(),
+            self.full_enforcer()?.clone(),
             Arc::new(clock),
         ))
     }
@@ -652,6 +742,11 @@ impl Service {
             !read_only && !stop_only,
         )
         .await?;
+        if self.recovery_only() && !read_only && !stop_only {
+            // Authentication still precedes this refusal. No writer, submit
+            // reservation, approval, source, export target or fresh job is opened.
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
         if read_only || matches!(envelope.request, BrokerCommandV1::Cancel { .. }) {
             self.validate_registry().await?;
         } else {
@@ -768,12 +863,12 @@ impl Service {
         }
     }
     async fn require_starts(&self) -> Result<(), BrokerErrorCodeV1> {
-        if self.fenced.load(Ordering::SeqCst) {
+        if self.recovery_only() || self.fenced.load(Ordering::SeqCst) {
             Err(BrokerErrorCodeV1::NeedsReconciliation)
         } else if self.stopping.load(Ordering::SeqCst) {
             Err(BrokerErrorCodeV1::Unavailable)
         } else {
-            self.enforcer
+            self.full_enforcer()?
                 .require_admission_ready()
                 .await
                 .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
@@ -1154,9 +1249,21 @@ impl Service {
             if let Some(result) = cancel_retry_tests::delivery(operation, cancel.current()) {
                 return result;
             }
-            deliver_cancellation(&self.enforcer, scope, projection, cancel)
-                .await
-                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+            if let Some(enforcer) = &self.stop_enforcer {
+                if canonical(scope).map_err(jobs::journal_error)?
+                    != canonical(projection.scope()).map_err(jobs::journal_error)?
+                {
+                    return Err(BrokerErrorCodeV1::Conflict);
+                }
+                enforcer
+                    .deliver_projection(Arc::new(projection), cancel.current())
+                    .await
+                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+            } else {
+                deliver_cancellation(self.full_enforcer()?, scope, projection, cancel)
+                    .await
+                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)
+            }
         }
         .await?;
         // Known targets were attempted even when coverage was incomplete.
@@ -1366,7 +1473,25 @@ impl Service {
                 }
             }
         }
-        match self.enforcer.status().await {
+        if let Some(enforcer) = &self.stop_enforcer {
+            match enforcer.status().await {
+                Ok(status) if status.transport_healthy() && status.slot_count() == restored => {}
+                _ => eprintln!(
+                    "broker recovery: STOP transport or target coverage incomplete; admission remains fenced"
+                ),
+            }
+            // This explicitly restricted epoch cannot promote into Full.
+            self.fenced.store(true, Ordering::SeqCst);
+            return;
+        }
+        let status = match self.full_enforcer() {
+            Ok(enforcer) => enforcer.status().await,
+            Err(_) => {
+                self.fenced.store(true, Ordering::SeqCst);
+                return;
+            }
+        };
+        match status {
             Ok(status) if status.healthy() && status.slot_count() == restored => {}
             _ => {
                 self.fenced.store(true, Ordering::SeqCst);
@@ -1444,8 +1569,14 @@ impl Service {
                     _ => partial = true,
                 }
             }
+            let full = self
+                .enforcer
+                .as_ref()
+                .map(|_| self.full_enforcer().cloned())
+                .transpose()?;
             tasks.spawn(restore_recovered_job(
-                self.enforcer.clone(),
+                full,
+                self.stop_enforcer.clone(),
                 Arc::clone(&report),
                 index,
                 job,
@@ -1468,11 +1599,12 @@ impl Service {
         // Transfer the existing lease into one actor, without an unlock/relock
         // window. Partial recovery can only retain the STOP capability.
         let proof = Arc::clone(&report);
+        let force_stops = partial || self.stop_enforcer.is_some();
         match self
             .filesystem(move || {
                 Ok(ProfileWriterCapabilities::from_recovery_report(
                     &proof,
-                    partial,
+                    force_stops,
                     64,
                     WRITER_TIMEOUT,
                 )?)
@@ -1639,12 +1771,43 @@ fn recover_existing_profile(
 }
 
 async fn restore_recovered_job(
-    enforcer: EnforcerClient,
+    enforcer: Option<EnforcerClient>,
+    stop_enforcer: Option<EnforcerStopClient>,
     report: Arc<StopRecoveryReportV1>,
     index: usize,
     job: Arc<Job>,
 ) -> (usize, bool) {
     let Some(recovered) = report.jobs().get(index) else {
+        job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
+        return (0, true);
+    };
+    if let Some(enforcer) = stop_enforcer {
+        let mut restored = 0;
+        let mut partial = false;
+        // There are no retirement P/Q records in this transport version. No
+        // old Q/R+ is admitted or manufactured. Once retirement is connected,
+        // its metadata-only reconciliation must precede Restore of that Arm;
+        // an unrelated failure must keep this per-job sweep advancing.
+        for target_index in 0..recovered.stops().len() {
+            match enforcer
+                .restore_report_target(
+                    Arc::clone(&report),
+                    index,
+                    target_index,
+                    job.cancel.current(),
+                )
+                .await
+            {
+                Ok(()) => restored += 1,
+                Err(_) => partial = true,
+            }
+        }
+        if partial || !recovered.managed_workspace() {
+            job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
+        }
+        return (restored, partial);
+    }
+    let Some(enforcer) = enforcer else {
         job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
         return (0, true);
     };

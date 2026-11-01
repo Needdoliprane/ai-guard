@@ -137,6 +137,20 @@ Cette commande n'installe aucune unité systemd ou tâche launchd et ne revendiq
 
 L'authentification IPC privée du gardien appartient à l'état du broker et reste distincte des credentials runner/viewer. Une authentification existante est lue sans réécriture. Si elle manque dans un rôle possédant déjà un état, le démarrage refuse d'en générer une autre. Préserver la racine du rôle, son historique et les sauvegardes privées cohérentes ; récupérer l'authentification originale sous maintenance contrôlée. Effacer l'historique pour obtenir une racine apparemment vide n'est pas une procédure de reprise.
 
+### Reprendre les arrêts autorisés avec admission fermée
+
+Pour une installation existante qui doit uniquement restaurer ses cibles d'arrêt prouvées, démarrer explicitement le service restreint :
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only
+```
+
+Ce mode exige les racines privées, verrous de rôle, authentification IPC et namespaces de découverte existants. Il n'initialise aucune nouvelle installation et ne régénère pas une authentification manquante. Une lease occupée ou un enforcer vivant incompatible reste un refus ; cette commande ne prend jamais le contrôle d'un processus existant et ne l'arrête pas. Préserver son état et utiliser sa connexion prise en charge lorsqu'elle est disponible.
+
+Le service demande explicitement la capacité `StopsOnly` du protocole2. Il restaure uniquement les cibles prouvées par des lecteurs de journal retenus, conserve leur identité de conteneur et leur échéance originales, et retient les annulations durables pour les rejouer après reconnexion. L'admission reste fermée pendant toute la vie de ce service : Submit, approve, resume et export ne peuvent pas obtenir de capacité Full. Status, list, recovery-status et cancel conservent leurs dépendances normales d'authentification et de données ; ce mode ne réactive pas un gateway inactif.
+
+Une réservation d'arrêt ou une annulation acceptée ne confirme ni effet runtime ni résultat terminal. Une couverture partielle du journal reste partielle. Le transport de reprise ne prouve pas le drainage d'un ancien démarrage, ne finalise pas un retrait et n'autorise pas un nouveau worker à remplacer une cible ambiguë. Des racines, authentifications, verrous ou sockets manquants ou dangereux nécessitent une récupération contrôlée de ces ancres exactes ; une nouvelle racine ou un nouveau credential ne les remplace pas.
+
 ## Soumettre et consulter un job
 
 Dans le terminal client, renseigner les mêmes variables de chemins. Choisir **une seule fois** un UUID d'opération neuf non nul, le conserver et garder les mêmes entrées lors d'un retry. La valeur ci-dessous doit être remplacée avant exécution.
