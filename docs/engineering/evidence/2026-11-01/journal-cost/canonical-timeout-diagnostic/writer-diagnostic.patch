@@ -1,0 +1,50 @@
+--- a/src/broker/writer.rs
++++ b/src/broker/writer.rs
+@@ -246,8 +246,19 @@
+     async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
+         tokio::time::timeout(self.timeout, receive)
+             .await
+-            .map_err(|_| JournalError::Io)?
+-            .map_err(|_| JournalError::Io)?
++            .map_err(|_| {
++                eprintln!("broker_writer_receive_diagnostic {{\"outcome\":\"timeout\"}}");
++                JournalError::Io
++            })?
++            .map_err(|_| {
++                eprintln!("broker_writer_receive_diagnostic {{\"outcome\":\"channel_closed\"}}");
++                JournalError::Io
++            })?
++            .inspect_err(|error| {
++                if *error == JournalError::Io {
++                    eprintln!("broker_writer_receive_diagnostic {{\"outcome\":\"backend_io\"}}");
++                }
++            })
+     }
+ }
+ 
+@@ -799,10 +810,21 @@
+                 events,
+                 reply,
+             } => {
+-                let _ = reply.send(
+-                    backend
+-                        .full()
+-                        .and_then(|journal| enqueue_events(journal, operation_id, events)),
++                let started = std::time::Instant::now();
++                let result = backend
++                    .full()
++                    .and_then(|journal| enqueue_events(journal, operation_id, events));
++                let result_ok = result.is_ok();
++                let item_count = result.as_ref().ok().map(Vec::len);
++                let delivered = reply.send(result).is_ok();
++                eprintln!(
++                    "broker_writer_enqueue_backend_diagnostic {}",
++                    serde_json::json!({
++                        "result_ok": result_ok,
++                        "item_count": item_count,
++                        "delivered": delivered,
++                        "elapsed_ns": started.elapsed().as_nanos(),
++                    })
+                 );
+             }
+             Command::AcknowledgeEvents {

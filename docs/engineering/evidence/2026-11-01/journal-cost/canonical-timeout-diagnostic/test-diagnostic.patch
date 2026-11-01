@@ -1,0 +1,56 @@
+--- a/tests/broker_outbox.rs
++++ b/tests/broker_outbox.rs
+@@ -790,14 +790,51 @@
+     let second_session = Uuid::from_u128(0xcccccccccccc4ccc8ccccccccccccccc);
+     let (intent, first_request) = fixture.accept(first_operation, first_session);
+     let (_second_intent, second_request) = fixture.accept(second_operation, second_session);
++    // Temporary diagnostic: retain this entirely synthetic fixture before an
++    // unknown caller outcome can unwind while its accepted writer work drains.
++    let _retained = fixture._root.keep();
+     let boundary: Vec<_> = (0..512)
+         .map(|index| synthetic_event(&first_request, index))
+         .collect();
++    let enqueue_started = std::time::Instant::now();
+     let at_cap = fixture
+         .writer
+         .enqueue_events(first_operation, boundary)
+-        .await
+-        .unwrap();
++        .await;
++    eprintln!(
++        "broker_outbox_enqueue_diagnostic {}",
++        json!({
++            "ok": at_cap.is_ok(),
++            "elapsed_ns": enqueue_started.elapsed().as_nanos(),
++        })
++    );
++    if at_cap.is_err() {
++        // This later strict observation may wait for the writer mutex and
++        // perform its own synchronizations. It says nothing about the head or
++        // event ACK state at the instant the original caller returned.
++        let observation_started = std::time::Instant::now();
++        let observation = fixture.journal.load(first_operation);
++        let ok = observation.is_ok();
++        let (head, events) = match observation {
++            Ok(Some(job)) => (
++                Some(job.head().revision()),
++                job.broker_checkpoint_v4()
++                    .map(|checkpoint| checkpoint.events().len()),
++            ),
++            Ok(None) | Err(_) => (None, None),
++        };
++        eprintln!(
++            "broker_outbox_post_error_diagnostic {}",
++            json!({
++                "observation": "after_enqueue_error",
++                "ok": ok,
++                "head": head,
++                "events": events,
++                "elapsed_ns": observation_started.elapsed().as_nanos(),
++            })
++        );
++    }
++    let at_cap = at_cap.unwrap();
+     assert_eq!(at_cap.len(), 512);
+     let first_head = fixture
+         .journal

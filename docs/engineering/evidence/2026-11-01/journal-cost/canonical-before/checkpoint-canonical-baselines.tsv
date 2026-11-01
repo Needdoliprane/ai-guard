@@ -1,0 +1,4 @@
+fixture|canonical_bytes|sha256|rc|result
+v2_pending_decision|1183|953d58805e666acf69592a63680e249a04277fe5942fdbf66d29415c03989ff2|0|PASS 1/1; 7 filtered
+v3_failure_observed|922|ef72f1658b25c8b2ac538eab2d3ba4b8ec8cbb0cde84970395e3b6dc5f3af206|0|PASS 1/1; 6 filtered
+v4_pending_and_acknowledged|2172|f7dab6c73d7fa87da6c4749e3e15465b6e6db5380f801171105c1efbaeb94d47|0|PASS 1/1; 5 filtered

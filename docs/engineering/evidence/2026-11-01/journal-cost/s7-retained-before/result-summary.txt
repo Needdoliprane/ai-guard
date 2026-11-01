@@ -1,0 +1,7 @@
+Test: broker::journal::tests::measure_retained_journal_copy_cost_without_runtime
+Mode: debug, opt-in ignored test selected explicitly
+Result: PASS; 1 passed, 0 failed, 0 ignored, 154 filtered out; 71.42 s
+Instrumentation emitted five measurements: copy preparation source counters, retained_load_first, retained_load_second, retained_status, chain_validation_in_memory. All reported outcome=ok at head 30. Source preparation counters showed no create/publish/sync calls; after copying, Journal::load/status and pure in-memory verifier ran against the private copy. No performance threshold was asserted.
+Source snapshot: 160 files; pre and post checkout verification each 160/160, RC 0. Archive contains source/Cargo/toolchain only; copied test data is kept separately under private fixtures and excluded from archive.
+Host: Darwin 27.2.0 arm64, macOS 27.2. Filesystem type: NOT_RECORDED.
+Caveat: caller durations are fixture-specific debug observations and include work as named by the stage; instrumentation spans can overlap. Do not sum inclusive spans or extrapolate to release, capacity, H10 cause, or production performance.

@@ -731,6 +731,416 @@ fn verify_cost_snapshot(
     assert!(snapshot.metric(Operation::ReadAt).bytes > 0);
 }
 
+/// Copies only the explicitly selected private journal records. Imported scope
+/// and historical receipts are fixture data, never authentication or permission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "opt-in retained journal copy measurement; explicit private source required"]
+async fn measure_retained_journal_copy_cost_without_runtime() {
+    use crate::{broker::writer::WriterClient, control_fs::cost_probe::Operation};
+
+    tokio::time::timeout(Duration::from_secs(600), async {
+        let source = std::env::var_os("AI_GUARD_JOURNAL_COST_SOURCE_SCOPE")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .expect("explicit absolute source scope is required");
+        let source = crate::control_fs::absolute_path(&source)
+            .unwrap_or_else(|_| panic!("source scope path is unsupported"));
+        let operation_id = std::env::var("AI_GUARD_JOURNAL_COST_SOURCE_OPERATION")
+            .ok()
+            .and_then(|value| Uuid::parse_str(&value).ok())
+            .filter(|value| !value.is_nil())
+            .expect("explicit source operation is required");
+        // Caller wall time covers the entire copy preparation, including new
+        // destination writes. Only filesystem spans below SOURCE are collected.
+        let (copy, source_cost) = measure_writer_cost(
+            &source,
+            "copy_preparation_source_counters",
+            30,
+            async { copy_retained_cost_records(&source, operation_id) },
+            |copy| Some(copy.head.revision()),
+        )
+        .await;
+        for operation in [
+            Operation::FileSync, Operation::FileSyncAll, Operation::DirectorySync,
+            Operation::DirectorySyncAll, Operation::Create, Operation::Publish,
+        ] {
+            assert_eq!(source_cost.metric(operation).calls, 0,
+                "source must receive no write or synchronization request");
+        }
+        for operation in [Operation::Read, Operation::ReadToEnd, Operation::Revalidate,
+            Operation::ReadAt, Operation::DirectoryRevalidate] {
+            let metric = source_cost.metric(operation);
+            assert!(metric.calls > 0, "source reads must be observed");
+            assert_eq!(metric.calls, metric.succeeded);
+            assert_eq!(metric.failed, 0);
+            assert_eq!(metric.abandoned, 0);
+        }
+
+        // Only the new copy is opened as a Journal. Its fresh local lock does
+        // not authorize any historical claim, execution or external operation.
+        let journal = Journal::open(&copy.root, copy.scope.clone(), &FsExclusions::new(),
+            JournalLimitsV1::default(), ControlSecrets::new(vec![]).unwrap()).unwrap();
+        let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(60)).unwrap();
+        let mut confirmed = None;
+        for stage in ["retained_load_first", "retained_load_second"] {
+            let (loaded, cost) = measure_writer_cost(
+                copy.root.path(), stage, 30, writer.load(operation_id),
+                |job| job.as_ref().map(|job| job.head().revision()),
+            ).await;
+            let loaded = loaded.expect("copied journal must contain the selected operation");
+            assert!(loaded.head() == &copy.head, "copied load must confirm the exact head");
+            verify_cost_snapshot(&cost, 36, 3);
+            assert_eq!(cost.metric(Operation::Create).calls, 0);
+            assert_eq!(cost.metric(Operation::Publish).calls, 0);
+            confirmed = Some(loaded);
+        }
+        let (status, cost) = measure_writer_cost(
+            copy.root.path(), "retained_status", 30, writer.status(operation_id),
+            |status| match status {
+                Some(super::JournalStatusV1::Accepted(job)) => Some(job.head().revision()),
+                _ => None,
+            },
+        ).await;
+        assert!(matches!(status, Some(super::JournalStatusV1::Accepted(job)) if job.head() == &copy.head),
+            "copied status must confirm the exact accepted head");
+        verify_cost_snapshot(&cost, 36, 3);
+        assert_eq!(cost.metric(Operation::Create).calls, 0);
+        assert_eq!(cost.metric(Operation::Publish).calls, 0);
+
+        let loaded = confirmed.unwrap();
+        assert!(loaded.0.chain.first() == Some(&copy.initial), "initial checkpoint changed");
+        // This is wall time of the real pure verifier over COPIED bytes. It is
+        // neither CPU time nor an independently subtractible part of a load.
+        let (verified, validation_cost) = measure_writer_cost(
+            copy.root.path(), "chain_validation_in_memory", 30,
+            async {
+                let mut verifier = super::confirmed::ChainVerifierV1::new(
+                    journal.scope(), &journal.0.control, loaded.intent(),
+                    loaded.binding_manifest(), &copy.initial,
+                )?;
+                for (revision, bytes) in copy.revisions.iter().enumerate() {
+                    verifier.push(revision as u64, bytes)?;
+                }
+                verifier.finish(loaded.head())
+            },
+            |verified| verified.chain.last().map(|head| head.revision()),
+        ).await;
+        for operation in [Operation::Read, Operation::ReadToEnd, Operation::Revalidate,
+            Operation::ReadAt, Operation::DirectoryRevalidate, Operation::DirectorySync,
+            Operation::DirectorySyncAll, Operation::FileSync, Operation::FileSyncAll,
+            Operation::Create, Operation::Publish] {
+            assert_eq!(validation_cost.metric(operation).calls, 0,
+                "in-memory verification must perform no filesystem operation");
+        }
+        assert!(verified.chain == loaded.0.chain, "verified chain differs from strict load");
+        assert_eq!(verified.chain.len(), 31);
+        assert!(verified.chain.last() == Some(&copy.head), "verified head changed");
+        assert_eq!(verified.legacy_managed_seen, loaded.0.legacy_managed_seen);
+        assert_eq!(verified.last_cancel_operations, loaded.0.last_cancel_operations);
+        assert_eq!(verified.command_receipts.len(), loaded.0.command_receipts.len());
+        assert_eq!(verified.outbox_receipts.len(), loaded.0.outbox_receipts.len());
+        let same_payload = match (&verified.payload, &loaded.0.checkpoint) {
+            (super::LoadedCheckpoint::V1(left), super::LoadedCheckpoint::V1(right)) =>
+                super::canonical(left).unwrap() == super::canonical(right).unwrap(),
+            (super::LoadedCheckpoint::V2(left), super::LoadedCheckpoint::V2(right)) =>
+                super::canonical(left).unwrap() == super::canonical(right).unwrap(),
+            (super::LoadedCheckpoint::V3(left), super::LoadedCheckpoint::V3(right)) =>
+                super::canonical(left).unwrap() == super::canonical(right).unwrap(),
+            (super::LoadedCheckpoint::V4(left), super::LoadedCheckpoint::V4(right)) =>
+                super::canonical(left).unwrap() == super::canonical(right).unwrap(),
+            _ => false,
+        };
+        assert!(same_payload, "verified final payload differs from strict load");
+        copy.revalidate_source().unwrap();
+    }).await.expect("retained cost probe exceeded its cooperative 600-second observation bound");
+}
+
+struct RetainedCostCopy {
+    root: Directory,
+    scope: JournalScopeV1,
+    initial: super::RevisionRefV1,
+    head: super::RevisionRefV1,
+    revisions: Vec<Vec<u8>>,
+    source_scope: Directory,
+    source_job: Directory,
+    source_files: Vec<crate::control_fs::PrivateFile>,
+    scope_entries: Vec<(String, bool, u64)>,
+    job_entries: Vec<(String, bool, u64)>,
+}
+
+impl RetainedCostCopy {
+    fn revalidate_source(&self) -> JournalResult<()> {
+        for file in &self.source_files {
+            file.persistent_revalidate()
+                .map_err(|_| JournalError::UnsafeFilesystem)?;
+        }
+        if retained_cost_entries(&self.source_scope, 4)? != self.scope_entries
+            || retained_cost_entries(&self.source_job, 37)? != self.job_entries
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
+    }
+}
+
+fn retained_cost_entries(
+    directory: &Directory,
+    limit: u32,
+) -> JournalResult<Vec<(String, bool, u64)>> {
+    let mut entries: Vec<_> = directory
+        .persistent_entries(limit)
+        .map_err(|_| JournalError::UnsafeFilesystem)?
+        .into_iter()
+        .map(|entry| (entry.name, entry.directory, entry.bytes))
+        .collect();
+    entries.sort();
+    Ok(entries)
+}
+
+fn copy_retained_cost_records(
+    source: &Path,
+    operation_id: Uuid,
+) -> JournalResult<RetainedCostCopy> {
+    use crate::control_fs::PrivateFile;
+    let source_scope =
+        Directory::open_existing(source).map_err(|_| JournalError::UnsafeFilesystem)?;
+    let scope_entries = retained_cost_entries(&source_scope, 4)?;
+    if scope_entries.len() != 3
+        || scope_entries
+            .iter()
+            .any(|(name, directory, bytes)| match name.as_str() {
+                ".writer.lock" => *directory || *bytes != 0,
+                "scope.json" => *directory || *bytes > super::SMALL,
+                "jobs" => !*directory,
+                _ => true,
+            })
+    {
+        return Err(JournalError::InvalidInput);
+    }
+    let scope_file = source_scope
+        .persistent_read("scope.json", super::SMALL, &[])
+        .map_err(|_| JournalError::UnsafeFilesystem)?
+        .ok_or(JournalError::Interrupted)?;
+    let scope: JournalScopeV1 = super::parse(scope_file.bytes())?;
+    let scope_bytes = super::canonical(&scope)?;
+    let scope_hash = super::digest("ai-guard:broker-journal-scope:v1", &scope_bytes);
+    if scope_bytes != scope_file.bytes()
+        || source.file_name().and_then(|name| name.to_str()) != Some(scope_hash.as_str())
+    {
+        return Err(JournalError::Conflict);
+    }
+    let jobs = source_scope
+        .persistent_child("jobs", false)
+        .map_err(|_| JournalError::UnsafeFilesystem)?
+        .ok_or(JournalError::Interrupted)?;
+    let source_job = jobs
+        .persistent_child(&operation_id.to_string(), false)
+        .map_err(|_| JournalError::UnsafeFilesystem)?
+        .ok_or(JournalError::Interrupted)?;
+    let job_entries = retained_cost_entries(&source_job, 37)?;
+    let fixed = [
+        "reservation.json",
+        "accepted.json",
+        "intent.json",
+        "bindings.json",
+        "current.json",
+    ];
+    let mut expected: Vec<_> = fixed.iter().map(|name| (*name).to_owned()).collect();
+    expected.extend((0..31).map(super::revision_name));
+    expected.sort();
+    let actual: Vec<_> = job_entries
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    let total_bytes = job_entries
+        .iter()
+        .try_fold(scope_file.bytes().len() as u64, |total, (_, _, bytes)| {
+            total.checked_add(*bytes).ok_or(JournalError::TooLarge)
+        })?;
+    let revision_bytes = job_entries
+        .iter()
+        .filter(|(name, _, _)| name.starts_with("rev-"))
+        .try_fold(0u64, |total, (_, _, bytes)| {
+            total.checked_add(*bytes).ok_or(JournalError::TooLarge)
+        })?;
+    if actual != expected
+        || job_entries.iter().any(|(_, directory, _)| *directory)
+        || total_bytes > 2 * 1024 * 1024
+        || revision_bytes != 866_540
+    {
+        return Err(JournalError::InvalidInput);
+    }
+    let mut files: Vec<(String, PrivateFile)> = Vec::new();
+    for (name, _, bytes) in &job_entries {
+        let bound = if name == "intent.json" {
+            256 * 1024
+        } else if name.starts_with("rev-") {
+            super::CHECKPOINT
+        } else {
+            super::SMALL
+        };
+        if *bytes > bound {
+            return Err(JournalError::TooLarge);
+        }
+        let file = source_job
+            .persistent_read(name, *bytes, &[])
+            .map_err(|_| JournalError::UnsafeFilesystem)?
+            .ok_or(JournalError::Interrupted)?;
+        files.push((name.clone(), file));
+    }
+    let find = |name: &str| -> JournalResult<&PrivateFile> {
+        files
+            .iter()
+            .find(|(found, _)| found == name)
+            .map(|(_, file)| file)
+            .ok_or(JournalError::Interrupted)
+    };
+    let reservation: super::Reservation = super::parse(find("reservation.json")?.bytes())?;
+    let accepted: super::Accepted = super::parse(find("accepted.json")?.bytes())?;
+    let bindings: super::Bindings = super::parse(find("bindings.json")?.bytes())?;
+    let current: super::Current = super::parse(find("current.json")?.bytes())?;
+    let intent = ExecutionIntentV1::from_bytes(find("intent.json")?.bytes())
+        .map_err(|_| JournalError::Corrupt)?;
+    let intent_hash = intent.intent_hash().map_err(|_| JournalError::Corrupt)?;
+    if reservation.version != 1
+        || reservation.operation_id != operation_id
+        || reservation.scope_hash != scope_hash
+        || accepted.version != 1
+        || accepted.operation_id != operation_id
+        || accepted.scope_hash != scope_hash
+        || accepted.submit_hash != reservation.submit_hash
+        || accepted.intent_hash != intent_hash
+        || bindings.version != 1
+        || bindings.operation_id != operation_id
+        || bindings.intent_hash != intent_hash
+        || bindings.binding.kind() != super::BindingKindV1::None
+        || intent.operation_id() != operation_id
+        || intent.provider_credential().is_some()
+        || intent.provider_input().is_some()
+        || intent
+            .initial_options()
+            .run_options()
+            .secret_env_file
+            .is_some()
+        || current.version != 1
+        || current.operation_id != operation_id
+        || current.intent_hash != intent_hash
+        || current.head.revision() != 30
+        || accepted.initial_checkpoint.revision() != 0
+        || super::canonical(&reservation)? != find("reservation.json")?.bytes()
+        || super::canonical(&accepted)? != find("accepted.json")?.bytes()
+        || super::canonical(&bindings)? != find("bindings.json")?.bytes()
+        || super::canonical(&current)? != find("current.json")?.bytes()
+        || intent
+            .canonical_bytes()
+            .map_err(|_| JournalError::Corrupt)?
+            != find("intent.json")?.bytes()
+        || accepted.bindings_hash
+            != super::digest(
+                "ai-guard:broker-bindings:v1",
+                find("bindings.json")?.bytes(),
+            )
+    {
+        return Err(JournalError::InvalidInput);
+    }
+    super::valid_hash(&reservation.submit_hash)?;
+    for revision in 0..31 {
+        let file = find(&super::revision_name(revision))?;
+        let raw: Value = super::parse(file.bytes())?;
+        if !matches!(raw.get("version").and_then(Value::as_u64), Some(1..=4))
+            || raw.get("operation_id").and_then(Value::as_str)
+                != Some(operation_id.to_string().as_str())
+            || raw.get("intent_hash").and_then(Value::as_str) != Some(intent_hash.as_str())
+            || raw.get("revision").and_then(Value::as_u64) != Some(revision)
+            || !raw.get("payload").is_some_and(Value::is_object)
+            || super::canonical(&raw)? != file.bytes()
+        {
+            return Err(JournalError::Corrupt);
+        }
+    }
+    for (_, file) in &files {
+        file.persistent_revalidate()
+            .map_err(|_| JournalError::UnsafeFilesystem)?;
+    }
+    scope_file
+        .persistent_revalidate()
+        .map_err(|_| JournalError::UnsafeFilesystem)?;
+    if retained_cost_entries(&source_scope, 4)? != scope_entries
+        || retained_cost_entries(&source_job, 37)? != job_entries
+    {
+        return Err(JournalError::Conflict);
+    }
+
+    let parent = std::env::temp_dir()
+        .canonicalize()
+        .map_err(|_| JournalError::UnsafeFilesystem)?;
+    if parent.starts_with(source) {
+        return Err(JournalError::UnsafeFilesystem);
+    }
+    let temporary = tempfile::Builder::new()
+        .prefix("ai-guard-retained-cost-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in(&parent)
+        .map_err(|_| JournalError::UnsafeFilesystem)?;
+    let destination = temporary.keep();
+    if destination.starts_with(source) || source.starts_with(&destination) {
+        return Err(JournalError::UnsafeFilesystem);
+    }
+    let root =
+        Directory::open_existing(&destination).map_err(|_| JournalError::UnsafeFilesystem)?;
+    let child = |directory: &Directory, name: &str| -> JournalResult<Directory> {
+        directory
+            .persistent_child(name, true)
+            .map_err(|_| JournalError::UnsafeFilesystem)?
+            .ok_or(JournalError::Io)
+    };
+    let namespace = child(&root, "broker-journal-v1")?;
+    let target_scope = child(&namespace, &scope_hash)?;
+    let target_jobs = child(&target_scope, "jobs")?;
+    let target_job = child(&target_jobs, &operation_id.to_string())?;
+    let copy_file =
+        |directory: &Directory, name: &str, original: &PrivateFile| -> JournalResult<PrivateFile> {
+            original
+                .persistent_revalidate()
+                .map_err(|_| JournalError::UnsafeFilesystem)?;
+            let copied = directory
+                .persistent_create(name, original.bytes())
+                .map_err(|_| JournalError::Io)?;
+            if copied.bytes() != original.bytes() || copied.digest() != original.digest() {
+                return Err(JournalError::Corrupt);
+            }
+            copied.persistent_sync().map_err(|_| JournalError::Io)?;
+            Ok(copied)
+        };
+    copy_file(&target_scope, "scope.json", &scope_file)?;
+    let mut revisions = Vec::with_capacity(31);
+    for (name, file) in &files {
+        let copied = copy_file(&target_job, name, file)?;
+        if name.starts_with("rev-") {
+            revisions.push(copied.bytes().to_vec());
+        }
+    }
+    for directory in [&target_job, &target_jobs, &target_scope, &namespace, &root] {
+        directory.sync().map_err(|_| JournalError::Io)?;
+    }
+    let mut source_files = vec![scope_file];
+    source_files.extend(files.into_iter().map(|(_, file)| file));
+    let copy = RetainedCostCopy {
+        root,
+        scope,
+        initial: accepted.initial_checkpoint,
+        head: current.head,
+        revisions,
+        source_scope,
+        source_job,
+        source_files,
+        scope_entries,
+        job_entries,
+    };
+    copy.revalidate_source()?;
+    Ok(copy)
+}
+
 #[test]
 #[ignore = "spawned only by the parent SIGKILL test"]
 fn crash_child_at_stage() {

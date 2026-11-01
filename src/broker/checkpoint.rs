@@ -212,23 +212,26 @@ impl BrokerCheckpointV2 {
         Ok(value)
     }
     pub fn canonical_bytes(&self) -> JournalResult<Vec<u8>> {
-        self.validate_shape()?;
-        let bytes = canonical(self)?;
+        let bytes = self.validated_canonical_bytes()?;
         if bytes.len() > MAX_BYTES {
             return Err(JournalError::TooLarge);
         }
         Ok(bytes)
     }
     fn validate_shape(&self) -> JournalResult<()> {
+        self.validated_canonical_bytes().map(drop)
+    }
+    fn validated_canonical_bytes(&self) -> JournalResult<Vec<u8>> {
         if self.version != 2 {
             return Err(JournalError::UnsupportedVersion);
         }
         self.runner.canonical_bytes()?;
         self.supervision.validate_shape()?;
-        if canonical(self)?.len() > MAX_BYTES {
+        let bytes = canonical(self)?;
+        if bytes.len() > MAX_BYTES {
             return Err(JournalError::TooLarge);
         }
-        Ok(())
+        Ok(bytes)
     }
     pub(crate) fn validate_transition(&self, previous: Option<&Self>) -> JournalResult<()> {
         self.validate_shape()?;

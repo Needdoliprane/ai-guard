@@ -1,0 +1,6 @@
+stage	head_before	head_after	caller_ms	read_calls	read_to_end_calls	revalidate_calls	read_at_calls	directory_revalidate_calls	file_sync_all_calls	file_sync_all_ms	directory_sync_all_calls	directory_sync_all_ms	create_calls	publish_calls
+copy_preparation_source_counters	30	30	5905.024042	37	37	148	148	469	0	0	0	0	0	0
+retained_load_first	30	30	16530.911584	41	39	112	111	374	36	499.78329	3	0.01	0	0
+retained_load_second	30	30	17696.926334	41	39	112	111	374	36	681.79983	3	17.343166	0	0
+retained_status	30	30	16921.048209	41	39	112	111	374	36	221.55483	3	23.660625	0	0
+chain_validation_in_memory	30	30	13571.291	0	0	0	0	0	0	0	0	0	0	0

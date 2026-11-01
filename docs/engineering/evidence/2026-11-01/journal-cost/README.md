@@ -1,6 +1,6 @@
 # Coût du journal et des gardiens — 1er novembre 2026
 
-Base applicative `b32711d`, worktree broker-service. Ce lot mesure avant d'optimiser ; il ne qualifie ni le démarrage, ni l'arrêt/reprise, ni D5. **G09 reste FAIL et aucun gate n'est clos.** Aucun worker, modèle ou service nouveau lancé, aucune ressource existante arrêtée ou nettoyée.
+Travaux amorcés sur `b32711d`, poursuivis depuis `f6f93b3` dans le worktree broker-service : mesures, factorisation canonique et contrôles ciblés. Les sections gardent leurs gels et résultats datés ; la [synthèse finale](#résultats-finaux-du-lot) distingue validation logicielle et performance non démontrée. **G09 reste FAIL et aucun gate n'est clos.** Aucun worker, modèle ou service nouveau lancé, aucune ressource existante arrêtée ou nettoyée.
 
 ## Observation passive du gardien H10
 
@@ -84,3 +84,72 @@ cargo build --release --locked
 ```
 
 La fixture du diagnostic est volontairement conservée même après échec ; fournir au processus un TMPDIR privé neuf pour la retrouver sans publier son chemin dans les métriques. N'utiliser ni racine de journal existante ni secrets réels. Les autres canaris gardent leur gestion de fixtures habituelle. L'option `--release` n'a pas été employée pour ces mesures : elle ne serait pas une nouvelle qualification par simple changement de commande.
+
+## S7 — mesure sur copie privée du graphe riche
+
+**PASS du diagnostic**, base `f6f93b3` plus le probe `a9db5d10801144bafad2e24689b5a34d46b7499ece523ee531647f015ed8dde5`, sans correction applicative. La [revue avant exécution](s7-retained-before/preflight-review.md) couvre l'import borné de données de recherche. Luna sélectionne explicitement un journal retenu, copie uniquement ses cinq fichiers de contexte sans binding secret et ses31 révisions vers une nouvelle racine privée, puis utilise le vrai Journal/Writer et le vrai ChainVerifier. Aucune identité, autorisation ou action métier n'est restaurée ; aucun moteur, fournisseur ou gardien nouveau n'est lancé.
+
+Le [log](s7-retained-before/01-retained-copy-cost.log), RC0 et [tableau numérique](s7-retained-before/cost-summary.tsv) portent cinq segments fermés :
+
+| Segment | Temps mural caller, debug | Nombre d'appels File sync_all / Directory sync_all |
+|---|---:|---:|
+| Préparation de la copie, compteurs limités à la source | 5 905,02 ms | 0 / 0 |
+| Premier load de la copie, head30 | 16 530,91 ms | 36 / 3 |
+| Second load, même head | 17 696,93 ms | 36 / 3 |
+| Status, même head | 16 921,05 ms | 36 / 3 |
+| Validation de la chaîne depuis les bytes en mémoire | 13 571,29 ms | 0 / 0 |
+
+**1 test exécuté,71,42s**,154 filtrés ; compilation séparée. Origine revalidée avant/après, zéro demande de création/publication/sync observée dans son collecteur ; l'ouverture source n'utilise pas Journal::open ni le verrou writer. Le verrouillage n'est pas instrumenté : ce dernier point est une propriété de source relue, pas une conclusion des compteurs. La préparation inclut les écritures de destination dans son temps caller, mais les compteurs ne couvrent que la source. La collecte mémoire ne voit aucune IO et vérifie réellement head/chaîne/payload ; son temps n'est pas du CPU et n'isole pas la seule sérialisation. Les durées inclusives se chevauchent ; ne pas les additionner ou les soustraire mécaniquement pour attribuer un coût.
+
+Les [160 sources](s7-retained-before/SHA256SUMS) concordent avant/après ; Root vérifie aussi l'[archive extraite](s7-retained-before/root-archive-verify.txt), manifeste SHA `089639722e9db93b67c2154e148c118d10a94cb6f0e2925a125acdde8faa53c3`, archive privée SHA `afb448b645210ad6e13cb071de60c55893a4927572e5a478698a87040dfbb968`. Une première vérification Root trop large a refusé les fixtures publiques `tests/fixtures/` ; filtre corrigé, sans modifier l'archive. Archives, corpus, IDs et chemins source privés restent hors Git ; seule la [commande paramétrée](s7-retained-before/command-template.txt) est partagée. Darwin27.2.0 arm64/macOS27.2, FS exact **NOT_RECORDED**.
+
+Cette mesure établit un coût important dans le traitement en mémoire de ce graphe, sans prouver la cause de H10, une latence release, un percentile ou une capacité. La [factorisation canonique proposée](checkpoint-canonical-design.md) retire un doublon local identifié en source ; sa validation et sa mesure après correction sont distinctes. Le probe n'est pas un import générique, une sauvegarde atomique ou un outil de reprise : les contre-exemples source malformée/symlink/hardlink ne sont pas exécutés ici. Les premiers niveaux de répertoires peuvent être ouverts pour leur inventaire avant refus, sans lecture des fichiers référencés. G09 reste FAIL, D5 ouvert et aucun gate clos.
+
+## Correction canonique — premier contrôle
+
+Les [trois tests avant correction](canonical-before/checkpoint-canonical-baselines.tsv) passent sur l'ancienne implémentation. Leurs empreintes sont figées avant le code : V2,1 183octets ; V3,922 ; V4,2 172. Les [logs et manifests](canonical-before/result-summary.txt) et l'[archive vérifiée par Root](canonical-before/root-archive-verify.txt) conservent cette provenance ; manifeste SHA `3a1708f1193b882e112f221bb75965b1db4f999002e3b4dfbf83d665883a5ac9`, archive privée SHA `714f501eee7dcd1196519e92c0eaab51e9b2a73a2d5986f8d838da8256d752e8`. Les cas négatifs portent sur erreurs, cardinalité et tailles ; l'entrée32MiB+1 teste la borne d'entrée, pas séparément la taille canonique de sortie.
+
+La correction ajoute un helper privé dans chacun des checkpoints V2/V3/V4, qui restitue les bytes produits par la validation complète. Aucun champ, format, domaine de hash, API, cap ou ordre de refus ne change ; les caps de liste conservent leur court-circuit et tous les appelants de shape restent contrôlés. Aucun cache ni suppression de Full pré/post, CAS/floors, synchronisation, claim ou enforcement. La comparaison source indépendante est favorable ; la validation complète de ce lot reste ouverte.
+
+**Premier contrôle :6 fonctions PASS,1 FAIL**, source phase2 gelée. Trois goldens, promotion du vrai journal, contexte/replay/caps lifecycle et conservation V4 passent une fois chacun. Le [septième test outbox](canonical-first-check/07-outbox-caps.log) échoue RC101 après11,15s : enqueue du lot positif512 → `Io` avant les autres assertions. Le nom « green » de sa capture privée n'est pas un statut. Les [résultats](canonical-first-check/result-summary.txt), commandes et160 sources avant/après sont conservés ; Root vérifie aussi l'[archive extraite](canonical-first-check/root-archive-verify.txt), manifeste SHA `74090ab4c5ae1dd000eb836d99fb51f40d967a0eddb0ef4616dc6e9b1a4507c3`, archive privée SHA `7a786f17f71e781824cb054cbaa530a7d3195e5a44d83c59673ed4ae66b48c03`. Le fichier des commandes a été ajouté après l'arrêt par transcription des arguments réels de l'outil, avec son PATH historique ; le reproducer séparé n'a pas été exécuté.
+
+Le caller de la fixture est10s, mais timeout, oneshot fermé et erreur backend peuvent tous produire `Io`. Ce log ne tranche pas ; la factorisation ne peut être incriminée ou exonérée par cette seule durée. Un diagnostic Rust temporaire fermé est préparé à budgets et assertions identiques, avec conservation préalable de cette fixture entièrement synthétique. Une éventuelle relecture du journal après erreur sera datée comme observation ultérieure ; elle ne prouve ni le head au timeout ni la livraison de la réponse initiale. Tout marqueur sera retiré exactement après capture. **S7 après correction, fmt, Clippy et release : NOT_RUN** à ce premier arrêt ; aucun nouveau moteur/modèle/front/E2E lancé.
+
+La [proposition source du prochain profil de lancement Docker](d5-launch-profile-design.md) reste non implémentée. Elle concerne un prérequis distinct de D5 et ne constitue ni témoin de fin normale ni preuve de fencing ; aucune ressource retenue n'est retirée sur cette base.
+
+## Diagnostic à budgets inchangés
+
+**FAIL reproduit, origine observée.** Une seule exécution instrumentée du même test, toujours avec caller10s, donne RC101 en20,01s après compilation4min04s. La [commande est écrite avant exécution](canonical-timeout-diagnostic/command-before-run.txt) ; les [marqueurs bruts](canonical-timeout-diagnostic/01-reproduction.log) ne contiennent que codes, nombres et booléens.
+
+| Observation | Résultat |
+|---|---|
+| Branche de réception | `timeout` |
+| Retour du caller | erreur après10,304650s, prévalidation comprise |
+| Fin de commande backend | résultat réussi,512 reçus construits,14,120798s ; send non accepté par le oneshot |
+| Relecture après erreur | succès, head1 et512 événements ; durée propre8,855521s |
+
+Le diagnostic prouve cette branche de timeout et une réussite backend ultérieure. Il ne donne ni le head au timeout, ni une réponse lue par le caller, ni un ACK d'audit central. Les chronomètres ont des origines distinctes ; leur soustraction n'attribue pas un coût. La relecture peut attendre ou concurrencer des étapes du writer et possède ses propres synchronisations. Aucune cause temporelle de la factorisation ou de H10 n'est établie ; le cas512 n'avait pas de baseline pré-correction et ce diagnostic ne mesure pas la performance du code non instrumenté.
+
+Les [160 sources](canonical-timeout-diagnostic/SHA256SUMS) concordent avant/après ; Root vérifie l'[archive extraite](canonical-timeout-diagnostic/root-archive-verify.txt), manifeste SHA `8bc17aadb12e14be06338118ec3294d7dfc4b2ab7c3a94d51956a0070bb56d9f`, archive privée SHA `6bf490e5aacbed6dd266267e8bcebf7d5e980078adef49049912495e4d59f606`. Les [deux](canonical-timeout-diagnostic/writer-diagnostic.patch) [deltas](canonical-timeout-diagnostic/test-diagnostic.patch) et leur [note](canonical-timeout-diagnostic/design.md) sont conservés comme preuves temporaires. Ils ont ensuite été retirés exactement : Writer retrouve SHA `47c72983851dc057c22d6731f55b99b0c208bbe8401d8333e00e582d217538d7`, test outbox retrouve d'abord son gel phase2 SHA `f9a34cfc7fbf3398bc81821af21860ce8958a0a36a4e2dc376c7faf1481ac7a5`. Aucun de ces marqueurs ne reste dans le code applicatif final.
+
+La correction suivante porte seulement sur le harnais : constructeur privé avec attente paramétrée, défaut10s inchangé, et seul test fonctionnel512 porté à60s, plafond existant de Writer. Tous les oracles512/513, refus de contexte/secrets et absence d'écriture restent identiques. Aucun retry, attente artificielle, nouveau service ou délai de worker modifié. Ce choix permet de vérifier les bornes fonctionnelles en debug ; il ne qualifie pas une latence10s. Un canari existant de timeout/ownership sera exécuté avec les deux coutures outbox, puis S7 et les checks du nouveau gel. Leur statut est encore **NOT_RUN** à cette étape. Les deux échecs précédents restent visibles.
+
+## Résultats finaux du lot
+
+**PASS logiciel ciblé, neuf fonctions uniques après correction.** Les six fonctions du premier gel ont passé ; sur le dernier gel, le test fonctionnel512 passe en25,95s, la couture V4 est rejouée en10,01s, le canari `stop_append_unknown_retains_queued_identity_and_replays_once` passe en2,64s et S7 passe en71,35s. Cette couture V4 répétée n'est pas comptée deux fois. Le canari conserve ses10ms et vérifie réellement queue, résultat inconnu et replay ; le délai produit n'est pas relevé. Les trois baselines avant code, les deux FAIL et leur diagnostic restent dans les sections précédentes. Les [logs individuels](canonical-final/result-summary.txt), [commandes assainies](canonical-final/commands-sanitized.txt) et [revue indépendante finale](canonical-final/independent-review.md) conservent leurs périmètres.
+
+`cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings` et `cargo build --release --locked` terminent RC0 ; Clippy sans diagnostic, release11min52s. Les160 sources concordent avant/après ; Root vérifie le [checkout courant](canonical-final/root-current-checkout-verify.txt), l'[archive extraite](canonical-final/root-archive-verify.txt) et les deux copies binaires600 hors Git/cache. Manifeste source SHA `6467bd2c42262291164ddd66095ef2dea65f805b3fda86069ae3af9ac5960376`, archive privée SHA `49199ae33da6b80f014bd1bcdb43462142faddfbc4721354f5b41c194cc022f8`. Binaires : agentsandbox `879bffb4f1978fe0a069314cd1d89f392ccd5f4ac5e081e67d02a48bb480fcad`, ai-guard-provider `222e7e07ba94d2bc3e505fa839fb9bdbd808e24776c5b1d127500b709493c8a5`. Les enregistrements copiés, archives et binaires restent privés. Deux valeurs source sont remplacées dans la commande publique ; les arguments réels restent dans la capture privée.
+
+Même probe et mêmes31 révisions sélectionnées, avant/après factorisation ; temps muraux caller en millisecondes, **debug uniquement** :
+
+| Segment | Avant | Après |
+|---|---:|---:|
+| Préparation, compteurs limités à la source | 5 905,02 | 5 699,32 |
+| Premier load | 16 530,91 | 16 952,07 |
+| Second load | 17 696,93 | 16 901,40 |
+| Status | 16 921,05 | 16 766,08 |
+| Vérification en mémoire | 13 571,29 | 13 959,58 |
+
+**Aucun gain de latence n'est démontré.** Les valeurs restent du même ordre et le temps du vérificateur augmente sur cet échantillon. Les compteurs lecture/sync restent identiques, notamment36 appels file-sync_all et3 directory-sync_all par load/status ; source et segment mémoire n'observent toujours aucune création/publication/sync. Le [relevé après](canonical-final/s7-cost-summary.tsv), nommé `.tsv`, utilise ici `|` comme séparateur ; les JSON bruts du [log](canonical-final/04-s7-retained-copy.log) font autorité. Les spans inclusifs ne sont pas additifs ; aucune isolation de charge, CPU consommé, performance release, percentile, capacité100 ou causalité H10 n'est prouvé. La suppression locale du doublon est établie par la source et les contrats ; le coût principal et le démarrage restent ouverts.
+
+Deux erreurs documentaires sont aussi corrigées dans [BROKER_JOURNAL.md](../../../BROKER_JOURNAL.md) : le code n'emploie aucun domaine de hash propre à reservation/accepted ; il utilise le vrai submit_hash et les liens vérifiés. Aucun domaine fictif n'est ajouté au code. **NOT_RUN :** nouveaux Docker/Podman/Kubernetes, autres plateformes/FS, pannes runtime et reprise, matrice3/100workers, frontend/navigateur/fournisseurs/SSO. La conception du [profil de lancement suivant](../docker-launch-profile/README.md) reste un chantier distinct, sans témoin D5 ou autorisation de retirer les anciens slots. G09 FAIL et0/12 gates clos.

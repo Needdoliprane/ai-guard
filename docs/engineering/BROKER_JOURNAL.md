@@ -104,7 +104,7 @@ ControlSecrets : liste vide valide ; <=64 valeurs UTF-8 non vides1..4096bytes, t
 
 Racine durable retenue → `broker-journal-v1/<scope_hash>/` ; scope hash SHA256(`ai-guard:broker-journal-scope:v1\0` + JSON canonique scope). `.writer.lock`0600 retenu/flock exclusif non bloquant ; `scope.json` immutable ; `jobs/<operation-UUID-canonique>/`. Noms générés, aucun segment source/caller. Canonique : clés triées récursivement, tableaux/texte exacts ; SHA256 hex minuscules64, domaines séparés terminés par NUL.
 
-- `reservation.json` : `{version:1,scope_hash,operation_id,submit_hash}`, domaine `ai-guard:broker-reservation:v1`.
+- `reservation.json` : `{version:1,scope_hash,operation_id,submit_hash}`. Le record n'a pas de domaine de hash propre ; `submit_hash` engage les bytes de soumission via `ai-guard:broker-submit:v1`, décrit ci-dessous.
 - `intent.json` : canonical_bytes ExecutionIntent exacts, domaine/hash existants inchangés.
 - `bindings.json` : `{version:1,operation_id,intent_hash,binding:BindingManifestV1}`, domaine `ai-guard:broker-bindings:v1`.
 - BindingManifest fermé : `{"kind":"none"}` ; ou `{"kind":"manual","binding_id":Uuid,"file_name":"manual-env-v1.bin","names":[String],"source_sha256":H,"stored_sha256":H,"handoff_sha256":H,"stored_bytes":N}` ; ou `{"kind":"provider","binding_id":Uuid,"file_name":"<UUID>.json","names":[BOOTSTRAP_ENV],"source_sha256":H,"stored_sha256":H,"handoff_sha256":H,"stored_bytes":N}`. Aucune valeur Env/secret dans métadonnées.
@@ -112,7 +112,7 @@ Racine durable retenue → `broker-journal-v1/<scope_hash>/` ; scope hash SHA256
 - `bindings/<UUID>.json` fournisseur3 : record original copié EXACTEMENT ; binding_id/file_name/digest égaux intent.provider_credential ; source_sha=stored_sha=digest original, stored_bytes=longueur réelle. Parseur pur partagé valide record/version/id/format/contexte ; handoff_sha=SHA(env_bytes décodés réellement remis au runtime), names=[BOOTSTRAP_ENV]. Aucune résolution/Auto/nouvelUUID/réécriture du record ; env et secrets décodés contrôlés contre ControlSecrets.
 - `rev-00000000000000000000.json` puis revision u64 décimale20digits : `{version:1,operation_id,intent_hash,revision,previous:null|RevisionRefV1,payload:CheckpointPayloadV1}`, domaine `ai-guard:broker-checkpoint:v1`. RevisionRef wire `{revision:u64,hash:H}` ; rev0 previous=null, sinon précédente+1/hash exact, sans trou.
 - `current.json` : `{version:1,operation_id,intent_hash,head:RevisionRefV1}` ; seule entrée vers révisions confirmées.
-- `accepted.json` : `{version:1,scope_hash,operation_id,submit_hash,intent_hash,bindings_hash,initial_checkpoint:RevisionRefV1}`, domaine `ai-guard:broker-accepted:v1`.
+- `accepted.json` : `{version:1,scope_hash,operation_id,submit_hash,intent_hash,bindings_hash,initial_checkpoint:RevisionRefV1}`. Aucun domaine de hash propre à ce record n'est utilisé actuellement. Le lecteur valide ses champs et leurs liens vers la réservation, l'intention, les bindings et la révision initiale.
 
 None obligatoire et explicite si intention sans credential ; manuel attendu/fournisseur3 manquant ou incompatible refuse. Source ne prouve aucune identité. reserve calcule LUI-MÊME submit_hash=SHA256(`ai-guard:broker-submit:v1\0` + submit_bytes EXACTS), vérifie <=256KiB AVANT I/O et n'accepte aucun hash libre prétendu vérifié. Ces bytes ne sont ni parsés ni exécutés par le journal et peuvent ne pas être persistés ; leur format/frame canonique futur reste hors lot. Toute différence de bytes change l'identité de soumission ; aucune normalisation silencieuse.
 

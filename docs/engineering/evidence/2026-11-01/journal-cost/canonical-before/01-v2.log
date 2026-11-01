@@ -1,0 +1,10 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 03s
+     Running tests/broker_checkpoint.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_checkpoint-c1806e2183c70a88)
+
+running 1 test
+test canonical_v2_public_fixture_baseline_and_errors ... checkpoint_canonical_baseline {"fixture":"v2_pending_decision","bytes":1183,"sha256":"953d58805e666acf69592a63680e249a04277fe5942fdbf66d29415c03989ff2"}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.02s
+

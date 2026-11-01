@@ -296,10 +296,12 @@ impl BrokerCheckpointV3 {
         Ok(value)
     }
     pub fn canonical_bytes(&self) -> JournalResult<Vec<u8>> {
-        self.validate_shape()?;
-        canonical(self)
+        self.validated_canonical_bytes()
     }
     fn validate_shape(&self) -> JournalResult<()> {
+        self.validated_canonical_bytes().map(drop)
+    }
+    fn validated_canonical_bytes(&self) -> JournalResult<Vec<u8>> {
         if self.version != 3 {
             return Err(JournalError::UnsupportedVersion);
         }
@@ -318,12 +320,14 @@ impl BrokerCheckpointV3 {
             ));
         }
         require(approvals <= 1)?;
-        if canonical(&self.commands)?.len() > MAX_COMMAND_BYTES
-            || canonical(self)?.len() > MAX_BYTES
-        {
+        if canonical(&self.commands)?.len() > MAX_COMMAND_BYTES {
             return Err(JournalError::TooLarge);
         }
-        Ok(())
+        let bytes = canonical(self)?;
+        if bytes.len() > MAX_BYTES {
+            return Err(JournalError::TooLarge);
+        }
+        Ok(bytes)
     }
     pub(crate) fn validate_context(
         &self,

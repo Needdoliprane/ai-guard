@@ -1,0 +1,5 @@
+Command and metadata recorded before execution; one run only.
+cwd: /Users/louis/Documents/ai-guard/.worktrees/docker-launch-profile
+login=false; yield_time_ms=1000; PATH includes /usr/sbin and /sbin.
+TMPDIR is the new private capture fixture directory. Source snapshot excludes TMPDIR contents.
+export PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; proof=/private/tmp/ai-guard-launch-profile-red-20261101-021053; CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target TMPDIR="$proof/fixtures/tmp" cargo test --locked --lib broker::service::profile::tests::registry_v2_accepts_explicit_minimal_docker_start_profile -- --exact --nocapture --test-threads=1 > "$proof/01-registry-v2-red.log" 2>&1; rc=$?; /usr/bin/printf '%s\n' "$rc" > "$proof/01-registry-v2-red.rc"; exit "$rc"

@@ -1,0 +1,9 @@
+PASS — broker_outbox::wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes: 1 passed, 5 filtered; test 25.95 s; RC 0.
+PASS — broker_outbox::v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_refused: 1 passed, 5 filtered; test 10.01 s; RC 0.
+PASS — broker::writer::tests::stop_append_unknown_retains_queued_identity_and_replays_once: 1 passed, 154 filtered; test 2.64 s; RC 0.
+PASS — broker::journal::tests::measure_retained_journal_copy_cost_without_runtime: explicitly ignored opt-in selected; 1 passed, 154 filtered; test 71.35 s; RC 0; five measurements at head 30 in s7-cost-summary.tsv.
+PASS — cargo fmt --all -- --check; RC 0.
+PASS — cargo clippy --locked --all-targets -- -D warnings; RC 0, no diagnostics.
+PASS — cargo build --release --locked; RC 0, 11m52s.
+Snapshot/archive: 160 Cargo/source/test/toolchain files; pre and post checkout checks 160/160, RC 0. Source archive excludes fixtures. Release binaries copied mode600 outside repository/cache; hashes are in release-binaries/SHA256SUMS.
+S7 table is a debug observation for this retained-copy fixture only; overlapping/inclusive spans are not additive and do not establish H10 cause, release latency, or production performance. Filesystem type NOT_RECORDED.

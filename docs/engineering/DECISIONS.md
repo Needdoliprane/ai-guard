@@ -1,5 +1,25 @@
 # Décisions d'industrialisation
 
+## 1er novembre — Keycloak, PKI de test simple et backend local partagé
+
+Le mainteneur demande davantage de parallélisme, notamment la mise en place et les essais Keycloak pendant le chantier du broker, et confirme que toute occasion utile de déléguer des tâches indépendantes doit être saisie sans nouvelle relance. Cette obligation est inscrite dans [AGENTS.md](../../AGENTS.md), avec périmètres de fichiers, coordination des dépendances et économie des tests. Le profil reste une découverte explicitement activée, isolée des tenants et credentials existants, avec les quatre comptes du [contrat SSO](../sso.md). Le DNS local nécessaire peut être configuré en préservant les entrées existantes ; sur ce Mac, la résolution relève de `/etc/hosts`. Aucun changement de nom de machine n'est nécessaire à ce seul besoin.
+
+Pour les certificats de test, le mainteneur retient une solution simple : un outil/script générant localement AC racine, intermédiaire et certificat serveur, avec clés privées protégées et refus d'écraser une sortie existante. L'automatisation du projet reste en Rust ; elle fournit les éléments utilisables par les clients et services de test, sans dépendance au NAS ni nouvelle infrastructure PKI. Les usages de confiance et les preuves TLS restent explicites.
+
+Le profil du modèle local essayé pour Jev est réutilisé pour tester l'inférence d'entreprise : [Qwen2.5-0.5B-Instruct Q4_K_M](evidence/2026-10-30/local-judge/README.md), révision/quantification/contexte et image déjà consignés. Son protocole et son budget sous1Go ont passé ; son jugement de sécurité a échoué. Le backend peut être partagé, avec routes/profils, contexte, permissions, quotas et traces séparés ; il ne devient pas une autorité de décision. Existence actuelle du service, format compatible OpenAI/Claude, confiance TLS et parcours des clients restent à vérifier, sans repli cloud ni téléchargement d'un autre modèle implicite.
+
+## 1er novembre — factoriser sans annoncer un gain non mesuré
+
+Les checkpoints V2/V3/V4 réutilisent leurs bytes déjà validés, avec mêmes contrôles, caps, ordre de refus, formats et domaines. Les trois goldens sont relevés avant code puis figés ; aucune autorité en cache, barrière ou durée produit n'est supprimée. Le timeout d'un test outbox est reproduit puis séparé de son oracle fonctionnel : seule cette fixture utilise60s déjà admises par Writer, tandis qu'un canari conserve la sémantique timeout/queue/replay. [Neuf fonctions, checks, revue et preuves](evidence/2026-11-01/journal-cost/README.md#résultats-finaux-du-lot).
+
+La comparaison du même graphe ne démontre aucun gain de latence ; le coût principal et H10 restent ouverts. Ni le build release ni ces temps debug ne qualifient un runtime, une capacité100 ou un retrait D5.
+
+## 1er novembre — profil Docker lié au parent accepté, contrat approuvé
+
+Le [contrat concret relu](evidence/2026-11-01/docker-launch-profile/README.md) reste dans le broker/runtime Rust et le journal existants. Nouveau choix opérateur explicite versionné, paire bindingsV2/Accepted2 strictement couplée, profil minimal exact privé et durable avant acceptation, scope authentifié/parent/intention/invocation engagés, seed distinct et contrôle juste avant le start préarmé. Les formats V1, credentials, plans fournisseurs et empreintes historiques restent exacts ; aucun changement implicite de choix au replay. Le profil ne constitue pas une nouvelle preuve d'identité.
+
+Les métadonnées de preuve et le blob sont distincts : la reprise STOP n'ouvre pas ce dernier, mais audit/budget/stockage nécessaires à un append restent obligatoires. Un échec de ces prérequis conserve l'inconnue et les projections/enforcer prouvés, sans faux ACK. Aucun sceau contre mêmeUID/root, aucun témoin de complétion/fencing et aucune permission de retirer des slots n'en découlent. Le premier test de parser est écrit dans un checkout séparé ; code et qualification du profil restent à livrer. Aucun moteur, cloud, PKI ou service OS lancé par cette décision.
+
 ## 1er novembre — mesurer sans supprimer les barrières du journal
 
 Après H10, séparer le coût des lectures/validations, des appels exacts `File::sync_all` et de la queue du Writer avant d'optimiser. Le probe est uniquement `cfg(test)`, opt-in et ignoré par défaut ; il exécute les corps applicatifs originaux sur un vrai journal neuf. Champs fermés, racine conservée seulement en mémoire, aucun contenu/credential/identifiant dans les métriques. Les temps inclusifs se chevauchent et le timeout reste coopératif, sans annulation d'une commande Writer déjà acceptée.

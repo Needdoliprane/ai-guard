@@ -1,0 +1,7 @@
+Baseline phase before canonicalization changes. The three exact public-fixture integration tests passed once each in debug mode. These lengths and SHA-256 values are current-code candidates to freeze as independent expected literals, not post-change expected values.
+
+v2_pending_decision: 1183 bytes, 953d58805e666acf69592a63680e249a04277fe5942fdbf66d29415c03989ff2
+v3_failure_observed: 922 bytes, ef72f1658b25c8b2ac538eab2d3ba4b8ec8cbb0cde84970395e3b6dc5f3af206
+v4_pending_and_acknowledged: 2172 bytes, f7dab6c73d7fa87da6c4749e3e15465b6e6db5380f801171105c1efbaeb94d47
+
+All three exited RC 0. Snapshot and current checkout each verify 160/160 source/Cargo/toolchain files. The source archive excludes documentation and all generated fixtures. Each test used a separate private TMPDIR. No runtime, Journal, Store, filesystem fixture, engine, or provider was used by these public DTO baseline tests.

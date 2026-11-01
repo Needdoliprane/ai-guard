@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running tests/broker_lifecycle.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_lifecycle-b0a2234ecc84211d)
+
+running 1 test
+test lifecycle_wire_context_replay_caps_and_legacy_approval_boundaries ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 10.08s
+

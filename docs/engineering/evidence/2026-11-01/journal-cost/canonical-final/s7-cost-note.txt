@@ -1,0 +1,1 @@
+5 measured stages, all outcome=ok at head30. Fixture-specific debug observations only; caller spans and instrumented spans are not additive and are not a release/H10 performance qualification.

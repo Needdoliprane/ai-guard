@@ -35,6 +35,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(control_secrets: &[&str]) -> Self {
+        Self::with_timeout(control_secrets, Duration::from_secs(10))
+    }
+
+    fn with_timeout(control_secrets: &[&str], timeout: Duration) -> Self {
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -66,7 +70,7 @@ impl Fixture {
             control,
         )
         .unwrap();
-        let writer = WriterClient::start(journal.clone(), 16, Duration::from_secs(10)).unwrap();
+        let writer = WriterClient::start(journal.clone(), 16, timeout).unwrap();
         Self {
             writer,
             journal,
@@ -144,6 +148,116 @@ fn synthetic_event(request: &DecisionRequest, index: usize) -> Event {
     event.trace_id = request.trace_id.clone();
     event.data = json!({"synthetic_test": true, "index": index});
     event
+}
+
+/// Golden observed before the canonical-byte factorization, with fixed public
+/// event identities/timestamps and no runtime or audit services.
+#[test]
+fn canonical_v4_public_fixture_baseline_and_error_order() {
+    use sha2::{Digest, Sha256};
+
+    let operation = Uuid::from_u128(0x66666666666646668666666666666666);
+    let session = Uuid::from_u128(0x77777777777747778777777777777777);
+    let plan = legacy_plan_value(operation, session);
+    let request: DecisionRequest = serde_json::from_value(plan["request"].clone()).unwrap();
+    let intent = ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+    let intent_hash = intent.intent_hash().unwrap();
+    let runner = CheckpointPayloadV1::initial(&intent).unwrap();
+    let broker = BrokerCheckpointV2::new(
+        runner,
+        SupervisionCheckpointV1::new(
+            Uuid::from_u128(0x22222222222242228222222222222222),
+            vec![],
+            vec![],
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lifecycle = BrokerCheckpointV3::new(broker, vec![]).unwrap();
+    let event = OutboxEventV1::new(operation, &intent_hash, synthetic_event(&request, 0)).unwrap();
+    let acknowledged = OutboxEventV1::new(operation, &intent_hash, synthetic_event(&request, 1))
+        .unwrap()
+        .acknowledged(71)
+        .unwrap();
+    let checkpoint =
+        BrokerCheckpointV4::new(lifecycle.clone(), vec![event.clone(), acknowledged]).unwrap();
+    let bytes = checkpoint.canonical_bytes().unwrap();
+    assert_eq!(bytes.len(), 2172);
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "f7dab6c73d7fa87da6c4749e3e15465b6e6db5380f801171105c1efbaeb94d47"
+    );
+    assert_eq!(checkpoint.canonical_bytes().unwrap(), bytes);
+    assert_eq!(
+        BrokerCheckpointV4::from_bytes(&bytes)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        bytes
+    );
+
+    let wire: Value = serde_json::from_slice(&bytes).unwrap();
+    for invalid in [
+        {
+            let mut value = wire.clone();
+            value["version"] = json!(99);
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["unexpected"] = Value::Null;
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["events"][0]["event"]["unexpected"] = Value::Null;
+            value
+        },
+    ] {
+        assert_eq!(
+            BrokerCheckpointV4::from_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
+            JournalError::InvalidInput
+        );
+    }
+    let mut trailing = bytes;
+    trailing.extend_from_slice(b" {}");
+    assert_eq!(
+        BrokerCheckpointV4::from_bytes(&trailing).unwrap_err(),
+        JournalError::InvalidInput
+    );
+    assert_eq!(
+        BrokerCheckpointV4::new(lifecycle.clone(), vec![event.clone(); 2]).unwrap_err(),
+        JournalError::Conflict
+    );
+    // The 512-event cap precedes duplicate event/command identity validation.
+    assert_eq!(
+        BrokerCheckpointV4::new(lifecycle.clone(), vec![event; 513]).unwrap_err(),
+        JournalError::LimitExceeded
+    );
+    let mut large_event = synthetic_event(&request, 2);
+    large_event.data = json!({"padding": "x".repeat(120 * 1024)});
+    assert_eq!(
+        OutboxEventV1::new(operation, &intent_hash, large_event).unwrap_err(),
+        JournalError::TooLarge
+    );
+    // Each entry fits its 120-KiB cap; 41 entries exceed only the 4-MiB
+    // aggregate cap, well below the 32-MiB checkpoint and 512-event limits.
+    let large_entries: Vec<_> = (10..51)
+        .map(|index| {
+            let mut event = synthetic_event(&request, index);
+            event.data = json!({"padding": "x".repeat(100 * 1024)});
+            OutboxEventV1::new(operation, &intent_hash, event).unwrap()
+        })
+        .collect();
+    assert_eq!(
+        BrokerCheckpointV4::new(lifecycle, large_entries).unwrap_err(),
+        JournalError::TooLarge
+    );
+    let oversized_input = vec![b' '; 32 * 1024 * 1024 + 1];
+    assert_eq!(
+        BrokerCheckpointV4::from_bytes(&oversized_input).unwrap_err(),
+        JournalError::TooLarge
+    );
 }
 
 fn assert_same_head(
@@ -673,7 +787,9 @@ async fn v4_survives_command_and_lifecycle_updates_and_direct_v3_downgrade_is_re
 
 #[tokio::test]
 async fn wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes() {
-    let fixture = Fixture::new(&[SYNTHETIC_SECRET]);
+    // This checks functional event bounds in debug, not qualified 10-second
+    // latency. Only this test uses the existing Writer API's 60-second ceiling.
+    let fixture = Fixture::with_timeout(&[SYNTHETIC_SECRET], Duration::from_secs(60));
     let first_operation = Uuid::from_u128(0x99999999999949998999999999999999);
     let first_session = Uuid::from_u128(0xaaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa);
     let second_operation = Uuid::from_u128(0xbbbbbbbbbbbb4bbb8bbbbbbbbbbbbbbb);

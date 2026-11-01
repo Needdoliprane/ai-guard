@@ -1,0 +1,6 @@
+stage|head|caller_ms|file_sync_all calls/ms|directory_sync_all calls/ms|read|read_to_end|revalidate|read_at|directory_revalidate|create/publish
+copy_preparation_source_counters|30|5699.317208|0/0|0/0|37|37|148|148|469|0/0
+retained_load_first|30|16952.067291|36/679.586040|3/18.380250|41|39|112|111|374|0/0
+retained_load_second|30|16901.396416|36/366.870664|3/6.970208|41|39|112|111|374|0/0
+retained_status|30|16766.077958|36/339.548379|3/2.905499|41|39|112|111|374|0/0
+chain_validation_in_memory|30|13959.577625|0/0|0/0|0|0|0|0|0|0/0

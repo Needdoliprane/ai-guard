@@ -1,0 +1,5 @@
+Commande paramétrée ; les deux variables SOURCE ont été fournies explicitement par le harnais privé. Aucun chemin, identifiant ou corpus source n'est publié ici.
+
+CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=<shared-cargo-cache> TMPDIR=<fresh-private-tmp> AI_GUARD_JOURNAL_COST_SOURCE_SCOPE=<approved-private-scope-directory> AI_GUARD_JOURNAL_COST_SOURCE_OPERATION=<approved-operation-uuid> cargo test --locked --lib broker::journal::tests::measure_retained_journal_copy_cost_without_runtime -- --exact --ignored --nocapture --test-threads=1
+
+Résultat : RC0, 1 passed, 154 filtered out, 71.42s ; debug, une exécution. Les captures privées conservent la commande réellement utilisée. Aucun autre test ou moteur n'est qualifié par cette commande.

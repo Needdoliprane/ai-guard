@@ -1,0 +1,6 @@
+Command record created before execution; verbatim invocation is below.
+Working directory: /Users/louis/Documents/ai-guard/.worktrees/broker-service
+login=false; yield_time_ms=1000 ms; one execution only.
+Environment: CARGO_INCREMENTAL=0; CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target; TMPDIR is the new private capture fixture directory.
+
+export PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; proof=/private/tmp/ai-guard-outbox-io-reproduction-20261101-013745; CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target TMPDIR="$proof/fixtures/tmp" cargo test --locked --test broker_outbox wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes -- --exact --nocapture --test-threads=1 > "$proof/01-reproduction.log" 2>&1; rc=$?; /usr/bin/printf '%s\n' "$rc" > "$proof/01-reproduction.rc"; exit "$rc"

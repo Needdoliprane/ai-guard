@@ -1,0 +1,3 @@
+NOT_RUN — separate reproduction record; no command was run while creating this file.
+Candidate reproducer is exactly case [07] in commands.txt, with identical cwd, PATH, CARGO_TARGET_DIR, CARGO_INCREMENTAL, TMPDIR, filter, and output paths. Do not count this record as a test or infer a new execution.
+Observed original failure is preserved in 07-outbox-caps.log and .rc (RC 101).

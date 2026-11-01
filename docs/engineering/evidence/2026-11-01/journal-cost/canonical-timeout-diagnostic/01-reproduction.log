@@ -1,0 +1,23 @@
+   Compiling agentsandbox v0.1.0 (/Users/louis/Documents/ai-guard/.worktrees/broker-service)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 04s
+     Running tests/broker_outbox.rs (/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target/debug/deps/broker_outbox-6e1d6ac6d1b0c8d5)
+
+running 1 test
+test wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes ... broker_writer_receive_diagnostic {"outcome":"timeout"}
+broker_outbox_enqueue_diagnostic {"elapsed_ns":10304649958,"ok":false}
+broker_writer_enqueue_backend_diagnostic {"delivered":false,"elapsed_ns":14120798250,"item_count":512,"result_ok":true}
+broker_outbox_post_error_diagnostic {"elapsed_ns":8855521250,"events":512,"head":1,"observation":"after_enqueue_error","ok":true}
+
+thread 'wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes' (32037271) panicked at tests/broker_outbox.rs:837:25:
+called `Result::unwrap()` on an `Err` value: Io
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 20.01s
+
+error: test failed, to rerun pass `--test broker_outbox`

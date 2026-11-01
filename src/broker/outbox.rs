@@ -298,10 +298,12 @@ impl BrokerCheckpointV4 {
         Ok(value)
     }
     pub fn canonical_bytes(&self) -> JournalResult<Vec<u8>> {
-        self.validate_shape()?;
-        canonical(self)
+        self.validated_canonical_bytes()
     }
     fn validate_shape(&self) -> JournalResult<()> {
+        self.validated_canonical_bytes().map(drop)
+    }
+    fn validated_canonical_bytes(&self) -> JournalResult<Vec<u8>> {
         if self.version != 4 {
             return Err(JournalError::UnsupportedVersion);
         }
@@ -313,12 +315,14 @@ impl BrokerCheckpointV4 {
             entry.validate_shape()?;
         }
         validate_command_ids(&self.lifecycle, &self.events)?;
-        if canonical(&self.events)?.len() > MAX_OUTBOX_BYTES
-            || canonical(self)?.len() > MAX_CHECKPOINT_BYTES
-        {
+        if canonical(&self.events)?.len() > MAX_OUTBOX_BYTES {
             return Err(JournalError::TooLarge);
         }
-        Ok(())
+        let bytes = canonical(self)?;
+        if bytes.len() > MAX_CHECKPOINT_BYTES {
+            return Err(JournalError::TooLarge);
+        }
+        Ok(bytes)
     }
     pub(crate) fn validate_context(&self, intent: &ExecutionIntentV1) -> JournalResult<()> {
         self.validate_shape()?;

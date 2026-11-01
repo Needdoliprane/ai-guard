@@ -82,6 +82,82 @@ fn legacy_intent() -> (ExecutionIntentV1, DecisionRequest) {
     (intent, request)
 }
 
+/// Public synthetic fixture fingerprint observed before the canonical-byte
+/// factorization. The expected bytes are independent of the changed code.
+#[test]
+fn canonical_v2_public_fixture_baseline_and_errors() {
+    use agentsandbox::broker::journal::JournalError;
+
+    let (intent, request) = legacy_intent();
+    let runner = CheckpointPayloadV1::initial(&intent).unwrap();
+    let namespace = Uuid::from_u128(0x22222222222242228222222222222222);
+    let pending = SupervisionOperationV1::Decision {
+        request,
+        response: None,
+    };
+    let supervision =
+        SupervisionCheckpointV1::new(namespace, vec![], vec![pending.clone()]).unwrap();
+    let checkpoint = BrokerCheckpointV2::new(runner, supervision).unwrap();
+    let bytes = checkpoint.canonical_bytes().unwrap();
+    assert_eq!(bytes.len(), 1183);
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "953d58805e666acf69592a63680e249a04277fe5942fdbf66d29415c03989ff2"
+    );
+    assert_eq!(checkpoint.canonical_bytes().unwrap(), bytes);
+    assert_eq!(
+        BrokerCheckpointV2::from_bytes(&bytes)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        bytes
+    );
+
+    let wire: Value = serde_json::from_slice(&bytes).unwrap();
+    for invalid in [
+        {
+            let mut value = wire.clone();
+            value["version"] = json!(99);
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["unexpected"] = Value::Null;
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["supervision"]["operations"][0]["request"]["unexpected"] = Value::Null;
+            value
+        },
+    ] {
+        assert_eq!(
+            BrokerCheckpointV2::from_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
+            JournalError::InvalidInput
+        );
+    }
+    let mut trailing = bytes;
+    trailing.extend_from_slice(b" {}");
+    assert_eq!(
+        BrokerCheckpointV2::from_bytes(&trailing).unwrap_err(),
+        JournalError::InvalidInput
+    );
+    assert_eq!(
+        SupervisionCheckpointV1::new(namespace, vec![], vec![pending.clone(); 2]).unwrap_err(),
+        JournalError::Conflict
+    );
+    // Cardinality must be checked before duplicate operation identities.
+    assert_eq!(
+        SupervisionCheckpointV1::new(namespace, vec![], vec![pending; 129]).unwrap_err(),
+        JournalError::LimitExceeded
+    );
+    let oversized_input = vec![b' '; 32 * 1024 * 1024 + 1];
+    assert_eq!(
+        BrokerCheckpointV2::from_bytes(&oversized_input).unwrap_err(),
+        JournalError::TooLarge
+    );
+}
+
 fn open_journal(root: &Path, scope: JournalScopeV1) -> Journal {
     let root = root.canonicalize().expect("canonical private journal root");
     Journal::open(

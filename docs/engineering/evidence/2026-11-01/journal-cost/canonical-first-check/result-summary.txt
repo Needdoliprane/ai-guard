@@ -1,0 +1,5 @@
+Post-correction validation stopped at the first failure, as instructed.
+PASS before failure (one exact test each, RC 0): V2 public golden; V3 public golden; V4 public golden; Journal V1-rev0 promotion; lifecycle wire/context/replay/caps; V4 preservation through command/lifecycle update.
+FAIL: wrong_context_secrets_strict_nested_decision_and_event_cap_are_rejected_without_writes; RC 101; panic at tests/broker_outbox.rs:800, enqueue_events(first_operation, boundary).await.unwrap() returned Io; test result 0 passed, 1 failed, 5 filtered, 11.15 s.
+Stopped immediately. S7 repeat, fmt check, Clippy, and release build are NOT_RUN.
+Sources/Cargo/toolchain snapshot and post-checkout verification: 160/160, post RC 0. Source archive contains 160 source/Cargo/toolchain files only; fixture directories are separate and private. No source changes made by this executor.

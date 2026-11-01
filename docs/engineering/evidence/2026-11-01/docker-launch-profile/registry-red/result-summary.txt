@@ -1,0 +1,5 @@
+Expected RED observed: the valid V1 positive control completed first; the assertion that a valid RegistryV2 profile must load failed.
+Selected test: broker::service::profile::tests::registry_v2_accepts_explicit_minimal_docker_start_profile; RC 101; 0 passed, 1 failed, 154 filtered.
+Failure location: src/broker/service/profile.rs:445:9; message: valid RegistryV2 with explicit minimal Docker start profile must load.
+Compile and test harness succeeded; this is the expected behavior assertion, not a fixture or loader compilation failure.
+Snapshot and current checkout each verify 160/160 source/Cargo/toolchain files; source archive excludes the private TMPDIR fixture.

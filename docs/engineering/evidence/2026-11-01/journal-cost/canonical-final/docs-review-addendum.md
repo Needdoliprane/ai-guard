@@ -1,0 +1,17 @@
+# Addendum de revue documentaire finale
+
+1er novembre2026. **PASS ciblé de la documentation finale ; aucun blocage restant identifié avant les contrôles de publication Root.** Relecture en lecture seule des deltas CURRENT_STATE, PRODUCTION_READINESS, IMPLEMENTATION_PLAN, DECISIONS, VALIDATION, journal-cost/README et du dossier docker-launch-profile (contrat/avis/plan/RED). Aucun Cargo/test, moteur, API, credential ou corpus privé ouvert/exécuté ; aucune source, documentation ou preuve modifiée par le reviewer. Le rapport de revue canonique copié reste inchangé.
+
+Un raccourci causal a été signalé puis corrigé par Root dans CURRENT_STATE : le premier échec est désormais un Io non attribué ; seule la reproduction prouve timeout caller puis réussite backend tardive, sans réponse livrée. Traitement relu directement. Les sections détaillées conservent les deux FAIL et n'en déduisent pas une causalité de factorisation ou de H10.
+
+Comptage cohérent : six fonctions réussies au premier gel, puis quatre tests finaux dont la couture V4 déjà comptée ; neuf fonctions uniques post-correction sur les gels explicités. Les trois baselines avant correction restent distinctes. Les délais finaux25,95/10,01/2,64/71,35s correspondent aux quatre logs déjà relus. Les deux FAIL ne sont ni retirés ni transformés en succès. L'exception60s appartient au seul test fonctionnel512 ; les defaults10s et le canari ownership10ms restent explicitement conservés.
+
+Aucune promesse de gain relevée : S7 mémoire13959,58ms contre13571,29ms, autres temps du même ordre et compteurs36/3 identiques. Le texte conserve debug, temps mural, spans inclusifs non additifs, absence d'isolation de charge et de preuve CPU/latence release/percentile/capacité100/H10. Le build release est un check logiciel, pas une mesure release. G09 FAIL, D5 ouvert et0/12 gates clos restent affichés.
+
+Le dossier du profil Docker ne livre pas de parser ou runtimeV2 : contrat approuvé, un test RED sur checkout séparé82f00d7, aucun corps applicatif changé. Le log montre l'assertion V2 ligne445 après contrôle positif V1, RC101,0,02s ; le relevé donne160/160 et SHA test54498cd3585de8fa03efeef2b831562a9c6add5a45baf97eef339dc507c8bfe5. L'intitulé historique du plan « non exécuté » reste borné à son gel ; README/VALIDATION donnent le résultat exécuté sans le présenter comme PASS fonctionnel V2.
+
+Les quatre conditions de ma revue sont désormais explicites dans contract-before-red : un NUL unique, inventaire fermé/budgets partiels, distinction preuve engagée/blob pour STOP et recoupement du binding commun avant le worker principal. L'inventaire/budget ou l'audit inconnu interdit tout faux ACK d'append, sans effacer les projections/enforcer encore prouvés ; cet écart reste ouvert et ne devient pas une facultativité du produit. Ancien lecteur refusé, pas de rollback/effacement implicite, aucun start, moteur nouveau, témoin D5 ou retrait autorisé par le RED.
+
+Précision sur le libellé de mon avis contract-review historique : « aucun code…ouvert/exécuté » était un raccourci maladroit. La portée réelle, précisée dans la phrase suivante et dans le travail effectué, est **lecture ciblée de coutures source, aucune exécution**, sans données privées. Cette précision n'ajoute aucune qualification et ne réécrit pas l'avis conservé.
+
+`git diff --check` observé RC0 au terme de cette relecture. Les contrôles Root de liens, manifestes assainis et scanner avant commit demeurent ses vérifications propres ; aucun résultat non encore constaté n'est annoncé ici.

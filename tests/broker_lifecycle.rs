@@ -70,6 +70,91 @@ fn legacy_plan_value(profile: &str) -> Value {
     plan
 }
 
+/// Golden observed before the canonical-byte factorization. This public
+/// fixture performs no Journal, Store or runtime IO.
+#[test]
+fn canonical_v3_public_fixture_baseline_and_error_order() {
+    use sha2::{Digest, Sha256};
+
+    let plan = legacy_plan_value("strict");
+    let intent = ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
+    let runner = CheckpointPayloadV1::initial(&intent).unwrap();
+    let broker = v2(
+        runner,
+        Uuid::from_u128(0x22222222222242228222222222222222),
+        vec![],
+    );
+    let command = LocalCommandV1::new(
+        intent.operation_id(),
+        &intent.intent_hash().unwrap(),
+        Uuid::from_u128(0x66666666666646668666666666666666),
+        LocalCommandRequestV1::FailureObserved {
+            phase: LocalFailurePhaseV1::Worker,
+            code: LocalFailureCodeV1::Unavailable,
+        },
+    )
+    .unwrap();
+    let checkpoint = BrokerCheckpointV3::new(broker.clone(), vec![command.clone()]).unwrap();
+    let bytes = checkpoint.canonical_bytes().unwrap();
+    assert_eq!(bytes.len(), 922);
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "ef72f1658b25c8b2ac538eab2d3ba4b8ec8cbb0cde84970395e3b6dc5f3af206"
+    );
+    assert_eq!(checkpoint.canonical_bytes().unwrap(), bytes);
+    assert_eq!(
+        BrokerCheckpointV3::from_bytes(&bytes)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        bytes
+    );
+
+    let wire: Value = serde_json::from_slice(&bytes).unwrap();
+    for invalid in [
+        {
+            let mut value = wire.clone();
+            value["version"] = json!(99);
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["unexpected"] = Value::Null;
+            value
+        },
+        {
+            let mut value = wire.clone();
+            value["commands"][0]["request"]["unexpected"] = Value::Null;
+            value
+        },
+    ] {
+        assert_eq!(
+            BrokerCheckpointV3::from_bytes(&serde_json::to_vec(&invalid).unwrap()).unwrap_err(),
+            JournalError::InvalidInput
+        );
+    }
+    let mut trailing = bytes;
+    trailing.extend_from_slice(b" {}");
+    assert_eq!(
+        BrokerCheckpointV3::from_bytes(&trailing).unwrap_err(),
+        JournalError::InvalidInput
+    );
+    assert_eq!(
+        BrokerCheckpointV3::new(broker.clone(), vec![command.clone(); 2]).unwrap_err(),
+        JournalError::Conflict
+    );
+    // Cardinality must precede duplicate command checks.
+    assert_eq!(
+        BrokerCheckpointV3::new(broker, vec![command; 65]).unwrap_err(),
+        JournalError::LimitExceeded
+    );
+    let oversized_input = vec![b' '; 32 * 1024 * 1024 + 1];
+    assert_eq!(
+        BrokerCheckpointV3::from_bytes(&oversized_input).unwrap_err(),
+        JournalError::TooLarge
+    );
+}
+
 struct LifecycleHarness {
     _root: TempDir,
     store: Store,

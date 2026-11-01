@@ -1,0 +1,6 @@
+Unique instrumented reproduction, debug profile.
+Result: FAIL, RC 101; test phase 20.01 s after 4m04s compilation.
+Observed bounded markers only: receive outcome=timeout; caller enqueue elapsed_ns=10304649958, ok=false; backend enqueue item_count=512, result_ok=true, elapsed_ns=14120798250, delivered=false; later Journal.load observation ok=true, head=1, events=512, elapsed_ns=8855521250, observation=after_enqueue_error.
+Original oracle then panicked at tests/broker_outbox.rs:837 on at_cap.unwrap(). No source changes by this executor.
+Interpretation limit: the caller timeout branch is observed; delivered=false means the result send was not accepted; later head/events is post-error observation only and does not establish head at timeout or backend completion time.
+Source snapshot/archive contains 160 Cargo/source/test files only and verifies 160/160 after run, RC0. Runtime fixture path and contents remain private and are not part of the archive.
