@@ -9,7 +9,7 @@ use crate::broker::{
         recovery::{ConfirmedCancelPrefixV1, RecoveredStopV1, StopRecoveryReportV1},
     },
     lifecycle::LocalCommandReceiptV1,
-    local_ipc::{PrivateListener, read_frame, write_frame},
+    local_ipc::{EndpointRecordV1, PrivateListener, read_frame, write_frame},
 };
 use crate::control_fs::Directory;
 use hmac::{Hmac, Mac};
@@ -24,6 +24,10 @@ use tokio::net::UnixStream;
 const HANDSHAKE_FRAME: u32 = 4096;
 const RETRY_WINDOW: Duration = Duration::from_secs(10);
 const MAX_PENDING_ATTEMPTS: usize = 16;
+
+#[path = "recovery_v3.rs"]
+mod recovery_v3;
+pub use recovery_v3::{EnforcerStopClientV3, EnforcerStopStatusV3};
 
 #[cfg(test)]
 #[path = "recovery_auth_binding_tests.rs"]
@@ -405,7 +409,7 @@ impl EnforcerStopStatusV2 {
         self.clock_healthy
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StopRequest {
     StatusStops {},
@@ -438,6 +442,9 @@ pub(super) struct RecoveryState {
     pub(super) root_binding: String,
     pub(super) clock: Option<Arc<NativeHostClock>>,
     lease: Option<EnforcerRoleLeaseV2>,
+    // Retained only by explicitly extended listeners. Missing anchors cannot
+    // authenticate V3; legacy V2 state and transport checks remain unchanged.
+    transport_v3: Option<(Directory, EndpointRecordV1)>,
     slots: Mutex<BTreeMap<String, Arc<StopActor>>>,
     progress: AtomicU64,
     clock_healthy: AtomicBool,
@@ -462,6 +469,7 @@ impl RecoveryState {
             root_binding,
             clock,
             lease,
+            transport_v3: None,
             slots: Mutex::new(BTreeMap::new()),
             progress: AtomicU64::new(1),
             clock_healthy: AtomicBool::new(false),
@@ -470,6 +478,55 @@ impl RecoveryState {
             #[cfg(test)]
             faults: TestFaults::from_environment(),
         }
+    }
+    fn retain_transport_v3(
+        &mut self,
+        root: &Directory,
+        endpoint: &EndpointRecordV1,
+    ) -> EnforcerResult<()> {
+        let lease = self.lease.as_ref().ok_or(EnforcerError::UnsafeFilesystem)?;
+        if endpoint.epoch() != self.epoch
+            || lease.root_binding(endpoint)? != self.root_binding
+            || recovery_root_binding(root, endpoint)? != self.root_binding
+        {
+            return Err(EnforcerError::UnsafeFilesystem);
+        }
+        self.transport_v3 = Some((root.clone(), endpoint.clone()));
+        Ok(())
+    }
+    async fn check_transport_v3(self: &Arc<Self>) -> EnforcerResult<()> {
+        self.check_transport().await?;
+        let anchors = self.transport_v3.clone();
+        let lease = self.lease.clone();
+        let epoch = self.epoch;
+        let binding = self.root_binding.clone();
+        let checked = tokio::task::spawn_blocking(move || {
+            let (root, endpoint) = anchors.ok_or(EnforcerError::UnsafeFilesystem)?;
+            let lease = lease.ok_or(EnforcerError::UnsafeFilesystem)?;
+            if endpoint.epoch() != epoch
+                || lease.root_binding(&endpoint)? != binding
+                || recovery_root_binding(&root, &endpoint)? != binding
+            {
+                return Err(EnforcerError::UnsafeFilesystem);
+            }
+            let current = load_endpoint(&root)?.ok_or(EnforcerError::UnsafeFilesystem)?;
+            if current.epoch() != epoch
+                || lease.root_binding(&current)? != binding
+                || recovery_root_binding(&root, &current)? != binding
+            {
+                return Err(EnforcerError::UnsafeFilesystem);
+            }
+            lease.revalidate()?;
+            root.revalidate()
+                .map_err(|_| EnforcerError::UnsafeFilesystem)
+        })
+        .await
+        .map_err(|_| EnforcerError::Unavailable)
+        .and_then(|checked| checked);
+        if checked.is_err() {
+            self.transport_failed();
+        }
+        checked
     }
     pub(super) fn status(&self) -> EnforcerResult<EnforcerStopStatusV2> {
         let slot_count = self
@@ -551,14 +608,16 @@ pub async fn run_internal_recovery_enforcer(
     let lease = EnforcerRoleLeaseV2::acquire_existing(root)?;
     let listener = PrivateListener::bind_new(&lease.listener_root()?)?;
     let root_binding = lease.root_binding(listener.endpoint())?;
-    let state = Arc::new(RecoveryState::new(
+    let mut state = RecoveryState::new(
         listener.endpoint().epoch(),
         max_slots,
         capability,
         root_binding,
         NativeHostClock::new().ok().map(Arc::new),
         Some(lease.clone()),
-    ));
+    );
+    state.retain_transport_v3(root, listener.endpoint())?;
+    let state = Arc::new(state);
     lease.publish_endpoint(listener.endpoint())?;
     let connections = Arc::new(tokio::sync::Semaphore::new(32));
     let mut tasks = tokio::task::JoinSet::new();
@@ -607,19 +666,23 @@ pub(super) async fn serve_connection(
     mut stream: UnixStream,
     state: Arc<RecoveryState>,
 ) -> EnforcerResult<()> {
+    let handshake_started = Instant::now();
     state.check_transport().await?;
-    let challenge = ChallengeV2 {
-        protocol: 2,
-        role: "enforcer".into(),
-        epoch: state.epoch,
-        nonce: Uuid::new_v4(),
-        root_binding: state.root_binding.clone(),
-        offered_roles: vec![RequestedRole::StopsOnly],
-        ledger_state: unverified_ledger(),
-    };
+    let challenge = recovery_v3::challenge_for(&state);
     write_frame(&mut stream, &challenge, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
-    let authentication: AuthenticationV2 =
-        read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
+    let authentication = match read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT).await? {
+        recovery_v3::FirstAuthentication::V2(authentication) => authentication,
+        recovery_v3::FirstAuthentication::V3(negotiate) => {
+            return recovery_v3::serve(
+                stream,
+                state,
+                challenge,
+                negotiate,
+                handshake_started + recovery_v3::HANDSHAKE_WINDOW,
+            )
+            .await;
+        }
+    };
     verify_auth(
         &state.capability,
         &challenge,
@@ -937,11 +1000,32 @@ fn start_stop_actor(
 /// conversion exists. Each request reconnects explicitly in protocol 2.
 #[derive(Clone)]
 pub struct EnforcerStopClient(Arc<StopClient>);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopProtocol {
+    V2,
+    V3,
+}
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CREATED_STOP_CLIENTS: std::cell::RefCell<Vec<std::sync::Weak<StopClient>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Harness-only weak ownership observation. Extinction is not an actor join,
+/// engine drain, lease proof or D5 quiescence certificate.
+#[cfg(test)]
+pub(crate) struct TestStopClientOwners(Vec<std::sync::Weak<StopClient>>);
+#[cfg(test)]
+impl TestStopClientOwners {
+    pub(crate) fn is_extinct(&self) -> bool {
+        self.0.iter().all(|owner| owner.strong_count() == 0)
+    }
+}
 struct StopClient {
     root: Directory,
     executable: PathBuf,
     max_slots: u32,
     capability: [u8; 32],
+    protocol: StopProtocol,
     cache: Mutex<StopCache>,
     changed: Arc<tokio::sync::Notify>,
     watch_failed: AtomicBool,
@@ -983,6 +1067,7 @@ enum Claim {
 struct StopConnection {
     stream: UnixStream,
     epoch: Uuid,
+    v3: Option<recovery_v3::Session3>,
 }
 
 #[derive(Default)]
@@ -1031,10 +1116,22 @@ impl fmt::Debug for EnforcerStopClient {
     }
 }
 impl EnforcerStopClient {
+    #[cfg(test)]
+    pub(crate) fn take_created_clients_for_test() -> TestStopClientOwners {
+        TEST_CREATED_STOP_CLIENTS.with(|owners| TestStopClientOwners(owners.take()))
+    }
     pub async fn connect_or_spawn_for_recovery(
         root: &Directory,
         executable: &Path,
         max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        Self::connect_with_protocol(root, executable, max_slots, StopProtocol::V2).await
+    }
+    async fn connect_with_protocol(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        protocol: StopProtocol,
     ) -> EnforcerResult<Self> {
         if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
             return Err(EnforcerError::InvalidInput);
@@ -1047,6 +1144,7 @@ impl EnforcerStopClient {
             executable: executable.into(),
             max_slots,
             capability,
+            protocol,
             cache: Mutex::new(StopCache::default()),
             changed: Arc::new(tokio::sync::Notify::new()),
             watch_failed: AtomicBool::new(false),
@@ -1058,6 +1156,10 @@ impl EnforcerStopClient {
             #[cfg(test)]
             observed_epochs: Mutex::new(Vec::new()),
         }));
+        #[cfg(test)]
+        TEST_CREATED_STOP_CLIENTS.with(|owners| {
+            owners.borrow_mut().push(Arc::downgrade(&client.0));
+        });
         client.ensure_open().await?;
         tokio::spawn(monitor_recovery(Arc::downgrade(&client.0)));
         Ok(client)
@@ -1174,6 +1276,8 @@ impl EnforcerStopClient {
             .ok_or(OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
         let binding =
             recovery_root_binding(root, &endpoint).map_err(|e| OpenFailure::Other(e.into()))?;
+        let handshake_deadline = (self.0.protocol == StopProtocol::V3)
+            .then(|| Instant::now() + recovery_v3::HANDSHAKE_WINDOW);
         let mut stream = match endpoint.connect_checked(&endpoints).await {
             Ok(stream) => stream,
             Err(crate::broker::local_ipc::IpcError::Unavailable) => {
@@ -1181,9 +1285,19 @@ impl EnforcerStopClient {
             }
             Err(error) => return Err(OpenFailure::Other(error.into())),
         };
-        let challenge: ChallengeV2 = read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT)
-            .await
-            .map_err(|e| OpenFailure::Other(e.into()))?;
+        let frame_timeout = match handshake_deadline {
+            Some(deadline) => recovery_v3::time_left(deadline).map_err(OpenFailure::Other)?,
+            None => IO_TIMEOUT,
+        };
+        let challenge: ChallengeV2 = if handshake_deadline.is_some() {
+            recovery_v3::read_preface(&mut stream, frame_timeout)
+                .await
+                .map_err(OpenFailure::Other)?
+        } else {
+            read_frame(&mut stream, HANDSHAKE_FRAME, frame_timeout)
+                .await
+                .map_err(|e| OpenFailure::Other(e.into()))?
+        };
         if challenge.protocol != 2
             || challenge.role != "enforcer"
             || challenge.epoch != endpoint.epoch()
@@ -1194,46 +1308,62 @@ impl EnforcerStopClient {
         {
             return Err(OpenFailure::Other(EnforcerError::Unauthorized));
         }
-        let authentication = AuthenticationV2 {
-            requested_role: RequestedRole::StopsOnly,
-            proof: auth_proof(
-                &self.0.capability,
-                &challenge,
-                RequestedRole::StopsOnly,
-                false,
+        let v3 = if let Some(deadline) = handshake_deadline {
+            Some(
+                recovery_v3::client_handshake(
+                    &mut stream,
+                    &challenge,
+                    &self.0.capability,
+                    deadline,
+                    RequestedRole::StopsOnly,
+                    self.0.max_slots,
+                )
+                .await
+                .map_err(OpenFailure::Other)?,
             )
-            .map_err(OpenFailure::Other)?,
-        };
-        write_frame(&mut stream, &authentication, HANDSHAKE_FRAME, IO_TIMEOUT)
-            .await
-            .map_err(|e| OpenFailure::Other(e.into()))?;
-        let reply: AuthenticationReplyV2 = read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT)
-            .await
-            .map_err(|e| OpenFailure::Other(e.into()))?;
-        match reply {
-            AuthenticationReplyV2::Granted {
-                granted_role: RequestedRole::StopsOnly,
-                epoch,
-                nonce,
-                root_binding,
-                ledger_state,
-                proof,
-            } if epoch == challenge.epoch
-                && nonce == challenge.nonce
-                && root_binding == binding
-                && ledger_state == challenge.ledger_state =>
-            {
-                verify_auth(
+        } else {
+            let authentication = AuthenticationV2 {
+                requested_role: RequestedRole::StopsOnly,
+                proof: auth_proof(
                     &self.0.capability,
                     &challenge,
                     RequestedRole::StopsOnly,
-                    true,
-                    &proof,
+                    false,
                 )
-                .map_err(OpenFailure::Other)?;
+                .map_err(OpenFailure::Other)?,
+            };
+            write_frame(&mut stream, &authentication, HANDSHAKE_FRAME, IO_TIMEOUT)
+                .await
+                .map_err(|e| OpenFailure::Other(e.into()))?;
+            let reply: AuthenticationReplyV2 = read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT)
+                .await
+                .map_err(|e| OpenFailure::Other(e.into()))?;
+            match reply {
+                AuthenticationReplyV2::Granted {
+                    granted_role: RequestedRole::StopsOnly,
+                    epoch,
+                    nonce,
+                    root_binding,
+                    ledger_state,
+                    proof,
+                } if epoch == challenge.epoch
+                    && nonce == challenge.nonce
+                    && root_binding == binding
+                    && ledger_state == challenge.ledger_state =>
+                {
+                    verify_auth(
+                        &self.0.capability,
+                        &challenge,
+                        RequestedRole::StopsOnly,
+                        true,
+                        &proof,
+                    )
+                    .map_err(OpenFailure::Other)?;
+                }
+                _ => return Err(OpenFailure::Other(EnforcerError::Unauthorized)),
             }
-            _ => return Err(OpenFailure::Other(EnforcerError::Unauthorized)),
-        }
+            None
+        };
         if recovery_root_binding(root, &endpoint).map_err(|e| OpenFailure::Other(e.into()))?
             != binding
         {
@@ -1244,6 +1374,9 @@ impl EnforcerStopClient {
             .is_none_or(|latest| latest.epoch() != endpoint.epoch())
         {
             return Err(OpenFailure::Other(EnforcerError::Conflict));
+        }
+        if let Some(deadline) = handshake_deadline {
+            recovery_v3::time_left(deadline).map_err(OpenFailure::Other)?;
         }
         #[cfg(test)]
         {
@@ -1260,10 +1393,15 @@ impl EnforcerStopClient {
         Ok(StopConnection {
             stream,
             epoch: endpoint.epoch(),
+            v3,
         })
     }
     async fn request(&self, request: StopRequest) -> EnforcerResult<(Uuid, StopResponse)> {
         let mut connection = self.ensure_open().await?;
+        if connection.v3.is_some() {
+            let response = recovery_v3::request(&mut connection, request).await?;
+            return Ok((connection.epoch, response.into_legacy()));
+        }
         write_frame(&mut connection.stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
         let response: StopResponse =
             read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT).await?;
@@ -1284,6 +1422,100 @@ impl EnforcerStopClient {
             }
             _ => Err(EnforcerError::Unavailable),
         }
+    }
+    #[cfg(test)]
+    pub(crate) async fn negotiate_v3_frame_for_test(
+        &self,
+    ) -> EnforcerResult<(Uuid, String, Uuid, Uuid, EnforcerResult<serde_json::Value>)> {
+        tokio::time::timeout(Duration::from_secs(6), async {
+            // This is a separate, ungranted connection. In particular, do not
+            // call ensure_open(), which has already authenticated Stops2.
+            let root = &self.0.root;
+            root.revalidate()
+                .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+            let key = capability(root, false)?;
+            if key != self.0.capability {
+                return Err(EnforcerError::Unauthorized);
+            }
+            let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
+            let endpoints = root
+                .persistent_child("endpoints", false)
+                .map_err(|_| EnforcerError::UnsafeFilesystem)?
+                .ok_or(EnforcerError::UnsafeFilesystem)?;
+            let binding = recovery_root_binding(root, &endpoint)?;
+            let mut stream = endpoint.connect_checked(&endpoints).await?;
+            let challenge: ChallengeV2 =
+                read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT).await?;
+            if challenge.protocol != 2
+                || challenge.role != "enforcer"
+                || challenge.epoch != endpoint.epoch()
+                || challenge.nonce.is_nil()
+                || challenge.root_binding != binding
+                || challenge.offered_roles != [RequestedRole::StopsOnly]
+                || challenge.ledger_state != unverified_ledger()
+            {
+                return Err(EnforcerError::Unauthorized);
+            }
+            let requested_role = RequestedRole::StopsOnly;
+            let client_nonce = Uuid::new_v4();
+            if client_nonce.is_nil() || client_nonce == challenge.nonce {
+                return Err(EnforcerError::InvalidInput);
+            }
+            // N uses the seven values actually received in the closed V2
+            // preface, followed by protocol3, requested role and client nonce.
+            let transcript = serde_json::to_vec(&(
+                challenge.protocol,
+                &challenge.role,
+                challenge.epoch,
+                challenge.nonce,
+                &challenge.root_binding,
+                &challenge.offered_roles,
+                &challenge.ledger_state,
+                3_u32,
+                requested_role,
+                client_nonce,
+            ))
+            .map_err(|_| EnforcerError::InvalidInput)?;
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(&key).map_err(|_| EnforcerError::InvalidInput)?;
+            mac.update(b"ai-guard:enforcer-client-negotiate:v3\0");
+            mac.update(&transcript);
+            let proof = hex::encode(mac.finalize().into_bytes());
+            write_frame(
+                &mut stream,
+                &serde_json::json!({
+                    "kind": "negotiate_v3",
+                    "protocol": 3_u32,
+                    "requested_role": requested_role,
+                    "client_nonce": client_nonce,
+                    "proof": proof,
+                }),
+                HANDSHAKE_FRAME,
+                IO_TIMEOUT,
+            )
+            .await?;
+            // Separate a setup/write error from the behavioral absence of a
+            // Challenge3 after the exact authenticated Negotiate3 was sent.
+            let response: EnforcerResult<serde_json::Value> =
+                read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT)
+                    .await
+                    .map_err(EnforcerError::from);
+            if recovery_root_binding(root, &endpoint)? != binding {
+                return Err(EnforcerError::UnsafeFilesystem);
+            }
+            if load_endpoint(root)?.is_none_or(|current| current.epoch() != endpoint.epoch()) {
+                return Err(EnforcerError::Conflict);
+            }
+            Ok((
+                challenge.epoch,
+                binding,
+                challenge.nonce,
+                client_nonce,
+                response,
+            ))
+        })
+        .await
+        .map_err(|_| EnforcerError::Unavailable)?
     }
     pub async fn query_stop(
         &self,
@@ -1671,6 +1903,21 @@ async fn close_watch(watch: &mut Option<WatchReader>) {
         let _ = task.await;
     }
 }
+async fn begin_watch(
+    connection: &mut StopConnection,
+) -> EnforcerResult<Option<recovery_v3::Watch3Reader>> {
+    if connection.v3.is_some() {
+        return recovery_v3::start_watch(connection).await.map(Some);
+    }
+    write_frame(
+        &mut connection.stream,
+        &StopRequest::WatchStops {},
+        MAX_FRAME,
+        IO_TIMEOUT,
+    )
+    .await?;
+    Ok(None)
+}
 async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
     let mut watch = None::<WatchReader>;
     let mut progress = WatchProgress::default();
@@ -1682,14 +1929,7 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
         let client = EnforcerStopClient(inner);
         if watch.is_none() {
             if let Ok(mut connection) = client.ensure_open().await
-                && write_frame(
-                    &mut connection.stream,
-                    &StopRequest::WatchStops {},
-                    MAX_FRAME,
-                    IO_TIMEOUT,
-                )
-                .await
-                .is_ok()
+                && let Ok(mut watch3) = begin_watch(&mut connection).await
             {
                 let epoch = connection.epoch;
                 let (sender, receiver) = tokio::sync::mpsc::channel(4);
@@ -1697,9 +1937,15 @@ async fn monitor_recovery(weak: std::sync::Weak<StopClient>) {
                     loop {
                         // This dedicated reader is never cancelled by a
                         // Notify/timer while part-way through a frame.
-                        let frame = read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT)
-                            .await
-                            .map_err(EnforcerError::from);
+                        let frame = match &mut watch3 {
+                            Some(reader) => reader
+                                .read(&mut connection.stream)
+                                .await
+                                .map(|value| StopResponse::StatusStops { value }),
+                            None => read_frame(&mut connection.stream, MAX_FRAME, IO_TIMEOUT)
+                                .await
+                                .map_err(EnforcerError::from),
+                        };
                         let terminal = frame.is_err();
                         if sender.send(frame).await.is_err() || terminal {
                             return;

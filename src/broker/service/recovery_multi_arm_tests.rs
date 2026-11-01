@@ -532,3 +532,6 @@ async fn recovery_report_job_retains_all_arms_before_an_abandoned_bootstrap_wait
     drop(child);
     assert_independent_multi_arm_recovery(observed);
 }
+
+#[path = "d5_ledger_tests.rs"]
+mod d5_ledger_tests;

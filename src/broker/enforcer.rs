@@ -30,8 +30,8 @@ use uuid::Uuid;
 pub use client::{EnforcedSlot, EnforcerClient};
 pub(crate) use diagnostics::EnforcerStageFailure;
 pub use recovery::{
-    EnforcerStopClient, EnforcerStopStatusV2, StopPhaseV1, StopSlotV1,
-    run_internal_recovery_enforcer,
+    EnforcerStopClient, EnforcerStopClientV3, EnforcerStopStatusV2, EnforcerStopStatusV3,
+    StopPhaseV1, StopSlotV1, run_internal_recovery_enforcer,
 };
 pub use server::run_internal_enforcer;
 
