@@ -6,7 +6,7 @@ Le SSO est facultatif à l'installation, mais son support et sa qualification fo
 
 Les [axes de configuration indépendants](../sso.md#configuration-par-axes-indépendants) et le [profil d'inférence interne](../sso.md#inférence-interne-et-déploiement-sans-internet) suivent le contrat canonique : topologie, identité, périmètres/permissions, client et authentification IA, réseau/TLS et exploitation ne sont pas couplés arbitrairement. Le client construit et distribue ses images depuis les Dockerfiles ; aucune image publique préconstruite n'est obligatoire. Ces exigences restent à implémenter et qualifier, sans repli cloud ni garantie pour une combinaison non testée. La connexion SSO ne configure pas les credentials ou l'inférence de Codex/Claude.
 
-**OIDC, PKCE et l'intégration Keycloak sont ABSENTS du code actuel.** Aucun endpoint de connexion, option CLI SSO, schéma de configuration OIDC ou profil Compose Keycloak exécutable n'est livré par ce document. Une spécification ne clôture aucun gate de qualification.
+**Actualisation du1er novembre : OIDC/PKCE et l'identité humaine sont toujours ABSENTS du code applicatif.** Le [profil Compose Keycloak](../../deploy/keycloak-demo/compose.yaml), son realm public et les [guides EN](../setup/keycloak/README.md)/[FR](../setup/keycloak/README.fr.md) sont désormais distribués. Ils préparent l'IdP ; ils ne livrent aucun login Web/CLI ai-guard, validation de token ou membership humain. Les constats du31octobre qui précédaient ce profil restent historiques ; aucun gate n'est fermé par sa distribution.
 
 ## État constaté
 
@@ -18,7 +18,7 @@ Les [axes de configuration indépendants](../sso.md#configuration-par-axes-indé
 | Navigateur | Saisie « Jeton de lecture » dans [main.ts](../../front/src/main.ts) ; bearer gardé en mémoire, requêtes et SSE par `fetch`, effacement à la fermeture dans [api.ts](../../front/src/api.ts). | Flux PKCE, renouvellement, logout, fin de session et retrait des données devenues interdites à implémenter. Ce stockage mémoire existant ne prouve pas ces parcours. |
 | Broker CLI | `VerifiedProfile` confirme une identité `runner` auprès du contrôle dans [service/mod.rs](../../src/broker/service/mod.rs), via [AuditClient](../../src/runner.rs). | Un token humain PKCE n'est pas déjà accepté par `broker submit`. Délégation et permissions humaines explicites à implémenter. |
 | Local sans IdP | Des clés statiques permettent le fonctionnement hors ligne. | L'authentification locale **nominative** et son audit individuel restent à implémenter et qualifier. |
-| Découverte Keycloak | Aucun profil Keycloak dans les configurations inspectées. | Profil local explicitement activé, configuration et recette réelle à livrer. |
+| Découverte Keycloak | Profil local opt-in et configuration du realm/clients publics distribués dans deploy/keycloak-demo, guides EN/FR fournis. | Parcours du produit avec utilisateurs nommés, login Web/CLI, permissions et recette complète toujours à implémenter/qualifier ; pas d'assimilation de l'IdP au SSO applicatif. |
 
 Les anciennes clés partagées ne prouvent pas l'identité d'une personne. Leur historique conserve sa provenance ; aucune migration ne doit réattribuer rétroactivement leurs actions à un utilisateur nommé. L'OAuth et les abonnements de Codex/Claude sont distincts du SSO ai-guard : une connexion à l'un ne connecte pas à l'autre.
 
@@ -99,7 +99,7 @@ Les réglages publics, redirects et origines sont décrits dans le [guide offici
 
 ## Deux procédures à livrer
 
-**Découverte locale — ABSENTE / NOT_RUN.** Livrer un profil Compose explicitement activé, limité au loopback, avec Keycloak conteneurisé épinglé, realm de démonstration identifié et clients publics PKCE préconfigurés. Quatre comptes publics sont propres à cette découverte :
+**Découverte locale — profil IdP livré, parcours applicatif ABSENT / NOT_RUN.** Le profil Compose opt-in limité au loopback, Keycloak épinglé, realm de démonstration et clients publics PKCE sont distribués. Le parcours ai-guard complet reste à livrer/qualifier. Quatre comptes publics sont propres à cette découverte :
 
 | Compte | Identifiants publics de démonstration | Permissions attendues |
 |---|---|---|
@@ -140,7 +140,7 @@ L'intégration doit étendre l'authentification Rust existante avant les entrée
 | Session | Refresh, concurrence/réutilisation, expiration, logout local/IdP, réponse tardive, perte de permission et fermeture SSE selon bornes publiées ; panne sans fallback. | NOT_RUN |
 | Confidentialité et audit | Tokens Web en mémoire, jamais en Web Storage ; état PKCE privé éphémère conservé puis effacé selon son propriétaire ; code/state de callback transitoires nettoyés ; aucun token/code/verifier en logs, exports ou worker ; audit nominatif/causal, masquage avant persistance et refus si audit obligatoire indisponible. | NOT_RUN |
 | Local et migration | Connexion locale nominative hors ligne, sélection explicite ; anciennes clés restent attribuées comme telles, pas de réattribution ni changement de tenant. | NOT_RUN ; identité locale nominative absente |
-| Découverte et entreprise | Installation neuve, quatre comptes publics confinés et rôles distincts : admin realm sans droit applicatif implicite, admin-ai-guard administrateur du seul périmètre autorisé, user-1/user-2 sans ce rôle et ressources privées séparées ; données existantes préservées, parcours réel chronométré et procédure entreprise sans comptes publics. | NOT_RUN ; profil absent |
+| Découverte et entreprise | Installation neuve, quatre comptes publics confinés et rôles distincts : admin realm sans droit applicatif implicite, admin-ai-guard administrateur du seul périmètre autorisé, user-1/user-2 sans ce rôle et ressources privées séparées ; données existantes préservées, parcours réel chronométré et procédure entreprise sans comptes publics. | NOT_RUN pour ce parcours ; profil IdP distribué, intégration applicative absente |
 | Configuration et inférence | Interactions d'identité/périmètre avec les [axes indépendants](../sso.md#configuration-par-axes-indépendants) et l'[inférence interne](../sso.md#inférence-interne-et-déploiement-sans-internet) qualifiées selon le contrat canonique ; choix et contraintes effectifs validés côté contrôle, combinaisons incompatibles refusées sans repli ; aucune compatibilité universelle déduite d'un essai SSO. | NOT_RUN ; exigences non qualifiées |
 | CLI sans navigateur | Capacité et protocole explicites, menace et refus propres au mode headless ; aucune déduction depuis le test navigateur. | NOT_RUN ; capacité absente |
 

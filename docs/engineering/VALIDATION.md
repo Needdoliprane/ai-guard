@@ -1,5 +1,18 @@
 # Validation courante
 
+## 1er novembre — démarrage réel du juge TLS FAIL
+
+Capture privée `/private/tmp/ai-guard-local-judge-tls-run-20261101T154306Z/`, configurations et PKI neuves, aucun secret utilisateur ou fournisseur. Images contrôle `sha256:5fa8a0952f850139f9c58d1363af5a176adb5de707e91493ee5cbc0c1b66ebca` et modèle `sha256:d6bdfcbe064f5e2ef5fac7d8b143b6a7e81037e46c7efa9516e18a6cc482d8ce` réutilisées sans rebuild. Ports réservés `127.0.0.1:18787/14080`, contexte512, CPU2, mémoire/swap1Go et délais produit inchangés. Les commandes Compose utilisent un environnement vide explicite, les seuls fichiers préparés et `up --no-build --pull never -d`.
+
+- Projet modèle `ai-guard-local-ai-tls-qual-20261101t154306z` : up RC0 mais ses deux services quittent avec code1/OOM=false ; ceci est **FAIL**, pas un service disponible. Driver de logs `none`, donc `docker logs` ne fournit pas le stderr.
+- Projet contrôle `ai-guard-tls-qual-control-20261101t154306z` : up RC1 ; gateway en boucle puis arrêt ciblé pour borner les tentatives, message `Jev configuration is invalid`. Dashboard et ingress restent Created. Volume d'audit neuf conservé.
+- Une seule reproduction `docker start --attach` par conteneur modèle/relais, gateway arrêté : deux RC1. Modèle : `Permission denied` sur `/models/model.gguf` ; relais : `TLS material or configuration is invalid or unavailable`. Aucune génération, aucun paramètre modifié.
+- Un conteneur `/usr/bin/stat` inerte depuis l'image contrôle, UID1000, réseau none, racine RO, caps retirées/NNP, CPU0,25/RAM128MiB/PID32 et seulement trois projections RO : fichiers réguliers UID/GID1000, mode0444, nlink1 ; parents root0755, `/run/secrets`1000:1000/0700. Retrait de ce seul conteneur après capture. Ce constat ne vérifie ni filesystem/ACL ni le lecteur Rust et ne réfute pas son refus.
+
+Résultats/captures : `evidence/model-reproduction.*`, `relay-reproduction.*`, `control-gateway-new-only.log`, `containers-targeted-inspect.txt`, `networks-targeted-inspect.txt` et `projection-stat-diagnostic-*`. L'inspection ciblée confirme les paramètres Compose observables et les réseaux internes attendus ; elle ne démontre aucun échange ou confinement par effet. Les cinq conteneurs initiaux, réseaux, volume d'audit et matériel privé restent conservés pour diagnostic. **NOT_RUN :** healthcheck HTTPS, `/api/v1/decide`, inférence, panne/reprise, worker et Podman. Aucun PASS runtime déduit des tests natifs ou du build Linux.
+
+La sonde Rust privée n'est pas exécutée. Son premier build a échoué faute de `cc` dans le PATH transmis (compilateur présent sur l'hôte), puis une seule compilation corrective offline avec PATH explicite et `/usr/bin/clang` a réussi ; captures `probe-build-first-attempt.tool-output.txt` et `probe-build-corrective.*`. Aucun rehaussement de budget ni retry d'appel modèle pour produire un résultat vert. G09/G11 et qualification sémantique restent ouverts.
+
 ## 1er novembre — TLS T2, validation logicielle finale et prérequis de montage
 
 Les deux RED précédents restent inchangés. T2 modifie seulement la grammaire partagée dans `src/tls.rs` et le signal de fermeture attendu par Axum, puis ajoute un groupe synthétique de grammaire des trois labels de clé. Aucun nouveau crate/permission/réseau/tâche ; bornes et drain normal5s conservés. Revue indépendante privée `/tmp/ai-guard-local-judge-tls-t2-independent-review-20261101.md` favorable, trois SHA avant/après conformes, sans nouvel écart bloquant. Code D5 candidat1 inchangé.
