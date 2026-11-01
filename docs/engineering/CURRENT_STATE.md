@@ -1,5 +1,9 @@
 # État constaté — suivi au 1er novembre 2026
 
+## Image de contrôle — permissions publiques en correction
+
+La construction Linux/ARM64 du commit65f828a passe après correction d'une liste de contexte périmée :148 fichiers suivis attendus/reçus, dont les13 omis lors du premier essai. La première recette réelle échoue ensuite : le contexte extrait avec des modes privés transmet `0600` à la politique, copiée root dans l'image ; UID1000 ne peut pas la lire. Aucun Store n'est initialisé et les parcours humains restent NOT_RUN. Le Dockerfile normalise désormais uniquement les assets publics (front, politiques, licence) ; nouvelle image et contrôle réel de lecture restent à vérifier. Données, projections de credentials, utilisateur et restrictions runtime ne changent pas. [Chronologie](VALIDATION.md#1er-novembre--image-humain5-contexte-et-permissions).
+
 Ce fichier rassemble les constats datés et leurs limites. Chaque résultat reste attaché au gel, au checkout et à l'environnement nommés ; il ne qualifie pas automatiquement la branche courante, un autre worktree ou la pile QA. Aucun commit initial n'existait au début du chantier ; les fichiers préexistants étaient non suivis et le travail a commencé en place avec périmètres exclusifs. Le30octobre, à la demande du mainteneur, le checkpoint initial `fa75d6ef34ee506a4d5facdc9e50fc515f79cf7b` est poussé sur `origin/main` du dépôt privé configuré, référence distante vérifiée. Secrets, `.env`, caches, bases et volumes restent hors Git ; seules les preuves assainies de documentation sont partagées. Branches et worktrees sont désormais possibles. La copie initiale `/tmp/ai-guard-baseline.KqN9Hi` reste une archive temporaire, pas une release.
 
 ## Lots parallèles ouverts — identité, dashboard et registre

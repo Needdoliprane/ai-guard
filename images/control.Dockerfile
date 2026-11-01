@@ -24,6 +24,9 @@ COPY --from=rust-build /build/target/release/agentsandbox /usr/local/bin/agentsa
 COPY --from=front-build /build/front/dist/ /app/front/
 COPY policies/ /app/policies/
 COPY LICENSE /usr/share/licenses/ai-guard/LICENSE
+# Public assets must be readable by UID1000 even from a private checkout.
+# Data and projected credentials retain their separate private modes.
+RUN chmod -R a+rX /app/front /app/policies /usr/share/licenses/ai-guard
 WORKDIR /app
 USER 1000:1000
 EXPOSE 8787 4000
