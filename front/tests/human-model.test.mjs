@@ -29,6 +29,46 @@ test("les droits sur une ressource restent distincts et une page incorrecte ne d
     assert.throws(() => parseResourcePage(bad), /Contrat/);
 });
 
+test("une page partagée conserve les propriétaires locaux et OIDC sans modifier leurs identités", () => {
+  const local = { resource: { kind: "session", resource_id: "session-local" }, owner: principal, revision: "1",
+    permissions: { metadata: true, content: true, export: true } };
+  const shared = { resource: { kind: "project", resource_id: "project-shared" },
+    owner: { kind: "human_oidc", issuer: "https://identity.example.test/realms/a/", subject: '<img src=x onerror="alert(1)">' },
+    revision: "2", permissions: { metadata: true, content: false, export: false } };
+  const parsed = parseResourcePage({ ...envelope, items: [local, shared] });
+  assert.deepEqual(parsed.items, [local, shared]);
+  const loopbackOwner = { kind: "human_oidc", issuer: "http://127.0.0.1:8080/realms/discovery", subject: "é".repeat(256) };
+  assert.deepEqual(parseResourcePage({ ...envelope, items: [{ ...shared, owner: loopbackOwner }] }).items[0].owner, loopbackOwner);
+});
+
+test("un propriétaire OIDC invalide ou une identité de contrôle ne deviennent pas un propriétaire humain", () => {
+  const owner = { kind: "human_oidc", issuer: "https://identity.example.test/realms/a", subject: "user-1" };
+  const item = { resource: { kind: "session", resource_id: "session-shared" }, owner, revision: "1",
+    permissions: { metadata: true, content: false, export: false } };
+  const badIssuers = [null, "", " ", "identity.example.test/realms/a", "file:///realms/a", "https://",
+    "https://user:password@identity.example.test", "https://identity.example.test?", "https://identity.example.test?tenant=a",
+    "https://identity.example.test#", "https://identity.example.test#fragment", "https://identity.example.test/\u0085",
+    `https://identity.example.test/${"é".repeat(1024)}`];
+  const badSubjects = [null, "", " ", "user\n1", "user\u00851", "a".repeat(513), "é".repeat(257)];
+  const badOwners = [
+    ...badIssuers.map((issuer) => ({ ...owner, issuer })), ...badSubjects.map((subject) => ({ ...owner, subject })),
+    { kind: "legacy_control", credential_id: "legacy-viewer", role: "viewer" }, { kind: "unknown" },
+    { ...owner, account_id: uuid },
+  ];
+  for (const bad of badOwners)
+    assert.throws(() => parseResourcePage({ ...envelope, items: [{ ...item, owner: bad }] }), /Contrat/);
+});
+
+test("un propriétaire OIDC ne permet pas de se connecter avec une identité ou une méthode SSO non intégrée", () => {
+  const identity = { version: 1, principal, display_name: "Alice locale",
+    authentication: { method: "local_credential", credential_id: uuid, expires_at: null }, contexts: [context] };
+  assert.deepEqual(parseHumanIdentity(identity).principal, principal);
+  const oidc = { kind: "human_oidc", issuer: "https://identity.example.test/realms/a", subject: "user-1" };
+  assert.throws(() => parseHumanIdentity({ ...identity, principal: oidc }), /Contrat/);
+  for (const method of ["oidc", "oidc_access_token", "unknown"])
+    assert.throws(() => parseHumanIdentity({ ...identity, authentication: { ...identity.authentication, method } }), /Contrat/);
+});
+
 test("la projection metadata interdit contenus, séquences et identités de contrôle", () => {
   const event = { metadata: { id: uuid, timestamp: "2026-11-01T12:00:00Z", received_at: "2026-11-01T12:00:01Z",
     kind: "command.completed", source: "test", provenance: "observed", coverage: "partial",
