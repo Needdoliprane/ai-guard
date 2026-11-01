@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 1er novembre — pagination humaine et version d'autorisation opaque
+
+Le candidat de lecture humaine doit permettre les précédents et les retries pendant son contexte, sans exposer de compteur global. La revue a constaté que retirer les ancêtres de curseurs cassait la navigation après trois pages. Le contrat de ce lot non publié remplace ce cache de pages par des curseurs AEAD au sein d'un registre borné de contextes :4096 au total,64 par credential/principal, durée absolue300s, saturation explicite sans éviction vivante. Chaque contexte possède une clé CSPRNG et un compteur de nonce partagés uniques, sans wrap ni réinitialisation ; aucune position d'audit n'est publique. La dépendance directe prévue `ring = "=0.17.14"` est déjà transitive et verrouillée ; le wrapper reste à implémenter, tester et relire.
+
+La révision globale d'autorisation reste privée ; les DTO portent une `authorization_version` opaque. Les lectures revalident les droits et enregistrent durablement leur propre reçu avant restitution. Rejouer un curseur ne prouve pas la réception des données. Le SSE reprend après la dernière trame complète validée, avec doublons possibles au retry ; il ne promet pas le même futur lot encore inconnu. Les budgets de traversée ne constituent pas un quota contre l'exfiltration. Cette décision précise un contrat en cours ; elle ne qualifie ni authentification humaine, ni SSO, ni cloud.
+
 ## 1er novembre — identité humaine indexée et version de stockage explicite
 
 Choix d'implémentation de l'orchestrateur dans la base SQLite par tenant existante : domaine humain distinct de `runner`/`viewer`, permissions personnelles/administratives explicites et projections indexées, avec audit atomique. Le lot en cours prépare un schéma4 exact et une migration3→4 explicite avec sauvegarde vérifiée ; aucun objet ni nouveau domaine métier n'est dissimulé sous le schéma3. Les lecteurs de supervision ne reconnaissent4 qu'avec les capacités et invariants effectivement conservés ; ni comparaison `>=3` ni réactivation lors d'une ouverture/migration. Les formats des plans fournisseurs restent distincts et inchangés.

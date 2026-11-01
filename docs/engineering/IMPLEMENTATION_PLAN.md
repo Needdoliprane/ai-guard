@@ -11,6 +11,8 @@ Objectif : satisfaire les exigences complètes local-first/cloud et produire des
 - Registre : credential de broker distinct et lié au tenant côté serveur, ownership et heartbeat audités, fraîcheur observée distincte de liveness déclarée. Contrat coordonné avec la migration identité avant implémentation des coutures partagées ; pas d'assimilation d'une autorité moteur à un broker.
 - Les tests produit ciblés sont exécutés par Luna après gel ; revues et intégration précèdent tout statut livré. Les trois worktrees dédiés sont suivis jusqu'à leur retrait contrôlé après publication, sans suppression de données privées ou de ressources vivantes.
 
+Le composite publié cd3d0b5 passe ensuite une seule release native arm64, sans nouveau canari ni appel modèle. La verticale humaine locale productive continue en parallèle dans un worktree backend réutilisé et un nouveau frontend : API/Store, CLI et UI ont des périmètres exclusifs. Ce nouveau raccordement et sa revue/validation restent ouverts ; OIDC/PKCE et lancement humain ne sont pas livrés par le socle. L'image Linux et l'import TLS réels sont qualifiés séparément, sans compilation lourde concurrente.
+
 ### Lots indépendants et fermeture des worktrees — 1er novembre
 
 - Dashboard : correctif de refus401/403 intégré et poussé sous `d1164bf`, référence distante vérifiée. Onze tests API/build et navigateur ciblé PASS sur le gel, revue traitée ; onze tests API et build repassent après intégration. Preuves conservées hors checkout, inventaire final traité et checkout secondaire supprimé par Git sans force ; branche conservée.
