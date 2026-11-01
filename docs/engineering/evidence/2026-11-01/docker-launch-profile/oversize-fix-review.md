@@ -1,0 +1,11 @@
+# Relecture ciblée — correction STOP oversize proposée
+
+1 novembre 2026, lecture seule, hors checkout. SHA constatés : patch c1c65a8d57728602443390f6ae9429022040f8448147149e60474b9cc0fb111e ; recovery-proposed.rs 30d11ce0ace64d1463fc0ff0aec37d02f776c7d500b75e901c6977efd4edd981. Aucun patch appliqué par le reviewer ; aucun Cargo/test/moteur, donnée réelle ou credential ouvert. RED encore en cours chez Luna au moment de l'avis ; aucune réussite d'exécution déduite.
+
+Avis favorable sur le delta proposé. RecoveryBlobBytes:184–218 sépare uniquement les octets metadata des blobs du budget dur des records lus. Les additions des totaux job/scope et leur combinaison avec Usage utilisent checked_add ; overflow devient None et diagnostic incomplet, jamais zéro. next_job remet seulement le total du job à zéro, sans effacer un overflow ou dépassement du scope. Dans read_job:1043–1063, seuls les octets du sous-arbre bindings/launch et d'un parent launch remplacé par fichier sont différés ; entrées visitées, jobs, révisions et tailles des records restent dans Usage avec erreurs propagées. Les bornes de persistent_read et les vérifications de chaîne sont inchangées. La capacité mémoire de lecture n'est donc pas rendue proportionnelle à un blob agrandi.
+
+scan:895–917 conserve le RecoveredJob vérifié, puis émet LimitExceeded si le budget blob combiné est excessif/inconnu. Le dépassement blob n'alimente plus le test d'interruption du scan sur Usage:928 ; les jobs suivants restent examinables sous leurs propres bornes de records/entrées. recovery_status conserve aussi la projection et son statut incomplet.
+
+stop_budget_usage:530–583 et son appel avant publication:464 restent inchangés : toutes les tailles réelles et les entrées sont recomptées, sans remplacer la taille observée par3, sauter un cap, créer une réserve ou produire un ACK avec budget inconnu. Full et start continuent à contrôler contenu exact/SHA/capacité, donc à refuser le blob altéré.
+
+Le delta traite le défaut signalé à la lecture, sans second défaut étayé. L'application reste dépendante du RED préalable décidé par Root ; la preuve GREEN devra confirmer conservation des mêmes Arm/projections, refus Full/start et refus d'ACK budgétaire. Aucun témoin D5/fencing ou qualification runtime n'est accordé.

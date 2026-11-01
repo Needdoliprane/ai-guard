@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 1er novembre — provenance des builds et intégration du profil Docker
+
+Les validations destinées à publication utilisent une cible Cargo dédiée au checkout, réutilisable pour ses changements suivants, sans partage entre worktrees de contenus différents. Une incohérence source/bibliothèque dans l'ancienne cible partagée est conservée sans attribution rétrospective ; une compilation neuve isolée établit seulement les résultats de son propre gel. Aucun clean, effacement de preuve ou relèvement de délai produit n'est utilisé comme correction. Les modes privés des captures ne doivent pas retirer le bit de traversée aux répertoires ni le bit d'exécution aux binaires.
+
+Le profil Docker accepté est intégré avec ses formats V2 couplés, anciens formats inchangés et choix opérateur explicite. La revue a conduit à corriger la projection STOP sous blob surdimensionné puis l'indirection privée des métadonnées ; ses [gels et résultats](evidence/2026-11-01/docker-launch-profile/README.md) restent distincts. L'oracle EOF utilise désormais des barrières causales au lieu d'un sommeil arbitraire ; ses budgets de harnais n'expriment pas une nouvelle latence ou échéance produit. Les retraits de gardien et la réactivation sûre du contrôle restent des exigences ouvertes, sans faux terminal ou libération de quota.
+
 ## 1er novembre — manuel bilingue du produit complet et essais auxiliaires locaux
 
 Le mainteneur demande un manuel du produit complet, organisé par contexte avec exemples de configuration : local, fournisseurs IA, Keycloak, Qwen local, combinaison locale et entreprise. La rédaction adopte cette cible complète ; preuves de fonctionnement et écarts du code restent dans les documents d'ingénierie. L'hypothèse éditoriale ne constitue ni une implémentation ni une qualification de production.

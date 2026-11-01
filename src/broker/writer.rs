@@ -696,11 +696,12 @@ fn serve_backend(backend: Backend, receiver: mpsc::Receiver<Command>) {
                 let result = backend.full().and_then(|journal| {
                     let (ticket, prepared) = input.into_parts();
                     prepared.initial_checkpoint().and_then(|initial| {
-                        journal.accept(
+                        journal.accept_with_launch_profile(
                             ticket,
                             prepared.intent(),
                             prepared.binding_inputs(),
                             &initial,
+                            prepared.launch_selection(),
                         )
                     })
                 });

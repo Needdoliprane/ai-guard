@@ -417,6 +417,7 @@ impl Execution<'_> {
             checkpoint,
             self.context.runtime(),
             draft.run.options().allow_rootful_runtime,
+            self.launch_profile.as_ref(),
         )
         .await?;
         let request = ExportRequestV1 {

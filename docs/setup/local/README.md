@@ -1,6 +1,6 @@
 # Local workstation
 
-[Français](README.fr.md) · [Setup index](../README.md) · [AI providers](../providers/README.md)
+[Français](README.fr.md) · [Setup index](../README.md) · [Trusted broker](../broker/README.md) · [AI providers](../providers/README.md)
 
 Use this guide to run the control services in Docker or Podman, execute a first command in a worker, inspect its audit and export its changes. The trusted Rust CLI controls the engine on your workstation. The gateway and dashboard run in separate containers; workers receive a filtered copy of the project, never the original project mount.
 

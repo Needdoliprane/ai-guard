@@ -9,6 +9,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | Guide | Éléments configurés |
 |---|---|
 | [Poste local](local/README.fr.md) | CLI Rust, Docker/Podman, services de contrôle, premier worker, permissions, copie/export, données et reprise. |
+| [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
 | [Fournisseurs IA](providers/README.fr.md) | Codex et Claude Code par abonnement ou API, sélection explicite, credentials privés et Jev optionnel. |
 | [Keycloak et OIDC](keycloak/README.fr.md) | Fournisseur local, clients publics Web/CLI, PKCE, claims, appartenances et raccord IdP d'entreprise. |
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |

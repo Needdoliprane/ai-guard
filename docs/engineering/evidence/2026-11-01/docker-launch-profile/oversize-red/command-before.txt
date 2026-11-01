@@ -1,0 +1,6 @@
+cwd=/Users/louis/Documents/ai-guard/.worktrees/docker-launch-profile
+PATH=/Users/louis/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+CARGO_TARGET_DIR=/Users/louis/Documents/ai-guard/.worktrees/broker-supervision/target
+CARGO_INCREMENTAL=0
+TMPDIR=<private capture>/tmp
+command=CARGO_INCREMENTAL=0 cargo test --locked --lib broker::journal::launch_profile_tests::oversized_launch_blob_keeps_proven_arm_and_other_jobs_without_append_ack -- --exact --test-threads=1

@@ -1,6 +1,6 @@
 # Codex, Claude Code et moteurs de décision
 
-[English](README.md) · [Index d'installation](../README.fr.md) · [Installation locale](../local/README.fr.md)
+[English](README.md) · [Index d'installation](../README.fr.md) · [Installation locale](../local/README.fr.md) · [Broker de confiance](../broker/README.fr.md)
 
 Configurer trois choix indépendants : identité ai-guard, client de développement et son authentification abonnement/API, puis moteur de décision du contrôle. Une connexion à l'IdP ne connecte pas Codex ou Claude Code. Une clé Jev autorise un service de décision du contrôle ; elle n'appartient jamais à un fichier de credentials worker.
 

@@ -1,6 +1,6 @@
 # Poste de travail local
 
-[English](README.md) · [Index d'installation](../README.fr.md) · [Fournisseurs IA](../providers/README.fr.md)
+[English](README.md) · [Index d'installation](../README.fr.md) · [Broker de confiance](../broker/README.fr.md) · [Fournisseurs IA](../providers/README.fr.md)
 
 Ce guide permet de lancer les services de contrôle dans Docker ou Podman, d'exécuter une première commande dans un worker, d'examiner son audit et d'exporter ses changements. Le CLI Rust de confiance commande le moteur du poste. Gateway et dashboard occupent des conteneurs distincts ; les workers reçoivent une copie filtrée du projet, jamais un montage du projet original.
 

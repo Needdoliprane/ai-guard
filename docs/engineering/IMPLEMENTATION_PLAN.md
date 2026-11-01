@@ -8,6 +8,10 @@ Lecture du plan : le [cycle broker permanent](#cycle-actif--broker-permanent-et-
 
 ## Point de reprise — raccord permanent du 31 octobre, en cours
 
+- [x] Profil Docker minimal lié au parent accepté : contrat wire2/bindings2, blob privé exact et reprise STOP indépendante, correction du dépassement de blob ; gels, douze régressions, checks et intégration ciblée [documentés séparément](evidence/2026-11-01/docker-launch-profile/README.md). Ce lot ne retire aucun gardien ni ne ferme D5/G09.
+- [x] Nom de source Claude par abonnement corrigé avec alias historique, sans réécriture ; dix tests de configuration, oracle EOF renforcé, formatage et Clippy strict passent dans une cible privée PRIMARY. Les échecs de harnais et du cache partagé restent conservés.
+- [ ] Retrait du gardien : corriger le contrat après revue (inventaire durable et rapprochement pending avant choix Full/STOP), puis implémenter preuves vivantes, quiescence et reprise idempotente. Pas d'éviction automatique ni retrait fondé sur un simple terminal.
+- [ ] Réactivation du contrôle après reopen : le Store3 fraîchement activé ne survit pas au restart ; définir et vérifier une reprise sûre sans reconstruire d'autorité depuis une base restaurée seule. Ne pas contourner par suppression de base ou modification d'un flag.
 - [x] Générateur local PKI en une commande Rust : chaîne neuve, protections de fichiers/programme, refus et TLS réellement testés ; [preuves et limites](evidence/2026-11-01/demo-pki/README.md). Ce lot ne qualifie pas G11 ni le raccord HTTPS des services.
 - [ ] Poursuivre indépendamment le profil Docker/reprise STOP et le raccord identité/SSO ; ni la PKI de test ni le profil Keycloak de découverte ne livrent ces parcours complets.
 

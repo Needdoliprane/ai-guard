@@ -18,6 +18,7 @@ pub(super) struct ChainVerifierV1<'a> {
     intent: &'a ExecutionIntentV1,
     intent_hash: String,
     binding: &'a BindingManifestV1,
+    launch: Option<&'a DockerLaunchProfileBindingV1>,
     initial: &'a RevisionRefV1,
     chain: Vec<RevisionRefV1>,
     payload: Option<LoadedCheckpoint>,
@@ -28,6 +29,7 @@ pub(super) struct ChainVerifierV1<'a> {
     last_cancel_operations: Option<usize>,
 }
 impl<'a> ChainVerifierV1<'a> {
+    #[cfg(test)]
     pub fn new(
         scope: &'a JournalScopeV1,
         control: &'a ControlSecrets,
@@ -35,12 +37,23 @@ impl<'a> ChainVerifierV1<'a> {
         binding: &'a BindingManifestV1,
         initial: &'a RevisionRefV1,
     ) -> JournalResult<Self> {
+        Self::new_with_launch_profile(scope, control, intent, binding, initial, None)
+    }
+    pub fn new_with_launch_profile(
+        scope: &'a JournalScopeV1,
+        control: &'a ControlSecrets,
+        intent: &'a ExecutionIntentV1,
+        binding: &'a BindingManifestV1,
+        initial: &'a RevisionRefV1,
+        launch: Option<&'a DockerLaunchProfileBindingV1>,
+    ) -> JournalResult<Self> {
         Ok(Self {
             scope,
             control,
             intent,
             intent_hash: intent.intent_hash().map_err(|_| JournalError::Corrupt)?,
             binding,
+            launch,
             initial,
             chain: Vec::new(),
             payload: None,
@@ -97,12 +110,13 @@ impl<'a> ChainVerifierV1<'a> {
             Some(4) => decode!(OutboxCheckpoint, V4, "ai-guard:broker-checkpoint:v4"),
             _ => return Err(JournalError::UnsupportedVersion),
         };
-        context_checkpoint(
+        context_checkpoint_with_launch(
             self.scope,
             self.control,
             &next_payload,
             self.intent,
             self.binding,
+            self.launch,
         )?;
         if let Some(old) = &self.payload {
             check_transition(
@@ -184,14 +198,38 @@ impl<'a> ChainVerifierV1<'a> {
     }
 }
 
-pub(super) fn context_checkpoint(
+pub(super) fn context_checkpoint_with_launch(
     scope: &JournalScopeV1,
     control: &ControlSecrets,
     checkpoint: &LoadedCheckpoint,
     intent: &ExecutionIntentV1,
     binding: &BindingManifestV1,
+    launch: Option<&DockerLaunchProfileBindingV1>,
 ) -> JournalResult<()> {
     context(scope, control, checkpoint.runner(), intent, binding)?;
+    if let Some(profile) = launch {
+        profile.validate().map_err(|_| JournalError::Conflict)?;
+        if profile.journal_scope_hash
+            != digest("ai-guard:broker-journal-scope:v1", &canonical(scope)?)
+            || profile.parent_operation_id != intent.operation_id()
+            || profile.intent_hash != intent.intent_hash().map_err(|_| JournalError::Conflict)?
+        {
+            return Err(JournalError::Conflict);
+        }
+    }
+    let context = checkpoint.runner().broker_context();
+    match context.binding {
+        Some(authority) => {
+            if authority.docker_launch_profile.as_ref() != launch {
+                return Err(JournalError::Conflict);
+            }
+            authority
+                .validate_docker_launch_profile()
+                .map_err(|_| JournalError::Conflict)?;
+        }
+        None if launch.is_some() && context.managed => return Err(JournalError::Conflict),
+        None => {}
+    }
     if let Some(value) = checkpoint.supervised() {
         value.validate_context(intent, scope.0.control_namespace_uuid, binding)?;
     }
@@ -240,6 +278,22 @@ pub(super) fn check_transition(
     legacy_managed_seen: bool,
     last_cancel_operations: Option<usize>,
 ) -> JournalResult<()> {
+    if let Some(profile) = previous
+        .runner()
+        .broker_context()
+        .binding
+        .and_then(|authority| authority.docker_launch_profile.as_ref())
+        && next
+            .runner()
+            .broker_context()
+            .binding
+            .and_then(|authority| authority.docker_launch_profile.as_ref())
+            != Some(profile)
+    {
+        // Once a strict authority exists, removing the whole managed projection
+        // must not erase its engaged start profile. Legacy transitions stay exact.
+        return Err(JournalError::Conflict);
+    }
     if let Some(value) = next.outbox() {
         value.validate_transition(previous.outbox())?;
     } else if previous.outbox().is_some() {

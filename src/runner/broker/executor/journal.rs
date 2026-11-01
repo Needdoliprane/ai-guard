@@ -74,6 +74,12 @@ impl<'a> Execution<'a> {
             .await?
             .context("job is unavailable")?;
         ensure!(same(job.scope(), context.scope())?, "job scope mismatch");
+        if let Some(profile) = job.launch_profile_binding() {
+            ensure!(
+                profile.invocation_fingerprint == context.runtime().invocation().fingerprint(),
+                "accepted Docker start profile invocation changed"
+            );
+        }
         let credentials = credentials_from_job(&job, context.config())?;
         let client = context.client().clone().with_secrets(
             credentials
@@ -95,6 +101,7 @@ impl<'a> Execution<'a> {
             client,
             generation: context.expected_generation(),
             phase: AtomicU8::new(0),
+            launch_profile: job.launch_profile().cloned(),
         })
     }
 

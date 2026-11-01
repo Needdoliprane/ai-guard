@@ -5,6 +5,9 @@ use super::{
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1},
     outbox::{BrokerCheckpointV4, OutboxReceiptV1},
 };
+use crate::runtime::launch_profile::{
+    DockerLaunchProfileBindingV1, LaunchProfileSelection, RetainedDockerLaunchProfile,
+};
 use crate::{
     control_fs::{Directory, PrivateFile},
     runner::CheckpointPayloadV1,
@@ -143,12 +146,55 @@ record!(Reservation {
     operation_id: Uuid,
     submit_hash: String
 });
-record!(Bindings {
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Bindings {
     version: u32,
     operation_id: Uuid,
     intent_hash: String,
-    binding: BindingManifestV1
-});
+    binding: BindingManifestV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docker_launch_profile: Option<DockerLaunchProfileBindingV1>,
+}
+impl Bindings {
+    fn hash(&self, bytes: &[u8]) -> JournalResult<String> {
+        match (self.version, self.docker_launch_profile.is_some()) {
+            (1, false) => Ok(digest("ai-guard:broker-bindings:v1", bytes)),
+            (2, true) => Ok(digest("ai-guard:broker-bindings:v2", bytes)),
+            _ => Err(JournalError::Corrupt),
+        }
+    }
+    fn validate_launch(
+        &self,
+        accepted_version: u32,
+        scope: &str,
+        operation: Uuid,
+        intent: &ExecutionIntentV1,
+    ) -> JournalResult<()> {
+        if self.version != accepted_version {
+            return Err(JournalError::Corrupt);
+        }
+        if !matches!(
+            (self.version, self.docker_launch_profile.is_some()),
+            (1, false) | (2, true)
+        ) {
+            return Err(JournalError::Corrupt);
+        }
+        if let Some(profile) = &self.docker_launch_profile {
+            profile.validate().map_err(|_| JournalError::Corrupt)?;
+            let options = intent.initial_options().run_options();
+            if profile.journal_scope_hash != scope
+                || profile.parent_operation_id != operation
+                || profile.intent_hash != self.intent_hash
+                || options.runtime != crate::runtime::RuntimeKind::Docker
+                || options.runtime_endpoint.as_deref() != Some(profile.runtime_endpoint.as_str())
+            {
+                return Err(JournalError::Corrupt);
+            }
+        }
+        Ok(())
+    }
+}
 record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:CheckpointPayloadV1 });
 record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
 record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
@@ -698,6 +744,16 @@ impl Journal {
         bindings: BindingInputs<'_>,
         checkpoint0: &CheckpointPayloadV1,
     ) -> JournalResult<AcceptedJobV1> {
+        self.accept_with_launch_profile(ticket, intent, bindings, checkpoint0, None)
+    }
+    pub(crate) fn accept_with_launch_profile(
+        &self,
+        ticket: ReservationTicket,
+        intent: &ExecutionIntentV1,
+        bindings: BindingInputs<'_>,
+        checkpoint0: &CheckpointPayloadV1,
+        launch: Option<&LaunchProfileSelection>,
+    ) -> JournalResult<AcceptedJobV1> {
         let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
         self.check_writer()?;
         if !Arc::ptr_eq(&ticket.owner, &self.0)
@@ -725,11 +781,25 @@ impl Journal {
         let (binding, binding_bytes) = self.prepare_binding(intent, bindings)?;
         self.context(checkpoint0, intent, &binding)?;
         let manifest = Bindings {
-            version: 1,
+            version: if launch.is_some() { 2 } else { 1 },
             operation_id: ticket.operation,
             intent_hash: intent_hash.clone(),
             binding,
+            docker_launch_profile: launch
+                .map(|selection| {
+                    selection.binding(&self.0.scope_hash, ticket.operation, &intent_hash)
+                })
+                .transpose()
+                .map_err(|_| JournalError::InvalidInput)?,
         };
+        manifest
+            .validate_launch(
+                manifest.version,
+                &self.0.scope_hash,
+                ticket.operation,
+                intent,
+            )
+            .map_err(|_| JournalError::InvalidInput)?;
         let manifest_bytes = self.checked_record(&manifest, SMALL)?;
         let checkpoint = Checkpoint {
             version: 1,
@@ -752,12 +822,12 @@ impl Journal {
         };
         let current_bytes = self.checked_record(&current, SMALL)?;
         let accepted = Accepted {
-            version: 1,
+            version: manifest.version,
             scope_hash: self.0.scope_hash.clone(),
             operation_id: ticket.operation,
             submit_hash: ticket.submit_hash.clone(),
             intent_hash,
-            bindings_hash: digest("ai-guard:broker-bindings:v1", &manifest_bytes),
+            bindings_hash: manifest.hash(&manifest_bytes)?,
             initial_checkpoint: head,
         };
         let accepted_bytes = self.checked_record(&accepted, SMALL)?;
@@ -780,8 +850,8 @@ impl Journal {
             + binding_bytes.as_ref().map_or(0, |b| b.len() as u64);
         self.budget(
             &name,
-            added_bytes,
-            5 + if binding_bytes.is_some() { 2 } else { 0 },
+            added_bytes + if launch.is_some() { 3 } else { 0 },
+            5 + if binding_bytes.is_some() { 2 } else { 0 } + if launch.is_some() { 2 } else { 0 },
         )?;
         if let Some(bytes) = binding_bytes {
             let directory =
@@ -793,6 +863,9 @@ impl Journal {
             io(directory.sync())?;
             io(job.sync())?;
             stage!(BindingDurable);
+        }
+        if let Some(profile) = &manifest.docker_launch_profile {
+            io(RetainedDockerLaunchProfile::create(&job, profile))?;
         }
         self.write(&job, "intent.json", &intent_bytes)?;
         stage!(IntentDurable);
@@ -1079,7 +1152,14 @@ impl Journal {
         {
             return Err(JournalError::Conflict);
         }
-        self.context_checkpoint(&next, &loaded.0.intent, &loaded.0.binding)?;
+        confirmed::context_checkpoint_with_launch(
+            &self.0.scope,
+            &self.0.control,
+            &next,
+            &loaded.0.intent,
+            &loaded.0.binding,
+            loaded.0.launch_binding.as_ref(),
+        )?;
         let (bytes, head) = encode_checkpoint(
             &self.0,
             operation_id,
@@ -1359,7 +1439,7 @@ impl Journal {
         let reservation: Reservation = self.read(&job, "reservation.json", SMALL)?;
         self.check_reservation(&reservation, operation_id)?;
         let accepted: Accepted = self.read(&job, "accepted.json", SMALL)?;
-        if accepted.version != 1
+        if !matches!(accepted.version, 1 | 2)
             || accepted.operation_id != operation_id
             || accepted.scope_hash != self.0.scope_hash
             || accepted.submit_hash != reservation.submit_hash
@@ -1388,16 +1468,34 @@ impl Journal {
             .ok_or(JournalError::Interrupted)?;
         self.0.control.record(binding_file.bytes())?;
         let bindings: Bindings = parse(binding_file.bytes())?;
-        if bindings.version != 1
+        if bindings.version != accepted.version
             || bindings.operation_id != operation_id
             || bindings.intent_hash != intent_hash
-            || accepted.bindings_hash != digest("ai-guard:broker-bindings:v1", binding_file.bytes())
+            || accepted.bindings_hash != bindings.hash(binding_file.bytes())?
             || canonical(&bindings)? != binding_file.bytes()
         {
             return Err(JournalError::Corrupt);
         }
+        bindings.validate_launch(accepted.version, &self.0.scope_hash, operation_id, &intent)?;
         io(binding_file.persistent_sync())?;
         let source = self.load_binding(&job, &intent, &bindings.binding)?;
+        let launch_profile = bindings
+            .docker_launch_profile
+            .as_ref()
+            .map(|binding| {
+                fscheck(RetainedDockerLaunchProfile::load(
+                    &job,
+                    binding,
+                    &self.0.exclusions.0,
+                ))
+            })
+            .transpose()?;
+        if bindings.docker_launch_profile.is_none()
+            && fscheck(job.persistent_child(crate::runtime::launch_profile::DIRECTORY, false))?
+                .is_some()
+        {
+            return Err(JournalError::Corrupt);
+        }
         let current: Current = self.read(&job, "current.json", SMALL)?;
         if current.version != 1
             || current.operation_id != operation_id
@@ -1407,12 +1505,13 @@ impl Journal {
             return Err(JournalError::Corrupt);
         }
         valid_hash(&current.head.hash).map_err(|_| JournalError::Corrupt)?;
-        let mut verifier = confirmed::ChainVerifierV1::new(
+        let mut verifier = confirmed::ChainVerifierV1::new_with_launch_profile(
             &self.0.scope,
             &self.0.control,
             &intent,
             &bindings.binding,
             &accepted.initial_checkpoint,
+            bindings.docker_launch_profile.as_ref(),
         )?;
         for revision in 0..=current.head.revision {
             let file = self
@@ -1436,6 +1535,9 @@ impl Journal {
                 return Err(JournalError::Conflict);
             }
         }
+        if let Some(profile) = &launch_profile {
+            fscheck(profile.revalidate())?;
+        }
         io(job.sync())?;
         io(self.0.jobs.sync())?;
         io(self.0.directory.sync())?;
@@ -1449,6 +1551,8 @@ impl Journal {
             submit_hash: accepted.submit_hash,
             binding: bindings.binding,
             source,
+            launch_binding: bindings.docker_launch_profile,
+            launch_profile,
             head: current.head,
             checkpoint: payload,
             legacy_managed_seen,
@@ -1537,14 +1641,6 @@ impl Journal {
     ) -> JournalResult<()> {
         confirmed::context(&self.0.scope, &self.0.control, checkpoint, intent, binding)
     }
-    fn context_checkpoint(
-        &self,
-        checkpoint: &LoadedCheckpoint,
-        intent: &ExecutionIntentV1,
-        binding: &BindingManifestV1,
-    ) -> JournalResult<()> {
-        confirmed::context_checkpoint(&self.0.scope, &self.0.control, checkpoint, intent, binding)
-    }
     fn check_transition(
         &self,
         previous: &LoadedCheckpoint,
@@ -1595,19 +1691,26 @@ impl Journal {
             let mut revisions = 0u32;
             for file in fscheck(directory.persistent_entries(self.0.limits.job_entries))? {
                 if file.directory {
-                    if file.name != "bindings" {
+                    if file.name != "bindings"
+                        && file.name != crate::runtime::launch_profile::DIRECTORY
+                    {
                         return Err(JournalError::Corrupt);
                     }
-                    let bindings = fscheck(directory.persistent_child("bindings", false))?
+                    let bindings = fscheck(directory.persistent_child(&file.name, false))?
                         .ok_or(JournalError::Corrupt)?;
                     for binding in fscheck(bindings.persistent_entries(self.0.limits.job_entries))?
                     {
                         if binding.directory
-                            || !(binding.name == "manual-env-v1.bin"
-                                || binding.name.strip_suffix(".json").is_some_and(|id| {
-                                    Uuid::parse_str(id)
-                                        .is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == id)
-                                }))
+                            || !(if file.name == crate::runtime::launch_profile::DIRECTORY {
+                                binding.name == crate::runtime::launch_profile::FILE
+                            } else {
+                                binding.name == "manual-env-v1.bin"
+                                    || binding.name.strip_suffix(".json").is_some_and(|id| {
+                                        Uuid::parse_str(id).is_ok_and(|uuid| {
+                                            !uuid.is_nil() && uuid.to_string() == id
+                                        })
+                                    })
+                            })
                         {
                             return Err(JournalError::Corrupt);
                         }
@@ -1681,5 +1784,7 @@ pub(super) enum FaultStage {
     RejectedDurable,
     BeforeAck,
 }
+#[cfg(test)]
+mod launch_profile_tests;
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,103 @@
+use super::launch_profile::{DockerLaunchProfileBindingV1, RetainedDockerLaunchProfile};
 use super::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
+
+#[cfg(test)]
+mod launch_profile_tests {
+    use super::*;
+    use crate::control_fs::Directory;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn only_prearmed_command_uses_retained_profile_and_stop_does_not_open_blob() {
+        let temp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = Directory::open_existing(&temp.path().canonicalize().unwrap()).unwrap();
+        // The test binary is approved but never executed by this command test.
+        let runtime =
+            Runtime::with_program(RuntimeKind::Docker, &std::env::current_exe().unwrap()).unwrap();
+        let profile_binding = DockerLaunchProfileBindingV1::new(
+            &"1".repeat(64),
+            Uuid::from_u128(1),
+            &"2".repeat(64),
+            "unix:///not-opened/docker.sock",
+            &runtime.invocation().fingerprint(),
+        )
+        .unwrap();
+        let retained = RetainedDockerLaunchProfile::create(&root, &profile_binding).unwrap();
+        let mut authority = RuntimeAuthority {
+            authority_id: Uuid::from_u128(2),
+            kind: RuntimeKind::Docker,
+            endpoint: profile_binding.runtime_endpoint.clone(),
+            engine_id: Some("synthetic-engine".into()),
+            invocation: Some(runtime.invocation().clone()),
+            docker_launch_profile: None,
+            podman: None,
+        };
+        let legacy_bytes = serde_json::to_value(&authority).unwrap();
+        let old_fingerprint = authority.fingerprint();
+        assert!(
+            !legacy_bytes
+                .as_object()
+                .unwrap()
+                .contains_key("docker_launch_profile")
+        );
+        authority.docker_launch_profile = Some(profile_binding.clone());
+        assert_eq!(
+            authority.fingerprint(),
+            old_fingerprint,
+            "historical engine fingerprint stays unchanged"
+        );
+        authority.validate_docker_launch_profile().unwrap();
+        let managed = ManagedRuntime {
+            runtime,
+            binding: authority,
+            launch_profile: Some(retained.clone()),
+        };
+        let (mut command, prepared, held) = managed.prearmed_command().unwrap();
+        command.arg("start").arg("--attach").arg("synthetic-cid");
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_os_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "--host".into(),
+                profile_binding.runtime_endpoint.clone().into(),
+                "--config".into(),
+                retained.directory_path().as_os_str().to_owned(),
+                "start".into(),
+                "--attach".into(),
+                "synthetic-cid".into()
+            ]
+        );
+        assert_eq!(prepared, Some(profile_binding));
+        assert!(held.is_some());
+        fs::remove_file(
+            retained
+                .directory_path()
+                .join(crate::runtime::launch_profile::FILE),
+        )
+        .unwrap();
+        assert!(managed.prearmed_command().is_err());
+        let mut stop = managed.command().unwrap();
+        stop.arg("stop").arg("synthetic-cid");
+        assert!(
+            !stop.as_std().get_args().any(|arg| arg == "--config"),
+            "STOP command construction has no blob dependency"
+        );
+        let without_cap = ManagedRuntime {
+            launch_profile: None,
+            ..managed
+        };
+        assert!(without_cap.prearmed_command().is_err());
+    }
+}
 
 /// This binding belongs in the broker's private checkpoint, never in an API DTO.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -12,6 +109,8 @@ pub struct RuntimeAuthority {
     pub engine_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation: Option<InvocationBindingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) docker_launch_profile: Option<DockerLaunchProfileBindingV1>,
     podman: Option<PodmanBinding>,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +135,22 @@ impl std::fmt::Debug for RuntimeAuthority {
     }
 }
 impl RuntimeAuthority {
+    pub(crate) fn validate_docker_launch_profile(&self) -> Result<()> {
+        if let Some(profile) = &self.docker_launch_profile {
+            profile.validate()?;
+            ensure!(
+                self.kind == RuntimeKind::Docker
+                    && self.endpoint == profile.runtime_endpoint
+                    && self
+                        .invocation
+                        .as_ref()
+                        .is_some_and(|invocation| invocation.policy_version == 2
+                            && invocation.fingerprint() == profile.invocation_fingerprint),
+                "Docker start profile conflicts with authority"
+            );
+        }
+        Ok(())
+    }
     pub fn invocation_fingerprint(&self) -> Option<String> {
         self.invocation
             .as_ref()
@@ -215,6 +330,7 @@ impl From<PrearmedStartDirective> for OwnedStartDirective {
 pub struct ManagedRuntime {
     runtime: Runtime,
     binding: RuntimeAuthority,
+    launch_profile: Option<RetainedDockerLaunchProfile>,
 }
 impl ManagedRuntime {
     pub async fn connect_docker(authority_id: Uuid, endpoint: &str) -> Result<Self> {
@@ -246,9 +362,11 @@ impl ManagedRuntime {
                 endpoint: endpoint.into(),
                 engine_id: None,
                 invocation: Some(runtime.invocation().clone()),
+                docker_launch_profile: None,
                 podman: None,
             },
             runtime,
+            launch_profile: None,
         };
         managed.binding.engine_id = Some(managed.docker_engine_id().await?);
         Ok(managed)
@@ -288,9 +406,11 @@ impl ManagedRuntime {
                 endpoint: endpoint.into(),
                 engine_id: None,
                 invocation: Some(runtime.invocation().clone()),
+                docker_launch_profile: None,
                 podman: None,
             },
             runtime,
+            launch_profile: None,
         };
         let info = managed.podman_info().await?;
         let marker = PodmanBinding {
@@ -356,10 +476,16 @@ impl ManagedRuntime {
             runtime.kind == binding.kind,
             "runtime kind conflicts with historical authority"
         );
+        ensure!(
+            binding.docker_launch_profile.is_none()
+                || binding.invocation.as_ref() == Some(runtime.invocation()),
+            "strict Docker start profile invocation cannot be adopted; a new acceptance is required"
+        );
         binding.invocation = Some(runtime.invocation().clone());
         Self::validated_reopen(binding, runtime).await
     }
     async fn validated_reopen(binding: RuntimeAuthority, runtime: Runtime) -> Result<Self> {
+        binding.validate_docker_launch_profile()?;
         validate_endpoint(binding.kind, &binding.endpoint)?;
         ensure!(
             !binding.authority_id.is_nil(),
@@ -375,7 +501,11 @@ impl ManagedRuntime {
                 "Podman binding is incomplete; explicit bootstrap required"
             ),
         }
-        let managed = Self { runtime, binding };
+        let managed = Self {
+            runtime,
+            binding,
+            launch_profile: None,
+        };
         // Legacy Podman environment remains part of the engine fingerprint. It
         // is never replayed; adoption verifies storage roots and the private
         // marker under the newly approved environment instead.
@@ -384,6 +514,69 @@ impl ManagedRuntime {
     }
     pub fn binding(&self) -> &RuntimeAuthority {
         &self.binding
+    }
+    pub(crate) fn bind_docker_launch_profile(
+        mut self,
+        profile: RetainedDockerLaunchProfile,
+    ) -> Result<Self> {
+        ensure!(
+            self.binding.docker_launch_profile.is_none(),
+            "Docker start profile already bound"
+        );
+        self.binding.docker_launch_profile = Some(profile.binding().clone());
+        self.binding.validate_docker_launch_profile()?;
+        profile.revalidate()?;
+        self.launch_profile = Some(profile);
+        Ok(self)
+    }
+    pub(crate) fn retain_docker_launch_profile(
+        mut self,
+        profile: RetainedDockerLaunchProfile,
+    ) -> Result<Self> {
+        ensure!(
+            self.binding.docker_launch_profile.as_ref() == Some(profile.binding()),
+            "Docker start profile binding changed"
+        );
+        self.binding.validate_docker_launch_profile()?;
+        profile.revalidate()?;
+        self.launch_profile = Some(profile);
+        Ok(self)
+    }
+    pub(super) fn prearmed_command(
+        &self,
+    ) -> Result<(
+        Command,
+        Option<DockerLaunchProfileBindingV1>,
+        Option<RetainedDockerLaunchProfile>,
+    )> {
+        let mut command = self.command()?;
+        let retained = match &self.binding.docker_launch_profile {
+            Some(binding) => {
+                let profile = self
+                    .launch_profile
+                    .as_ref()
+                    .context("Docker start profile capability is unavailable")?;
+                ensure!(
+                    profile.binding() == binding,
+                    "Docker start profile capability differs"
+                );
+                profile.revalidate()?;
+                command.arg("--config").arg(profile.directory_path());
+                Some(profile.clone())
+            }
+            None => {
+                ensure!(
+                    self.launch_profile.is_none(),
+                    "unexpected Docker start profile capability"
+                );
+                None
+            }
+        };
+        Ok((
+            command,
+            self.binding.docker_launch_profile.clone(),
+            retained,
+        ))
     }
     pub async fn doctor(&self, allow_rootful: bool) -> Result<RuntimeInfo> {
         self.verify_authority().await?;
@@ -906,6 +1099,10 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        ensure!(
+            self.binding.docker_launch_profile.is_none(),
+            "strict Docker start profile requires the prearmed start port"
+        );
         spec.require_current_creation_policy()?;
         ensure!(
             !duration.is_zero() && duration <= Duration::from_secs(24 * 60 * 60),
@@ -1071,6 +1268,10 @@ impl ManagedRuntime {
         F: FnMut(ContainerObservation) -> Fut,
         Fut: Future<Output = Result<()>>,
     {
+        ensure!(
+            duration.is_none() || self.binding.docker_launch_profile.is_none(),
+            "strict Docker start profile requires the prearmed start port"
+        );
         self.validate_handle(&handle)?;
         ensure!(
             handle.session == spec.session

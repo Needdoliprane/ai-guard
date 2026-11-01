@@ -8,6 +8,7 @@ use tokio::{
 };
 use uuid::Uuid;
 mod invocation;
+pub(crate) mod launch_profile;
 mod managed;
 mod prestart;
 pub mod terminal;
@@ -29,10 +30,40 @@ pub trait BeforeSpawnGuard: Send {
 pub struct PrearmedStartControl {
     guard: Box<dyn BeforeSpawnGuard>,
     stop: tokio::sync::watch::Receiver<bool>,
+    launch_profile: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
 }
 impl PrearmedStartControl {
     pub fn new(guard: Box<dyn BeforeSpawnGuard>, stop: tokio::sync::watch::Receiver<bool>) -> Self {
-        Self { guard, stop }
+        Self {
+            guard,
+            stop,
+            launch_profile: None,
+        }
+    }
+    pub(crate) fn with_launch_profile(
+        guard: Box<dyn BeforeSpawnGuard>,
+        stop: tokio::sync::watch::Receiver<bool>,
+        launch_profile: Option<launch_profile::DockerLaunchProfileBindingV1>,
+    ) -> Self {
+        Self {
+            guard,
+            stop,
+            launch_profile: launch_profile.map(Box::new),
+        }
+    }
+}
+struct ProfileBoundSpawnGuard {
+    inner: Box<dyn BeforeSpawnGuard>,
+    expected: Option<Box<launch_profile::DockerLaunchProfileBindingV1>>,
+    prepared: Option<launch_profile::DockerLaunchProfileBindingV1>,
+}
+impl BeforeSpawnGuard for ProfileBoundSpawnGuard {
+    fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()> {
+        ensure!(
+            self.expected.as_deref() == self.prepared.as_ref(),
+            "prepared Docker start profile differs from the armed control"
+        );
+        self.inner.check_before_spawn(target)
     }
 }
 impl std::fmt::Debug for PrearmedStartControl {
@@ -1106,12 +1137,13 @@ impl Runtime {
                 &instance.target,
             )
         })?;
-        let mut command = authority.command().with_context(|| {
-            RuntimePrestartStageFailure::new(
-                RuntimePrestartStage::InvocationBeforeSpawn,
-                &instance.target,
-            )
-        })?;
+        let (mut command, prepared_profile, _retained_profile) =
+            authority.prearmed_command().with_context(|| {
+                RuntimePrestartStageFailure::new(
+                    RuntimePrestartStage::InvocationBeforeSpawn,
+                    &instance.target,
+                )
+            })?;
         command.arg("start").arg("--attach");
         if input.is_some() {
             command.arg("--interactive").stdin(Stdio::piped());
@@ -1121,7 +1153,16 @@ impl Runtime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let PrearmedStartControl { guard, mut stop } = control;
+        let PrearmedStartControl {
+            guard,
+            mut stop,
+            launch_profile,
+        } = control;
+        let guard: Box<dyn BeforeSpawnGuard> = Box::new(ProfileBoundSpawnGuard {
+            inner: guard,
+            expected: launch_profile,
+            prepared: prepared_profile,
+        });
         ensure_prearmed_live(&stop).with_context(|| {
             RuntimePrestartStageFailure::new(
                 RuntimePrestartStage::StopBeforeSpawn,
@@ -1901,6 +1942,56 @@ fn parse_runtime_info(kind: RuntimeKind, bytes: &[u8], allow_rootful: bool) -> R
 #[cfg(test)]
 mod capture_error_tests {
     use super::*;
+
+    #[test]
+    fn profile_guard_compares_complete_binding_before_consuming_existing_guard() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Count(Arc<AtomicUsize>);
+        impl BeforeSpawnGuard for Count {
+            fn check_before_spawn(self: Box<Self>, target: &str) -> Result<()> {
+                ensure!(target == "synthetic-cid");
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let binding = launch_profile::DockerLaunchProfileBindingV1::new(
+            &"1".repeat(64),
+            Uuid::from_u128(1),
+            &"2".repeat(64),
+            "unix:///not-opened/docker.sock",
+            &"3".repeat(64),
+        )
+        .unwrap();
+        for (expected, prepared, ok) in [
+            (None, None, true),
+            (Some(binding.clone()), Some(binding.clone()), true),
+            (None, Some(binding.clone()), false),
+            (Some(binding.clone()), None, false),
+        ] {
+            let before = count.load(Ordering::SeqCst);
+            let guard = Box::new(ProfileBoundSpawnGuard {
+                inner: Box::new(Count(count.clone())),
+                expected: expected.map(Box::new),
+                prepared,
+            });
+            assert_eq!(guard.check_before_spawn("synthetic-cid").is_ok(), ok);
+            assert_eq!(count.load(Ordering::SeqCst), before + usize::from(ok));
+        }
+        let mut other = binding.clone();
+        other.parent_operation_id = Uuid::from_u128(4);
+        let before = count.load(Ordering::SeqCst);
+        let guard = Box::new(ProfileBoundSpawnGuard {
+            inner: Box::new(Count(count.clone())),
+            expected: Some(Box::new(binding)),
+            prepared: Some(other),
+        });
+        assert!(guard.check_before_spawn("synthetic-cid").is_err());
+        assert_eq!(count.load(Ordering::SeqCst), before);
+    }
 
     #[tokio::test]
     async fn failed_control_capture_never_formats_raw_stderr() {

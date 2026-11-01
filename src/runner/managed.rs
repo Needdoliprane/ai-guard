@@ -363,6 +363,35 @@ use private_state::{AttemptGuard, Directory};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_seed_is_distinct_for_scope_parent_intent_ref_and_invocation() {
+        use crate::runtime::launch_profile::DockerLaunchProfileBindingV1;
+        let profile = DockerLaunchProfileBindingV1::new(
+            &"1".repeat(64),
+            Uuid::from_u128(1),
+            &"2".repeat(64),
+            "unix:///not-opened/docker.sock",
+            &"3".repeat(64),
+        )
+        .unwrap();
+        let first = launch_authority_seed_name(&profile).unwrap();
+        let mut names = std::collections::HashSet::from([first]);
+        for field in 0..5 {
+            let mut other = profile.clone();
+            match field {
+                0 => other.journal_scope_hash = "4".repeat(64),
+                1 => other.parent_operation_id = Uuid::from_u128(2),
+                2 => other.intent_hash = "5".repeat(64),
+                3 => other.invocation_fingerprint = "6".repeat(64),
+                _ => other.runtime_endpoint = "unix:///not-opened/other.sock".into(),
+            }
+            assert!(names.insert(launch_authority_seed_name(&other).unwrap()));
+        }
+        let mut invalid = profile;
+        invalid.directory_ref = "../elsewhere".into();
+        assert!(launch_authority_seed_name(&invalid).is_err());
+    }
     #[cfg(unix)]
     #[test]
     fn attempt_guard_rejects_concurrent_owners_substitution_and_linked_files() {
@@ -402,6 +431,8 @@ struct AuthoritySeed {
     binding: Option<RuntimeAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     invocation: Option<InvocationBindingV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    docker_launch_profile: Option<crate::runtime::launch_profile::DockerLaunchProfileBindingV1>,
 }
 #[derive(Clone)]
 struct PlanState {
@@ -649,26 +680,64 @@ async fn prepare_authority(
     plan: &RunPlan,
     approved: &Runtime,
 ) -> Result<(String, AuthoritySeed, String)> {
+    prepare_authority_for_launch(plan, approved, None).await
+}
+fn launch_authority_seed_name(
+    profile: &crate::runtime::launch_profile::DockerLaunchProfileBindingV1,
+) -> Result<String> {
+    profile.validate()?;
+    let value = json!({"version":2,"kind":"docker","journal_scope_hash":profile.journal_scope_hash,
+        "parent_operation_id":profile.parent_operation_id,"intent_hash":profile.intent_hash,
+        "launch_profile":profile,"invocation_fingerprint":profile.invocation_fingerprint,
+        "runtime_endpoint":profile.runtime_endpoint});
+    let mut hash = Sha256::new();
+    hash.update(b"ai-guard:runtime-authority-seed:v2\0");
+    hash.update(crate::broker::journal::canonical(&value)?);
+    Ok(format!(
+        "docker-launch-v1-{}.json",
+        hex::encode(hash.finalize())
+    ))
+}
+async fn prepare_authority_for_launch(
+    plan: &RunPlan,
+    approved: &Runtime,
+    launch: Option<&crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
+) -> Result<(String, AuthoritySeed, String)> {
     let endpoint = selected_endpoint(&plan.options, approved).await?;
-    let name = format!(
-        "{}-{}-{}.json",
-        plan.options.runtime,
-        &hex::encode(Sha256::digest(endpoint.as_bytes()))[..24],
-        &approved.invocation().fingerprint()[..24],
-    );
+    let name = if let Some(profile) = launch {
+        profile.revalidate()?;
+        let binding = profile.binding();
+        anyhow::ensure!(
+            plan.options.runtime == RuntimeKind::Docker
+                && binding.runtime_endpoint == endpoint
+                && binding.parent_operation_id == plan.operation_id
+                && binding.invocation_fingerprint == approved.invocation().fingerprint(),
+            "Docker start profile differs from preparation"
+        );
+        launch_authority_seed_name(binding)?
+    } else {
+        format!(
+            "{}-{}-{}.json",
+            plan.options.runtime,
+            &hex::encode(Sha256::digest(endpoint.as_bytes()))[..24],
+            &approved.invocation().fingerprint()[..24],
+        )
+    };
     let directory = Directory::root(&plan.options.config_dir)?.child("authorities")?;
     let mut seed = directory
         .read::<AuthoritySeed>(&name)?
         .unwrap_or(AuthoritySeed {
-            version: 1,
+            version: if launch.is_some() { 2 } else { 1 },
             authority_id: Uuid::new_v4(),
             kind: plan.options.runtime,
             endpoint: endpoint.clone(),
             binding: None,
             invocation: Some(approved.invocation().clone()),
+            docker_launch_profile: launch.map(|p| p.binding().clone()),
         });
+    let expected_version = if launch.is_some() { 2 } else { 1 };
     anyhow::ensure!(
-        seed.version == 1
+        seed.version == expected_version
             && !seed.authority_id.is_nil()
             && seed.kind == plan.options.runtime
             && seed.endpoint == endpoint,
@@ -678,8 +747,30 @@ async fn prepare_authority(
         seed.invocation.as_ref() == Some(approved.invocation()),
         "runtime authority invocation differs from the approved program"
     );
+    anyhow::ensure!(
+        seed.docker_launch_profile.as_ref() == launch.map(|p| p.binding()),
+        "runtime authority start profile differs from accepted binding"
+    );
     let image = if let Some(binding) = seed.binding.clone() {
+        anyhow::ensure!(
+            binding.docker_launch_profile.as_ref() == seed.docker_launch_profile.as_ref(),
+            "runtime authority seed binding differs"
+        );
+        if launch.is_some() {
+            anyhow::ensure!(
+                binding.authority_id == seed.authority_id
+                    && binding.kind == seed.kind
+                    && binding.endpoint == seed.endpoint
+                    && binding.invocation == seed.invocation,
+                "strict runtime authority seed fields differ from its binding"
+            );
+        }
         let runtime = ManagedRuntime::reopen_with_runtime(binding, approved.clone()).await?;
+        let runtime = if let Some(profile) = launch {
+            runtime.retain_docker_launch_profile(profile.clone())?
+        } else {
+            runtime
+        };
         runtime.doctor(plan.options.allow_rootful_runtime).await?;
         runtime.resolve_image(&plan.options.image).await?
     } else if seed.kind == RuntimeKind::Docker {
@@ -689,6 +780,11 @@ async fn prepare_authority(
             approved.clone(),
         )
         .await?;
+        let runtime = if let Some(profile) = launch {
+            runtime.bind_docker_launch_profile(profile.clone())?
+        } else {
+            runtime
+        };
         runtime.doctor(plan.options.allow_rootful_runtime).await?;
         let image = runtime.resolve_image(&plan.options.image).await?;
         seed.binding = Some(runtime.binding().clone());
@@ -979,6 +1075,7 @@ pub(super) struct BrokerPreparation<'a> {
     pub runtime: &'a Runtime,
     pub workspace: workspace::PreparedWorkspace,
     pub credentials: Option<&'a CredentialFile>,
+    pub launch_profile: Option<&'a crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
 }
 
 pub(super) fn broker_require_new_archive(config: &Path, operation: Uuid) -> Result<()> {
@@ -999,10 +1096,20 @@ pub(super) async fn broker_prepare(input: BrokerPreparation<'_>) -> Result<Manag
     let plan = input.plan;
     anyhow::ensure!(!plan.options.interactive, "broker requires batch mode");
     let root = crate::control_fs::Directory::open_existing(&plan.options.config_dir)?;
+    if let Some(profile) = input.launch_profile {
+        let mut scope_hash = Sha256::new();
+        scope_hash.update(b"ai-guard:broker-journal-scope:v1\0");
+        scope_hash.update(crate::broker::journal::canonical(input.scope)?);
+        anyhow::ensure!(
+            profile.binding().journal_scope_hash == hex::encode(scope_hash.finalize()),
+            "Docker start profile scope differs from preparation"
+        );
+    }
     let authorities = root.child("authorities")?;
     authorities.sync()?;
     root.sync()?;
-    let (authority_file, seed, image_id) = prepare_authority(plan, input.runtime).await?;
+    let (authority_file, seed, image_id) =
+        prepare_authority_for_launch(plan, input.runtime, input.launch_profile).await?;
     let archive_name = format!("{}.tar", plan.operation_id);
     // O_EXCL is the authority here. An orphan, including a partial file, is
     // preserved and cannot cause the original project to be copied again.
@@ -1095,6 +1202,7 @@ pub(super) async fn broker_runtime(
     checkpoint: &ManagedCheckpoint,
     approved: &Runtime,
     allow_rootful: bool,
+    launch: Option<&crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
 ) -> Result<ManagedRuntime> {
     anyhow::ensure!(
         checkpoint.worker.is_some(),
@@ -1129,6 +1237,15 @@ pub(super) async fn broker_runtime(
         };
         seed.binding = Some(runtime.binding().clone());
         directory.write(&checkpoint.authority_file, &seed)?;
+        runtime
+    };
+    let runtime = if let Some(profile) = launch {
+        runtime.retain_docker_launch_profile(profile.clone())?
+    } else {
+        anyhow::ensure!(
+            runtime.binding().docker_launch_profile.is_none(),
+            "Docker start profile capability is unavailable"
+        );
         runtime
     };
     runtime.doctor(allow_rootful).await?;

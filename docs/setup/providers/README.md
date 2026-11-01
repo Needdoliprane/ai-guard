@@ -1,6 +1,6 @@
 # Codex, Claude Code and decision engines
 
-[Français](README.fr.md) · [Setup index](../README.md) · [Local installation](../local/README.md)
+[Français](README.fr.md) · [Setup index](../README.md) · [Local installation](../local/README.md) · [Trusted broker](../broker/README.md)
 
 Configure three independent choices: your ai-guard identity, the coding client and its subscription/API authentication, and the decision engine used by the control plane. Signing into an IdP does not sign into Codex or Claude Code. A Jev key authorizes a control-plane decision service; it never belongs in a worker credential file.
 

@@ -416,6 +416,8 @@ pub(super) struct AcceptedData {
     pub(super) submit_hash: String,
     pub(super) binding: BindingManifestV1,
     pub(super) source: Option<PrivateFile>,
+    pub(super) launch_binding: Option<crate::runtime::launch_profile::DockerLaunchProfileBindingV1>,
+    pub(super) launch_profile: Option<crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
     pub(super) head: RevisionRefV1,
     pub(super) checkpoint: LoadedCheckpoint,
     pub(super) legacy_managed_seen: bool,
@@ -483,6 +485,16 @@ impl AcceptedJobV1 {
     }
     pub fn binding_source(&self) -> Option<&PrivateFile> {
         self.0.source.as_ref()
+    }
+    pub(crate) fn launch_profile(
+        &self,
+    ) -> Option<&crate::runtime::launch_profile::RetainedDockerLaunchProfile> {
+        self.0.launch_profile.as_ref()
+    }
+    pub(crate) fn launch_profile_binding(
+        &self,
+    ) -> Option<&crate::runtime::launch_profile::DockerLaunchProfileBindingV1> {
+        self.0.launch_binding.as_ref()
     }
     pub fn head(&self) -> &RevisionRefV1 {
         &self.0.head

@@ -880,7 +880,7 @@ impl EnforcedSlot {
             .lock()
             .map_err(|_| failure(EnforcerFailureReason::LockPoisoned, Some(&sample)))? =
             (value, Instant::now());
-        Ok(PrearmedStartControl::new(
+        Ok(PrearmedStartControl::with_launch_profile(
             Box::new(SpawnGuard {
                 client: self.client.clone(),
                 local: Arc::clone(&self.local),
@@ -888,6 +888,7 @@ impl EnforcedSlot {
                 clock,
             }),
             self.local.stop.subscribe(),
+            registration.authority.docker_launch_profile.clone(),
         ))
     }
 

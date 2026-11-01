@@ -240,6 +240,17 @@ impl RegistrationV1 {
 
     fn validate(&self) -> EnforcerResult<()> {
         let invalid = || EnforcerError::InvalidInput;
+        self.authority
+            .validate_docker_launch_profile()
+            .map_err(|_| invalid())?;
+        if self
+            .authority
+            .docker_launch_profile
+            .as_ref()
+            .is_some_and(|profile| profile.intent_hash != self.arm.intent_hash)
+        {
+            return Err(invalid());
+        }
         self.arm.validate().map_err(|_| invalid())?;
         self.receipt
             .validate_for_arm(&self.arm)
