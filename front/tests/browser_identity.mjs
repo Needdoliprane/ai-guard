@@ -35,6 +35,8 @@ const allocation = (tenant) => {
 };
 let bOutage = true;
 let aDenied = false;
+let summaryDeniedStatus = null;
+let detailDeniedStatus = null;
 let identityMode = "normal";
 const streams = new Map();
 const requests = [];
@@ -60,6 +62,13 @@ const server = createServer(async (request, response) => {
       streams.set(tenant, response);
       request.on("close", () => { if (streams.get(tenant) === response) streams.delete(tenant); });
       return;
+    }
+    if (tenant === "a" && summaryDeniedStatus && ["/api/overview", "/api/agents"].includes(url.pathname)) {
+      response.writeHead(url.pathname === "/api/overview" ? 500 : summaryDeniedStatus);
+      response.end(); return;
+    }
+    if (tenant === "a" && detailDeniedStatus && url.pathname === `/api/v1/workers/${aId}`) {
+      response.writeHead(detailDeniedStatus); response.end(); return;
     }
     if ((tenant === "b" && bOutage) || (tenant === "a" && aDenied)) {
       response.writeHead(tenant === "a" ? 403 : 500); response.end(); return;
@@ -176,6 +185,35 @@ try {
   await page.getByText("Flux connecté", { exact: true }).waitFor();
   await navigate("Agents"); await page.getByText("ONLY_A_AGENT", { exact: true }).first().waitFor();
   await navigate("Sandboxes"); await page.getByText("ONLY_A_SANDBOX", { exact: true }).first().waitFor();
+  // Une panne de la première lecture ne masque jamais le refus d’une autre.
+  // Un détail déjà ouvert appartient lui aussi à la session révoquée.
+  for (const status of [401, 403]) {
+    await navigate("Agents");
+    await page.getByRole("button", { name: "Détails", exact: true }).first().click();
+    await page.locator("dialog[open]").waitFor();
+    summaryDeniedStatus = status;
+    streams.get("a").write(`id: ${status + 100}\nevent: audit\ndata: ${JSON.stringify({ seq: status + 100,
+      id: `ONLY_A_REVOCATION_${status}`, timestamp: "2026-10-29T12:00:00Z", kind: "command.completed" })}\n\n`);
+    await page.getByLabel("Jeton de lecture").waitFor();
+    assert.equal(await page.locator(".app-shell, dialog").count(), 0,
+      `Le refus ${status} ferme la session et le détail malgré overview500`);
+    assert.ok(!(await page.locator("body").textContent()).includes("ONLY_A_"), "Aucune donnée révoquée ne reste affichée");
+    await page.getByText("Votre session a expiré ou le jeton a été refusé.", { exact: true }).waitFor();
+    summaryDeniedStatus = null;
+    await login("a"); await page.getByText("Flux connecté", { exact: true }).waitFor();
+  }
+  // La fermeture du dialogue abandonne son affichage, pas le refus du serveur.
+  detailDeniedStatus = 403;
+  await navigate("Workers"); await page.getByText(aId, { exact: true }).first().waitFor();
+  await page.evaluate(() => { window.__identityHold = true; });
+  await page.getByRole("button", { name: "Détails", exact: true }).click();
+  await waitHeld(`/workers/${aId}`);
+  await page.keyboard.press("Escape");
+  await page.evaluate(() => window.__identityRelease());
+  await page.getByLabel("Jeton de lecture").waitFor();
+  assert.equal(await page.locator(".app-shell, dialog").count(), 0, "Le refus tardif du détail fermé invalide encore sa session");
+  detailDeniedStatus = null;
+  await login("a"); await page.getByText("Flux connecté", { exact: true }).waitFor();
   for (const name of ["Workers", "Quotas", "Allocations"]) {
     await navigate(name); await page.getByText("Lecture réussie", { exact: true }).waitFor();
   }
@@ -251,7 +289,7 @@ try {
   }
   assert.deepEqual(errors, [], "Aucune exception navigateur");
   assert.ok(requests.every((request) => request.method === "GET" && !request.path.includes("tenant_id=")), "Les credentials seuls déterminent le client");
-  process.stdout.write(`Contrôle identité réussi : identité viewer validée avant données, indisponibilité/invalide/runner refusés, A→B avec B500, ${heldPaths.length} réponses/flux A tardifs ignorés, pagination/détail/export, refus A403 tardif, péremption limitée au même client.\n`);
+  process.stdout.write(`Contrôle identité réussi : identité viewer validée avant données, indisponibilité/invalide/runner refusés, refus401/403 malgré overview500, refus403 d’un détail fermé, A→B avec B500, ${heldPaths.length} réponses/flux A tardifs ignorés, pagination/détail/export, refus A403 tardif, péremption limitée au même client.\n`);
 } catch (error) {
   process.stderr.write(JSON.stringify({ errors, requests, page: await page.locator("body").innerText() }, null, 2) + "\n");
   throw error;

@@ -311,7 +311,10 @@ function login(message = "") {
     submit.disabled = true;
     submit.textContent = "Connexion…";
     error.hidden = true;
-    const candidate = new ApiClient(value);
+    const candidate = new ApiClient(value, fetch, () => {
+      if (client === candidate)
+        disconnect("Votre session a expiré ou le jeton a été refusé.");
+    });
     token.value = "";
     try {
       const authenticated = await candidate.identity();

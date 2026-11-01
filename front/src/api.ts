@@ -24,16 +24,18 @@ export type StreamStatus = "connecting" | "live" | "retrying" | "closed";
 export class ApiClient {
   #token: string;
   #fetcher: typeof fetch;
+  #onAuthError: (() => void) | undefined;
   #controller = new AbortController();
-  constructor(token: string, fetcher: typeof fetch = fetch) {
+  constructor(token: string, fetcher: typeof fetch = fetch, onAuthError?: () => void) {
     this.#token = token;
     this.#fetcher = fetcher;
+    this.#onAuthError = onAuthError;
   }
   close() {
     this.#controller.abort();
     this.#token = "";
   }
-  async #request(path: string, stream = false, cursor = 0): Promise<Response> {
+  async #request(path: string, stream = false, cursor = 0, onAuthError = this.#onAuthError): Promise<Response> {
     if (!this.#token || this.#controller.signal.aborted)
       throw new Error("Session fermée.");
     if (
@@ -62,7 +64,15 @@ export class ApiClient {
           ]),
     });
     if (!response.ok) {
-      await response.body?.cancel();
+      if ((response.status === 401 || response.status === 403) && !this.#controller.signal.aborted) {
+        this.close();
+        onAuthError?.();
+      }
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Closing the session may already have aborted the response body.
+      }
       throw new ApiError(response.status);
     }
     return response;
@@ -106,7 +116,7 @@ export class ApiClient {
     while (!this.#controller.signal.aborted) {
       onStatus(attempt ? "retrying" : "connecting");
       try {
-        const response = await this.#request("/api/stream", true, cursor);
+        const response = await this.#request("/api/stream", true, cursor, this.#onAuthError ?? onAuthError);
         if (
           !response.body ||
           !response.headers.get("content-type")?.includes("text/event-stream")
@@ -123,7 +133,6 @@ export class ApiClient {
           error instanceof ApiError &&
           (error.status === 401 || error.status === 403)
         ) {
-          onAuthError();
           return;
         }
         if (this.#controller.signal.aborted) break;

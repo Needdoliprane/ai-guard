@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ApiClient, eventUrl } from "../src/api.ts";
+import { ApiClient, ApiError, eventUrl } from "../src/api.ts";
 
 test("l’export reprend tous les filtres actifs sans reprendre la pagination", async () => {
   const filters = {
@@ -171,5 +171,41 @@ test("une session de lecture exige une identité viewer complète et conserve se
     const client = new ApiClient("viewer", async () => Response.json(identity));
     await assert.rejects(client.identity(), /Identité|Jeton refusé/);
     client.close();
+  }
+});
+
+test("un refus de lecture termine la session même si son appelant ignore la réponse", async () => {
+  for (const status of [401, 403]) {
+    let expired = 0;
+    const client = new ApiClient("viewer", async () => new Response(null, { status }), () => expired++);
+    await assert.rejects(client.get("/api/agents"), (error) => error instanceof ApiError && error.status === status);
+    assert.equal(expired, 1, `Le refus ${status} signale la fin de la session`);
+    await assert.rejects(client.get("/api/overview"), /fermée/i,
+      "Aucune nouvelle lecture ne part avec le credential refusé");
+    assert.equal(expired, 1, "La fin de session n’est signalée qu’une fois");
+  }
+});
+
+test("un refus tardif d’une session fermée n’invalide pas la session suivante", async () => {
+  let release;
+  let expired = 0;
+  const client = new ApiClient("viewer-a", () => new Promise((resolve) => { release = resolve; }), () => expired++);
+  const pending = client.get("/api/agents");
+  client.close();
+  release(new Response(null, { status: 403 }));
+  await assert.rejects(pending, (error) => error instanceof ApiError && error.status === 403);
+  assert.equal(expired, 0, "La continuation A ne signale plus de fin de session après fermeture");
+});
+
+test("un refus SSE utilise une seule notification centrale ou historique", async () => {
+  for (const central of [true, false]) {
+    const signals = [];
+    const client = new ApiClient("viewer", async () => new Response(null, { status: 403 }),
+      central ? () => signals.push("central") : undefined);
+    await client.listen(0, () => assert.fail("Un flux refusé ne fournit aucun événement"), () => {},
+      () => signals.push("historique"));
+    assert.deepEqual(signals, central ? ["central"] : ["historique"],
+      "Le rappel central est prioritaire et le rappel historique reste disponible en son absence");
+    await assert.rejects(client.get("/api/overview"), /fermée/i);
   }
 });
