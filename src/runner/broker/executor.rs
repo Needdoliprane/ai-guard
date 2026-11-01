@@ -193,6 +193,7 @@ struct Execution<'a> {
     client: AuditClient,
     generation: u64,
     phase: AtomicU8,
+    launch_profile: Option<crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
 }
 
 impl BatchExecutor {
@@ -444,6 +445,7 @@ impl<'a> Execution<'a> {
                 runtime: self.context.runtime(),
                 workspace,
                 credentials: credentials.as_ref().map(|c| &c.credential),
+                launch_profile: self.launch_profile.as_ref(),
             })
             .await
             .map_err(|_| anyhow!("immutable workspace preparation requires reconciliation"))?;
@@ -497,6 +499,7 @@ impl<'a> Execution<'a> {
             checkpoint,
             self.context.runtime(),
             draft.run.options().allow_rootful_runtime,
+            self.launch_profile.as_ref(),
         )
         .await?;
         let binding = runtime.binding().clone();

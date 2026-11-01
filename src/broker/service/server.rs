@@ -882,12 +882,13 @@ impl Service {
                 .await?;
             let mut literals = self.material.literals.clone();
             literals.push(credential.to_owned());
-            let prepared = self
+            let mut prepared = self
                 .filesystem(move || prepare_broker_submission(options, operation, &literals))
                 .await?;
             if job.cancel.current() != preparation_generation {
                 return Err(BrokerErrorCodeV1::Interrupted);
             }
+            let start_profile = self.registry.start_profile(&profile.id);
             let context = self
                 .context(
                     verified,
@@ -897,6 +898,11 @@ impl Service {
                     Some(Arc::clone(&source)),
                 )
                 .await?;
+            if start_profile == super::profile::PrearmedStartProfile::DockerMinimal {
+                prepared
+                    .select_minimal_docker_start_profile(context.runtime())
+                    .map_err(|_| BrokerErrorCodeV1::InvalidInput)?;
+            }
             if context.expected_generation() != preparation_generation
                 || job.cancel.current() != preparation_generation
             {

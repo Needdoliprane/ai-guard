@@ -526,10 +526,12 @@ async fn pending_started_callback_is_not_reinvoked_when_attach_reaches_eof() {
         let (_stop_tx, stop_rx) = watch::channel(false);
         let (entered_tx, entered_rx) = oneshot::channel();
         let mut entered_tx = Some(entered_tx);
+        let (first_finished_tx, mut first_finished_rx) = oneshot::channel();
+        let mut first_finished_tx = Some(first_finished_tx);
         let calls = Arc::new(AtomicUsize::new(0));
         let notify = Arc::new(Notify::new());
         let guard_root = root.clone();
-        let execution = tokio::spawn({
+        let mut execution = tokio::spawn({
             let managed = managed.clone();
             let calls = calls.clone();
             let notify = notify.clone();
@@ -558,8 +560,16 @@ async fn pending_started_callback_is_not_reinvoked_when_attach_reaches_eof() {
                             if call == 1 && let Some(sender) = entered_tx.take() {
                                 let _ = sender.send(());
                             }
+                            let finished = if call == 1 {
+                                first_finished_tx.take()
+                            } else {
+                                None
+                            };
                             async move {
                                 notify.notified().await;
+                                if let Some(sender) = finished {
+                                    let _ = sender.send(());
+                                }
                                 Ok(())
                             }
                         },
@@ -567,30 +577,114 @@ async fn pending_started_callback_is_not_reinvoked_when_attach_reaches_eof() {
                     .await
             }
         });
-        tokio::time::timeout(Duration::from_secs(5), entered_rx)
-            .await
-            .expect("first observation callback entered")
-            .expect("callback entry signal delivered");
+        // This is only the fixture preparation budget. Observation has a
+        // separate harness budget after the Rust fixture reaches start.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !root.join("start_seen").exists() {
+                tokio::select! {
+                    outcome = &mut execution => match outcome {
+                        Ok(Err(_)) => panic!("execution failed before fixture start"),
+                        Ok(Ok(_)) => panic!("execution completed before fixture start"),
+                        Err(_) => panic!("execution task failed before fixture start"),
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "fixture preparation timed out: info={} create={} start={} inspect={}",
+                command_count(&root, "info"),
+                command_count(&root, "create"),
+                command_count(&root, "start"),
+                command_count(&root, "inspect"),
+            );
+        });
+        // Before the user callback, execution_inspect and the managed callback
+        // wrapper each perform info (15s cap) + inspect (10s cap). The harness
+        // allows 60s for these two phases; this is not a runtime latency bound.
+        tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::select! {
+                entered = entered_rx => entered.expect("callback entry signal delivered"),
+                outcome = &mut execution => match outcome {
+                    Ok(Err(_)) => panic!("execution failed before callback entry"),
+                    Ok(Ok(_)) => panic!("execution completed before its pending callback"),
+                    Err(_) => panic!("execution task failed before callback entry"),
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            let state = match std::fs::read_to_string(root.join("state")).as_deref() {
+                Ok("created") => "created",
+                Ok("running") => "running",
+                Ok("exited") => "exited",
+                _ => "unknown",
+            };
+            panic!(
+                "first observation callback timed out: info={} create={} start={} inspect={} state={state}",
+                command_count(&root, "info"),
+                command_count(&root, "create"),
+                command_count(&root, "start"),
+                command_count(&root, "inspect"),
+            );
+        });
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
-        // The Rust fixture's attach process remains alive while state=running.
-        // Releasing its explicit fixture state makes the attach reach EOF while
-        // the original on_started future is still pending on Notify.
+        // The first callback is pending on Notify, so its inspection path
+        // cannot run again. A terminal inspect after attach_done therefore
+        // belongs to the runtime's branch after child.wait() has consumed EOF.
         std::fs::write(root.join("state"), "exited").unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while !root.join("attach_done").exists() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "fixture attach did not reach EOF"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !root.join("attach_done").exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("fixture attach reaches its exit marker");
+        // Unlike the fixture exit marker, this phase runs external authority
+        // and inspection commands (15s and 10s caps). This is a harness budget.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !root.join("terminal_after_attach").exists() {
+                tokio::select! {
+                    outcome = &mut execution => match outcome {
+                        Ok(Err(_)) => panic!("execution failed before terminal EOF inspection"),
+                        Ok(Ok(_)) => panic!("execution completed while its first callback was pending"),
+                        Err(_) => panic!("execution task failed before terminal EOF inspection"),
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+                }
+            }
+        })
+        .await
+        .expect("runtime inspected terminal state after attach EOF");
+        assert!(
+            !execution.is_finished(),
+            "runtime must still await the original callback after attach EOF"
+        );
+        assert!(
+            matches!(
+                first_finished_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the first callback future must remain pending after attach EOF"
+        );
         let calls_at_eof = calls.load(Ordering::SeqCst);
+        assert_eq!(calls_at_eof, 1, "on_started was reinvoked after attach EOF");
         notify.notify_one();
-        let result = tokio::time::timeout(Duration::from_secs(3), execution)
+        // The marker precedes inspect's process exit, so that command (10s
+        // cap) may still be pending before the runtime repolls this future.
+        tokio::time::timeout(Duration::from_secs(30), first_finished_rx)
             .await
-            .expect("the original callback future is allowed to finish")
+            .expect("the first callback future finishes after its notification")
+            .expect("the first callback future is preserved until completion");
+        // With input=None, the remaining path can drain two captures (10s
+        // each), then observe again (info 15s + inspect 10s). Allow 60s for
+        // those existing phases in the harness; no runtime cap is changed.
+        let result = tokio::time::timeout(Duration::from_secs(60), execution)
+            .await
+            .expect("fixture runtime finishes its captures and final observation")
             .expect("runtime task does not panic")
             .expect("terminal attach completes without a synthetic timeout");
         assert_eq!(calls_at_eof, 1, "on_started was reinvoked after attach EOF");
@@ -618,13 +712,19 @@ async fn pending_started_callback_is_not_reinvoked_when_attach_reaches_eof() {
     assert_eq!(source.matches(start).count(), 1);
     source = source.replace(
         start,
-        "        \"start\" => {\n            println!(\"prearmed fixture stdout\");\n            eprintln!(\"prearmed fixture stderr\");\n            assert_eq!(args.last().unwrap(), ID);",
+        "        \"start\" => {\n            println!(\"prearmed fixture stdout\");\n            eprintln!(\"prearmed fixture stderr\");\n            assert_eq!(args.last().unwrap(), ID);\n            fs::write(root.join(\"start_seen\"), \"seen\").unwrap();",
     );
     let end = "            }\n        }\n        \"inspect\" => {";
     assert_eq!(source.matches(end).count(), 1);
     source = source.replace(
         end,
         "            }\n            fs::write(root.join(\"attach_done\"), \"done\").unwrap();\n        }\n        \"inspect\" => {",
+    );
+    let inspect = "            let state = fs::read_to_string(root.join(\"state\")).unwrap();";
+    assert_eq!(source.matches(inspect).count(), 1);
+    source = source.replace(
+        inspect,
+        "            let state = fs::read_to_string(root.join(\"state\")).unwrap();\n            if state == \"exited\" && root.join(\"attach_done\").exists() {\n                fs::write(root.join(\"terminal_after_attach\"), \"observed\").unwrap();\n            }",
     );
     std::fs::write(&fixture_source, source).unwrap();
     let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());

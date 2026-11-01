@@ -79,6 +79,7 @@ pub struct PreparedSubmission {
     intent: ExecutionIntentV1,
     binding: PreparedBinding,
     config: Directory,
+    launch: Option<crate::runtime::launch_profile::LaunchProfileSelection>,
 }
 
 impl fmt::Debug for PreparedSubmission {
@@ -88,6 +89,31 @@ impl fmt::Debug for PreparedSubmission {
 }
 
 impl PreparedSubmission {
+    pub(crate) fn select_minimal_docker_start_profile(
+        &mut self,
+        runtime: &crate::runtime::Runtime,
+    ) -> Result<()> {
+        ensure!(
+            self.launch.is_none(),
+            "broker start profile already selected"
+        );
+        let options = self.intent.initial_options().run_options();
+        let endpoint = options
+            .runtime_endpoint
+            .as_deref()
+            .ok_or_else(|| anyhow!("minimal Docker start profile requires an explicit endpoint"))?;
+        self.launch = Some(
+            crate::runtime::launch_profile::LaunchProfileSelection::from_runtime(
+                runtime, endpoint,
+            )?,
+        );
+        Ok(())
+    }
+    pub(crate) fn launch_selection(
+        &self,
+    ) -> Option<&crate::runtime::launch_profile::LaunchProfileSelection> {
+        self.launch.as_ref()
+    }
     pub fn intent(&self) -> &ExecutionIntentV1 {
         &self.intent
     }
@@ -200,6 +226,7 @@ fn prepare_submission(
         intent,
         binding,
         config: chosen.config,
+        launch: None,
     })
 }
 

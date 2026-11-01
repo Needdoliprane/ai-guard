@@ -11,6 +11,7 @@ use crate::{
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
 };
@@ -34,6 +35,110 @@ pub(super) struct Registry {
     pub(super) source: PrivateFile,
     pub(super) source_directory: Directory,
     pub(super) data: RegistryWireV1,
+    start_profiles: BTreeMap<String, PrearmedStartProfile>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum PrearmedStartProfile {
+    #[default]
+    Legacy,
+    DockerMinimal,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartProfileWireV1 {
+    version: u32,
+    mode: StartProfileMode,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StartProfileMode {
+    Legacy,
+    DockerMinimal,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegistryWireV2 {
+    version: u32,
+    installation_id: Uuid,
+    root: PathBuf,
+    max_enforcer_slots: u32,
+    profiles: Vec<ControlProfileV2>,
+    #[serde(default)]
+    additional_control_secret_files: Vec<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ControlProfileV2 {
+    id: String,
+    gateway: String,
+    tenant_id: String,
+    control_namespace_uuid: Uuid,
+    config_dir: PathBuf,
+    runner_token_file: PathBuf,
+    runtime: RuntimeKind,
+    runtime_program: PathBuf,
+    runtime_endpoint: String,
+    image: String,
+    policy_profile: String,
+    network: NetworkMode,
+    allow_rootful_runtime: bool,
+    max_timeout_seconds: u32,
+    allow_capture_output: bool,
+    managed_clients: bool,
+    #[serde(default)]
+    providers_file: Option<PathBuf>,
+    #[serde(default)]
+    manual_credential_file: Option<PathBuf>,
+    source_roots: Vec<PathBuf>,
+    export_roots: Vec<PathBuf>,
+    prearmed_start_profile: StartProfileWireV1,
+}
+impl ControlProfileV2 {
+    fn resolve(self) -> Result<(ControlProfileV1, PrearmedStartProfile)> {
+        ensure!(
+            self.prearmed_start_profile.version == 1,
+            "unsupported broker start profile"
+        );
+        let selection = match self.prearmed_start_profile.mode {
+            StartProfileMode::Legacy => PrearmedStartProfile::Legacy,
+            StartProfileMode::DockerMinimal => {
+                ensure!(
+                    self.runtime == RuntimeKind::Docker,
+                    "minimal Docker start profile requires Docker"
+                );
+                PrearmedStartProfile::DockerMinimal
+            }
+        };
+        Ok((
+            ControlProfileV1 {
+                id: self.id,
+                gateway: self.gateway,
+                tenant_id: self.tenant_id,
+                control_namespace_uuid: self.control_namespace_uuid,
+                config_dir: self.config_dir,
+                runner_token_file: self.runner_token_file,
+                runtime: self.runtime,
+                runtime_program: self.runtime_program,
+                runtime_endpoint: self.runtime_endpoint,
+                image: self.image,
+                policy_profile: self.policy_profile,
+                network: self.network,
+                allow_rootful_runtime: self.allow_rootful_runtime,
+                max_timeout_seconds: self.max_timeout_seconds,
+                allow_capture_output: self.allow_capture_output,
+                managed_clients: self.managed_clients,
+                providers_file: self.providers_file,
+                manual_credential_file: self.manual_credential_file,
+                source_roots: self.source_roots,
+                export_roots: self.export_roots,
+            },
+            selection,
+        ))
+    }
 }
 impl fmt::Debug for Registry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -50,10 +155,43 @@ impl Registry {
             .ok_or_else(|| anyhow!("invalid broker configuration parent"))?;
         let source_directory = Directory::open_existing(parent)
             .map_err(|_| anyhow!("broker configuration requires a private parent directory"))?;
-        let mut data: RegistryWireV1 = serde_json::from_slice(source.bytes())
+        #[derive(Deserialize)]
+        struct Version {
+            version: u32,
+        }
+        let version: Version = serde_json::from_slice(source.bytes())
             .map_err(|_| anyhow!("invalid private broker configuration"))?;
+        let mut start_profiles = BTreeMap::new();
+        let mut data: RegistryWireV1 = match version.version {
+            1 => serde_json::from_slice(source.bytes())
+                .map_err(|_| anyhow!("invalid private broker configuration"))?,
+            2 => {
+                let wire: RegistryWireV2 = serde_json::from_slice(source.bytes())
+                    .map_err(|_| anyhow!("invalid private broker configuration"))?;
+                let mut profiles = Vec::with_capacity(wire.profiles.len());
+                for profile in wire.profiles {
+                    let (profile, selection) = profile.resolve()?;
+                    ensure!(
+                        start_profiles
+                            .insert(profile.id.clone(), selection)
+                            .is_none(),
+                        "duplicate broker profile identity"
+                    );
+                    profiles.push(profile);
+                }
+                RegistryWireV1 {
+                    version: wire.version,
+                    installation_id: wire.installation_id,
+                    root: wire.root,
+                    max_enforcer_slots: wire.max_enforcer_slots,
+                    profiles,
+                    additional_control_secret_files: wire.additional_control_secret_files,
+                }
+            }
+            _ => return Err(anyhow!("unsupported broker configuration")),
+        };
         ensure!(
-            data.version == 1 && !data.installation_id.is_nil(),
+            matches!(data.version, 1 | 2) && !data.installation_id.is_nil(),
             "unsupported broker configuration"
         );
         ensure!(
@@ -87,6 +225,7 @@ impl Registry {
             source,
             source_directory,
             data,
+            start_profiles,
         })
     }
 
@@ -96,6 +235,9 @@ impl Registry {
             .iter()
             .find(|profile| profile.id == id)
             .ok_or_else(|| anyhow!("broker request is not authorized"))
+    }
+    pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
+        self.start_profiles.get(id).copied().unwrap_or_default()
     }
 }
 
@@ -357,5 +499,134 @@ impl SubmitV1 {
             }
         }
         Ok(options)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn registry_v2_accepts_explicit_minimal_docker_start_profile() {
+        let temporary = tempfile::Builder::new()
+            .prefix("broker-launch-registry-")
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap_or_else(|_| panic!("private registry fixture directory unavailable"));
+        let base = temporary
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| panic!("private registry fixture root unavailable"));
+        let directory = Directory::open_existing(&base)
+            .unwrap_or_else(|_| panic!("private registry fixture root unsafe"));
+        // These paths and the loopback/Unix endpoints are data only. Registry
+        // parsing must not open a runner token, runtime program or endpoint.
+        let v1 = json!({
+            "version": 1,
+            "installation_id": "11111111-1111-4111-8111-111111111111",
+            "root": base.join("broker-state"),
+            "max_enforcer_slots": 8,
+            "profiles": [{
+                "id": "strict-docker",
+                "gateway": "http://127.0.0.1:8787",
+                "tenant_id": "tenant-launch-profile-test",
+                "control_namespace_uuid": "22222222-2222-4222-8222-222222222222",
+                "config_dir": base.join("config-not-opened"),
+                "runner_token_file": base.join("runner-token-not-opened"),
+                "runtime": "docker",
+                "runtime_program": base.join("docker-program-not-opened"),
+                "runtime_endpoint": "unix:///not-opened/docker.sock",
+                "image": "worker:synthetic",
+                "policy_profile": "strict",
+                "network": "none",
+                "allow_rootful_runtime": false,
+                "max_timeout_seconds": 30,
+                "allow_capture_output": false,
+                "managed_clients": false,
+                "providers_file": null,
+                "manual_credential_file": null,
+                "source_roots": [base.join("source-not-opened")],
+                "export_roots": [base.join("export-not-opened")]
+            }],
+            "additional_control_secret_files": []
+        });
+        let v1_bytes = serde_json::to_vec(&v1).unwrap();
+        let v1_file = directory
+            .persistent_create("registry-v1.json", &v1_bytes)
+            .unwrap_or_else(|_| panic!("private V1 registry fixture creation failed"));
+        v1_file
+            .persistent_sync()
+            .unwrap_or_else(|_| panic!("private V1 registry fixture synchronization failed"));
+        directory.sync().unwrap_or_else(|_| {
+            panic!("private registry fixture namespace synchronization failed")
+        });
+        let legacy = Registry::load(v1_file.path())
+            .unwrap_or_else(|_| panic!("the valid V1 registry fixture must load first"));
+        assert!(
+            legacy.profile("strict-docker").is_ok(),
+            "the V1 positive control must expose its configured profile"
+        );
+        assert!(legacy.start_profile("strict-docker") == PrearmedStartProfile::Legacy);
+
+        let mut v2 = v1;
+        v2["version"] = json!(2);
+        v2["profiles"][0]["prearmed_start_profile"] =
+            json!({"version": 1, "mode": "docker_minimal"});
+        let v2_bytes = serde_json::to_vec(&v2).unwrap();
+        let v2_file = directory
+            .persistent_create("registry-v2.json", &v2_bytes)
+            .unwrap_or_else(|_| panic!("private V2 registry fixture creation failed"));
+        v2_file
+            .persistent_sync()
+            .unwrap_or_else(|_| panic!("private V2 registry fixture synchronization failed"));
+        directory.sync().unwrap_or_else(|_| {
+            panic!("private registry fixture namespace synchronization failed")
+        });
+        let strict = Registry::load(v2_file.path());
+        assert!(
+            strict.is_ok(),
+            "valid RegistryV2 with explicit minimal Docker start profile must load"
+        );
+        let strict = strict.unwrap();
+        assert!(
+            strict.profile("strict-docker").is_ok(),
+            "the V2 registry must expose its configured profile"
+        );
+        assert!(strict.start_profile("strict-docker") == PrearmedStartProfile::DockerMinimal);
+        // Every variant uses the real private-file parser. Referenced paths and
+        // endpoints remain unopened data, including explicit Legacy in V2.
+        for variant in 0..7 {
+            let mut changed = v2.clone();
+            let expected = variant == 0;
+            match variant {
+                0 => changed["profiles"][0]["prearmed_start_profile"]["mode"] = json!("legacy"),
+                1 => {
+                    changed["profiles"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("prearmed_start_profile");
+                }
+                2 => changed["profiles"][0]["prearmed_start_profile"]["version"] = json!(2),
+                3 => changed["profiles"][0]["prearmed_start_profile"]["mode"] = json!("automatic"),
+                4 => changed["profiles"][0]["prearmed_start_profile"]["unknown"] = json!(true),
+                5 => changed["profiles"][0]["runtime"] = json!("podman"),
+                _ => changed["version"] = json!(1),
+            }
+            let file = directory
+                .persistent_create(
+                    &format!("registry-variant-{variant}.json"),
+                    &serde_json::to_vec(&changed).unwrap(),
+                )
+                .unwrap();
+            file.persistent_sync().unwrap();
+            directory.sync().unwrap();
+            let loaded = Registry::load(file.path());
+            assert_eq!(loaded.is_ok(), expected, "strict registry variant result");
+            if let Ok(loaded) = loaded {
+                assert!(loaded.start_profile("strict-docker") == PrearmedStartProfile::Legacy);
+            }
+        }
     }
 }

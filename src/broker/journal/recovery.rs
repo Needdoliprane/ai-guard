@@ -49,6 +49,7 @@ pub struct RecoveredJobV1 {
 struct StopMetadata {
     intent: ExecutionIntentV1,
     binding: BindingManifestV1,
+    launch_binding: Option<DockerLaunchProfileBindingV1>,
     checkpoint: LoadedCheckpoint,
     legacy_managed_seen: bool,
     last_cancel_operations: Option<usize>,
@@ -180,6 +181,41 @@ impl Journal {
 
 type StopRead = (StopRecoveryReaderV1, RecoveredJobV1, bool);
 
+// Recovery bounds the control records it actually reads independently of blob
+// metadata. A broken blob cannot revoke a proven STOP projection. Its observed
+// bytes still diagnose the physical budget; overflow is unknown, never zero.
+// Mutation uses stop_budget_usage's unchanged strict accounting, not this data.
+struct RecoveryBlobBytes {
+    scope: Option<u64>,
+    job: Option<u64>,
+}
+impl Default for RecoveryBlobBytes {
+    fn default() -> Self {
+        Self {
+            scope: Some(0),
+            job: Some(0),
+        }
+    }
+}
+impl RecoveryBlobBytes {
+    fn next_job(&mut self) {
+        self.job = Some(0);
+    }
+    fn observe(&mut self, bytes: u64) {
+        self.scope = self.scope.and_then(|total| total.checked_add(bytes));
+        self.job = self.job.and_then(|total| total.checked_add(bytes));
+    }
+    fn exceeds_or_unknown(&self, records: &Usage, limits: &JournalLimitsV1) -> bool {
+        self.scope
+            .and_then(|bytes| records.bytes.checked_add(bytes))
+            .is_none_or(|bytes| bytes > limits.scope_bytes)
+            || self
+                .job
+                .and_then(|bytes| records.job_bytes.checked_add(bytes))
+                .is_none_or(|bytes| bytes > limits.job_bytes)
+    }
+}
+
 impl StopJournal {
     pub(crate) fn from_full(journal: &Journal) -> Self {
         Self {
@@ -224,8 +260,11 @@ impl StopJournal {
         // Existence itself is observed even when the accepted prefix is later
         // found interrupted. A subsequent disappearance cannot become Absent.
         writer.observed_jobs.insert(operation_id);
-        let (recovered, rejected_hash, partial) =
-            reader.read_job(operation_id, &mut Usage::default())?;
+        let (recovered, rejected_hash, partial) = reader.read_job(
+            operation_id,
+            &mut Usage::default(),
+            &mut RecoveryBlobBytes::default(),
+        )?;
         if writer
             .rejected_floors
             .get(&operation_id)
@@ -397,12 +436,13 @@ impl StopJournal {
         {
             return Err(JournalError::Conflict);
         }
-        confirmed::context_checkpoint(
+        confirmed::context_checkpoint_with_launch(
             &self.core.scope,
             &self.core.control,
             &next,
             &metadata.intent,
             &metadata.binding,
+            metadata.launch_binding.as_ref(),
         )?;
         confirmed::check_transition(
             &metadata.checkpoint,
@@ -524,10 +564,11 @@ fn stop_budget_usage(core: &Inner, operation_id: Uuid) -> JournalResult<Usage> {
                 }
             }
             if file.directory {
-                if file.name != "bindings" {
+                if file.name != "bindings" && file.name != crate::runtime::launch_profile::DIRECTORY
+                {
                     return Err(JournalError::UnsafeFilesystem);
                 }
-                let bindings = fscheck(job.persistent_child("bindings", false))?
+                let bindings = fscheck(job.persistent_child(&file.name, false))?
                     .ok_or(JournalError::UnsafeFilesystem)?;
                 for binding in fscheck(bindings.persistent_entries(core.limits.job_entries))? {
                     if binding.directory {
@@ -814,6 +855,7 @@ impl StopRecoveryReaderV1 {
             return report;
         }
         let mut usage = Usage::default();
+        let mut blobs = RecoveryBlobBytes::default();
         let inventory = match report.reader.inventory_scopes(&mut usage) {
             Ok((entries, partial)) => {
                 if partial {
@@ -848,19 +890,22 @@ impl StopRecoveryReaderV1 {
             usage.jobs += 1;
             usage.job_bytes = 0;
             usage.job_entries = 0;
+            blobs.next_job();
             report.observed_jobs.insert(operation_id);
-            match report.reader.read_job(operation_id, &mut usage) {
+            let recovered = report.reader.read_job(operation_id, &mut usage, &mut blobs);
+            let partial_error = if blobs.exceeds_or_unknown(&usage, &report.reader.limits) {
+                JournalError::LimitExceeded
+            } else {
+                JournalError::Interrupted
+            };
+            match recovered {
                 Ok((Some(mut job), None, partial)) => {
                     // Startup reports retain stop facts, not an entire copy of
                     // every job's prompts, outbox bodies and runner payload.
                     job.metadata = None;
                     report.jobs.push(job);
                     if partial {
-                        report.issue(
-                            Some(operation_id),
-                            StopRecoveryPhaseV1::Job,
-                            JournalError::Interrupted,
-                        );
+                        report.issue(Some(operation_id), StopRecoveryPhaseV1::Job, partial_error);
                     }
                 }
                 Ok((None, rejected_hash, partial)) => {
@@ -868,11 +913,7 @@ impl StopRecoveryReaderV1 {
                         report.rejected_floors.insert(operation_id, hash);
                     }
                     if partial {
-                        report.issue(
-                            Some(operation_id),
-                            StopRecoveryPhaseV1::Job,
-                            JournalError::Interrupted,
-                        );
+                        report.issue(Some(operation_id), StopRecoveryPhaseV1::Job, partial_error);
                     }
                 }
                 Ok((Some(_), Some(_), _)) => {
@@ -983,6 +1024,7 @@ impl StopRecoveryReaderV1 {
         &self,
         operation_id: Uuid,
         usage: &mut Usage,
+        blobs: &mut RecoveryBlobBytes,
     ) -> JournalResult<(Option<RecoveredJobV1>, Option<String>, bool)> {
         self.check_shared()?;
         let job = fscheck(self.jobs.persistent_child(&operation_id.to_string(), false))?
@@ -996,26 +1038,38 @@ impl StopRecoveryReaderV1 {
         let mut revision_count = 0_u32;
         let mut revisions = Vec::new();
         let mut binding_entries = None;
+        let mut launch_entries = None;
         for entry in &inventory.entries {
-            usage.add(entry.bytes, 0, true, &self.limits)?;
+            if entry.name == crate::runtime::launch_profile::DIRECTORY {
+                // Also covers a launch parent substituted by a regular file.
+                blobs.observe(entry.bytes);
+            } else {
+                usage.add(entry.bytes, 0, true, &self.limits)?;
+            }
             if entry.directory {
-                if entry.name != "bindings" {
+                if entry.name != "bindings"
+                    && entry.name != crate::runtime::launch_profile::DIRECTORY
+                {
                     return Err(JournalError::Corrupt);
                 }
                 // Inspect credentials only by metadata. Never open any blob FD.
-                match fscheck(job.persistent_child("bindings", false)) {
+                match fscheck(job.persistent_child(&entry.name, false)) {
                     Ok(Some(bindings)) => {
                         match fscheck(bindings.persistent_inventory(self.limits.job_entries)) {
                             Ok(items) => {
                                 partial |= items.incomplete;
                                 usage.add(0, items.visited, true, &self.limits)?;
                                 for item in &items.entries {
-                                    usage.add(item.bytes, 0, true, &self.limits)?;
+                                    blobs.observe(item.bytes);
                                     if item.directory {
                                         partial = true;
                                     }
                                 }
-                                binding_entries = Some(items.entries);
+                                if entry.name == crate::runtime::launch_profile::DIRECTORY {
+                                    launch_entries = Some(items.entries);
+                                } else {
+                                    binding_entries = Some(items.entries);
+                                }
                             }
                             Err(_) => partial = true,
                         }
@@ -1037,6 +1091,10 @@ impl StopRecoveryReaderV1 {
                 revisions.push(revision);
             } else if entry.name == "current-next.json" {
                 partial = true;
+            } else if entry.name == crate::runtime::launch_profile::DIRECTORY {
+                // A substituted blob parent is not a control record. Count its
+                // metadata and retain the independently proven STOP projection.
+                partial = true;
             } else if !matches!(
                 entry.name.as_str(),
                 "reservation.json"
@@ -1049,6 +1107,7 @@ impl StopRecoveryReaderV1 {
                 return Err(JournalError::Corrupt);
             }
         }
+        partial |= blobs.exceeds_or_unknown(usage, &self.limits);
         if revision_count > self.limits.revisions {
             return Err(JournalError::LimitExceeded);
         }
@@ -1098,7 +1157,7 @@ impl StopRecoveryReaderV1 {
         };
         self.control.record(accepted_file.bytes())?;
         let accepted: Accepted = parse(accepted_file.bytes())?;
-        if accepted.version != 1
+        if !matches!(accepted.version, 1 | 2)
             || accepted.operation_id != operation_id
             || accepted.scope_hash != self.scope_hash
             || accepted.submit_hash != reservation.submit_hash
@@ -1127,14 +1186,24 @@ impl StopRecoveryReaderV1 {
             .ok_or(JournalError::Interrupted)?;
         self.control.record(binding_file.bytes())?;
         let bindings: Bindings = parse(binding_file.bytes())?;
-        if bindings.version != 1
+        if bindings.version != accepted.version
             || bindings.operation_id != operation_id
             || bindings.intent_hash != intent_hash
-            || accepted.bindings_hash != digest("ai-guard:broker-bindings:v1", binding_file.bytes())
+            || accepted.bindings_hash != bindings.hash(binding_file.bytes())?
             || canonical(&bindings)? != binding_file.bytes()
         {
             return Err(JournalError::Corrupt);
         }
+        bindings.validate_launch(accepted.version, &self.scope_hash, operation_id, &intent)?;
+        partial |= match &bindings.docker_launch_profile {
+            Some(_) => launch_entries.as_ref().is_none_or(|entries| {
+                entries.len() != 1
+                    || entries[0].directory
+                    || entries[0].name != crate::runtime::launch_profile::FILE
+                    || entries[0].bytes != 3
+            }),
+            None => launch_entries.is_some(),
+        };
         validate_binding_metadata(&intent, &bindings.binding)?;
         // A valid expected blob alone does not make the credential directory
         // complete. Compare its entire metadata inventory with the manifest,
@@ -1179,12 +1248,13 @@ impl StopRecoveryReaderV1 {
         partial |= revisions
             .iter()
             .any(|revision| *revision > current.head.revision);
-        let mut verifier = confirmed::ChainVerifierV1::new(
+        let mut verifier = confirmed::ChainVerifierV1::new_with_launch_profile(
             &self.scope,
             &self.control,
             &intent,
             &bindings.binding,
             &accepted.initial_checkpoint,
+            bindings.docker_launch_profile.as_ref(),
         )?;
         for revision in 0..=current.head.revision {
             let file = self
@@ -1302,6 +1372,7 @@ impl StopRecoveryReaderV1 {
                 metadata: Some(StopMetadata {
                     intent,
                     binding: bindings.binding,
+                    launch_binding: bindings.docker_launch_profile,
                     checkpoint: confirmed.payload,
                     legacy_managed_seen: confirmed.legacy_managed_seen,
                     last_cancel_operations: confirmed.last_cancel_operations,
