@@ -12,7 +12,8 @@ This manual describes the complete product contract. The implementation and qual
 | [Trusted local broker](broker/README.md) | Private Registry2, Docker start profile, service/IPC, replay identities, approval, cancellation, recovery and export. |
 | [AI providers](providers/README.md) | Codex and Claude Code with subscription or API, explicit selection, private credentials and optional Jev. |
 | [Named local access](identity/README.md) | Private human account provisioning, explicit resource permissions, authenticated reads, export and recovery without an IdP. |
-| [Keycloak and OIDC](keycloak/README.md) | Local identity provider, public Web/CLI clients, PKCE, claims, memberships and enterprise IdP setup. |
+| [ai-guard SSO](sso/README.md) | Implemented candidate: private gateway JSON, authentication audit initialization/reopen, memberships, Web sign-in, foreground CLI and operating limits. Real IdP/browser and complete Compose/bootstrap qualification remain open. |
+| [Keycloak provider](keycloak/README.md) | Separate local identity-provider project, public Web/CLI clients, PKCE, claims and enterprise IdP preparation. |
 | [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |
 | [Enterprise](enterprise/README.md) | Shared control services, tenant boundaries, private CAs, internal inference and operations. |
 
@@ -32,6 +33,7 @@ Each guide contains prerequisites, configuration, startup, expected endpoints, d
 | `.env.exemple.providers` | Template for a **new private provider input**; follow the provider guide for explicit import. Not a Compose or SSO configuration. |
 | `.env.exemple.entreprise` | Base Compose transport and optional Jev override; identities, tenants and inference policies have separate typed configuration. |
 | `<config-dir>/providers.json` | Rust provider selection, created/inspected with `providers init/status`; override through `--providers-file`. |
+| Private OIDC JSON and its public [examples](sso/README.md#prepare-the-private-gateway-json) | Gateway `--oidc-config`; a separate versioned file, with no environment interpolation. Explicit fresh audit initialization differs from normal reopen. |
 | Private runner/viewer/Jev files | Explicit Rust/control credential references, never global worker environment. |
 
 The volume profile first requires `model-tls provision`: pass its base file, then the published `volumes.env`, using two `--env-file` options. The public example alone cannot activate it; do not invent selectors. The Rust CLI does not source dotenv. Compose expands `${HOME}` and reads these examples only when `--env-file` names one. Host environment variables may override Compose interpolation; inspect your shell configuration when values differ. CLI flags configure their named component, not every service.
@@ -49,6 +51,8 @@ docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local-ai 
 ```
 
 These are three Compose projects with one ai-guard dashboard. Keeping project names explicit preserves separate data and networks. Do not merge their Compose files as overrides. Initial builds acquire public images and the pinned model; prepare them beforehand for offline use.
+
+These commands start the separate projects; they do not enable ai-guard SSO, create human memberships or attach the gateway to the identity network. Follow the [SSO operator guide](sso/README.md) for the accepted configuration and explicit preparation. It does not claim a complete automated bootstrap or a qualified real Keycloak/browser path.
 
 | Access | Local default |
 |---|---|

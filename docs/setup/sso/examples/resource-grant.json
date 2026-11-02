@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "operation_id": "55555555-5555-4555-8555-555555555555",
+  "change": {
+    "action": "resource_grant",
+    "expected_revision": 0,
+    "grant": {
+      "version": 1,
+      "tenant_id": "replace-with-configured-tenant",
+      "organization_scope": "example-organization",
+      "resource": {
+        "kind": "session",
+        "resource_id": "REPLACE_WITH_KNOWN_SESSION_ID"
+      },
+      "owner": {
+        "kind": "human_oidc",
+        "issuer": "https://login.example.invalid/realms/company",
+        "subject": "REPLACE_WITH_VERIFIED_SUBJECT"
+      },
+      "revision": 1,
+      "active": true,
+      "shares": []
+    }
+  }
+}

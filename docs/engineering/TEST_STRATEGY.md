@@ -1,5 +1,11 @@
 # Stratégie de qualification
 
+## SSO candidat — ciblage du 2 novembre
+
+Les cibles `oidc_authentication_audit`, `oidc_gateway`, `oidc_gateway_flow`, `oidc_transport` et `sso_cli` vérifient le produit avec SQLite durable, HTTP/TLS contrôlé, JWT signés de test et vrais sous-processus CLI. Elles ne qualifient pas Keycloak, le navigateur, un fournisseur payant ni un moteur. `human_access` conserve les canaris de plafond de permissions ; `human_cli` couvre la compatibilité locale. Exécuter les régressions touchées, puis les contrôles statiques, sans rejouer systématiquement tous les parcours E2E. [Résultats par gel](VALIDATION.md#2-novembre--composition-sso-résultats-comportementaux-et-revues).
+
+Après copie de sources depuis une archive, ne pas supposer Cargo frais sur les seules dates restaurées : renouveler le mtime des entrées exactement copiées, vérifier leurs bytes, puis contrôler que les tests sélectionnés s'exécutent réellement. Zéro test ou un test ignoré ne constitue pas un PASS. Un échec pendant login/PKI préparatoire ne reproduit pas un oracle de refresh qui n'a pas encore été atteint.
+
 ## Diagnostic Jev — ciblage et absence d'appel modèle
 
 `cargo test --locked --test jev_diagnostics` exécute dix intégrations contrôlées TCP loopback/SQLite ; l'unité exacte `jev::local::tests::final_local_checkpoint_rejects_late_masks_of_the_whole_fixed_frame_without_connecting` couvre les masques introduits après construction. Deux attentes testent le vrai budget5s, sans le modifier. Canaris retenus : `jev_contract`, `jev_backends`, `jev_store_redaction`, `decision_idempotence`, soit13 fonctions existantes ; fmt/Clippy strict complètent ce périmètre. Les24 fonctions passent sur le gel composé documenté, sans rejouer humains/navigateur ni appeler un modèle/fournisseur. [Résultats et limites](VALIDATION.md#1er-novembre--diagnostic-jev-fermé-et-trame-locale).

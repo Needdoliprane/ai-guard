@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "operation_id": "33333333-3333-4333-8333-333333333333",
+  "change": {
+    "action": "membership",
+    "expected_revision": 0,
+    "membership": {
+      "version": 1,
+      "membership_id": "44444444-4444-4444-8444-444444444444",
+      "principal": {
+        "kind": "human_oidc",
+        "issuer": "https://login.example.invalid/realms/company",
+        "subject": "REPLACE_WITH_VERIFIED_SUBJECT"
+      },
+      "tenant_id": "replace-with-configured-tenant",
+      "organization_scope": "example-organization",
+      "revision": 1,
+      "active": true,
+      "capabilities": ["read_metadata", "read_content", "export"]
+    }
+  }
+}

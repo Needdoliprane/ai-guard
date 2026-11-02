@@ -91,8 +91,10 @@ export class HumanDashboard {
     this.#closed = true; this.#purgeContext(); this.#api.close(); this.#identity = null;
     clearInterval(this.#poll); this.#page?.replaceChildren(); if (this.#mounted) this.#root.replaceChildren();
   }
-  logout(message = "Session personnelle fermée. Le credential local reste administré par le contrôle.") {
-    this.close(); this.#onLogout(message);
+  logout(message?: string) {
+    const detail = message ?? (this.#identity?.authentication.method === "oidc_access_token" ?
+      "Session OIDC locale fermée." : "Session personnelle fermée. Le credential local reste administré par le contrôle.");
+    this.close(); this.#onLogout(detail);
   }
   #purgeContext() {
     this.#generation++; this.#selectionGeneration++; this.#invalidation++;
@@ -129,7 +131,7 @@ export class HumanDashboard {
       this.#page.contains(document.activeElement) ? this.#page : null;
     const active = focusScope ? document.activeElement as HTMLElement : null;
     const key = active?.dataset.focusKey;
-    this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte local"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
+    this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte personnel"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message; this.#notice.textContent = this.#message;
     const nav = (["contexts", "resources", "events"] as const).map((mode, index) => {
@@ -146,7 +148,8 @@ export class HumanDashboard {
     }, this.#identityLoading));
     const heading = el("h1", "", this.#mode === "contexts" ? "Choisir un contexte." : this.#mode === "resources" ? "Ressources autorisées." : "Événements autorisés.");
     heading.tabIndex = -1;
-    this.#page.replaceChildren(el("div", "page-heading", el("p", "eyebrow", "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
+    this.#page.replaceChildren(el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
+      "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
       el("p", "page-description", "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
@@ -248,7 +251,8 @@ export class HumanDashboard {
         !state.value.items.length ? empty("Aucune ressource sur cette page", "Aucune ressource explicitement autorisée dans cette sélection. Une ancienne trace seule n’accorde aucun accès.") :
           el("div", "human-resource-list", ...state.value.items.map((item, index) => el("article", "human-resource-row",
             el("div", "", el("h3", "", kindName[item.resource.kind]), el("p", "mono control-id", item.resource.resource_id),
-              el("p", "muted", `Propriétaire local : ${item.owner.account_id}`), el("p", "mono", `Révision ${item.revision}`)),
+              el("p", "muted", item.owner.kind === "human_local" ? `Propriétaire local : ${item.owner.account_id}` :
+                `Propriétaire OIDC : ${item.owner.subject} · ${item.owner.issuer}`), el("p", "mono", `Révision ${item.revision}`)),
             el("div", "human-resource-actions",
               action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !item.permissions.metadata),
               action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), !item.permissions.metadata || !item.permissions.content),

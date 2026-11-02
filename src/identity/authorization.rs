@@ -13,6 +13,7 @@ pub struct AuthorizedScopeV1 {
     authorization_revision: u64,
     mode: ContextModeV1,
     capabilities: BTreeSet<HumanCapabilityV1>,
+    capability_ceiling: Option<BTreeSet<HumanCapabilityV1>>,
 }
 
 pub(crate) fn authorize_context(
@@ -53,6 +54,7 @@ pub(crate) fn authorize_context(
         authorization_revision: 0,
         mode,
         capabilities,
+        capability_ceiling: None,
     })
 }
 
@@ -84,6 +86,40 @@ impl AuthorizedScopeV1 {
     }
     pub fn has_capability(&self, capability: HumanCapabilityV1) -> bool {
         self.capabilities.contains(&capability)
+    }
+    /// Restrict an authorized snapshot, retaining earlier restrictions when
+    /// Store revalidates it. This never grants a membership capability.
+    pub fn restrict_capabilities(
+        mut self,
+        ceiling: BTreeSet<HumanCapabilityV1>,
+    ) -> Result<Self, IdentityFailureV1> {
+        self.capabilities
+            .retain(|capability| ceiling.contains(capability));
+        if self.capabilities.is_empty()
+            || (self.mode == ContextModeV1::Administration
+                && !self
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.is_administration()))
+        {
+            return Err(IdentityFailureV1::PermissionDenied);
+        }
+        // Store the effective intersection: a later restriction or membership
+        // reload must never restore a capability removed from this snapshot.
+        self.capability_ceiling = Some(self.capabilities.clone());
+        Ok(self)
+    }
+    pub(crate) fn retain_ceiling_on_revalidation(
+        &self,
+        current: Self,
+    ) -> Result<Self, IdentityFailureV1> {
+        match &self.capability_ceiling {
+            Some(ceiling) => current.restrict_capabilities(ceiling.clone()),
+            None if matches!(self.principal, PrincipalRefV1::HumanOidc { .. }) => {
+                Err(IdentityFailureV1::PermissionDenied)
+            }
+            None => Ok(current),
+        }
     }
     pub(crate) fn permits_resource(
         &self,

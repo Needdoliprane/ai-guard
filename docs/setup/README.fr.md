@@ -12,7 +12,8 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
 | [Fournisseurs IA](providers/README.fr.md) | Codex et Claude Code par abonnement ou API, sélection explicite, credentials privés et Jev optionnel. |
 | [Accès local nominatif](identity/README.fr.md) | Provisioning privé des comptes humains, permissions explicites, consultation authentifiée, export et reprise sans IdP. |
-| [Keycloak et OIDC](keycloak/README.fr.md) | Fournisseur local, clients publics Web/CLI, PKCE, claims, appartenances et raccord IdP d'entreprise. |
+| [SSO ai-guard](sso/README.fr.md) | Candidat implémenté : JSON privé gateway, initialisation/réouverture de l'audit d'authentification, memberships, connexion Web, CLI au premier plan et limites d'exploitation. Qualifications IdP/navigateur réels et Compose/bootstrap complets encore ouvertes. |
+| [Fournisseur Keycloak](keycloak/README.fr.md) | Projet fournisseur local séparé, clients publics Web/CLI, PKCE, claims et préparation de l'IdP d'entreprise. |
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |
 | [Entreprise](enterprise/README.fr.md) | Services de contrôle partagés, frontières tenant, AC privées, inférence interne et exploitation. |
 
@@ -32,6 +33,7 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 | `.env.exemple.providers` | Modèle d'une **nouvelle entrée fournisseur privée** ; suivre son guide pour l'import explicite. Ni configuration Compose ni SSO. |
 | `.env.exemple.entreprise` | Transport Compose du socle et override Jev optionnel ; identités, tenants et politiques d'inférence utilisent leurs configurations typées distinctes. |
 | `<config-dir>/providers.json` | Sélection fournisseur Rust, créée/examinée avec `providers init/status` ; choix explicite via `--providers-file`. |
+| JSON OIDC privé et ses [exemples publics](sso/README.fr.md#préparer-le-json-privé-du-gateway) | Gateway `--oidc-config` ; fichier versionné distinct, sans interpolation d'environnement. Initialisation explicite d'un audit neuf distincte de sa réouverture normale. |
 | Fichiers privés runner/viewer/Jev | Références explicites du contrôle Rust, jamais environnement global des workers. |
 
 Le profil volumes exige d’abord `model-tls provision` : passer son fichier de base puis le `volumes.env` publié avec deux options `--env-file`. Il ne fonctionne pas avec le seul exemple public ; ne pas inventer les sélecteurs. La CLI Rust ne source pas dotenv. Compose développe `${HOME}` et lit ces exemples seulement avec `--env-file`. L'environnement du poste peut remplacer des valeurs d'interpolation Compose ; examiner la configuration du terminal si une valeur diffère. Une option CLI configure le composant nommé, pas tous les services.
@@ -49,6 +51,8 @@ docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local-ai 
 ```
 
 Trois projets Compose fournissent un seul dashboard ai-guard. Les noms explicites conservent données et réseaux séparés. Ne pas fusionner ces fichiers Compose comme overrides. Les premières constructions acquièrent les images publiques et le modèle épinglé ; les préparer avant un usage hors ligne.
+
+Ces commandes démarrent les projets séparés ; elles n'activent pas le SSO ai-guard, ne créent pas les memberships humains et ne raccordent pas le gateway au réseau d'identité. Le [guide opérateur SSO](sso/README.fr.md) décrit la configuration acceptée et les préparations explicites. Il ne promet ni bootstrap automatisé complet ni parcours réel Keycloak/navigateur qualifié.
 
 | Accès | Défaut local |
 |---|---|

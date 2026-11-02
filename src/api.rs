@@ -40,8 +40,10 @@ use std::{
 mod auth;
 mod human;
 mod human_state;
+mod oidc;
 mod supervision;
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
+pub use oidc::{OidcClaimRuleV1, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1};
 
 type ApiResult<T> = Result<T, (StatusCode, Json<Value>)>;
 fn error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
@@ -136,8 +138,16 @@ pub struct GatewayState {
     jev: Option<Arc<JevBackend>>,
     redactor: Arc<Redactor>,
     human: Arc<human::HumanAccessState>,
+    oidc: Option<Arc<OidcGateway>>,
 }
 impl GatewayState {
+    pub fn with_oidc(mut self, oidc: OidcGateway) -> anyhow::Result<Self> {
+        for tenant in self.tenants.iter() {
+            oidc.audit.ensure_distinct_from_business(&tenant.store)?;
+        }
+        self.oidc = Some(Arc::new(oidc));
+        Ok(self)
+    }
     /// Quotas come only from trusted server configuration, never request data.
     pub fn with_worker_quotas(
         mut self,
@@ -210,6 +220,7 @@ impl GatewayState {
                     jev: jev.map(Arc::new),
                     redactor: Arc::new(redactor),
                     human: Arc::new(human::HumanAccessState::new()),
+                    oidc: None,
                 };
             }
         };
@@ -231,6 +242,7 @@ impl GatewayState {
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
             human: Arc::new(human::HumanAccessState::new()),
+            oidc: None,
         }
     }
     pub fn for_tenants(
@@ -299,6 +311,7 @@ impl GatewayState {
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
             human: Arc::new(human::HumanAccessState::new()),
+            oidc: None,
         })
     }
     fn authorize(
@@ -355,6 +368,32 @@ impl TenantState {
 }
 
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    security_headers_inner(request, next, false, false).await
+}
+async fn gateway_security_headers(
+    State(state): State<GatewayState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let configured = state.oidc.as_ref();
+    let callback = configured.is_some()
+        && request.method() == "GET"
+        && request.uri().path() == "/auth/oidc/callback";
+    let trusted_origin = configured.is_some_and(|oidc| {
+        oidc::browser_post(request.method(), request.uri().path())
+            && oidc::same_origin(request.headers(), &oidc.config.web_origin)
+            || request.method() == "GET"
+                && request.uri().path() == "/auth/oidc/status"
+                && oidc::public_status_origin(request.headers(), &oidc.config.web_origin)
+    });
+    security_headers_inner(request, next, trusted_origin, callback).await
+}
+async fn security_headers_inner(
+    request: Request,
+    next: Next,
+    trusted_origin: bool,
+    callback: bool,
+) -> Response {
     if request.uri().to_string().len() > 4096 {
         return error(StatusCode::URI_TOO_LONG, "URI trop longue.").into_response();
     }
@@ -370,14 +409,15 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
                             || h.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
                     })
             });
-        if !safe {
+        if !safe && !trusted_origin && !callback {
             return error(StatusCode::FORBIDDEN, "Origine non autorisée.").into_response();
         }
     }
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|h| h == "cross-site")
+    if !callback
+        && request
+            .headers()
+            .get("sec-fetch-site")
+            .is_some_and(|h| h == "cross-site")
     {
         return error(StatusCode::FORBIDDEN, "Requête cross-site refusée.").into_response();
     }
@@ -414,6 +454,7 @@ pub fn gateway_router(state: GatewayState) -> Router {
         .route("/usage", get(worker_usage));
     Router::new()
         .route("/healthz", get(gateway_health))
+        .nest("/auth/oidc", oidc::routes())
         .nest(
             "/api/v1",
             routes
@@ -423,7 +464,10 @@ pub fn gateway_router(state: GatewayState) -> Router {
         )
         .nest("/api", routes)
         .layer(DefaultBodyLimit::max(262_144))
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            gateway_security_headers,
+        ))
         .with_state(state)
 }
 
@@ -917,6 +961,7 @@ struct DashboardState {
     upstream: reqwest::Url,
     viewer_token: Option<String>,
     client: reqwest::Client,
+    oidc_web_origin: Option<String>,
 }
 pub fn dashboard_router(
     upstream: &str,
@@ -937,6 +982,33 @@ fn dashboard_router_with_auth(
     viewer_token: Option<String>,
     front: PathBuf,
 ) -> anyhow::Result<Router> {
+    dashboard_router_with_oidc(upstream, viewer_token, front, None)
+}
+/// Explicit auth proxy activation uses the same public origin as the gateway.
+pub fn dashboard_router_with_oidc(
+    upstream: &str,
+    viewer_token: Option<String>,
+    front: PathBuf,
+    oidc_web_origin: Option<String>,
+) -> anyhow::Result<Router> {
+    if let Some(origin) = &oidc_web_origin {
+        let parsed = reqwest::Url::parse(origin)?;
+        anyhow::ensure!(
+            origin == &parsed.origin().ascii_serialization()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && (parsed.scheme() == "https"
+                    || parsed.scheme() == "http"
+                        && parsed
+                            .host_str()
+                            .and_then(|host| host
+                                .trim_matches(['[', ']'])
+                                .parse::<std::net::IpAddr>()
+                                .ok())
+                            .is_some_and(|ip| ip.is_loopback())),
+            "invalid dashboard OIDC origin"
+        );
+    }
     let upstream = reqwest::Url::parse(upstream)?;
     anyhow::ensure!(
         ["http", "https"].contains(&upstream.scheme())
@@ -950,6 +1022,7 @@ fn dashboard_router_with_auth(
     let s = DashboardState {
         upstream,
         viewer_token,
+        oidc_web_origin,
         client: reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
@@ -962,9 +1035,169 @@ fn dashboard_router_with_auth(
             get(|| async { Json(json!({"status":"ok","service":"dashboard"})) }),
         )
         .route("/api/{*path}", get(dashboard_proxy))
+        .route("/auth/oidc/status", get(dashboard_oidc_proxy))
+        .route("/auth/oidc/start", post(dashboard_oidc_proxy))
+        .route("/auth/oidc/callback", get(dashboard_oidc_proxy))
+        .route("/auth/oidc/tokens", post(dashboard_oidc_proxy))
+        .route("/auth/oidc/refresh", post(dashboard_oidc_proxy))
+        .route("/auth/oidc/logout", post(dashboard_oidc_proxy))
+        .route_service(
+            "/auth/oidc/complete",
+            tower_http::services::ServeFile::new(front.join("index.html")),
+        )
         .fallback_service(tower_http::services::ServeDir::new(front))
-        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn_with_state(
+            s.clone(),
+            dashboard_security_headers,
+        ))
         .with_state(s))
+}
+async fn dashboard_security_headers(
+    State(state): State<DashboardState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let callback = state.oidc_web_origin.is_some()
+        && request.method() == "GET"
+        && request.uri().path() == "/auth/oidc/callback";
+    let trusted = state.oidc_web_origin.as_ref().is_some_and(|origin| {
+        oidc::browser_post(request.method(), request.uri().path())
+            && oidc::same_origin(request.headers(), origin)
+            || request.method() == "GET"
+                && request.uri().path() == "/auth/oidc/status"
+                && oidc::public_status_origin(request.headers(), origin)
+    });
+    security_headers_inner(request, next, trusted, callback).await
+}
+async fn dashboard_oidc_proxy(
+    State(state): State<DashboardState>,
+    request: Request,
+) -> ApiResult<Response> {
+    let enabled = state.oidc_web_origin.as_ref().ok_or_else(|| {
+        human::failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "oidc_not_configured",
+            "The dashboard OIDC proxy is disabled.",
+            "contact_operator",
+        )
+    })?;
+    let path = request.uri().path();
+    let callback = request.method() == "GET" && path == "/auth/oidc/callback";
+    if oidc::browser_post(request.method(), path) && !oidc::same_origin(request.headers(), enabled)
+    {
+        return Err(human::failure(
+            StatusCode::FORBIDDEN,
+            "origin_denied",
+            "The authentication origin is not approved.",
+            "authenticate",
+        ));
+    }
+    if request.uri().query().is_some() && !callback {
+        return Err(oidc::invalid_request());
+    }
+    let mut destination = state.upstream.clone();
+    destination.set_path(path);
+    destination.set_query(request.uri().query());
+    let mut call = state
+        .client
+        .request(request.method().clone(), destination)
+        .timeout(Duration::from_secs(35));
+    for name in [
+        header::ORIGIN,
+        header::CONTENT_TYPE,
+        header::AUTHORIZATION,
+        header::HeaderName::from_static("sec-fetch-site"),
+        header::HeaderName::from_static("sec-fetch-mode"),
+    ] {
+        let mut values = request.headers().get_all(&name).iter();
+        if let Some(value) = values.next() {
+            if values.next().is_some()
+                || value.as_bytes().len()
+                    > if name == header::AUTHORIZATION {
+                        16_391
+                    } else {
+                        2048
+                    }
+            {
+                return Err(oidc::invalid_request());
+            }
+            call = call.header(name, value);
+        }
+    }
+    if let Some(cookie) = oidc::correlation_cookie(request.headers())? {
+        call = call.header(header::COOKIE, format!("aiguard_oidc={cookie}"));
+    }
+    let body = tokio::time::timeout(
+        Duration::from_secs(5),
+        axum::body::to_bytes(request.into_body(), 35_000),
+    )
+    .await
+    .map_err(|_| oidc::invalid_request())?
+    .map_err(|_| oidc::invalid_request())?;
+    let upstream = call.body(body).send().await.map_err(|_| {
+        human::failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_unavailable",
+            "The authentication gateway is unavailable.",
+            "authenticate",
+        )
+    })?;
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    if !(status.is_client_error()
+        || status.is_server_error()
+        || status == StatusCode::OK
+        || status == StatusCode::SEE_OTHER)
+    {
+        return Err(oidc::invalid_request());
+    }
+    let mut chunks = upstream.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|_| oidc::invalid_request())?;
+        if bytes.len().saturating_add(chunk.len()) > 65_536 {
+            return Err(oidc::invalid_request());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let mut response = Response::new(Body::from(bytes));
+    *response.status_mut() = status;
+    if status == StatusCode::SEE_OTHER {
+        if !callback
+            || headers
+                .get(header::LOCATION)
+                .is_none_or(|v| v != "/auth/oidc/complete")
+        {
+            return Err(oidc::invalid_request());
+        }
+        response.headers_mut().insert(
+            header::LOCATION,
+            HeaderValue::from_static("/auth/oidc/complete"),
+        );
+    } else {
+        if headers
+            .get(header::CONTENT_TYPE)
+            .is_none_or(|v| v != "application/json")
+        {
+            return Err(oidc::invalid_request());
+        }
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+    }
+    let mut cookies = headers.get_all(header::SET_COOKIE).iter();
+    if let Some(cookie) = cookies.next() {
+        if cookies.next().is_some()
+            || !oidc::valid_response_cookie(cookie, enabled.starts_with("https://"))
+        {
+            return Err(oidc::invalid_request());
+        }
+        response
+            .headers_mut()
+            .insert(header::SET_COOKIE, cookie.clone());
+    }
+    Ok(response)
 }
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
     let canonical_path = request
@@ -975,20 +1208,24 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .unwrap_or_else(|| request.uri().path().to_owned());
     let human_path =
         request.uri().path().starts_with("/api/v1/human/") && human_dashboard_path(&canonical_path);
-    let token = bearer(request.headers())
-        .ok_or_else(|| {
-            if human_path {
-                human::failure(
-                    StatusCode::UNAUTHORIZED,
-                    "authentication_required",
-                    "A local human bearer credential is required.",
-                    "authenticate",
-                )
-            } else {
-                error(StatusCode::UNAUTHORIZED, "Jeton de lecture requis.")
-            }
-        })?
-        .to_owned();
+    let token = (if human_path {
+        oidc::human_bearer(request.headers())
+    } else {
+        bearer(request.headers())
+    })
+    .ok_or_else(|| {
+        if human_path {
+            human::failure(
+                StatusCode::UNAUTHORIZED,
+                "authentication_required",
+                "A human bearer proof is required.",
+                "authenticate",
+            )
+        } else {
+            error(StatusCode::UNAUTHORIZED, "Jeton de lecture requis.")
+        }
+    })?
+    .to_owned();
     if !human_path
         && s.viewer_token
             .as_ref()
@@ -1167,16 +1404,28 @@ async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResul
             )
         })?;
     if identity.version != 1
-        || identity.authentication.method != "local_credential"
         || !matches!(
-            identity.principal,
-            crate::identity::PrincipalRefV1::HumanLocal { .. }
+            (&identity.authentication.method[..], &identity.principal),
+            (
+                "local_credential",
+                crate::identity::PrincipalRefV1::HumanLocal { .. }
+            ) | (
+                "oidc_access_token",
+                crate::identity::PrincipalRefV1::HumanOidc { .. }
+            )
         )
+        || identity.authentication.method == "oidc_access_token"
+            && (uuid::Uuid::parse_str(&identity.authentication.credential_id).is_err()
+                || identity
+                    .authentication
+                    .expires_at
+                    .as_ref()
+                    .is_none_or(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).is_err()))
     {
         return Err(human::failure(
             StatusCode::FORBIDDEN,
             "permission_denied",
-            "A local human identity is required.",
+            "A supported authenticated human identity is required.",
             "review_permissions",
         ));
     }

@@ -1073,13 +1073,14 @@ pub(super) fn revalidate_scope(
         scope.membership_id(),
     )?
     .ok_or(IdentityFailureV1::ContextRevoked)?;
-    Ok(crate::identity::authorize_context(
+    let current = crate::identity::authorize_context(
         scope.principal(),
         &member,
         scope.mode(),
         scope.membership_revision(),
     )?
-    .at_authorization_revision(scope.authorization_revision()))
+    .at_authorization_revision(scope.authorization_revision());
+    Ok(scope.retain_ceiling_on_revalidation(current)?)
 }
 
 pub(super) fn json_row<T: serde::de::DeserializeOwned>(

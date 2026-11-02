@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "operation_id": "22222222-2222-4222-8222-222222222222",
+  "change": {
+    "action": "account",
+    "expected_revision": 0,
+    "account": {
+      "version": 1,
+      "principal": {
+        "kind": "human_oidc",
+        "issuer": "https://login.example.invalid/realms/company",
+        "subject": "REPLACE_WITH_VERIFIED_SUBJECT"
+      },
+      "display_name": "Example user",
+      "revision": 1,
+      "active": true
+    }
+  }
+}
