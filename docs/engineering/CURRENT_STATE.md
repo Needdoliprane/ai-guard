@@ -1,6 +1,6 @@
 # État constaté — suivi au 2 novembre 2026
 
-Dernier contrôle logiciel D5 : les 19 tests de records, 13 tests ledger et 5 tests FS passent dans leurs gels ciblés. La compilation composée des acteurs/ports Writer passe sur toutes les cibles ; les 12 tests acteurs exécutés donnent 11 PASS et 1 FAIL sur le scénario de deux jobs partageant un identifiant de retrait. Le diagnostic conserve la réponse fermée sans modifier les délais ni l'oracle. Les tests journal/recovery de ce gel restent NOT_RUN. Le raccord productif CLI/service/runtime est en développement et sa première compilation relève deux erreurs ; le retrait complet reste non qualifié. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
+Dernier contrôle logiciel D5 : les 37 fonctions des fondations restent PASS dans leurs gels ciblés. Sur le gel logiciel suivant, compilation de toutes les cibles et du harness PASS, puis 31 fonctions ciblées PASS : acteur12, journal4, recovery1, arbitre avant claim10 et retry4. Le FAIL acteur antérieur ne se reproduit ni isolément ni dans le groupe ; sa cause reste indéterminée. Le nouveau pump d'audit et son rattrapage après réponse perdue sont en validation sur d'autres gels, avec revue indépendante et tests composés HTTP/SQLite/IPC. Aucun moteur ni parcours vertical complet n'est qualifié par ces résultats. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
 
 ## Préparation SSO locale — intégrée, recette complète ouverte
 
