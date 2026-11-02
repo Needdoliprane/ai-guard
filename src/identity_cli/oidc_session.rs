@@ -65,14 +65,6 @@ impl Admission {
         );
         Ok(expires)
     }
-    fn validate(&self, access: &VerifiedAccess, expected: Option<&Self>) -> Result<i64> {
-        let expires = self.validate_binding(access, expected)?;
-        ensure!(
-            expires > chrono::Utc::now().timestamp(),
-            "OIDC admission expiry is outside the verified access proof"
-        );
-        Ok(expires)
-    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -591,8 +583,10 @@ impl Session {
                 "generation":self.admission.generation,"intent_id":intent.id(),"access_token":tokens.access_token()}),
                 reqwest::StatusCode::OK,
             )).await.map_err(|_|anyhow::anyhow!("OIDC rotation exceeded its native intent deadline; no automatic retry"))??;
-        let expires = admission.validate(&access, Some(&self.admission))?;
-        client.bound_memory_expiry(expires)?;
+        let expires = admission.validate_binding(&access, Some(&self.admission))?;
+        // Acceptance consumed the intent. Retain only the correctly bound new
+        // tuple and its private logout context before checking freshness, so a
+        // late ACK is closed with its exact bearer/generation on failure.
         self.access = access;
         self.access_token = tokens.access_token().to_owned();
         self.refresh_token = refresh_token;
@@ -602,6 +596,7 @@ impl Session {
         if logout_context.is_some() {
             self.logout_context = logout_context;
         }
+        self.client.bound_memory_expiry(expires)?;
         print_json(
             &json!({"version":1,"status":"session_refreshed","authentication_id":self.admission.authentication_id,
             "generation":self.admission.generation,"expires_at":self.admission.expires_at,

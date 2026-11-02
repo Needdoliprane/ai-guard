@@ -67,6 +67,14 @@ const AUTH_ID: &str = "88888888-8888-4888-8888-888888888888";
 const LOGIN_INTENT: &str = "99999999-9999-4999-8999-999999999999";
 const REFRESH_INTENT: &str = "77777777-7777-4777-8777-777777777777";
 
+#[derive(Clone, Copy, Default)]
+enum RotationAck {
+    #[default]
+    Valid,
+    WrongAuthenticationId,
+    WrongGeneration,
+}
+
 #[derive(Default)]
 struct Behavior {
     issuer: String,
@@ -78,6 +86,7 @@ struct Behavior {
     access: String,
     rotated_access: String,
     expires_at: String,
+    admission_ttl_seconds: Option<i64>,
     generation: u32,
     refresh_delay: Duration,
     invalid_nonce: bool,
@@ -88,10 +97,20 @@ struct Behavior {
     refresh_intent: bool,
     intent_actions: Vec<String>,
     admit_gate: Option<Arc<tokio::sync::Notify>>,
+    admit_notify: Option<Arc<tokio::sync::Notify>>,
     admit_accepted: bool,
     reflect_generations: bool,
     short_refresh: bool,
     malformed_admission: bool,
+    request_timeout_ms: u64,
+    short_rotated_access: bool,
+    rotated_expires_at: i64,
+    rotate_gate: Option<Arc<tokio::sync::Notify>>,
+    rotate_seen: Option<Arc<tokio::sync::Notify>>,
+    rotate_accepted: bool,
+    rotation_ack: RotationAck,
+    capture_logout: bool,
+    logout_requests: Vec<(Option<String>, Value)>,
 }
 struct Fixture {
     origin: String,
@@ -126,6 +145,7 @@ impl Fixture {
                 .unwrap()
                 .to_rfc3339(),
             generation: 1,
+            request_timeout_ms: 1000,
             ..Behavior::default()
         }));
         let router = Router::new().fallback(endpoint).with_state(state.clone());
@@ -246,7 +266,7 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
                     "web_redirect_uri":format!("{}/auth/oidc/callback",issuer.trim_end_matches("/realm")),
                     "cli_callback_path":"/oidc/callback","end_session_endpoint":null,
                     "transport":{"kind":"isolated_demo_http","exact_issuer":issuer},
-                    "limits":{"request_timeout_ms":1000,"max_response_bytes":131072,"max_token_bytes":16384,
+                    "limits":{"request_timeout_ms":state.request_timeout_ms,"max_response_bytes":131072,"max_token_bytes":16384,
                         "max_jwks_keys":32,"max_inflight":8,"metadata_ttl_seconds":300,"jwks_ttl_seconds":300,
                         "unknown_kid_cooldown_seconds":30,"pkce_ttl_seconds":5,"clock_skew_seconds":5,
                         "max_token_lifetime_seconds":3600}
@@ -305,7 +325,21 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
                 assert_eq!(form["grant_type"], "refresh_token");
                 assert_eq!(form["refresh_token"], "oidc-refresh-one");
                 delay = state.refresh_delay;
-                json!({"access_token":state.rotated_access,"refresh_token":"oidc-refresh-two","token_type":"Bearer","expires_in":120})
+                if state.short_rotated_access {
+                    let now = chrono::Utc::now().timestamp();
+                    let exp = now + 4;
+                    state.rotated_expires_at = exp;
+                    state.expires_at = chrono::DateTime::from_timestamp(exp, 0)
+                        .unwrap()
+                        .to_rfc3339();
+                    state.rotated_access = sign(
+                        &json!({"iss":issuer,"sub":"subject-a","aud":"guard-api","azp":"cli-public",
+                        "typ":"Bearer","iat":now,"nbf":now-1,"exp":exp,"jti":"rotated-short-lived"}),
+                    );
+                    json!({"access_token":state.rotated_access,"refresh_token":"oidc-refresh-two","token_type":"Bearer","expires_in":4})
+                } else {
+                    json!({"access_token":state.rotated_access,"refresh_token":"oidc-refresh-two","token_type":"Bearer","expires_in":120})
+                }
             }
         } else if path == "/auth/oidc/admit" {
             assert_eq!(method, reqwest::Method::POST);
@@ -319,8 +353,19 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
             );
             status = 201;
             state.admit_accepted = true;
+            if let Some(notify) = &state.admit_notify {
+                notify.notify_one();
+            }
             gate = state.admit_gate.clone();
-            json!({"version":1,"authentication_id":if state.malformed_admission {"not-a-valid-authentication-id"}else{AUTH_ID},"generation":1,"expires_at":state.expires_at})
+            let expires_at = if let Some(seconds) = state.admission_ttl_seconds {
+                let expires_at =
+                    (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339();
+                state.expires_at = expires_at.clone();
+                expires_at
+            } else {
+                state.expires_at.clone()
+            };
+            json!({"version":1,"authentication_id":if state.malformed_admission {"not-a-valid-authentication-id"}else{AUTH_ID},"generation":1,"expires_at":expires_at})
         } else if path == "/auth/oidc/rotate" {
             assert_eq!(method, reqwest::Method::POST);
             assert_eq!(
@@ -337,28 +382,57 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
                 json!({"error":{"code":"audit_unavailable","message":"private-provider-canary","retry_action":"retry"}})
             } else {
                 state.generation = 2;
-                json!({"version":1,"authentication_id":AUTH_ID,"generation":2,"expires_at":state.expires_at})
+                state.rotate_accepted = true;
+                if let Some(seen) = &state.rotate_seen {
+                    seen.notify_one();
+                }
+                gate = state.rotate_gate.clone();
+                match state.rotation_ack {
+                    RotationAck::Valid => {
+                        json!({"version":1,"authentication_id":AUTH_ID,"generation":2,"expires_at":state.expires_at})
+                    }
+                    RotationAck::WrongAuthenticationId => {
+                        json!({"version":1,"authentication_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","generation":2,"expires_at":state.expires_at})
+                    }
+                    RotationAck::WrongGeneration => {
+                        json!({"version":1,"authentication_id":AUTH_ID,"generation":3,"expires_at":state.expires_at})
+                    }
+                }
             }
         } else if path == "/auth/oidc/logout" {
             assert_eq!(method, reqwest::Method::POST);
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            if state.capture_logout {
+                state
+                    .logout_requests
+                    .push((authorization.clone(), body.clone()));
+            }
             let expected = if state.generation == 1 {
                 &state.access
             } else {
                 &state.rotated_access
             };
-            assert_eq!(
-                authorization.as_deref(),
-                Some(format!("Bearer {expected}").as_str())
-            );
-            assert_eq!(
-                serde_json::from_slice::<Value>(&bytes).unwrap(),
-                json!({"version":1,"authentication_id":AUTH_ID,"generation":state.generation})
-            );
-            if state.logout_unavailable {
-                status = 503;
-                json!({"error":{"code":"audit_unavailable","message":"private-provider-canary","retry_action":"retry"}})
+            let exact_current_tuple = authorization.as_deref()
+                == Some(format!("Bearer {expected}").as_str())
+                && body
+                    == json!({"version":1,"authentication_id":AUTH_ID,"generation":state.generation});
+            if state.capture_logout && !exact_current_tuple {
+                json!({"version":1,"local_session":"unknown","provider_logout":"not_attempted","audit":"unavailable"})
             } else {
-                json!({"version":1,"local_session":"closed","provider_logout":"not_attempted","audit":"recorded"})
+                assert_eq!(
+                    authorization.as_deref(),
+                    Some(format!("Bearer {expected}").as_str())
+                );
+                assert_eq!(
+                    body,
+                    json!({"version":1,"authentication_id":AUTH_ID,"generation":state.generation})
+                );
+                if state.logout_unavailable {
+                    status = 503;
+                    json!({"error":{"code":"audit_unavailable","message":"private-provider-canary","retry_action":"retry"}})
+                } else {
+                    json!({"version":1,"local_session":"closed","provider_logout":"not_attempted","audit":"recorded"})
+                }
             }
         } else if path.starts_with("/api/v1/human/") {
             assert_eq!(method, reqwest::Method::GET);
@@ -912,6 +986,120 @@ async fn failed_rotation_closes_session_without_repeating_provider_refresh() {
     no_tokens(&fixture, &err);
     no_secrets(&out, &err);
 }
+
+#[tokio::test]
+async fn accepted_rotation_expiring_before_ack_is_closed_with_its_exact_new_tuple() {
+    let fixture = Fixture::new(true).await;
+    let ack_gate = Arc::new(tokio::sync::Notify::new());
+    let ack_seen = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.request_timeout_ms = 12_000;
+        state.short_rotated_access = true;
+        state.rotate_gate = Some(ack_gate.clone());
+        state.rotate_seen = Some(ack_seen.clone());
+        state.capture_logout = true;
+    }
+    let mut child = signed_in(&fixture).await;
+    send(&mut child, "refresh\n").await;
+
+    tokio::time::timeout(Duration::from_secs(5), ack_seen.notified())
+        .await
+        .expect("fixture must observe gateway acceptance before its ACK is released");
+    let expires_at = {
+        let state = fixture.state.lock().unwrap();
+        assert!(state.rotate_accepted);
+        assert_eq!(state.generation, 2);
+        assert!(state.rotated_expires_at > chrono::Utc::now().timestamp());
+        state.rotated_expires_at
+    };
+    let expires = chrono::DateTime::from_timestamp(expires_at, 0).unwrap()
+        + chrono::Duration::milliseconds(150);
+    tokio::time::sleep(
+        expires
+            .signed_duration_since(chrono::Utc::now())
+            .to_std()
+            .unwrap(),
+    )
+    .await;
+    assert!(chrono::Utc::now() > expires);
+    ack_gate.notify_one();
+
+    let (status, out, err) = finish(child).await;
+    assert!(
+        !status.success(),
+        "an expired rotated access token cannot reopen the session"
+    );
+    assert!(out.contains("session_closed"));
+    assert!(!out.contains("session_refreshed"));
+    no_business_reads(&fixture);
+    let close: Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(close["local_session"], "closed");
+    assert_eq!(close["audit"], "recorded");
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.logout_requests.len(), 1);
+    let expected_bearer = format!("Bearer {}", state.rotated_access);
+    assert!(
+        state.logout_requests[0].0.as_deref() == Some(expected_bearer.as_str()),
+        "logout must use the accepted generation-2 bearer"
+    );
+    assert_eq!(
+        state.logout_requests[0].1,
+        json!({"version":1,"authentication_id":AUTH_ID,"generation":2}),
+        "logout must target the accepted generation-2 authentication"
+    );
+    drop(state);
+    assert_eq!(fixture.hits("/auth/oidc/logout"), 1);
+    no_tokens(&fixture, &out);
+    no_tokens(&fixture, &err);
+    no_secrets(&out, &err);
+}
+
+async fn assert_invalid_rotation_ack_does_not_authorize_close(ack: RotationAck) {
+    let fixture = Fixture::new(true).await;
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.rotation_ack = ack;
+        state.capture_logout = true;
+    }
+    let mut child = signed_in(&fixture).await;
+    send(&mut child, "refresh\n").await;
+    let (status, out, err) = finish(child).await;
+    assert!(!status.success());
+    assert!(out.contains("session_closed"));
+    assert!(!out.contains("session_refreshed"));
+    no_business_reads(&fixture);
+    let close: Value = serde_json::from_str(out.trim()).unwrap();
+    assert_eq!(close["local_session"], "unknown");
+    assert_eq!(close["audit"], "unavailable");
+    let state = fixture.state.lock().unwrap();
+    assert_eq!(state.logout_requests.len(), 1);
+    let expected_bearer = format!("Bearer {}", state.access);
+    assert!(
+        state.logout_requests[0].0.as_deref() == Some(expected_bearer.as_str()),
+        "an unbound rotation ACK cannot supply logout bearer authority"
+    );
+    assert_eq!(
+        state.logout_requests[0].1,
+        json!({"version":1,"authentication_id":AUTH_ID,"generation":1}),
+        "an unbound rotation ACK cannot supply logout identity or generation authority"
+    );
+    drop(state);
+    no_tokens(&fixture, &out);
+    no_tokens(&fixture, &err);
+    no_secrets(&out, &err);
+}
+
+#[tokio::test]
+async fn wrong_authentication_id_rotation_ack_cannot_become_close_authority() {
+    assert_invalid_rotation_ack_does_not_authorize_close(RotationAck::WrongAuthenticationId).await;
+}
+
+#[tokio::test]
+async fn wrong_generation_rotation_ack_cannot_become_close_authority() {
+    assert_invalid_rotation_ack_does_not_authorize_close(RotationAck::WrongGeneration).await;
+}
+
 #[tokio::test]
 async fn logout_outage_still_closes_foreground_tokens_and_reports_unknown_control_state() {
     let fixture = Fixture::new(true).await;
@@ -933,8 +1121,7 @@ async fn logout_outage_still_closes_foreground_tokens_and_reports_unknown_contro
 #[tokio::test]
 async fn admitted_expiry_closes_idle_foreground_session_without_waiting_for_input() {
     let fixture = Fixture::new(true).await;
-    fixture.state.lock().unwrap().expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(2)).to_rfc3339();
+    fixture.state.lock().unwrap().admission_ttl_seconds = Some(2);
     let child = signed_in(&fixture).await;
     let (status, out, err) = finish(child).await;
     assert!(!status.success());
@@ -1036,16 +1223,30 @@ async fn native_intent_refresh_audit_failure_prevents_provider_token_reuse() {
 async fn admission_cancellation(signal: bool) {
     let fixture = Fixture::new(true).await;
     let gate = Arc::new(tokio::sync::Notify::new());
-    fixture.state.lock().unwrap().admit_gate = Some(gate.clone());
+    let admission_reached = Arc::new(tokio::sync::Notify::new());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.admit_gate = Some(gate.clone());
+        state.admit_notify = Some(admission_reached.clone());
+    }
+    let admission_reached = admission_reached.notified();
+    tokio::pin!(admission_reached);
     let mut child = fixture.spawn();
     code_callback(&fixture, &mut child).await;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        while !fixture.state.lock().unwrap().admit_accepted {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("signed provider login must reach the held accepted admission");
+    if tokio::time::timeout(Duration::from_secs(8), &mut admission_reached)
+        .await
+        .is_err()
+    {
+        let child_exit = child.try_wait();
+        panic!(
+            "signed provider login did not reach the held accepted admission within 8s; child_exit={child_exit:?}; fixed_path_hits: native_intent={}, discovery={}, jwks={}, token={}, admit={}",
+            fixture.hits("/auth/oidc/native-intent"),
+            fixture.hits("/realm/.well-known/openid-configuration"),
+            fixture.hits("/realm/keys"),
+            fixture.hits("/realm/token"),
+            fixture.hits("/auth/oidc/admit"),
+        );
+    }
     assert_eq!(fixture.hits("/realm/token"), 1);
     assert_eq!(fixture.hits("/auth/oidc/admit"), 1);
     assert_eq!(fixture.hits("/api/v1/human/identity"), 0);
