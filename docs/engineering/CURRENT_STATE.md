@@ -1,10 +1,16 @@
 # État constaté — suivi au 2 novembre 2026
 
+## Préparation SSO locale — intégrée, recette complète ouverte
+
+Le lot `7a08d18`, publié sur `codex/sso-setup`, est intégré par `586c17e`. Le CLI Rust prépare hors ligne une destination privée neuve : bases tenant migrées5 avec sauvegardes, journal d'authentification distinct, credentials techniques et memberships OIDC explicites. La reprise conserve identités et reçus ; elle ne fabrique ni ressource ni session. Profils Compose autonomes Docker/Podman, manifeste public et guides EN/FR sont livrés. [Contrat et résultats](LOCAL_SSO_SETUP.md).
+
+Les8tests CLI setup et24tests audit ont leurs résumés PASS ; leur code de sortie Cargo final n'a pas été enregistré. Les4unités setup finales,2canaris fichiers corrigés, fmt et Clippy strict ont chacun RC0 et sources stables. Revues correctives traitées. Un vrai import Keycloak26.8.1 retourne les trois IDs attendus ; cela ne qualifie pas le trajet gateway/Web/CLI. Nouvelle image de contrôle et recette complète NOT_RUN. DNS hôte manquant nécessite une intervention administrateur ; l'ancien ingress IdP propriétaire du port18080 est inventorié et doit être préservé lors d'une bascule réversible. G09 reste FAIL,0/12gates clos.
+
 ## G09 — essai courant refusé avant lancement
 
 Release de test d6cb136 compilée (RC0, aucun test exécuté par le build), puis une unique recette Docker réelle : FAIL275,75s à `readiness_before_claim`. Worker Created, aucun Running/claim/fault SIGKILL ; oracle de deadline NOT_RUN. À la première vérification Ready, le slot est stopping et son horloge prouve l'expiration de l'Arm5s depuis20,609s. Cause dominante de latence encore non mesurée : pending journal → POST central → ACK journal → register/reopen. Instrumenter avant d'optimiser, sans nouveau budget ni retrait de durabilité. [Preuves et portée](VALIDATION.md#2-novembre--g09-release-courant-refus-avant-claim).
 
-Processus12284, worker/volume/racine privée et release f798bcb2 conservés. Ne pas reconstruire cette cible release tant que le gardien/les ancres la retiennent ; debug distinct utilisable. Nouveau worktree `codex/sso-setup` séparé, base d6cb136, pour le préparateur Rust et les profils locaux. Son plan est `docs/engineering/LOCAL_SSO_SETUP.md` dans ce worktree ; tests RED et configuration en préparation, aucun bootstrap qualifié par cette déclaration. Gouvernance du checkout principal et anciens gardiens inchangés.
+Processus12284, worker/volume/racine privée et release f798bcb2 conservés. Ne pas reconstruire cette cible release tant que le gardien/les ancres la retiennent ; debug distinct utilisable. Le lot du worktree `codex/sso-setup`, base d6cb136, est désormais intégré comme décrit ci-dessus ; sa fermeture suit l'inventaire des consommateurs et la sauvegarde. Gouvernance du checkout principal et anciens gardiens inchangés.
 
 ## SSO Web/CLI — lots parallèles en intégration
 

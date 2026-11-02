@@ -1,8 +1,16 @@
 # Stratégie de qualification
 
+## Préparation SSO locale — ciblage du 2 novembre
+
+`setup_prepare` couvre les vrais sous-processus de préparation et leurs fichiers/SQLite : publication neuve, refus, reprise exacte et stdin borné. `setup::tests::` vérifie les interruptions durables, la saturation d'audit et la reprise d'une vraie base>32Mio ; `closed_entry_sync_` vérifie la barrière fichiers sans élargir les lectures. Le parent temporaire des canaris est canonique pour respecter la même politique nofollow sur macOS et Linux. Choisir uniquement les cas touchés ; les résumés8+24 et les commandes finales4+2/fmt/Clippy ont des preuves distinctes, décrites dans [VALIDATION](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement).
+
+Les rendus Compose, l'import réel des trois IDs Keycloak et la revue statique des commandes ne remplacent ni la préparation du volume de contrôle conteneurisé ni le parcours réel gateway/Web/CLI. Les outils auxiliaires IdP restent privés, hors dépôt. Aucun appel fournisseur ou E2E global n'est requis pour rejouer une correction purement fichiers ou stdin.
+
 ## SSO candidat — ciblage du 2 novembre
 
 Les cibles `oidc_authentication_audit`, `oidc_gateway`, `oidc_gateway_flow`, `oidc_transport` et `sso_cli` vérifient le produit avec SQLite durable, HTTP/TLS contrôlé, JWT signés de test et vrais sous-processus CLI. Elles ne qualifient pas Keycloak, le navigateur, un fournisseur payant ni un moteur. `human_access` conserve les canaris de plafond de permissions ; `human_cli` couvre la compatibilité locale. Exécuter les régressions touchées, puis les contrôles statiques, sans rejouer systématiquement tous les parcours E2E. [Résultats par gel](VALIDATION.md#2-novembre--composition-sso-résultats-comportementaux-et-revues).
+
+État logiciel consigné dans d6cb136 : les24tests `sso_cli` passent ensemble ; fmt et Clippy strict finaux PASS. Le test transport exact passe après correction de sa fixture ; les15autres résultats restent ceux du gel précédent, sans suite transport entière rejouée. Les résultats intermédiaires CLI19/21 et transport15/16 restent dans la chronologie, sans décrire des défauts encore ouverts après ces corrections. Les travaux SSO/setup du worktree distinct ne sont pas intégrés à ce gel et ne qualifient aucun bootstrap.
 
 Après copie de sources depuis une archive, ne pas supposer Cargo frais sur les seules dates restaurées : renouveler le mtime des entrées exactement copiées, vérifier leurs bytes, puis contrôler que les tests sélectionnés s'exécutent réellement. Zéro test ou un test ignoré ne constitue pas un PASS. Un échec pendant login/PKI préparatoire ne reproduit pas un oracle de refresh qui n'a pas encore été atteint.
 
@@ -18,7 +26,7 @@ Les cibles Rust pertinentes sont `api::human_state::tests`, `human_access`, `hum
 
 Exécuter les cibles touchées, puis canaris/statiques appropriés. Les résultats couvrent plusieurs gels : assertion expiry mal préparée, fixture CLI accordée avant fait connu et correction Clippy sont conservées dans la [chronologie](VALIDATION.md#1er-novembre--accès-humain-local-apicli-et-dashboard), sans compter les rejeux comme nouvelles fonctions. La modification finale du prédicat d'expiration ne rejoue que son test exact et fmt/Clippy ; aucune suite globale n'est déduite.
 
-Dans `front/`, `node --test --test-isolation=none tests/human-model.test.mjs tests/human-api.test.mjs` cible les17 unités humaines. Le navigateur ciblé utilise `AI_GUARD_HUMAN_SCENARIO=focus node tests/browser_human.mjs` ou `AI_GUARD_HUMAN_SCENARIO=access-modes node tests/browser_human.mjs` ; variable absente pour le parcours humain et ses captures. Ces fixtures front ne qualifient pas le backend/runtime. Ne pas relancer ces parcours automatiquement pour une correction sans effet sur eux. Source composée/build vérifiés sur Node25.6.1 ; tests Node24 et parcours humain5 en vrais conteneurs encore NOT_RUN.
+Dans `front/`, `node --test --test-isolation=none tests/human-model.test.mjs tests/human-api.test.mjs` cible les17 unités humaines. Le navigateur ciblé utilise `AI_GUARD_HUMAN_SCENARIO=focus node tests/browser_human.mjs` ou `AI_GUARD_HUMAN_SCENARIO=access-modes node tests/browser_human.mjs` ; variable absente pour le parcours humain et ses captures. Ces fixtures front ne qualifient pas le backend/runtime. Ne pas relancer ces parcours automatiquement pour une correction sans effet sur eux. Source composée/build vérifiés sur Node25.6.1 ; tests Node24 et parcours humain5 en vrais conteneurs NOT_RUN au gel du1er novembre. La [recette Docker API/CLI A/B du2novembre](VALIDATION.md#2-novembre--recette-humaine-réelle-docker-apicli-ab) passe depuis sur son image figée, sans navigateur ni worker.
 
 S0,1er novembre : RED natif de lease après abandon listener, puis sept fonctions ciblées PASS (parent IPC/acteur/idle inchangé, trois cas owner, deux intégrations du vrai binaire et retained Cancel). Fmt/Clippy strict/release arm64 PASS et revue source traitée. Deux fences Unknown de test conservées ; marqueur payload≠join, aucun crash processus/OS ou moteur qualifié. Sources auxiliaires/ignorées hachées avant Clippy, sans réussite PKI/fournisseur attribuée au lot. [Gels, commandes et limites](VALIDATION.md#1er-novembre--s0-r2-green-ciblé). Ledger/retrait durable, G09 et recette Docker/Podman restent ouverts ; pas de répétition des32STOP3 ou d'E2E global pour ce correctif.
 
@@ -50,7 +58,7 @@ Cette couverture ne remplace pas les requêtes humaines réellement authentifié
 
 ## Identité individuelle, SSO et découverte — à qualifier
 
-Exigences approuvées le 31 octobre, détaillées dans [le contrat canonique d'identité et de configuration](../sso.md). Cette matrice fixe les preuves d'acceptation ; ses libellés ne sont pas des noms de suites déjà disponibles. Les cas sont **NOT_RUN pour ce nouveau périmètre**. Le SSO facultatif à l'installation ne dispense pas le produit de qualifier son connecteur et sa documentation. Les comptes préconfigurés servent à l'environnement explicite de découverte ; les événements d'exécution doivent être réels.
+Exigences approuvées le 31 octobre, détaillées dans [le contrat canonique d'identité et de configuration](../sso.md). Cette matrice fixe les preuves d'acceptation ; ses libellés ne sont pas des noms de suites déjà disponibles. Les preuves partielles logicielles et Docker API/CLI locales citées ci-dessus ne qualifient pas ces cas complets ; les parcours réels OIDC/Keycloak, navigateur, découverte et délégation restent **NOT_RUN**. Le SSO facultatif à l'installation ne dispense pas le produit de qualifier son connecteur et sa documentation. Les comptes préconfigurés servent à l'environnement explicite de découverte ; les événements d'exécution doivent être réels.
 
 | Cas | Preuve et refus attendus |
 |---|---|

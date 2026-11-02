@@ -1,5 +1,25 @@
 # Validation courante
 
+## 2 novembre — préparateur SSO privé et profils de lancement
+
+Source `codex/sso-setup`, base `d6cb136`, lot publié `7a08d183f8b05253a645c9a9d6a9fc89ef3c63f5`, intégré par `586c17e`. Préparation Rust hors ligne, reprise avec identités immuables, stockage5/audit et configuration autonome ; [contrat, RED, corrections et limites](LOCAL_SSO_SETUP.md). Les trois défauts de revue ont leur reproduction pertinente avant correction : stdin ouvert sans EOF, capacité genesis impossible acceptée avant création et refus de reprise d'une vraie base>32Mio. Deux essais préparatoires de la grande base et le premier canari de fichier ne dépassaient pas leurs préconditions ; ils ne sont pas comptés comme défaut produit.
+
+| Commande ou contrôle ciblé | Résultat constaté |
+|---|---|
+| `cargo test --locked --offline --no-fail-fast --test setup_prepare --test oidc_authentication_audit` | Résumés exécutables8/8 et24/24 PASS, hashes stables ; code de sortie Cargo final NOT_RECORDED après perte du handle. Aucun rejeu inutile pour le seul code numérique. |
+| `cargo test --locked --offline --lib setup::tests::` | PASS4/4, RC0,124,85s ; reprise réelle sur base>32Mio, audit saturé et publication retenue. |
+| `cargo test --locked --offline --lib closed_entry_sync_` | PASS2/2, RC0,0,07s après correction du parent temporaire canonique ; politique nofollow/modes/liens et limite de lecture inchangées. |
+| `cargo fmt --all -- --check` | PASS, RC0. |
+| `cargo clippy --locked --offline --all-targets -- -D warnings` | PASS, RC0,2min47. |
+| Deux profils Compose et sélection des images | PASS des rendus ; YAML Podman analysé par Docker Compose, moteur Podman NOT_RUN. |
+| Liens relatifs des six guides/plan | PASS100/100 ; revues source et lancement statique sans constat bloquant restant. |
+
+Captures privées `ai-guard-luna-setup-final-20261102-Rnt38Y` : les manifests setup final partagent SHA `2e014ebfbaca991705f50398e692ce2d7edd1d586fda4e20c71b8158e399ebc1`, puis canaris/Clippy `439f4cba11b5d0dacb61c80aecb343a1a91281faf13d5e0046f249f79de5d7e0`. Seule delta intermédiaire : les deux parents temporaires de test passent à leur chemin canonique. Le renommage local antérieur, survenu pendant une compilation, a été reconnu et suivi du rejeu ciblé4unités ; ce résultat intermédiaire n'est pas présenté comme gel final. Release G09 épinglée inchangée.
+
+Vrai import frais Keycloak26.8.1, image `74dfae33caf76590f87454e601112cf0eeb5bc28841f3186b1185cbc94ffed78` : PASS des trois IDs publics exacts via CLI officiel, sans réseau ni port publié. Conteneur arrêté et données conservées ; capture privée `ai-guard-keycloak-import-corrected.XA9hpO`. Le premier lancement omettait la variable publique d'origine Web et n'avait pas atteint l'oracle. Aucun outil auxiliaire Keycloak ajouté au dépôt.
+
+Publication :22fichiers, aucun secret littéral connu ni motif sensible non-fixture. Les deux signaux relus sont le nom du fichier public `.env.exemple.local-keycloak-sso` et le faux marqueur de clé du test de refus. **NOT_RUN : image de contrôle de ce lot, préparation du volume conteneurisé et connexion réelle gateway/Web/CLI.** DNS hôte non résolu, modification administrateur non disponible sans interaction ; ancien ingress propriétaire de18080 inventorié, volume et IdP à conserver. Aucun gate global clos.
+
 ## 2 novembre — G09 release courant, refus avant claim
 
 Luna compile uniquement `cargo test --release --locked --offline --no-run --test broker_runtime` sur le commit publié `d6cb136b0309d2c231ca129d4a103416af3f1fee` : RC0, durée Cargo13min16, aucune exécution de test. HEAD, Rust, Cargo/toolchain et fixtures avant/après identiques. Application SHA `f798bcb25dffabb625c57922b9747e2bd5b4a59da7ff0935fb10ee5a25257b19`, test SHA `4094a0abd9fd97d24162606e6e263df464dcd70086d0ac0d4f532a0b3c733c8d` ; copies privées dans `ai-guard-luna-broker-runtime-norun-20261102-x5rjHW`. Un contrôle de processus confirme une compilation CPU active pendant l'attente ; ni blocage IO ni pression mémoire globale ne sont établis par cette seule observation.
