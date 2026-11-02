@@ -1,5 +1,13 @@
 # Validation courante
 
+## 2 novembre — DNS hôte Keycloak résolu
+
+Le mainteneur a autorisé l'édition et validé l'authentification administrateur macOS. L'entrée `127.0.0.1 keycloak.ai-guard.test` est présente dans `/etc/hosts`, sans remplacement du fichier ; propriétaire root et mode0644 conservés. Sauvegarde privée : `/private/var/tmp/ai-guard-hosts-backup.jZtiun/hosts`, répertoire root0700. L'appel administrateur AppleScript n'a pas rendu la main et son client exact a été arrêté après constat de l'écriture, RC143. Ce code n'est pas présenté comme un succès de commande : la validation porte sur l'état effectivement lu ensuite.
+
+`dscacheutil -q host -a name keycloak.ai-guard.test` renvoie uniquement `127.0.0.1`. `curl --noproxy '*' --fail --silent --show-error --max-time 10` vers le discovery, sans `--resolve` ni header Host substitué, puis une assertion `jq -e`, confirme l'issuer exact `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`, le grant `authorization_code` et PKCE `S256`. Commande de validation **RC0**, contrats DNS/discovery **PASS**. Capture privée `ai-guard-keycloak-host-dns-20261102.YldsFX`, sans corps brut, credential ou token.
+
+Cette correction ferme le blocage DNS hôte, pas la qualification OIDC globale. Aucun binaire macOS natif de provenance actuelle n'a été établi pour le login CLI ; le build natif, la connexion et les lectures restent **NOT_RUN**. Les parcours Web réels précédemment documentés conservent leurs résultats et leur portée ; un manifeste de préparation hors ligne n'annule pas ces recettes. G09 et les autres gates ne changent pas.
+
 ## 2 novembre — diagnostic ciblé du writer D5
 
 Le gel `ai-guard-d5-small-invocation-input-20261102.Efq7q2` contient 2005 fichiers ; manifeste SHA-256 `f83a9bc78ed2d124ce45ccc82ba6095e1d169d25f590c444f973f30b4a9583bd`. `cargo check --locked --offline --all-targets` **PASS RC0**, 7 min 07 s ; `cargo test --locked --offline --lib --no-run` **PASS RC0**, 16 min 11 s. Ces commandes ne vérifient pas les nettoyages et nouveaux tests ajoutés ensuite dans le worktree vivant.
