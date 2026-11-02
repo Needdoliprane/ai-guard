@@ -35,6 +35,79 @@ pub struct ConfiguredTenant {
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OidcFile {
+    version: u32,
+    gateway: agentsandbox::api::OidcGatewayConfigV1,
+    authentication_audit: AuthenticationAuditFile,
+    ca_bundle_file: Option<PathBuf>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthenticationAuditFile {
+    path: PathBuf,
+    installation_id: uuid::Uuid,
+    policy: agentsandbox::audit::authentication::AuthenticationAuditPolicyV1,
+}
+/// A separate explicit operator file. Existing tenant registry format stays closed.
+pub fn load_oidc(
+    path: &Path,
+    initialize_new: bool,
+    redactor: agentsandbox::redaction::Redactor,
+) -> Result<agentsandbox::api::OidcGateway> {
+    use agentsandbox::{
+        audit::authentication::AuthenticationAudit,
+        control_fs::{PrivateFile, absolute_path},
+    };
+    let path = absolute_path(path)?;
+    let held = PrivateFile::open(&path, 1_048_576)?;
+    let file: OidcFile =
+        serde_json::from_slice(held.bytes()).context("Invalid OIDC gateway file")?;
+    anyhow::ensure!(file.version == 1, "Unsupported OIDC gateway file version");
+    file.gateway.validate()?;
+    let parent = path.parent().context("OIDC file has no parent")?;
+    let resolve = |path: PathBuf| -> Result<PathBuf> {
+        anyhow::ensure!(!path.as_os_str().is_empty(), "Empty OIDC file reference");
+        absolute_path(&if path.is_absolute() {
+            path
+        } else {
+            parent.join(path)
+        })
+    };
+    let ca_bundle_pem = file
+        .ca_bundle_file
+        .map(|path| -> Result<String> {
+            let ca = PrivateFile::open(&resolve(path)?, 262_144)?;
+            String::from_utf8(ca.bytes().to_vec()).context("Invalid public OIDC CA bundle")
+        })
+        .transpose()?;
+    if let Some(pem) = &ca_bundle_pem {
+        agentsandbox::oidc::OidcProvider::new_with_ca(
+            file.gateway.provider.clone(),
+            pem.as_bytes(),
+        )?;
+    }
+    let audit_path = resolve(file.authentication_audit.path)?;
+    let audit = if initialize_new {
+        AuthenticationAudit::init_new(
+            &audit_path,
+            file.authentication_audit.installation_id,
+            file.authentication_audit.policy,
+            redactor,
+        )?
+    } else {
+        AuthenticationAudit::open_existing(
+            &audit_path,
+            file.authentication_audit.installation_id,
+            file.authentication_audit.policy,
+            redactor,
+        )?
+    };
+    held.revalidate()?;
+    agentsandbox::api::OidcGateway::new(file.gateway, std::sync::Arc::new(audit), ca_bundle_pem)
+}
+
 pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);

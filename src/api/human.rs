@@ -111,10 +111,40 @@ fn cursor_unavailable() -> (StatusCode, Json<Value>) {
 }
 
 struct VerifiedHuman {
-    credential: VerifiedLocalCredentialV1,
-    source: usize,
+    credential: HumanAuthenticationProof,
+    source: HumanProofSource,
     digest: [u8; 32],
     redactor: Redactor,
+}
+struct HumanAuthenticationProof {
+    principal: PrincipalRefV1,
+    credential_id: String,
+    revision: u64,
+    expires_at: Option<String>,
+}
+enum HumanProofSource {
+    Local(usize),
+    Oidc(super::oidc::OidcHumanProof),
+}
+impl VerifiedHuman {
+    fn method(&self) -> &'static str {
+        match self.source {
+            HumanProofSource::Local(_) => "local_credential",
+            HumanProofSource::Oidc(_) => "oidc_access_token",
+        }
+    }
+    fn ceiling(&self) -> Option<&std::collections::BTreeSet<HumanCapabilityV1>> {
+        match &self.source {
+            HumanProofSource::Local(_) => None,
+            HumanProofSource::Oidc(proof) => Some(&proof.ceiling),
+        }
+    }
+    fn mapping_revision(&self) -> Option<String> {
+        match &self.source {
+            HumanProofSource::Local(_) => None,
+            HumanProofSource::Oidc(proof) => Some(proof.mapping_revision.clone()),
+        }
+    }
 }
 impl FromRequestParts<GatewayState> for VerifiedHuman {
     type Rejection = (StatusCode, Json<Value>);
@@ -131,21 +161,47 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
             "contact_operator",
         ));
     }
-    let token = bearer(headers).ok_or_else(|| {
+    let token = super::oidc::human_bearer(headers).ok_or_else(|| {
         failure(
             StatusCode::UNAUTHORIZED,
             "authentication_required",
-            "A local human bearer credential is required.",
+            "A human bearer proof is required.",
             "authenticate",
         )
     })?;
     if !crate::identity::local_credential_format(token) {
-        return Err(failure(
-            StatusCode::UNAUTHORIZED,
-            "credential_invalid",
-            "The credential is not a local human credential.",
-            "authenticate",
-        ));
+        let oidc = state.oidc.as_ref().ok_or_else(|| {
+            failure(
+                StatusCode::UNAUTHORIZED,
+                "credential_invalid",
+                "No admitted human proof matches this bearer.",
+                "authenticate",
+            )
+        })?;
+        if state.credential_index.lookup(token).is_some() {
+            return Err(failure(
+                StatusCode::UNAUTHORIZED,
+                "credential_invalid",
+                "A control credential is not a human proof.",
+                "authenticate",
+            ));
+        }
+        reject_control_collision(state, token)?;
+        let proof = oidc.authenticate(token)?;
+        let expiry = chrono::DateTime::from_timestamp(proof.expires_at, 0)
+            .ok_or_else(invalid_request)?
+            .to_rfc3339();
+        return Ok(VerifiedHuman {
+            credential: HumanAuthenticationProof {
+                principal: proof.principal.clone(),
+                credential_id: proof.authentication_id.clone(),
+                revision: u64::from(proof.generation),
+                expires_at: Some(expiry),
+            },
+            digest: proof.digest,
+            source: HumanProofSource::Oidc(proof),
+            redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
+        });
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let mut matches = Vec::new();
@@ -189,8 +245,13 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
             )
         })?;
     Ok(VerifiedHuman {
-        credential,
-        source,
+        credential: HumanAuthenticationProof {
+            principal: credential.principal,
+            credential_id: credential.credential_id,
+            revision: credential.revision,
+            expires_at: credential.expires_at,
+        },
+        source: HumanProofSource::Local(source),
         digest,
         redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
     })
@@ -218,6 +279,16 @@ pub(super) fn reject_control_collision(state: &GatewayState, token: &str) -> Api
     Ok(())
 }
 fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> {
+    let source = match &proof.source {
+        HumanProofSource::Oidc(oidc_proof) => {
+            return state
+                .oidc
+                .as_ref()
+                .ok_or_else(|| context_failure("context_revoked"))?
+                .reauthenticate(oidc_proof);
+        }
+        HumanProofSource::Local(source) => *source,
+    };
     let mut count = 0usize;
     for tenant in state.tenants.iter() {
         count += usize::from(
@@ -236,7 +307,7 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
             "contact_operator",
         ));
     }
-    let verified = state.tenants[proof.source]
+    let verified = state.tenants[source]
         .store
         .authenticate_local_digest(&proof.digest)
         .map_err(store_failure)?
@@ -313,7 +384,7 @@ fn selected_context(
         .find(|tenant| tenant.tenant_id == binding.tenant_id)
         .ok_or_else(|| context_failure("context_revoked"))?
         .clone();
-    let scope = tenant
+    let mut scope = tenant
         .store
         .authorize_human_context(
             &proof.credential.principal,
@@ -322,6 +393,16 @@ fn selected_context(
             binding.mode,
         )
         .map_err(store_failure)?;
+    if let Some(ceiling) = proof.ceiling() {
+        scope = scope
+            .restrict_capabilities(ceiling.clone())
+            .map_err(|error| store_failure(error.into()))?;
+    }
+    if binding.authentication_method != proof.method()
+        || binding.mapping_revision != proof.mapping_revision()
+    {
+        return Err(context_failure("context_revoked"));
+    }
     if scope.authorization_revision() != binding.authorization_revision {
         return Err(context_failure("context_revoked"));
     }
@@ -470,7 +551,7 @@ async fn identity(
     let mut contexts = Vec::new();
     let mut display_name = None;
     let principal_key = proof.credential.principal.key().map_err(store_failure)?;
-    let remaining = proof
+    let mut remaining = proof
         .credential
         .expires_at
         .as_ref()
@@ -487,6 +568,9 @@ async fn identity(
         .map_err(|_| invalid_request())?
         .unwrap_or(CONTEXT_TTL)
         .min(CONTEXT_TTL);
+    if let HumanProofSource::Oidc(oidc) = &proof.source {
+        remaining = remaining.min(oidc.deadline.saturating_duration_since(Instant::now()));
+    }
     for (index, tenant) in state.tenants.iter().enumerate() {
         let snapshot = tenant
             .store
@@ -507,13 +591,21 @@ async fn identity(
         let Some(account) = snapshot.account else {
             continue;
         };
-        if index == proof.source {
+        if matches!(proof.source, HumanProofSource::Local(source) if index == source)
+            || matches!(proof.source, HumanProofSource::Oidc(_)) && display_name.is_none()
+        {
             display_name = Some(account.display_name);
         }
         let revision = snapshot
             .authorization_revision
             .ok_or_else(|| context_failure("context_revoked"))?;
-        for member in snapshot.memberships {
+        for mut member in snapshot.memberships {
+            if let Some(ceiling) = proof.ceiling() {
+                member.capabilities = member.capabilities.intersection(ceiling).copied().collect();
+            }
+            if member.capabilities.is_empty() {
+                continue;
+            }
             let mut modes = vec![ContextModeV1::Personal];
             if member
                 .capabilities
@@ -536,6 +628,8 @@ async fn identity(
                     principal_key: principal_key.clone(),
                     credential_id: proof.credential.credential_id.clone(),
                     credential_revision: proof.credential.revision,
+                    authentication_method: proof.method().into(),
+                    mapping_revision: proof.mapping_revision(),
                     tenant_id: tenant.tenant_id.clone(),
                     organization_scope: member.organization_scope.clone(),
                     membership_id: member.membership_id.clone(),
@@ -577,12 +671,12 @@ async fn identity(
             failure(
                 StatusCode::UNAUTHORIZED,
                 "identity_revoked",
-                "The local account is unavailable.",
+                "The authenticated account is unavailable.",
                 "authenticate",
             )
         })?,
         authentication: HumanAuthenticationV1 {
-            method: "local_credential".into(),
+            method: proof.method().into(),
             credential_id: proof.credential.credential_id.clone(),
             expires_at: proof.credential.expires_at.clone(),
         },

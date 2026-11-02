@@ -1567,3 +1567,211 @@ async fn human_stream_exceeds_sixty_four_batches_and_resumes_without_skipping_ne
     .await
     .expect("SSE traversal exceeded its total progression budget");
 }
+
+#[test]
+fn capability_ceiling_survives_store_revalidation_and_cannot_be_widened() {
+    let f = Fixture::new();
+    let IdentityChangeV1::Membership { membership, .. } = &f.provision_a1.mutations[2].change
+    else {
+        panic!("fixture membership");
+    };
+    let scope =
+        f.a.authorize_human_context(
+            &f.user_a1,
+            &membership.membership_id,
+            membership.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "session-a1".into(),
+    };
+    assert!(
+        f.a.authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Content,)
+            .unwrap()
+            .is_some(),
+        "positive control: owner has content rights"
+    );
+    let restricted = scope
+        .restrict_capabilities(BTreeSet::from([HumanCapabilityV1::ReadMetadata]))
+        .unwrap();
+    assert!(restricted.has_capability(HumanCapabilityV1::ReadMetadata));
+    assert!(!restricted.has_capability(HumanCapabilityV1::ReadContent));
+    assert!(
+        f.a.authorized_resource_grant(&restricted, &resource, ResourcePermissionV1::Metadata,)
+            .unwrap()
+            .is_some()
+    );
+    for permission in [ResourcePermissionV1::Content, ResourcePermissionV1::Export] {
+        assert!(
+            f.a.authorized_resource_grant(&restricted, &resource, permission,)
+                .unwrap()
+                .is_none(),
+            "transaction must retain the ceiling"
+        );
+    }
+    let restricted_again = restricted
+        .restrict_capabilities(BTreeSet::from([
+            HumanCapabilityV1::ReadMetadata,
+            HumanCapabilityV1::ReadContent,
+            HumanCapabilityV1::Export,
+            HumanCapabilityV1::ReadTenantMetadata,
+        ]))
+        .unwrap();
+    assert!(!restricted_again.has_capability(HumanCapabilityV1::ReadContent));
+    assert!(!restricted_again.has_capability(HumanCapabilityV1::ReadTenantMetadata));
+    assert!(
+        f.a.authorized_resource_grant(&restricted_again, &resource, ResourcePermissionV1::Content,)
+            .unwrap()
+            .is_none(),
+        "second restriction cannot remove the first"
+    );
+}
+
+#[test]
+fn capability_ceiling_refuses_a_context_with_no_remaining_capability() {
+    let f = Fixture::new();
+    let IdentityChangeV1::Membership { membership, .. } = &f.provision_a1.mutations[2].change
+    else {
+        panic!("fixture membership");
+    };
+    let scope =
+        f.a.authorize_human_context(
+            &f.user_a1,
+            &membership.membership_id,
+            membership.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    assert!(scope.has_capability(HumanCapabilityV1::ReadMetadata));
+    assert_eq!(
+        scope.restrict_capabilities(BTreeSet::new()).unwrap_err(),
+        IdentityFailureV1::PermissionDenied,
+    );
+}
+
+#[test]
+fn capability_ceiling_refuses_administration_when_mapping_removes_it() {
+    let f = Fixture::new();
+    let IdentityChangeV1::Membership { membership, .. } = &f.provision_a1.mutations[2].change
+    else {
+        panic!("fixture membership");
+    };
+    let mut administrative = membership.clone();
+    administrative.revision += 1;
+    administrative
+        .capabilities
+        .insert(HumanCapabilityV1::ReadTenantMetadata);
+    f.a.mutate_identity(&change(IdentityChangeV1::Membership {
+        expected_revision: membership.revision,
+        membership: administrative.clone(),
+    }))
+    .unwrap();
+    let scope =
+        f.a.authorize_human_context(
+            &f.user_a1,
+            &administrative.membership_id,
+            administrative.revision,
+            ContextModeV1::Administration,
+        )
+        .unwrap();
+    assert!(scope.has_capability(HumanCapabilityV1::ReadTenantMetadata));
+    assert_eq!(
+        scope
+            .restrict_capabilities(BTreeSet::from([HumanCapabilityV1::ReadMetadata,]))
+            .unwrap_err(),
+        IdentityFailureV1::PermissionDenied,
+        "admin context cannot survive removal of its admin ceiling",
+    );
+}
+
+#[test]
+fn capability_ceiling_is_required_for_oidc_before_transactional_resource_reads() {
+    let f = Fixture::new();
+    let oidc = PrincipalRefV1::HumanOidc {
+        issuer: "https://identity.example.test/realm".into(),
+        subject: "fixture-verified-subject".into(),
+    };
+    f.a.mutate_identity(&change(IdentityChangeV1::Account {
+        expected_revision: 0,
+        account: HumanAccountV1 {
+            version: 1,
+            principal: oidc.clone(),
+            display_name: "OIDC fixture reader".into(),
+            revision: 1,
+            active: true,
+        },
+    }))
+    .unwrap();
+    let membership = MembershipV1 {
+        version: 1,
+        membership_id: Uuid::new_v4().to_string(),
+        principal: oidc.clone(),
+        tenant_id: "tenant-a".into(),
+        organization_scope: "organization-a".into(),
+        revision: 1,
+        active: true,
+        capabilities: BTreeSet::from([
+            HumanCapabilityV1::ReadMetadata,
+            HumanCapabilityV1::ReadContent,
+            HumanCapabilityV1::Export,
+        ]),
+    };
+    f.a.mutate_identity(&change(IdentityChangeV1::Membership {
+        expected_revision: 0,
+        membership: membership.clone(),
+    }))
+    .unwrap();
+    let resource = ResourceRefV1 {
+        kind: ResourceKindV1::Session,
+        resource_id: "session-a1".into(),
+    };
+    let mut grant = f.a.identity_resource_grant(&resource).unwrap().unwrap();
+    let expected_revision = grant.revision;
+    grant.revision += 1;
+    grant.shares.push(ResourceShareV1 {
+        principal: oidc.clone(),
+        permissions: BTreeSet::from([
+            ResourcePermissionV1::Metadata,
+            ResourcePermissionV1::Content,
+            ResourcePermissionV1::Export,
+        ]),
+    });
+    f.a.mutate_identity(&change(IdentityChangeV1::ResourceGrant {
+        expected_revision,
+        grant,
+    }))
+    .unwrap();
+    let scope =
+        f.a.authorize_human_context(
+            &oidc,
+            &membership.membership_id,
+            membership.revision,
+            ContextModeV1::Personal,
+        )
+        .unwrap();
+    assert!(scope.has_capability(HumanCapabilityV1::ReadContent));
+    let error =
+        f.a.authorized_resource_grant(&scope, &resource, ResourcePermissionV1::Metadata)
+            .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<IdentityFailureV1>(),
+        Some(&IdentityFailureV1::PermissionDenied),
+        "OIDC requires an explicit ceiling even when a durable share exists"
+    );
+    let restricted = scope
+        .restrict_capabilities(BTreeSet::from([HumanCapabilityV1::ReadMetadata]))
+        .unwrap();
+    assert!(
+        f.a.authorized_resource_grant(&restricted, &resource, ResourcePermissionV1::Metadata)
+            .unwrap()
+            .is_some(),
+        "positive control: the explicit ceiling permits the existing share"
+    );
+    assert!(
+        f.a.authorized_resource_grant(&restricted, &resource, ResourcePermissionV1::Content)
+            .unwrap()
+            .is_none()
+    );
+}

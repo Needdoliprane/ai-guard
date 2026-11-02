@@ -100,6 +100,12 @@ struct GatewayArgs {
     /// Versioned registry of tenant database and credential file references.
     #[arg(long, conflicts_with_all = ["data", "runner_token_file", "viewer_token_file", "worker_limit", "worker_cpu_millis", "worker_memory_bytes", "worker_max_seconds"])]
     tenants_file: Option<PathBuf>,
+    /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
+    #[arg(long)]
+    oidc_config: Option<PathBuf>,
+    /// Initialize an exclusively new operator-private authentication audit.
+    #[arg(long, requires = "oidc_config")]
+    initialize_oidc_audit: bool,
     #[arg(long, default_value = ".agentsandbox/audit.sqlite")]
     data: PathBuf,
     #[arg(long, default_value = ".agentsandbox/secrets/runner")]
@@ -262,6 +268,9 @@ struct DashboardArgs {
     viewer_token_file: Option<PathBuf>,
     #[arg(long, default_value = "front/dist")]
     front_dir: PathBuf,
+    /// Enable only the fixed authentication proxy for this exact public origin.
+    #[arg(long)]
+    oidc_web_origin: Option<String>,
 }
 
 #[derive(Args)]
@@ -603,10 +612,20 @@ async fn main() -> Result<()> {
                 });
             }
             let tenant_count = gateways.len();
-            let router = api::gateway_router(
+            let oidc = args
+                .oidc_config
+                .as_ref()
+                .map(|path| {
+                    gateway_config::load_oidc(path, args.initialize_oidc_audit, redactor.clone())
+                })
+                .transpose()?;
+            let mut state =
                 GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?
-                    .with_worker_quotas(quotas)?,
-            );
+                    .with_worker_quotas(quotas)?;
+            if let Some(oidc) = oidc {
+                state = state.with_oidc(oidc)?;
+            }
+            let router = api::gateway_router(state);
             let shutdown = shutdown_signal()?;
             let listener = tokio::net::TcpListener::bind(args.listen).await?;
             eprintln!(
@@ -661,12 +680,22 @@ async fn main() -> Result<()> {
                 "Front absent : exécuter npm ci && npm run build dans front/"
             );
             let router = if args.shared_tenants {
-                api::dashboard_shared_router(&args.upstream, args.front_dir)?
+                api::dashboard_router_with_oidc(
+                    &args.upstream,
+                    None,
+                    args.front_dir,
+                    args.oidc_web_origin,
+                )?
             } else {
                 let token_path = args
                     .viewer_token_file
                     .unwrap_or_else(|| PathBuf::from(".agentsandbox/secrets/viewer"));
-                api::dashboard_router(&args.upstream, read_token(&token_path)?, args.front_dir)?
+                api::dashboard_router_with_oidc(
+                    &args.upstream,
+                    Some(read_token(&token_path)?),
+                    args.front_dir,
+                    args.oidc_web_origin,
+                )?
             };
             let shutdown = shutdown_signal()?;
             let listener = tokio::net::TcpListener::bind(args.listen).await?;

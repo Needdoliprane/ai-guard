@@ -1,14 +1,15 @@
 export type HumanView = "metadata" | "content";
 export type ResourceKind = "session" | "sandbox" | "agent" | "project";
 export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants";
-export interface Principal { kind: "human_local"; installation_id: string; account_id: string }
+export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
+  { kind: "human_oidc"; issuer: string; subject: string };
 export interface HumanContext {
   id: string; tenant_id: string; organization_scope: string; mode: "personal" | "administration";
   capabilities: Capability[]; membership_revision: string; authorization_version: string; expires_at: string;
 }
 export interface HumanIdentity {
   version: 1; principal: Principal; display_name: string;
-  authentication: { method: "local_credential"; credential_id: string; expires_at: string | null };
+  authentication: { method: "local_credential" | "oidc_access_token"; credential_id: string; expires_at: string | null };
   contexts: HumanContext[];
 }
 export interface ResourceRef { kind: ResourceKind; resource_id: string }
@@ -53,8 +54,21 @@ function revision(value: unknown): value is string {
 }
 function authorizationVersion(value: unknown): value is string { return typeof value === "string" && /^[0-9a-f]{64}$/.test(value); }
 function principal(value: unknown): Principal {
-  requireContract(object(value) && value.kind === "human_local" && uuid(value.installation_id) && uuid(value.account_id));
-  return { kind: "human_local", installation_id: value.installation_id, account_id: value.account_id };
+  requireContract(object(value));
+  if (value.kind === "human_local") {
+    requireContract(Object.keys(value).every((key) => ["kind", "installation_id", "account_id"].includes(key)) && uuid(value.installation_id) && uuid(value.account_id));
+    return { kind: "human_local", installation_id: value.installation_id, account_id: value.account_id };
+  }
+  requireContract(value.kind === "human_oidc" && Object.keys(value).every((key) => ["kind", "issuer", "subject"].includes(key)) &&
+    utf8Text(value.issuer, 2048) && utf8Text(value.subject, 512));
+  let issuer: URL;
+  try { issuer = new URL(value.issuer); } catch { throw new HumanContractError(); }
+  requireContract(["https:", "http:"].includes(issuer.protocol) && issuer.hostname &&
+    !issuer.username && !issuer.password && !value.issuer.includes("?") && !value.issuer.includes("#"));
+  return { kind: "human_oidc", issuer: value.issuer, subject: value.subject };
+}
+function utf8Text(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && new TextEncoder().encode(value).length <= max && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
 function resource(value: unknown): ResourceRef {
   requireContract(object(value) && ["session", "sandbox", "agent", "project"].includes(String(value.kind)) && boundedText(value.resource_id));
@@ -62,7 +76,7 @@ function resource(value: unknown): ResourceRef {
 }
 export function parseHumanIdentity(value: unknown): HumanIdentity {
   requireContract(object(value) && value.version === 1 && boundedText(value.display_name, 256) && object(value.authentication) &&
-    value.authentication.method === "local_credential" && uuid(value.authentication.credential_id) &&
+    ["local_credential", "oidc_access_token"].includes(String(value.authentication.method)) && uuid(value.authentication.credential_id) &&
     (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000);
   const seen = new Set<string>();
   const contexts = value.contexts.map((item): HumanContext => {
@@ -76,8 +90,11 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
       mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,
       authorization_version: item.authorization_version, expires_at: item.expires_at, capabilities: item.capabilities as Capability[] };
   });
-  return { version: 1, principal: principal(value.principal), display_name: value.display_name,
-    authentication: { method: "local_credential", credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null }, contexts };
+  const authenticatedPrincipal = principal(value.principal);
+  requireContract((value.authentication.method === "local_credential" && authenticatedPrincipal.kind === "human_local") ||
+    (value.authentication.method === "oidc_access_token" && authenticatedPrincipal.kind === "human_oidc" && timestamp(value.authentication.expires_at)));
+  return { version: 1, principal: authenticatedPrincipal, display_name: value.display_name,
+    authentication: { method: value.authentication.method as HumanIdentity["authentication"]["method"], credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null }, contexts };
 }
 function page<T>(value: unknown, parse: (item: unknown) => T, streaming = false): HumanPage<T> {
   requireContract(object(value) && value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&

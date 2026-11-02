@@ -18,6 +18,7 @@ use std::{
     },
 };
 
+pub mod authentication;
 mod control;
 mod human;
 mod identity;

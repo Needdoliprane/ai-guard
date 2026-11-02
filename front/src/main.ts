@@ -6,6 +6,7 @@ import { ControlDashboard } from "./control-view.ts";
 import { HumanDashboard } from "./human-view.ts";
 import { HumanApiError } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
+import { OidcSession, OidcSessionError } from "./oidc-session.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import type { WorkerRecord } from "./control.ts";
 import {
@@ -103,6 +104,8 @@ let client: ApiClient | null = null;
 let identity: ViewerIdentity | null = null;
 let control: ControlDashboard | null = null;
 let humanSession: HumanDashboard | null = null;
+let oidcSession: OidcSession | null = null;
+let authenticationView = 0;
 let overview: Overview | null = null;
 let agents: Agent[] = [];
 let sandboxes: Sandbox[] = [];
@@ -272,7 +275,7 @@ function setNotice(message = "", kind: "error" | "info" = "error", summaryClient
   );
 }
 function errorMessage(error: unknown): string {
-  return error instanceof ApiError || error instanceof IdentityError || error instanceof HumanApiError || error instanceof HumanContractError ||
+  return error instanceof ApiError || error instanceof IdentityError || error instanceof HumanApiError || error instanceof HumanContractError || error instanceof OidcSessionError ||
     error instanceof Error && error.message === "Contrat de liste d’identités incomplet ou incompatible."
     ? error.message
     : "Connexion au collecteur impossible. Vérifiez le service local puis réessayez.";
@@ -288,6 +291,7 @@ function onError(error: unknown, summaryClient: ApiClient | null = null) {
   setNotice(errorMessage(error), "error", summaryClient);
 }
 function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
+  const currentAuthenticationView = ++authenticationView;
   document.title = "ai-guard · Supervision locale";
   const access = el("select", "text-input login-access"); access.id = "access-mode";
   const technical = el("option", "", "Lecture technique (viewer)"); technical.value = "viewer";
@@ -337,6 +341,25 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
   };
   access.addEventListener("change", () => { describeAccess(); error.hidden = true; });
   describeAccess();
+  const sso = el("div", "login-note"); sso.setAttribute("aria-live", "polite");
+  const inspectSso = async () => {
+    sso.replaceChildren(el("p", "muted", "Vérification de la connexion SSO…"));
+    const candidate = new OidcSession();
+    try {
+      const status = await candidate.status();
+      if (currentAuthenticationView !== authenticationView) { candidate.close(); return; }
+      if (!status.enabled) { sso.replaceChildren(el("p", "muted", "SSO non activé sur ce contrôle.")); candidate.close(); return; }
+      const connect = button(`Se connecter avec ${status.provider_label}`, "button button-secondary", async () => {
+        connect.disabled = true; connect.textContent = "Connexion au fournisseur…";
+        try { window.location.assign(await candidate.start()); }
+        catch (cause) { if (currentAuthenticationView === authenticationView) { error.textContent = errorMessage(cause); error.hidden = false; connect.disabled = false; connect.textContent = "Réessayer la connexion SSO"; } }
+      });
+      sso.replaceChildren(connect, el("p", "field-help", `Source : ${status.issuer}. Les permissions restent établies par le contrôle.`));
+    } catch {
+      if (currentAuthenticationView !== authenticationView) return;
+      candidate.close(); sso.replaceChildren(el("p", "muted", "État SSO indisponible."), button("Réessayer", "button button-secondary", () => { void inspectSso(); }));
+    }
+  };
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const value = token.value.trim();
@@ -405,6 +428,7 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
           el("label", "sr-only", "Type d’accès"),
           access,
           form,
+          sso,
           el(
             "p",
             "muted",
@@ -438,6 +462,7 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
     ),
   );
   root.querySelector<HTMLLabelElement>('label.sr-only')!.htmlFor = access.id;
+  void inspectSso();
 }
 
 function shell() {
@@ -2162,5 +2187,46 @@ async function exportJournal(button: HTMLButtonElement) {
     button.disabled = false;
   }
 }
-window.addEventListener("beforeunload", () => { client?.close(); humanSession?.close(); });
-login();
+function browserOidcSession(): OidcSession {
+  let session: OidcSession;
+  session = new OidcSession(fetch, {
+    onChange: () => { if (oidcSession === session) void mountOidc(session); },
+    onClose: (message) => {
+      if (oidcSession !== session) return;
+      oidcSession = null; humanSession?.close(); humanSession = null; login(message, "human");
+    },
+  });
+  return session;
+}
+async function mountOidc(session: OidcSession): Promise<void> {
+  const token = session.accessToken; if (!token || oidcSession !== session) return;
+  ++authenticationView; humanSession?.close();
+  const candidate = new HumanDashboard(root, token, { brand, themeButton }, () => {
+    if (humanSession !== candidate || oidcSession !== session) return;
+    candidate.close(); humanSession = null;
+    const pending = session.logout(); const closedView = authenticationView;
+    void pending.then((result) => {
+      if (authenticationView !== closedView) return;
+      const provider = result.provider_logout === "accepted" ? "Fermeture auprès du fournisseur acceptée." :
+        "Fermeture auprès du fournisseur non confirmée ; sa session peut rester ouverte.";
+      login(`Session locale fermée. ${provider}${result.audit === "unavailable" ? " Audit de fermeture indisponible." : ""}`, "human");
+    }).catch(() => {
+      if (authenticationView === closedView) login("Session locale fermée. Fournisseur et audit de fermeture non confirmés.", "human");
+    });
+  });
+  humanSession = candidate;
+  try { await candidate.start(); }
+  catch (cause) {
+    if (humanSession !== candidate || oidcSession !== session) return;
+    candidate.close(); humanSession = null; session.close(errorMessage(cause));
+  }
+}
+window.addEventListener("beforeunload", () => { client?.close(); humanSession?.close(); oidcSession?.close(); });
+if (window.location.pathname === "/auth/oidc/complete") {
+  window.history.replaceState(null, "", "/auth/oidc/complete");
+  login("Vérification de la connexion SSO…", "human");
+  const session = browserOidcSession(); oidcSession = session;
+  void session.redeem().then(() => window.history.replaceState(null, "", "/")).catch((error) => {
+    if (oidcSession === session) { oidcSession = null; login(errorMessage(error), "human"); }
+  });
+} else login();

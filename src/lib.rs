@@ -12,6 +12,7 @@ pub mod jev;
 pub mod model;
 pub mod model_ingress;
 pub mod model_tls;
+pub mod oidc;
 pub mod operations;
 pub mod policy;
 pub mod provider;
