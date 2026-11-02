@@ -1,6 +1,6 @@
 # État constaté — suivi au 2 novembre 2026
 
-Dernier contrôle logiciel D5 : les 37 fonctions des fondations restent PASS dans leurs gels ciblés. Sur le gel logiciel suivant, compilation de toutes les cibles et du harness PASS, puis 31 fonctions ciblées PASS : acteur12, journal4, recovery1, arbitre avant claim10 et retry4. Le FAIL acteur antérieur ne se reproduit ni isolément ni dans le groupe ; sa cause reste indéterminée. Le nouveau pump d'audit et son rattrapage après réponse perdue sont en validation sur d'autres gels, avec revue indépendante et tests composés HTTP/SQLite/IPC. Aucun moteur ni parcours vertical complet n'est qualifié par ces résultats. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
+Dernier contrôle logiciel D5 : les 37 fonctions des fondations et les 31 fonctions composées précédentes passent dans leurs gels ciblés. Le FAIL acteur antérieur reste non reproduit, de cause indéterminée. Le nouveau test du pump **FAIL** sur le gel `Efq7q2` : dépôt du signal dans l'outbox, `JournalError::Io` après 10003 ms ; le second test est **NOT_RUN**. Compilation toutes cibles et harness **PASS** pour ce même gel. Le diagnostic du writer continue sans augmenter les délais. Les nettoyages de code et le nouveau test de saturation ont passé une revue de source ; leurs tests compilés restent à exécuter. Aucun moteur ni parcours vertical complet n'est qualifié. [Résultats et limites](VALIDATION.md#2-novembre--diagnostic-ciblé-du-writer-d5).
 
 ## Préparation SSO locale — intégrée, recette complète ouverte
 
