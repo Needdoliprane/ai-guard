@@ -1,5 +1,11 @@
 # État constaté — suivi au 2 novembre 2026
 
+## G09 — essai courant refusé avant lancement
+
+Release de test d6cb136 compilée (RC0, aucun test exécuté par le build), puis une unique recette Docker réelle : FAIL275,75s à `readiness_before_claim`. Worker Created, aucun Running/claim/fault SIGKILL ; oracle de deadline NOT_RUN. À la première vérification Ready, le slot est stopping et son horloge prouve l'expiration de l'Arm5s depuis20,609s. Cause dominante de latence encore non mesurée : pending journal → POST central → ACK journal → register/reopen. Instrumenter avant d'optimiser, sans nouveau budget ni retrait de durabilité. [Preuves et portée](VALIDATION.md#2-novembre--g09-release-courant-refus-avant-claim).
+
+Processus12284, worker/volume/racine privée et release f798bcb2 conservés. Ne pas reconstruire cette cible release tant que le gardien/les ancres la retiennent ; debug distinct utilisable. Nouveau worktree `codex/sso-setup` séparé, base d6cb136, pour le préparateur Rust et les profils locaux. Son plan est `docs/engineering/LOCAL_SSO_SETUP.md` dans ce worktree ; tests RED et configuration en préparation, aucun bootstrap qualifié par cette déclaration. Gouvernance du checkout principal et anciens gardiens inchangés.
+
 ## SSO Web/CLI — lots parallèles en intégration
 
 Recette humaine locale réelle Docker Desktop/LinuxARM64 : API/CLI A/B, permissions distinctes, exports neufs, migrations sauvegardées3→4→5, redémarrage et révocation hors ligne PASS sur l'image `954246…051e` du commit7afdd43. Audits finaux valides (A31/B20événements), SQLite5/integrity_check=ok ; volumes et preuves conservés. Navigateur NOT_RUN : module du runtime historique manquant, Playwright local absent, puis hôte d'accès navigateur CUA indisponible lors du diagnostic direct. Aucun credential transmis aux outils. Cette recette ne lance aucun worker et ne remplace pas A1/A2/B1. [Preuve](VALIDATION.md#2-novembre--recette-humaine-réelle-docker-apicli-ab).
