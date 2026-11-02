@@ -4,7 +4,7 @@
 
 This guide describes the Rust OIDC configuration, the Web sign-in and the foreground human CLI. Use it with the matching ai-guard binary and built frontend. It does not configure Codex or Claude authentication: choose their subscription, API key or approved inference endpoint separately in the [provider guide](../providers/README.md).
 
-Choose the **fresh local DEMO** below to prepare new control data and the three imported application accounts, or use the [manual installation procedure](#prepare-an-existing-or-enterprise-installation) with an existing provider. A real fresh Keycloak 26.8.1 import has verified the three explicit subject IDs in the public manifest. This does not qualify the complete gateway/Web/CLI login path, which remains NOT_RUN. Preparation, configuration checks and historical results retain their scope in the [engineering record](../../engineering/VALIDATION.md); the [identity contract](../../sso.md) describes the complete product target.
+Choose the **fresh local DEMO** below to prepare new control data and the three imported application accounts, or use the [manual installation procedure](#prepare-an-existing-or-enterprise-installation) with an existing provider. Use a matching current control image and built frontend; the [engineering record](../../engineering/VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) distinguishes the observed Web sign-in from the remaining CLI, role and lifecycle qualification. Browser-specific hostname mapping does not establish the host DNS resolution required by the native CLI. Preparation and historical results retain their dated scope; the [identity contract](../../sso.md) describes the complete product target.
 
 ## Prepare a fresh local DEMO
 
