@@ -85,6 +85,15 @@ impl AuthorizedScopeV1 {
     pub fn has_capability(&self, capability: HumanCapabilityV1) -> bool {
         self.capabilities.contains(&capability)
     }
+    /// Restrict an authorized snapshot, retaining earlier restrictions when
+    /// Store revalidates it. This never grants a membership capability.
+    pub fn restrict_capabilities(
+        self,
+        _ceiling: BTreeSet<HumanCapabilityV1>,
+    ) -> Result<Self, IdentityFailureV1> {
+        // Test-first fail-closed seam; no API route uses this scaffold.
+        Err(IdentityFailureV1::IdentityUnavailable)
+    }
     pub(crate) fn permits_resource(
         &self,
         grant: &ResourceGrantV1,

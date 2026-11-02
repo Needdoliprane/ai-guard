@@ -9,6 +9,9 @@ use std::path::PathBuf;
 mod export;
 mod http;
 mod offline;
+mod oidc;
+mod oidc_callback;
+mod oidc_session;
 
 #[derive(Args)]
 pub struct HumanArgs {
@@ -18,6 +21,8 @@ pub struct HumanArgs {
 
 #[derive(Subcommand)]
 pub enum HumanCommand {
+    /// Sign in to ai-guard in an external browser; keep this human session in memory.
+    Sso(oidc::SsoArgs),
     /// Prepare private files before atomically provisioning a local human.
     Provision(ProvisionArgs),
     /// Replay the exact retained preparation, without rotating or overwriting.
@@ -214,6 +219,7 @@ pub struct ResumeExportArgs {
 
 pub async fn execute(args: HumanArgs) -> Result<()> {
     match args.command {
+        HumanCommand::Sso(args) => oidc::execute(args).await,
         HumanCommand::Provision(args) => offline::provision(args),
         HumanCommand::ResumeProvision(args) => offline::resume(args),
         HumanCommand::Apply(args) => offline::apply(args),

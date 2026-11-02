@@ -1,7 +1,7 @@
 //! Bounded private export preparation; only a complete snapshot is published.
 use super::http::{Client, selection_query, validate_event_page, validate_page};
-use super::offline::{destination, print_json, save};
-use super::{ContextArgs, ExportArgs, ResumeExportArgs, SelectionArgs, View};
+use super::offline::{destination, save};
+use super::{ExportArgs, ResumeExportArgs, SelectionArgs, View};
 use crate::{
     control_fs::{Directory, PrivateFile, publication::PublicationFailure},
     identity::*,
@@ -56,7 +56,7 @@ impl Plan {
     fn verify(
         &self,
         client: &Client,
-        access: &ContextArgs,
+        context: &str,
         parent: &Directory,
         directory: &Directory,
         leaf: &str,
@@ -68,7 +68,7 @@ impl Plan {
             self.version == 1
                 && self.gateway_origin == client.origin()
                 && self.credential_digest == client.credential_digest
-                && self.context_id == access.context
+                && self.context_id == context
                 && self.final_name == leaf
                 && self.parent_path == parent.path()
                 && self.directory_device == facts.dev()
@@ -132,32 +132,48 @@ struct Prepared {
 
 pub(super) async fn start(args: ExportArgs) -> Result<()> {
     let client = Client::new(&args.access.connection)?;
-    super::http::validate_opaque(&args.access.context)?;
-    selection_query(&args.selection)?;
-    let (parent, leaf) = destination(&args.output_dir)?;
+    start_with_client(
+        &client,
+        &args.access.context,
+        args.selection,
+        args.output_dir,
+    )
+    .await
+}
+
+pub(super) async fn start_with_client(
+    client: &Client,
+    context: &str,
+    selection: SelectionArgs,
+    output_dir: PathBuf,
+) -> Result<()> {
+    client.revalidate()?;
+    super::http::validate_opaque(context)?;
+    selection_query(&selection)?;
+    let (parent, leaf) = destination(&output_dir)?;
     parent.require_absent_child(&leaf)?;
     let stage_name = format!("{leaf}.preparing");
     let stage = parent.exclusive_child(&stage_name)
         .context("export preparation could not be created; preserve existing entries and use resume-export for an existing preparation")?;
-    let view = match args.selection.view {
+    let view = match selection.view {
         View::Metadata => HumanReadViewV1::Metadata,
         View::Content => HumanReadViewV1::Content,
     };
     let resource = ResourceRefV1 {
-        kind: match args.selection.resource_kind {
+        kind: match selection.resource_kind {
             super::ResourceKind::Session => ResourceKindV1::Session,
             super::ResourceKind::Sandbox => ResourceKindV1::Sandbox,
             super::ResourceKind::Agent => ResourceKindV1::Agent,
             super::ResourceKind::Project => ResourceKindV1::Project,
         },
-        resource_id: args.selection.resource_id,
+        resource_id: selection.resource_id,
     };
     let facts = stage.try_clone_file()?.metadata()?;
     let plan = Plan {
         version: 1,
         gateway_origin: client.origin().into(),
         credential_digest: client.credential_digest.clone(),
-        context_id: args.access.context.clone(),
+        context_id: context.to_owned(),
         view,
         resource,
         created_at: chrono::Utc::now().to_rfc3339(),
@@ -178,16 +194,7 @@ pub(super) async fn start(args: ExportArgs) -> Result<()> {
             plan_file.persistent_try_lock()?,
             "export preparation is already in use"
         );
-        run(
-            &client,
-            &args.access,
-            &parent,
-            &stage,
-            &leaf,
-            &plan_file,
-            &plan,
-        )
-        .await
+        run(client, context, &parent, &stage, &leaf, &plan_file, &plan).await
     }
     .await;
     retained(result, &parent, &stage_name, &leaf)
@@ -195,7 +202,17 @@ pub(super) async fn start(args: ExportArgs) -> Result<()> {
 
 pub(super) async fn resume(args: ResumeExportArgs) -> Result<()> {
     let client = Client::new(&args.access.connection)?;
-    let (parent, leaf) = destination(&args.output_dir)?;
+    resume_with_client(&client, &args.access.context, args.output_dir).await
+}
+
+pub(super) async fn resume_with_client(
+    client: &Client,
+    context: &str,
+    output_dir: PathBuf,
+) -> Result<()> {
+    client.revalidate()?;
+    super::http::validate_opaque(context)?;
+    let (parent, leaf) = destination(&output_dir)?;
     let stage_name = format!("{leaf}.preparing");
     let staged = parent.persistent_child(&stage_name, false)?;
     let published = parent.persistent_child(&leaf, false)?;
@@ -216,7 +233,7 @@ pub(super) async fn resume(args: ResumeExportArgs) -> Result<()> {
     let plan: Plan = serde_json::from_slice(plan_file.bytes()).map_err(|_| {
         anyhow::anyhow!("retained export selection is invalid; preserve the preparation")
     })?;
-    plan.verify(&client, &args.access, &parent, &stage, &leaf)?;
+    plan.verify(client, context, &parent, &stage, &leaf)?;
     let result = if already_published {
         let prepared = inspect(&stage, &plan, &plan_file)?;
         ensure!(
@@ -224,34 +241,20 @@ pub(super) async fn resume(args: ResumeExportArgs) -> Result<()> {
             "published export lacks a complete retained selection; preserve it for diagnosis"
         );
         verify_manifest(&stage, &prepared)?;
-        current_authorization(
-            &client,
-            &args.access,
-            prepared.authorization_version.as_deref(),
-        )
-        .await?;
+        current_authorization(client, context, prepared.authorization_version.as_deref()).await?;
         sync_pages(&prepared)?;
         stage.sync()?;
         parent.sync()?;
-        exported(&parent, &leaf, &prepared)
+        exported(client, &parent, &leaf, &prepared)
     } else {
-        run(
-            &client,
-            &args.access,
-            &parent,
-            &stage,
-            &leaf,
-            &plan_file,
-            &plan,
-        )
-        .await
+        run(client, context, &parent, &stage, &leaf, &plan_file, &plan).await
     };
     retained(result, &parent, &stage_name, &leaf)
 }
 
 fn retained(result: Result<()>, parent: &Directory, stage_name: &str, leaf: &str) -> Result<()> {
     result.with_context(|| format!(
-        "export is unresolved; preserve {} and any final {}; run human resume-export with the same gateway, credential file, exact context and output directory; an expired context requires a new explicit export in a new destination",
+        "export is unresolved; preserve {} and any final {}; use resume-export with the same gateway, authentication, exact context and output directory (OIDC requires the same foreground session and generation); an expired context requires a new explicit export in a new destination",
         parent.path().join(stage_name).display(),parent.path().join(leaf).display()
     ))
 }
@@ -376,14 +379,14 @@ fn admit(
 
 async fn run(
     client: &Client,
-    access: &ContextArgs,
+    context: &str,
     parent: &Directory,
     stage: &Directory,
     leaf: &str,
     plan_file: &PrivateFile,
     plan: &Plan,
 ) -> Result<()> {
-    plan.verify(client, access, parent, stage, leaf)?;
+    plan.verify(client, context, parent, stage, leaf)?;
     let mut prepared = inspect(stage, plan, plan_file)?;
     let remaining = plan.remaining()?;
     tokio::time::timeout(remaining,async {
@@ -393,20 +396,20 @@ async fn run(
             let mut query = selection_query(&plan.selection())?;
             query.push(("limit".into(),"100".into()));
             if let Some(cursor) = &prepared.next_cursor { query.push(("cursor".into(),cursor.clone())); }
-            let (page,response_bytes): (HumanPageV1<HumanEventItemV1>,_) = client.get("export",Some(&access.context),&query).await?;
+            let (page,response_bytes): (HumanPageV1<HumanEventItemV1>,_) = client.get("export",Some(context),&query).await?;
             let sanitized = client.sanitized(&page)?;
             let page = serde_json::from_value(sanitized).map_err(|_| anyhow::anyhow!("redacted export response is invalid"))?;
             let record = StoredPage { version:1,response_bytes,page };
             let bytes = serde_json::to_vec_pretty(&record)?;
             ensure!(bytes.len() as u64 <= RECORD_BYTES, "export record exceeds its private page bound");
-            admit(&mut prepared,&record,plan.selection().view,&access.context,bytes.len(),&plan.resource)?;
+            admit(&mut prepared,&record,plan.selection().view,context,bytes.len(),&plan.resource)?;
             let name = format!("page-{:04}.json",prepared.page_count);
             plan_file.persistent_revalidate()?;
             let file = save(stage,&name,&bytes)?;
             prepared.evidence.push(PageEvidence { file:name,sha256:file.digest().into(),response_bytes,read_receipt:record.page.read_receipt });
             prepared.files.push(file);
         }
-        current_authorization(client,access,prepared.authorization_version.as_deref()).await?;
+        current_authorization(client,context,prepared.authorization_version.as_deref()).await?;
         plan_file.persistent_sync()?;
         sync_pages(&prepared)?;
         publish_manifest(stage,&prepared)?;
@@ -419,14 +422,14 @@ async fn run(
                 let final_directory = parent.persistent_child(leaf,false)?.context("published export directory is unavailable; preserve the final destination")?;
                 let final_plan = final_directory.persistent_read("selection.json",PLAN_BYTES,&[])?.context("published export selection receipt is unavailable")?;
                 ensure!(final_plan.bytes() == plan_file.bytes(), "published export selection differs from its retained preparation");
-                plan.verify(client,access,parent,&final_directory,leaf)?;
+                plan.verify(client,context,parent,&final_directory,leaf)?;
                 let final_prepared = inspect(&final_directory,plan,&final_plan)?;
                 verify_manifest(&final_directory,&final_prepared)?;
                 sync_pages(&final_prepared)?;
                 final_directory.sync()?;
                 parent.sync()?;
                 ensure!(Instant::now() < deadline, "export was published but final verification exceeded the 60 second bound; preserve the final output and verify it with resume-export");
-                exported(parent,leaf,&final_prepared)
+                exported(client,parent,leaf,&final_prepared)
             },
             Err(PublicationFailure::NotPublished) => anyhow::bail!("complete export remains in preparation; exclusive publication failed, no destination was overwritten"),
             Err(PublicationFailure::DurabilityUnknown) => anyhow::bail!("export rename may have succeeded but durability is unknown; preserve both paths and resume the exact export to verify the final receipt"),
@@ -443,16 +446,15 @@ fn sync_pages(prepared: &Prepared) -> Result<()> {
 
 async fn current_authorization(
     client: &Client,
-    access: &ContextArgs,
+    context: &str,
     expected_version: Option<&str>,
 ) -> Result<()> {
     // Every completed traversal has a durable receipt. This final context read
     // rechecks revocation and the selected authorization version before publication.
     let query = vec![("limit".into(), "1".into())];
-    let (page, _): (HumanPageV1<HumanResourceItemV1>, _) = client
-        .get("resources", Some(&access.context), &query)
-        .await?;
-    validate_page(&page, &access.context)?;
+    let (page, _): (HumanPageV1<HumanResourceItemV1>, _) =
+        client.get("resources", Some(context), &query).await?;
+    validate_page(&page, context)?;
     ensure!(
         expected_version == Some(page.authorization_version.as_str()),
         "export authorization changed before publication; preserve the preparation"
@@ -502,8 +504,8 @@ fn publish_manifest(stage: &Directory, prepared: &Prepared) -> Result<()> {
         Ok(())
     }
 }
-fn exported(parent: &Directory, leaf: &str, prepared: &Prepared) -> Result<()> {
-    print_json(
+fn exported(client: &Client, parent: &Directory, leaf: &str, prepared: &Prepared) -> Result<()> {
+    client.print_json(
         &serde_json::json!({"version":1,"status":"exported","output_dir":parent.path().join(leaf),"selection_complete":true,"coverage":"authorized_selection","pages":prepared.page_count,"response_bytes":prepared.response_bytes,"authorization_version":prepared.authorization_version}),
     )
 }

@@ -14,13 +14,24 @@ use sha2::{Digest, Sha256};
 use std::{net::IpAddr, time::Duration};
 
 pub(super) const MAX_PAGE_BYTES: usize = 262_144;
+const MAX_MEMORY_LITERALS: usize = 128;
+const MAX_MEMORY_LITERAL_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy)]
+struct LiteralBudget {
+    entries: usize,
+    bytes: usize,
+}
 
 pub(super) struct Client {
     http: reqwest::Client,
     origin: Url,
-    credential: PrivateFile,
+    credential: Option<PrivateFile>,
+    memory_expires_at: Option<i64>,
+    authentication_method: &'static str,
     authorization: header::HeaderValue,
     redactor: Redactor,
+    memory_literals: Option<LiteralBudget>,
     pub credential_digest: String,
 }
 
@@ -49,26 +60,135 @@ impl Client {
         authorization.set_sensitive(true);
         let redactor = Redactor::new(vec![token.to_owned()]);
         let credential_digest = hex::encode(Sha256::digest(token.as_bytes()));
-        let http = reqwest::Client::builder()
-            .https_only(origin.scheme() == "https")
-            .http1_only()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(3))
-            .read_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(12))
-            .pool_max_idle_per_host(0)
-            .build()
-            .map_err(|_| anyhow::anyhow!("human HTTP client could not be initialized"))?;
+        let http = build_http(&origin)?;
         Ok(Self {
             http,
             origin,
-            credential,
+            credential: Some(credential),
+            memory_expires_at: None,
+            authentication_method: "local_credential",
             authorization,
             redactor,
+            memory_literals: None,
             credential_digest,
         })
+    }
+
+    /// A foreground OIDC session never creates or adopts a credential file.
+    pub(super) fn in_memory(
+        gateway: &str,
+        token: &str,
+        authentication_id: &str,
+        generation: u32,
+        expires_at: i64,
+        private_values: Vec<String>,
+    ) -> Result<Self> {
+        let origin = validate_origin(gateway)?;
+        uuid::Uuid::parse_str(authentication_id)
+            .map_err(|_| anyhow::anyhow!("OIDC admission reference is invalid"))?;
+        ensure!(generation > 0, "OIDC admission generation is invalid");
+        ensure!(
+            !token.is_empty()
+                && token.len() <= 65_536
+                && token.bytes().all(|b| b.is_ascii_graphic()),
+            "OIDC access token format is invalid"
+        );
+        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| anyhow::anyhow!("OIDC access token format is invalid"))?;
+        authorization.set_sensitive(true);
+        // This receipt identifies the exact foreground admission/generation.
+        // It is intentionally independent of raw token bytes.
+        let credential_digest = hex::encode(Sha256::digest(format!(
+            "ai-guard/foreground-oidc/v1/{authentication_id}/{generation}"
+        )));
+        let mut secrets = private_values;
+        secrets.push(token.to_owned());
+        ensure!(
+            secrets
+                .iter()
+                .all(|value| (4..=65_536).contains(&value.len())),
+            "OIDC private credential cannot be covered by the bounded literal redactor; sign in again"
+        );
+        let bytes = secrets
+            .iter()
+            .try_fold(0usize, |sum, value| sum.checked_add(value.len()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("OIDC redaction dictionary exceeds its byte bound; sign in again")
+            })?;
+        ensure!(
+            secrets.len() <= MAX_MEMORY_LITERALS && bytes <= MAX_MEMORY_LITERAL_BYTES,
+            "OIDC redaction dictionary reached its session bound; sign in again"
+        );
+        let budget = LiteralBudget {
+            entries: secrets.len(),
+            bytes,
+        };
+        let redactor = Redactor::new(secrets).union(&Redactor::new(vec![]));
+        let client = Self {
+            http: build_http(&origin)?,
+            origin,
+            credential: None,
+            memory_expires_at: Some(expires_at),
+            authentication_method: "oidc_access_token",
+            authorization,
+            redactor,
+            memory_literals: Some(budget),
+            credential_digest,
+        };
+        client.revalidate()?;
+        Ok(client)
+    }
+
+    /// Registration counts conservatively include repeated values. Saturation
+    /// closes the foreground session rather than forgetting an older literal.
+    /// Check this on the candidate before admitting a rotated access token.
+    pub(super) fn inherit_memory_redaction(&mut self, previous: &Self) -> Result<()> {
+        let current = self
+            .memory_literals
+            .ok_or_else(|| anyhow::anyhow!("OIDC redaction context is unavailable"))?;
+        let previous_budget = previous
+            .memory_literals
+            .ok_or_else(|| anyhow::anyhow!("OIDC redaction context is unavailable"))?;
+        let entries = current
+            .entries
+            .checked_add(previous_budget.entries)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OIDC redaction dictionary reached its session bound; sign in again"
+                )
+            })?;
+        let bytes = current
+            .bytes
+            .checked_add(previous_budget.bytes)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "OIDC redaction dictionary reached its session bound; sign in again"
+                )
+            })?;
+        ensure!(
+            entries <= MAX_MEMORY_LITERALS && bytes <= MAX_MEMORY_LITERAL_BYTES,
+            "OIDC redaction dictionary reached its 128 entry or 1 MiB session bound; this session must close and sign in again"
+        );
+        let redactor = previous.redactor.union(&self.redactor);
+        ensure!(
+            redactor.covers(&previous.redactor) && redactor.covers(&self.redactor),
+            "OIDC redaction coverage is incomplete; this session must close and sign in again"
+        );
+        self.redactor = redactor;
+        self.memory_literals = Some(LiteralBudget { entries, bytes });
+        Ok(())
+    }
+
+    pub(super) fn bound_memory_expiry(&mut self, expires_at: i64) -> Result<()> {
+        ensure!(
+            self.memory_literals.is_some()
+                && self
+                    .memory_expires_at
+                    .is_some_and(|maximum| expires_at <= maximum),
+            "OIDC admission expiry exceeds its prepared proof"
+        );
+        self.memory_expires_at = Some(expires_at);
+        self.revalidate()
     }
 
     pub fn origin(&self) -> &str {
@@ -76,7 +196,27 @@ impl Client {
     }
 
     pub fn revalidate(&self) -> Result<()> {
-        self.credential.revalidate()
+        if let Some(credential) = &self.credential {
+            credential.revalidate()?;
+        }
+        ensure!(
+            self.memory_expires_at
+                .is_none_or(|exp| exp > chrono::Utc::now().timestamp()),
+            "OIDC session expired; close this session and sign in again"
+        );
+        Ok(())
+    }
+
+    pub(super) fn validate_identity(&self, identity: &HumanIdentityV1) -> Result<()> {
+        validate_identity_method(identity, self.authentication_method)
+    }
+
+    pub(super) fn print_json(&self, value: &serde_json::Value) -> Result<()> {
+        if self.authentication_method == "oidc_access_token" {
+            super::oidc::print_json(value)
+        } else {
+            super::offline::print_json(value)
+        }
     }
 
     pub fn sanitized<T: serde::Serialize>(&self, value: &T) -> Result<serde_json::Value> {
@@ -182,7 +322,22 @@ impl Client {
     }
 }
 
-fn validate_origin(value: &str) -> Result<Url> {
+pub(super) fn build_http(origin: &Url) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .https_only(origin.scheme() == "https")
+        .http1_only()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .connect_timeout(Duration::from_secs(3))
+        .read_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(12))
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|_| anyhow::anyhow!("human HTTP client could not be initialized"))
+}
+
+pub(super) fn validate_origin(value: &str) -> Result<Url> {
     ensure!(
         value.len() <= 2048,
         "gateway origin exceeds its length bound"
@@ -309,7 +464,7 @@ struct ErrorDetail {
     retry_action: String,
 }
 
-fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
+pub(super) fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
     let parsed = serde_json::from_slice::<ErrorEnvelope>(bytes).ok();
     let (code, action) = parsed
         .as_ref()
@@ -331,6 +486,9 @@ fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
                 "identity_unavailable" => "identity_unavailable",
                 "audit_unavailable" => "audit_unavailable",
                 "migration_required" => "migration_required",
+                "session_conflict" => "session_conflict",
+                "provider_unavailable" => "provider_unavailable",
+                "oidc_not_configured" => "oidc_not_configured",
                 _ => "protocol_error",
             };
             let action = match e.error.retry_action.as_str() {
@@ -374,16 +532,16 @@ fn public_error(status: u16, bytes: &[u8]) -> anyhow::Error {
 pub(super) async fn identity(args: ConnectionArgs) -> Result<()> {
     let client = Client::new(&args)?;
     let (identity, _): (HumanIdentityV1, _) = client.get("identity", None, &[]).await?;
-    validate_identity(&identity)?;
+    client.validate_identity(&identity)?;
     super::offline::print_json(&client.sanitized(&identity)?)
 }
 
-fn validate_identity(identity: &HumanIdentityV1) -> Result<()> {
+fn validate_identity_method(identity: &HumanIdentityV1, method: &str) -> Result<()> {
     ensure!(
         identity.version == 1
             && identity.principal.is_human()
             && identity.contexts.len() <= 128
-            && identity.authentication.method == "local_credential",
+            && identity.authentication.method == method,
         "unsupported human identity response"
     );
     identity.principal.validate()?;
@@ -406,7 +564,7 @@ pub(super) async fn resources(args: ResourcesArgs) -> Result<()> {
         );
         let client = Client::new(&args.connection)?;
         let (identity, _): (HumanIdentityV1, _) = client.get("identity", None, &[]).await?;
-        validate_identity(&identity)?;
+        client.validate_identity(&identity)?;
         return super::offline::print_json(&client.sanitized(&serde_json::json!({"version":1,"status":"context_selection_required","identity":identity,"next_action":"select an offered context ID with --context"}))?);
     };
     ensure!((1..=100).contains(&args.limit), "page limit must be 1..100");
