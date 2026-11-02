@@ -11,7 +11,8 @@ function tokens(generation = 1) {
 
 test("OIDC disabled status is explicit and does not start a provider flow", async () => {
   const requests = [];
-  const session = new OidcSession(async (path, options) => {
+  const session = new OidcSession(async function (path, options) {
+    assert.equal(this, undefined, "OIDC must call native browser fetch without a session receiver");
     requests.push({ path, options }); return Response.json({ version: 1, enabled: false });
   });
   assert.deepEqual(await session.status(), { version: 1, enabled: false });

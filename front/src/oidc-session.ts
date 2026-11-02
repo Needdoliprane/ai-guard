@@ -66,7 +66,8 @@ export class OidcSession {
       const headers: Record<string, string> = { Accept: "application/json" };
       if (body) headers["Content-Type"] = "application/json";
       if (bearer) headers.Authorization = `Bearer ${bearer}`;
-      const response = await this.#fetch(`/auth/oidc/${path}`, {
+      const fetcher = this.#fetch;
+      const response = await fetcher(`/auth/oidc/${path}`, {
         method, headers, ...(body ? { body: JSON.stringify(body) } : {}), cache: "no-store", redirect: "error", credentials: "same-origin",
         signal: logout ? timeout.signal : AbortSignal.any([timeout.signal, this.#scope.signal]),
       });

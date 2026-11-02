@@ -1,6 +1,6 @@
 # Gates de qualification production
 
-Préparateur SSO intégré par586c17e : configuration Rust hors ligne, reprise durable, profils locaux et guides EN/FR. [Validation ciblée](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement) et revues passent dans leurs portées documentées ; import des IDs Keycloak réel vérifié séparément. Image de contrôle et parcours complet gateway/Web/CLI encore NOT_RUN, aucun gate clos. Les paragraphes suivants conservent les gels précédents.
+Préparateur SSO intégré par586c17e : configuration Rust hors ligne, reprise durable, profils locaux et guides EN/FR. [Validation ciblée](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement) et revues passent dans leurs portées documentées. [Image6040058a, volume neuf et démarrage réel](VALIDATION.md#2-novembre--installation-conteneurisée-sso-neuve) PASS dans la topologie QA déclarée ; premier scénario Web en échec préparatoire, utilisateur Keycloak et CLI natif pas encore qualifiés. Aucun gate clos. Les paragraphes suivants conservent les gels précédents.
 
 Dernier essai G09 sur d6cb136 : [FAIL avant claim](VALIDATION.md#2-novembre--g09-release-courant-refus-avant-claim), worker Created, Arm5s expirée avant première vérification Ready. Aucun Running ni SIGKILL au point prévu ; effet d'arrêt autonome NOT_RUN, pas de fail-open démontré. Release courante et preuves conservées, instrumentation du chemin d'armement prioritaire. Aucun gate clos par cette nouvelle tentative.
 

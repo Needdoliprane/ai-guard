@@ -1,5 +1,30 @@
 # Validation courante
 
+## 2 novembre — installation conteneurisée SSO neuve
+
+Image `sha256:6040058a124619ff52e0ea278d7e337f8b11746a537e67f6667d605cb103c927`, ARM64, USER1000:1000, construite depuis le commit publié d343848 : Docker build RC0,168entrées Git vérifiées avant/après, aucun fichier privé de travail envoyé. Archive SHA `39f99ae027915c3ed621e388bd4d612591392a9826cd2e6188f74691056bf470`. Capture privée `ai-guard-luna-sso-control-build-20261102-oqUZXz` ; aucun démarrage par ce build.
+
+Deux projets neufs contrôlés absents avant création, images explicitement sélectionnées, Keycloak74dfae33 et manifeste public411c96f9 issus du gel. L'ancien ingress QA exactc97aa754 est arrêté réversiblement après inventaire ; ancien Keycloak71911f0b, volumes, images et réseaux conservés. Quatre CIDR QA privés /28 sont utilisés après absence de chevauchement avec Docker/préfixes hôte observés ; présence de routes tunnel consignée. Aucun échec actuel de pool n'est provoqué ou prétendu, aucune qualification des sous-réseaux standards ni d'un futur VPN.
+
+| Étape réelle | Résultat constaté |
+|---|---|
+| Nouveau Keycloak et discovery publique | PASS, HTTP200, issuer exact, réseau identity interne réellement inspecté. |
+| `compose run ... setup setup prepare --input - --output-dir /data/installation --demo-defaults` | PASS, RC0 ; JSON version1/statusprepared/chemin attendu/identity_provider_contacted=false. |
+| Métadonnées du volume neuf | PASS1000:1000 ; installation700, oidc.json/tenants.json/authentication.sqlite600, aucun contenu privé lu. |
+| Démarrage normal gateway/dashboard/ingress | PASS, RC0, running/healthy ; pas de nouvel init, migration ou provisioning. |
+| Métadonnées de confinement des services | Rootfs RO, non privilégiés, CapDropALL, no-new-privileges. Seul gateway monte/data et rejoint identity ; dashboard contrôle seul, ingress contrôle+publication sans volume, ports4000/8787 loopback seuls. Ce constat ne qualifie aucun worker. |
+| Page dashboard et statut SSO public via proxy/gateway | PASS, HTTP200, enabled=true, issuer exact et provider_label Keycloak DEMO. Aucun compte encore connecté. |
+
+Le premier `compose run --no-build` est refusé par le CLI Compose avant création de conteneur : défaut documentaire reproduit, pas échec du préparateur. Après vérification de l'aide locale et de l'absence du projet, seul ce flag est retiré de run ; le service est image-only, `--no-deps --pull never -T` conservés. Les quatre commandes prepare/resume EN/FR sont corrigées ; les commandes `compose up --no-build` restent intactes.
+
+Capture privée `ai-guard-luna-sso-phase1-20261102-q0Hl7E` : setup766b1bb9 en exited0 retenu, volume `ai-guard-sso-d343-20261102-r1_installation_data`, gateway31c3c125/dashboard4f9f8592/ingressebc889e0. Codes naturels, config source, réseau, métadonnées et hashes release préservés. Le warning d'orphelin Compose désigne le one-shot conservé pour preuve, non supprimé.
+
+Un unique parcours navigateur réel user-1 est tenté avec Playwright et DNS limité au harnais : FAIL à `dashboard_login`/E_DASHBOARD_LOGIN, RC1, avant clic SSO ou saisie de compte. **Login utilisateur, lecture autorisée et logout NOT_RUN**, pas de PASS déduit des endpoints sains. Rapport fermé `ai-guard-user1-live.4uSxSE`, sans token, trace, capture ou log réseau. Le CLI natif attend la résolution DNS hôte ; aucun repli ajouté. G09 reste FAIL, aucun gate global clos.
+
+Diagnostic public ciblé : page/assets200, titres corrects, zéro bouton SSO et message État SSO indisponible. Une seconde sonde publique distingue `f(...)` (HTTP200) de `holder.f(...)` (TypeError, prédicat Illegal invocation), sans login ni valeur sensible. `OidcSession` appelait le fetcher natif comme méthode privée et lui imposait donc un mauvais receiver. Captures `ai-guard-dashboard-login-diagnostic.5TDe7P` et `ai-guard-fetch-receiver-diagnostic.5AIvze` ; l'unique screenshot porte sur la page publique après vérification des champs secrets vides.
+
+Régression utile sur le premier test existant : callback sensible à this, appel libre exigé, RED1test/RC1 à la requête status avant correction. Le correctif extrait le fetcher dans une variable locale, sans modifier routes, délais, signaux, cookies, masquage ou tokens. Fichiers `oidc-session.test.mjs` et `oidc-human.test.mjs` PASS7/7, RC0 ; build TypeScript/Vite PASS, RC0, Node25.6.1/npm11.13.0, hashes avant/après identiques. Un premier build ne lançait pas son script car le PATH du harnais omettait/bin/sh (RC254) ; seule cette invocation est corrigée, sans refaire les tests. Revue indépendante sans défaut bloquant. Preuves `ai-guard-luna-oidc-receiver-red-20261102-4c9DAe` et `ai-guard-luna-oidc-fix-verification-20261102-mzfZtn`. Le correctif doit encore être construit dans une nouvelle image puis rejoué sur les vrais services ; aucune réussite Web rétroactive attribuée à l'image6040058a.
+
 ## 2 novembre — préparateur SSO privé et profils de lancement
 
 Source `codex/sso-setup`, base `d6cb136`, lot publié `7a08d183f8b05253a645c9a9d6a9fc89ef3c63f5`, intégré par `586c17e`. Préparation Rust hors ligne, reprise avec identités immuables, stockage5/audit et configuration autonome ; [contrat, RED, corrections et limites](LOCAL_SSO_SETUP.md). Les trois défauts de revue ont leur reproduction pertinente avant correction : stdin ouvert sans EOF, capacité genesis impossible acceptée avant création et refus de reprise d'une vraie base>32Mio. Deux essais préparatoires de la grande base et le premier canari de fichier ne dépassaient pas leurs préconditions ; ils ne sont pas comptés comme défaut produit.
@@ -18,7 +43,9 @@ Captures privées `ai-guard-luna-setup-final-20261102-Rnt38Y` : les manifests se
 
 Vrai import frais Keycloak26.8.1, image `74dfae33caf76590f87454e601112cf0eeb5bc28841f3186b1185cbc94ffed78` : PASS des trois IDs publics exacts via CLI officiel, sans réseau ni port publié. Conteneur arrêté et données conservées ; capture privée `ai-guard-keycloak-import-corrected.XA9hpO`. Le premier lancement omettait la variable publique d'origine Web et n'avait pas atteint l'oracle. Aucun outil auxiliaire Keycloak ajouté au dépôt.
 
-Publication :22fichiers, aucun secret littéral connu ni motif sensible non-fixture. Les deux signaux relus sont le nom du fichier public `.env.exemple.local-keycloak-sso` et le faux marqueur de clé du test de refus. **NOT_RUN : image de contrôle de ce lot, préparation du volume conteneurisé et connexion réelle gateway/Web/CLI.** DNS hôte non résolu, modification administrateur non disponible sans interaction ; ancien ingress propriétaire de18080 inventorié, volume et IdP à conserver. Aucun gate global clos.
+Publication :22fichiers, aucun secret littéral connu ni motif sensible non-fixture. Les deux signaux relus sont le nom du fichier public `.env.exemple.local-keycloak-sso` et le faux marqueur de clé du test de refus. Références distantes d343848/7a08d18 vérifiées exactement. Worktree SSO clean, ancêtre et sans consommateur ouvert ; archive privée `sso-setup-7a08d183-closure.pOKplo`, SHA `14ea3e62e76842039f4c0b399035da51a0619c82e314d1cc735d0722d88167e7`, puis retrait normal RC0. Branches et preuves conservées ; états main/PRIMARY identiques avant/après fermeture.
+
+**NOT_RUN : image de contrôle de ce lot, préparation du volume conteneurisé et connexion réelle gateway/Web/CLI.** DNS hôte non résolu, modification administrateur non disponible sans interaction ; ancien ingress propriétaire de18080 inventorié, volume et IdP à conserver. Un smoke indépendant du harnais navigateur local passe (Node25.6.1, Playwright1.62.1, Chrome headless148.0.7778.97, about:blank/contenu local/focus, RC0) ; ce n'est pas une preuve du produit ou de SSO. Le futur runner live utilise le vrai backend et une résolution DNS limitée au navigateur de test, sans mocks ni trace réseau. Aucun gate global clos.
 
 ## 2 novembre — G09 release courant, refus avant claim
 

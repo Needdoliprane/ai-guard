@@ -104,7 +104,7 @@ After selecting the network, validate the service configuration without exposing
 "$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
   -f "$AIGUARD_SSO_COMPOSE" config --quiet
 "$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
-  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --no-build --pull never -T \
+  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --pull never -T \
   setup setup prepare --input - --output-dir /data/installation --demo-defaults \
   < docs/setup/sso/examples/local-demo.json
 ```
@@ -163,7 +163,7 @@ If preparation fails, read its reported retained directory and stop every contro
 
 ```sh
 "$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
-  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --no-build --pull never -T \
+  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --pull never -T \
   setup setup resume --recovery-dir /data/RETAINED_DIRECTORY_FROM_ERROR --confirm-control-stopped
 ```
 
