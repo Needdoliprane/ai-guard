@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 2 novembre — navigation publique après le callback OIDC
+
+Le retour réel Keycloak révèle callback303 puis complete403 : [Fetch Metadata tient compte de toute la chaîne de redirections](https://www.w3.org/TR/fetch-metadata/#redirects), même après retour à l'origine du dashboard. Le dashboard autorise donc la navigation GET exacte vers `/auth/oidc/complete` lorsque SSO est configuré, sans query et avec une seule valeur `navigate`/`document` pour chaque métadonnée correspondante. Son contenu reste le fichier statique public index.html, avec CSP, frame-ancestors/FrameDENY et no-store ; garder cette page sans données d'identité, de session ou de secret.
+
+La remise des tokens reste un POST protégé par l'origine exacte, les métadonnées et le cookie corrélé ; callback, PKCE, nonce, consommation unique, droits et tenant restent sous l'autorité existante du gateway. Les méthodes/actions, API métier, fetch/subresources et configurations SSO désactivées conservent le refus cross-site. Ce correctif garde les frontières et routes approuvées. Régression RED observée,6tests/fmt/Clippy strict PASS et revue indépendante approuvée ; nouvelle image et recette réelle exigées avant qualification du trajet. [Preuves et état](VALIDATION.md#2-novembre--installation-conteneurisée-sso-neuve).
+
 ## 2 novembre — sessions OIDC durables et portée de l'audit
 
 Choix d'implémentation de l'orchestrateur dans la frontière SSO approuvée : audit privé d'authentification distinct des bases métiers, empreintes de tokens séparées par domaine, générations positives sans wrap et transitions admission/refresh pending/rotation/fermeture atomiques avec leur audit. Une intention est consommable une seule fois ; son replay ne déclenche aucun nouvel échange fournisseur. Le CLI conserve son PKCE natif mais demande un ACK d'intention durable avant ses échanges : le gateway observe la demande et valide le token remis, sans prétendre avoir observé le nonce ou l'échange CLI. Aucun bearer, refresh token ou ID token brut n'est persisté.

@@ -392,7 +392,7 @@ async fn security_headers_inner(
     request: Request,
     next: Next,
     trusted_origin: bool,
-    callback: bool,
+    oidc_navigation: bool,
 ) -> Response {
     if request.uri().to_string().len() > 4096 {
         return error(StatusCode::URI_TOO_LONG, "URI trop longue.").into_response();
@@ -409,11 +409,11 @@ async fn security_headers_inner(
                             || h.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback())
                     })
             });
-        if !safe && !trusted_origin && !callback {
+        if !safe && !trusted_origin && !oidc_navigation {
             return error(StatusCode::FORBIDDEN, "Origine non autorisée.").into_response();
         }
     }
-    if !callback
+    if !oidc_navigation
         && request
             .headers()
             .get("sec-fetch-site")
@@ -1060,6 +1060,21 @@ async fn dashboard_security_headers(
     let callback = state.oidc_web_origin.is_some()
         && request.method() == "GET"
         && request.uri().path() == "/auth/oidc/callback";
+    // A cross-site IdP redirect keeps that metadata through the callback's 303.
+    // Only the public completion document is admitted, never its token exchange.
+    let completion_navigation = state.oidc_web_origin.is_some()
+        && request.method() == "GET"
+        && request.uri().path() == "/auth/oidc/complete"
+        && request.uri().query().is_none()
+        && [
+            ("sec-fetch-mode", "navigate"),
+            ("sec-fetch-dest", "document"),
+        ]
+        .into_iter()
+        .all(|(name, expected)| {
+            let mut values = request.headers().get_all(name).iter();
+            values.next().is_some_and(|value| value == expected) && values.next().is_none()
+        });
     let trusted = state.oidc_web_origin.as_ref().is_some_and(|origin| {
         oidc::browser_post(request.method(), request.uri().path())
             && oidc::same_origin(request.headers(), origin)
@@ -1067,7 +1082,7 @@ async fn dashboard_security_headers(
                 && request.uri().path() == "/auth/oidc/status"
                 && oidc::public_status_origin(request.headers(), origin)
     });
-    security_headers_inner(request, next, trusted, callback).await
+    security_headers_inner(request, next, trusted, callback || completion_navigation).await
 }
 async fn dashboard_oidc_proxy(
     State(state): State<DashboardState>,

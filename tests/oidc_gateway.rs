@@ -1,7 +1,7 @@
-//! Gateway HTTP boundaries without a configured provider. No IdP or runtime.
+//! OIDC gateway and dashboard HTTP boundaries. No IdP or runtime.
 mod support;
 use agentsandbox::{
-    api::{GatewayState, gateway_router},
+    api::{GatewayState, dashboard_router_with_oidc, gateway_router},
     audit::Store,
     policy::Policy,
     redaction::Redactor,
@@ -34,6 +34,111 @@ fn fixture() -> (tempfile::TempDir, axum::Router) {
         Redactor::new(vec![]),
     );
     (files, gateway_router(state))
+}
+
+fn dashboard_fixture(oidc_web_origin: Option<&str>) -> (tempfile::TempDir, axum::Router) {
+    let files = support::private_tempdir();
+    std::fs::write(
+        files.path().join("index.html"),
+        "<!doctype html><title>OIDC redirect completion</title>",
+    )
+    .unwrap();
+    let router = dashboard_router_with_oidc(
+        "http://127.0.0.1:8787",
+        None,
+        files.path().to_path_buf(),
+        oidc_web_origin.map(str::to_owned),
+    )
+    .unwrap();
+    (files, router)
+}
+
+#[tokio::test]
+async fn dashboard_oidc_completion_accepts_cross_site_redirect_navigation() {
+    let (_files, router) = dashboard_fixture(Some("http://127.0.0.1:4000"));
+    // The IdP redirect chain keeps cross-site metadata on the final public page.
+    let response = router
+        .oneshot(
+            Request::get("/auth/oidc/complete")
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the public completion page must remain reachable after the IdP redirect"
+    );
+    assert_eq!(response.headers()["content-type"], "text/html");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["x-frame-options"], "DENY");
+    assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    assert!(
+        response.headers()["content-security-policy"]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'")
+    );
+    assert!(response.headers().get("set-cookie").is_none());
+    assert_eq!(
+        to_bytes(response.into_body(), 4096).await.unwrap().as_ref(),
+        b"<!doctype html><title>OIDC redirect completion</title>"
+    );
+}
+
+#[tokio::test]
+async fn dashboard_oidc_completion_exception_does_not_admit_cross_site_actions() {
+    let (_files, router) = dashboard_fixture(Some("http://127.0.0.1:4000"));
+    for (method, path, mode, destination) in [
+        ("POST", "/auth/oidc/complete", "navigate", "document"),
+        ("POST", "/auth/oidc/tokens", "cors", "empty"),
+        ("GET", "/api/v1/human/identity", "navigate", "document"),
+        ("GET", "/auth/oidc/complete", "cors", "empty"),
+        ("GET", "/auth/oidc/complete", "no-cors", "image"),
+        (
+            "GET",
+            "/auth/oidc/complete?unexpected=value",
+            "navigate",
+            "document",
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("sec-fetch-site", "cross-site")
+                    .header("sec-fetch-mode", mode)
+                    .header("sec-fetch-dest", destination)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn dashboard_oidc_completion_keeps_cross_site_guard_when_sso_is_disabled() {
+    let (_files, router) = dashboard_fixture(None);
+    let response = router
+        .oneshot(
+            Request::get("/auth/oidc/complete")
+                .header("sec-fetch-site", "cross-site")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
