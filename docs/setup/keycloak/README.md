@@ -98,10 +98,22 @@ The bootstrap applies to a fresh DEMO database. These values are never installat
 | Client | Contract |
 |---|---|
 | `ai-guard-demo-web` | Public; Authorization Code; PKCE S256 required; registered return `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback`; exact Web origin and logout return `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered loopback reference `http://127.0.0.1:80/oidc/callback`; no CORS origin. The native flow uses an ephemeral loopback port, the same IP and fixed path. Provider support for the loopback port exception is required. |
+| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered loopback reference `http://127.0.0.1/oidc/callback` without an explicit port; no CORS origin. The native flow uses an ephemeral loopback port, the same IP and fixed path. Provider support for the loopback port exception is required. |
 | `ai-guard-demo-api` | Bearer-only resource server and access-token audience; no login flow or service account. |
 
 Neither public client distributes a `client_secret`. Implicit, password grants, device flow, CIBA, service accounts and token exchange are disabled. Do not replace a failed browser flow with a password grant or manual token copy.
+
+### Update an existing DEMO CLI client
+
+Keycloak's [startup import skips an existing realm](https://www.keycloak.org/server/importExport#importing-a-realm-during-startup); rebuilding the image does not update that client's stored configuration. In realm `ai-guard-demo`, select only `ai-guard-demo-cli` through an authorized administrator session. Save a private copy of its client ID, redirect URIs, Web origins, public-client status, Code setting and PKCE method. Proceed only if its sole old URI is `http://127.0.0.1:80/oidc/callback`, Web origins are empty, and public client, Code and S256 remain enabled; review any other state separately.
+
+Change only the registered URI to `http://127.0.0.1/oidc/callback`, then read it back and compare those other fields. With the Admin REST API, PUT to `/admin/realms/ai-guard-demo/clients/{client-uuid}` using:
+
+```json
+{"clientId":"ai-guard-demo-cli","redirectUris":["http://127.0.0.1/oidc/callback"],"webOrigins":[]}
+```
+
+The unchanged `clientId` and empty `webOrigins` preserve identity and CORS settings: [Keycloak 26.8.1's updater](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java#L549-L550) can otherwise derive Web origins from the redirect. Keep accounts, memberships, IDs and volumes; do not delete or reimport the realm. To roll back, restore the saved URI through the same scoped update, preserving those fields, and verify again. Close the administrative session. The [upstream native-redirect test](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java#L69-L90) uses a portless registration with a variable request port, as required by [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252.html#section-7.3); no host/path wildcard is needed. This configuration change does not qualify a successful CLI login.
 
 Both public clients have exactly `basic` and `profile` as default client scopes, with no optional scopes. `basic` supplies Keycloak's access-token subject mapper; the signed token must contain a non-empty `sub`. Its absence is a provider configuration error, not a reason to weaken validation. `basic` need not appear in the token's textual `scope` field: it is a default client scope whose mapper is applied by the provider.
 

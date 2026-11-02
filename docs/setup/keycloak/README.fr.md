@@ -98,10 +98,22 @@ Le bootstrap s'applique à une base DEMO neuve. Ces valeurs ne sont jamais les v
 | Client | Contrat |
 |---|---|
 | `ai-guard-demo-web` | Public ; Authorization Code ; PKCE S256 obligatoire ; retour enregistré `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback` ; origine Web exacte et retour logout `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence loopback enregistrée `http://127.0.0.1:80/oidc/callback` ; aucune origine CORS. Le flux natif emploie un port loopback éphémère, la même IP et le chemin fixe. Le fournisseur doit accepter l'exception de port loopback. |
+| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence loopback enregistrée `http://127.0.0.1/oidc/callback` sans port explicite ; aucune origine CORS. Le flux natif emploie un port loopback éphémère, la même IP et le chemin fixe. Le fournisseur doit accepter l'exception de port loopback. |
 | `ai-guard-demo-api` | Serveur de ressources bearer-only et audience des access tokens ; aucun flux de connexion ou compte de service. |
 
 Aucun `client_secret` n'est distribué par les clients publics. Implicit, grants mot de passe, device flow, CIBA, comptes de service et token exchange sont désactivés. Ne remplacez pas un échec du flux navigateur par un grant mot de passe ou une copie manuelle de jeton.
+
+### Mettre à jour un client CLI DEMO existant
+
+L'[import au démarrage de Keycloak ignore un realm existant](https://www.keycloak.org/server/importExport#importing-a-realm-during-startup) ; reconstruire l'image ne met pas à jour la configuration persistée de ce client. Dans le realm `ai-guard-demo`, sélectionnez uniquement `ai-guard-demo-cli` avec une session administrateur autorisée. Conservez une copie privée de son identifiant client, des URI de retour, des origines Web, du statut public, du réglage Code et de la méthode PKCE. Continuez seulement si son unique ancienne URI est `http://127.0.0.1:80/oidc/callback`, ses origines Web sont vides et client public, Code et S256 restent activés ; examinez tout autre état séparément.
+
+Changez uniquement l'URI enregistrée en `http://127.0.0.1/oidc/callback`, puis relisez-la et comparez ces autres champs. Avec l'API Admin REST, faites un PUT sur `/admin/realms/ai-guard-demo/clients/{client-uuid}` avec :
+
+```json
+{"clientId":"ai-guard-demo-cli","redirectUris":["http://127.0.0.1/oidc/callback"],"webOrigins":[]}
+```
+
+Les valeurs inchangées de `clientId` et `webOrigins` préservent l'identité et les réglages CORS : le [code de mise à jour de Keycloak 26.8.1](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java#L549-L550) peut sinon déduire les origines Web du retour. Conservez comptes, appartenances, identifiants et volumes ; ne supprimez ni ne réimportez le realm. Pour revenir en arrière, restaurez l'URI sauvegardée par la même mise à jour ciblée en préservant ces champs, puis vérifiez à nouveau. Fermez la session administrateur. Le [test natif amont](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/test/java/org/keycloak/protocol/oidc/utils/RedirectUtilsTest.java#L69-L90) emploie un enregistrement sans port avec un port de requête variable, conformément à [RFC 8252 §7.3](https://www.rfc-editor.org/rfc/rfc8252.html#section-7.3) ; aucun joker d'hôte ou de chemin n'est nécessaire. Ce changement de configuration ne qualifie pas une connexion CLI réussie.
 
 Les deux clients publics ont exactement `basic` et `profile` comme client scopes par défaut, sans scope facultatif. `basic` fournit le mapper du sujet des access tokens Keycloak ; le jeton signé doit contenir un `sub` non vide. Son absence est une erreur de configuration du fournisseur, pas un motif d'assouplissement du validateur. `basic` peut être absent du champ textuel `scope` du jeton : il s'agit d'un client scope par défaut dont le mapper est appliqué par le fournisseur.
 
