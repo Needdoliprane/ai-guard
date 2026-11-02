@@ -1,6 +1,6 @@
 # État constaté — suivi au 2 novembre 2026
 
-Dernier contrôle logiciel D5 : après correction et revue des décodeurs `Worker`/`Closing`, les19tests de records passent, RC0. La régression distincte des scopes reproduit ensuite le conflit attendu,1FAIL/RC101 ; son correctif attend le GREEN. Ces preuves portent sur des gels des fondations, pas sur les nouveaux acteurs/ports Writer ni sur le retrait complet. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
+Dernier contrôle logiciel D5 : les 19 tests de records passent après correction et revue des décodeurs `Worker`/`Closing`. La régression distincte des scopes reproduit d'abord le conflit attendu ; après correction, les 13 tests ledger puis 5 tests FS passent, RC0. Ces 37 fonctions vérifient les gels des fondations ; les nouveaux acteurs/ports Writer et le retrait complet restent non qualifiés. La compilation composée révèle des erreurs corrigées successivement et reste en validation. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
 
 ## Préparation SSO locale — intégrée, recette complète ouverte
 
