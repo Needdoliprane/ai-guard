@@ -19,6 +19,7 @@ pub mod provider;
 pub mod redaction;
 pub mod runner;
 pub mod runtime;
+pub mod setup;
 pub mod tenancy;
 pub mod tls;
 pub mod workspace;

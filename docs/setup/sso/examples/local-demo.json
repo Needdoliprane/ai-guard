@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "gateway": {
+    "version": 1,
+    "provider": {
+      "version": 1,
+      "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+      "web_client_id": "ai-guard-demo-web",
+      "cli_client_id": "ai-guard-demo-cli",
+      "api_audience": "ai-guard-demo-api",
+      "authorization_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/auth",
+      "token_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/token",
+      "jwks_uri": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/certs",
+      "web_redirect_uri": "http://127.0.0.1:4000/auth/oidc/callback",
+      "cli_callback_path": "/oidc/callback",
+      "end_session_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/logout",
+      "transport": {
+        "kind": "isolated_demo_http",
+        "exact_issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo"
+      }
+    },
+    "provider_label": "Keycloak DEMO",
+    "web_origin": "http://127.0.0.1:4000",
+    "mapping": {
+      "revision": "keycloak-demo-policy-1",
+      "default_capabilities": ["read_metadata", "read_content", "export"],
+      "rules": [
+        {
+          "claim_path": ["resource_access", "ai-guard-demo-api", "roles"],
+          "equals": "admin-ai-guard",
+          "capabilities": ["read_tenant_metadata"]
+        }
+      ]
+    }
+  },
+  "authentication_policy": {
+    "max_records": 100000,
+    "max_serialized_bytes": 33554432,
+    "approved_clients": [
+      {
+        "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+        "client_id": "ai-guard-demo-web"
+      },
+      {
+        "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+        "client_id": "ai-guard-demo-cli"
+      }
+    ]
+  },
+  "ca_bundle_pem": null,
+  "tenants": [
+    {
+      "tenant_id": "ai-guard-demo",
+      "organization_id": "ai-guard-demo",
+      "worker_quota": {
+        "version": 1,
+        "max_active_workers": 3,
+        "max_cpu_millis": 6000,
+        "max_memory_bytes": 3221225472,
+        "max_timeout_seconds": 3600
+      },
+      "identities": [
+        {
+          "principal": {
+            "kind": "human_oidc",
+            "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+            "subject": "1fab92df-3da5-4ba1-909b-240ddae48001"
+          },
+          "display_name": "admin-ai-guard — DEMO",
+          "capabilities": ["read_metadata", "read_content", "export", "read_tenant_metadata"]
+        },
+        {
+          "principal": {
+            "kind": "human_oidc",
+            "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+            "subject": "76b4c4f7-5758-4c1d-bb82-eac642f8f002"
+          },
+          "display_name": "user-1 — DEMO",
+          "capabilities": ["read_metadata", "read_content", "export"]
+        },
+        {
+          "principal": {
+            "kind": "human_oidc",
+            "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+            "subject": "80af23ad-cd92-48ac-b8dd-cb39b4676003"
+          },
+          "display_name": "user-2 — DEMO",
+          "capabilities": ["read_metadata", "read_content", "export"]
+        }
+      ]
+    }
+  ]
+}

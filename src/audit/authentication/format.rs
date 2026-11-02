@@ -131,6 +131,16 @@ pub(super) fn validate_policy(
         checked_json(policy, redactor)?.len() <= 16_384,
         AuthenticationAuditFailureV1::InvalidInput
     );
+    // Genesis persists both UUIDs in canonical 36-byte form. Sizing with a
+    // non-nil placeholder namespace is exact, before storage creation. The
+    // empty redactor is intentional: the future random namespace must not
+    // inherit a spurious redaction collision from the placeholder value.
+    genesis_payload(
+        installation_id,
+        Uuid::from_u128(1),
+        policy,
+        &Redactor::new(vec![]),
+    )?;
     Ok(())
 }
 
@@ -359,13 +369,12 @@ pub(super) fn validate_schema(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn initialize(
-    db: &Connection,
+fn genesis_payload(
     installation_id: Uuid,
     namespace_id: Uuid,
     policy: &AuthenticationAuditPolicyV1,
     redactor: &Redactor,
-) -> Result<()> {
+) -> Result<String> {
     let entry = Entry::Genesis {
         format: 1,
         purpose: PURPOSE.into(),
@@ -378,6 +387,17 @@ pub(super) fn initialize(
         payload.len() as u64 <= policy.max_serialized_bytes,
         AuthenticationAuditFailureV1::Capacity
     );
+    Ok(payload)
+}
+
+pub(super) fn initialize(
+    db: &Connection,
+    installation_id: Uuid,
+    namespace_id: Uuid,
+    policy: &AuthenticationAuditPolicyV1,
+    redactor: &Redactor,
+) -> Result<()> {
+    let payload = genesis_payload(installation_id, namespace_id, policy, redactor)?;
     let received = timestamp();
     let hash = digest(1, &received, ZERO_HASH, &payload);
     for (_, sql) in SCHEMA {
@@ -914,4 +934,54 @@ pub(super) fn replay(
         );
     }
     Ok(replay)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn genesis_capacity_accepts_exact_serialized_boundary_and_rejects_one_byte_less() {
+        let installation = Uuid::from_u128(0x11111111111141118111111111111111);
+        let namespace = Uuid::from_u128(0x22222222222242228222222222222222);
+        let redactor = Redactor::new(vec![]);
+        let mut policy = AuthenticationAuditPolicyV1 {
+            max_records: 1,
+            max_serialized_bytes: 512,
+            approved_clients: vec![ApprovedAuthenticationClientV1 {
+                issuer: "https://identity.example.test/realm".into(),
+                client_id: "public-web".into(),
+            }],
+        };
+        // Independent wire-shape oracle, including the capacity's own decimal
+        // digits. Stabilize that value to obtain an exact byte boundary.
+        let wire = |policy: &AuthenticationAuditPolicyV1| {
+            serde_json::json!({
+                "kind":"genesis", "format":1, "purpose":"authentication_audit_v1",
+                "installation_id":installation, "namespace_id":namespace, "policy":policy
+            })
+            .to_string()
+        };
+        for _ in 0..4 {
+            let required = wire(&policy).len() as u64;
+            if required == policy.max_serialized_bytes {
+                break;
+            }
+            policy.max_serialized_bytes = required;
+        }
+        assert_eq!(wire(&policy).len() as u64, policy.max_serialized_bytes);
+        validate_policy(installation, &policy, &redactor).unwrap();
+        assert_eq!(
+            genesis_payload(installation, namespace, &policy, &redactor).unwrap(),
+            wire(&policy)
+        );
+        let boundary = policy.max_serialized_bytes;
+        policy.max_serialized_bytes -= 1;
+        assert_eq!(wire(&policy).len() as u64, boundary);
+        let error = validate_policy(installation, &policy, &redactor).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<AuthenticationAuditFailureV1>(),
+            Some(&AuthenticationAuditFailureV1::Capacity)
+        );
+    }
 }

@@ -132,6 +132,37 @@ impl EnforcerLeaseFile {
 }
 
 impl Directory {
+    /// Synchronize an existing private regular entry without reading payloads.
+    /// The caller must first drop every SQLite owner of this namespace: even
+    /// closing a second raw descriptor could release SQLite's POSIX locks.
+    /// This is a durability barrier, not content validation or a read snapshot.
+    pub(crate) fn sync_closed_private_entry(&self, name: &str) -> Result<()> {
+        let _path = self.path().join(name);
+        measure_control_fs!(FileSync, &_path, |_| 0, {
+            self.revalidate()?;
+            let encoded = persistent_name(name)?;
+            let expected = self
+                .private_entry(OsStr::new(name))?
+                .context("closed private entry is unavailable")?;
+            let file = open_file(&self.0.file, &encoded)?;
+            let before = check_private_file(&file)?;
+            ensure!(
+                entry_identity(&before) == expected
+                    && self.private_entry(OsStr::new(name))? == Some(expected),
+                "closed private entry identity changed before synchronization"
+            );
+            measure_control_fs!(FileSyncAll, &_path, |_| 0, { file.sync_all() })
+                .context("closed private entry synchronization failed")?;
+            let after = check_private_file(&file)?;
+            ensure!(
+                same_file_state(&before, &after)
+                    && self.private_entry(OsStr::new(name))? == Some(expected),
+                "closed private entry changed during synchronization"
+            );
+            self.revalidate()
+        })
+    }
+
     /// Metadata-only peer expectation; this neither opens the lock file nor
     /// acquires, creates or upgrades an authority. Native IDs are provenance,
     /// never ledger identity or a permission to start.
@@ -830,5 +861,61 @@ impl PrivateFile {
             return Ok(false);
         }
         Err(error).context("persistent writer lock failed")
+    }
+}
+
+#[cfg(test)]
+mod closed_entry_sync_tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn closed_entry_sync_keeps_nofollow_private_modes_and_single_link_policy() {
+        let files = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let directory = Directory::open_existing(files.path()).unwrap();
+        let valid = directory.persistent_create("valid", b"retained").unwrap();
+        valid.persistent_sync().unwrap();
+        directory.sync_closed_private_entry("valid").unwrap();
+        let public = directory.persistent_create("public", b"unchanged").unwrap();
+        public.persistent_sync().unwrap();
+        std::fs::set_permissions(public.path(), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(directory.sync_closed_private_entry("public").is_err());
+        symlink(valid.path(), directory.path().join("symlink")).unwrap();
+        assert!(directory.sync_closed_private_entry("symlink").is_err());
+        directory.exclusive_child("child").unwrap();
+        assert!(directory.sync_closed_private_entry("child").is_err());
+        std::fs::hard_link(valid.path(), directory.path().join("hardlink")).unwrap();
+        assert!(directory.sync_closed_private_entry("hardlink").is_err());
+        assert!(directory.sync_closed_private_entry("valid").is_err());
+        assert_eq!(std::fs::read(valid.path()).unwrap(), b"retained");
+        assert_eq!(std::fs::read(public.path()).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn closed_entry_sync_accepts_large_file_without_expanding_snapshot_read_limit() {
+        let files = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let directory = Directory::open_existing(files.path()).unwrap();
+        let file = directory.create_private_entry(OsStr::new("large")).unwrap();
+        file.set_len(MAX_PRIVATE_FILE_BYTES + 1).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        directory.sync_closed_private_entry("large").unwrap();
+        assert!(
+            directory
+                .persistent_read("large", MAX_PRIVATE_FILE_BYTES, &[])
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(directory.path().join("large"))
+                .unwrap()
+                .len(),
+            MAX_PRIVATE_FILE_BYTES + 1
+        );
     }
 }

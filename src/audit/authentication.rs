@@ -140,6 +140,17 @@ impl std::fmt::Debug for AuthenticationAuditPolicyV1 {
     }
 }
 
+impl AuthenticationAuditPolicyV1 {
+    /// Offline operator preflight, identical to initialization's policy checks.
+    pub(crate) fn validate_for_installation(
+        &self,
+        installation_id: Uuid,
+        redactor: &Redactor,
+    ) -> anyhow::Result<()> {
+        format::validate_policy(installation_id, self, redactor)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthenticationActionV1 {

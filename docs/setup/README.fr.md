@@ -12,7 +12,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
 | [Fournisseurs IA](providers/README.fr.md) | Codex et Claude Code par abonnement ou API, sélection explicite, credentials privés et Jev optionnel. |
 | [Accès local nominatif](identity/README.fr.md) | Provisioning privé des comptes humains, permissions explicites, consultation authentifiée, export et reprise sans IdP. |
-| [SSO ai-guard](sso/README.fr.md) | Candidat implémenté : JSON privé gateway, initialisation/réouverture de l'audit d'authentification, memberships, connexion Web, CLI au premier plan et limites d'exploitation. Qualifications IdP/navigateur réels et Compose/bootstrap complets encore ouvertes. |
+| [SSO ai-guard](sso/README.fr.md) | DEMO locale neuve : images propres, réseau d’identité inspecté, préparation du volume UID1000 et réouverture normale. Couvre aussi fournisseurs existants/entreprise, connexion Web, CLI au premier plan et reprise. Interopérabilité complète gateway/Web/CLI non qualifiée. |
 | [Fournisseur Keycloak](keycloak/README.fr.md) | Projet fournisseur local séparé, clients publics Web/CLI, PKCE, claims et préparation de l'IdP d'entreprise. |
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |
 | [Entreprise](enterprise/README.fr.md) | Services de contrôle partagés, frontières tenant, AC privées, inférence interne et exploitation. |
@@ -26,6 +26,7 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 | `.env.exemple.local` | Option Compose `--env-file`, socle Docker ou Podman. |
 | `.env.exemple.local-rules` | Socle avec `deploy/docker/compose.jev-rules.example.yaml`, catalogue de décision Rust fini sans service modèle. |
 | `.env.exemple.local-keycloak` | Compose du socle et projet Keycloak séparé. |
+| [`.env.exemple.local-keycloak-sso`](../../.env.exemple.local-keycloak-sso) | Projet Keycloak séparé et `deploy/{docker,podman}/compose.sso.yaml` autonome ; sélectionner de nouveaux tags/projets et le nom exact du réseau d’identité externe inspecté. Le profil explicite de préparation initialise une seule fois son volume privé. |
 | `.env.exemple.local-qwen` | Compose du socle et projet IA locale séparé. |
 | `.env.exemple.local-qwen-tls-volumes` + `volumes.env` publié | Projet modèle TLS à volumes neufs et surcharge gateway ; suivre [la préparation explicite](local-ai/TLS.fr.md). |
 | `.env.exemple.local-qwen-tls` | Alternative bind TLS explicite, seulement sur filesystem réellement supporté ; suivre [le guide TLS](local-ai/TLS.fr.md). |
@@ -38,7 +39,9 @@ Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagn
 
 Le profil volumes exige d’abord `model-tls provision` : passer son fichier de base puis le `volumes.env` publié avec deux options `--env-file`. Il ne fonctionne pas avec le seul exemple public ; ne pas inventer les sélecteurs. La CLI Rust ne source pas dotenv. Compose développe `${HOME}` et lit ces exemples seulement avec `--env-file`. L'environnement du poste peut remplacer des valeurs d'interpolation Compose ; examiner la configuration du terminal si une valeur diffère. Une option CLI configure le composant nommé, pas tous les services.
 
-Les exemples publics s'utilisent directement pour les défauts locaux documentés. Pour personnaliser, créer un nouveau fichier privé sous un autre nom et réutiliser ce chemin partout. Ne jamais écraser `.env`, credentials ou base existants. Une entrée fournisseur privée doit être0600 et son parent0700. Ne pas `source` une configuration téléchargée ou fournie par un projet.
+Les exemples publics décrivent les défauts locaux documentés ; compléter les sélecteurs obligatoires vides selon leur guide. Pour personnaliser, créer un nouveau fichier privé sous un autre nom et réutiliser ce chemin partout. Ne jamais écraser `.env`, credentials ou base existants. Une entrée fournisseur privée doit être0600 et son parent0700. Ne pas `source` une configuration téléchargée ou fournie par un projet.
+
+Pour une installation SSO locale neuve, suivre la [procédure DEMO neuve](sso/README.fr.md#préparer-une-demo-locale-neuve). Son exemple env laisse volontairement vide le sélecteur de réseau d’identité avant inspection ; il ne démarre pas inchangé. Construire l’image de contrôle actuelle contenant `setup prepare` et l’image actuelle du realm, puis préparer le nouveau volume via stdin public. Aucun bind OIDC privé appartenant à l’hôte ou image publique préconstruite n’est requis. L’ancienne image de contrôle commençant par `954246…` ne contient pas ce préparateur.
 
 ## Combiner les contextes locaux
 
@@ -52,7 +55,7 @@ docker compose --env-file .env.exemple.local-keycloak-qwen -p ai-guard-local-ai 
 
 Trois projets Compose fournissent un seul dashboard ai-guard. Les noms explicites conservent données et réseaux séparés. Ne pas fusionner ces fichiers Compose comme overrides. Les premières constructions acquièrent les images publiques et le modèle épinglé ; les préparer avant un usage hors ligne.
 
-Ces commandes démarrent les projets séparés ; elles n'activent pas le SSO ai-guard, ne créent pas les memberships humains et ne raccordent pas le gateway au réseau d'identité. Le [guide opérateur SSO](sso/README.fr.md) décrit la configuration acceptée et les préparations explicites. Il ne promet ni bootstrap automatisé complet ni parcours réel Keycloak/navigateur qualifié.
+Ces anciennes commandes démarrent les projets séparés ; elles n'activent pas le SSO ai-guard, ne créent pas les memberships humains et ne raccordent pas le gateway au réseau d'identité. Utiliser les [fichiers SSO et leur préparation dédiée](sso/README.fr.md#préparer-une-demo-locale-neuve) pour une installation SSO neuve. Le parcours réel gateway/Web/CLI complet demande encore sa propre qualification.
 
 | Accès | Défaut local |
 |---|---|
@@ -78,6 +81,6 @@ Le parcours CLI `up/down` possède son propre projet et ses ports par défaut. U
 
 ## Secrets, TLS et responsabilités
 
-Créer les credentials locaux ai-guard avec `init` ; obtenir identité d'entreprise et credentials IA par les parcours opérateur/fournisseur choisis. Un administrateur Keycloak n'est pas automatiquement administrateur ai-guard. Le contrôle administre chaque rattachement tenant et permission. Un backend modèle partagé conserve des périmètres authentifiés, permissions et quotas distincts.
+Créer les anciens credentials locaux ai-guard avec `init`, ou préparer une installation SSO neuve avec `setup prepare` selon son guide ; ne pas initialiser par-dessus un volume déjà préparé. Obtenir identité d'entreprise et credentials IA par les parcours opérateur/fournisseur choisis. Un administrateur Keycloak n'est pas automatiquement administrateur ai-guard. Le contrôle administre chaque rattachement tenant et permission. Un backend modèle partagé conserve des périmètres authentifiés, permissions et quotas distincts.
 
 Pour préparer les certificats locaux, consulter le [générateur Rust d'AC](../demo-pki.fr.md). Garder les clés privées d'AC dans le contrôle de confiance ; transmettre uniquement la chaîne publique utile aux clients. Configurer SAN/issuer de façon cohérente et conserver la vérification TLS. Les exemples HTTP locaux utilisent des comptes publics de découverte ; ce ne sont pas des réglages de transport d'entreprise.

@@ -161,6 +161,7 @@
   },
   "users": [
     {
+      "id": "1fab92df-3da5-4ba1-909b-240ddae48001",
       "username": "admin-ai-guard",
       "firstName": "Administrateur ai-guard — DÉMONSTRATION",
       "lastName": "Démonstration",
@@ -172,6 +173,7 @@
       "clientRoles": {"ai-guard-demo-api": ["admin-ai-guard"]}
     },
     {
+      "id": "76b4c4f7-5758-4c1d-bb82-eac642f8f002",
       "username": "user-1",
       "firstName": "Utilisateur 1 — DÉMONSTRATION",
       "lastName": "Démonstration",
@@ -183,6 +185,7 @@
       "clientRoles": {}
     },
     {
+      "id": "80af23ad-cd92-48ac-b8dd-cb39b4676003",
       "username": "user-2",
       "firstName": "Utilisateur 2 — DÉMONSTRATION",
       "lastName": "Démonstration",
