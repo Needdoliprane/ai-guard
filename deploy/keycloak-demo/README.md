@@ -1,9 +1,31 @@
-# Local Keycloak configuration
+# Local Keycloak DEMO / DEMO Keycloak locale
 
-[English guide](../../docs/setup/keycloak/README.md) · [Guide français](../../docs/setup/keycloak/README.fr.md)
+[SSO setup — English](../../docs/setup/sso/README.md) · [Installation SSO — français](../../docs/setup/sso/README.fr.md) · [Provider guide — English](../../docs/setup/keycloak/README.md) · [Guide fournisseur — français](../../docs/setup/keycloak/README.fr.md)
 
-This directory contains the pinned Keycloak Dockerfile, initial public DEMO realm and isolated Compose project. Configuration is supplied through `.env.exemple.local-keycloak` or `.env.exemple.local-keycloak-qwen` at the repository root. The guide covers build, DNS, clients, accounts, identity mapping, TLS and data preservation.
+## English
 
-Keep the project name `ai-guard-keycloak` separate from the main ai-guard project. The HTTP profile must be explicitly enabled with `--profile keycloak-demo-http`. Do not reuse its public accounts or transport policy in an enterprise deployment. Existing realm data is preserved; editing the import file does not overwrite an imported realm.
+This directory contains the pinned Keycloak Dockerfile, initial public DEMO realm and isolated Compose project. For a **fresh complete configuration**, follow the [SSO setup guide](../../docs/setup/sso/README.md#prepare-a-fresh-local-demo): build the current control and identity images under unused local tags, choose new project/volume identities, prepare the private control volume once and select the actual inspected internal identity network. The SSO stack is separate from the legacy base Compose files.
 
-Auxiliary interoperability tests and their credentials/captures are not distributed here.
+The public [`.env.exemple.local-keycloak-sso`](../../.env.exemple.local-keycloak-sso) configures this identity project and the standalone Docker/Podman SSO stack. `AI_GUARD_DEMO_IDP_IMAGE` selects the identity image; `AI_GUARD_DEMO_CONTROL_IMAGE` selects its Rust ingress. If the former is omitted, Compose retains the old local image default `ai-guard-keycloak-demo:26.8.1-3f3c5f8e`. Existing `.env.exemple.local-keycloak` and `.env.exemple.local-keycloak-qwen` remain provider-only/legacy choices; they do not prepare SSO memberships.
+
+Explicitly enable `--profile keycloak-demo-http`. Keep the identity project's name distinct from the ai-guard control project; do not assume a generated network name. The fixed fresh-DEMO issuer is `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`, with host DNS resolving its name to 127.0.0.1. The five advertised host/port/origin values must match the public manifest. Keycloak must receive `AI_GUARD_DEMO_WEB_ORIGIN` **inside its environment** for [realm-import substitution](https://www.keycloak.org/server/importExport#_using_environment_variables_within_the_realm_configuration_files); the Compose file forwards it. No OS DNS/trust change is performed automatically.
+
+The realm file declares explicit IDs for the three application users; the [public preparation manifest](../../docs/setup/sso/examples/local-demo.json) uses those same `(issuer, sub)` values. Their actual import was verified on a fresh Keycloak 26.8.1 with its official CLI. The master `admin` remains provider administration, with no prepared application membership. Usernames or provider administration never establish application authority.
+
+Existing realm data is preserved: startup import skips an existing realm, and rebuilding an image does not reset or change its stored users/IDs. Never adopt the fresh IDs by name, delete a volume to obtain them, or overwrite an existing installation. Existing realms/enterprise providers need a reviewed manifest of their actual verified subjects and the manual setup route. Public DEMO credentials and HTTP loopback transport are not enterprise defaults.
+
+Fresh import verification and structural Compose checks do not qualify complete ai-guard gateway/Web/CLI interoperability or production operation. Follow the dated [engineering evidence](../../docs/engineering/VALIDATION.md). Auxiliary interoperability tools, private credentials and captures are not distributed here.
+
+## Français
+
+Ce répertoire contient le Dockerfile Keycloak épinglé, le realm initial public DEMO et le projet Compose isolé. Pour une **configuration complète neuve**, suivre le [guide d’installation SSO](../../docs/setup/sso/README.fr.md#préparer-une-demo-locale-neuve) : construire les images actuelles du contrôle et de l’identité sous des tags locaux inutilisés, choisir de nouveaux projets/volumes, préparer une seule fois le volume privé du contrôle et sélectionner le vrai réseau interne d’identité inspecté. La pile SSO est distincte des anciens Compose du socle.
+
+Le fichier public [`.env.exemple.local-keycloak-sso`](../../.env.exemple.local-keycloak-sso) configure ce projet d’identité et la pile SSO autonome Docker/Podman. `AI_GUARD_DEMO_IDP_IMAGE` choisit l’image d’identité ; `AI_GUARD_DEMO_CONTROL_IMAGE` choisit son relais Rust. Sans le premier réglage, Compose conserve l’ancien défaut local `ai-guard-keycloak-demo:26.8.1-3f3c5f8e`. `.env.exemple.local-keycloak` et `.env.exemple.local-keycloak-qwen` restent des choix fournisseur seul/anciens parcours ; ils ne préparent pas les memberships SSO.
+
+Activer explicitement `--profile keycloak-demo-http`. Conserver un nom de projet d’identité distinct du contrôle ai-guard ; ne pas déduire un nom de réseau généré. L’issuer fixe de la DEMO neuve est `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`, avec résolution DNS hôte de son nom vers 127.0.0.1. Les cinq valeurs publiques hôte/ports/origine doivent correspondre au manifeste. Keycloak doit recevoir `AI_GUARD_DEMO_WEB_ORIGIN` **dans son environnement** pour la [substitution à l’import du realm](https://www.keycloak.org/server/importExport#_using_environment_variables_within_the_realm_configuration_files) ; le Compose le transmet. Aucun changement DNS/confiance OS n’est automatique.
+
+Le realm déclare des IDs explicites pour les trois utilisateurs applicatifs ; le [manifeste public de préparation](../../docs/setup/sso/examples/local-demo.json) reprend les mêmes `(issuer, sub)`. Leur import réel a été vérifié dans un Keycloak 26.8.1 neuf avec son CLI officiel. Le compte master `admin` reste réservé à l’administration fournisseur, sans membership applicatif préparé. Ni nom de connexion ni administration fournisseur n’établit l’autorité applicative.
+
+Les données de realm existantes sont conservées : l’import de démarrage ignore un realm présent et reconstruire une image ne réinitialise ni ne change ses utilisateurs/IDs persistés. Ne pas adopter les IDs neufs par leur nom, supprimer un volume pour les obtenir ou écraser une installation existante. Realms existants/fournisseurs d’entreprise demandent un manifeste relu de leurs sujets réels vérifiés et le parcours manuel. Credentials publics DEMO et HTTP loopback ne sont pas des défauts d’entreprise.
+
+La vérification d’import neuf et les contrôles Compose structurels ne qualifient ni l’interopérabilité complète gateway/Web/CLI ai-guard ni l’exploitation de production. Suivre les [preuves d’ingénierie datées](../../docs/engineering/VALIDATION.md). Outils auxiliaires d’interopérabilité, credentials privés et captures ne sont pas distribués ici.

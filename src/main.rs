@@ -42,6 +42,8 @@ enum Command {
     Broker(broker_cli::BrokerArgs),
     /// Named local accounts, authorized human reads and filtered audit export.
     Human(agentsandbox::identity_cli::HumanArgs),
+    /// Prepare or recover a new private local OIDC installation offline.
+    Setup(agentsandbox::setup::SetupArgs),
     #[command(name = "__broker-enforcer", hide = true)]
     InternalBrokerEnforcer {
         #[arg(long)]
@@ -432,6 +434,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
+        Command::Setup(args) => agentsandbox::setup::execute(args)?,
         Command::ModelTls(args) => {
             agentsandbox::model_tls::execute(args, shutdown_signal()?).await?
         }

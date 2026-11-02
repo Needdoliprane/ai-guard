@@ -1,0 +1,104 @@
+# Standalone opt-in SSO stack; do not merge with the legacy compose.yaml.
+# Prepare once from public stdin under --profile sso-prepare; normal up reopens.
+name: ai-guard-sso
+services:
+  setup:
+    profiles: [sso-prepare]
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
+    command: ["setup", "prepare", "--input", "-", "--output-dir", "/data/installation", "--demo-defaults"]
+    # Public advertised values are validation inputs, not configurable endpoints.
+    environment:
+      AI_GUARD_DEMO_IDP_HOST: ${AI_GUARD_DEMO_IDP_HOST:-keycloak.ai-guard.test}
+      AI_GUARD_DEMO_IDP_PORT: "${AI_GUARD_DEMO_IDP_PORT:-18080}"
+      AI_GUARD_DEMO_WEB_ORIGIN: ${AI_GUARD_DEMO_WEB_ORIGIN:-http://127.0.0.1:4000}
+      AI_GUARD_GATEWAY_PORT: "${AI_GUARD_GATEWAY_PORT:-8787}"
+      AI_GUARD_DASHBOARD_PORT: "${AI_GUARD_DASHBOARD_PORT:-4000}"
+    stdin_open: true
+    tty: false
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: "1.0"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    volumes: ["installation_data:/data"]
+    network_mode: none
+    restart: "no"
+  gateway:
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
+    command: ["gateway", "--listen", "0.0.0.0:8787", "--container-listen", "--tenants-file", "/data/installation/tenants.json", "--oidc-config", "/data/installation/oidc.json", "--policy", "/app/policies/default.json"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 384m
+    cpus: "1.0"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    volumes: ["installation_data:/data"]
+    networks: [control, identity]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "agentsandbox", "healthcheck", "--url", "http://127.0.0.1:8787/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  dashboard:
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
+    command: ["dashboard", "--listen", "0.0.0.0:4000", "--container-listen", "--upstream", "http://gateway:8787", "--shared-tenants", "--oidc-web-origin", "http://127.0.0.1:4000", "--front-dir", "/app/front"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 192m
+    cpus: "0.5"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    networks: [control]
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "agentsandbox", "healthcheck", "--url", "http://127.0.0.1:4000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+  ingress:
+    image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
+    command: ["ingress", "--gateway-listen", "0.0.0.0:8787", "--dashboard-listen", "0.0.0.0:4000", "--container-listen", "--gateway-upstream", "http://gateway:8787", "--dashboard-upstream", "http://dashboard:4000"]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
+    mem_limit: 192m
+    cpus: "0.5"
+    tmpfs: ["/tmp:rw,nosuid,nodev,noexec,size=16m,mode=1777"]
+    ports: ["127.0.0.1:8787:8787", "127.0.0.1:4000:4000"]
+    networks: [control, publication]
+    depends_on:
+      gateway:
+        condition: service_healthy
+      dashboard:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "agentsandbox", "healthcheck", "--url", "http://127.0.0.1:8787/healthz", "--url", "http://127.0.0.1:4000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+networks:
+  control:
+    internal: true
+  identity:
+    external: true
+    name: ${AI_GUARD_SSO_IDENTITY_NETWORK:?Set the inspected internal identity network name}
+  publication: {}
+volumes:
+  installation_data:

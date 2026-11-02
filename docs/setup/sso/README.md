@@ -4,7 +4,170 @@
 
 This guide describes the Rust OIDC configuration, the Web sign-in and the foreground human CLI. Use it with the matching ai-guard binary and built frontend. It does not configure Codex or Claude authentication: choose their subscription, API key or approved inference endpoint separately in the [provider guide](../providers/README.md).
 
-The steps below require an existing control installation and operator-approved identity provider. The distributed Keycloak profile prepares the provider; it does not bootstrap ai-guard accounts, memberships, resource ownership or the container network connection. Real Keycloak Web/CLI interoperability, the complete container setup and production operation need their own qualification. Consult the dated [implementation and validation record](../../engineering/VALIDATION.md) for evidence and the [product identity contract](../../sso.md) for the full target.
+Choose the **fresh local DEMO** below to prepare new control data and the three imported application accounts, or use the [manual installation procedure](#prepare-an-existing-or-enterprise-installation) with an existing provider. A real fresh Keycloak 26.8.1 import has verified the three explicit subject IDs in the public manifest. This does not qualify the complete gateway/Web/CLI login path, which remains NOT_RUN. Preparation, configuration checks and historical results retain their scope in the [engineering record](../../engineering/VALIDATION.md); the [identity contract](../../sso.md) describes the complete product target.
+
+## Prepare a fresh local DEMO
+
+This path uses a new Keycloak project, a new ai-guard project, two locally built images and a new private control volume. It creates schema5 tenant storage, the separate authentication audit, technical credentials, accounts and memberships from the public [local-demo.json](examples/local-demo.json). It creates no sessions, resource grants, worker activity or human execution delegation. An empty authorized resource list after preparation is expected.
+
+The shipped [Docker](../../../deploy/docker/compose.sso.yaml) and [Podman](../../../deploy/podman/compose.sso.yaml) entry points are standalone opt-in stacks. Do not combine them with the legacy `deploy/*/compose.yaml` or its host-secret mounts. The setup container has no network; only the gateway later joins the selected internal identity network. Dashboard and workers do not join it. No preparation or application container receives an engine socket or the project being executed.
+
+### 1. Check prerequisites and choose new names
+
+Use a supported local Docker or Podman installation with Compose available, a shell, and the current source checkout. Build dependencies/base images must be available; prepare them before working offline. Node is used while building the frontend image, not as a production server. The previously validated control image beginning `954246…` predates `setup prepare`: build a new image from the source containing this command. No public prebuilt ai-guard image is required.
+
+Before startup, have your normal host DNS configuration resolve `keycloak.ai-guard.test` to `127.0.0.1` for the browser and CLI. Verify that resolution on the workstation. This guide does not edit OS DNS or trust. The container's identity-network alias supplies its own route to the same issuer; do not replace the issuer with `localhost`, a service name or a different IP.
+
+Ports 8787, 4000 and 18080 must be free on host loopback. The fresh preset fixes these five public settings:
+
+| Variable | Required value |
+|---|---|
+| `AI_GUARD_DEMO_IDP_HOST` | `keycloak.ai-guard.test` |
+| `AI_GUARD_DEMO_IDP_PORT` | `18080` |
+| `AI_GUARD_DEMO_WEB_ORIGIN` | `http://127.0.0.1:4000` |
+| `AI_GUARD_GATEWAY_PORT` | `8787` |
+| `AI_GUARD_DASHBOARD_PORT` | `4000` |
+
+`--demo-defaults` checks those values and refuses incompatible overrides; it does not rewrite endpoints. Ordinary startup uses the fixed ports/origin in the SSO Compose file. For another topology, prepare a reviewed generic manifest and matching service configuration instead of editing these advertised values alone.
+
+From the repository root, select the engine, matching SSO file and new names. The examples below use Docker; for Podman set `AIGUARD_ENGINE="podman"` and `AIGUARD_SSO_COMPOSE="deploy/podman/compose.sso.yaml"` together. Keep these choices for the whole lifecycle:
+
+```sh
+AIGUARD_ENGINE="docker"
+AIGUARD_SSO_COMPOSE="deploy/docker/compose.sso.yaml"
+AIGUARD_SSO_PROJECT="ai-guard-sso-fresh"
+AIGUARD_IDP_PROJECT="ai-guard-keycloak-sso-fresh"
+AIGUARD_SSO_ENV="/absolute/private/ai-guard-demo/sso.env"
+```
+
+Check that neither project name belongs to existing resources. The filters and inspection format below use Docker Compose's labels. With Podman, verify the actual Compose provider's project/network labels and inspection fields, and adapt the inventory commands if they differ; an empty unmatched filter does not establish that a name is unused. The Podman deployment requires its own real qualification.
+
+```sh
+"$AIGUARD_ENGINE" ps -a --filter "label=com.docker.compose.project=$AIGUARD_SSO_PROJECT"
+"$AIGUARD_ENGINE" volume ls --filter "label=com.docker.compose.project=$AIGUARD_SSO_PROJECT"
+"$AIGUARD_ENGINE" network ls --filter "label=com.docker.compose.project=$AIGUARD_SSO_PROJECT"
+"$AIGUARD_ENGINE" ps -a --filter "label=com.docker.compose.project=$AIGUARD_IDP_PROJECT"
+"$AIGUARD_ENGINE" volume ls --filter "label=com.docker.compose.project=$AIGUARD_IDP_PROJECT"
+"$AIGUARD_ENGINE" network ls --filter "label=com.docker.compose.project=$AIGUARD_IDP_PROJECT"
+```
+
+If a name is already in use, choose another; do not remove the resources. Create a **new** operator file at `AIGUARD_SSO_ENV`, copying [`.env.exemple.local-keycloak-sso`](../../../.env.exemple.local-keycloak-sso) without overwriting an existing file. Its parent must already be private. This file contains public deployment settings; keep it outside an executed workspace. Use the same `--env-file` and explicit `-p` options throughout. Shell values override Compose interpolation, so remove or resolve conflicting overrides before proceeding; do not `source` the file.
+
+### 2. Build your control and identity images
+
+Choose unused local tags so an existing installation's image reference is preserved. The public env example selects:
+
+```dotenv
+AI_GUARD_CONTROL_IMAGE=agentsandbox-control:local-sso
+AI_GUARD_DEMO_CONTROL_IMAGE=agentsandbox-control:local-sso
+AI_GUARD_DEMO_IDP_IMAGE=ai-guard-keycloak-demo:local-sso
+```
+
+If a tag is already used, choose a new one in the new env file and in the build commands. The first two settings must reference your newly built control image; the second supplies the fixed-destination IdP ingress. Build both images from this checkout:
+
+```sh
+"$AIGUARD_ENGINE" build -f images/control.Dockerfile -t agentsandbox-control:local-sso .
+"$AIGUARD_ENGINE" build -f deploy/keycloak-demo/Dockerfile -t ai-guard-keycloak-demo:local-sso deploy/keycloak-demo
+```
+
+The [control Dockerfile](../../../images/control.Dockerfile) compiles Rust and the static frontend. The [Keycloak Dockerfile](../../../deploy/keycloak-demo/Dockerfile) pins Keycloak 26.8.1 and its upstream digest, then copies this checkout's realm file into the local image for import at startup. Reusing an older local image would omit the explicit demo subjects. Record the actual image IDs with the installation inventory. `AI_GUARD_DEMO_IDP_IMAGE` selects the local IdP tag; old profiles that omit it retain their previous image default.
+
+### 3. Start the new IdP and inspect its network
+
+Use the separate project and explicit HTTP DEMO profile:
+
+```sh
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_IDP_PROJECT" \
+  -f deploy/keycloak-demo/compose.yaml --profile keycloak-demo-http \
+  up -d --no-build --pull never keycloak-demo keycloak-demo-ingress
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_IDP_PROJECT" \
+  -f deploy/keycloak-demo/compose.yaml --profile keycloak-demo-http ps
+"$AIGUARD_ENGINE" network ls --filter "label=com.docker.compose.project=$AIGUARD_IDP_PROJECT"
+```
+
+Inspect each returned network name; substitute the actual name in this command, without inventing a project-derived name:
+
+```sh
+"$AIGUARD_ENGINE" network inspect ACTUAL_NETWORK_NAME \
+  --format '{{.Name}} internal={{.Internal}} logical={{index .Labels "com.docker.compose.network"}}'
+```
+
+Select the network whose logical Compose label is `identity_demo` and whose `Internal` value is true, then write its exact `.Name` into `AI_GUARD_SSO_IDENTITY_NETWORK` in the new env file. Do not select `publication_demo` or another installation's network. The SSO Compose file treats this as an external network and refuses an empty selector. It does not infer or create the identity network from the project name.
+
+The exact issuer is `http://keycloak.ai-guard.test:18080/realms/ai-guard-demo`; its discovery document is at that URL plus `/.well-known/openid-configuration`. The provider administration page is `http://keycloak.ai-guard.test:18080/admin/`. Keep this public-password HTTP DEMO on host loopback. Keycloak receives `AI_GUARD_DEMO_WEB_ORIGIN` inside its container for the supported realm-import environment substitution; setting it only in the host shell or omitting the container environment does not prepare the same realm.
+
+### 4. Prepare the private control volume once
+
+After selecting the network, validate the service configuration without exposing a raw rendered configuration in shared logs:
+
+```sh
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" config --quiet
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --no-build --pull never -T \
+  setup setup prepare --input - --output-dir /data/installation --demo-defaults \
+  < docs/setup/sso/examples/local-demo.json
+```
+
+The first `setup` selects the Compose service; the second is the Rust subcommand after the image entrypoint. Input redirection sends the **public manifest**, not a credential file. Do not use a terminal/TTY or manually paste input: stdin is bounded to 262144 bytes and must finish within 5 seconds. The process runs as UID/GID 1000:1000, on a new `installation_data` volume whose `/data` parent is private. It generates private files under that identity instead of mounting a host-owned 0600 OIDC file into a different UID. No network/provider/engine/model is contacted by preparation.
+
+Proceed only after exit 0 and JSON status `prepared` for `/data/installation`. Keep the one-shot container and its outcome for diagnosis. Successful preparation publishes the final directory only after its durable steps. Its important files are:
+
+| Location under `/data/installation` | Purpose |
+|---|---|
+| `tenants.json`, `oidc.json` | Private gateway registry and OIDC configuration referring to the final paths. |
+| `authentication.sqlite` | Separate initialized authentication audit. |
+| `tenants/<tenant>/audit.sqlite` | Tenant-bound schema5 storage, with retained migration backups and identity receipts. |
+| `tenants/<tenant>/runner`, `viewer` | Generated technical credentials; never browser or worker credentials. |
+| `preparation.json`, `completion.json` and origin/binding records | Private recovery identities, fingerprints, bindings and completion receipts. |
+| `secret-material.json` | **Private credential recovery material containing the generated secrets. Never display, log, export to a report or distribute it.** |
+
+Files remain 0600 and directories 0700 under the control UID. Preserve the whole private installation and recovery material. Do not run `init` over it, repeat `prepare` on the final path or regenerate missing credentials. Recovery is described below.
+
+### 5. Start ai-guard and use the prepared accounts
+
+Normal startup reopens the completed tenant stores and authentication audit. It does not repeat provisioning and has **no `--initialize-oidc-audit` flag**:
+
+```sh
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" up -d --no-build --pull never gateway dashboard ingress
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" ps
+```
+
+Open `http://127.0.0.1:4000` for the dashboard or use gateway `http://127.0.0.1:8787` from the foreground CLI described below. A healthy container is not a successful login. Complete a real sign-in before concluding the IdP path works; an error is not an empty activity list.
+
+| Public DEMO account/password | Prepared application access |
+|---|---|
+| `admin / admin` | Keycloak **master** administration only. No ai-guard account or membership is prepared for it. |
+| `admin-ai-guard / admin-ai-guard` | DEMO application account with an explicit membership including `read_tenant_metadata`; the matching verified client role also has to satisfy the server mapping. |
+| `user-1 / user-1` | DEMO personal context with metadata/content/export capabilities; resources require separate grants. |
+| `user-2 / user-2` | Same personal capabilities, without the application administrator capability. |
+
+The three application subjects are explicit IDs shared by the fresh realm import and `local-demo.json`; they are not derived from usernames. Their import has been checked with Keycloak's official CLI on a fresh realm. Existing realms are **not** reset, adopted or migrated by this procedure, and startup import skips an existing realm. Rebuilding the image does not change its stored subject IDs. For an existing realm, supply a reviewed manifest of its actual verified `(issuer, sub)` values and use generic preparation into a separate new destination. Do not grant membership from a name match or copy the fresh-demo IDs into an unrelated realm.
+
+### Stop, restart and resume a failed preparation
+
+Keep the same engine, env file, project names, images, external network and volumes. Stop only the services belonging to this installation:
+
+```sh
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" stop ingress dashboard gateway
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_IDP_PROJECT" \
+  -f deploy/keycloak-demo/compose.yaml --profile keycloak-demo-http stop
+```
+
+After an ordinary successful installation, resume its existing services with the same start commands above. Do not rerun preparation. Gateway restart loses live human admissions; browser/CLI users must explicitly sign in again. It preserves the audit and prepared memberships, without restoring tokens, execution authority or sessions from recovery records.
+
+If preparation fails, read its reported retained directory and stop every control/broker/automatic restart that could consume that installation before recovery. A pre-publication failure normally retains `/data/.setup-…`; a failure after publication may retain `/data/installation` even when the command reported an error. Use the exact reported/existing directory, not a guessed hash. Override the one-shot service command to resume the retained preparation:
+
+```sh
+"$AIGUARD_ENGINE" compose --env-file "$AIGUARD_SSO_ENV" -p "$AIGUARD_SSO_PROJECT" \
+  -f "$AIGUARD_SSO_COMPOSE" --profile sso-prepare run --no-deps --no-build --pull never -T \
+  setup setup resume --recovery-dir /data/RETAINED_DIRECTORY_FROM_ERROR --confirm-control-stopped
+```
+
+`--confirm-control-stopped` is an operator attestation, not process fencing. Resume uses the exact retained files, inode/owner bindings, credentials and operation identities, on the **same volume, UID and `/data` path**. Moving or copying the recovery tree does not preserve those bindings. It does not reread a new manifest, regenerate secrets or adopt an unrelated final directory. A missing/partial intent, substituted file, both staging and final directories present, or conflicting receipt requires preserving the material and resolving the reported cause. Do not delete a directory/volume, edit the recovery JSON, use `down -v`, or rerun `prepare` to force success. If a new destination is required after an incomplete intent, preserve the old material and deliberately prepare a separate installation; the fixed Compose path must then be adapted explicitly.
 
 ## Understand the connections
 
@@ -18,7 +181,9 @@ The steps below require an existing control installation and operator-approved i
 
 SSO currently provides authorized human consultation and export. Do not pass its token to `broker submit` or interpret sign-in as permission to launch an agent. Human execution delegation and the complete administration view are separate product requirements.
 
-## Prepare the installation
+## Prepare an existing or enterprise installation
+
+The following sections are the manual route for existing storage or an operator-approved provider. They are an alternative to the fresh DEMO procedure above. Preserve that installation's actual identities and data; do not import the public DEMO users into it.
 
 1. Prepare the gateway/dashboard images and built frontend using the [local guide](../local/README.md), or your approved enterprise deployment. Preserve the existing tenant registry, credential files, policy, data volumes and service identity.
 2. Stop the gateway, brokers and automatic restarts before offline identity maintenance. The flag `--confirm-control-stopped` is an operator attestation; it does not fence another process.
@@ -27,6 +192,29 @@ SSO currently provides authorized human consultation and export. Do not pass its
 5. Inventory reachability from the browser, CLI and gateway, plus the dashboard-to-gateway route. They must use the same issuer identity. A host loopback address identifies the container itself from inside that container; browser access alone proves no container route.
 
 For container-owned databases, perform offline maintenance with the existing control UID/GID and the existing volume, with all other consumers stopped. The [named local access guide](../identity/README.md#prepare-storage-and-authority) explains the isolated one-shot maintenance pattern. OIDC account mutations use the same operator authority and need no local human credential.
+
+### Prepare new storage for an approved existing provider
+
+Generic `setup prepare` can create a separate new installation from a reviewed manifest of actual verified subjects. It never adopts an existing tenant database or verifies the IdP online. Its closed version1 input is distinct from the runtime `gateway.https.json` example:
+
+| Input field | Content |
+|---|---|
+| `version` | `1`. |
+| `gateway` | Approved `OidcGatewayConfigV1`: provider, exact Web origin, label and role mapping. |
+| `authentication_policy` | Audit quotas and exactly the configured issuer's two public clients. |
+| `ca_bundle_pem` | Optional/null public certificate-only PEM bundle, at most 64 KiB / 8 certificates; no private key. |
+| `tenants` | Array of `tenant_id`, `organization_id`, optional `worker_quota` and `identities`. |
+| Each identity | `principal` with `kind:"human_oidc"`, exact approved `issuer` and verified `subject`, plus `display_name` and `capabilities`. |
+
+Run under the actual trusted control UID with a new destination below an existing private parent. The CLI form is:
+
+```sh
+AIGUARD_BIN="/absolute/path/to/agentsandbox"
+"$AIGUARD_BIN" setup prepare --input /absolute/private/ai-guard/approved-manifest.json \
+  --output-dir /absolute/private/ai-guard/new-installation
+```
+
+For container-owned storage, execute this same Rust command inside a no-network one-shot container under the control UID and its prepared private volume; use `--input -` with public stdin to avoid a host-owner bind mismatch. Omit `--demo-defaults` for a generic manifest. This does **not** adapt the standalone DEMO Compose's hardcoded ports, origin or provider network; use reviewed matching service configuration. The generated `oidc.json` references `ca-bundle.pem` only when supplied. That public bundle configures provider trust, not browser OS trust or the separate CLI→gateway connection. Existing storage instead follows the explicit maintenance/mutation sections below.
 
 ## Register public clients and the API audience
 
@@ -92,7 +280,7 @@ The gateway additionally limits tokens to 16 KiB and PKCE transactions to 300 se
 
 ## Establish accounts, memberships and resources
 
-The operator must create an active OIDC account and membership in each intended tenant database. Sign-in does not provision either. Use these public templates in order:
+On the manual route, the operator must create an active OIDC account and membership in each intended tenant database. Sign-in does not provision either. The fresh DEMO preparer already performs these account/membership mutations for its reviewed manifest. For existing storage use these public templates in order:
 
 1. [account.json](examples/account.json): the approved `human_oidc` principal and display name.
 2. [membership.json](examples/membership.json): the same principal, actual tenant binding, organization and allowed capabilities.
@@ -149,7 +337,7 @@ Enable the dashboard's fixed proxy with the same exact public Web origin as `gat
 
 Adapt the upstream to the actual internal gateway route and verify the built asset path in your image. `--shared-tenants` removes the fixed viewer-file requirement; it does not grant users all tenants. If retaining a fixed viewer deployment, keep its existing viewer-file configuration instead. For the DEMO set `--oidc-web-origin` to `http://127.0.0.1:4000`. The dashboard needs only its fixed gateway route, not direct access to the IdP. Neither service requires an engine socket or a mount of the project being executed.
 
-The Rust listeners are HTTP listeners; configuring an HTTPS public origin does not create TLS termination. Prepare and qualify the approved transport before exposing the installation. The existing [Keycloak guide](../keycloak/README.md) covers the provider project, DNS and public DEMO accounts. The main Compose files do not automatically attach the gateway to its internal identity network. An operator must prepare that narrowly scoped gateway connection while preserving the same issuer and leaving the dashboard/workers outside it; this guide does not claim that topology has been exercised.
+The Rust listeners are HTTP listeners; configuring an HTTPS public origin does not create TLS termination. Prepare and qualify the approved transport before exposing the installation. The existing [Keycloak guide](../keycloak/README.md) covers the provider project, DNS and public DEMO accounts. The legacy base Compose files do not attach the gateway to the identity network. The standalone SSO files above do, using the explicitly inspected external network. For a manual deployment, prepare that narrowly scoped gateway connection while preserving the same issuer and leaving dashboard/workers outside it; a declared topology does not prove successful interoperability.
 
 ## Sign in from the browser
 
@@ -161,10 +349,18 @@ Use the application's disconnect action. Local browser state is cleared even whe
 
 ## Sign in and work in the foreground CLI
 
+Build a native host CLI from the same source revision if one is not already available. The control image contains a Linux binary; do not extract it for use on a macOS workstation. From the repository root, with the repository's Rust toolchain:
+
+```sh
+cargo build --locked --bin agentsandbox
+```
+
+If you set `CARGO_TARGET_DIR`, use the binary in that directory instead. Keep the selected native binary matched to the installed gateway version.
+
 Run the trusted CLI on the user's workstation, pointing to the **gateway origin**, without `/api` or another path. This is ai-guard login, separate from provider CLI login:
 
 ```sh
-AIGUARD_BIN="/absolute/path/to/agentsandbox"
+AIGUARD_BIN="$(pwd)/target/debug/agentsandbox"
 "$AIGUARD_BIN" human sso --gateway https://guard-api.example.invalid
 ```
 

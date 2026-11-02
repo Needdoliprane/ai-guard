@@ -4,7 +4,7 @@ name: ai-guard-keycloak-demo
 services:
   keycloak-demo:
     profiles: [keycloak-demo-http]
-    image: ai-guard-keycloak-demo:26.8.1-3f3c5f8e
+    image: ${AI_GUARD_DEMO_IDP_IMAGE:-ai-guard-keycloak-demo:26.8.1-3f3c5f8e}
     build:
       context: .
       dockerfile: Dockerfile
