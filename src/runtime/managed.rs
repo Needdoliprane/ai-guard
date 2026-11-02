@@ -3,6 +3,195 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+#[cfg(all(test, unix))]
+mod preclaim_outcome_tests {
+    use super::*;
+    use crate::{broker::journal::RevisionRefV1, control_fs::Directory};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        sync::{Arc, Mutex},
+    };
+
+    /// Uses the existing native CLI fixture, not a Docker/Podman engine. This
+    /// checks only runtime dispatch after a crate-internal retirement result;
+    /// it does not establish durable Final, actor join or real confinement.
+    #[tokio::test]
+    async fn abandoned_prearmed_ports_retain_created_without_start_construction_or_later_cli() {
+        let temp = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("engine.rs");
+        let program = root.join("engine");
+        fs::write(
+            &source,
+            include_str!("../../tests/runtime_fixtures/managed.rs"),
+        )
+        .unwrap();
+        let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let compiled = tokio::time::timeout(
+            Duration::from_secs(30),
+            Command::new(compiler)
+                .args([
+                    "--edition=2024",
+                    "--crate-name",
+                    "abandoned_prearmed_fixture",
+                ])
+                .arg(&source)
+                .arg("-o")
+                .arg(&program)
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("the controlled Rust CLI fixture compiles within its harness budget")
+        .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let metadata = program.with_extension("fixture");
+        fs::create_dir(&metadata).unwrap();
+        fs::write(
+            metadata.join("AI_GUARD_MANAGED_ROOT"),
+            root.as_os_str().as_encoded_bytes(),
+        )
+        .unwrap();
+        fs::write(metadata.join("AI_GUARD_MANAGED_CHILD"), b"success").unwrap();
+        let runtime = Runtime::with_program(RuntimeKind::Docker, &program).unwrap();
+        let managed = ManagedRuntime::connect_docker_with_runtime(
+            Uuid::from_u128(3),
+            "unix:///fixture/docker.sock",
+            runtime,
+        )
+        .await
+        .unwrap();
+        let profile_binding = DockerLaunchProfileBindingV1::new(
+            &"1".repeat(64),
+            Uuid::from_u128(1),
+            &"2".repeat(64),
+            &managed.binding.endpoint,
+            &managed.runtime.invocation().fingerprint(),
+        )
+        .unwrap();
+        let directory = Directory::open_existing(&root).unwrap();
+        let profile = RetainedDockerLaunchProfile::create(&directory, &profile_binding).unwrap();
+        let profile_file = profile
+            .directory_path()
+            .join(crate::runtime::launch_profile::FILE);
+        let managed = managed.bind_docker_launch_profile(profile).unwrap();
+        // A start-command construction would now fail, independently of whether
+        // the fixture would report a successful start. STOP does not need it.
+        fs::remove_file(profile_file).unwrap();
+        assert!(managed.prearmed_command().is_err());
+        let spec = ContainerSpec::with_operation(
+            Uuid::from_u128(4),
+            ContainerPurpose::Run,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            vec!["/usr/bin/id".into()],
+            NetworkMode::None,
+            Uuid::from_u128(5),
+        )
+        .unwrap()
+        .with_managed_names("aig-fixture-worker", "aig-fixture-worker-work")
+        .unwrap();
+        let recorded = Arc::new(Mutex::new(None));
+        let callback_recorded = Arc::clone(&recorded);
+        let callback_root = root.clone();
+        let outcome = managed
+            .execute_prearmed_retained(
+                &spec,
+                None,
+                1024,
+                move |owned| {
+                    *callback_recorded.lock().unwrap() = Some((
+                        owned,
+                        fs::read_to_string(callback_root.join("log")).unwrap(),
+                    ));
+                    async {
+                        Ok(PrearmedStartDirective::AbandonedBeforeClaim(
+                            AbandonedBeforeClaim::new(
+                                Uuid::from_u128(1),
+                                Uuid::from_u128(6),
+                                RevisionRefV1::new(7, &"a".repeat(64)).unwrap(),
+                            )
+                            .unwrap(),
+                        ))
+                    }
+                },
+                |_| async { bail!("abandoned instance cannot invoke started callback") },
+            )
+            .await
+            .unwrap();
+        let ManagedPrearmedOutcome::Abandoned { owned, retirement } = outcome else {
+            panic!("abandoned instance cannot become an executed transport");
+        };
+        let (callback_owned, callback_log) = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(
+            serde_json::to_value(&owned).unwrap(),
+            serde_json::to_value(callback_owned).unwrap()
+        );
+        assert_eq!(retirement.final_revision().revision(), 7);
+        assert_eq!(fs::read_to_string(root.join("log")).unwrap(), callback_log);
+        assert_eq!(fs::read_to_string(root.join("state")).unwrap(), "created");
+        let callback_recorded = Arc::clone(&recorded);
+        let callback_root = root.clone();
+        let outcome = managed
+            .start_owned_prearmed_retained(
+                &spec,
+                &owned,
+                None,
+                1024,
+                move |owned| {
+                    *callback_recorded.lock().unwrap() = Some((
+                        owned,
+                        fs::read_to_string(callback_root.join("log")).unwrap(),
+                    ));
+                    async {
+                        Ok(PrearmedStartDirective::AbandonedBeforeClaim(
+                            AbandonedBeforeClaim::new(
+                                Uuid::from_u128(1),
+                                Uuid::from_u128(6),
+                                RevisionRefV1::new(7, &"a".repeat(64)).unwrap(),
+                            )
+                            .unwrap(),
+                        ))
+                    }
+                },
+                |_| async { bail!("abandoned instance cannot invoke started callback") },
+            )
+            .await
+            .unwrap();
+        let ManagedPrearmedOutcome::Abandoned {
+            owned: recovered, ..
+        } = outcome
+        else {
+            panic!("abandoned recovered instance cannot become an executed transport");
+        };
+        let (callback_owned, callback_log) = recorded.lock().unwrap().take().unwrap();
+        assert_eq!(
+            serde_json::to_value(&recovered).unwrap(),
+            serde_json::to_value(callback_owned).unwrap()
+        );
+        assert_eq!(recovered.handle.id(), owned.handle.id());
+        let log = fs::read_to_string(root.join("log")).unwrap();
+        assert_eq!(log, callback_log);
+        assert_eq!(
+            log.lines()
+                .filter(|line| line.starts_with("create "))
+                .count(),
+            1
+        );
+        for forbidden in ["start ", "kill ", "rm "] {
+            assert!(!log.lines().any(|line| line.starts_with(forbidden)));
+        }
+        assert_eq!(fs::read_to_string(root.join("state")).unwrap(), "created");
+    }
+}
+
 #[cfg(test)]
 mod launch_profile_tests {
     use super::*;
@@ -305,10 +494,70 @@ impl ManagedPrearmedExecution {
     }
 }
 
+/// Abandonment retains the exact Created snapshot and Final reference without
+/// manufacturing a transport capture, terminal observation or usage result.
+// Keep both public outcomes owned by value, including the established executed
+// result. This transport does not add a heap allocation to the existing path.
+#[allow(clippy::large_enum_variant)]
+pub enum ManagedPrearmedOutcome {
+    Executed(ManagedPrearmedExecution),
+    Abandoned {
+        owned: OwnedContainerSnapshot,
+        retirement: AbandonedBeforeClaim,
+    },
+}
+
+impl std::fmt::Debug for ManagedPrearmedOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Executed(_) => {
+                f.write_str("ManagedPrearmedOutcome::Executed([private retained execution])")
+            }
+            Self::Abandoned { .. } => {
+                f.write_str("ManagedPrearmedOutcome::Abandoned([private retained instance])")
+            }
+        }
+    }
+}
+
+// The private dispatcher preserves the same ownership until its public port
+// chooses the legacy or prearmed result; it adds no transport allocation.
+#[allow(clippy::large_enum_variant)]
+enum OwnedExecutionOutcome {
+    Executed(ManagedRetainedExecution),
+    Abandoned {
+        owned: OwnedContainerSnapshot,
+        retirement: AbandonedBeforeClaim,
+    },
+}
+
+impl OwnedExecutionOutcome {
+    fn into_legacy(self) -> Result<ManagedRetainedExecution> {
+        match self {
+            Self::Executed(retained) => Ok(retained),
+            Self::Abandoned { .. } => {
+                bail!("unused-slot retirement requires the prearmed transport")
+            }
+        }
+    }
+
+    fn into_prearmed(self) -> ManagedPrearmedOutcome {
+        match self {
+            Self::Executed(retained) => {
+                ManagedPrearmedOutcome::Executed(ManagedPrearmedExecution::from_retained(retained))
+            }
+            Self::Abandoned { owned, retirement } => {
+                ManagedPrearmedOutcome::Abandoned { owned, retirement }
+            }
+        }
+    }
+}
+
 enum OwnedStartDirective {
     ObserveOnly,
     Legacy,
     Prearmed(PrearmedStartControl),
+    AbandonedBeforeClaim(AbandonedBeforeClaim),
 }
 impl From<StartDirective> for OwnedStartDirective {
     fn from(value: StartDirective) -> Self {
@@ -323,6 +572,9 @@ impl From<PrearmedStartDirective> for OwnedStartDirective {
         match value {
             PrearmedStartDirective::ObserveOnly => Self::ObserveOnly,
             PrearmedStartDirective::EmitOnce(control) => Self::Prearmed(control),
+            PrearmedStartDirective::AbandonedBeforeClaim(retirement) => {
+                Self::AbandonedBeforeClaim(retirement)
+            }
         }
     }
 }
@@ -1120,6 +1372,7 @@ impl ManagedRuntime {
             on_started,
         )
         .await
+        .and_then(OwnedExecutionOutcome::into_legacy)
     }
     async fn create_owned_handle(&self, spec: &ContainerSpec) -> Result<ContainerHandle> {
         spec.require_current_creation_policy()?;
@@ -1180,6 +1433,7 @@ impl ManagedRuntime {
             on_started,
         )
         .await
+        .and_then(OwnedExecutionOutcome::into_legacy)
     }
     /// Create a batch instance, then consume only a fresh, independently armed
     /// claim. This port never subscribes a session to process-wide signals.
@@ -1190,7 +1444,7 @@ impl ManagedRuntime {
         stdout_limit: usize,
         on_created: C,
         on_started: F,
-    ) -> Result<ManagedPrearmedExecution>
+    ) -> Result<ManagedPrearmedOutcome>
     where
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
         CFut: Future<Output = Result<PrearmedStartDirective>>,
@@ -1213,7 +1467,7 @@ impl ManagedRuntime {
             on_started,
         )
         .await
-        .map(ManagedPrearmedExecution::from_retained)
+        .map(OwnedExecutionOutcome::into_prearmed)
     }
     /// Recovered Created instances require a newly returned EmitOnce control.
     /// Stored/replayed claims produce ObserveOnly and can never re-emit start.
@@ -1225,7 +1479,7 @@ impl ManagedRuntime {
         stdout_limit: usize,
         on_ready: C,
         on_started: F,
-    ) -> Result<ManagedPrearmedExecution>
+    ) -> Result<ManagedPrearmedOutcome>
     where
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
         CFut: Future<Output = Result<PrearmedStartDirective>>,
@@ -1248,7 +1502,7 @@ impl ManagedRuntime {
             on_started,
         )
         .await
-        .map(ManagedPrearmedExecution::from_retained)
+        .map(OwnedExecutionOutcome::into_prearmed)
     }
     #[allow(clippy::too_many_arguments)]
     async fn execute_owned<C, CFut, F, Fut>(
@@ -1261,7 +1515,7 @@ impl ManagedRuntime {
         stdout_limit: usize,
         on_created: C,
         on_started: F,
-    ) -> Result<ManagedRetainedExecution>
+    ) -> Result<OwnedExecutionOutcome>
     where
         C: FnOnce(OwnedContainerSnapshot) -> CFut,
         CFut: Future<Output = Result<OwnedStartDirective>>,
@@ -1291,7 +1545,7 @@ impl ManagedRuntime {
             handle: handle.clone(),
             observation: observation.clone(),
         });
-        let result: Result<ManagedRetainedExecution> = async {
+        let result: Result<OwnedExecutionOutcome> = async {
             let facts = self.inspect_facts(&id).await?;
             let observation = parse_container_observation_version(
                 &facts.bytes,
@@ -1326,6 +1580,10 @@ impl ManagedRuntime {
                     ensure!(duration.is_none(), "prearmed start cannot authorize legacy transport");
                     Some(control)
                 }
+                OwnedStartDirective::AbandonedBeforeClaim(retirement) => {
+                    ensure!(duration.is_none(), "unused-slot retirement requires the prearmed transport");
+                    return Ok(OwnedExecutionOutcome::Abandoned { owned: created, retirement });
+                }
             };
             let instance = CreatedInstance {
                 kind: self.binding.kind,
@@ -1355,11 +1613,11 @@ impl ManagedRuntime {
             };
             let terminal = self.observe(&handle).await?;
             terminal.validate_terminal(self.binding.kind, &created.observation)?;
-            Ok(ManagedRetainedExecution {
+            Ok(OwnedExecutionOutcome::Executed(ManagedRetainedExecution {
                 execution: RetainedExecution { result, instance },
                 created,
                 terminal,
-            })
+            }))
         }.await;
         match result {
             Ok(result) => Ok(result),

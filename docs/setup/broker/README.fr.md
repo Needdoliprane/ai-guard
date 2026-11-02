@@ -29,7 +29,7 @@ Le fonctionnement rootless est l'exigence normale. `allow_rootful_runtime: true`
 
 ## Exiger un contrôle compatible et actif
 
-Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, exactement `schema_version: 3` ou `4` et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
+Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version: 3`, `4` ou `5` et le protocole `broker_supervision_v1`. Submit, approve, resume, export et abandon-before-claim exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
 
 Lire les vrais tenant, namespace, rôle et état de supervision avant de rédiger le registre. Remplacer le binaire, l'origine et le chemin de credential privé par les valeurs de l'installation :
 
@@ -152,6 +152,33 @@ Cette commande n'installe aucune unité systemd ou tâche launchd et ne revendiq
 
 L'authentification IPC privée du gardien appartient à l'état du broker et reste distincte des credentials runner/viewer. Une authentification existante est lue sans réécriture. Si elle manque dans un rôle possédant déjà un état, le démarrage refuse d'en générer une autre. Préserver la racine du rôle, son historique et les sauvegardes privées cohérentes ; récupérer l'authentification originale sous maintenance contrôlée. Effacer l'historique pour obtenir une racine apparemment vide n'est pas une procédure de reprise.
 
+### Sélectionner explicitement un enforcer Full3
+
+La commande ci-dessus conserve la sélection historique du gardien. Pour utiliser Full3, choisir explicitement l'une des entrées suivantes. Le choix du gardien est distinct du `prearmed_start_profile` du registre ; ni les fichiers existants ni Registry2 n'activent automatiquement Full3. Utiliser la CLI et le service issus de la même version livrée. Avant l'une ou l'autre commande, arrêter délibérément le précédent broker au premier plan et vérifier la libération de sa lease broker. Préserver son gardien et l'état retenu.
+
+Choisir un nom de rôle de 1–100 lettres ASCII, chiffres, tirets ou underscores. `broker`, `journals` et `enforcer` sont réservés. C'est un seul nom enfant privé sous le `root` configuré du broker, jamais un chemin. Le conserver avec l'identité d'installation et le registre.
+
+Pour un rôle neuf :
+
+```sh
+AIGUARD_ENFORCER_ROLE="full3-primary"
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --enforcer-full3-new "$AIGUARD_ENFORCER_ROLE"
+```
+
+Le rôle doit être absent. L'entrée neuve actuelle accepte uniquement une nouvelle installation ou des journaux de profils configurés confirmés vides avec couverture complète. Un job existant, une couverture inconnue ou un profil de journal non configuré cause un refus. Ce n'est pas une migration des jobs ou gardiens existants. Conserver leurs racines, journaux, credentials, processus, volumes et échéances ; ne pas vider ou renommer l'état pour réussir le contrôle, et ne pas adopter le rôle historique `enforcer` comme Full3.
+
+Pour une connexion ultérieure du broker, préserver le gardien et réutiliser les mêmes installation, registre, racine et nom de rôle :
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --enforcer-full3-existing "$AIGUARD_ENFORCER_ROLE"
+```
+
+Cette entrée se connecte uniquement au rôle scellé existant. Elle vérifie l'identité d'installation et le ledger retenu avant admission. Si le pair est absent ou son état incompatible, elle refuse ; elle ne lance pas de remplaçant Full3, n'initialise pas un autre historique et ne se replie pas sur Legacy. Une Arm chargée conserve son affectation de rôle confirmée et ne peut pas être enregistrée de nouveau comme Arm originale fraîche.
+
+Les deux options Full3 sont mutuellement exclusives et incompatibles avec `--recovery-only` ou `--enforcer-role`. Choisir l'entrée d'arrêt restreinte ci-dessous si l'admission doit rester fermée.
+
 ### Reprendre les arrêts autorisés avec admission fermée
 
 Pour une installation existante qui doit uniquement restaurer ses cibles d'arrêt prouvées, démarrer explicitement le service restreint :
@@ -160,9 +187,18 @@ Pour une installation existante qui doit uniquement restaurer ses cibles d'arrê
 "$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only
 ```
 
+Sans nom de rôle, cette commande conserve la reprise historique. Pour reprendre les cibles STOP prouvées d'un rôle Full3 précédemment scellé, conserver la même installation et sélectionner explicitement ce rôle :
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --recovery-only --enforcer-role "$AIGUARD_ENFORCER_ROLE"
+```
+
+`--enforcer-role` est accepté uniquement avec `--recovery-only` et suit les mêmes règles de nom enfant que Full3. Il ouvre un rôle scellé existant sans initialiser d'authentification ou de ledger neuf. Il ne donne pas d'admission Full3.
+
 Ce mode exige les racines privées, verrous de rôle, authentification IPC et namespaces de découverte existants. Il n'initialise aucune nouvelle installation et ne régénère pas une authentification manquante. Une lease occupée ou un enforcer vivant incompatible reste un refus ; cette commande ne prend jamais le contrôle d'un processus existant et ne l'arrête pas. Préserver son état et utiliser sa connexion prise en charge lorsqu'elle est disponible.
 
-Le service demande explicitement la capacité `StopsOnly` du protocole2. Il restaure uniquement les cibles prouvées par des lecteurs de journal retenus, conserve leur identité de conteneur et leur échéance originales, et retient les annulations durables pour les rejouer après reconnexion. L'admission reste fermée pendant toute la vie de ce service : Submit, approve, resume et export ne peuvent pas obtenir de capacité Full. Status, list, recovery-status et cancel conservent leurs dépendances normales d'authentification et de données ; ce mode ne réactive pas un gateway inactif.
+Le service demande explicitement la capacité `StopsOnly` : protocole2 pour la reprise historique, protocole3 pour le rôle scellé nommé. Il restaure uniquement les cibles prouvées par des lecteurs de journal retenus, conserve leur identité de conteneur et leur échéance originales, et retient les annulations durables pour les rejouer après reconnexion. L'admission reste fermée pendant toute la vie de ce service : Submit, approve, resume, export et abandon-before-claim sont refusés. Status, list, recovery-status et cancel conservent leurs dépendances normales d'authentification et de données ; ce mode ne réactive pas un gateway inactif.
 
 Pour chaque lot de reprise, le broker retient les cibles validées dans sa capacité configurée avant d'attendre leurs confirmations individuelles de contrôle. La disparition du client attendant cette demande ne les efface pas tant que le broker fonctionne. Les cibles indépendantes continuent après l'échec d'une cible ; le résultat signale une couverture partielle. Une confirmation porte sur l'instance du gardien et la révision de cible acquittées à cet instant, pas sur un worker observé arrêté. Après un crash du broker, la reprise exige toujours le journal durable conservé.
 
@@ -220,6 +256,8 @@ Un ACK d'annulation n'est ni une observation terminale runtime ni une preuve de 
 
 `recovery-status` lit les métadonnées confirmées du journal même si le chargement métier complet est indisponible. Sa `source` est `confirmed_journal` et sa `runtime_evidence` est `not_queried` : il **n'inspecte pas le moteur**. `journal_mode: "stop_only"`, `incomplete`, `reconciliation_required`, les Arms pending et les échéances originales décrivent les preuves retenues, pas de nouvelles observations ou une permission d'exécution. Des champs ou cibles absents n'établissent pas leur absence du runtime.
 
+Le **payload version2** de recovery-status conserve les champs de version1 et ajoute `known_arms[].preclaim` et `retirements`. L'enveloppe IPC locale reste en version1 ; les payloads Status et Page sont inchangés. Utiliser des CLI/service de même version livrée et mettre à jour les consommateurs qui valident le payload fermé : un ancien lecteur peut refuser ces nouveaux champs. Un ancien service refuse la commande inconnue abandon-before-claim ; aucun repli vers Cancel ou une autre commande n'existe.
+
 Pour une réconciliation explicite du même job accepté, quand contrôle et runtime requis sont disponibles :
 
 ```sh
@@ -228,6 +266,56 @@ AIGUARD_RESUME="<new-resume-command-uuid>"
 ```
 
 Resume conserve intention acceptée, credentials, autorité runtime, échéances originales et claims consommés. Il ne donne ni autre start ni renouvellement de durée. Une capacité source fraîche n'est admise que par les contrôles produit de source figée pour l'étape pré-managed concernée ; ne pas modifier source, binding ou checkpoint pour les faire passer. Une dépendance indisponible, un runtime ambigu ou une réconciliation refusée reste une erreur explicite.
+
+## Abandonner une Arm Full3 originale avant claim
+
+Une Arm identifie une cible d'enforcement acquittée pour un worker ou un helper. Utiliser `abandon-before-claim` pour inhiber le claim d'une Arm Full3 originale exacte, sous réserve de la course avec claim et STOP. Cette commande n'annule pas tout le job. Elle exige un contrôle compatible actif, les mêmes droits authentifiés de mutation et le mode d'admission Full3 du service. Une Arm historique ou restaurée, un claim/STOP réservé, un epoch/génération divergent ou un propriétaire inconnu ne permettent pas ce parcours. L'exécution normale avance immédiatement, sans période d'attente humaine ; le claim peut gagner avant que l'opérateur puisse lire et transmettre une demande. La commande n'ajoute aucun délai de grâce et ne renouvelle aucune échéance.
+
+Lire d'abord l'opération d'origine :
+
+```sh
+"$AIGUARD_BIN" broker recovery-status --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+Sélectionner son `known_arms[].arm_id` exact. Le `preclaim` imbriqué est une **métadonnée locale au processus**, en version1, avec `source: "process_local"` et `freshness: "current_process_state"` ou `"unknown"`. Il expose `expected_epoch`, `generation`, `state`, `command_id` et `signal_audit_confirmed`. Après redémarrage, propriétaire absent ou lecture incomplète du journal, état inconnu et identités null ne reconstituent ni propriétaire original ni signal d'abandon.
+
+| `preclaim.state` | Interprétation opérateur |
+|---|---|
+| `registration_in_flight`, `original_unclaimed` | Une demande peut encore concurrencer le claim, sous réserve des vérifications du service. Copier exactement epoch et génération actuels. |
+| `claim_reserved`, `stop_reserved` | L'abandon ne peut pas gagner cette Arm. Consulter le job d'origine ; Cancel reste disponible sous ses contrôles normaux. |
+| `abandon_pending_audit` | La voie locale du claim est inhibée, mais l'ACK d'audit du signal n'est pas confirmé. Ne pas en déduire un retrait. |
+| `abandon_requested` | Le signal est acquitté par l'audit. Seul un enregistrement de retrait confirmé avec `phase: "final"` établit sa fin. |
+| `retiring` | Le retrait est en cours ; consulter les enregistrements `retirements` confirmés. |
+| `unknown` | Ne pas cibler cette projection. Préserver les preuves et utiliser reprise/annulation normales lorsqu'elles sont admissibles. |
+
+Conserver une seule fois un nouvel UUID de commande. Remplacer chaque placeholder ci-dessous par les identités observées exactes et la génération décimale ; tous les UUID doivent être non nuls. Cette commande exige un `--command-id` explicite et n'en génère jamais pour l'opérateur.
+
+```sh
+AIGUARD_ARM="<arm-uuid-from-known-arms>"
+AIGUARD_EPOCH="<expected-epoch-from-preclaim>"
+AIGUARD_GENERATION="<generation-from-preclaim>"
+AIGUARD_ABANDON_COMMAND="<new-abandon-command-uuid>"
+"$AIGUARD_BIN" broker abandon-before-claim --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION" --arm-id "$AIGUARD_ARM" \
+  --expected-epoch "$AIGUARD_EPOCH" --generation "$AIGUARD_GENERATION" \
+  --command-id "$AIGUARD_ABANDON_COMMAND"
+"$AIGUARD_BIN" broker recovery-status --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+Après réponse perdue, ne réessayer que les mêmes UUID de commande, opération, Arm, epoch et génération. Un contenu changé sous cet UUID est un conflit ; une nouvelle génération n'hérite pas de l'ancienne demande. Une réponse `abandon_requested` confirme seulement l'ACK durable d'audit du signal. Sa révision et son checkpoint concernent cet acquittement, pas Final. Un ACK absent ou en erreur ne donne jamais de droit de retrait et ne rouvre pas le claim inhibé. Si claim ou STOP gagne, conserver le refus et utiliser Cancel au besoin ; ne pas substituer une autre Arm ou créer un deuxième job pour le contourner.
+
+Dans recovery-status, faire correspondre `retirements[].arm_id` et `retirement_id` à l'Arm choisie et à l'UUID de commande. `phase: "pending"` est une intention de retrait enregistrée ; `intention_audit_confirmed` concerne cette intention, séparément de l'ACK du signal. `phase: "final"` et son `guardian_receipt_hash` identifient le retrait terminé confirmé. Comparer les événements d'audit autorisés `broker.abandon-before-claim.requested`, `broker.retirement.pending` et `broker.retirement.final` ; une cible absente de `known_arms` ne suffit pas à établir Final. Une lecture indisponible ou partielle reste inconnue.
+
+Si `preclaim.retirement_continuation_retained` vaut `true`, ce processus broker conserve encore un propriétaire après une publication bloquée. Examiner l'erreur du job et conserver le processus et ses preuves ; cet indicateur ne donne aucun droit et n'établit pas Final. Une valeur nulle reste inconnue. Un redémarrage ne reconstitue pas ce propriétaire vivant depuis le JSON du journal.
+
+Les événements d'audit de retrait en attente sont rejoués par le writer restreint même si les nouveaux starts sont interdits ou qu'un blob de credentials fournisseur est indisponible. La livraison exige toujours le credential runner configuré et le gateway correspondant. Un service Full3 qui détient déjà la connexion au gardien original peut confirmer son résultat terminé puis enregistrer Final après une réponse perdue ; le mode recovery-only n'obtient jamais de droit Full pour cela.
+
+Après abandon, l'instance possédée conserve son état Created réel et l'allocation centrale conserve son état confirmé. Aucun quota encore réservé n'est libéré par déduction. Ce résultat ne fournit ni observation terminale, ni capture de sortie vide, ni usage nul ou nettoyage automatique. Conserver l'instance et utiliser les procédures explicites d'annulation/réconciliation avec leurs contrôles de preuves normaux. Si un export est abandonné, son CLI affiche la réponse de retrait et termine en échec ; il ne renvoie pas d'acquittement d'export.
 
 ## Exporter vers une destination neuve
 

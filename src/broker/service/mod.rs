@@ -1,13 +1,48 @@
 //! Trusted service integration. IPC authentication is distinct from Unix UID.
 mod client;
 mod jobs;
+pub(crate) mod preclaim;
 mod profile;
 pub mod protocol;
 mod server;
 mod targets;
 pub use client::{encode_submit, request};
+pub use preclaim::{AbandonBeforeClaimV1, PreclaimStateV1};
 pub use profile::{RequestedExecutionV1, SubmitV1};
-pub use server::{serve, serve_recovery};
+pub use server::{serve, serve_recovery, serve_selected};
+
+/// Explicit operator selection. Existing files never promote a legacy service
+/// into Full3, and recovery never requests admission authority.
+#[derive(Debug)]
+pub enum ServiceEnforcerSelectionV1 {
+    Legacy,
+    Recovery { role_name: Option<String> },
+    Full3Fresh { role_name: String },
+    Full3Existing { role_name: String },
+}
+
+impl ServiceEnforcerSelectionV1 {
+    fn validate(&self) -> anyhow::Result<()> {
+        let role = match self {
+            Self::Legacy | Self::Recovery { role_name: None } => return Ok(()),
+            Self::Recovery {
+                role_name: Some(role_name),
+            }
+            | Self::Full3Fresh { role_name }
+            | Self::Full3Existing { role_name } => role_name,
+        };
+        anyhow::ensure!(
+            !role.is_empty()
+                && role.len() <= 100
+                && role
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                && !matches!(role.as_str(), "broker" | "journals" | "enforcer"),
+            "invalid or reserved private enforcer role name"
+        );
+        Ok(())
+    }
+}
 
 use super::{enforcer::CancelGeneration, journal::JournalScopeV1};
 use crate::{
@@ -34,6 +69,7 @@ pub(crate) struct AuthenticatedBatchContext {
     config: Directory,
     runtime: Runtime,
     cancel: CancelGeneration,
+    preclaim: preclaim::PreclaimControlV1,
     expected_generation: u64,
     source: Option<Arc<AuthorizedSource>>,
     exclusions: Vec<File>,
@@ -71,6 +107,7 @@ impl AuthenticatedBatchContext {
             scope,
             config,
             runtime,
+            preclaim: preclaim::PreclaimControlV1::new(cancel.clone()),
             cancel,
             expected_generation,
             source: None,
@@ -92,6 +129,9 @@ impl AuthenticatedBatchContext {
     }
     pub(crate) fn cancel_generation(&self) -> &CancelGeneration {
         &self.cancel
+    }
+    pub(crate) fn preclaim(&self) -> &preclaim::PreclaimControlV1 {
+        &self.preclaim
     }
     pub(crate) fn expected_generation(&self) -> u64 {
         self.expected_generation
@@ -202,6 +242,7 @@ impl VerifiedProfile {
         profile: &profile::ControlProfileV1,
         root: &Directory,
         cancel: CancelGeneration,
+        preclaim: preclaim::PreclaimControlV1,
         source: Option<Arc<AuthorizedSource>>,
     ) -> Result<AuthenticatedBatchContext> {
         // Capture once, before any filesystem operation or deferred task. A
@@ -234,9 +275,67 @@ impl VerifiedProfile {
             config,
             runtime,
             cancel,
+            preclaim,
             expected_generation,
             source,
             exclusions,
         })
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::ServiceEnforcerSelectionV1;
+
+    #[test]
+    fn service_selection_validates_roles_without_relying_on_cli_parser() {
+        for role in [
+            "../other",
+            "/private/other",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "",
+            "broker",
+            "journals",
+            "enforcer",
+            "é",
+            "role\0suffix",
+        ] {
+            for selection in [
+                ServiceEnforcerSelectionV1::Full3Fresh {
+                    role_name: role.into(),
+                },
+                ServiceEnforcerSelectionV1::Full3Existing {
+                    role_name: role.into(),
+                },
+                ServiceEnforcerSelectionV1::Recovery {
+                    role_name: Some(role.into()),
+                },
+            ] {
+                assert!(selection.validate().is_err());
+            }
+        }
+        assert!(ServiceEnforcerSelectionV1::Legacy.validate().is_ok());
+        assert!(
+            ServiceEnforcerSelectionV1::Recovery { role_name: None }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ServiceEnforcerSelectionV1::Full3Fresh {
+                role_name: "role-D5_1".into()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ServiceEnforcerSelectionV1::Full3Fresh {
+                role_name: "a".repeat(101)
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

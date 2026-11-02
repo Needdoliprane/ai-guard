@@ -3,6 +3,43 @@ use super::journal::{same, without_response};
 use super::*;
 
 impl Execution<'_> {
+    /// A loaded Arm can only reconnect to the exact role assignment confirmed
+    /// in V5. Its metadata never reconstructs an original registration owner.
+    pub(super) async fn restore_assigned_slot(
+        &self,
+        registration: RegistrationV1,
+    ) -> Result<EnforcedSlot> {
+        let (job, _) = self.load().await?;
+        let arm = Uuid::parse_str(registration.arm_id())?;
+        let binding = job.broker_checkpoint_v5().and_then(|checkpoint| {
+            checkpoint
+                .bindings()
+                .iter()
+                .find(|binding| binding.arm_id() == arm)
+        });
+        if self.executor.enforcer.full3().is_none() {
+            ensure!(
+                binding.is_none(),
+                "Full3 assigned Arm cannot enter a legacy guardian"
+            );
+            return Ok(self
+                .executor
+                .enforcer
+                .restore(registration, self.context.cancel_generation().clone())
+                .await?);
+        }
+        let binding = binding.context("loaded Arm has no confirmed Full3 assignment")?;
+        Ok(self
+            .executor
+            .enforcer
+            .restore_with_binding(
+                registration,
+                self.context.cancel_generation().clone(),
+                binding,
+            )
+            .await?)
+    }
+
     pub(super) async fn arm_and_claim(
         &self,
         runtime: &ManagedRuntime,
@@ -31,6 +68,7 @@ impl Execution<'_> {
                 }
                 _ => None,
             });
+        let newly_requested_arm = previous_arm.is_none();
         let pending = if let Some(previous) = previous_arm {
             without_response(&previous)
         } else {
@@ -99,33 +137,78 @@ impl Execution<'_> {
         let (_confirmed_arm_head, current) = committed
             .into_parts(self.operation, self.context.scope())
             .context(diagnostics::BrokerStep::ArmExchange)?;
-        let slot = self
-            .executor
-            .enforcer
-            .register(
-                RegistrationV1::new(
-                    hex::encode(Sha256::digest(
-                        self.context.scope().gateway_origin().as_bytes(),
-                    )),
-                    self.context.scope().tenant_id().into(),
-                    request.clone(),
-                    response.receipt.clone(),
-                    runtime.binding().clone(),
-                    owned,
-                )
-                .context(diagnostics::BrokerStep::Registration)?,
-                self.context.cancel_generation().clone(),
-            )
-            .await
-            .map_err(|code| -> anyhow::Error {
-                match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
-                    &request, code,
-                ) {
-                    Some(failure) => failure.into(),
-                    None => code.into(),
+        if let Some(full) = self.executor.enforcer.full3()
+            && newly_requested_arm
+        {
+            self.context.preclaim().announce_registration(
+                self.operation,
+                Uuid::parse_str(&request.operation_id)?,
+                full.epoch(),
+                self.generation,
+            )?;
+        }
+        let registration = RegistrationV1::new(
+            hex::encode(Sha256::digest(
+                self.context.scope().gateway_origin().as_bytes(),
+            )),
+            self.context.scope().tenant_id().into(),
+            request.clone(),
+            response.receipt.clone(),
+            runtime.binding().clone(),
+            owned,
+        )
+        .context(diagnostics::BrokerStep::Registration)?;
+        let slot = if self.executor.enforcer.full3().is_some() && !newly_requested_arm {
+            self.restore_assigned_slot(registration).await
+        } else {
+            self.executor
+                .enforcer
+                .register(registration, self.context.cancel_generation().clone())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .map_err(|code| -> anyhow::Error {
+            let Some(code) = code
+                .downcast_ref::<crate::broker::enforcer::EnforcerError>()
+                .copied()
+            else {
+                return code;
+            };
+            match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
+                &request, code,
+            ) {
+                Some(failure) => failure.into(),
+                None => code.into(),
+            }
+        })
+        .context(diagnostics::BrokerStep::Registration)?;
+        if self.executor.enforcer.full3().is_some() && newly_requested_arm {
+            let binding = slot.full3_registration_binding()?;
+            let mut confirmed = false;
+            for _ in 0..16 {
+                // An authenticated abandon signal or Cancel can advance the
+                // head while native Register is in flight. Keep this exact
+                // original slot/binding; merge only through the writer CAS.
+                let (latest, _) = self.load().await?;
+                match self
+                    .executor
+                    .writer
+                    .bind_full3_registration(self.operation, latest.head().clone(), binding.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        confirmed = true;
+                        break;
+                    }
+                    Err(JournalError::Conflict) => continue,
+                    Err(error) => return Err(error.into()),
                 }
-            })
-            .context(diagnostics::BrokerStep::Registration)?;
+            }
+            ensure!(
+                confirmed,
+                "Full3 assignment publication requires reconciliation"
+            );
+        }
         // Later mutations still reload and use the writer's strict CAS.
         if current.operations.iter().any(|op| match op {
             Operation::WorkerClaim { request: claim, .. } => {
@@ -144,6 +227,32 @@ impl Execution<'_> {
         // the enforcer's consumed guard immediately before the engine spawn.
         slot.check_ready_for_claim_diagnosed(self.generation)
             .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
+        if let Some(full) = self.executor.enforcer.full3() {
+            let arm_id = Uuid::parse_str(&request.operation_id)?;
+            self.context.preclaim().mark_original_unclaimed(
+                arm_id,
+                full.epoch(),
+                self.generation,
+            )?;
+            match self
+                .context
+                .preclaim()
+                .choose_claim(arm_id, full.epoch(), self.generation)
+            {
+                Ok(reservation) => reservation.consume()?,
+                Err(crate::broker::service::protocol::BrokerErrorCodeV1::Conflict) => {
+                    let signal = self
+                        .context
+                        .preclaim()
+                        .signal_for_arm(arm_id, full.epoch(), self.generation)?
+                        .context("preclaim reservation is unavailable")?;
+                    return self
+                        .retire_unused_before_claim(slot, &request, signal)
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let operation_id = Uuid::new_v4().to_string();
         let emitter_id = Uuid::new_v4().to_string();
         let check = self
@@ -178,6 +287,17 @@ impl Execution<'_> {
                 response: None,
             }
         };
+        let reservation = slot.reserve_claim(self.generation)?;
+        let claim_arm_id = match &claim {
+            Operation::WorkerClaim { request, .. } => &request.arm_receipt.arm_id,
+            Operation::HelperClaim { request, .. } => &request.arm_receipt.arm_id,
+            _ => return Err(anyhow!("invalid preclaim operation")),
+        };
+        ensure!(
+            claim_arm_id == &request.operation_id,
+            "claim selected a different Arm"
+        );
+        slot.consume_claim_reservation(reservation, &request, self.generation)?;
         let (acknowledged, fresh) = self
             .rpc_checked(claim, Some(&slot))
             .await
@@ -223,7 +343,7 @@ impl Execution<'_> {
         purpose: HelperPurposeV1,
         permission: HelperPermissionV1,
         request_id: Option<Uuid>,
-    ) -> Result<HelperCompletion> {
+    ) -> Result<BatchStep<HelperCompletion>> {
         self.stage(match purpose {
             HelperPurposeV1::Import => LocalFailurePhaseV1::Import,
             HelperPurposeV1::ImportVerification => LocalFailurePhaseV1::ImportVerification,
@@ -283,7 +403,7 @@ impl Execution<'_> {
         if let Some(completion) = completed_helper(&draft, &policy)? {
             self.finish_helper_cleanup(runtime, &preparation, &completion.arm)
                 .await?;
-            return Ok(completion);
+            return Ok(ControlFlow::Continue(completion));
         }
         if let Some(owned) = preparation.owned()
             && draft.operations.iter().any(|op| matches!(op,
@@ -295,11 +415,11 @@ impl Execution<'_> {
                     => Some((request.clone(), response.receipt.clone())),
                 _ => None,
             }).context("historical helper arm is missing")?;
-            self.executor.enforcer.restore(RegistrationV1::new(
+            self.restore_assigned_slot(RegistrationV1::new(
                 hex::encode(Sha256::digest(self.context.scope().gateway_origin().as_bytes())),
                 self.context.scope().tenant_id().into(), arm, receipt.clone(),
                 runtime.binding().clone(), owned.clone(),
-            )?, self.context.cancel_generation().clone()).await?;
+            )?).await?;
             let terminal = runtime.resume_terminal(&owned.handle).await?;
             let observation = managed::broker_helper_observation(&worker, &policy, &terminal)?;
             let request = HelperObservationV1 {version: 1, operation_id: Uuid::new_v4().to_string(),
@@ -312,7 +432,7 @@ impl Execution<'_> {
             ensure!(request.observation.exit_code == Some(0), "historical helper failed");
             ensure!(purpose == HelperPurposeV1::Import,
                 "historical helper transport bytes are unknown; fresh verification or export is required");
-            return Ok(HelperCompletion { policy, arm: receipt, receipt: terminal_receipt, bytes: None, manifest: None });
+            return Ok(ControlFlow::Continue(HelperCompletion { policy, arm: receipt, receipt: terminal_receipt, bytes: None, manifest: None }));
         }
         let input = if purpose == HelperPurposeV1::Import {
             let checkpoint = draft
@@ -394,6 +514,15 @@ impl Execution<'_> {
                     |_observation| async { Ok(()) },
                 )
                 .await?
+        };
+        let retained = match retained {
+            crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
+            crate::runtime::ManagedPrearmedOutcome::Abandoned { owned, retirement } => {
+                return Ok(ControlFlow::Break(Box::new(AbandonedBatch {
+                    owned,
+                    retirement,
+                })));
+            }
         };
         let observation =
             managed::broker_helper_observation(&worker, &policy, retained.terminal())?;
@@ -491,13 +620,13 @@ impl Execution<'_> {
             verified,
             "import verification differs from its immutable source"
         );
-        Ok(HelperCompletion {
+        Ok(ControlFlow::Continue(HelperCompletion {
             policy,
             arm,
             receipt,
             bytes: Some(bytes),
             manifest,
-        })
+        }))
     }
 
     pub(super) async fn helper_arm(&self, helper_id: &str) -> Result<ArmReceiptV1> {

@@ -52,6 +52,14 @@ enum Command {
         max_slots: u32,
         #[arg(long)]
         recovery_only: bool,
+        #[arg(long, conflicts_with_all = ["recovery_only", "full3_existing"], requires_all = ["role_name", "installation_id"])]
+        full3_fresh: bool,
+        #[arg(long, conflicts_with = "recovery_only")]
+        full3_existing: bool,
+        #[arg(long, requires = "full3_fresh")]
+        role_name: Option<String>,
+        #[arg(long, requires = "full3_fresh")]
+        installation_id: Option<uuid::Uuid>,
     },
     /// Collecteur d'audit et moteur de décisions ; normalement lancé dans un conteneur.
     Gateway(Box<GatewayArgs>),
@@ -834,11 +842,31 @@ async fn main() -> Result<()> {
             root,
             max_slots,
             recovery_only,
+            full3_fresh,
+            full3_existing,
+            role_name,
+            installation_id,
         } => {
             let root = absolute_path(&root)
                 .and_then(|root| Directory::open_existing(&root))
                 .map_err(|_| anyhow::anyhow!("private enforcer root validation failed"))?;
-            if recovery_only {
+            if full3_fresh {
+                let role_name = role_name
+                    .ok_or_else(|| anyhow::anyhow!("explicit fresh Full3 role name is required"))?;
+                let installation_id = installation_id.ok_or_else(|| {
+                    anyhow::anyhow!("explicit fresh Full3 installation is required")
+                })?;
+                agentsandbox::broker::enforcer::run_internal_full3_fresh(
+                    &root,
+                    &role_name,
+                    installation_id,
+                    max_slots,
+                )
+                .await?;
+            } else if full3_existing {
+                agentsandbox::broker::enforcer::run_internal_full3_existing(&root, max_slots)
+                    .await?;
+            } else if recovery_only {
                 agentsandbox::broker::enforcer::run_internal_recovery_enforcer(&root, max_slots)
                     .await?;
             } else {

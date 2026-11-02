@@ -1,9 +1,21 @@
 //! Batch execution from a durable intention. Journal I/O is delegated to the
 //! bounded writer; the enforcer owns stop independently of that writer.
+macro_rules! continue_step {
+    ($step:expr) => {
+        match $step {
+            ControlFlow::Continue(value) => value,
+            ControlFlow::Break(abandoned) => return Ok(ControlFlow::Break(abandoned)),
+        }
+    };
+}
+
 mod diagnostics;
 mod helpers;
 mod journal;
 mod results;
+mod retirement;
+#[cfg(all(test, unix))]
+mod retirement_live_tests;
 use super::{BrokerRunState, FreshStartPermission, credentials_from_job};
 use crate::{
     broker::{
@@ -12,7 +24,7 @@ use crate::{
             SupervisionOperationV1 as Operation,
         },
         clock::{HostClock, checked_deadline},
-        enforcer::{CancelGeneration, EnforcedSlot, EnforcerClient, RegistrationV1},
+        enforcer::{CancelGeneration, EnforcedSlot, ExecutionEnforcerV1, RegistrationV1},
         journal::{AcceptedJobV1, CancelStopProjectionV1, JournalError, JournalScopeV1},
         lifecycle::{
             BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1, LocalFailureCodeV1,
@@ -36,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
+    ops::ControlFlow,
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
@@ -50,7 +63,7 @@ const CANCEL_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Clone)]
 pub(crate) struct BatchExecutor {
     writer: WriterClient,
-    enforcer: EnforcerClient,
+    enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
 }
 impl fmt::Debug for BatchExecutor {
@@ -62,12 +75,21 @@ impl fmt::Debug for BatchExecutor {
 /// Disposition of this invocation. Detailed results are already persisted in
 /// the journal and audit; the service reads those facts for status responses.
 pub(crate) enum BatchOutcome {
+    AbandonedBeforeClaim(Box<AbandonedBatch>),
     AwaitingReview,
     Denied,
     AdmissionRefused,
     Cancelled,
     Terminal,
 }
+
+pub(crate) struct AbandonedBatch {
+    pub(crate) owned: OwnedContainerSnapshot,
+    pub(crate) retirement: crate::runtime::AbandonedBeforeClaim,
+}
+
+pub(crate) type BatchStep<T> = ControlFlow<Box<AbandonedBatch>, T>;
+
 impl fmt::Debug for BatchOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("BatchOutcome(<private observed state>)")
@@ -199,12 +221,12 @@ struct Execution<'a> {
 impl BatchExecutor {
     pub(crate) fn new(
         writer: WriterClient,
-        enforcer: EnforcerClient,
+        enforcer: impl Into<ExecutionEnforcerV1>,
         clock: Arc<dyn HostClock>,
     ) -> Self {
         Self {
             writer,
-            enforcer,
+            enforcer: enforcer.into(),
             clock,
         }
     }
@@ -229,7 +251,7 @@ impl BatchExecutor {
         operation: Uuid,
         target: ValidatedExportTarget,
         context: &AuthenticatedBatchContext,
-    ) -> std::result::Result<ExportCompletion, BatchFailure> {
+    ) -> std::result::Result<BatchStep<ExportCompletion>, BatchFailure> {
         let execution = Execution::open(self, operation, context)
             .await
             .map_err(|_| BatchFailure)?;
@@ -248,7 +270,7 @@ impl BatchExecutor {
 /// immutable Cancel prefix. Known targets are attempted before partial coverage
 /// is reported, without changing a job generation, deadline or start permission.
 pub(crate) async fn deliver_cancellation(
-    enforcer: &EnforcerClient,
+    enforcer: &ExecutionEnforcerV1,
     expected_scope: &JournalScopeV1,
     projection: CancelStopProjectionV1,
     cancel: &CancelGeneration,
@@ -291,10 +313,27 @@ pub(crate) async fn deliver_cancellation(
                     continue;
                 }
             };
+            let binding = stop.full3_registration_binding().cloned();
             let enforcer = enforcer.clone();
             let cancel = cancel.clone();
             attempts.push(async move {
-                tokio::time::timeout(budget, enforcer.cancel_retained(registration, cancel)).await
+                tokio::time::timeout(budget, async {
+                    match (enforcer.full3(), binding.as_ref()) {
+                        (Some(_), Some(binding)) => {
+                            enforcer
+                                .cancel_retained_bound(registration, cancel, binding)
+                                .await
+                        }
+                        (Some(_), None) => {
+                            Err(crate::broker::enforcer::EnforcerError::Unauthorized)
+                        }
+                        (None, Some(_)) => {
+                            Err(crate::broker::enforcer::EnforcerError::Unauthorized)
+                        }
+                        (None, None) => enforcer.cancel_retained(registration, cancel).await,
+                    }
+                })
+                .await
             });
         }
         let outcomes = futures_util::future::join_all(attempts).await;
@@ -524,10 +563,12 @@ impl<'a> Execution<'a> {
         }
         if worker.state == WorkerStateV1::Preparing && worker.attempt.create_operation_id.is_none()
         {
-            self.import(&runtime).await?;
+            if let ControlFlow::Break(abandoned) = self.import(&runtime).await? {
+                return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+            }
             worker = self.mutate(WorkerTransitionV1::CreateIssued).await?;
         }
-        if (worker.state == WorkerStateV1::Preparing
+        if ((worker.state == WorkerStateV1::Preparing
             && worker.attempt.create_operation_id.is_some())
             || matches!(
                 worker.state,
@@ -536,9 +577,10 @@ impl<'a> Execution<'a> {
                     | WorkerStateV1::Running
                     | WorkerStateV1::InDoubt
                     | WorkerStateV1::Stopping
-            )
+            ))
+            && let ControlFlow::Break(abandoned) = self.execute_worker(&runtime).await?
         {
-            self.execute_worker(&runtime).await?;
+            return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
         }
         let (_, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -547,7 +589,9 @@ impl<'a> Execution<'a> {
             "runtime terminal is not centrally acknowledged"
         );
         self.post_worker_result().await?;
-        self.final_scan(&runtime).await?;
+        if let ControlFlow::Break(abandoned) = self.final_scan(&runtime).await? {
+            return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+        }
         Ok(BatchOutcome::Terminal)
     }
 
@@ -565,7 +609,7 @@ impl<'a> Execution<'a> {
             })
             .context("accepted admission receipt is missing")
     }
-    async fn import(&self, runtime: &ManagedRuntime) -> Result<()> {
+    async fn import(&self, runtime: &ManagedRuntime) -> Result<BatchStep<()>> {
         let (_, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
         // Repeating volume creation is safe only through the existing runtime's
@@ -591,31 +635,37 @@ impl<'a> Execution<'a> {
             )
             .await?;
         let admission = self.admission_receipt().await?;
-        let imported = self
-            .helper(
+        let imported = continue_step!(
+            self.helper(
                 runtime,
                 HelperPurposeV1::Import,
                 HelperPermissionV1::Admission { receipt: admission },
                 None,
             )
-            .await?;
+            .await?
+        );
         let verification = HelperPermissionV1::ImportVerification {
             import_helper_id: imported.policy.helper_id.clone(),
             import_arm: imported.arm,
             import_terminal: imported.receipt,
             manifest_digest: worker.launch.workspace_manifest_digest.clone(),
         };
-        self.helper(
-            runtime,
-            HelperPurposeV1::ImportVerification,
-            verification,
-            None,
-        )
-        .await?;
-        Ok(())
+        continue_step!(
+            self.helper(
+                runtime,
+                HelperPurposeV1::ImportVerification,
+                verification,
+                None,
+            )
+            .await?
+        );
+        Ok(ControlFlow::Continue(()))
     }
 
-    async fn execute_worker(&self, runtime: &ManagedRuntime) -> Result<ContainerObservation> {
+    async fn execute_worker(
+        &self,
+        runtime: &ManagedRuntime,
+    ) -> Result<BatchStep<ContainerObservation>> {
         self.stage(LocalFailurePhaseV1::Worker);
         let (job, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -667,22 +717,17 @@ impl<'a> Execution<'a> {
                     _ => None,
                 })
                 .context("historical worker arm is missing")?;
-            self.executor
-                .enforcer
-                .restore(
-                    RegistrationV1::new(
-                        hex::encode(Sha256::digest(
-                            self.context.scope().gateway_origin().as_bytes(),
-                        )),
-                        self.context.scope().tenant_id().into(),
-                        arm.0,
-                        arm.1,
-                        runtime.binding().clone(),
-                        owned.clone(),
-                    )?,
-                    self.context.cancel_generation().clone(),
-                )
-                .await?;
+            self.restore_assigned_slot(RegistrationV1::new(
+                hex::encode(Sha256::digest(
+                    self.context.scope().gateway_origin().as_bytes(),
+                )),
+                self.context.scope().tenant_id().into(),
+                arm.0,
+                arm.1,
+                runtime.binding().clone(),
+                owned.clone(),
+            )?)
+            .await?;
             let terminal = runtime.resume_terminal(&owned.handle).await?;
             self.save_observed_result(&terminal).await?;
             self.mutate(WorkerTransitionV1::Observe {
@@ -690,7 +735,7 @@ impl<'a> Execution<'a> {
             })
             .await?;
             self.post_worker_result().await?;
-            return Ok(terminal);
+            return Ok(ControlFlow::Continue(terminal));
         }
         let callback = |owned: OwnedContainerSnapshot| async move {
             self.patch(|draft| {
@@ -756,6 +801,15 @@ impl<'a> Execution<'a> {
                 .execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
                 .await?
         };
+        let retained = match retained {
+            crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
+            crate::runtime::ManagedPrearmedOutcome::Abandoned { owned, retirement } => {
+                return Ok(ControlFlow::Break(Box::new(AbandonedBatch {
+                    owned,
+                    retirement,
+                })));
+            }
+        };
         self.save_worker_result(&retained).await?;
         let (_, draft) = self.load().await?;
         self.mutate(WorkerTransitionV1::Observe {
@@ -780,6 +834,6 @@ impl<'a> Execution<'a> {
         })
         .await?;
         ensure!(removed, "worker cleanup requires reconciliation");
-        Ok(retained.terminal().clone())
+        Ok(ControlFlow::Continue(retained.terminal().clone()))
     }
 }

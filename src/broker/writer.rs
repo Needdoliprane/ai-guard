@@ -1,5 +1,9 @@
 //! A bounded typed queue around the existing journal. Only the dedicated OS
 //! thread performs journal work; a caller timeout never cancels queued work.
+#[path = "writer_retirement.rs"]
+mod retirement;
+pub(crate) use retirement::{AuthorizedRetirement, BeginUnusedRetirement, PendingUnusedRetirement};
+
 use super::{
     checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
     journal::{
@@ -115,6 +119,39 @@ opaque_input!(RejectInput);
 opaque_input!(CancelInputV1);
 
 enum Command {
+    #[cfg(test)]
+    TestPause {
+        release: mpsc::Receiver<()>,
+        active: Arc<std::sync::atomic::AtomicBool>,
+        reply: Reply<()>,
+    },
+    PendingRetirementEvents {
+        operation_id: Uuid,
+        reply: Reply<Vec<OutboxEventV1>>,
+    },
+    AcknowledgeRetirementEvents {
+        operation_id: Uuid,
+        acknowledgements: Vec<(Uuid, String, i64)>,
+        reply: Reply<Vec<OutboxReceiptV1>>,
+    },
+    BeginUnusedRetirement {
+        input: BeginUnusedRetirement,
+        reply: Reply<PendingUnusedRetirement>,
+    },
+    AuthorizeUnusedRetirement {
+        pending: PendingUnusedRetirement,
+        reply: Reply<AuthorizedRetirement>,
+    },
+    BindFull3 {
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        binding: Box<super::retirement_checkpoint::Full3RegistrationBindingV1>,
+        reply: Reply<CheckpointReceiptV1>,
+    },
+    FinalizeRetirement {
+        receipt: Box<super::enforcer::retirement::VerifiedRetirementReceipt>,
+        reply: Reply<CheckpointReceiptV1>,
+    },
     Reserve {
         operation_id: Uuid,
         submit: Vec<u8>,
@@ -398,6 +435,26 @@ impl StopWriterClient {
 #[derive(Clone)]
 pub struct WriterClient(Arc<ClientState>);
 
+/// Controls only a test pause in the real actor, without acquiring its journal
+/// mutex or replacing its backend, queue, or lease. Drop releases the actor.
+#[cfg(test)]
+pub(crate) struct WriterPauseGuard {
+    release: mpsc::Sender<()>,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(test)]
+impl WriterPauseGuard {
+    pub(crate) fn is_paused(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[cfg(test)]
+impl Drop for WriterPauseGuard {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+    }
+}
+
 impl fmt::Debug for WriterClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("WriterClient(<private>)")
@@ -405,6 +462,25 @@ impl fmt::Debug for WriterClient {
 }
 
 impl WriterClient {
+    #[cfg(test)]
+    pub(crate) async fn pause_for_test(&self) -> JournalResult<WriterPauseGuard> {
+        let (release, wait) = mpsc::channel();
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Construct before the fallible call: even a queued command whose ACK
+        // is lost will be released when this guard drops on the error path.
+        let guard = WriterPauseGuard {
+            release,
+            active: Arc::clone(&active),
+        };
+        self.call(move |reply| Command::TestPause {
+            release: wait,
+            active,
+            reply,
+        })
+        .await?;
+        Ok(guard)
+    }
+
     pub fn start(journal: Journal, capacity: u32, timeout: Duration) -> JournalResult<Self> {
         ClientState::start(Backend::Full(journal), capacity, timeout).map(Self)
     }
@@ -674,6 +750,78 @@ fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
 fn serve_backend(backend: Backend, receiver: mpsc::Receiver<Command>) {
     while let Ok(command) = receiver.recv() {
         match command {
+            #[cfg(test)]
+            Command::TestPause {
+                release,
+                active,
+                reply,
+            } => {
+                active.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = reply.send(Ok(()));
+                // Fail-safe bound belongs only to the test seam; no productive
+                // queue, RPC, Arm, or journal timeout is changed.
+                let _ = release.recv_timeout(Duration::from_secs(10));
+                active.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            Command::PendingRetirementEvents {
+                operation_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => {
+                        StopJournal::from_full(journal).pending_retirement_events(operation_id)
+                    }
+                    Backend::Stops(journal) => journal.pending_retirement_events(operation_id),
+                };
+                let _ = reply.send(result);
+            }
+            Command::AcknowledgeRetirementEvents {
+                operation_id,
+                acknowledgements,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => StopJournal::from_full(journal)
+                        .acknowledge_retirement_events(operation_id, acknowledgements),
+                    Backend::Stops(journal) => {
+                        journal.acknowledge_retirement_events(operation_id, acknowledgements)
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            Command::BeginUnusedRetirement { input, reply } => {
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| retirement::begin(journal, input)),
+                );
+            }
+            Command::AuthorizeUnusedRetirement { pending, reply } => {
+                let _ = reply.send(
+                    backend
+                        .full()
+                        .and_then(|journal| retirement::authorize(journal, pending)),
+                );
+            }
+            Command::BindFull3 {
+                operation_id,
+                expected,
+                binding,
+                reply,
+            } => {
+                let _ = reply.send(backend.full().and_then(|journal| {
+                    journal.bind_full3_registration(operation_id, expected, *binding)
+                }));
+            }
+            Command::FinalizeRetirement { receipt, reply } => {
+                let result = match &backend {
+                    Backend::Full(journal) => {
+                        StopJournal::from_full(journal).finalize_retirement(*receipt)
+                    }
+                    Backend::Stops(journal) => journal.finalize_retirement(*receipt),
+                };
+                let _ = reply.send(result);
+            }
             Command::Reserve {
                 operation_id,
                 submit,
@@ -981,6 +1129,10 @@ fn acknowledge_events(
     }
     receipts(&job, &states)
 }
+
+#[cfg(all(test, unix))]
+#[path = "writer_retirement_live_tests.rs"]
+mod retirement_live_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

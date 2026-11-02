@@ -10,6 +10,8 @@ use crate::broker::{
     },
     lifecycle::LocalCommandReceiptV1,
     local_ipc::{EndpointRecordV1, PrivateListener, read_frame, write_frame},
+    retirement::LedgerIdentityV1,
+    retirement_checkpoint::Full3RegistrationBindingV1,
 };
 use crate::control_fs::Directory;
 use hmac::{Hmac, Mac};
@@ -24,9 +26,15 @@ use tokio::net::UnixStream;
 const HANDSHAKE_FRAME: u32 = 4096;
 const RETRY_WINDOW: Duration = Duration::from_secs(10);
 const MAX_PENDING_ATTEMPTS: usize = 16;
+const MAX_FULL_CONNECTIONS: usize = 24;
+const MAX_STOP_CONNECTIONS: usize = 32;
+
+#[cfg(test)]
+#[path = "recovery_affinity_tests.rs"]
+mod affinity_tests;
 
 #[path = "recovery_v3.rs"]
-mod recovery_v3;
+pub(super) mod recovery_v3;
 pub use recovery_v3::{EnforcerStopClientV3, EnforcerStopStatusV3};
 
 #[cfg(test)]
@@ -264,6 +272,7 @@ impl StopOwner {
 struct RetainedRestore {
     request: RestoreRequiredStopV1,
     owner: StopOwner,
+    binding: Option<Full3RegistrationBindingV1>,
 }
 type RetainedBatch = Vec<EnforcerResult<RetainedRestore>>;
 #[derive(Default)]
@@ -285,14 +294,15 @@ impl RestoreBatchResult {
     }
 }
 fn retained_restore(
+    affinity: &StopAffinity,
     owner: StopOwner,
-    scope: &JournalScopeV1,
-    job_id: Uuid,
+    source: (&JournalScopeV1, Uuid),
     prefix: &ConfirmedCancelPrefixV1,
     target: &RecoveredStopV1,
     cancel: Option<&LocalCommandReceiptV1>,
     generation: u64,
 ) -> EnforcerResult<RetainedRestore> {
+    let (scope, job_id) = source;
     owner.revalidate()?;
     let registration = RegistrationV1::new(
         hex::encode(Sha256::digest(scope.gateway_origin().as_bytes())),
@@ -305,6 +315,12 @@ fn retained_restore(
     if registration.receipt.control_namespace_uuid != scope.control_namespace_uuid().to_string() {
         return Err(EnforcerError::InvalidInput);
     }
+    let registration_hash = registration.digest()?;
+    affinity.check(
+        &registration.arm.operation_id,
+        &registration_hash,
+        target.full3_registration_binding(),
+    )?;
     let cancel_prefix = if let Some(cancel) = cancel {
         if !prefix.receipts().iter().any(|known| {
             known.command_id() == cancel.command_id()
@@ -324,7 +340,7 @@ fn retained_restore(
     let request = RestoreRequiredStopV1 {
         version: 1,
         request_id: Uuid::new_v4(),
-        registration_hash: registration.digest()?,
+        registration_hash,
         registration,
         source: StopSourceV1 {
             scope_hash: hex::encode(Sha256::digest(
@@ -340,7 +356,11 @@ fn retained_restore(
         cancel_prefix,
     };
     request.validate()?;
-    Ok(RetainedRestore { request, owner })
+    Ok(RetainedRestore {
+        request,
+        owner,
+        binding: target.full3_registration_binding().cloned(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -445,6 +465,12 @@ pub(super) struct RecoveryState {
     // Retained only by explicitly extended listeners. Missing anchors cannot
     // authenticate V3; legacy V2 state and transport checks remain unchanged.
     transport_v3: Option<(Directory, EndpointRecordV1)>,
+    full: Mutex<Option<Arc<super::retirement::FullState>>>,
+    admitted: super::retirement::AdmissionRegistry,
+    full_stops: Mutex<BTreeMap<String, StopSlotV1>>,
+    full_connections: Arc<tokio::sync::Semaphore>,
+    stop_connections: Arc<tokio::sync::Semaphore>,
+    pub(super) shutdown_requested: AtomicBool,
     slots: Mutex<BTreeMap<String, Arc<StopActor>>>,
     progress: AtomicU64,
     clock_healthy: AtomicBool,
@@ -454,6 +480,13 @@ pub(super) struct RecoveryState {
     faults: TestFaults,
 }
 impl RecoveryState {
+    pub(super) fn full_owner(&self) -> EnforcerResult<Option<Arc<super::retirement::FullState>>> {
+        Ok(self
+            .full
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .clone())
+    }
     pub(super) fn new(
         epoch: Uuid,
         max_slots: u32,
@@ -470,6 +503,12 @@ impl RecoveryState {
             clock,
             lease,
             transport_v3: None,
+            full: Mutex::new(None),
+            admitted: Arc::new(Mutex::new(BTreeMap::new())),
+            full_stops: Mutex::new(BTreeMap::new()),
+            full_connections: Arc::new(tokio::sync::Semaphore::new(MAX_FULL_CONNECTIONS)),
+            stop_connections: Arc::new(tokio::sync::Semaphore::new(MAX_STOP_CONNECTIONS)),
+            shutdown_requested: AtomicBool::new(false),
             slots: Mutex::new(BTreeMap::new()),
             progress: AtomicU64::new(1),
             clock_healthy: AtomicBool::new(false),
@@ -530,7 +569,7 @@ impl RecoveryState {
     }
     pub(super) fn status(&self) -> EnforcerResult<EnforcerStopStatusV2> {
         let slot_count = self
-            .slots
+            .admitted
             .lock()
             .map_err(|_| EnforcerError::Unhealthy)?
             .len();
@@ -606,6 +645,66 @@ pub async fn run_internal_recovery_enforcer(
     }
     let capability = capability(root, false)?;
     let lease = EnforcerRoleLeaseV2::acquire_existing(root)?;
+    run_listener(root, max_slots, capability, lease, None, false).await
+}
+
+pub(super) async fn run_full_listener(
+    ledger: Arc<super::ledger::RetirementLedger>,
+    max_slots: u32,
+) -> EnforcerResult<()> {
+    let lease = ledger.lease();
+    let root = lease.ledger_root().clone();
+    let capability = capability(&root, false)?;
+    run_listener(&root, max_slots, capability, lease, Some(ledger), false).await
+}
+
+#[cfg(test)]
+pub(super) fn full_fixture_state(
+    ledger: Arc<super::ledger::RetirementLedger>,
+    endpoint: &EndpointRecordV1,
+    max_slots: u32,
+) -> EnforcerResult<Arc<RecoveryState>> {
+    let lease = ledger.lease();
+    let root = lease.ledger_root();
+    let mut state = RecoveryState::new(
+        endpoint.epoch(),
+        max_slots,
+        capability(root, false)?,
+        lease.root_binding(endpoint)?,
+        Some(Arc::new(
+            NativeHostClock::new().map_err(|_| EnforcerError::Unhealthy)?,
+        )),
+        Some(lease.clone()),
+    );
+    state.retain_transport_v3(root, endpoint)?;
+    let full = super::retirement::FullState::new(
+        ledger,
+        state.epoch,
+        max_slots,
+        state.clock.clone(),
+        Arc::clone(&state.admitted),
+    )?;
+    *state.full.lock().map_err(|_| EnforcerError::Unhealthy)? = Some(full);
+    Ok(Arc::new(state))
+}
+
+pub(super) async fn run_full_existing_listener(
+    root: &Directory,
+    max_slots: u32,
+) -> EnforcerResult<()> {
+    let capability = capability(root, false)?;
+    let lease = EnforcerRoleLeaseV2::acquire_existing(root)?;
+    run_listener(root, max_slots, capability, lease, None, true).await
+}
+
+async fn run_listener(
+    root: &Directory,
+    max_slots: u32,
+    capability: [u8; 32],
+    lease: EnforcerRoleLeaseV2,
+    full_ledger: Option<Arc<super::ledger::RetirementLedger>>,
+    scan_existing: bool,
+) -> EnforcerResult<()> {
     let listener = PrivateListener::bind_new(&lease.listener_root()?)?;
     let root_binding = lease.root_binding(listener.endpoint())?;
     let mut state = RecoveryState::new(
@@ -616,16 +715,61 @@ pub async fn run_internal_recovery_enforcer(
         NativeHostClock::new().ok().map(Arc::new),
         Some(lease.clone()),
     );
+    if let Some(ledger) = full_ledger {
+        *state.full.lock().map_err(|_| EnforcerError::Unhealthy)? =
+            Some(super::retirement::FullState::new(
+                ledger,
+                state.epoch,
+                max_slots,
+                state.clock.clone(),
+                Arc::clone(&state.admitted),
+            )?);
+    }
     state.retain_transport_v3(root, listener.endpoint())?;
     let state = Arc::new(state);
     lease.publish_endpoint(listener.endpoint())?;
-    let connections = Arc::new(tokio::sync::Semaphore::new(32));
+    if scan_existing {
+        let state = Arc::clone(&state);
+        let lease = lease.clone();
+        // Publish and structurally authenticate STOP before reading a single
+        // ledger record. This scan owns no actor/STOP mutex and cannot block
+        // a known stop request while storage is slow or broken.
+        tokio::spawn(async move {
+            let scanned = tokio::task::spawn_blocking(move || {
+                super::ledger::RetirementLedger::open_existing(lease)
+            })
+            .await;
+            if let Ok(Ok(ledger)) = scanned
+                && let Ok(full) = super::retirement::FullState::new(
+                    Arc::new(ledger),
+                    state.epoch,
+                    state.max_slots,
+                    state.clock.clone(),
+                    Arc::clone(&state.admitted),
+                )
+                && let Ok(mut retained) = state.full.lock()
+            {
+                *retained = Some(full);
+            }
+        });
+    }
+    serve_listener(listener, state).await
+}
+
+pub(super) async fn serve_listener(
+    listener: PrivateListener,
+    state: Arc<RecoveryState>,
+) -> EnforcerResult<()> {
+    // This budget bounds only pre-authentication. A verified request transfers
+    // into its separate Full or STOP budget before any long-lived work.
+    let connections = Arc::new(tokio::sync::Semaphore::new(MAX_STOP_CONNECTIONS));
     let mut tasks = tokio::task::JoinSet::new();
     let mut progress = tokio::time::interval(Duration::from_millis(25));
     let mut maintenance = tokio::time::interval(POLL);
     loop {
         tokio::select! {
             _ = progress.tick() => {
+                if state.shutdown_requested.load(Ordering::SeqCst) { return Ok(()); }
                 // Clock failure changes clock health, never transport progress.
                 state.clock_healthy.store(state.clock.as_ref().is_some_and(|clock| clock.sample().is_ok()), Ordering::SeqCst);
                 if state.progress.try_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1)).is_err() {
@@ -648,7 +792,7 @@ pub async fn run_internal_recovery_enforcer(
                 Ok(stream) => {
                     let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else { continue; };
                     let state = Arc::clone(&state);
-                    tasks.spawn(async move { let _permit = permit; let _ = serve_connection(stream, state).await; });
+                    tasks.spawn(async move { let _ = serve_connection_with_permit(stream, state, Some(permit)).await; });
                 },
                 Err(crate::broker::local_ipc::IpcError::Unauthorized) => {},
                 Err(_) => {
@@ -662,9 +806,18 @@ pub async fn run_internal_recovery_enforcer(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn serve_connection(
+    stream: UnixStream,
+    state: Arc<RecoveryState>,
+) -> EnforcerResult<()> {
+    serve_connection_with_permit(stream, state, None).await
+}
+
+async fn serve_connection_with_permit(
     mut stream: UnixStream,
     state: Arc<RecoveryState>,
+    initial_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> EnforcerResult<()> {
     let handshake_started = Instant::now();
     state.check_transport().await?;
@@ -673,12 +826,13 @@ pub(super) async fn serve_connection(
     let authentication = match read_frame(&mut stream, HANDSHAKE_FRAME, IO_TIMEOUT).await? {
         recovery_v3::FirstAuthentication::V2(authentication) => authentication,
         recovery_v3::FirstAuthentication::V3(negotiate) => {
-            return recovery_v3::serve(
+            return recovery_v3::serve_admitted(
                 stream,
                 state,
                 challenge,
                 negotiate,
                 handshake_started + recovery_v3::HANDSHAKE_WINDOW,
+                initial_permit,
             )
             .await;
         }
@@ -700,6 +854,10 @@ pub(super) async fn serve_connection(
         .await?;
         return Ok(());
     }
+    let _stop_permit = Arc::clone(&state.stop_connections)
+        .try_acquire_owned()
+        .map_err(|_| EnforcerError::Unavailable)?;
+    drop(initial_permit);
     let response = AuthenticationReplyV2::Granted {
         granted_role: RequestedRole::StopsOnly,
         epoch: challenge.epoch,
@@ -772,6 +930,23 @@ fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<
             arm_id,
             registration_hash,
         } => {
+            if let Some(mut value) = state
+                .full_stops
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .get(&arm_id)
+                .cloned()
+            {
+                if value.registration_hash != registration_hash {
+                    return Err(EnforcerError::Conflict);
+                }
+                let full = state.full_owner()?.ok_or(EnforcerError::Unhealthy)?;
+                update_full_stop(
+                    &mut value,
+                    &full.slot_snapshot(&arm_id, &registration_hash)?,
+                );
+                return Ok(StopResponse::StopStatus { value });
+            }
             let actor = state
                 .slots
                 .lock()
@@ -793,6 +968,34 @@ fn dispatch(state: &Arc<RecoveryState>, request: StopRequest) -> EnforcerResult<
                 .as_ref()
                 .ok_or(EnforcerError::InvalidInput)?;
             let identity = value.identity()?;
+            {
+                let mut retained = state
+                    .full_stops
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?;
+                if let Some(slot) = retained.get_mut(&value.registration.arm.operation_id) {
+                    if slot.registration_hash != value.registration_hash {
+                        return Err(EnforcerError::Conflict);
+                    }
+                    let order = prefix_order(&slot.cancel_prefix, &value.cancel_prefix)?;
+                    let full = state.full_owner()?.ok_or(EnforcerError::Unhealthy)?;
+                    full.cancel(
+                        &value.registration.arm.operation_id,
+                        &value.registration_hash,
+                        value.cancel_generation,
+                    )?;
+                    slot.generation = slot.generation.max(value.cancel_generation);
+                    if order != std::cmp::Ordering::Less {
+                        slot.cancel_command_id = Some(cancel.command_id);
+                        slot.durable_cancel = Some(cancel.clone());
+                        slot.cancel_prefix = value.cancel_prefix;
+                    }
+                    slot.phase = StopPhaseV1::StopRequested;
+                    return Ok(StopResponse::StopAccepted {
+                        value: slot.clone(),
+                    });
+                }
+            }
             let actor = state
                 .slots
                 .lock()
@@ -824,6 +1027,39 @@ fn reserve(
     request: RestoreRequiredStopV1,
 ) -> EnforcerResult<StopResponse> {
     request.validate()?;
+    let mut admitted = state
+        .admitted
+        .lock()
+        .map_err(|_| EnforcerError::Unhealthy)?;
+    if let Some(full) = state.full_owner()? {
+        full.check_restore(&request.registration.arm.operation_id)?;
+        if let Some(status) =
+            full.restore_existing(&request.registration, request.cancel_generation)?
+        {
+            let mut retained = state
+                .full_stops
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            let replayed = retained.contains_key(&request.registration.arm.operation_id);
+            let slot = retained
+                .entry(request.registration.arm.operation_id.clone())
+                .or_insert_with(|| StopSlotV1 {
+                    arm_id: request.registration.arm.operation_id.clone(),
+                    registration_hash: request.registration_hash.clone(),
+                    phase: StopPhaseV1::StopRestoring,
+                    generation: request.cancel_generation,
+                    cancel_command_id: None,
+                    durable_cancel: None,
+                    cancel_prefix: Vec::new(),
+                    stop_failures: 0,
+                });
+            update_full_stop(slot, &status);
+            return Ok(StopResponse::StopReserved {
+                value: slot.clone(),
+                replayed,
+            });
+        }
+    }
     let identity = request.identity()?;
     let (actor, replayed) = {
         let mut slots = state.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
@@ -834,7 +1070,7 @@ fn reserve(
             }
             (Arc::clone(actor), true)
         } else {
-            if slots.len() >= state.max_slots as usize {
+            if admitted.len() >= state.max_slots as usize || admitted.contains_key(&key) {
                 return Err(EnforcerError::Capacity);
             }
             let lease = state.lease.clone().ok_or(EnforcerError::UnsafeFilesystem)?;
@@ -862,10 +1098,12 @@ fn reserve(
                 #[cfg(test)]
                 fault_marker: state.faults.fault_marker.clone(),
             });
+            admitted.insert(key.clone(), super::retirement::RegistryOwner::Restored);
             slots.insert(key, Arc::clone(&actor));
             (actor, false)
         }
     };
+    drop(admitted);
     // Reservation precedes spawning. No runtime reopen, thread creation or
     // engine IO occurs while the actor map is locked, including on failure.
     ensure_stop_actor(Arc::clone(&actor), state.clock.clone());
@@ -873,6 +1111,16 @@ fn reserve(
         value: actor.snapshot()?,
         replayed,
     })
+}
+fn update_full_stop(slot: &mut StopSlotV1, status: &EnforcerSlotStatusV1) {
+    slot.generation = slot.generation.max(status.generation);
+    slot.stop_failures = status.stop_failures;
+    slot.phase = match status.phase {
+        SlotPhaseV1::Initializing => StopPhaseV1::StopRestoring,
+        SlotPhaseV1::Ready => StopPhaseV1::StopReady,
+        SlotPhaseV1::Stopping => StopPhaseV1::StopRequested,
+        SlotPhaseV1::Quarantined => StopPhaseV1::Quarantined,
+    };
 }
 fn ensure_stop_actor(actor: Arc<StopActor>, clock: Option<Arc<NativeHostClock>>) -> bool {
     if actor.worker_owned.load(Ordering::SeqCst) {
@@ -1005,6 +1253,59 @@ enum StopProtocol {
     V2,
     V3,
 }
+#[derive(Clone)]
+enum StopAffinity {
+    Legacy,
+    ExistingFull3(LedgerIdentityV1),
+}
+impl StopAffinity {
+    fn check(
+        &self,
+        arm_id: &str,
+        registration_hash: &str,
+        binding: Option<&Full3RegistrationBindingV1>,
+    ) -> EnforcerResult<()> {
+        match (self, binding) {
+            (Self::Legacy, None) => Ok(()),
+            (Self::Legacy, Some(_)) | (Self::ExistingFull3(_), None) => {
+                Err(EnforcerError::Unauthorized)
+            }
+            (Self::ExistingFull3(expected), Some(binding)) => {
+                if binding.arm_id().to_string() != arm_id
+                    || binding.registration_hash().as_str() != registration_hash
+                    || !binding
+                        .ledger()
+                        .matches(expected)
+                        .map_err(|_| EnforcerError::InvalidInput)?
+                {
+                    return Err(EnforcerError::Conflict);
+                }
+                // The original assignment epoch is immutable data. A STOP
+                // transport may restart without becoming a Full/Q producer.
+                Ok(())
+            }
+        }
+    }
+    fn check_root(&self, root: &Directory) -> EnforcerResult<()> {
+        if let Self::ExistingFull3(expected) = self {
+            let actual = root
+                .enforcer_recovery_binding()
+                .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+            if expected.native_binding() != &actual {
+                return Err(EnforcerError::Conflict);
+            }
+        }
+        Ok(())
+    }
+    fn check_retained(&self, retained: &RetainedRestore) -> EnforcerResult<()> {
+        retained.request.validate()?;
+        self.check(
+            &retained.request.registration.arm.operation_id,
+            &retained.request.registration_hash,
+            retained.binding.as_ref(),
+        )
+    }
+}
 #[cfg(test)]
 std::thread_local! {
     static TEST_CREATED_STOP_CLIENTS: std::cell::RefCell<Vec<std::sync::Weak<StopClient>>> =
@@ -1026,6 +1327,7 @@ struct StopClient {
     max_slots: u32,
     capability: [u8; 32],
     protocol: StopProtocol,
+    affinity: StopAffinity,
     cache: Mutex<StopCache>,
     changed: Arc<tokio::sync::Notify>,
     watch_failed: AtomicBool,
@@ -1133,6 +1435,49 @@ impl EnforcerStopClient {
         max_slots: u32,
         protocol: StopProtocol,
     ) -> EnforcerResult<Self> {
+        Self::connect_with_affinity(root, executable, max_slots, protocol, StopAffinity::Legacy)
+            .await
+    }
+    /// Explicit named-role recovery retains its classified native ledger data
+    /// as target affinity. It still grants only Unverified STOP transport.
+    pub async fn connect_or_spawn_existing_sealed(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        Self::connect_existing_sealed_protocol(root, executable, max_slots, StopProtocol::V3).await
+    }
+    async fn connect_existing_sealed_protocol(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        protocol: StopProtocol,
+    ) -> EnforcerResult<Self> {
+        if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
+            return Err(EnforcerError::InvalidInput);
+        }
+        let retained = root.clone();
+        let expected = tokio::task::spawn_blocking(move || {
+            super::execution::classify_existing_sealed_namespace(&retained)
+        })
+        .await
+        .map_err(|_| EnforcerError::Unavailable)??;
+        Self::connect_with_affinity(
+            root,
+            executable,
+            max_slots,
+            protocol,
+            StopAffinity::ExistingFull3(expected),
+        )
+        .await
+    }
+    async fn connect_with_affinity(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+        protocol: StopProtocol,
+        affinity: StopAffinity,
+    ) -> EnforcerResult<Self> {
         if !(1..=MAX_SLOTS).contains(&max_slots) || !executable.is_absolute() {
             return Err(EnforcerError::InvalidInput);
         }
@@ -1145,6 +1490,7 @@ impl EnforcerStopClient {
             max_slots,
             capability,
             protocol,
+            affinity,
             cache: Mutex::new(StopCache::default()),
             changed: Arc::new(tokio::sync::Notify::new()),
             watch_failed: AtomicBool::new(false),
@@ -1264,6 +1610,10 @@ impl EnforcerStopClient {
         let root = &self.0.root;
         root.revalidate()
             .map_err(|_| OpenFailure::Other(EnforcerError::UnsafeFilesystem))?;
+        self.0
+            .affinity
+            .check_root(root)
+            .map_err(OpenFailure::Other)?;
         if capability(root, false).map_err(OpenFailure::Other)? != self.0.capability {
             return Err(OpenFailure::Other(EnforcerError::Unauthorized));
         }
@@ -1547,6 +1897,12 @@ impl EnforcerStopClient {
             if previous.retained.request.identity()? != retained.request.identity()? {
                 return Err(EnforcerError::Conflict);
             }
+            if serde_json::to_vec(&previous.retained.binding)
+                .map_err(|_| EnforcerError::InvalidInput)?
+                != serde_json::to_vec(&retained.binding).map_err(|_| EnforcerError::InvalidInput)?
+            {
+                return Err(EnforcerError::Conflict);
+            }
             let order = prefix_order(
                 &previous.retained.request.cancel_prefix,
                 &retained.request.cancel_prefix,
@@ -1601,6 +1957,10 @@ impl EnforcerStopClient {
             // cannot claim A before B/C have also been considered and retained.
             for target in prepared {
                 match target
+                    .and_then(|target| {
+                        self.0.affinity.check_retained(&target)?;
+                        Ok(target)
+                    })
                     .and_then(|target| Self::retain_in(&mut cache, self.0.max_slots, target))
                 {
                     Ok(key) if seen.insert(key.clone()) => keys.push(key),
@@ -1782,6 +2142,7 @@ impl EnforcerStopClient {
         outcome
     }
     async fn perform_attempt(&self, mut retained: RetainedRestore) -> EnforcerResult<Uuid> {
+        self.0.affinity.check_retained(&retained)?;
         let owner = retained.owner.clone();
         tokio::task::spawn_blocking(move || owner.revalidate())
             .await
@@ -1826,6 +2187,7 @@ impl EnforcerStopClient {
         job_index: usize,
         generation: u64,
     ) -> (usize, bool) {
+        let affinity = self.0.affinity.clone();
         let receiver = self.start_owned_batch(move || {
             let Some(job) = report.jobs().get(job_index) else {
                 return vec![Err(EnforcerError::InvalidInput)];
@@ -1845,9 +2207,9 @@ impl EnforcerStopClient {
                         .cancel_prefix_for_stop(index)
                         .map_err(|_| EnforcerError::InvalidInput)?;
                     retained_restore(
+                        &affinity,
                         StopOwner::Report(Arc::clone(&report)),
-                        report.scope(),
-                        job.operation_id(),
+                        (report.scope(), job.operation_id()),
                         &prefix,
                         target,
                         cancel,
@@ -1867,6 +2229,7 @@ impl EnforcerStopClient {
         projection: Arc<CancelStopProjectionV1>,
         generation: u64,
     ) -> EnforcerResult<()> {
+        let affinity = self.0.affinity.clone();
         let receiver = self.start_owned_batch(move || {
             projection
                 .stops()
@@ -1877,9 +2240,9 @@ impl EnforcerStopClient {
                         .cancel_prefix_for_stop(index)
                         .ok_or(EnforcerError::InvalidInput)?;
                     retained_restore(
+                        &affinity,
                         StopOwner::Cancel(Arc::clone(&projection)),
-                        projection.scope(),
-                        projection.operation_id(),
+                        (projection.scope(), projection.operation_id()),
                         prefix,
                         target,
                         Some(projection.receipt()),

@@ -141,6 +141,28 @@ impl RoleLease {
 }
 
 impl EnforcerRoleLeaseV2 {
+    /// Consumes the mkdirat-only capability; no existing root can enter this
+    /// factory. Ledger sealing still has to complete before Full admission.
+    pub(crate) fn create_new(
+        fresh: crate::control_fs::persistent::ExclusiveEnforcerRoot,
+    ) -> IpcResult<Self> {
+        let (root, lock) = crate::control_fs::persistent::EnforcerLeaseFile::create_new(fresh)
+            .map_err(fs_error)?;
+        root.persistent_child("endpoints", true).map_err(fs_error)?;
+        root.persistent_child("announcements", true)
+            .map_err(fs_error)?;
+        root.durable_bootstrap().map_err(fs_error)?;
+        Ok(Self { root, lock })
+    }
+
+    pub(crate) fn ledger_root(&self) -> &Directory {
+        &self.root
+    }
+
+    pub(crate) fn ledger_lock(&self) -> &crate::control_fs::persistent::EnforcerLeaseFile {
+        &self.lock
+    }
+
     /// Explicitly join an existing role namespace, never a fresh factory path.
     /// An empty legacy lock may support this restricted transport but does not
     /// become a V2 retirement authority or obtain a verified ledger identity.

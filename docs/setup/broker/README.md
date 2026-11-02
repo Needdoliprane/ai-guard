@@ -29,7 +29,7 @@ Rootless operation is the normal requirement. `allow_rootful_runtime: true` is a
 
 ## Require an active compatible control
 
-Every request authenticates its **presented** credential afresh against `GET /api/v1/control/protocol`. The broker requires `role: "runner"`, the configured tenant and namespace, exactly `schema_version: 3` or `4` and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
+Every request authenticates its **presented** credential afresh against `GET /api/v1/control/protocol`. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version: 3`, `4` or `5` and the `broker_supervision_v1` protocol. Submit, approve, resume, export and abandon-before-claim also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
 
 Read the real tenant, namespace, role and supervision state before writing the registry. Replace the binary, origin and private credential path with your installation values:
 
@@ -152,6 +152,33 @@ This command installs no systemd unit or launchd job and makes no logout, reboot
 
 The enforcer's private IPC authentication belongs to the broker state and is separate from runner/viewer credentials. Existing authentication is read without rewriting it. If it is missing from a role that already has state, startup refuses to generate a replacement. Preserve the role root, its history and coherent private backups; recover the original authentication through controlled maintenance. Erasing history to obtain an apparently empty root is not a recovery procedure.
 
+### Select a Full3 enforcer explicitly
+
+The command above keeps the historical enforcer selection. To use Full3, select one of the following entries explicitly. The enforcer choice is separate from the registry's `prearmed_start_profile`; neither existing files nor Registry2 activate Full3 automatically. Use the CLI and service from the same release. Before either command, stop the previous foreground broker deliberately and verify that its broker lease is released. Preserve its guardian and retained state.
+
+Choose a role name containing 1–100 ASCII letters, digits, hyphens or underscores. `broker`, `journals` and `enforcer` are reserved. This is one private child name under the configured broker `root`, never a path. Record it with the installation identity and registry.
+
+For a fresh role:
+
+```sh
+AIGUARD_ENFORCER_ROLE="full3-primary"
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --enforcer-full3-new "$AIGUARD_ENFORCER_ROLE"
+```
+
+The role must not exist. The current fresh entry accepts only a new installation or configured profile journals confirmed empty with complete coverage. An existing job, unknown coverage or an unconfigured journal profile causes refusal. This is not a migration of existing jobs or guardians. Keep their roots, journals, credentials, processes, volumes and deadlines; do not empty or rename state to pass the check, and do not adopt the historical `enforcer` role as Full3.
+
+For a later broker connection, preserve the guardian and reuse the same installation, registry, root and role name:
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --enforcer-full3-existing "$AIGUARD_ENFORCER_ROLE"
+```
+
+This entry connects only to the existing sealed role. It checks the installation identity and retained ledger before admission. If the peer is absent or its state is incompatible, it refuses; it does not spawn a Full3 replacement, initialise another history or fall back to Legacy. A loaded Arm keeps its confirmed role assignment and cannot be registered again as a fresh original Arm.
+
+The two Full3 options are mutually exclusive and cannot be combined with `--recovery-only` or `--enforcer-role`. Choose the stop-only entry below when admission must stay closed.
+
 ### Recover authorised stops with admission closed
 
 For an existing installation that needs only to restore its proved stop targets, start the explicit restricted service:
@@ -160,9 +187,18 @@ For an existing installation that needs only to restore its proved stop targets,
 "$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only
 ```
 
+Without a role name, this keeps historical recovery. To recover proven STOP targets from a previously sealed Full3 role, retain the same installation and explicitly select that role:
+
+```sh
+"$AIGUARD_BIN" broker serve --config "$AIGUARD_BROKER_CONFIG" \
+  --recovery-only --enforcer-role "$AIGUARD_ENFORCER_ROLE"
+```
+
+`--enforcer-role` is accepted only with `--recovery-only` and follows the same child-name rules as Full3. It opens an existing sealed role without initialising new authentication or a new ledger. It does not grant Full3 admission.
+
 This mode requires the existing private roots, role locks, IPC authentication and discovery namespaces. It does not initialise a new installation or regenerate missing authentication. An occupied lease or an incompatible live enforcer remains a refusal; this command never takes over or stops an existing process. Keep its state and use the supported connection to that process where available.
 
-The service requests protocol 2's `StopsOnly` capability explicitly. It restores only targets proved by retained journal readers, keeps their original container identity and deadline, and retains durable cancellations for replay after reconnection. Start admission remains closed for the lifetime of this service: Submit, approve, resume and export cannot acquire a Full capability. Status, list, recovery-status and cancel retain their normal authentication and data dependencies; this mode does not reactivate an inactive gateway.
+The service requests the `StopsOnly` capability explicitly: protocol2 for historical recovery, protocol3 for the named sealed role. It restores only targets proved by retained journal readers, keeps their original container identity and deadline, and retains durable cancellations for replay after reconnection. Start admission remains closed for the lifetime of this service: Submit, approve, resume, export and abandon-before-claim are refused. Status, list, recovery-status and cancel retain their normal authentication and data dependencies; this mode does not reactivate an inactive gateway.
 
 For each recovery batch, the broker retains validated targets within its configured capacity before waiting for their individual control confirmations. Losing the client waiting for that request does not discard these targets while the broker remains running. Independent targets continue after a target fails; the result reports partial coverage. A confirmation refers to the guardian instance and target revision acknowledged at that point, not to a worker observed stopped. After a broker crash, recovery still requires the retained durable journal.
 
@@ -220,6 +256,8 @@ A cancellation ACK is neither a terminal runtime observation nor proof of quota 
 
 `recovery-status` reads confirmed journal metadata even when full business loading is unavailable. Its `source` is `confirmed_journal` and `runtime_evidence` is `not_queried`: it does **not inspect the engine**. `journal_mode: "stop_only"`, `incomplete`, `reconciliation_required`, pending Arms and original deadlines describe retained evidence, not new observations or execution permission. Missing fields or targets do not establish their absence in the runtime.
 
+The recovery-status **payload version2** keeps the version1 fields and adds `known_arms[].preclaim` and `retirements`. The local IPC envelope remains version1; Status and Page payloads are unchanged. Use matching CLI/service releases and update any consumers that validate the closed payload: an older reader can reject these new fields. An older service rejects the unknown abandon-before-claim command; there is no fallback to Cancel or another command.
+
 For explicit reconciliation of the same accepted job, once the required control and runtime are available:
 
 ```sh
@@ -228,6 +266,56 @@ AIGUARD_RESUME="<new-resume-command-uuid>"
 ```
 
 Resume preserves the accepted intent, credentials, runtime authority, original deadlines and consumed claims. It cannot grant another start or renew a duration. A fresh source capability is allowed only by the product's frozen-source checks for the relevant pre-managed stage; do not edit a source, binding or checkpoint to force them to pass. An unavailable dependency, ambiguous runtime state or refused reconciliation remains an explicit error.
+
+## Abandon one original Full3 Arm before claim
+
+An Arm identifies an acknowledged enforcement target for a worker or helper. Use `abandon-before-claim` to inhibit the claim of one exact original Full3 Arm, subject to the race with claim and STOP. It does not cancel the entire job. It requires an active compatible control, the same authenticated mutation rights and the service's Full3 admission mode. A historical or restored Arm, a reserved claim/STOP, a mismatched epoch/generation or an unknown owner cannot use this path. Normal execution proceeds immediately without a human waiting period; the claim may win before the operator can read and send a request. The command adds no grace period and renews no deadline.
+
+First read the original operation:
+
+```sh
+"$AIGUARD_BIN" broker recovery-status --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+Select its exact `known_arms[].arm_id`. The nested `preclaim` is version1 **process-local metadata**, with `source: "process_local"` and `freshness: "current_process_state"` or `"unknown"`. It exposes `expected_epoch`, `generation`, `state`, `command_id` and `signal_audit_confirmed`. After a restart, missing owner or incomplete journal read, unknown state and null identities do not reconstruct an original owner or an abandonment signal.
+
+| `preclaim.state` | Operator interpretation |
+|---|---|
+| `registration_in_flight`, `original_unclaimed` | A request may still race the claim, subject to the service's checks. Copy the current epoch and generation exactly. |
+| `claim_reserved`, `stop_reserved` | Abandonment cannot win this Arm. Inspect the original job; Cancel remains available under its normal checks. |
+| `abandon_pending_audit` | The local claim path is inhibited, but the signal's audit ACK is not confirmed. Do not infer retirement. |
+| `abandon_requested` | The signal is audit-ACKed. Only a confirmed retirement record with `phase: "final"` establishes completion. |
+| `retiring` | Retirement is in progress; inspect the confirmed `retirements` records. |
+| `unknown` | Do not target this projection. Preserve evidence and use normal recovery/cancellation where admissible. |
+
+Record a new command UUID once. Replace every placeholder below with the exact observed identities and decimal generation; all UUIDs must be non-nil. This command requires an explicit `--command-id` and never generates one for you.
+
+```sh
+AIGUARD_ARM="<arm-uuid-from-known-arms>"
+AIGUARD_EPOCH="<expected-epoch-from-preclaim>"
+AIGUARD_GENERATION="<generation-from-preclaim>"
+AIGUARD_ABANDON_COMMAND="<new-abandon-command-uuid>"
+"$AIGUARD_BIN" broker abandon-before-claim --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION" --arm-id "$AIGUARD_ARM" \
+  --expected-epoch "$AIGUARD_EPOCH" --generation "$AIGUARD_GENERATION" \
+  --command-id "$AIGUARD_ABANDON_COMMAND"
+"$AIGUARD_BIN" broker recovery-status --root "$AIGUARD_BROKER_ROOT" \
+  --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" \
+  --operation-id "$AIGUARD_OPERATION"
+```
+
+After a lost response, retry only the same command UUID, operation, Arm, epoch and generation. Changed content under that UUID is a conflict; a new generation does not inherit the old request. An `abandon_requested` reply confirms only the signal's durable audit ACK. Its revision/checkpoint refer to that acknowledgment, not to Final. A failed or missing ACK never grants retirement or reopens the inhibited claim. If claim or STOP wins, keep the refusal and use Cancel when required; do not substitute another Arm or issue a second job to bypass it.
+
+In recovery-status, match `retirements[].arm_id` and `retirement_id` to the selected Arm and command UUID. `phase: "pending"` is a recorded retirement intention; `intention_audit_confirmed` concerns that intention, separately from the signal ACK. `phase: "final"` and its `guardian_receipt_hash` identify the confirmed completed retirement. Compare the authorized audit events `broker.abandon-before-claim.requested`, `broker.retirement.pending` and `broker.retirement.final`; an absent target in `known_arms` alone is not Final. An unavailable or partial read remains unknown.
+
+When `preclaim.retirement_continuation_retained` is `true`, this broker process still retains an owner after a blocked publication. Inspect the job error and keep the process and its evidence; the flag grants no permission and does not establish Final. A null value is unknown. Restarting does not reconstruct that live owner from journal JSON.
+
+Pending retirement audit events are retried through the restricted writer even while new starts are fenced or a provider credential blob is unavailable. Delivery still requires the configured runner credential and the matching gateway. A Full3 service already holding the original guardian connection can confirm a completed guardian result and record Final after a lost reply; recovery-only never obtains Full authority to do this.
+
+After abandonment, the owned instance keeps its actual Created state and the central allocation keeps its confirmed state. No held quota is released by inference. This outcome supplies no terminal observation, empty output capture, zero usage or automatic cleanup. Retain the instance and use the explicit cancellation/reconciliation procedures with their normal evidence checks. If an export is abandoned, its CLI prints the retirement response and exits unsuccessfully; it does not report an export acknowledgement.
 
 ## Export into a new destination
 

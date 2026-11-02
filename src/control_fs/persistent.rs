@@ -17,6 +17,41 @@ impl fmt::Display for PersistentLimit {
 }
 impl std::error::Error for PersistentLimit {}
 use std::os::unix::fs::FileExt;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Only `mkdirat` success can produce this capability. Existing directories,
+/// including empty directories, cannot be adopted as fresh authority.
+pub(crate) struct ExclusiveEnforcerRoot(Directory);
+
+impl ExclusiveEnforcerRoot {
+    pub(crate) fn into_directory(self) -> Directory {
+        self.0
+    }
+}
+
+const MAX_ENFORCER_LOCK_BYTES: usize = 8 * 1024 * 1024;
+
+enum EnforcerLeaseCache {
+    Unread,
+    Parsed {
+        bytes: Vec<u8>,
+        facts: Metadata,
+        digest: String,
+    },
+    Tainted {
+        _previous: Option<Box<EnforcerLeaseCache>>,
+    },
+}
+
+fn taint_enforcer_cache(cache: &mut EnforcerLeaseCache) {
+    if !matches!(cache, EnforcerLeaseCache::Tainted { .. }) {
+        let previous = std::mem::replace(cache, EnforcerLeaseCache::Unread);
+        *cache = EnforcerLeaseCache::Tainted {
+            _previous: Some(Box::new(previous)),
+        };
+    }
+}
 
 /// Logical file bytes; directories consume an entry but no logical file bytes.
 pub(crate) struct Entry {
@@ -35,9 +70,9 @@ pub(crate) struct Inventory {
 }
 
 /// Lifetime of the existing enforcer lock for the explicit recovery transport.
-/// This owns one O_RDWR file description and never interprets, repairs or
-/// rewrites its contents. Ledger admission and a mutable ledger cache are not
-/// provided by this handle. Clones retain the same flock, including in actors.
+/// This owns one O_RDWR file description and an append-only cache used by the
+/// specialized ledger. Structural STOP checks never interpret ledger bytes or
+/// acquire its cache mutex. Clones retain the same flock, including in actors.
 #[derive(Clone)]
 pub(crate) struct EnforcerLeaseFile(Arc<EnforcerLeaseInner>);
 
@@ -45,6 +80,17 @@ struct EnforcerLeaseInner {
     root: Directory,
     file: File,
     identity: PrivateEntryIdentity,
+    cache: Mutex<EnforcerLeaseCache>,
+    ledger_owned: AtomicBool,
+}
+
+/// One publication owner per retained description; STOP clones do not grant
+/// a second, independently locked ledger writer.
+pub(crate) struct EnforcerLedgerOwner(EnforcerLeaseFile);
+impl Drop for EnforcerLedgerOwner {
+    fn drop(&mut self) {
+        self.0.0.ledger_owned.store(false, Ordering::Release);
+    }
 }
 
 impl fmt::Debug for EnforcerLeaseFile {
@@ -54,6 +100,182 @@ impl fmt::Debug for EnforcerLeaseFile {
 }
 
 impl EnforcerLeaseFile {
+    pub(crate) fn claim_ledger_owner(&self) -> Result<EnforcerLedgerOwner> {
+        ensure!(
+            self.0
+                .ledger_owned
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "enforcer lease already has a ledger owner"
+        );
+        Ok(EnforcerLedgerOwner(self.clone()))
+    }
+    pub(crate) fn create_new(fresh: ExclusiveEnforcerRoot) -> Result<(Directory, Self)> {
+        let root = fresh.into_directory();
+        let file = root.create_private_entry(OsStr::new(".owner.lock"))?;
+        let identity = entry_identity(&check_private_file(&file)?);
+        // SAFETY: exclusive newly created O_RDWR/CLOEXEC descriptor.
+        ensure!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "exclusive enforcer lock acquisition failed"
+        );
+        let lease = Self(Arc::new(EnforcerLeaseInner {
+            root: root.clone(),
+            file,
+            identity,
+            cache: Mutex::new(EnforcerLeaseCache::Unread),
+            ledger_owned: AtomicBool::new(false),
+        }));
+        lease.revalidate()?;
+        lease.0.file.sync_all()?;
+        root.sync()?;
+        Ok((root, lease))
+    }
+
+    /// Mutable cache belongs only to the retirement ledger. STOP transport uses
+    /// structural revalidation and never takes this mutex.
+    pub(crate) fn ledger_bytes(&self) -> Result<Vec<u8>> {
+        let mut cache = self
+            .0
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("enforcer cache poisoned"))?;
+        let result = (|| {
+            ensure!(
+                !matches!(*cache, EnforcerLeaseCache::Tainted { .. }),
+                "enforcer ledger tainted"
+            );
+            let (bytes, facts) = self.read_same_descriptor()?;
+            if let EnforcerLeaseCache::Parsed {
+                bytes: old,
+                facts: old_facts,
+                digest,
+            } = &*cache
+            {
+                ensure!(
+                    old == &bytes
+                        && same_file_state(old_facts, &facts)
+                        && *digest == hex::encode(Sha256::digest(&bytes)),
+                    "enforcer cached prefix changed"
+                );
+            }
+            *cache = EnforcerLeaseCache::Parsed {
+                bytes: bytes.clone(),
+                facts,
+                digest: hex::encode(Sha256::digest(&bytes)),
+            };
+            Ok(bytes)
+        })();
+        if result.is_err() {
+            taint_enforcer_cache(&mut cache);
+        }
+        result
+    }
+
+    pub(crate) fn taint_ledger(&self) {
+        if let Ok(mut cache) = self.0.cache.lock() {
+            taint_enforcer_cache(&mut cache);
+        }
+    }
+
+    /// A complete exact suffix discovered by a new owner must itself pass a
+    /// durability barrier before its floor can authorize pointer recovery.
+    pub(crate) fn synchronize_ledger(&self, expected: &[u8]) -> Result<()> {
+        self.append_ledger(expected, &[])
+    }
+
+    /// No seek, truncate, replacement, unlock, duplicate or pathname reopen.
+    /// Any uncertainty retains the descriptor and suffix and closes appends.
+    pub(crate) fn append_ledger(&self, expected: &[u8], suffix: &[u8]) -> Result<()> {
+        let mut cache = self
+            .0
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("enforcer cache poisoned"))?;
+        let result = (|| {
+            ensure!(
+                !matches!(*cache, EnforcerLeaseCache::Tainted { .. }),
+                "enforcer ledger tainted"
+            );
+            ensure!(
+                expected
+                    .len()
+                    .checked_add(suffix.len())
+                    .is_some_and(|size| size <= MAX_ENFORCER_LOCK_BYTES),
+                "enforcer lock byte limit"
+            );
+            let (before, facts) = self.read_same_descriptor()?;
+            ensure!(before == expected, "enforcer append prefix conflict");
+            if let EnforcerLeaseCache::Parsed {
+                bytes,
+                facts: cached,
+                digest,
+            } = &*cache
+            {
+                ensure!(
+                    bytes == &before
+                        && same_file_state(cached, &facts)
+                        && *digest == hex::encode(Sha256::digest(&before)),
+                    "enforcer cached append prefix changed"
+                );
+            }
+            #[cfg(test)]
+            if let Some(count) = enforcer_partial_append::take() {
+                self.0
+                    .file
+                    .write_all_at(&suffix[..count.min(suffix.len())], expected.len() as u64)?;
+                anyhow::bail!("injected failure after real partial floor write");
+            }
+            self.0
+                .file
+                .write_all_at(suffix, expected.len() as u64)
+                .context("enforcer floor append failed; retained suffix is unknown")?;
+            self.0
+                .file
+                .sync_all()
+                .context("enforcer floor synchronization unknown")?;
+            let (bytes, facts) = self.read_same_descriptor()?;
+            ensure!(
+                bytes.len() == expected.len() + suffix.len()
+                    && bytes.starts_with(expected)
+                    && &bytes[expected.len()..] == suffix,
+                "enforcer floor adoption mismatch"
+            );
+            let digest = hex::encode(Sha256::digest(&bytes));
+            *cache = EnforcerLeaseCache::Parsed {
+                bytes,
+                facts,
+                digest,
+            };
+            Ok(())
+        })();
+        if result.is_err() {
+            taint_enforcer_cache(&mut cache);
+        }
+        result
+    }
+
+    fn read_same_descriptor(&self) -> Result<(Vec<u8>, Metadata)> {
+        self.revalidate()?;
+        let before = check_private_file(&self.0.file)?;
+        ensure!(
+            before.len() <= MAX_ENFORCER_LOCK_BYTES as u64,
+            "enforcer lock exceeds bound"
+        );
+        let mut bytes = vec![0; before.len() as usize];
+        self.0
+            .file
+            .read_exact_at(&mut bytes, 0)
+            .context("enforcer same-FD read failed")?;
+        let after = check_private_file(&self.0.file)?;
+        ensure!(
+            same_file_state(&before, &after),
+            "enforcer lock changed during read"
+        );
+        self.revalidate()?;
+        Ok((bytes, after))
+    }
+
     /// Existing-only: a missing lock is not a factory request. None means a
     /// different file description already owns this exact lock inode.
     pub(crate) fn acquire_existing(root: &Directory) -> Result<Option<Self>> {
@@ -86,6 +308,8 @@ impl EnforcerLeaseFile {
             root: root.clone(),
             file,
             identity: expected,
+            cache: Mutex::new(EnforcerLeaseCache::Unread),
+            ledger_owned: AtomicBool::new(false),
         }));
         retained.revalidate()?;
         // SAFETY: retained CLOEXEC descriptor, nonblocking whole-file flock.
@@ -131,7 +355,36 @@ impl EnforcerLeaseFile {
     }
 }
 
+#[cfg(test)]
+mod enforcer_partial_append {
+    use std::cell::Cell;
+    thread_local! { static BYTES: Cell<Option<usize>> = const { Cell::new(None) }; }
+    pub(super) fn take() -> Option<usize> {
+        BYTES.with(|bytes| bytes.take())
+    }
+    pub(super) fn set(count: usize) {
+        BYTES.with(|bytes| bytes.set(Some(count)));
+    }
+}
+
 impl Directory {
+    pub(crate) fn create_enforcer_root(&self, name: &str) -> Result<ExclusiveEnforcerRoot> {
+        self.revalidate()?;
+        let encoded = persistent_name(name)?;
+        // SAFETY: checked leaf and retained private parent. EEXIST is always
+        // refusal, never permission to adopt another initialization.
+        if unsafe { libc::mkdirat(self.0.file.as_raw_fd(), encoded.as_ptr(), 0o700) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("exclusive enforcer root creation failed");
+        }
+        let child = self
+            .persistent_child(name, false)?
+            .context("exclusive enforcer root disappeared")?;
+        child.sync()?;
+        self.sync()?;
+        Ok(ExclusiveEnforcerRoot(child))
+    }
+
     /// Synchronize an existing private regular entry without reading payloads.
     /// The caller must first drop every SQLite owner of this namespace: even
     /// closing a second raw descriptor could release SQLite's POSIX locks.
@@ -868,6 +1121,85 @@ impl PrivateFile {
 mod closed_entry_sync_tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn enforcer_factory_refuses_existing_and_clones_retain_one_description() {
+        let files = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let parent = Directory::open_existing(files.path()).unwrap();
+        let fresh = parent.create_enforcer_root("fresh").unwrap();
+        assert!(parent.create_enforcer_root("fresh").is_err());
+        let (root, lease) = EnforcerLeaseFile::create_new(fresh).unwrap();
+        let copy = lease.clone();
+        let fd = lease.0.file.as_raw_fd();
+        assert_eq!(copy.0.file.as_raw_fd(), fd);
+        assert!(
+            EnforcerLeaseFile::acquire_existing(&root)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(lease.ledger_bytes().unwrap(), b"");
+        lease.append_ledger(b"", b"seal").unwrap();
+        assert_eq!(copy.ledger_bytes().unwrap(), b"seal");
+        assert_eq!(lease.0.file.as_raw_fd(), fd);
+        drop(lease);
+        assert!(
+            EnforcerLeaseFile::acquire_existing(&root)
+                .unwrap()
+                .is_none()
+        );
+        drop(copy);
+        let reopened = EnforcerLeaseFile::acquire_existing(&root).unwrap().unwrap();
+        assert_eq!(reopened.ledger_bytes().unwrap(), b"seal");
+        assert!(root.persistent_read(".owner.lock", 0, &[]).is_err());
+    }
+
+    #[test]
+    fn enforcer_prefix_mutation_taints_without_closing_structural_stop_lease() {
+        let files = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let parent = Directory::open_existing(files.path()).unwrap();
+        let (root, lease) =
+            EnforcerLeaseFile::create_new(parent.create_enforcer_root("fresh").unwrap()).unwrap();
+        lease.append_ledger(b"", b"seal").unwrap();
+        lease.0.file.write_all_at(b"torn", 0).unwrap();
+        assert!(lease.ledger_bytes().is_err());
+        assert!(lease.append_ledger(b"torn", b"repair").is_err());
+        assert!(lease.revalidate().is_ok());
+        assert_eq!(
+            std::fs::read(root.path().join(".owner.lock")).unwrap(),
+            b"torn"
+        );
+    }
+
+    #[test]
+    fn enforcer_partial_write_keeps_suffix_and_last_clone_flock() {
+        let files = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let parent = Directory::open_existing(files.path()).unwrap();
+        let (root, lease) =
+            EnforcerLeaseFile::create_new(parent.create_enforcer_root("fresh").unwrap()).unwrap();
+        lease.append_ledger(b"", b"seal").unwrap();
+        enforcer_partial_append::set(2);
+        assert!(lease.append_ledger(b"seal", b"floor").is_err());
+        assert_eq!(
+            std::fs::read(root.path().join(".owner.lock")).unwrap(),
+            b"sealfl"
+        );
+        assert!(lease.ledger_bytes().is_err());
+        assert!(lease.revalidate().is_ok());
+        assert!(
+            EnforcerLeaseFile::acquire_existing(&root)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn closed_entry_sync_keeps_nofollow_private_modes_and_single_link_policy() {

@@ -43,6 +43,10 @@ pub enum BrokerCommandV1 {
         operation_id: Uuid,
         command_id: Uuid,
     },
+    /// Audit an operator request to inhibit one original Arm before its claim.
+    AbandonBeforeClaim {
+        request: super::AbandonBeforeClaimV1,
+    },
     Resume {
         operation_id: Uuid,
         command_id: Uuid,
@@ -188,6 +192,36 @@ pub struct RecoveryTargetV1 {
     pub original_timeout_seconds: u32,
     pub original_deadline_ns_decimal: String,
     pub cancel_command_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preclaim: Option<RecoveryPreclaimV1>,
+}
+
+/// Current-process arbitration metadata, never runtime or permission proof.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryPreclaimV1 {
+    pub version: u32,
+    pub expected_epoch: Option<Uuid>,
+    pub generation: Option<u64>,
+    pub state: super::PreclaimStateV1,
+    pub source: PreclaimSourceV1,
+    pub freshness: PreclaimFreshnessV1,
+    pub command_id: Option<Uuid>,
+    pub signal_audit_confirmed: bool,
+    pub retirement_continuation_retained: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreclaimSourceV1 {
+    ProcessLocal,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreclaimFreshnessV1 {
+    CurrentProcessState,
+    Unknown,
 }
 
 /// A separate reply keeps existing Status/Page payloads unchanged. Its source
@@ -208,6 +242,25 @@ pub struct RecoveryStatusV1 {
     pub cancel_commands: Vec<RecoveryCommandV1>,
     pub known_arms: Vec<RecoveryTargetV1>,
     pub pending_arms: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retirements: Vec<RecoveryRetirementV1>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetirementPhaseV1 {
+    Pending,
+    Final,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryRetirementV1 {
+    pub arm_id: Uuid,
+    pub retirement_id: Uuid,
+    pub phase: RetirementPhaseV1,
+    pub intention_audit_confirmed: bool,
+    pub guardian_receipt_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -252,6 +305,22 @@ pub enum BrokerReplyV1 {
         input_hash: String,
         revision: u64,
         checkpoint_hash: String,
+    },
+    /// Only the signal is audit-ACKed. This does not assert Closing or Final.
+    AbandonRequested {
+        operation_id: Uuid,
+        arm_id: Uuid,
+        command_id: Uuid,
+        input_hash: String,
+        revision: u64,
+        checkpoint_hash: String,
+    },
+    AbandonedBeforeClaim {
+        operation_id: Uuid,
+        arm_id: Uuid,
+        container_id: String,
+        final_revision: u64,
+        final_checkpoint_hash: String,
     },
     ExportAcknowledged {
         operation_id: Uuid,

@@ -12,5 +12,7 @@ pub mod journal;
 pub mod lifecycle;
 pub mod local_ipc;
 pub mod outbox;
+pub(crate) mod retirement;
+pub(crate) mod retirement_checkpoint;
 pub mod service;
 pub mod writer;

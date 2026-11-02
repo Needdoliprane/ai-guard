@@ -7,6 +7,7 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::load_endpoint,
+        enforcer::EnforcerClient,
         intent::ExecutionIntentV1,
         journal::{BindingInputs, ControlSecrets, FsExclusions, Journal, ReserveResult},
         outbox::{BrokerCheckpointV4, OutboxEventV1},

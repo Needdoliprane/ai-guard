@@ -5,7 +5,10 @@
 
 mod client;
 mod diagnostics;
+mod execution;
+pub(crate) mod ledger;
 mod recovery;
+pub(crate) mod retirement;
 mod server;
 
 #[cfg(test)]
@@ -27,12 +30,15 @@ use std::{
 };
 use uuid::Uuid;
 
+pub(crate) use client::EnforcerFullClientV3;
 pub use client::{EnforcedSlot, EnforcerClient};
 pub(crate) use diagnostics::EnforcerStageFailure;
+pub(crate) use execution::ExecutionEnforcerV1;
 pub use recovery::{
     EnforcerStopClient, EnforcerStopClientV3, EnforcerStopStatusV2, EnforcerStopStatusV3,
     StopPhaseV1, StopSlotV1, run_internal_recovery_enforcer,
 };
+pub use retirement::{run_internal_full3_existing, run_internal_full3_fresh};
 pub use server::run_internal_enforcer;
 
 const MAX_SLOTS: u32 = 1024;
@@ -313,7 +319,22 @@ impl RegistrationV1 {
         Ok(())
     }
 
-    fn digest(&self) -> EnforcerResult<String> {
+    pub(crate) fn arm(&self) -> &ArmV1 {
+        &self.arm
+    }
+    pub(crate) fn arm_id(&self) -> &str {
+        &self.arm.operation_id
+    }
+    pub(crate) fn receipt(&self) -> &ArmReceiptV1 {
+        &self.receipt
+    }
+    pub(crate) fn control_origin_hash(&self) -> &str {
+        &self.control_origin_hash
+    }
+    pub(crate) fn tenant_id(&self) -> &str {
+        &self.tenant_id
+    }
+    pub(crate) fn digest(&self) -> EnforcerResult<String> {
         self.validate()?;
         // Full private binding, including invocation, not authority.fingerprint
         // alone. Serialization traverses structs and ordered invocation maps.

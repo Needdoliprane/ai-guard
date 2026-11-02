@@ -21,8 +21,17 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 use uuid::Uuid;
+#[cfg(test)]
+mod canonical_tests;
 mod confirmed;
 pub mod recovery;
+pub(crate) mod retirement;
+#[cfg(all(test, unix))]
+pub(crate) mod retirement_live_fixture;
+#[cfg(all(test, unix))]
+mod retirement_live_tests;
+#[cfg(all(test, unix))]
+mod retirement_tests;
 pub use recovery::{CancelStopProjectionV1, StopJobSnapshotV1, StopJournal};
 mod types;
 pub use types::*;
@@ -41,24 +50,11 @@ const SMALL: u64 = 8 * 1024;
 const CHECKPOINT: u64 = 32 * 1024 * 1024;
 
 pub(crate) fn canonical(value: &impl Serialize) -> JournalResult<Vec<u8>> {
-    fn order(value: Value) -> Value {
-        match value {
-            Value::Object(fields) => Value::Object(
-                fields
-                    .into_iter()
-                    .map(|(k, v)| (k, order(v)))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-                    .into_iter()
-                    .collect(),
-            ),
-            Value::Array(values) => Value::Array(values.into_iter().map(order).collect()),
-            other => other,
-        }
-    }
-    serde_json::to_vec(&order(
-        serde_json::to_value(value).map_err(|_| JournalError::InvalidInput)?,
-    ))
-    .map_err(|_| JournalError::InvalidInput)
+    let mut value = serde_json::to_value(value).map_err(|_| JournalError::InvalidInput)?;
+    // This preserves str/BTreeMap key ordering under either serde_json map
+    // backend, without rebuilding every already ordered object in the tree.
+    value.sort_all_objects();
+    serde_json::to_vec(&value).map_err(|_| JournalError::InvalidInput)
 }
 pub(super) fn digest(domain: &str, bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
@@ -109,6 +105,7 @@ struct Inner {
     limits: JournalLimitsV1,
     control: ControlSecrets,
     writer: Mutex<Writer>,
+    budget_incomplete: std::sync::atomic::AtomicBool,
 }
 #[derive(Default)]
 struct Writer {
@@ -199,6 +196,7 @@ record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revisio
 record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
 record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
 record!(OutboxCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV4 });
+record!(RetirementCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:super::retirement_checkpoint::BrokerCheckpointV5 });
 record!(Rejected {
     version: u32,
     scope_hash: String,
@@ -329,11 +327,25 @@ fn encode_checkpoint(
         LoadedCheckpoint::V4(value) => {
             encode!(OutboxCheckpoint, 4, value, "ai-guard:broker-checkpoint:v4")
         }
+        LoadedCheckpoint::V5(value) => {
+            encode!(
+                RetirementCheckpoint,
+                5,
+                value,
+                "ai-guard:broker-checkpoint:v5"
+            )
+        }
     }
 }
 
-/// The sole filesystem publication algorithm. Both callers have already
-/// validated their typed transition and supplied a complete metadata budget.
+struct PublicationResources<'a> {
+    usage: Usage,
+    budget: retirement::PublicationBudget,
+    floors: &'a HashMap<Uuid, RevisionRefV1>,
+}
+
+/// The sole filesystem publication algorithm. Callers have already validated
+/// their typed transition and supplied a complete metadata budget.
 fn publish_revision(
     core: &Inner,
     operation_id: Uuid,
@@ -341,8 +353,13 @@ fn publish_revision(
     expected: &RevisionRefV1,
     head: &RevisionRefV1,
     bytes: &[u8],
-    mut usage: Usage,
+    resources: PublicationResources<'_>,
 ) -> JournalResult<()> {
+    let PublicationResources {
+        mut usage,
+        budget: publication,
+        floors,
+    } = resources;
     if head.revision >= u64::from(core.limits.revisions) {
         return Err(JournalError::LimitExceeded);
     }
@@ -370,6 +387,14 @@ fn publish_revision(
         2,
         true,
         &core.limits,
+    )?;
+    retirement::reserve_future(
+        core,
+        operation_id,
+        Some((head, bytes)),
+        &usage,
+        &publication,
+        floors,
     )?;
     let file = io(job.persistent_create(&revision_name(head.revision), bytes))?;
     stage!(RevisionWritten);
@@ -483,6 +508,7 @@ impl Journal {
             limits,
             control: control_secrets,
             writer: Mutex::new(Writer::default()),
+            budget_incomplete: std::sync::atomic::AtomicBool::new(false),
         }));
         journal.usage(None)?;
         stage!(NamespaceDurable);
@@ -541,6 +567,14 @@ impl Journal {
             .checked_add(1)
             .ok_or(JournalError::LimitExceeded)?;
         usage.add(bytes.len() as u64, 2, true, &self.0.limits)?;
+        retirement::reserve_future(
+            &self.0,
+            operation_id,
+            None,
+            &usage,
+            &retirement::PublicationBudget::NewAllocation,
+            &writer.floors,
+        )?;
         let job = fscheck(self.0.jobs.persistent_child(&name, true))?.ok_or(JournalError::Io)?;
         let file = io(job.persistent_create("reservation.json", &bytes))?;
         stage!(ReservationWritten);
@@ -602,7 +636,12 @@ impl Journal {
             code,
         };
         let bytes = self.checked_record(&record, SMALL)?;
-        self.budget(&ticket.operation.to_string(), bytes.len() as u64, 1)?;
+        self.budget(
+            &ticket.operation.to_string(),
+            bytes.len() as u64,
+            1,
+            &writer,
+        )?;
         let file = io(job.persistent_create("rejected.json", &bytes))?;
         stage!(RejectedWritten);
         io(file.persistent_sync())?;
@@ -852,6 +891,7 @@ impl Journal {
             &name,
             added_bytes + if launch.is_some() { 3 } else { 0 },
             5 + if binding_bytes.is_some() { 2 } else { 0 } + if launch.is_some() { 2 } else { 0 },
+            &writer,
         )?;
         if let Some(bytes) = binding_bytes {
             let directory =
@@ -1084,7 +1124,17 @@ impl Journal {
         expected: RevisionRefV1,
         next: &BrokerCheckpointV4,
     ) -> JournalResult<CheckpointReceiptV1> {
-        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V4(next.clone()))
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        let loaded = self
+            .load_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        let next = match loaded.broker_checkpoint_v5() {
+            Some(current) => LoadedCheckpoint::V5(current.with_outbox(next.clone())?),
+            None => LoadedCheckpoint::V4(next.clone()),
+        };
+        valid_hash(&expected.hash)?;
+        self.advance_loaded_checkpoint(operation_id, expected, next, loaded, &mut writer)
     }
     /// Writer adaptation shares the mutation's strict preload and mutex. A V4
     /// writer update requires the current head even for an otherwise exact replay.
@@ -1104,7 +1154,15 @@ impl Journal {
             None | Some(JournalStatusV1::Rejected(_)) => return Err(JournalError::InvalidInput),
             Some(_) => return Err(JournalError::Interrupted),
         };
-        let next = if let Some(current) = loaded.broker_checkpoint_v4() {
+        let next = if let Some(current) = loaded.broker_checkpoint_v5() {
+            if loaded.head() != &expected {
+                return Err(JournalError::Conflict);
+            }
+            LoadedCheckpoint::V5(current.with_outbox(BrokerCheckpointV4::new(
+                next.clone(),
+                current.outbox().events().to_vec(),
+            )?)?)
+        } else if let Some(current) = loaded.broker_checkpoint_v4() {
             if loaded.head() != &expected {
                 return Err(JournalError::Conflict);
             }
@@ -1149,6 +1207,7 @@ impl Journal {
         if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
             || (next.lifecycle().is_none() && loaded.broker_checkpoint_v3().is_some())
             || (next.outbox().is_none() && loaded.broker_checkpoint_v4().is_some())
+            || (next.retirement().is_none() && loaded.broker_checkpoint_v5().is_some())
         {
             return Err(JournalError::Conflict);
         }
@@ -1194,7 +1253,11 @@ impl Journal {
             &expected,
             &head,
             &bytes,
-            usage,
+            PublicationResources {
+                usage,
+                budget: retirement::PublicationBudget::NewAllocation,
+                floors: &writer.floors,
+            },
         )?;
         // The CAS and directory barrier committed this head even when a later
         // business credential recheck fails. Preserve the conservative floor.
@@ -1650,9 +1713,18 @@ impl Journal {
     ) -> JournalResult<()> {
         confirmed::check_transition(previous, next, legacy_managed_seen, last_cancel_operations)
     }
-    fn budget(&self, name: &str, bytes: u64, entries: u32) -> JournalResult<()> {
-        self.usage(Some(name))?
-            .add(bytes, entries, true, &self.0.limits)
+    fn budget(&self, name: &str, bytes: u64, entries: u32, writer: &Writer) -> JournalResult<()> {
+        let mut usage = self.usage(Some(name))?;
+        usage.add(bytes, entries, true, &self.0.limits)?;
+        let operation = Uuid::parse_str(name).map_err(|_| JournalError::InvalidInput)?;
+        retirement::reserve_future(
+            &self.0,
+            operation,
+            None,
+            &usage,
+            &retirement::PublicationBudget::NewAllocation,
+            &writer.floors,
+        )
     }
     fn check_observation_capacity(&self, operation_id: Uuid, writer: &Writer) -> JournalResult<()> {
         if !writer.observed_jobs.contains(&operation_id)

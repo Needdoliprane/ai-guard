@@ -1,7 +1,7 @@
 //! Trusted broker process. A Unix peer UID routes a private transport; only a
 //! fresh gateway check of the presented credential authenticates a request.
 use super::{
-    AuthenticatedBatchContext, VerifiedProfile,
+    AuthenticatedBatchContext, ServiceEnforcerSelectionV1, VerifiedProfile,
     jobs::{self, Job, ProfileJobs, RunningJob},
     profile::{ControlProfileV1, Registry, SubmitV1},
     protocol::*,
@@ -11,7 +11,10 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::RoleLease,
-        enforcer::{CancelGeneration, EnforcerClient, EnforcerStopClient, RegistrationV1},
+        enforcer::{
+            CancelGeneration, EnforcerClient, EnforcerFullClientV3, EnforcerStopClient,
+            ExecutionEnforcerV1, RegistrationV1,
+        },
         journal::{
             AcceptedJobV1, CancelStopProjectionV1, ControlSecrets, FsExclusions, Journal,
             JournalLimitsV1, JournalScopeV1, JournalStatusV1, RejectionCodeV1, RejectionPhaseV1,
@@ -35,6 +38,7 @@ use crate::{
     workspace::AuthorizedSource,
 };
 use anyhow::{Result, anyhow, ensure};
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -61,10 +65,16 @@ const WRITER_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(test)]
 #[path = "cancel_retry_tests.rs"]
 mod cancel_retry_tests;
+#[cfg(all(test, unix))]
+#[path = "preclaim_live_tests.rs"]
+mod preclaim_live_tests;
+#[cfg(all(test, unix))]
+#[path = "retirement_audit_tests.rs"]
+mod retirement_audit_tests;
 #[cfg(test)]
 type ServiceEnforcer = cancel_retry_tests::TestEnforcer;
 #[cfg(not(test))]
-type ServiceEnforcer = EnforcerClient;
+type ServiceEnforcer = ExecutionEnforcerV1;
 
 struct Material {
     literals: Vec<String>,
@@ -164,6 +174,27 @@ impl Material {
             .trim()
             .to_owned())
     }
+    /// Validate only this profile's retained runner material for metadata
+    /// delivery. An unrelated missing provider/blob does not close this path.
+    fn checked_reconciler(&self, profile: &ControlProfileV1) -> Result<String> {
+        let file = self
+            .files
+            .iter()
+            .find(|file| file.path() == profile.runner_token_file)
+            .ok_or_else(|| anyhow!("private reconciler credential is unavailable"))?;
+        let parent_path = file
+            .path()
+            .parent()
+            .ok_or_else(|| anyhow!("private reconciler parent is unavailable"))?;
+        let parent = self
+            .parents
+            .iter()
+            .find(|parent| parent.path() == parent_path)
+            .ok_or_else(|| anyhow!("private reconciler parent is unavailable"))?;
+        parent.revalidate()?;
+        file.revalidate()?;
+        self.reconciler(profile)
+    }
     fn screen(&self, value: &Value, presented: &str) -> Result<(), BrokerErrorCodeV1> {
         let literals = self
             .literals
@@ -227,6 +258,12 @@ impl DeferredRun {
             let outcome = self.executor.run(self.operation, &self.context).await;
             match outcome {
                 Ok(BatchOutcome::AwaitingReview) => self.job.result(None),
+                Ok(BatchOutcome::AbandonedBeforeClaim(abandoned)) => {
+                    self.job.result(None);
+                    // These are retained Created/F facts; dropping their data
+                    // owners neither cleans the instance nor releases quota.
+                    drop(abandoned);
+                }
                 Ok(_) => {
                     self.job.result(None);
                     let _ = self.job.set_source(None);
@@ -260,16 +297,25 @@ impl Response {
 /// is ever executed on the host. SIGINT/SIGTERM closes admissions; the distinct
 /// helper retains every armed stop and its original deadline.
 pub async fn serve(config_path: &Path) -> Result<()> {
-    serve_mode(config_path, false).await
+    serve_selected(config_path, ServiceEnforcerSelectionV1::Legacy).await
 }
 
 /// Explicit existing-installation recovery. No Full capability is requested,
 /// no new control namespace is bootstrapped and admissions stay fenced.
 pub async fn serve_recovery(config_path: &Path) -> Result<()> {
-    serve_mode(config_path, true).await
+    serve_selected(
+        config_path,
+        ServiceEnforcerSelectionV1::Recovery { role_name: None },
+    )
+    .await
 }
 
-async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
+pub async fn serve_selected(
+    config_path: &Path,
+    selection: ServiceEnforcerSelectionV1,
+) -> Result<()> {
+    selection.validate()?;
+    let recovery_only = matches!(&selection, ServiceEnforcerSelectionV1::Recovery { .. });
     let path = config_path.to_owned();
     let registry = Arc::new(tokio::task::spawn_blocking(move || Registry::load(&path)).await??);
     let root = if recovery_only {
@@ -286,39 +332,79 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
     } else {
         RoleLease::acquire(&broker_root)?
     };
-    let enforcer_root = root
-        .persistent_child("enforcer", !recovery_only)?
-        .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
     let executable =
         std::env::current_exe().map_err(|_| anyhow!("broker executable is unavailable"))?;
-    let (enforcer, stop_enforcer) = if recovery_only {
-        (
-            None,
-            Some(
-                EnforcerStopClient::connect_or_spawn_for_recovery(
-                    &enforcer_root,
-                    &executable,
-                    registry.data.max_enforcer_slots,
-                )
-                .await?,
-            ),
-        )
-    } else {
-        (
-            Some(
-                EnforcerClient::connect_or_spawn(
-                    &enforcer_root,
-                    &executable,
-                    registry.data.max_enforcer_slots,
-                )
-                .await?,
-            ),
-            None,
-        )
-    };
     let material_registry = Arc::clone(&registry);
     let material =
         Arc::new(tokio::task::spawn_blocking(move || Material::load(&material_registry)).await??);
+    let (enforcer, stop_enforcer) = match selection {
+        ServiceEnforcerSelectionV1::Legacy => {
+            let role = root
+                .persistent_child("enforcer", true)?
+                .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
+            let client = EnforcerClient::connect_or_spawn(
+                &role,
+                &executable,
+                registry.data.max_enforcer_slots,
+            )
+            .await?;
+            (Some(ExecutionEnforcerV1::Legacy(client)), None)
+        }
+        ServiceEnforcerSelectionV1::Recovery { role_name } => {
+            let sealed = role_name.is_some();
+            let role = root
+                .persistent_child(role_name.as_deref().unwrap_or("enforcer"), false)?
+                .ok_or_else(|| anyhow!("broker stop root is unavailable"))?;
+            let stop = if sealed {
+                EnforcerStopClient::connect_or_spawn_existing_sealed(
+                    &role,
+                    &executable,
+                    registry.data.max_enforcer_slots,
+                )
+                .await?
+            } else {
+                EnforcerStopClient::connect_or_spawn_for_recovery(
+                    &role,
+                    &executable,
+                    registry.data.max_enforcer_slots,
+                )
+                .await?
+            };
+            (None, Some(stop))
+        }
+        ServiceEnforcerSelectionV1::Full3Fresh { role_name } => {
+            let scan_root = root.clone();
+            let scan_registry = Arc::clone(&registry);
+            let scan_material = Arc::clone(&material);
+            // Keep every existing profile lease through exclusive genesis.
+            // A source pathname or an empty-looking role is never a fresh proof.
+            let reports = tokio::task::spawn_blocking(move || {
+                verify_fresh_installation(&scan_root, &scan_registry, &scan_material)
+            })
+            .await??;
+            let client = EnforcerFullClientV3::spawn_fresh(
+                &root,
+                &role_name,
+                &executable,
+                registry.data.installation_id,
+                registry.data.max_enforcer_slots,
+            )
+            .await?;
+            client.verify_installation(registry.data.installation_id)?;
+            drop(reports);
+            (Some(ExecutionEnforcerV1::Full3(client)), None)
+        }
+        ServiceEnforcerSelectionV1::Full3Existing { role_name } => {
+            let role = root
+                .persistent_child(&role_name, false)?
+                .ok_or_else(|| anyhow!("sealed enforcer role is unavailable"))?;
+            let client =
+                EnforcerFullClientV3::connect_existing(&role, registry.data.max_enforcer_slots)
+                    .await?;
+            client.verify_installation(registry.data.installation_id)?;
+            (Some(ExecutionEnforcerV1::Full3(client)), None)
+        }
+    };
     let profiles = registry
         .data
         .profiles
@@ -405,7 +491,7 @@ impl Service {
     fn recovery_only(&self) -> bool {
         self.stop_enforcer.is_some()
     }
-    fn full_enforcer(&self) -> Result<&EnforcerClient, BrokerErrorCodeV1> {
+    fn full_enforcer(&self) -> Result<&ExecutionEnforcerV1, BrokerErrorCodeV1> {
         if self.recovery_only() {
             return Err(BrokerErrorCodeV1::NeedsReconciliation);
         }
@@ -602,6 +688,43 @@ impl Service {
             .iter()
             .map(|stop| {
                 let arm = stop.arm();
+                let local = self
+                    .profiles
+                    .get(&profile.id)
+                    .and_then(|jobs| jobs.known(operation));
+                let view = local.as_ref().and_then(|job| {
+                    Uuid::parse_str(&arm.operation_id)
+                        .ok()
+                        .map(|arm| job.preclaim.arm_view(arm))
+                });
+                let preclaim = match view {
+                    Some(view) if !snapshot.incomplete() => RecoveryPreclaimV1 {
+                        version: 1,
+                        expected_epoch: view.expected_epoch,
+                        generation: view.generation,
+                        state: view.state,
+                        source: PreclaimSourceV1::ProcessLocal,
+                        freshness: if view.freshness == "current_process_state" {
+                            PreclaimFreshnessV1::CurrentProcessState
+                        } else {
+                            PreclaimFreshnessV1::Unknown
+                        },
+                        command_id: view.command_id,
+                        signal_audit_confirmed: view.audit_confirmed,
+                        retirement_continuation_retained: view.retirement_continuation_retained,
+                    },
+                    _ => RecoveryPreclaimV1 {
+                        version: 1,
+                        expected_epoch: None,
+                        generation: None,
+                        state: super::PreclaimStateV1::Unknown,
+                        source: PreclaimSourceV1::ProcessLocal,
+                        freshness: PreclaimFreshnessV1::Unknown,
+                        command_id: None,
+                        signal_audit_confirmed: false,
+                        retirement_continuation_retained: None,
+                    },
+                };
                 RecoveryTargetV1 {
                     arm_id: arm.operation_id.clone(),
                     worker_id: arm.worker_id.clone(),
@@ -618,12 +741,13 @@ impl Service {
                     original_timeout_seconds: arm.timeout_seconds,
                     original_deadline_ns_decimal: arm.deadline_ns_decimal.clone(),
                     cancel_command_id: stop.cancel_after_arm(),
+                    preclaim: Some(preclaim),
                 }
             })
             .collect();
         Ok(Response::reply(BrokerReplyV1::RecoveryStatus {
             status: RecoveryStatusV1 {
-                version: 1,
+                version: 2,
                 operation_id: operation,
                 tenant_id: snapshot.scope().tenant_id().to_owned(),
                 journal_mode: if capabilities.is_stop_only() {
@@ -648,6 +772,34 @@ impl Service {
                     .collect(),
                 known_arms,
                 pending_arms: snapshot.pending_arms(),
+                retirements: snapshot
+                    .retirements()
+                    .iter()
+                    .map(|entry| {
+                        let pending = entry.request();
+                        Ok(RecoveryRetirementV1 {
+                            arm_id: Uuid::parse_str(&pending.identity().arm().operation_id)
+                                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?,
+                            retirement_id: *pending.identity().retirement_id(),
+                            phase: if entry.finalized().is_some() {
+                                RetirementPhaseV1::Final
+                            } else {
+                                RetirementPhaseV1::Pending
+                            },
+                            intention_audit_confirmed: pending.audit_ack().is_some(),
+                            guardian_receipt_hash: entry
+                                .finalized()
+                                .map(|entry| {
+                                    entry
+                                        .receipt()
+                                        .digest()
+                                        .map(|hash| hash.as_str().to_owned())
+                                })
+                                .transpose()
+                                .map_err(jobs::journal_error)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, BrokerErrorCodeV1>>()?,
             },
         }))
     }
@@ -664,6 +816,7 @@ impl Service {
         let root = self.root.clone();
         let material = Arc::clone(&self.material);
         let cancel = job.cancel.clone();
+        let preclaim = job.preclaim.clone();
         self.filesystem(move || {
             registry.source.revalidate()?;
             registry.source_directory.revalidate()?;
@@ -673,7 +826,8 @@ impl Service {
                 "broker command generation changed"
             );
             verified.client = verified.client.with_secrets(material.literals.clone());
-            let mut context = verified.open_context(&registry, &profile, &root, cancel, source)?;
+            let mut context =
+                verified.open_context(&registry, &profile, &root, cancel, preclaim, source)?;
             ensure!(
                 context.expected_generation() == generation
                     && context.cancel_generation().current() == generation,
@@ -791,6 +945,9 @@ impl Service {
         match envelope.request {
             BrokerCommandV1::Submit { payload } => {
                 self.submit(request, payload, &envelope.credential).await
+            }
+            BrokerCommandV1::AbandonBeforeClaim { request: signal } => {
+                self.abandon_before_claim(request, signal).await
             }
             BrokerCommandV1::Status { operation_id } => {
                 let durable = request
@@ -1063,6 +1220,87 @@ impl Service {
         jobs::require_profile(&job, profile)?;
         Ok(job)
     }
+    async fn abandon_before_claim(
+        &self,
+        request: AuthorizedRequest,
+        input: super::AbandonBeforeClaimV1,
+    ) -> Result<Response, BrokerErrorCodeV1> {
+        input.validate()?;
+        let full = self
+            .full_enforcer()?
+            .full3()
+            .ok_or(BrokerErrorCodeV1::Forbidden)?;
+        if full.epoch() != input.expected_epoch {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let local = request
+            .jobs
+            .known(input.operation_id)
+            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+        let durable = self
+            .load_job(&request.writer, input.operation_id, &request.profile)
+            .await?;
+        let arm_is_confirmed = durable.broker_checkpoint_v2().is_some_and(|checkpoint| {
+            checkpoint.supervision().operations().iter().any(|operation| matches!(
+                operation,
+                crate::broker::checkpoint::SupervisionOperationV1::Arm { request: arm, response: Some(_), .. }
+                    if arm.operation_id == input.arm_id.to_string()
+            ))
+        });
+        if !arm_is_confirmed {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        // The same process-local arbitration closes the claim path immediately.
+        // Disappearance of this IPC waiter cannot undo the owned audit task.
+        let signal = local.preclaim.request(input.clone())?;
+        let mut event = signal.event().clone();
+        let context = durable.intent().request_data();
+        event.session_id = context.session_id.clone();
+        event.project_id = context.project_id.clone();
+        event.sandbox_id = context.sandbox_id.clone();
+        event.agent_id = context.agent_id.clone();
+        event.correlation_id = context.correlation_id.clone();
+        event.trace_id = context.trace_id.clone();
+        let writer = request.writer;
+        let client = request.verified.client;
+        let task = tokio::spawn(async move {
+            let pending = writer
+                .enqueue_event(input.operation_id, event.clone())
+                .await
+                .map_err(jobs::journal_error)?;
+            let audit_seq = client
+                .post_event(
+                    serde_json::to_value(&event).map_err(|_| BrokerErrorCodeV1::InvalidInput)?,
+                )
+                .await
+                .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+            let confirmed = writer
+                .acknowledge_event(input.operation_id, input.command_id, audit_seq)
+                .await
+                .map_err(jobs::journal_error)?;
+            if confirmed.audit_seq() != Some(audit_seq)
+                || confirmed.input_hash() != pending.input_hash()
+            {
+                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+            }
+            let view = signal.confirm_audit()?;
+            if view.state == super::preclaim::PreclaimStateV1::StopReserved {
+                return Err(BrokerErrorCodeV1::Interrupted);
+            }
+            // Retain the Job until audit completion even if the requester exits.
+            drop(local);
+            Ok(Response::reply(BrokerReplyV1::AbandonRequested {
+                operation_id: input.operation_id,
+                arm_id: input.arm_id,
+                command_id: input.command_id,
+                input_hash: confirmed.input_hash().to_owned(),
+                revision: confirmed.head().revision(),
+                checkpoint_hash: confirmed.head().hash().to_owned(),
+            }))
+        });
+        task.await.map_err(|_| BrokerErrorCodeV1::Unavailable)?
+    }
+
     async fn approve(
         &self,
         request: AuthorizedRequest,
@@ -1420,13 +1658,23 @@ impl Service {
             .export(operation, target, &context)
             .await
         {
-            Ok(done) => {
+            Ok(std::ops::ControlFlow::Continue(done)) => {
                 job.result(None);
                 Ok(Response::reply(BrokerReplyV1::ExportAcknowledged {
                     operation_id: operation,
                     request_id: done.request_id,
                     manifest_digest: done.manifest_digest,
                     files: done.files,
+                }))
+            }
+            Ok(std::ops::ControlFlow::Break(abandoned)) => {
+                job.result(None);
+                Ok(Response::reply(BrokerReplyV1::AbandonedBeforeClaim {
+                    operation_id: abandoned.retirement.operation_id(),
+                    arm_id: abandoned.retirement.arm_id(),
+                    container_id: abandoned.owned.handle.id().to_owned(),
+                    final_revision: abandoned.retirement.final_revision().revision(),
+                    final_checkpoint_hash: abandoned.retirement.final_revision().hash().to_owned(),
                 }))
             }
             Err(_) => {
@@ -1462,8 +1710,19 @@ impl Service {
             self.fenced.store(true, Ordering::SeqCst);
             eprintln!("broker recovery: unknown or unsafe journal profile; new starts fenced");
         }
-        for profile in &self.registry.data.profiles {
-            match self.restore_profile(profile).await {
+        // Registry validation caps profiles at 32. Poll every retained profile
+        // owner independently, so an unrelated Q wait cannot serialize STOPs
+        // in a later profile. Each profile still transfers exactly one factory.
+        let mut profiles = futures_util::stream::iter(
+            self.registry
+                .data
+                .profiles
+                .iter()
+                .map(|profile| self.restore_profile(profile)),
+        )
+        .buffer_unordered(32);
+        while let Some(result) = profiles.next().await {
+            match result {
                 Ok(count) => restored = restored.saturating_add(count),
                 Err(_) => {
                     self.fenced.store(true, Ordering::SeqCst);
@@ -1525,79 +1784,105 @@ impl Service {
         let Some(report) = report else {
             return Ok(0);
         };
+        let has_full3 = self.enforcer.as_ref().is_some_and(|_| {
+            self.full_enforcer()
+                .ok()
+                .and_then(ExecutionEnforcerV1::full3)
+                .is_some()
+        });
+        let split_restore = has_full3
+            && report.jobs().iter().any(|job| {
+                job.retirements().iter().any(|entry| {
+                    matches!(
+                        entry,
+                        crate::broker::retirement_checkpoint::RetirementEntryV1::Pending(_)
+                    )
+                })
+            });
+        // Other STOP targets enter their native guardians before any unrelated
+        // Q wait. Pending Arms alone wait for their own Q→F reconciliation.
+        let (early_restored, early_partial) = if split_restore {
+            self.restore_profile_targets(profile, &report, RestorePass::RequiredOnly)
+                .await?
+        } else {
+            (0, false)
+        };
+        // Complete the exact guardian result before restoring that same Arm.
+        // Keep the reader's lease/core; no business blob is read.
+        let mut retirement_partial = false;
+        let report = if let Some(full) = self.enforcer.as_ref().and_then(|_| {
+            self.full_enforcer()
+                .ok()
+                .and_then(ExecutionEnforcerV1::full3)
+        }) {
+            let mut owned =
+                Arc::try_unwrap(report).map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+            let pending =
+                owned
+                    .jobs()
+                    .iter()
+                    .flat_map(|job| job.retirements())
+                    .filter_map(|entry| match entry {
+                        crate::broker::retirement_checkpoint::RetirementEntryV1::Pending(
+                            pending,
+                        ) if pending.audit_ack().is_some() => Some(pending.identity().clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+            let mut queries = futures_util::stream::iter(
+                pending
+                    .into_iter()
+                    .map(|identity| async move { full.query_retirement(&identity).await }),
+            )
+            .buffer_unordered(16);
+            while let Some(result) = queries.next().await {
+                match result {
+                    Ok(Some(verified)) => {
+                        let (next, result) = self
+                            .filesystem(move || {
+                                let result = owned.finalize_retirement(verified);
+                                Ok((owned, result))
+                            })
+                            .await?;
+                        owned = next;
+                        retirement_partial |= result.is_err();
+                    }
+                    Ok(None) => {}
+                    Err(_) => retirement_partial = true,
+                }
+            }
+            Arc::new(owned)
+        } else {
+            report
+        };
         let scope = report.scope().clone();
         let jobs = self.profile_jobs(&profile.id)?;
-        let mut restored = 0_usize;
-        let mut partial = incomplete || report.incomplete();
+        let (later_restored, later_partial) = self
+            .restore_profile_targets(
+                profile,
+                &report,
+                if split_restore {
+                    RestorePass::PendingOnly
+                } else {
+                    RestorePass::All
+                },
+            )
+            .await?;
+        let restored = early_restored.saturating_add(later_restored);
+        let mut partial = incomplete
+            || report.incomplete()
+            || retirement_partial
+            || early_partial
+            || later_partial;
         if partial {
             self.fenced.store(true, Ordering::SeqCst);
-        }
-        let mut tasks = JoinSet::new();
-        // Bound independent restores. A corrupt or unavailable job must not
-        // serialize every later job behind its engine or credential source.
-        for (index, recovered) in report.jobs().iter().enumerate() {
-            let job = match jobs.job(recovered.operation_id()) {
-                Ok(job) => job,
-                Err(_) => {
-                    partial = true;
-                    continue;
-                }
-            };
-            if job
-                .remember_cancel_ids(recovered.cancel_command_ids())
-                .is_err()
-            {
-                partial = true;
-                continue;
-            }
-            let proof = Arc::clone(&report);
-            if self
-                .filesystem(move || Ok(proof.revalidate()?))
-                .await
-                .is_err()
-            {
-                self.fenced.store(true, Ordering::SeqCst);
-                partial = true;
-                break;
-            }
-            if tasks.len() >= 16 {
-                match tasks.join_next().await {
-                    Some(Ok((count, failed))) => {
-                        restored += count;
-                        partial |= failed;
-                    }
-                    _ => partial = true,
-                }
-            }
-            let full = self
-                .enforcer
-                .as_ref()
-                .map(|_| self.full_enforcer().cloned())
-                .transpose()?;
-            tasks.spawn(restore_recovered_job(
-                full,
-                self.stop_enforcer.clone(),
-                Arc::clone(&report),
-                index,
-                job,
-            ));
-        }
-        while let Some(result) = tasks.join_next().await {
-            match result {
-                Ok((count, failed)) => {
-                    restored += count;
-                    partial |= failed;
-                }
-                Err(_) => partial = true,
-            }
         }
         let proof = Arc::clone(&report);
         partial |= self
             .filesystem(move || Ok(proof.revalidate()?))
             .await
             .is_err();
-        // Transfer the existing lease into one actor, without an unlock/relock
-        // window. Partial recovery can only retain the STOP capability.
+        // One factory inherits the retained reader/core after both passes.
         let proof = Arc::clone(&report);
         let force_stops = partial || self.stop_enforcer.is_some();
         match self
@@ -1622,11 +1907,87 @@ impl Service {
             }
             Err(_) => partial = true,
         }
-        drop(report);
         if partial {
             self.fenced.store(true, Ordering::SeqCst);
         }
         Ok(restored)
+    }
+
+    async fn restore_profile_targets(
+        &self,
+        profile: &ControlProfileV1,
+        report: &Arc<StopRecoveryReportV1>,
+        pass: RestorePass,
+    ) -> Result<(usize, bool), BrokerErrorCodeV1> {
+        let jobs = self.profile_jobs(&profile.id)?;
+        let mut restored = 0_usize;
+        let mut partial = report.incomplete();
+        let mut tasks = JoinSet::new();
+        // Bound independent restores. A corrupt or unavailable job must not
+        // serialize every later job behind its engine or credential source.
+        for (index, recovered) in report.jobs().iter().enumerate() {
+            let job = match jobs.job(recovered.operation_id()) {
+                Ok(job) => job,
+                Err(_) => {
+                    partial = true;
+                    continue;
+                }
+            };
+            if job
+                .remember_cancel_ids(recovered.cancel_command_ids())
+                .is_err()
+            {
+                partial = true;
+                continue;
+            }
+            let proof = Arc::clone(report);
+            if self
+                .filesystem(move || Ok(proof.revalidate()?))
+                .await
+                .is_err()
+            {
+                self.fenced.store(true, Ordering::SeqCst);
+                partial = true;
+                break;
+            }
+            if tasks.len() >= 16 {
+                match tasks.join_next().await {
+                    Some(Ok((count, failed))) => {
+                        restored += count;
+                        partial |= failed;
+                    }
+                    _ => partial = true,
+                }
+            }
+            let full = self
+                .enforcer
+                .as_ref()
+                .map(|_| self.full_enforcer().cloned())
+                .transpose()?;
+            tasks.spawn(restore_recovered_job_pass(
+                full,
+                self.stop_enforcer.clone(),
+                Arc::clone(report),
+                index,
+                job,
+                pass,
+            ));
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok((count, failed)) => {
+                    restored += count;
+                    partial |= failed;
+                }
+                Err(_) => partial = true,
+            }
+        }
+        let proof = Arc::clone(report);
+        partial |= self
+            .filesystem(move || Ok(proof.revalidate()?))
+            .await
+            .is_err();
+        Ok((restored, partial))
     }
 
     async fn reconcile_loop(self: Arc<Self>) {
@@ -1636,6 +1997,11 @@ impl Service {
             interval.tick().await;
             if self.stopping.load(Ordering::SeqCst) {
                 return;
+            }
+            // Audit completion is metadata-only and remains available while
+            // starts are fenced or the writer has only its STOP facade.
+            if self.validate_registry().await.is_ok() {
+                self.reconcile_retirement_audit().await;
             }
             // A recovery fence allows inspection/cancellation but never a new
             // business start, including an autonomous reconciliation.
@@ -1738,10 +2104,242 @@ impl Service {
             }
         }
     }
+
+    async fn reconcile_retirement_audit(self: &Arc<Self>) {
+        let mut profiles = futures_util::stream::FuturesUnordered::new();
+        // Each future owns its service/profile. No borrowed iterator is held
+        // across awaits in the spawned reconciler; the registry cap is 32.
+        for profile in self.registry.data.profiles.iter().cloned() {
+            profiles.push(Arc::clone(self).reconcile_retirement_audit_profile(profile));
+        }
+        while let Some(result) = profiles.next().await {
+            if result.is_err() {
+                eprintln!(
+                    "broker retirement audit reconciliation is unavailable for a configured profile"
+                );
+            }
+        }
+    }
+
+    async fn reconcile_retirement_audit_profile(
+        self: Arc<Self>,
+        profile: ControlProfileV1,
+    ) -> Result<(), BrokerErrorCodeV1> {
+        let jobs = self.profile_jobs(&profile.id)?;
+        let Some(capabilities) = jobs.writer.get() else {
+            return Ok(());
+        };
+        let writer = capabilities.stops();
+        let material = Arc::clone(&self.material);
+        let credential_profile = profile.clone();
+        let credential = self
+            .filesystem(move || material.checked_reconciler(&credential_profile))
+            .await?;
+        let verified =
+            VerifiedProfile::authenticate(&self.registry, &profile.id, &credential, false).await?;
+        if canonical(writer.scope()).map_err(jobs::journal_error)?
+            != canonical(&verified.scope).map_err(jobs::journal_error)?
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let client = verified.client.with_secrets(self.material.literals.clone());
+        let full = self.enforcer.as_ref().and_then(|_| {
+            self.full_enforcer()
+                .ok()
+                .and_then(ExecutionEnforcerV1::full3)
+                .cloned()
+        });
+        let mut operations = futures_util::stream::FuturesUnordered::new();
+        for operation in jobs.retirement_audit_batch()? {
+            let writer = writer.clone();
+            let client = client.clone();
+            let full = full.clone();
+            let local_job = jobs.known(operation);
+            operations.push(async move {
+                if let Some(full) = full {
+                    // Q work is one entry per job/round and cannot suppress
+                    // that job's independently promised audit delivery.
+                    let reconciliation: Result<(), BrokerErrorCodeV1> = async {
+                        let Some(snapshot) = writer
+                            .recovery_status(operation)
+                            .await
+                            .map_err(jobs::journal_error)?
+                        else {
+                            return Ok(());
+                        };
+                        let mut candidates = Vec::new();
+                        for entry in snapshot.retirements() {
+                            if entry.request().audit_ack().is_none() {
+                                continue;
+                            }
+                            if entry.finalized().is_some()
+                                && !full
+                                    .has_local_slot(&entry.request().identity().arm().operation_id)
+                                    .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                            {
+                                continue;
+                            }
+                            candidates.push(*entry.request().identity().retirement_id());
+                        }
+                        let Some(id) = local_job
+                            .as_ref()
+                            .ok_or(BrokerErrorCodeV1::Unavailable)?
+                            .next_retirement_query(&candidates)?
+                        else {
+                            return Ok(());
+                        };
+                        let entry = snapshot
+                            .retirements()
+                            .iter()
+                            .find(|entry| *entry.request().identity().retirement_id() == id)
+                            .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+                        let Some(verified) = full
+                            .query_retirement(entry.request().identity())
+                            .await
+                            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                        else {
+                            return Ok(());
+                        };
+                        if let Some(final_entry) = entry.finalized() {
+                            // Final data alone cannot remove a slot. Obtain a
+                            // fresh authenticated Q and compare its exact receipt.
+                            if verified.receipt().digest().map_err(jobs::journal_error)?
+                                != final_entry
+                                    .receipt()
+                                    .digest()
+                                    .map_err(jobs::journal_error)?
+                            {
+                                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                            }
+                            full.retire_local_slot(&verified)
+                                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+                        } else {
+                            let identity = verified.identity().clone();
+                            let receipt_hash =
+                                verified.receipt().digest().map_err(jobs::journal_error)?;
+                            writer
+                                .finalize_retirement(verified)
+                                .await
+                                .map_err(jobs::journal_error)?;
+                            let replay = full
+                                .query_retirement(&identity)
+                                .await
+                                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?
+                                .ok_or(BrokerErrorCodeV1::NeedsReconciliation)?;
+                            if replay.receipt().digest().map_err(jobs::journal_error)?
+                                != receipt_hash
+                            {
+                                return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                            }
+                            full.retire_local_slot(&replay)
+                                .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
+                        }
+                        Ok(())
+                    }
+                    .await;
+                    if reconciliation.is_err() {
+                        eprintln!(
+                            "broker retirement guardian result remains unknown for a known Arm"
+                        );
+                    }
+                }
+                let Some(event) = writer
+                    .pending_retirement_events(operation)
+                    .await
+                    .map_err(jobs::journal_error)?
+                    .into_iter()
+                    .next()
+                else {
+                    return Ok::<(), BrokerErrorCodeV1>(());
+                };
+                let sequence = client
+                    .post_event(
+                        serde_json::to_value(event.event())
+                            .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?,
+                    )
+                    .await
+                    .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+                writer
+                    .acknowledge_retirement_events(
+                        operation,
+                        vec![(event.event_id(), event.input_hash().to_owned(), sequence)],
+                    )
+                    .await
+                    .map_err(jobs::journal_error)?;
+                Ok(())
+            });
+        }
+        while let Some(result) = operations.next().await {
+            if result.is_err() {
+                eprintln!("broker retirement audit remains pending for a known job");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// No namespace is created for recovery. A partial sibling inventory fences
 /// admissions, while the reader can still prove the configured scope's stops.
+fn verify_fresh_installation(
+    root: &Directory,
+    registry: &Registry,
+    material: &Material,
+) -> Result<Vec<Arc<StopRecoveryReportV1>>> {
+    registry.source.revalidate()?;
+    registry.source_directory.revalidate()?;
+    root.revalidate()?;
+    material.revalidate()?;
+    ensure!(
+        material.complete,
+        "fresh enforcer requires complete control material"
+    );
+    let Some(journals) = root.persistent_child("journals", false)? else {
+        return Ok(Vec::new());
+    };
+    let known = registry
+        .data
+        .profiles
+        .iter()
+        .map(|profile| profile.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let inventory = journals.persistent_inventory(32)?;
+    ensure!(
+        !inventory.incomplete
+            && inventory
+                .entries
+                .iter()
+                .all(|entry| { entry.directory && known.contains(entry.name.as_str()) }),
+        "fresh enforcer requires complete configured journal inventory"
+    );
+    let mut reports = Vec::new();
+    for profile in &registry.data.profiles {
+        let scope = JournalScopeV1::new(
+            registry.data.installation_id,
+            &profile.tenant_id,
+            &profile.gateway,
+            profile.control_namespace_uuid,
+            &profile.id,
+        )?;
+        let (report, incomplete) = recover_existing_profile(root, scope, material)?;
+        ensure!(
+            !incomplete,
+            "fresh enforcer journal inventory is incomplete"
+        );
+        if let Some(report) = report {
+            // Conservative initial cutover: only an empty confirmed profile is
+            // accepted. Existing jobs keep their original guardian authority.
+            // No empty/unknown projection is treated as proof of no old Arm.
+            ensure!(
+                !report.incomplete() && report.jobs().is_empty(),
+                "fresh enforcer requires empty confirmed journal profiles"
+            );
+            report.revalidate()?;
+            reports.push(report);
+        }
+    }
+    Ok(reports)
+}
+
 fn recover_existing_profile(
     root: &Directory,
     scope: JournalScopeV1,
@@ -1770,18 +2368,48 @@ fn recover_existing_profile(
     Ok((report, incomplete))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RestorePass {
+    All,
+    RequiredOnly,
+    PendingOnly,
+}
+
+#[cfg(test)]
 async fn restore_recovered_job(
-    enforcer: Option<EnforcerClient>,
+    enforcer: Option<ExecutionEnforcerV1>,
     stop_enforcer: Option<EnforcerStopClient>,
     report: Arc<StopRecoveryReportV1>,
     index: usize,
     job: Arc<Job>,
+) -> (usize, bool) {
+    restore_recovered_job_pass(
+        enforcer,
+        stop_enforcer,
+        report,
+        index,
+        job,
+        RestorePass::All,
+    )
+    .await
+}
+
+async fn restore_recovered_job_pass(
+    enforcer: Option<ExecutionEnforcerV1>,
+    stop_enforcer: Option<EnforcerStopClient>,
+    report: Arc<StopRecoveryReportV1>,
+    index: usize,
+    job: Arc<Job>,
+    pass: RestorePass,
 ) -> (usize, bool) {
     let Some(recovered) = report.jobs().get(index) else {
         job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
         return (0, true);
     };
     if let Some(enforcer) = stop_enforcer {
+        if pass != RestorePass::All {
+            return (0, true);
+        }
         // There are no retirement P/Q records in this transport version. No
         // old Q/R+ is admitted or manufactured. Once retirement is connected,
         // its metadata-only reconciliation must precede Restore of that Arm;
@@ -1804,6 +2432,22 @@ async fn restore_recovered_job(
     let mut slots = Vec::new();
     let mut partial = false;
     for target in recovered.stops() {
+        let pending = matches!(
+            target.retirement(),
+            Some(crate::broker::retirement_checkpoint::RetirementEntryV1::Pending(_))
+        );
+        if (pass == RestorePass::RequiredOnly && pending)
+            || (pass == RestorePass::PendingOnly && !pending)
+        {
+            continue;
+        }
+        if matches!(
+            target.retirement(),
+            Some(crate::broker::retirement_checkpoint::RetirementEntryV1::Final(_))
+        ) {
+            // The verified chain retains F, not a runnable STOP authority.
+            continue;
+        }
         let registration = RegistrationV1::new(
             origin.clone(),
             report.scope().tenant_id().to_owned(),
@@ -1813,7 +2457,16 @@ async fn restore_recovered_job(
             target.owned().clone(),
         );
         let restored = match registration {
-            Ok(registration) => enforcer.restore(registration, job.cancel.clone()).await,
+            Ok(registration) => match (enforcer.full3(), target.full3_registration_binding()) {
+                (Some(_), Some(binding)) => {
+                    enforcer
+                        .restore_with_binding(registration, job.cancel.clone(), binding)
+                        .await
+                }
+                (Some(_), None) => Err(crate::broker::enforcer::EnforcerError::Unauthorized),
+                (None, Some(_)) => Err(crate::broker::enforcer::EnforcerError::Unauthorized),
+                (None, None) => enforcer.restore(registration, job.cancel.clone()).await,
+            },
             Err(error) => Err(error),
         };
         match restored {
@@ -1823,7 +2476,8 @@ async fn restore_recovered_job(
     }
     // Restores first seed the shared generation from every acknowledged child
     // slot. Numeric generations are not the causal proof of cancellation.
-    if !recovered.cancel_command_ids().is_empty() {
+    if !recovered.cancel_command_ids().is_empty() && (pass == RestorePass::All || !slots.is_empty())
+    {
         job.cancel.invalidate();
     }
     for (slot, cancelled) in &slots {
@@ -1838,6 +2492,14 @@ async fn restore_recovered_job(
 }
 
 fn needs_autonomous_reconciliation(job: &AcceptedJobV1) -> bool {
+    if job
+        .broker_checkpoint_v5()
+        .is_some_and(|checkpoint| !checkpoint.retirements().is_empty())
+    {
+        // Abandonment inhibits continuation. A durable Pending/Final is never
+        // converted into an automatic new claim, terminal or quota release.
+        return false;
+    }
     let context = job.checkpoint().broker_context();
     // An unprepared accepted job never reopens its original source implicitly.
     if !context.managed {
