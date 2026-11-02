@@ -8,16 +8,27 @@ Le déploiement RC0 remplace les seuls gateway, dashboard et ingress du projet S
 
 Vrai parcours Web `user-1 / user-1` DEMO : **PASS7/7, RC0**, sur cette image avec Keycloak26.8.1 réel. Le rapport fermé `ai-guard-user1-live-final.IbuDHn/report.json` et `exit-code.txt` distingue lancement du navigateur, page de connexion, redirection IdP, soumission OIDC/PKCE, identité authentifiée, lecture autorisée réellement vide et logout UI. Environnement : Node25.6.1, Playwright1.62.1, Chromium148.0.7778.97, origine `http://127.0.0.1:4000`. Le navigateur est fermé après la recette ; aucune activité fictive, aucun worker ou modèle n'est injecté. Cette lecture vide prouve le parcours de consultation dans ce périmètre, pas une exécution d'agent ou une synthèse administrative complète.
 
-Une recette de rôles distincte reste **FAIL, RC1** dans `ai-guard-role-live-run.GNBIOx/report.json` :
+Une première recette de rôles distincte est **FAIL, RC1** dans `ai-guard-role-live-run.GNBIOx/report.json` :
 
 | Persona et oracle | Résultat observé |
 |---|---|
 | `user-2` | PASS8/8 : identité OIDC HTTP200, un contexte personnel du tenant DEMO avec `read_metadata`, `read_content`, `export`, aucune administration proposée, lecture vide, logout et fermeture. |
 | `admin-ai-guard` | Identité OIDC HTTP200, policy et sélection UI PASS : deux contextes DEMO, personnel avec les trois mêmes capacités et administration avec `read_tenant_metadata` supplémentaire. Lecture UI signalée réussie, mais `empty_resources_visible=false` : oracle `metadata_read` FAIL,7/8 étapes PASS. Logout et fermeture PASS. |
 
-L'échec administratif est conservé sans relabellisation verte. L'hypothèse en cours est une exigence de liste vide injustifiée dans l'oracle du harness ; le rapport seul ne démontre ni refus de lecture ni défaut produit. La couverture des rôles et les refus adverses restent à terminer avant toute qualification de ces exigences.
+Ce premier échec administratif est conservé sans relabellisation verte. `empty_resources_visible=false` ne démontre ni contenu non vide, ni refus de lecture, ni défaut produit ; sa cause fine reste inconnue. Deux tentatives administratives suivantes gardent aussi leurs résultats distincts :
 
-**Limites :** la résolution DNS de ces recettes est un mapping du seul Chromium dédié ; elle ne prouve pas la résolution système. Le CLI natif macOS est **BLOCKED** par le DNS hôte manquant et l'intervention administrateur nécessaire, sans repli, changement d'issuer ou assouplissement TLS. Refresh/révocation réels, parcours CLI, refus adverses, délégation humaine et qualification d'ensemble restent ouverts. Les outils auxiliaires et rapports restent hors distribution. **G09 demeure FAIL,0/12 gates globaux clos.** Les échecs et gels antérieurs ci-dessous conservent leur portée historique.
+| Tentative auxiliaire | Résultat conservé |
+|---|---|
+| `ai-guard-admin-live-run.qsM4ry` | FAIL RC1 à `identity_context`/`E_ADMIN_CONTEXT` après soumission OIDC ; cause fine inconnue. `admin_resources` et `ui_logout` NOT_RUN. Navigateur fermé et logout tenté ; succès de ce nettoyage non confirmé par le rapport. |
+| `ai-guard-admin-diagnostic-run.j84Ph7` | FAIL RC1 à `admin_resources`/`E_ADMIN_RESOURCES` pendant la capture attendue, sans projection de réponse. Capture d'identité, nom, libellé OIDC, présence et unicité du bouton admin PASS ; `ui_logout` NOT_RUN, mais cleanup logout PASS et navigateur fermé. |
+
+Pour ce troisième échec seulement, un défaut du prédicat de capture est démontré : il exigeait `view=metadata` sur GET `/api/v1/human/resources`, alors que le [générateur d'URL existant](../../front/src/human-model.ts) envoie `?limit=25` sans `view` pour `resources` (lignes156–166). Ce prédicat ne pouvait donc pas reconnaître la vraie requête. Sa correction reste dans le harness privé ; aucun code produit, image ou configuration n'est modifié pour les recettes suivantes. Elle n'établit pas la cause des deux échecs précédents.
+
+La recette administrative suivante `ai-guard-admin-resource-run.ZLzGfR/report.json`, avec `exit-code.txt`, est **PASS 13/13, RC0**, toujours sur l'image72bfb911/source96fe9be. Le script auxiliaire final reste identique avant/après, SHA `3ea8f66c12abde4c236344b7195f459b7c942da405b19949e28217dd0b424bfd`. Ses étapes réelles distinguent login, capture/affichage d'identité, bouton administratif, requête de ressources, contrat de réponse, UI et logout. La projection fermée confirme HTTP200, version1, contexte et version d'autorisation attendus, `coverage=authorized_selection`, reçu de lecture aux UUID/horodatage valides, zéro ressource, `has_more=false` et compteur `unknown_count=0`. L'UI affiche zéro ligne, l'état vide et « Lecture réussie », en cohérence avec cette réponse réelle ; logout UI et fermeture navigateur PASS.
+
+Les trois comptes applicatifs DEMO ont donc une preuve Web réelle de connexion, lecture autorisée et logout dans leurs contextes observés. Les trois échecs précédents restent FAIL à leurs gels ; ce résultat ne qualifie ni refus adverses de permissions, ni cycle complet de session, ni administration complète du produit.
+
+**Limites :** la résolution DNS de ces recettes est un mapping du seul Chromium dédié ; elle ne prouve pas la résolution système. Le CLI natif macOS est **BLOCKED** par le DNS hôte manquant et l'intervention administrateur nécessaire, sans repli, changement d'issuer ou assouplissement TLS. Refresh/révocation réels, parcours CLI, refus adverses de permissions, délégation humaine et qualification SSO d'ensemble restent ouverts. Les outils auxiliaires et rapports restent hors distribution. **G09 demeure FAIL,0/12 gates globaux clos.** Les échecs et gels antérieurs ci-dessous conservent leur portée historique.
 
 ## 2 novembre — installation conteneurisée SSO neuve
 
