@@ -1,5 +1,7 @@
 # État constaté — suivi au 2 novembre 2026
 
+Dernier contrôle logiciel D5 : après correction et revue des décodeurs `Worker`/`Closing`, les19tests de records passent, RC0. La régression distincte des scopes reproduit ensuite le conflit attendu,1FAIL/RC101 ; son correctif attend le GREEN. Ces preuves portent sur des gels des fondations, pas sur les nouveaux acteurs/ports Writer ni sur le retrait complet. [Résultats et limites](VALIDATION.md#2-novembre--canary-préclaim-et-fondations-d5-en-cours).
+
 ## Préparation SSO locale — intégrée, recette complète ouverte
 
 Le lot `7a08d18`, publié sur `codex/sso-setup`, est intégré par `586c17e`. Le CLI Rust prépare hors ligne une destination privée neuve : bases tenant migrées5 avec sauvegardes, journal d'authentification distinct, credentials techniques et memberships OIDC explicites. La reprise conserve identités et reçus ; elle ne fabrique ni ressource ni session. Profils Compose autonomes Docker/Podman, manifeste public et guides EN/FR sont livrés. [Contrat et résultats](LOCAL_SSO_SETUP.md).
