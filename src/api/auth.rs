@@ -96,6 +96,7 @@ impl FromRequestParts<GatewayState> for ReadIdentity {
     async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> ApiResult<Self> {
         state
             .authorize(&parts.headers, false)
+            .await
             .map(|(tenant, role)| Self(tenant, role))
     }
 }
@@ -109,6 +110,7 @@ impl FromRequestParts<GatewayState> for RunnerIdentity {
     async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> ApiResult<Self> {
         state
             .authorize(&parts.headers, true)
+            .await
             .map(|(tenant, _)| Self(tenant))
     }
 }

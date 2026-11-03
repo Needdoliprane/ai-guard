@@ -6,6 +6,7 @@
 #[allow(dead_code)]
 #[path = "support/oidc_fixture.rs"]
 mod controlled;
+use agentsandbox as test_product;
 mod support;
 
 use agentsandbox::{

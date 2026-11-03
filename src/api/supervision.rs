@@ -43,16 +43,20 @@ fn owned_arm(tenant: &TenantState, id: &str, arm_id: &str) -> ApiResult<ArmResul
 }
 
 async fn protocol(ReadIdentity(tenant, role): ReadIdentity) -> ApiResult<Json<ControlProtocolV1>> {
-    let state = tenant.store.supervision_state().map_err(control_error)?;
-    Ok(Json(ControlProtocolV1 {
-        version: state.version,
-        schema_version: state.schema_version,
-        control_namespace_uuid: state.control_namespace_uuid,
-        tenant_id: tenant.tenant_id,
-        role: role.into(),
-        protocols: state.protocols,
-        active: state.active,
-    }))
+    tenant
+        .blocking(true, move |tenant| {
+            let state = tenant.store.supervision_state().map_err(control_error)?;
+            Ok(Json(ControlProtocolV1 {
+                version: state.version,
+                schema_version: state.schema_version,
+                control_namespace_uuid: state.control_namespace_uuid,
+                tenant_id: tenant.tenant_id,
+                role: role.into(),
+                protocols: state.protocols,
+                active: state.active,
+            }))
+        })
+        .await
 }
 
 fn validate_before_policy(s: &GatewayState, request: &SupervisedAdmissionV1) -> ApiResult<()> {
@@ -76,18 +80,27 @@ async fn reserve(
     tenant.write_quota()?;
     let request = parse_json(body)?;
     validate_before_policy(&s, &request)?;
+    let operation_id = request.admission.operation_id.clone();
     let replay = tenant
-        .store
-        .worker_operation(&request.admission.operation_id)
-        .map_err(control_error)?
-        .is_some();
+        .blocking(false, move |tenant| {
+            Ok(tenant
+                .store
+                .worker_operation(&operation_id)
+                .map_err(control_error)?
+                .is_some())
+        })
+        .await?;
     let (decision, jev) = if replay {
         (
             policy::evaluate(&s.policy, &request.admission.decision_request),
             Value::Null,
         )
     } else {
-        let state = tenant.store.supervision_state().map_err(control_error)?;
+        let state = tenant
+            .blocking(false, |tenant| {
+                tenant.store.supervision_state().map_err(control_error)
+            })
+            .await?;
         if ![3, 4, 5].contains(&state.schema_version) {
             return Err(control_error(ControlFailure::MigrationRequired.into()));
         }
@@ -97,9 +110,13 @@ async fn reserve(
         fresh_policy(&s, &request.admission.decision_request).await
     };
     let result = tenant
-        .store
-        .admit_supervised(&request, &s.policy, decision, jev, &tenant.worker_quota)
-        .map_err(control_error)?;
+        .blocking(false, move |tenant| {
+            tenant
+                .store
+                .admit_supervised(&request, &s.policy, decision, jev, &tenant.worker_quota)
+                .map_err(control_error)
+        })
+        .await?;
     let status = match result.refusal {
         Some(AdmissionRefusalV1::Policy) => StatusCode::FORBIDDEN,
         Some(AdmissionRefusalV1::Quota) => StatusCode::TOO_MANY_REQUESTS,
@@ -114,22 +131,30 @@ async fn arm(
     Path(id): Path<String>,
     body: Result<Json<ArmV1>, JsonRejection>,
 ) -> ApiResult<Json<ArmResultV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    match_worker_path(&id, &request.worker_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .arm_execution(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            match_worker_path(&id, &request.worker_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .arm_execution(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn read_arm(
     ReadIdentity(tenant, _): ReadIdentity,
     Path((id, arm_id)): Path<(String, String)>,
 ) -> ApiResult<Json<ArmResultV1>> {
-    Ok(Json(owned_arm(&tenant, &id, &arm_id)?))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(owned_arm(&tenant, &id, &arm_id)?))
+        })
+        .await
 }
 
 async fn claim_worker(
@@ -137,16 +162,20 @@ async fn claim_worker(
     Path(id): Path<String>,
     body: Result<Json<ArmedStartClaimV1>, JsonRejection>,
 ) -> ApiResult<Json<MutationResultV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    match_worker_path(&id, &request.worker_id)?;
-    owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .claim_armed_start(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            match_worker_path(&id, &request.worker_id)?;
+            owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .claim_armed_start(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn claim_helper(
@@ -154,15 +183,19 @@ async fn claim_helper(
     Path(id): Path<String>,
     body: Result<Json<HelperStartClaimV1>, JsonRejection>,
 ) -> ApiResult<Json<HelperClaimResultV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .claim_helper_start(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .claim_helper_start(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn observe_helper(
@@ -170,15 +203,19 @@ async fn observe_helper(
     Path(id): Path<String>,
     body: Result<Json<HelperObservationV1>, JsonRejection>,
 ) -> ApiResult<Json<MutationReceiptV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .observe_helper(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .observe_helper(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn cleanup_helper(
@@ -186,15 +223,19 @@ async fn cleanup_helper(
     Path(id): Path<String>,
     body: Result<Json<HelperCleanupV1>, JsonRejection>,
 ) -> ApiResult<Json<MutationReceiptV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .record_helper_cleanup(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            owned_arm(&tenant, &id, &request.arm_receipt.arm_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .record_helper_cleanup(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn request_export(
@@ -202,13 +243,17 @@ async fn request_export(
     Path(id): Path<String>,
     body: Result<Json<ExportRequestV1>, JsonRejection>,
 ) -> ApiResult<Json<MutationReceiptV1>> {
-    tenant.write_quota()?;
-    let request = parse_json(body)?;
-    match_worker_path(&id, &request.worker_id)?;
-    Ok(Json(
-        tenant
-            .store
-            .request_export(&request)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let request = parse_json(body)?;
+            match_worker_path(&id, &request.worker_id)?;
+            Ok(Json(
+                tenant
+                    .store
+                    .request_export(&request)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
