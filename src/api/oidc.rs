@@ -48,19 +48,22 @@ struct PendingRefresh {
     receipt: AuthenticationReceiptV1,
     deadline: Instant,
 }
+// Cookie/PKCE correlation is unverified, bounded, expiring memory state. It
+// must not reserve durable authentication capacity before provider proof.
 struct BrowserTransaction {
     pending: Option<PendingLogin>,
     expected_state: [u8; 32],
     transaction_id: Uuid,
     operation_id: Uuid,
-    intention: crate::audit::authentication::AuthenticationReceiptV1,
     session_id: Uuid,
     created: Instant,
 }
 struct NativeIntent {
     session_id: Uuid,
     operation_id: Uuid,
-    intention: AuthenticationReceiptV1,
+    // Initial login nonces have no durable authority. Only a refresh of an
+    // already admitted session carries a durable pending-transition receipt.
+    intention: Option<AuthenticationReceiptV1>,
     action: Action,
     previous: Option<SessionBinding>,
     created: Instant,
@@ -87,8 +90,9 @@ struct PendingDelivery {
 }
 struct ExchangeMarker {
     transaction_id: Uuid,
-    record: AuthenticationRecordV1,
-    receipt: AuthenticationReceiptV1,
+    // Retain this even before proof. If admission succeeds but the callback
+    // disappears before delivery, reap must close that exact admitted session.
+    session_id: Uuid,
     created: Instant,
 }
 #[derive(Default)]
