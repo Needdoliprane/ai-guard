@@ -2,7 +2,7 @@
 //! gateway/dashboard; this process has no credentials or business authority.
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, HttpBody},
     extract::{Request, State},
     http::{HeaderMap, HeaderName, Method, StatusCode, header},
     response::{IntoResponse, Response},
@@ -21,6 +21,7 @@ use std::{
 const MAX_URI: usize = 4096;
 const MAX_BODY: usize = 262_144;
 const MAX_CONCURRENT: usize = 64;
+const MAX_UPLOADS: usize = 16;
 
 struct ExchangeLease {
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
@@ -68,7 +69,8 @@ impl Drop for PumpLease {
 struct Timeouts {
     connect: Duration,
     headers: Duration,
-    request_body: Duration,
+    upload_total: Duration,
+    upload_idle: Duration,
     chunk: Duration,
 }
 impl Default for Timeouts {
@@ -76,7 +78,8 @@ impl Default for Timeouts {
         Self {
             connect: Duration::from_secs(3),
             headers: Duration::from_secs(15),
-            request_body: Duration::from_secs(30),
+            upload_total: Duration::from_secs(5),
+            upload_idle: Duration::from_secs(2),
             chunk: Duration::from_secs(30),
         }
     }
@@ -85,6 +88,7 @@ impl Default for Timeouts {
 struct Ingress {
     origin: reqwest::Url,
     client: reqwest::Client,
+    uploads: Arc<tokio::sync::Semaphore>,
     concurrency: Arc<tokio::sync::Semaphore>,
     timeouts: Timeouts,
 }
@@ -134,6 +138,7 @@ fn router(upstream: &str, timeouts: Timeouts) -> anyhow::Result<Router> {
             .retry(reqwest::retry::never())
             .no_proxy()
             .build()?,
+        uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
         concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
         timeouts,
     };
@@ -285,15 +290,6 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
         Ok(headers) => headers,
         Err(()) => return failure(StatusCode::BAD_REQUEST, "En-têtes de requête invalides."),
     };
-    let permit = match state.concurrency.clone().try_acquire_owned() {
-        Ok(permit) => permit,
-        Err(_) => {
-            return failure(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Trop de requêtes simultanées.",
-            );
-        }
-    };
     // set_path/set_query preserve the configured authority; Host, forwarded
     // headers, absolute request targets and redirects cannot choose another one.
     let mut destination = state.origin.clone();
@@ -302,15 +298,44 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
     let method = request.method().clone();
     // Bound the complete request before contacting the backend. In particular,
     // a chunked over-limit upload must not be partly applied upstream.
-    let body = match tokio::time::timeout(
-        state.timeouts.request_body,
-        read_request(request.into_body(), state.timeouts.chunk),
-    )
-    .await
-    {
-        Ok(Ok(body)) => body,
-        Ok(Err(failure)) => return failure.into_response(),
-        Err(_) => return BodyFailure::Timeout.into_response(),
+    // A request with an incomplete body must not reserve an exchange needed by
+    // a bodyless control read. The body's state, not its method or declared
+    // Content-Length, determines whether it needs upload admission.
+    let body = request.into_body();
+    let body = if body.is_end_stream() {
+        Vec::new()
+    } else {
+        let upload = match state.uploads.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                return failure(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Trop de corps de requête simultanés.",
+                );
+            }
+        };
+        let result = tokio::time::timeout(
+            state.timeouts.upload_total,
+            read_request(body, state.timeouts.upload_idle),
+        )
+        .await;
+        // Both phases are bounded independently; an upload never holds its
+        // permit while waiting for an exchange or streaming a response.
+        drop(upload);
+        match result {
+            Ok(Ok(body)) => body,
+            Ok(Err(failure)) => return failure.into_response(),
+            Err(_) => return BodyFailure::Timeout.into_response(),
+        }
+    };
+    let permit = match state.concurrency.clone().try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "Trop de requêtes simultanées.",
+            );
+        }
     };
     let call = state
         .client
@@ -413,6 +438,10 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
 }
 
 #[cfg(test)]
+#[path = "../tests/ingress_admission/slow_uploads.rs"]
+mod admission_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -438,7 +467,8 @@ mod tests {
         Timeouts {
             connect: Duration::from_millis(100),
             headers: Duration::from_millis(50),
-            request_body: Duration::from_millis(50),
+            upload_total: Duration::from_millis(50),
+            upload_idle: Duration::from_millis(50),
             chunk: Duration::from_millis(50),
         }
     }
@@ -525,71 +555,75 @@ mod tests {
 
     #[tokio::test]
     async fn continuously_progressing_upload_has_a_total_deadline_and_releases_its_slot() {
+        use tower::ServiceExt;
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
-        let upstream = serve(
-            Router::new()
-                .route(
-                    "/hold",
-                    any(|| async {
-                        let stream = async_stream::stream! {
-                            yield Ok::<_,std::io::Error>("hold");
-                            std::future::pending::<()>().await;
-                        };
-                        Response::new(Body::from_stream(stream))
-                    }),
-                )
-                .fallback(any(move || {
-                    let counter = counter.clone();
-                    async move {
-                        counter.fetch_add(1, Ordering::SeqCst);
-                        "available"
-                    }
-                })),
-        )
+        let upstream = serve(Router::new().fallback(any(move || {
+            let counter = counter.clone();
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                "available"
+            }
+        })))
         .await;
-        let mut timeouts = fast_timeouts();
-        timeouts.chunk = Duration::from_secs(5);
-        let ingress = serve(router(&upstream.url, timeouts).unwrap()).await;
-        // Keep every other slot occupied: a leaked upload permit would make
-        // the request following its 408 fail with 429 instead of succeeding.
-        let client = client();
-        let mut held = Vec::new();
-        for _ in 0..MAX_CONCURRENT - 1 {
-            let mut response = client
-                .get(format!("{}/hold", ingress.url))
-                .send()
-                .await
-                .unwrap();
-            assert_eq!(response.chunk().await.unwrap().unwrap(), "hold");
-            held.push(response);
-        }
+        let uploads = Arc::new(tokio::sync::Semaphore::new(1));
+        let exchanges = Arc::new(tokio::sync::Semaphore::new(1));
+        let held_exchange = exchanges.clone().try_acquire_owned().unwrap();
+        let state = Ingress {
+            origin: reqwest::Url::parse(&upstream.url).unwrap(),
+            client: client(),
+            uploads: uploads.clone(),
+            concurrency: exchanges.clone(),
+            timeouts: Timeouts {
+                upload_total: Duration::from_secs(1),
+                upload_idle: Duration::from_secs(120),
+                ..Timeouts::default()
+            },
+        };
+        let relay = Router::new().fallback(any(forward)).with_state(state);
+        let chunks = Arc::new(AtomicUsize::new(0));
+        let produced = chunks.clone();
         let stream = async_stream::stream! {
             loop {
+                produced.fetch_add(1, Ordering::SeqCst);
                 yield Ok::<_,std::io::Error>("x");
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
         let result = tokio::time::timeout(
-            Duration::from_millis(200),
-            client
-                .post(&ingress.url)
-                .body(reqwest::Body::wrap_stream(stream))
-                .send(),
+            Duration::from_secs(30),
+            relay.clone().oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .body(Body::from_stream(stream))
+                    .unwrap(),
+            ),
         )
         .await;
+        let response = result.expect(
+            "HARNESS INCONCLUSIVE: upload deadline did not settle; this is not a latency qualification",
+        );
         assert!(
-            result.is_ok(),
-            "continuous progress must not extend the total upload deadline"
+            chunks.load(Ordering::SeqCst) >= 2,
+            "HARNESS INCONCLUSIVE: upload did not make progress before its deadline"
         );
-        assert_eq!(
-            result.unwrap().unwrap().status(),
-            StatusCode::REQUEST_TIMEOUT
-        );
+        assert_eq!(response.unwrap().status(), StatusCode::REQUEST_TIMEOUT);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
-        let response = client.get(&ingress.url).send().await.unwrap();
+        assert_eq!(uploads.available_permits(), 1);
+        assert_eq!(exchanges.available_permits(), 0);
+        drop(held_exchange);
+        let response = relay
+            .oneshot(Request::builder().body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.text().await.unwrap(), "available");
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap(),
+            "available"
+        );
+        assert_eq!(exchanges.available_permits(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -607,6 +641,7 @@ mod tests {
         let state = Ingress {
             origin: reqwest::Url::parse(&upstream.url).unwrap(),
             client: client(),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
             concurrency: permits.clone(),
             timeouts: fast_timeouts(),
         };
@@ -674,6 +709,7 @@ mod tests {
         let state = Ingress {
             origin: reqwest::Url::parse(&upstream.url).unwrap(),
             client: client(),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
             concurrency: permits.clone(),
             timeouts,
         };

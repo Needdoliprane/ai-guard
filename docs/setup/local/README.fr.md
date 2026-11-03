@@ -74,6 +74,12 @@ podman compose --env-file "$AIGUARD_CONFIG/local.env" -f deploy/podman/compose.y
 
 Conserver le même compte moteur, contexte/endpoint, fichier env et fichier Compose. Utiliser ce parcours Compose direct pour les ports ou noms de projet personnalisés ; le parcours CLI `up/down` possède son propre projet fixe et ses URL de disponibilité par défaut.
 
+### Bornes du relais HTTP
+
+L'ingress Rust dispose de budgets indépendants pour **16 corps de requête en cours de lecture** et **64 échanges avec le service amont**. Chaque corps est limité à **256 Kio**, **5 secondes au total** et **2 secondes sans nouveau fragment**, à partir de sa lecture. Le corps complet est lu et son permis de lecture libéré avant de réserver un échange. Un corps connu vide par son état de flux passe sans permis de lecture ; la méthode HTTP ou le `Content-Length` déclaré ne décide pas de ce passage. Les routes, destinations fixes et contrôles d'authentification/autorisation amont restent identiques. Ces bornes sont fixées dans le binaire ; le fichier dotenv et le CLI ne proposent aucun réglage pour les modifier.
+
+Un budget de lecture plein peut répondre **429** à une requête avec corps, tandis que les lectures de contrôle sans corps peuvent encore utiliser le budget distinct des échanges. Des requêtes complètes ou des flux SSE peuvent encore saturer ce dernier. Cette séparation ne fournit pas de protection générale contre les floods et ne qualifie pas l'isolation runtime. Le runner demande toujours un arrêt ciblé du worker sur erreur de suivi du gateway, dans la limite de la disponibilité du moteur ; aucune fenêtre de réessai de 60 secondes n'est activée. Conserver la session enregistrée et la réconcilier après une interruption plutôt que lancer une autre instance pour masquer un résultat inconnu.
+
 ## Ouvrir la vue de contrôle
 
 Ouvrir `AIGUARD_DASHBOARD` dans le navigateur. L'URL gateway sert au CLI et aux API ; `/healthz` indique la disponibilité du service, pas l'autorisation de lancer un worker ni l'authentification auprès d'un fournisseur IA.
@@ -139,6 +145,8 @@ La copie exclut des noms sensibles connus et des répertoires de dépendances/ca
 | Moteur absent, exécutable dangereux ou mauvais endpoint | Lancer `doctor` sous le même compte et répéter les choix explicites `--runtime-program`/`--runtime-endpoint` sur les commandes qui les acceptent. Ne pas exécuter la tâche sur l'hôte en repli. |
 | Daemon non rootless refusé | Configurer rootless ou appliquer volontairement l'exception par commande décrite plus haut. |
 | Pile indisponible | Consulter Compose `ps` et `logs --tail 100 gateway dashboard ingress` avec la même configuration. Vérifier collisions de ports et projections privées des credentials. Examiner les logs avant toute publication pour exclure les secrets. |
+| HTTP 429 via l'ingress | Distinguer les [budgets de lecture/échange](#bornes-du-relais-http) des quotas amont à l'aide du message retourné. Réduire les requêtes parallèles et réessayer une lecture lorsque la capacité est disponible. Vérifier la session enregistrée avant de répéter un lancement. |
+| HTTP 408 ou 413 pendant l'envoi d'un corps | Vérifier les délais de 5 secondes au total/2 secondes sans fragment et la limite de 256 Kio. Réduire le contenu ou corriger l'émetteur bloqué ; modifier le fichier dotenv ne relève pas ces bornes. |
 | Non authentifié ou interdit | Se reconnecter avec l'identité et le tenant/périmètre autorisés. Ne pas remplacer une permission utilisateur manquante par une clé runner. |
 | Refus de politique ou review | Lire le motif et le périmètre demandé. Adapter la demande ou obtenir une approbation pour cette demande exacte. |
 | Copie ou export refusé | Vérifier taille, liens, nouveauté de la destination et permissions des répertoires. Préserver l'original et tout export déjà publié. |

@@ -74,6 +74,12 @@ podman compose --env-file "$AIGUARD_CONFIG/local.env" -f deploy/podman/compose.y
 
 Use the same engine account, context/endpoint, env file and Compose file throughout. Keep to this direct Compose workflow when customizing ports or project names; the CLI `up/down` workflow has its own fixed project and default readiness URLs.
 
+### HTTP ingress limits
+
+The Rust ingress has independent budgets for **16 request bodies being read** and **64 upstream exchanges**. Each body is limited to **256 KiB**, **5 seconds in total** and **2 seconds without a new chunk**, starting when body reading begins. The complete body is read and its upload permit released before an exchange is acquired. A body known to be empty from its stream state bypasses the upload budget; the HTTP method or declared `Content-Length` does not decide this. Routes, fixed destinations and upstream authentication/authorization stay the same. These bounds are fixed in the binary; the dotenv file and CLI expose no setting for them.
+
+A full upload budget can return **429** for a request with a body, while bodyless control reads can still use the separate exchange budget. Complete requests and SSE streams can still fill that exchange budget. This separation does not provide general flood protection or qualify runtime isolation. The runner still requests a targeted worker stop on a gateway tracking error, subject to engine availability; no 60-second retry window is enabled. Preserve the recorded session and reconcile it after an interruption rather than launching another instance to hide an unknown result.
+
 ## Open the control view
 
 Open `AIGUARD_DASHBOARD` in your browser. The gateway URL is for CLI/API access; `/healthz` reports service availability, not permission to run a worker or proof that an AI provider is authenticated.
@@ -139,6 +145,8 @@ The copy excludes known sensitive names and dependency/cache directories, but it
 | Engine missing, unsafe executable or wrong endpoint | Run `doctor` under the same account and repeat explicit `--runtime-program`/`--runtime-endpoint` choices on the commands that accept them. Do not fall back to running the task on the host. |
 | Non-rootless daemon refused | Configure rootless operation or deliberately apply the per-command exception described above. |
 | Stack unavailable | Check Compose `ps` and bounded `logs --tail 100 gateway dashboard ingress` with the same configuration. Check host-port collisions and private credential projections. Never publish raw logs without reviewing them for secrets. |
+| HTTP 429 through ingress | Distinguish the [upload/exchange budgets](#http-ingress-limits) from upstream quotas using the returned message. Reduce parallel requests and retry a read after capacity is available. Check the recorded session before repeating a launch. |
+| HTTP 408 or 413 while sending a body | Check the 5-second total/2-second idle deadlines and 256-KiB body limit. Reduce the payload or fix a stalled sender; changing the dotenv file does not extend these bounds. |
 | Unauthenticated or forbidden | Reconnect with the appropriate identity and authorized tenant/scope. Do not substitute a runner key for a missing user permission. |
 | Policy deny or review | Read the decision reason and requested scope. Adjust the request or obtain approval for that exact request. |
 | Project copy or export refused | Check size, links, destination freshness and directory permissions. Preserve the original and any already published export. |
