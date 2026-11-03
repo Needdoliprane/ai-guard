@@ -218,11 +218,16 @@ jusqu'au drop, y compris après erreur/EOF ; pas de timer de restitution.
 Registre Weak purgé et acquisitions partielles annulées. Revue indépendante
 sans bloquant ; 3 nouvelles intégrations, 2 unités et 3 canaris passent.
 Ces preuves Router/SQLite/Body ne qualifient pas tous les sockets HTTP ni
-l'éviction d'un client non pollé. Le budget durable F reste ouvert : la revue
-a demandé une prévalidation globale des politiques avant bootstrap et un
-raccord du refus logique dans le mapper de contrôle. Les deux RED ciblés ont
-été atteints séparément, puis les corrections ont été écrites/revues. GREEN
-en cours ; cette partie n'est pas encore intégrée ni réputée validée.
+l'éviction d'un client non pollé. Le budget durable F est intégré dans
+`aa4eef9`, source `4095586` : cumul tenant/principal événements et octets du
+payload exact, réserves contrôle/identité, classes internes et projection du
+préfixe committé, même chaîne/schéma5. La revue a demandé une prévalidation
+globale avant bootstrap et le raccord du refus logique dans le mapper de
+contrôle. Ces deux RED ont été atteints séparément puis corrigés, relus et
+vérifiés. **21 nouvelles fonctions et 30 canaris PASS**, guides EN/FR et
+exemple JSON relus. Cinq tests de la composition finale F1/SSE et le contrôle
+de toutes les cibles passent sur `aa4eef9`, sans warning. Worktrees F1/SSE
+fermés normalement, références source poussées et preuves préservées.
 
 Raccord client Web dans `f5b035a` : après un RED de parsing, 14 fonctions
 passent, dont conservation des codes/actions de capacité SSE et de budget
@@ -234,8 +239,11 @@ F est reproduit sur `b168784` avec le vrai routeur et deux stores : un humain
 remplit les64événements A par48lectures après baseline16, puis empêche les
 contrôles et les lectures d'un pair ; B reste disponible. Le RED exige le
 head physique atteint après contrôles, pas un délai ou un throttle D.
-Le candidat de budgets/réserves est écrit ; tests et corrections de revue
-restent requis avant intégration de cette partie.
+Sur le correctif, A1 est refusé au head23/429 ; décision, ingestion, lecture
+du pair et révocation restent durables, B200. Ce n'est pas une promesse de
+capacité illimitée : les réserves sont finies, les bytes ne bornent pas le
+fichier/WAL et aucun archivage qualifié n'est livré. Une base déjà pleine
+n'acquiert aucune place par déploiement du correctif.
 
 Le RED FD est aussi revalidé sur `b168784`, enfant seul en EMFILE réel puis
 FD restaurés : chaîne valide, Store interdit et append impossible. La revue

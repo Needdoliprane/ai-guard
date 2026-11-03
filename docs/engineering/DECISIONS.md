@@ -461,3 +461,26 @@ Darwin vide la queue au dernier close du slave et révoque le terminal contrôla
 L'alias `/dev/tty` Darwin n'est pas enregistrable dans kqueue. Le broker l'utilise pour attester session/foreground, puis ouvre séparément un vrai device depuis les streams standard avec O_NOFOLLOW, O_NOCTTY, NONBLOCK et CLOEXEC. Identité dev/inode/rdev, session et foreground sont revérifiés ; les flags du stdin partagé restent inchangés. Des streams tous réduits à l'alias sans device identifiable sont refusés avant admission, sans repli silencieux. Le helper public suppose un runtime Tokio I/O actif, comme documenté ; un Handle courant seul ne garantit pas ce prérequis d'embedding.
 
 Les [preuves](evidence/2026-10-30/interactive-cli/README.md) conservent les FAIL de développement et les régressions avant les deux PASS Docker génériques. Le driver Rust des tests garde le terminal physique pendant vérification et avance par poll borné ; son ancienne attente bloquée n'est pas présentée comme réussite. Les clients Codex/Claude et les autres moteurs/plateformes conservent leurs propres gates.
+
+## 3 novembre — capacité d'audit protégée et admission SSE
+
+Conserver la chaîne SQLite par tenant et le schéma5. Les budgets de reçus
+humains sont reconstruits depuis cette chaîne, avec une projection du seul
+préfixe committé ; changement de contexte, credential, connexion ou processus
+ne remet pas l'usage à zéro. Des classes privées choisies par les ports Rust
+réservent de la capacité au contrôle et à la maintenance d'identité. Un kind
+ou JSON fourni par un client ne sélectionne aucune classe privilégiée.
+
+Les seuils explicites sont une configuration opérateur, avec défauts dérivés
+et empreinte visibles ; ils ne constituent pas un nouvel historique durable
+des politiques. Le [guide EN](../setup/identity/README.md#audit-budgets-and-stream-capacity)
+et le [guide FR](../setup/identity/README.fr.md#budgets-daudit-et-capacité-des-flux)
+fixent paramètres, réserves finies et reprise sans purge fictive.
+
+L'admission SSE distincte borne les Bodies par principal/tenant et garde ses
+permis jusqu'au drop, y compris après erreur/EOF. Elle n'occupe aucun permis
+d'I/O Store pendant le transport. Un timer qui restituerait les permis avant
+destruction du Body est écarté : le nombre d'objets admis pourrait croître
+malgré les compteurs. Cette décision ne garantit pas l'éviction des clients
+non pollés ou la borne de tous les sockets HTTP. Sources et preuves du lot F
+sont dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md) et [VALIDATION.md](VALIDATION.md).

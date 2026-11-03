@@ -27,7 +27,7 @@ Les preuves, sources et limites sont dans [VALIDATION.md](VALIDATION.md#3-novemb
 Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
 épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
 
-Les cinq worktrees A/B/C/D/E sont fermés après intégration et contrôle
+Les worktrees A/B/C/D/E/F1/SSE sont fermés après intégration et contrôle
 des consommateurs ; preuves et références source sont préservées. Les RED de
 D ont précédé ses corrections, puis les unités/canaris et la revue finale.
 F a son RED sur D intégré : baseline16, 48 lectures acceptées, head64 ; les
@@ -37,13 +37,18 @@ menées dans des worktrees distincts, avec tests et revue indépendants.
 Le sous-lot SSE est désormais intégré dans `297376f` (source `279b5f2`) :
 4 flux par principal canonique, 24 humains dans les 32 du tenant, permis
 conservés jusqu'au drop du Body, même terminal/EOF. Huit fonctions ciblées
-passent après RED et revue indépendante. Les budgets durables restent ouverts.
-Deux régressions du candidat issues de revue ont été reproduites séparément
-(initialisation partielle et mapper générique), puis corrigées ; leurs GREEN
-et les tests de budgets sont en cours avant intégration.
+passent après RED et revue indépendante.
+Les budgets durables sont maintenant intégrés dans `aa4eef9` (source
+`4095586`) : 21 nouvelles fonctions et 30 canaris passent après reproduction,
+correction et revue. Deux régressions du candidat issues de revue ont été
+reproduites séparément (initialisation partielle et mapper générique), puis
+corrigées et vérifiées. F1 refuse A1 au head23/429 tout en conservant
+décision, ingestion, lecture d'A2 et révocation, avec B200. Sur l'archive
+composée `aa4eef9`, cinq tests du raccord F1/SSE et la compilation de toutes
+les cibles passent sans warning. Les gates globaux restent distincts.
 Le client Web conserve désormais leurs codes/actions de reprise (`f5b035a`,
 14 fonctions ciblées PASS après RED/revue). Ce test client ne prouve pas
-l'émission backend du budget durable, validée dans le chantier F1 séparé.
+l'émission backend du budget durable, prouvée séparément par le test F1.
 Le risque FD a son premier RED Store réel sur `a1fb518` : après restitution
 des descripteurs, chaîne valide mais autorité restant interdite. Le rejeu sur
 `b168784` confirme le même défaut. Son sous-agent de conception a été arrêté

@@ -1,5 +1,83 @@
 # Validation courante
 
+## 3 novembre — composition finale des budgets et flux
+
+Sur archive Git seule de `aa4eef9d8c0a1e21168a6148a3853daf90263ce1`, nouvelle
+cible privée attribuée à l'intégration, après les revues et tests des sources :
+
+```text
+cargo test --offline --locked --test human_stream_capacity -- --test-threads=1
+cargo test --offline --locked --test human_read_budget one_human_cannot_exhaust_control_revocation_or_another_humans_read_budget -- --exact --nocapture --test-threads=1
+cargo test --offline --locked --lib api::audit_capacity_tests -- --test-threads=1
+cargo check --offline --locked --all-targets
+```
+
+**PASS : 3 + 1 + 1 tests ; check RC0, aucun warning.** Le check ne compte
+aucun test supplémentaire. Rustfmt natif statique des17fichiers Rust touchés
+et diff-check PASS. Les13fichiers F1 hors API sont byte-identiques au gel
+source ; les deux fichiers API combinent uniquement les deltas F1/SSE relus.
+Module/tests SSE et les deux fichiers frontend restent aussi identiques à
+leurs gels testés.
+
+Preuves privées `/private/tmp/ai-guard-f-composition-luna-20261103.rv19FA/` :
+`compose1.log` SHA `4b2f7812206d3c4c856204078c110ab6e3027f17a0e6055b13f604c646f44c8e`,
+`compose2.log` SHA `706c0ca25842eea3d6024aaebf026f333d95b5ea58b2f821489d1fab7b9c0879`,
+`compose3.log` SHA `1019d02abe9654307cb9662d706f72a1d1d432ea402f4f51b789dbb5c9c921d1`,
+`check-all-targets.log` SHA `4e159594618b34f8dbab80e590ab7a89001ea0d07575c288f19a588933659810`.
+Inputs, mtimes, registre et Cargo.lock restent identiques avant/après. Le
+statut Git du worktree change uniquement par les docs modifiées par Root
+pendant le job ; ces WIP sont exclus de l'archive testée. Ne pas présenter
+ce statut différent comme une source compilée variable.
+
+Worktree F1 source retiré normalement après état propre/ignorés,
+équivalence de patch, référence distante et absence de consommateurs.
+Reçus privés `ai-guard-f1-worktree-close-20261103.bsRU4X/` dans `/private/tmp`.
+Le sandbox SSE ne contenait plus que sleep ; il est arrêté puis retiré sans
+volume. Son exit137 est l'arrêt de nettoyage explicite, pas le résultat des
+tests, tous RC0. Reçus dans le dossier de fermeture SSE indiqué plus bas.
+Clippy Linux, build frontend/navigateur, vrais workers Docker/Podman/Kubernetes
+et charge100 restent NOT_RUN dans ce lot ; aucun gate global n'est fermé.
+
+## 3 novembre — budgets durables de lecture humaine, GREEN F1
+
+Source `4095586`, intégrée avec traçabilité dans `aa4eef9`, base `b168784`.
+Après RED historique F et les deux RED de revue ci-dessous, **21 nouvelles
+fonctions puis 30 canaris uniques PASS** sur le même gel, aucun ignoré.
+
+Les sept premières commandes sélectionnent : R1 startup1, R2 contrôle1,
+F1 humain1, unités `audit::capacity_tests`15, API source/voisin1, registre1
+et conflit CLI1. Le F1 immuable refuse A1 après sept nouvelles lectures,
+head23, avec429 `audit_read_budget_exhausted` ; décision/ingestion/pair A
+répondent200 aux heads24/25/26, révocation durable au head27, credential
+révoquée401 et B200. Les erreurs n'ajoutent aucun reçu ou débit fictif.
+
+Les onze commandes suivantes sélectionnent pagination72pages1,
+SSE73reçus1, physique5031, migration humaine4, replay/révocation identité2,
+frontière API6, intégrité incrémentale3, I/O hors Tokio4, admission humaine1
+et `oidc_gateway_flow`7. Cette dernière utilise HTTP/JWT contrôlés, aucun
+IdP réel ; son attente contractuelle de refresh n'est pas un benchmark.
+
+Preuves privées `/private/tmp/ai-guard-f1-r1r2-luna-20261103.xrcVaY/` :
+`green-commands-and-counts.txt`, `canary-commands-and-counts.txt`,
+`green1..7.log` et `canary1..11.log`. Manifeste des18logs
+`root-final-log-sha256.txt`, SHA
+`1b60e5af850769f14bda7a7c1895a0e0b6e131eb502239d86763982d3c23c85d`.
+Les15hashs source sont vérifiés à la fois dans le worktree et le snapshot.
+Manifests, mtimes, registre readonly et snapshot RED inchangés après essais.
+Compilation et tests offline dans le sandbox Linux ARM64 borné habituel,
+sans socket, secret hôte, fournisseur, worker ou réseau externe.
+
+La revue finale privée `ai-guard-audit-f-f1-final-review-20261103.md` ne
+signale aucun bloquant du lot logiciel après correction de R1/R2 et de la
+liste documentaire des actions. Rustfmt natif statique ciblé et diff-check
+PASS ; Clippy Linux NOT_RUN, composant absent. Cumul conservé après reopen,
+rotation, siblings et commit externe ; projection stable sans replay complet
+à chaque lecture, rollback/replay/conflits et bytes UTF-8 couverts. Les réserves
+ne sont ni illimitées ni rétroactivement recréées dans une base pleine.
+Pas de migration nouvelle, purge, facture, haute disponibilité ou garantie
+de taille SQLite/WAL. Le correctif FD et le TTL initial restent distincts.
+Le raccord F1/SSE et sa compilation toutes cibles sont vérifiés séparément.
+
 ## 3 novembre — deux régressions du candidat F1 détectées en revue
 
 Ces constats portent sur le candidat non intégré, pas de nouveaux défauts

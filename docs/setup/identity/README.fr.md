@@ -174,3 +174,68 @@ Choisir l'accès local nominatif dans le formulaire de connexion, saisir seuleme
 | Audit ou stockage indisponible | Les lectures exigeant un audit sont refusées. Réparer capacité/stockage avant reprise. |
 
 Le client SSE reprend seulement après une trame complète validée. Un retry peut dupliquer des événements ; posséder un curseur ne prouve ni réception ni téléchargement. La révocation bloque les lectures futures, pas les octets déjà reçus. Identité locale, identité OIDC, identité de workload et authentification fournisseur IA restent indépendantes.
+
+## Budgets d'audit et capacité des flux
+
+Les lectures humaines d'identité, ressources, événements et exports exigent leur
+propre reçu durable. Les lots SSE livrés aussi ; un poll SSE vide ne crée aucun
+reçu. Ces budgets cumulatifs sont partagés par tous les credentials, contextes
+et sessions du même principal canonique dans un tenant. Reconnexion, rotation du
+credential et redémarrage du gateway ne rendent aucun crédit. Identités locale
+et OIDC restent distinctes ; le produit ne déduit pas qu'elles désignent la même
+personne.
+
+Sans politique explicite, chaque capacité événements et octets de payload définit :
+
+| Admission | Plafond ou réserve par défaut |
+|---|---|
+| Ensemble des reçus humains d'un tenant | Moitié de la capacité physique |
+| Reçus humains d'un principal | Un huitième de la capacité physique |
+| Réserve contrôle, protégée des lectures humaines | Un quart de la capacité physique |
+| Réserve maintenance d'identité, protégée des écritures ordinaires | Un huitième de la capacité physique |
+
+Les réserves se soustraient à l'occupation totale réelle ; les événements
+ordinaires déjà présents consomment toujours de la place. La maintenance
+d'identité comprend révocations et autres modifications autorisées : cette
+réserve est elle aussi finie. Les octets sont ceux du payload UTF-8 préparé
+exactement persisté, pas ceux de la réponse ni du fichier SQLite. Le plafond
+physique de payload est 256 Mio ; `--max-events` règle celui des événements.
+Les capacités automatiques trop petites pour représenter les budgets protégés
+désactivent explicitement les nouvelles lectures humaines, sans relever le
+plafond physique ni invalider le stockage existant. Les lectures exigent aussi
+le schéma5.
+
+[audit-capacity.json](examples/audit-capacity.json) donne les défauts résolus pour
+`--max-events 100000`. Copier ce fichier dans le répertoire de contrôle privé
+existant avec le mode0600. Pour le gateway local, ajouter
+`--audit-capacity-file /absolute/private/ai-guard/audit-capacity.json` à sa
+commande habituelle. Cette option est incompatible avec `--tenants-file` : avec
+un registre, placer plutôt le même objet JSON dans le champ optionnel
+`audit_capacity_policy` de chaque tenant concerné. Conserver les autres champs
+et les chemins de données existants. Les commandes hors ligne `human provision`,
+`resume-provision` et `apply` acceptent la même option de fichier. Employer la
+même politique et le même `--max-events` voulus entre consommateurs ; le défaut
+du plafond d'événements est `1000000` hors ligne et `100000` pour le gateway.
+Changer la politique ne remet jamais l'usage enregistré à zéro. Le diagnostic
+de démarrage indique politique résolue, provenance et empreinte, sans prouver
+qu'il reste de la capacité disponible.
+
+`429 audit_read_budget_exhausted` avec `retry_action:"contact_operator"` est un
+refus cumulatif : ne pas relancer sur un timer. Conserver base, politique et
+exports incomplets, puis faire examiner occupation et politique par l'opérateur.
+Une augmentation explicite peut permettre des lectures seulement si capacité
+physique et réserves le permettent. Aucune procédure d'archivage/purge qualifiée
+n'est fournie ici ; supprimer des événements ou redémarrer ne constitue pas une
+reprise. L'épuisement physique et l'indisponibilité du stockage obligatoire
+restent503. Un profil voisin indisponible peut donner une réponse d'identité
+partielle ; elle ne prouve pas que des droits ont disparu.
+
+L'admission SSE humaine permet quatre flux vivants par principal canonique et
+24 flux humains par tenant, dans le total32 partagé existant. Huit places
+restent disponibles aux flux techniques lorsque le pool humain est plein. Ces
+bornes fixes sont distinctes des permis I/O Store et des budgets de reçus.
+Fermer les flux inutiles avant de réessayer un refus de concurrence. Un Body
+retenu garde ses permis jusqu'au drop, même après erreur terminale ou EOF
+observé ; un client qui ne poll pas peut immobiliser sa part. Chaque poll
+revérifie expiration et révocation. Ces bornes ne prouvent ni un plafond de tous
+les sockets HTTP ni une éviction autonome.

@@ -11,9 +11,10 @@
    D intégré dans `b168784` après RED, corrections de revue, 59 fonctions
    uniques ciblées et contrôle composé de toutes les cibles PASS.
    Aucune sévérité ni performance déduite d'un délai sur le Mac sous pression.
-3. F est reproduit sur D intégré : head64 et contrôles refusés après lectures.
-   Concevoir puis implémenter ses budgets/réserves après revue. Le risque
-   FD est également revalidé sur `b168784` ; concevoir son correctif et
+3. F est intégré : SSE `297376f`, budgets `aa4eef9`, client `f5b035a`, après
+   RED/GREEN ciblés et revues. Cinq tests du raccord composé et la compilation
+   de toutes les cibles passent sur `aa4eef9`.
+   Le risque FD est revalidé sur `b168784` ; concevoir son correctif et
    préserver le témoin du commit connu. La conception FD via Daybreak attend
    l'authentification matérielle de session, sans bloquer les autres travaux.
    Rapprocher tout nouveau constat du rapport final
@@ -77,12 +78,12 @@ Propriétaire : agent core dans `audit-human-budget-20261103`, pour `audit.rs`,
 
 - [x] Reproduire le défaut avec `tests/human_read_budget.rs` gelé, sans moteur
   ni oracle de latence : head64 et contrôles refusés, RC101.
-- [ ] Implémenter les classes privées, coûts exacts et projection committée ;
+- [x] Implémenter les classes privées, coûts exacts et projection committée ;
   conserver replay identique, conflits et témoins de D.
-- [ ] Exposer `AuditCapacityPolicyV1`, `AuditCapacityFailureV1` et
+- [x] Exposer `AuditCapacityPolicyV1`, `AuditCapacityFailureV1` et
   `Store::with_capacity_policy` ; raccorder registre et fichier privé CLI,
   propager la politique aux siblings et afficher un diagnostic sans secret.
-- [ ] Faire exécuter par Luna le RED inchangé devenu GREEN et les unités
+- [x] Faire exécuter par Luna le RED inchangé devenu GREEN et les unités
   count/bytes, réserves, rollback/replay, reopen/sibling/externe et coût stable.
 
 ### F2 — admission des flux, en parallèle
@@ -99,11 +100,11 @@ La petite traduction des erreurs publiques F1 est raccordée après composition.
 
 ### Composition et clôture
 
-- [ ] Root compose les fichiers disjoints dans un staging dédié ; Luna exécute
+- [x] Root compose les fichiers disjoints dans un staging dédié ; Luna exécute
   les canaris pertinents (dont72pages/73reçus), pas une matrice fournisseur.
-- [ ] Revue indépendante d'implémentation, correction de ses bloquants,
+- [x] Revue indépendante d'implémentation, correction de ses bloquants,
   formatage, contrôle des cibles touchées et guides EN/FR synchronisés.
-- [ ] Après preuves et revue seulement : commit, push, état/limites mis à jour,
+- [x] Après preuves et revue seulement : commit, push, état/limites mis à jour,
   contrôle des consommateurs et fermeture normale des worktrees sources.
 
 FD et le retry du runner ne font pas partie de cette correction. L'archivage

@@ -146,9 +146,36 @@ retains its permits until drop, including after a terminal error/EOF. An
 unpolled client can occupy its share. These permits are separate from Store
 I/O segments and do not bound all HTTP sockets.
 
+Les reçus humains ont aussi un budget cumulatif par tenant et principal,
+distinct des limites de pages, de flux et de fréquence. Identité, page vide
+REST, export et lot SSE livré consomment chacun un reçu ; un poll SSE vide
+n'en consomme pas. Le coût est celui du payload préparé persisté, compté en
+événements et octets UTF-8. Rotation, contexte neuf et redémarrage ne rendent
+aucun crédit. Une lecture refusée pour budget reçoit
+`429 {error:{code:"audit_read_budget_exhausted",message:...,retry_action:"contact_operator"}}`,
+sans données ni `Retry-After`. Les nouvelles écritures ordinaires devant la
+réserve d'identité reçoivent de même `audit_write_budget_exhausted`. Une base
+physiquement pleine reste503. Les profils voisins suivent encore le contrat
+partiel ci-dessus ; en OIDC, si aucun profil n'est lisible, la réponse peut
+rester503. Voir les
+[budgets et procédures EN](setup/identity/README.md#audit-budgets-and-stream-capacity)
+et [FR](setup/identity/README.fr.md#budgets-daudit-et-capacité-des-flux).
+
+Human receipts also have cumulative tenant/principal budgets, separate from
+page, stream and frequency limits. Identity, an empty REST page, export and a
+delivered SSE batch each consume a receipt; an empty SSE poll does not. Cost
+is the exact prepared stored payload, in events and UTF-8 bytes. Rotation,
+new contexts and restart do not replenish usage. Budget rejection returns
+`429 {error:{code:"audit_read_budget_exhausted",message:...,retry_action:"contact_operator"}}`
+without data or `Retry-After`. New ordinary writes reaching the identity
+reserve similarly return `audit_write_budget_exhausted`. Physical exhaustion
+remains503. Neighboring profiles retain the partial-coverage contract above;
+OIDC with no readable profile can still return503. Follow the linked budget
+configuration/recovery guides instead of retrying a cumulative refusal.
+
 Les contextes/curseurs lient aussi méthode d'authentification, empreinte de la preuve, référence et révision/génération, révision du mapping OIDC, membership, organisation, mode et version d'autorisation. Chaque poll SSE revérifie l'admission et ces droits avant restitution : refresh pending, rotation, logout, expiration ou révocation termine l'ancien flux avec erreur. La nouvelle génération impose de demander `/identity` et sélectionner un contexte neuf ; aucun curseur ni export de l'ancienne génération ne se transfère. SSE and context bindings preserve the OIDC capability ceiling; a new generation cannot reuse the previous authorized view.
 
-Les erreurs humaines sont `{error:{code,message,retry_action}}`.401 ferme la session humaine, même après changement local de contexte ;403 de contexte retire ses données/curseurs et exige une nouvelle sélection ; un refus de ressource ne déconnecte pas toute la session.404 ne distingue pas objet absent et inaccessible.400 refuse entrée/curseur,429 indique capacité,503 contrôle/audit indisponible ; `migration_required`503 demande `contact_operator`, sans repli viewer. Les actions sont `authenticate|select_context|review_permissions|reduce_page|retry|contact_operator`.
+Les erreurs humaines sont `{error:{code,message,retry_action}}`.401 ferme la session humaine, même après changement local de contexte ;403 de contexte retire ses données/curseurs et exige une nouvelle sélection ; un refus de ressource ne déconnecte pas toute la session.404 ne distingue pas objet absent et inaccessible.400 refuse entrée/curseur,429 indique capacité,503 contrôle/audit indisponible ; `migration_required`503 demande `contact_operator`, sans repli viewer. Les actions sont `authenticate|select_context|review_permissions|reduce_page|retry|contact_operator|close_unused_streams`.
 
 Human errors use the envelope above.401 closes the human session independently of a previous context change or an unreadable response body. Context revocation/expiry clears that context; an individual resource refusal does not log out the whole session.404 hides absence versus inaccessibility. Capacity and storage/migration failures remain explicit; neither is an empty result or a viewer fallback.
 

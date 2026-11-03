@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "human_tenant": { "events": 50000, "bytes": 134217728 },
+  "human_principal": { "events": 12500, "bytes": 33554432 },
+  "control_reserve": { "events": 25000, "bytes": 67108864 },
+  "identity_reserve": { "events": 12500, "bytes": 33554432 }
+}

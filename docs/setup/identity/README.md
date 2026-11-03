@@ -174,3 +174,62 @@ Select named local access in the dashboard connection form, enter only the perso
 | Audit/storage unavailable | Reads requiring audit fail closed. Repair storage/capacity before retrying. |
 
 The SSE client resumes only after a complete validated frame. Retries may duplicate events; possession of a cursor proves neither delivery nor download. Revocation stops future authorized reads, not bytes already received. Local identity, OIDC identity, workload identity and AI-provider authentication remain independent concerns.
+
+## Audit budgets and stream capacity
+
+Human identity, resource, event and export reads require their own durable receipt.
+Delivered SSE batches also require a receipt; empty SSE polls do not. Their
+cumulative budgets are shared by all credentials, contexts and sessions of the
+same canonical principal within a tenant. Reconnecting, rotating a credential or
+restarting the gateway does not restore the budget. Local and OIDC identities
+remain distinct; the product does not infer that they identify the same person.
+
+With no explicit policy, the event and payload-byte capacities each allocate:
+
+| Admission | Default limit or reserve |
+|---|---|
+| All human receipts in a tenant | Half of physical capacity |
+| One principal's human receipts | One eighth of physical capacity |
+| Reserve for control, protected from human reads | One quarter of physical capacity |
+| Reserve for identity maintenance, protected from ordinary writes | One eighth of physical capacity |
+
+Reserves are subtracted from the actual total occupancy; ordinary events already
+stored still consume capacity. Identity maintenance includes revocation and other
+authorized identity changes, so that reserve is finite too. Bytes count the exact
+prepared UTF-8 payload stored in the audit, rather than response bytes or SQLite
+file size. The physical payload limit is 256 MiB; `--max-events` sets the event
+limit. Very small automatic capacities that cannot represent protected human
+budgets disable new human reads explicitly, without raising the physical limit
+or invalidating existing storage. Human reads still require schema5.
+
+[audit-capacity.json](examples/audit-capacity.json) gives the resolved defaults
+for `--max-events 100000`. Copy it into your existing private control directory
+with mode0600. For a local gateway, add
+`--audit-capacity-file /absolute/private/ai-guard/audit-capacity.json` to its
+existing launch command. This option conflicts with `--tenants-file`: with a
+tenant registry, put the same JSON object in each relevant tenant's optional
+`audit_capacity_policy` field instead. Keep all other fields and existing data
+paths. Offline `human provision`, `resume-provision` and `apply` accept the same
+file option. Use the same intended policy and `--max-events` across consumers;
+the offline command defaults to `1000000` events and the gateway to `100000`.
+Policy changes never clear previously recorded usage. Start-up diagnostics print
+the resolved policy, its source and fingerprint, without proving free capacity.
+
+`429 audit_read_budget_exhausted` with `retry_action:"contact_operator"` is a
+cumulative refusal: do not retry on a timer. Preserve the database, policy and
+incomplete exports, then ask the operator to inspect occupancy and policy. An
+explicit increase can permit further reads only if physical capacity and
+reserves allow it. No qualified archive/purge operation is supplied here;
+deleting events or restarting is not recovery. Physical exhaustion or unavailable
+mandatory storage remains503. A neighboring unavailable profile may produce a
+partial identity response; it must not be treated as proof that access vanished.
+
+Human SSE admission allows four live streams per canonical principal and
+24 human streams per tenant, within the existing shared total32. Eight places
+remain available to technical streams when the human pool is full. These fixed
+admission bounds are separate from Store I/O permits and receipt budgets. Close
+unused streams before retrying a concurrency refusal. A retained Body keeps its
+permits until drop, including after a terminal error or observed EOF; a client
+that does not poll can occupy its share. Every poll still rechecks expiry and
+revocation. These bounds do not establish a limit on all HTTP sockets or an
+autonomous eviction guarantee.
