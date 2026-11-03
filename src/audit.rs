@@ -19,6 +19,10 @@ use std::{
 };
 
 pub mod authentication;
+mod capacity;
+pub use capacity::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+#[cfg(test)]
+mod capacity_tests;
 mod control;
 mod human;
 mod identity;
@@ -61,6 +65,7 @@ pub struct Store {
     backing: StoreStorage,
     redactor: Redactor,
     max_events: u64,
+    capacity_policy: AuditCapacityPolicyV1,
     unhealthy: AtomicBool,
     validated_data_version: AtomicI64,
     validated_total_changes: AtomicU64,
@@ -71,6 +76,7 @@ pub struct Store {
 
 struct SupervisionOrigin {
     state: Mutex<SupervisionLease>,
+    capacity: Mutex<capacity::Cache>,
     invalidated: AtomicBool,
 }
 
@@ -590,10 +596,20 @@ impl Store {
         } else {
             None
         };
+        let mut capacity = capacity::Cache::default();
+        let capacity_prefix = if initial_valid {
+            Some(capacity.prepare(&tx)?)
+        } else {
+            None
+        };
         tx.commit()?;
         backing.verify(&db)?;
+        if let Some(prefix) = capacity_prefix {
+            capacity.publish(prefix);
+        }
         let validated_total_changes = db.total_changes();
         let supervision_lease = Arc::new(SupervisionOrigin {
+            capacity: Mutex::new(capacity),
             state: Mutex::new(SupervisionLease {
                 backing: backing.identity_key(),
                 namespace,
@@ -611,6 +627,7 @@ impl Store {
             backing,
             redactor,
             max_events,
+            capacity_policy: AuditCapacityPolicyV1::resolved(max_events),
             unhealthy: AtomicBool::new(!initial_valid),
             validated_data_version: AtomicI64::new(validated_data_version),
             validated_total_changes: AtomicU64::new(validated_total_changes),
@@ -652,6 +669,9 @@ impl Store {
             redactor,
             self.max_events,
         )?;
+        // The parent's resolved policy is immutable, including disabled defaults
+        // for small stores. Do not resolve defaults again on this connection.
+        sibling.capacity_policy = self.capacity_policy.clone();
         anyhow::ensure!(
             sibling.backing.identity_key() == self.backing.identity_key(),
             "sibling backing differs from live origin"
@@ -796,6 +816,15 @@ impl Store {
                 anyhow::ensure!(Self::check_integrity(&tx)?.valid, "audit integrity failure");
                 control::validate(&tx)?;
             }
+            // integrity() can already have validated an external commit. The
+            // independent capacity anchor still has to advance in that case.
+            let mut capacity = self
+                .supervision_lease
+                .capacity
+                .lock()
+                .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+            let prefix = capacity.prepare(&tx)?;
+            capacity.publish(prefix); // No new event exists in this transaction yet.
             Ok(())
         })();
         if let Err(error) = verification {
@@ -844,8 +873,15 @@ impl Store {
                 None
             };
             let checked_changes = transaction.total_changes();
+            let mut capacity = self
+                .supervision_lease
+                .capacity
+                .lock()
+                .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+            let capacity_prefix = capacity.prepare(&transaction)?;
             transaction.commit()?;
             self.backing.verify_names()?;
+            capacity.publish(capacity_prefix);
             // The shared guard still covers this publication, before an ACK or EmitOnce.
             lease.floor = next_head;
             lease.namespace = namespace;
@@ -874,6 +910,32 @@ impl Store {
         event: Event,
         payload: String,
     ) -> anyhow::Result<StoredEvent> {
+        self.append_with_capacity_class(tx, event, payload, capacity::Class::OrdinaryWrite)
+    }
+    fn append_identity_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_capacity_class(tx, event, payload, capacity::Class::IdentityMaintenance)
+    }
+    fn append_human_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        principal: &crate::identity::PrincipalRefV1,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_capacity_class(tx, event, payload, capacity::Class::HumanRead(principal))
+    }
+    fn append_with_capacity_class(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        class: capacity::Class<'_>,
+    ) -> anyhow::Result<StoredEvent> {
         let existing = tx
             .query_row(
                 "SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE id=?1",
@@ -896,17 +958,53 @@ impl Store {
             )
             .optional()?
             .unwrap_or((0, "0".repeat(64)));
+        let count = u64::try_from(last).context("invalid audit event count")?;
         anyhow::ensure!(
-            last < (self.max_events as i64),
-            "audit capacity exhausted; archive before new executions"
+            count < self.max_events,
+            "audit capacity exhausted; preserve audit and contact operator"
         );
         let used: i64 = tx.query_row("SELECT bytes FROM quota WHERE id=1", [], |r| r.get(0))?;
+        let used_bytes = u64::try_from(used).context("invalid audit byte usage")?;
+        let payload_bytes = u64::try_from(payload.len()).context("audit payload too large")?;
         anyhow::ensure!(
-            used + payload.len() as i64 <= 256 * 1024 * 1024,
+            used_bytes
+                .checked_add(payload_bytes)
+                .is_some_and(|next| next <= capacity::PHYSICAL_BYTES),
             "audit byte capacity exhausted"
         );
+        let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if schema == 5 {
+            let mut cache = self
+                .supervision_lease
+                .capacity
+                .lock()
+                .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+            let pending = cache.prepare(tx)?;
+            cache.admit(
+                &pending,
+                &self.capacity_policy,
+                AuditCapacityV1 {
+                    events: self.max_events,
+                    bytes: capacity::PHYSICAL_BYTES,
+                },
+                AuditCapacityV1 {
+                    events: count,
+                    bytes: used_bytes,
+                },
+                AuditCapacityV1 {
+                    events: 1,
+                    bytes: payload_bytes,
+                },
+                class,
+            )?;
+        }
         let received = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let seq = last + 1;
+        let seq = last.checked_add(1).context("audit sequence overflow")?;
+        let stored_payload_bytes =
+            i64::try_from(payload_bytes).context("audit payload too large")?;
+        let next_used = used
+            .checked_add(stored_payload_bytes)
+            .context("audit byte usage overflow")?;
         let hash = digest(seq, &received, &prev, &payload);
         let decision = event.decision.as_ref().map(|d| match d.outcome {
             Outcome::Allow => "allow",
@@ -917,7 +1015,7 @@ impl Store {
             let inserted = tx.execute("INSERT INTO events(seq,id,received_at,prev_hash,hash,payload,kind,agent_id,sandbox_id,project_id,decision) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",params![seq,event.id,received,prev,hash,payload,event.kind,event.agent_id,event.sandbox_id,event.project_id,decision])?;
             let updated = tx.execute(
                 "UPDATE quota SET bytes=bytes+?1 WHERE id=1",
-                [payload.len() as i64],
+                [stored_payload_bytes],
             )?;
             let persisted: Option<(i64, String)> = tx.query_row("SELECT seq,payload FROM events WHERE id=?1 AND received_at=?2 AND prev_hash=?3 AND hash=?4", params![event.id,received,prev,hash], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
             let quota_after: i64 =
@@ -926,7 +1024,7 @@ impl Store {
                 inserted == 1
                     && updated == 1
                     && persisted == Some((seq, payload.clone()))
-                    && quota_after == used + payload.len() as i64,
+                    && quota_after == next_used,
                 "audit append did not persist the expected event and quota"
             );
             Ok(())

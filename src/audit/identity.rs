@@ -789,7 +789,7 @@ impl Store {
         let original = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         invalid(original == serde_json::to_value(&event)?)?;
-        self.append_in_transaction(tx, event, payload)?;
+        self.append_identity_in_transaction(tx, event, payload)?;
         Ok(())
     }
     /// Offline maintenance only, with an exclusive verified schema3 backup.
@@ -816,7 +816,7 @@ impl Store {
         let original = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         invalid(serde_json::to_value(&event)? == original)?;
-        let stored = self.append_in_transaction(tx, event, payload)?;
+        let stored = self.append_identity_in_transaction(tx, event, payload)?;
         tx.execute("INSERT INTO identity_meta(singleton,authorization_revision,genesis_seq,genesis_hash) VALUES(1,0,?1,?2)",params![stored.seq,stored.hash])?;
         Ok(())
     }
@@ -897,7 +897,7 @@ impl Store {
         let original = serde_json::to_value(&event)?;
         let (event, payload) = self.prepare_event(event)?;
         invalid(serde_json::to_value(&event)? == original)?;
-        let stored = self.append_in_transaction(tx, event, payload)?;
+        let stored = self.append_identity_in_transaction(tx, event, payload)?;
         conflict(stored.seq == next_seq)?;
         persist_change(tx, mutation, stored.seq)?;
         tx.execute(

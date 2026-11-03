@@ -23,6 +23,7 @@ struct TenantFiles {
     viewer_token_file: PathBuf,
     #[serde(default)]
     worker_quota: agentsandbox::control::QuotaPolicyV1,
+    audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
 }
 
 pub struct ConfiguredTenant {
@@ -33,6 +34,7 @@ pub struct ConfiguredTenant {
     pub runner_token: String,
     pub viewer_token: String,
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
+    pub audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
 }
 
 #[derive(Deserialize)]
@@ -188,6 +190,7 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             runner_token,
             viewer_token,
             worker_quota: tenant.worker_quota,
+            audit_capacity_policy: tenant.audit_capacity_policy,
         });
     }
     Ok(result)
@@ -224,6 +227,31 @@ mod tests {
             "limits outside the supported range must fail"
         );
         assert!(!path.parent().unwrap().join("a.sqlite").exists());
+    }
+
+    #[test]
+    fn audit_capacity_policy_is_optional_and_closed_in_tenant_registry() {
+        let (_dir, path, mut value) = fixture();
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(load(&path).unwrap()[0].audit_capacity_policy.is_none());
+        let capacity = |events, bytes| json!({"events": events, "bytes": bytes});
+        value["tenants"][0]["audit_capacity_policy"] = json!({
+            "version": 1,
+            "human_tenant": capacity(50, 128 * 1024 * 1024),
+            "human_principal": capacity(12, 32 * 1024 * 1024),
+            "control_reserve": capacity(25, 64 * 1024 * 1024),
+            "identity_reserve": capacity(12, 32 * 1024 * 1024)
+        });
+        std::fs::write(&path, value.to_string()).unwrap();
+        load(&path).unwrap()[0]
+            .audit_capacity_policy
+            .as_ref()
+            .unwrap()
+            .validate(100)
+            .unwrap();
+        value["tenants"][0]["audit_capacity_policy"]["unknown"] = json!(true);
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(load(&path).is_err());
     }
 
     #[test]

@@ -102,6 +102,9 @@ struct GatewayArgs {
     /// Versioned registry of tenant database and credential file references.
     #[arg(long, conflicts_with_all = ["data", "runner_token_file", "viewer_token_file", "worker_limit", "worker_cpu_millis", "worker_memory_bytes", "worker_max_seconds"])]
     tenants_file: Option<PathBuf>,
+    /// Private, versioned audit budgets for the local tenant; never resets usage.
+    #[arg(long, conflicts_with = "tenants_file")]
+    audit_capacity_file: Option<PathBuf>,
     /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
     #[arg(long)]
     oidc_config: Option<PathBuf>,
@@ -472,6 +475,11 @@ async fn main() -> Result<()> {
                         max_memory_bytes: args.worker_memory_bytes,
                         max_timeout_seconds: args.worker_max_seconds,
                     },
+                    audit_capacity_policy: args
+                        .audit_capacity_file
+                        .as_deref()
+                        .map(Store::load_capacity_policy)
+                        .transpose()?,
                 }]
             };
             let mut secrets: Vec<String> = tenants
@@ -547,6 +555,13 @@ async fn main() -> Result<()> {
                 args.max_events > 0 && args.max_events <= 1_000_000,
                 "max-events doit être compris entre 1 et 1000000"
             );
+            // Validate the complete registry before preparing backups or any
+            // fresh origin: a later tenant must not strand an earlier one.
+            for tenant in &tenants {
+                if let Some(policy) = &tenant.audit_capacity_policy {
+                    policy.validate(args.max_events)?;
+                }
+            }
             let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
                 let mut credential_files: Vec<&Path> = tenants
                     .iter()
@@ -573,13 +588,14 @@ async fn main() -> Result<()> {
             let mut gateways = Vec::new();
             let mut quotas = Vec::new();
             let mut event_count = 0_u64;
+            let mut capacity_diagnostics = Vec::with_capacity(tenants.len());
             for tenant in tenants {
                 tenant
                     .worker_quota
                     .validate()
                     .context("Quota workers invalide")?;
                 quotas.push((tenant.tenant_id.clone(), tenant.worker_quota));
-                let store = Arc::new(if let Some(root) = &backup_root {
+                let store = if let Some(root) = &backup_root {
                     root.revalidate()?;
                     let name = format!(
                         "tenant-{}-v2.sqlite",
@@ -599,7 +615,30 @@ async fn main() -> Result<()> {
                         redactor.clone(),
                         args.max_events,
                     )?
-                });
+                };
+                let capacity_source = if tenant.audit_capacity_policy.is_some() {
+                    "explicit_operator_policy"
+                } else {
+                    "derived_defaults"
+                };
+                let store = if let Some(policy) = tenant.audit_capacity_policy {
+                    store.with_capacity_policy(policy)?
+                } else {
+                    store
+                };
+                capacity_diagnostics.push(format!(
+                    "Audit capacity tenant={} source={} human_read_policy={} policy={} fingerprint={}",
+                    store.tenant_id(),
+                    capacity_source,
+                    if store.capacity_policy().human_reads_enabled() {
+                        "enabled"
+                    } else {
+                        "human_reads_disabled_insufficient_capacity"
+                    },
+                    serde_json::to_string(store.capacity_policy())?,
+                    store.capacity_policy_fingerprint()?,
+                ));
+                let store = Arc::new(store);
                 let check = store.integrity()?;
                 anyhow::ensure!(
                     check.valid,
@@ -638,6 +677,9 @@ async fn main() -> Result<()> {
                 tenant_count,
                 event_count
             );
+            for diagnostic in capacity_diagnostics {
+                eprintln!("{diagnostic}");
+            }
             serve_http(listener, router, shutdown).await?;
         }
         Command::MigrateControl {
@@ -853,6 +895,30 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gateway_audit_capacity_file_conflicts_with_tenant_registry() {
+        assert!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "gateway",
+                "--audit-capacity-file",
+                "capacity.json"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "agentsandbox",
+                "gateway",
+                "--audit-capacity-file",
+                "capacity.json",
+                "--tenants-file",
+                "tenants.json"
+            ])
+            .is_err()
+        );
+    }
 
     fn gateway_arguments(arguments: &[&str]) -> GatewayArgs {
         let cli = Cli::try_parse_from(

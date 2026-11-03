@@ -509,7 +509,7 @@ impl Store {
             }),
         })
     }
-    fn record_human_read(
+    pub(super) fn record_human_read(
         &self,
         tx: &Transaction<'_>,
         principal: &PrincipalRefV1,
@@ -540,7 +540,7 @@ impl Store {
             "human read audit identity requires redaction"
         );
         let (event, payload) = self.prepare_event(event)?;
-        let stored = self.append_in_transaction(tx, event, payload)?;
+        let stored = self.append_human_in_transaction(tx, event, payload, principal)?;
         Ok(HumanReadReceiptV1 {
             request_id,
             audit_event_id: stored.event.id,
