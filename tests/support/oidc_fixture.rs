@@ -1,6 +1,6 @@
 //! Test-only controlled issuer with public synthetic RSA material from
 //! jsonwebtoken's MIT-licensed tests. This is never an installation credential.
-use agentsandbox::oidc::{OidcConfigV1, OidcLimitsV1, OidcTransportModeV1};
+use super::test_product::oidc::{OidcConfigV1, OidcLimitsV1, OidcTransportModeV1};
 use axum::{
     Router,
     body::{Body, to_bytes},

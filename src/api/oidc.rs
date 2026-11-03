@@ -236,6 +236,7 @@ pub struct OidcGateway {
     pub(super) audit: Arc<AuthenticationAudit>,
     ca_bundle_pem: Option<String>,
     registry: Mutex<Registry>,
+    cleanup_slots: Arc<tokio::sync::Semaphore>,
 }
 impl OidcGateway {
     pub fn new(
@@ -264,6 +265,7 @@ impl OidcGateway {
             audit,
             ca_bundle_pem,
             registry: Mutex::new(Registry::default()),
+            cleanup_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }
     pub(super) fn authenticate(&self, token: &str) -> ApiResult<OidcHumanProof> {
@@ -341,6 +343,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/logout", post(logout))
 }
 async fn status(State(state): State<GatewayState>, headers: HeaderMap) -> ApiResult<Response> {
+    state
+        .blocking_identity(move |state| status_sync(State(state), headers))
+        .await
+}
+fn status_sync(State(state): State<GatewayState>, headers: HeaderMap) -> ApiResult<Response> {
     let mut response = Json(match &state.oidc {
         Some(oidc) => json!({"version":1,"enabled":true,"issuer":oidc.config.provider.issuer,"provider_label":oidc.config.provider_label}),
         None => json!({"version":1,"enabled":false}),

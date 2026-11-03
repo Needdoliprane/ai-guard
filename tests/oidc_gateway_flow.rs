@@ -3,6 +3,7 @@
 #[path = "support/oidc_fixture.rs"]
 mod controlled;
 mod support;
+use agentsandbox as test_product;
 use agentsandbox::{
     api::{GatewayState, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1, gateway_router},
     audit::{

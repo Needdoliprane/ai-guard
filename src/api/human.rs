@@ -110,18 +110,21 @@ fn cursor_unavailable() -> (StatusCode, Json<Value>) {
     )
 }
 
+#[derive(Clone)]
 struct VerifiedHuman {
     credential: HumanAuthenticationProof,
     source: HumanProofSource,
     digest: [u8; 32],
     redactor: Redactor,
 }
+#[derive(Clone)]
 struct HumanAuthenticationProof {
     principal: PrincipalRefV1,
     credential_id: String,
     revision: u64,
     expires_at: Option<String>,
 }
+#[derive(Clone)]
 enum HumanProofSource {
     Local(usize),
     Oidc(super::oidc::OidcHumanProof),
@@ -149,7 +152,10 @@ impl VerifiedHuman {
 impl FromRequestParts<GatewayState> for VerifiedHuman {
     type Rejection = (StatusCode, Json<Value>);
     async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> ApiResult<Self> {
-        authenticate(state, &parts.headers)
+        let headers = parts.headers.clone();
+        state
+            .blocking_identity(move |state| authenticate(&state, &headers))
+            .await
     }
 }
 fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<VerifiedHuman> {
@@ -207,7 +213,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
     let mut matches = Vec::new();
     let mut unavailable = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        match tenant.store.local_credential_binding(&digest) {
+        match credential_binding(state, tenant, &digest, store_io::Lane::Discovery) {
             Ok(Some(_)) => matches.push(index),
             Ok(None) => {}
             Err(error) => {
@@ -225,7 +231,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         && matches.is_empty()
         && let Some(error) = unavailable
     {
-        return Err(store_failure(error));
+        return Err(error.into_api());
     }
     if control_credential || matches.is_empty() {
         return Err(failure(
@@ -244,9 +250,14 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         ));
     }
     let source = matches[0];
-    let credential = state.tenants[source]
-        .store
-        .authenticate_local_digest(&digest)
+    let credential = state
+        .io_scope
+        .with_store(
+            &state.tenants[source],
+            store_io::Lane::Read,
+            true,
+            |store| store.authenticate_local_digest(&digest),
+        )?
         .map_err(store_failure)?
         .ok_or_else(|| {
             failure(
@@ -268,14 +279,45 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
     })
 }
+// Unavailable metadata is not an absent binding. A neighboring failure may be
+// tolerated only with the separate, freshly verified source proof (policy B).
+enum MetadataUnavailable {
+    Admission((StatusCode, Json<Value>)),
+    Storage(anyhow::Error),
+}
+impl MetadataUnavailable {
+    fn into_api(self) -> (StatusCode, Json<Value>) {
+        match self {
+            Self::Admission(error) => error,
+            Self::Storage(error) => store_failure(error),
+        }
+    }
+}
+fn credential_binding(
+    state: &GatewayState,
+    tenant: &TenantState,
+    digest: &[u8; 32],
+    lane: store_io::Lane,
+) -> Result<Option<LocalCredentialV1>, MetadataUnavailable> {
+    state
+        .io_scope
+        .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
+            store.local_credential_binding(digest)
+        })
+        .map_err(MetadataUnavailable::Admission)?
+        .map_err(MetadataUnavailable::Storage)
+}
 pub(super) fn reject_control_collision(
     state: &GatewayState,
     token: &str,
-    own: Option<usize>,
+    own: Option<(usize, store_io::Lane)>,
 ) -> ApiResult<()> {
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
-        match tenant.store.local_credential_binding(&digest) {
+        let lane = own
+            .filter(|(source, _)| *source == index)
+            .map_or(store_io::Lane::Discovery, |(_, lane)| lane);
+        match credential_binding(state, tenant, &digest, lane) {
             Ok(Some(_)) => {
                 return Err(error(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -283,11 +325,14 @@ pub(super) fn reject_control_collision(
                 ));
             }
             Ok(None) => {}
-            Err(_) if own == Some(index) => {
-                return Err(error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Configuration d'identité indisponible.",
-                ));
+            Err(unavailable) if own.is_some_and(|(source, _)| source == index) => {
+                return Err(match unavailable {
+                    MetadataUnavailable::Admission(error) => error,
+                    MetadataUnavailable::Storage(_) => super::error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Configuration d'identité indisponible.",
+                    ),
+                });
             }
             // An unavailable sibling cannot authenticate its local bindings.
             // Readable collisions are still checked on every request, including
@@ -310,9 +355,14 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
     };
     let mut count = 0usize;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        match tenant.store.local_credential_binding(&proof.digest) {
+        let lane = if index == source {
+            store_io::Lane::Read
+        } else {
+            store_io::Lane::Discovery
+        };
+        match credential_binding(state, tenant, &proof.digest, lane) {
             Ok(binding) => count += usize::from(binding.is_some()),
-            Err(error) if index == source => return Err(store_failure(error)),
+            Err(error) if index == source => return Err(error.into_api()),
             Err(_) => {}
         }
     }
@@ -324,9 +374,14 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
             "contact_operator",
         ));
     }
-    let verified = state.tenants[source]
-        .store
-        .authenticate_local_digest(&proof.digest)
+    let verified = state
+        .io_scope
+        .with_store(
+            &state.tenants[source],
+            store_io::Lane::Read,
+            true,
+            |store| store.authenticate_local_digest(&proof.digest),
+        )?
         .map_err(store_failure)?
         .ok_or_else(|| {
             failure(
@@ -367,11 +422,11 @@ fn state_failure(error: StateFailure) -> (StatusCode, Json<Value>) {
         ),
     }
 }
-fn selected_context(
+fn registered_context(
     state: &GatewayState,
     proof: &VerifiedHuman,
     headers: &HeaderMap,
-) -> ApiResult<(Arc<RegisteredContext>, TenantState, AuthorizedScopeV1)> {
+) -> ApiResult<(Arc<RegisteredContext>, TenantState)> {
     let mut values = headers.get_all(CONTEXT_HEADER).iter();
     let value = values
         .next()
@@ -401,6 +456,16 @@ fn selected_context(
         .find(|tenant| tenant.tenant_id == binding.tenant_id)
         .ok_or_else(|| context_failure("context_revoked"))?
         .clone();
+    context.ensure_valid().map_err(state_failure)?;
+    Ok((context, tenant))
+}
+fn selected_context(
+    state: &GatewayState,
+    proof: &VerifiedHuman,
+    headers: &HeaderMap,
+) -> ApiResult<(Arc<RegisteredContext>, TenantState, AuthorizedScopeV1)> {
+    let (context, tenant) = registered_context(state, proof, headers)?;
+    let binding = &context.binding;
     let mut scope = tenant
         .store
         .authorize_human_context(
@@ -428,6 +493,44 @@ fn selected_context(
     }
     context.ensure_valid().map_err(state_failure)?;
     Ok((context, tenant, scope))
+}
+
+async fn run_human<T, F>(
+    state: &GatewayState,
+    proof: &VerifiedHuman,
+    headers: Option<&HeaderMap>,
+    operation: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(GatewayState, VerifiedHuman) -> ApiResult<T> + Send + 'static,
+{
+    // Header/context lookup is memory-only. It cannot select an arbitrary
+    // tenant: the registry binds this selection to the authenticated proof.
+    let mut scope = store_io::Scope::default();
+    if let HumanProofSource::Local(source) = proof.source {
+        scope.hold(&state.tenants[source], store_io::Lane::Read, true)?;
+    }
+    if let Some(headers) = headers {
+        scope.hold(
+            &registered_context(state, proof, headers)?.1,
+            store_io::Lane::Read,
+            true,
+        )?;
+    }
+    let state = state.scoped(Arc::new(scope));
+    let proof = proof.clone();
+    store_io::run(
+        Arc::clone(&state.io),
+        None,
+        store_io::Lane::Read,
+        true,
+        move || {
+            reauthenticate(&state, &proof)?;
+            operation(state, proof)
+        },
+    )
+    .await
 }
 
 #[derive(Clone, Deserialize)]
@@ -565,6 +668,15 @@ async fn identity(
     proof: VerifiedHuman,
     State(state): State<GatewayState>,
 ) -> ApiResult<Json<HumanIdentityV1>> {
+    run_human(&state, &proof, None, |state, proof| {
+        identity_sync(proof, State(state))
+    })
+    .await
+}
+fn identity_sync(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+) -> ApiResult<Json<HumanIdentityV1>> {
     let mut contexts = Vec::new();
     let mut contexts_complete = true;
     let mut display_name = None;
@@ -590,10 +702,23 @@ async fn identity(
         remaining = remaining.min(oidc.deadline.saturating_duration_since(Instant::now()));
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let snapshot = match tenant
-            .store
-            .human_profile(&proof.credential.principal, &proof.redactor)
-        {
+        let snapshot = match state.io_scope.with_store(
+            tenant,
+            store_io::Lane::Read,
+            true,
+            |store| store.human_profile(&proof.credential.principal, &proof.redactor),
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) if matches!(proof.source, HumanProofSource::Local(source) if source == index) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {
+                contexts_complete = false;
+                continue;
+            }
+        };
+        let snapshot = match snapshot {
             Ok(snapshot) => snapshot,
             Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
             {
@@ -748,6 +873,19 @@ async fn resources(
     query: Result<Query<PageQuery>, QueryRejection>,
 ) -> ApiResult<Json<HumanPageV1<HumanResourceItemV1>>> {
     let Query(query) = query.map_err(|_| invalid_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&selected), move |state, proof| {
+        resources_sync(proof, State(state), headers, Ok(Query(query)))
+    })
+    .await
+}
+fn resources_sync(
+    proof: VerifiedHuman,
+    State(state): State<GatewayState>,
+    headers: HeaderMap,
+    query: Result<Query<PageQuery>, QueryRejection>,
+) -> ApiResult<Json<HumanPageV1<HumanResourceItemV1>>> {
+    let Query(query) = query.map_err(|_| invalid_request())?;
     let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
     let key = query.key(Traversal::Resources)?;
     let mut cursor = context
@@ -796,6 +934,21 @@ async fn event(
     event_page(proof, state, headers, query, Some(id), false).await
 }
 async fn event_page(
+    proof: VerifiedHuman,
+    state: GatewayState,
+    headers: HeaderMap,
+    query: Result<Query<PageQuery>, QueryRejection>,
+    id: Option<String>,
+    is_export: bool,
+) -> ApiResult<Json<HumanPageV1<HumanEventItemV1>>> {
+    let Query(query) = query.map_err(|_| invalid_request())?;
+    let selected = headers.clone();
+    run_human(&state, &proof, Some(&selected), move |state, proof| {
+        event_page_sync(proof, state, headers, Ok(Query(query)), id, is_export)
+    })
+    .await
+}
+fn event_page_sync(
     proof: VerifiedHuman,
     state: GatewayState,
     headers: HeaderMap,
@@ -862,7 +1015,12 @@ async fn stream(
         return Err(invalid_cursor());
     }
     let Query(query) = query.map_err(|_| invalid_request())?;
-    let (context, tenant, scope) = selected_context(&state, &proof, &headers)?;
+    let selected = headers.clone();
+    let (context, tenant, scope) =
+        run_human(&state, &proof, Some(&headers), move |state, proof| {
+            selected_context(&state, &proof, &selected)
+        })
+        .await?;
     let key = query.key(Traversal::Stream)?;
     let mut cursor = context
         .start(&key, query.cursor.as_deref())
@@ -878,29 +1036,17 @@ async fn stream(
     let events = async_stream::stream! {
         let _permit = permit;
         loop {
-            let result = (|| -> ApiResult<Option<(SseEvent,bool)>> {
-                reauthenticate(&state,&proof)?;
-                let (current_context,_,current) = selected_context(&state,&proof,&headers)?;
-                if !Arc::ptr_eq(&context,&current_context) || current.authorization_revision() != scope.authorization_revision() { return Err(context_failure("context_revoked")); }
-                let filter = HumanEventFilterV1 {view:key.view,resource:key.resource.clone(),event_id:None,export:false,stream:true};
-                let poll = tenant.store.human_events(&scope,&filter,cursor.after_event,cursor.upper_event,key.limit,&proof.redactor).map_err(store_failure)?;
-                reauthenticate(&state,&proof)?;
-                let Some(page) = poll.page else { cursor.after_event = poll.after_event;cursor.upper_event = None;return Ok(None); };
-                cursor.after_event = page.after_event;
-                cursor.upper_event = if page.has_more {Some(page.upper_event)} else {None};
-                let has_more = page.has_more;
-                let page = envelope(&context,page,Some(key.view),false);
-                let frame_bytes = serde_json::to_vec(&page).map_err(|_|invalid_request())?.len().checked_add(CURSOR_HEX_BYTES+64).ok_or_else(invalid_request)?;
-                if frame_bytes > HUMAN_MAX_PAGE_BYTES { return Err(invalid_request()); }
-                cursor = advance_budget(&context,cursor.clone(),frame_bytes)?;
-                let resume = context.seal(&key,&cursor).map_err(state_failure)?;
-                let event = SseEvent::default().event("human_audit").id(resume).json_data(page).map_err(|_|invalid_request())?;
-                Ok(Some((event,has_more)))
-            })();
+            let poll_context = Arc::clone(&context);
+            let poll_scope = scope.clone();
+            let poll_key = key.clone();
+            let poll_cursor = cursor.clone();
+            let poll_headers = headers.clone();
+            let result = run_human(&state,&proof,Some(&headers),move |state,proof|
+                stream_poll(&state,&proof,&poll_headers,&poll_context,&poll_scope,&poll_key,poll_cursor)).await;
             let mut dense = false;
             match result {
-                Ok(Some((event,has_more))) => {dense = has_more;yield Ok::<_,Infallible>(event);},
-                Ok(None) => {},
+                Ok((Some((event,has_more)),next)) => {cursor = next;dense = has_more;yield Ok::<_,Infallible>(event);},
+                Ok((None,next)) => {cursor = next;},
                 Err((_,Json(error))) => {yield Ok(SseEvent::default().event("error").json_data(error).expect("bounded serializable human error"));break;},
             }
             if dense {tokio::task::yield_now().await;} else {tokio::time::sleep(Duration::from_secs(1)).await;}
@@ -913,4 +1059,169 @@ async fn stream(
                 .text("heartbeat"),
         )
         .into_response())
+}
+
+fn stream_poll(
+    state: &GatewayState,
+    proof: &VerifiedHuman,
+    headers: &HeaderMap,
+    context: &Arc<RegisteredContext>,
+    scope: &AuthorizedScopeV1,
+    key: &QueryKey,
+    mut cursor: CursorState,
+) -> ApiResult<(Option<(SseEvent, bool)>, CursorState)> {
+    let (current_context, tenant, current) = selected_context(state, proof, headers)?;
+    if !Arc::ptr_eq(context, &current_context)
+        || current.authorization_revision() != scope.authorization_revision()
+    {
+        return Err(context_failure("context_revoked"));
+    }
+    let filter = HumanEventFilterV1 {
+        view: key.view,
+        resource: key.resource.clone(),
+        event_id: None,
+        export: false,
+        stream: true,
+    };
+    let poll = tenant
+        .store
+        .human_events(
+            scope,
+            &filter,
+            cursor.after_event,
+            cursor.upper_event,
+            key.limit,
+            &proof.redactor,
+        )
+        .map_err(store_failure)?;
+    reauthenticate(state, proof)?;
+    let Some(page) = poll.page else {
+        cursor.after_event = poll.after_event;
+        cursor.upper_event = None;
+        return Ok((None, cursor));
+    };
+    cursor.after_event = page.after_event;
+    cursor.upper_event = if page.has_more {
+        Some(page.upper_event)
+    } else {
+        None
+    };
+    let has_more = page.has_more;
+    let page = envelope(context, page, Some(key.view), false);
+    let frame_bytes = serde_json::to_vec(&page)
+        .map_err(|_| invalid_request())?
+        .len()
+        .checked_add(CURSOR_HEX_BYTES + 64)
+        .ok_or_else(invalid_request)?;
+    if frame_bytes > HUMAN_MAX_PAGE_BYTES {
+        return Err(invalid_request());
+    }
+    cursor = advance_budget(context, cursor, frame_bytes)?;
+    let resume = context.seal(key, &cursor).map_err(state_failure)?;
+    let event = SseEvent::default()
+        .event("human_audit")
+        .id(resume)
+        .json_data(page)
+        .map_err(|_| invalid_request())?;
+    Ok((Some((event, has_more)), cursor))
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::api::read_execution_tests::{human_get, local_identity_state};
+    use crate::audit::read_test_observer::{Call, observe};
+    use axum::http::Request;
+
+    async fn resources_from_verified_proof(
+        state: &GatewayState,
+        proof: &VerifiedHuman,
+        context: &str,
+    ) -> ApiResult<Json<HumanPageV1<HumanResourceItemV1>>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTEXT_HEADER, HeaderValue::from_str(context).unwrap());
+        let selected = headers.clone();
+        run_human(state, proof, Some(&selected), move |state, proof| {
+            resources_sync(
+                proof,
+                State(state),
+                headers,
+                Ok(Query(PageQuery {
+                    cursor: None,
+                    limit: Some(1),
+                    view: None,
+                    resource_kind: None,
+                    resource_id: None,
+                })),
+            )
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn context_a_revalidation_cannot_open_saturated_credential_source_b() {
+        let (_directory, state, token) = local_identity_state();
+        let router = gateway_router(state.clone());
+        let (status, identity) = human_get(&router, &token, "/api/v1/human/identity", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let contexts = identity["contexts"].as_array().unwrap();
+        let context_id = |tenant| {
+            contexts
+                .iter()
+                .find(|context| context["tenant_id"] == tenant)
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let context_a = context_id("tenant-a");
+        let context_b = context_id("tenant-b");
+        let (mut parts, _) = Request::builder()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+            .into_parts();
+        // Use the real extractor before saturation. The retained proof lets
+        // this test isolate revalidation from the initial authentication I/O.
+        let proof = VerifiedHuman::from_request_parts(&mut parts, &state)
+            .await
+            .unwrap();
+        let observations = observe(&state.tenants[1].store);
+        let _three_source_slots: Vec<_> = (0..3)
+            .map(|_| {
+                state.tenants[1]
+                    .io
+                    .admit(store_io::Lane::Read, false)
+                    .unwrap()
+            })
+            .collect();
+        // Source == context needs one remaining slot, not a double acquisition.
+        let _ = resources_from_verified_proof(&state, &proof, &context_b)
+            .await
+            .unwrap();
+        let baseline_transactions = observations
+            .try_iter()
+            .filter(|sample| sample.call == Call::BeginChecked)
+            .count();
+        assert!(baseline_transactions > 0);
+
+        let _fourth_source_slot = state.tenants[1]
+            .io
+            .admit(store_io::Lane::Read, false)
+            .unwrap();
+        let result = resources_from_verified_proof(&state, &proof, &context_a).await;
+        let status = result
+            .as_ref()
+            .err()
+            .map_or(StatusCode::OK, |error| error.0);
+        let transactions = observations
+            .try_iter()
+            .filter(|sample| sample.call == Call::BeginChecked)
+            .count();
+        assert_eq!(
+            transactions, 0,
+            "context A bypassed the source B admission during revalidation; status={status}"
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    }
 }

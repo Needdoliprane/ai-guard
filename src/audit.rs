@@ -14,7 +14,7 @@ use std::{
     path::Path,
     sync::{
         Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
 };
 
@@ -22,6 +22,8 @@ pub mod authentication;
 mod control;
 mod human;
 mod identity;
+#[cfg(test)]
+pub(crate) mod read_test_observer;
 pub(crate) use control::expected_worker_transition;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 mod storage;
@@ -61,7 +63,10 @@ pub struct Store {
     max_events: u64,
     unhealthy: AtomicBool,
     validated_data_version: AtomicI64,
+    validated_total_changes: AtomicU64,
     supervision_lease: Arc<SupervisionOrigin>,
+    #[cfg(test)]
+    read_test_observer: read_test_observer::ReadTestObserver,
 }
 
 struct SupervisionOrigin {
@@ -587,6 +592,7 @@ impl Store {
         };
         tx.commit()?;
         backing.verify(&db)?;
+        let validated_total_changes = db.total_changes();
         let supervision_lease = Arc::new(SupervisionOrigin {
             state: Mutex::new(SupervisionLease {
                 backing: backing.identity_key(),
@@ -607,7 +613,10 @@ impl Store {
             max_events,
             unhealthy: AtomicBool::new(!initial_valid),
             validated_data_version: AtomicI64::new(validated_data_version),
+            validated_total_changes: AtomicU64::new(validated_total_changes),
             supervision_lease,
+            #[cfg(test)]
+            read_test_observer: read_test_observer::ReadTestObserver::default(),
         })
     }
     /// Another connection to this live origin; no caller-selected identity or path.
@@ -738,6 +747,9 @@ impl Store {
         &'a self,
         db: &'a mut Connection,
     ) -> anyhow::Result<CheckedTransaction<'a>> {
+        #[cfg(test)]
+        self.read_test_observer
+            .record(read_test_observer::Call::BeginChecked);
         let mut lease = self.lock_supervision_lease()?;
         anyhow::ensure!(
             self.healthy() && !lease.invalidated,
@@ -773,25 +785,29 @@ impl Store {
         // stable until this append is committed, without rescanning our own
         // unchanged chain for every event.
         let current_version: i64 = tx.pragma_query_value(None, "data_version", |row| row.get(0))?;
-        if current_version != self.validated_data_version.load(Ordering::Acquire) {
-            let verification = (|| -> anyhow::Result<()> {
-                validate_schema(&tx, false)?;
+        let changed = current_version != self.validated_data_version.load(Ordering::Acquire)
+            || tx.total_changes() != self.validated_total_changes.load(Ordering::Acquire);
+        let verification = (|| -> anyhow::Result<()> {
+            // Schema checks also cover DDL/PRAGMA issued on this connection,
+            // which need not advance either SQLite data_version or total_changes.
+            validate_schema(&tx, false)?;
+            if changed {
                 Self::validate_metadata(&tx, &self.tenant_id)?;
                 anyhow::ensure!(Self::check_integrity(&tx)?.valid, "audit integrity failure");
                 control::validate(&tx)?;
-                Ok(())
-            })();
-            if let Err(error) = verification {
-                self.unhealthy.store(true, Ordering::Release);
-                lease.invalidate();
-                self.supervision_lease
-                    .invalidated
-                    .store(true, Ordering::Release);
-                return Err(error);
             }
-            self.validated_data_version
-                .store(current_version, Ordering::Release);
+            Ok(())
+        })();
+        if let Err(error) = verification {
+            self.unhealthy.store(true, Ordering::Release);
+            lease.invalidate();
+            self.supervision_lease
+                .invalidated
+                .store(true, Ordering::Release);
+            return Err(error);
         }
+        self.validated_data_version
+            .store(current_version, Ordering::Release);
         Ok(CheckedTransaction {
             transaction: tx,
             lease,
@@ -827,6 +843,7 @@ impl Store {
             } else {
                 None
             };
+            let checked_changes = transaction.total_changes();
             transaction.commit()?;
             self.backing.verify_names()?;
             // The shared guard still covers this publication, before an ACK or EmitOnce.
@@ -835,6 +852,11 @@ impl Store {
             if activate_supervision {
                 lease.active = true;
             }
+            // Publish only our checked changes. In particular, do not read and
+            // publish a new data_version after commit: a concurrent external
+            // commit must remain unvalidated for the next transaction.
+            self.validated_total_changes
+                .store(checked_changes, Ordering::Release);
             Ok(())
         })();
         if result.is_err() {
@@ -1087,6 +1109,9 @@ impl Store {
         }
     }
     pub fn integrity(&self) -> anyhow::Result<Integrity> {
+        #[cfg(test)]
+        self.read_test_observer
+            .record(read_test_observer::Call::Integrity);
         let mut db = self
             .db
             .lock()
@@ -1097,11 +1122,35 @@ impl Store {
             // Keep schema, quota and event checks on one consistent snapshot,
             // even when another legitimate Store is appending concurrently.
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let version_before_snapshot: i64 =
+                tx.pragma_query_value(None, "data_version", |row| row.get(0))?;
             validate_schema(&tx, false)?;
-            Self::validate_metadata(&tx, &self.tenant_id)?;
-            let mut integrity = Self::check_integrity(&tx)?;
+            let current_version: i64 =
+                tx.pragma_query_value(None, "data_version", |row| row.get(0))?;
+            let total_changes = tx.total_changes();
+            let changed = !self.healthy()
+                || version_before_snapshot != current_version
+                || current_version != self.validated_data_version.load(Ordering::Acquire)
+                || total_changes != self.validated_total_changes.load(Ordering::Acquire);
+            let mut integrity = if changed {
+                Self::validate_metadata(&tx, &self.tenant_id)?;
+                let integrity = Self::check_integrity(&tx)?;
+                if integrity.valid {
+                    control::validate(&tx)?;
+                }
+                integrity
+            } else {
+                // Checked commits preserve the contiguous chain. Read its live
+                // head rather than caching a count that misses our own appends.
+                let (seq, hash) = audit_head(&tx)?;
+                Integrity {
+                    valid: true,
+                    event_count: seq as u64,
+                    head_hash: hash,
+                    error: None,
+                }
+            };
             if integrity.valid {
-                control::validate(&tx)?;
                 if let Err(error) = lease.verify_prefix(&self.backing, &tx) {
                     integrity.valid = false;
                     integrity.error = Some(error.to_string());
@@ -1115,6 +1164,14 @@ impl Store {
                     "audit head regressed during integrity check"
                 );
                 lease.floor = head;
+                // A commit racing the establishment of this read snapshot
+                // must not be acknowledged as a validated newer snapshot.
+                if version_before_snapshot == current_version {
+                    self.validated_data_version
+                        .store(current_version, Ordering::Release);
+                }
+                self.validated_total_changes
+                    .store(total_changes, Ordering::Release);
             }
             Ok(integrity)
         })();
@@ -1383,6 +1440,92 @@ impl Store {
         Ok(
             json!({"counts":{"agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed").count(),"subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="observed" && !a["parent_id"].is_null()).count(),"declared_agents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared").count(),"declared_subagents":agents.iter().filter(|a|a["status"]=="running" && a["provenance"]=="declared" && !a["parent_id"].is_null()).count(),"sandboxes":sandboxes.len(),"commands":count("kind='command.requested'")?,"allowed":count("kind='security.decision' AND decision='allow'")?,"denied":count("kind='security.decision' AND decision='deny'")?,"pending":pending,"security":count("kind LIKE 'security.%'")?},"health":{"collector":if self.healthy(){"ok"}else{"degraded"},"engine":"unknown","jev":"disabled"},"resources":{"cpu_percent":null,"memory_bytes":null},"coverage":"observed","timestamp":chrono::Utc::now().to_rfc3339(),"sequence":db.query_row("SELECT COALESCE(MAX(seq),0) FROM events",[],|r|r.get::<_,i64>(0))?}),
         )
+    }
+}
+
+#[cfg(all(test, unix))]
+mod incremental_integrity_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixture() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let store = Store::open(
+            &directory.path().join("audit.sqlite"),
+            Redactor::new(vec![]),
+            100,
+        )
+        .unwrap();
+        assert!(store.integrity().unwrap().valid);
+        (directory, store)
+    }
+
+    #[test]
+    fn checked_own_and_sibling_commits_keep_live_integrity_count_and_head() {
+        let (_directory, store) = fixture();
+        assert_eq!(store.integrity().unwrap().event_count, 1);
+        let first = store.append(Event::new("fixture.own")).unwrap();
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        assert_eq!(integrity.event_count, 2);
+        assert_eq!(integrity.head_hash, first.hash);
+        let sibling = store.sibling().unwrap();
+        let second = sibling.append(Event::new("fixture.sibling")).unwrap();
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        assert_eq!(integrity.event_count, 3);
+        assert_eq!(integrity.head_hash, second.hash);
+        let third = store
+            .append(Event::new("fixture.own_after_sibling"))
+            .unwrap();
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        assert_eq!(integrity.event_count, 4);
+        assert_eq!(integrity.head_hash, third.hash);
+    }
+
+    #[test]
+    fn unchecked_changes_on_the_same_connection_do_not_reuse_validation() {
+        for statement in [
+            "UPDATE events SET hash='tampered'",
+            "UPDATE quota SET bytes=0",
+            "CREATE INDEX unexpected ON events(kind)",
+            "PRAGMA user_version=999",
+        ] {
+            let (_directory, store) = fixture();
+            store.db.lock().unwrap().execute_batch(statement).unwrap();
+            assert!(
+                store.integrity().map_or(true, |integrity| !integrity.valid),
+                "{statement}"
+            );
+            assert!(!store.healthy(), "{statement}");
+            assert!(store.append(Event::new("fixture.after_tamper")).is_err());
+        }
+    }
+
+    #[test]
+    fn external_changes_are_not_masked_by_a_subsequent_checked_write() {
+        for statement in [
+            "UPDATE events SET hash='tampered'",
+            "UPDATE quota SET bytes=0",
+            "CREATE INDEX unexpected ON events(kind)",
+        ] {
+            let (directory, store) = fixture();
+            let external = Connection::open(directory.path().join("audit.sqlite")).unwrap();
+            external.execute_batch(statement).unwrap();
+            assert!(
+                store.append(Event::new("fixture.after_external")).is_err(),
+                "{statement}"
+            );
+            assert!(!store.healthy(), "{statement}");
+            assert!(
+                store.integrity().map_or(true, |integrity| !integrity.valid),
+                "{statement}"
+            );
+        }
     }
 }
 

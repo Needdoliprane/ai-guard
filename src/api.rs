@@ -41,6 +41,9 @@ mod auth;
 mod human;
 mod human_state;
 mod oidc;
+#[cfg(test)]
+mod read_execution_tests;
+mod store_io;
 mod supervision;
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 pub use oidc::{OidcClaimRuleV1, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1};
@@ -116,15 +119,27 @@ struct TenantState {
     streams: Arc<tokio::sync::Semaphore>,
     rate: Arc<Mutex<(Instant, u32)>>,
     worker_quota: QuotaPolicyV1,
+    io: Arc<store_io::Gate>,
+    shared_io: Arc<store_io::Gate>,
+    control_proof: Option<Arc<ControlProof>>,
 }
-impl From<TenantGateway> for TenantState {
-    fn from(tenant: TenantGateway) -> Self {
+struct ControlProof {
+    state: GatewayState,
+    headers: HeaderMap,
+    write: bool,
+    lane: store_io::Lane,
+}
+impl TenantState {
+    fn from_gateway(tenant: TenantGateway, shared_io: Arc<store_io::Gate>) -> Self {
         Self {
             tenant_id: tenant.tenant_id,
             store: tenant.store,
             streams: Arc::new(tokio::sync::Semaphore::new(32)),
             rate: Arc::new(Mutex::new((Instant::now(), 0))),
             worker_quota: QuotaPolicyV1::default(),
+            io: Arc::new(store_io::Gate::new(false)),
+            shared_io,
+            control_proof: None,
         }
     }
 }
@@ -139,8 +154,33 @@ pub struct GatewayState {
     redactor: Arc<Redactor>,
     human: Arc<human::HumanAccessState>,
     oidc: Option<Arc<OidcGateway>>,
+    io: Arc<store_io::Gate>,
+    io_scope: Arc<store_io::Scope>,
 }
 impl GatewayState {
+    fn scoped(&self, scope: Arc<store_io::Scope>) -> Self {
+        let mut state = self.clone();
+        state.io_scope = scope;
+        state
+    }
+    /// OIDC/discovery work with no authenticated tenant yet. Callers must move
+    /// owned input into this closure and revalidate registry/session expiry
+    /// inside it. Never hold a registry guard across this await.
+    pub(super) async fn blocking_identity<T, F>(&self, operation: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(GatewayState) -> ApiResult<T> + Send + 'static,
+    {
+        let state = self.scoped(Arc::default());
+        store_io::run(
+            Arc::clone(&self.io),
+            None,
+            store_io::Lane::Discovery,
+            false,
+            move || operation(state),
+        )
+        .await
+    }
     pub fn with_oidc(mut self, oidc: OidcGateway) -> anyhow::Result<Self> {
         for tenant in self.tenants.iter() {
             oidc.audit.ensure_distinct_from_business(&tenant.store)?;
@@ -195,6 +235,7 @@ impl GatewayState {
         jev: Option<JevBackend>,
         redactor: Redactor,
     ) -> Self {
+        let io = Arc::new(store_io::Gate::new(true));
         let redactor = redactor.union(&Redactor::new(vec![
             runner_token.clone(),
             viewer_token.clone(),
@@ -221,6 +262,8 @@ impl GatewayState {
                     redactor: Arc::new(redactor),
                     human: Arc::new(human::HumanAccessState::new()),
                     oidc: None,
+                    io,
+                    io_scope: Arc::default(),
                 };
             }
         };
@@ -235,7 +278,12 @@ impl GatewayState {
             Err(_) => (CredentialIndex::default(), false),
         };
         Self {
-            tenants: Arc::new(tenants.into_iter().map(TenantState::from).collect()),
+            tenants: Arc::new(
+                tenants
+                    .into_iter()
+                    .map(|tenant| TenantState::from_gateway(tenant, Arc::clone(&io)))
+                    .collect(),
+            ),
             credential_index: Arc::new(credential_index),
             valid_credentials,
             policy: Arc::new(policy),
@@ -243,6 +291,8 @@ impl GatewayState {
             redactor: Arc::new(redactor),
             human: Arc::new(human::HumanAccessState::new()),
             oidc: None,
+            io,
+            io_scope: Arc::default(),
         }
     }
     pub fn for_tenants(
@@ -303,8 +353,14 @@ impl GatewayState {
             anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
         }
         let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        let io = Arc::new(store_io::Gate::new(true));
         Ok(Self {
-            tenants: Arc::new(tenants.into_iter().map(TenantState::from).collect()),
+            tenants: Arc::new(
+                tenants
+                    .into_iter()
+                    .map(|tenant| TenantState::from_gateway(tenant, Arc::clone(&io)))
+                    .collect(),
+            ),
             credential_index: Arc::new(credential_index),
             valid_credentials: true,
             policy: Arc::new(policy),
@@ -312,9 +368,11 @@ impl GatewayState {
             redactor: Arc::new(redactor),
             human: Arc::new(human::HumanAccessState::new()),
             oidc: None,
+            io,
+            io_scope: Arc::default(),
         })
     }
-    fn authorize(
+    fn control_binding(
         &self,
         headers: &HeaderMap,
         write: bool,
@@ -343,11 +401,99 @@ impl GatewayState {
                 "Cette identité est en lecture seule.",
             ));
         }
-        human::reject_control_collision(self, token, Some(binding.tenant_index))?;
         Ok((tenant.clone(), binding.role.as_str()))
+    }
+    fn authorize_sync(
+        &self,
+        headers: &HeaderMap,
+        write: bool,
+    ) -> ApiResult<(TenantState, &'static str)> {
+        let (mut tenant, role) = self.control_binding(headers, write)?;
+        let token = bearer(headers)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton Bearer requis."))?;
+        let binding = self
+            .credential_index
+            .lookup(token)
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "Jeton invalide."))?;
+        let lane = if role == "runner" {
+            store_io::Lane::Control
+        } else {
+            store_io::Lane::Read
+        };
+        human::reject_control_collision(self, token, Some((binding.tenant_index, lane)))?;
+        let mut proof_headers = HeaderMap::new();
+        if let Some(value) = headers.get(header::AUTHORIZATION) {
+            proof_headers.insert(header::AUTHORIZATION, value.clone());
+        }
+        tenant.control_proof = Some(Arc::new(ControlProof {
+            // No task admission lease may escape into a returned HTTP proof.
+            state: self.scoped(Arc::default()),
+            headers: proof_headers,
+            write,
+            lane: if role == "runner" {
+                store_io::Lane::Control
+            } else {
+                store_io::Lane::Read
+            },
+        }));
+        Ok((tenant, role))
+    }
+    async fn authorize(
+        &self,
+        headers: &HeaderMap,
+        write: bool,
+    ) -> ApiResult<(TenantState, &'static str)> {
+        // Reject malformed/unrecognized credentials before admitting Store work.
+        let (tenant, role) = self.control_binding(headers, write)?;
+        let lane = if role == "runner" {
+            store_io::Lane::Control
+        } else {
+            store_io::Lane::Read
+        };
+        let mut scope = store_io::Scope::default();
+        scope.hold(&tenant, lane, false)?;
+        let state = self.scoped(Arc::new(scope));
+        let headers = headers.clone();
+        store_io::run(Arc::clone(&self.io), None, lane, false, move || {
+            state.authorize_sync(&headers, write)
+        })
+        .await
     }
 }
 impl TenantState {
+    async fn blocking<T, F>(&self, expensive: bool, operation: F) -> ApiResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(TenantState) -> ApiResult<T> + Send + 'static,
+    {
+        let tenant = self.clone();
+        let lane = self
+            .control_proof
+            .as_ref()
+            .map_or(store_io::Lane::Read, |proof| proof.lane);
+        let mut scope = store_io::Scope::default();
+        scope.hold(&tenant, lane, expensive)?;
+        let scope = Arc::new(scope);
+        store_io::run(
+            Arc::clone(&self.shared_io),
+            None,
+            lane,
+            expensive,
+            move || {
+                // Queueing for a blocking worker cannot extend an authorization.
+                if let Some(proof) = &tenant.control_proof {
+                    proof
+                        .state
+                        .scoped(Arc::clone(&scope))
+                        .authorize_sync(&proof.headers, proof.write)?;
+                }
+                // Hold the exact Store lease through all legacy/control I/O.
+                let _scope = scope;
+                operation(tenant)
+            },
+        )
+        .await
+    }
     fn write_quota(&self) -> ApiResult<()> {
         let mut state = self
             .rate
@@ -494,26 +640,30 @@ async fn ingest(
     RunnerIdentity(tenant): RunnerIdentity,
     Json(event): Json<Event>,
 ) -> ApiResult<Json<StoredEvent>> {
-    tenant.write_quota()?;
-    event
-        .validate()
-        .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-    if ["security.decision", "control", "worker", "usage.allocation"]
-        .iter()
-        .any(|namespace| {
-            event.kind == *namespace
-                || event
-                    .kind
-                    .strip_prefix(namespace)
-                    .is_some_and(|suffix| suffix.starts_with('.'))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            event
+                .validate()
+                .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+            if ["security.decision", "control", "worker", "usage.allocation"]
+                .iter()
+                .any(|namespace| {
+                    event.kind == *namespace
+                        || event
+                            .kind
+                            .strip_prefix(namespace)
+                            .is_some_and(|suffix| suffix.starts_with('.'))
+                })
+            {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "Ce namespace est réservé aux opérations du contrôle.",
+                ));
+            }
+            Ok(Json(tenant.store.append(event).map_err(unavailable)?))
         })
-    {
-        return Err(error(
-            StatusCode::FORBIDDEN,
-            "Ce namespace est réservé aux opérations du contrôle.",
-        ));
-    }
-    Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+        .await
 }
 
 async fn decide(
@@ -528,18 +678,24 @@ async fn decide(
             "Intégrité de l'audit défaillante : exécution refusée.",
         ));
     }
+    let lookup = request.clone();
     if let Some(stored) = tenant
-        .store
-        .decision(&request, None)
-        .map_err(decision_error)?
+        .blocking(false, move |tenant| {
+            tenant.store.decision(&lookup, None).map_err(decision_error)
+        })
+        .await?
     {
         return Ok(decision_response(stored));
     }
     let (decision, jev) = fresh_policy(&s, &request).await;
     let stored = tenant
-        .store
-        .decision(&request, Some((decision, jev)))
-        .map_err(decision_error)?
+        .blocking(false, move |tenant| {
+            tenant
+                .store
+                .decision(&request, Some((decision, jev)))
+                .map_err(decision_error)
+        })
+        .await?
         .ok_or_else(|| error(StatusCode::SERVICE_UNAVAILABLE, "Décision durable absente."))?;
     Ok(decision_response(stored))
 }
@@ -667,11 +823,16 @@ async fn reserve_worker(
     admission.validate().map_err(control_error)?;
     // Replays are checked inside the same durable operation. They do not make
     // another external policy call or grant a new start permission.
+    let operation_id = admission.operation_id.clone();
     let replay = tenant
-        .store
-        .worker_operation(&admission.operation_id)
-        .map_err(control_error)?
-        .is_some();
+        .blocking(false, move |tenant| {
+            Ok(tenant
+                .store
+                .worker_operation(&operation_id)
+                .map_err(control_error)?
+                .is_some())
+        })
+        .await?;
     let (decision, jev) = if replay {
         (
             policy::evaluate(&s.policy, &admission.decision_request),
@@ -681,9 +842,13 @@ async fn reserve_worker(
         fresh_policy(&s, &admission.decision_request).await
     };
     let result = tenant
-        .store
-        .admit_worker(&admission, &s.policy, decision, jev, &tenant.worker_quota)
-        .map_err(control_error)?;
+        .blocking(false, move |tenant| {
+            tenant
+                .store
+                .admit_worker(&admission, &s.policy, decision, jev, &tenant.worker_quota)
+                .map_err(control_error)
+        })
+        .await?;
     let status = match result.refusal {
         Some(AdmissionRefusalV1::Policy) => StatusCode::FORBIDDEN,
         Some(AdmissionRefusalV1::Quota) => StatusCode::TOO_MANY_REQUESTS,
@@ -698,164 +863,210 @@ async fn transition_worker(
     Path(id): Path<String>,
     body: Result<Json<WorkerMutationV1>, JsonRejection>,
 ) -> ApiResult<Json<crate::control::MutationResultV1>> {
-    tenant.write_quota()?;
-    let Json(mutation) = body.map_err(|_| control_error(ControlFailure::InvalidRequest.into()))?;
-    if mutation.worker_id != id {
-        return Err(control_error(ControlFailure::InvalidRequest.into()));
-    }
-    Ok(Json(
-        tenant
-            .store
-            .mutate_worker(&mutation)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            let Json(mutation) =
+                body.map_err(|_| control_error(ControlFailure::InvalidRequest.into()))?;
+            if mutation.worker_id != id {
+                return Err(control_error(ControlFailure::InvalidRequest.into()));
+            }
+            Ok(Json(
+                tenant
+                    .store
+                    .mutate_worker(&mutation)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn workers(
     ReadIdentity(tenant, _): ReadIdentity,
     query: Result<Query<WorkerPageQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    let page = WorkerPageQuery::parse(query)?;
-    let limit = page.limit.unwrap_or(50);
-    let items = tenant
-        .store
-        .workers_page(page.cursor.as_deref(), limit)
-        .map_err(control_error)?;
-    let next_cursor = if items.len() == limit as usize {
-        let last = items.last().map(|worker| worker.worker_id.clone());
-        if !tenant
-            .store
-            .workers_page(last.as_deref(), 1)
-            .map_err(control_error)?
-            .is_empty()
-        {
-            last
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+    tenant
+        .blocking(true, move |tenant| {
+            let page = WorkerPageQuery::parse(query)?;
+            let limit = page.limit.unwrap_or(50);
+            let items = tenant
+                .store
+                .workers_page(page.cursor.as_deref(), limit)
+                .map_err(control_error)?;
+            let next_cursor = if items.len() == limit as usize {
+                let last = items.last().map(|worker| worker.worker_id.clone());
+                if !tenant
+                    .store
+                    .workers_page(last.as_deref(), 1)
+                    .map_err(control_error)?
+                    .is_empty()
+                {
+                    last
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+        })
+        .await
 }
 
 async fn worker(
     ReadIdentity(tenant, _): ReadIdentity,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crate::control::WorkerV1>> {
-    let worker = tenant
-        .store
-        .worker(&id)
-        .map_err(control_error)?
-        .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?;
-    Ok(Json(worker))
+    tenant
+        .blocking(true, move |tenant| {
+            let worker = tenant
+                .store
+                .worker(&id)
+                .map_err(control_error)?
+                .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?;
+            Ok(Json(worker))
+        })
+        .await
 }
 
 async fn worker_operation(
     ReadIdentity(tenant, _): ReadIdentity,
     Path(id): Path<String>,
 ) -> ApiResult<Json<crate::control::MutationReceiptV1>> {
-    Ok(Json(
-        tenant
-            .store
-            .worker_operation(&id)
-            .map_err(control_error)?
-            .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?,
-    ))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                tenant
+                    .store
+                    .worker_operation(&id)
+                    .map_err(control_error)?
+                    .ok_or_else(|| control_error(ControlFailure::NotFound.into()))?,
+            ))
+        })
+        .await
 }
 
 async fn worker_quota(
     ReadIdentity(tenant, _): ReadIdentity,
 ) -> ApiResult<Json<crate::control::QuotaUsageV1>> {
-    Ok(Json(
-        tenant
-            .store
-            .worker_quota(&tenant.worker_quota)
-            .map_err(control_error)?,
-    ))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                tenant
+                    .store
+                    .worker_quota(&tenant.worker_quota)
+                    .map_err(control_error)?,
+            ))
+        })
+        .await
 }
 
 async fn worker_usage(
     ReadIdentity(tenant, _): ReadIdentity,
     query: Result<Query<WorkerPageQuery>, QueryRejection>,
 ) -> ApiResult<Json<Value>> {
-    let page = WorkerPageQuery::parse(query)?;
-    let limit = page.limit.unwrap_or(50);
-    let items = tenant
-        .store
-        .worker_usage_page(page.cursor.as_deref(), limit)
-        .map_err(control_error)?;
-    let next_cursor = if items.len() == limit as usize {
-        let last = items.last().map(|allocation| allocation.attempt_id.clone());
-        if !tenant
-            .store
-            .worker_usage_page(last.as_deref(), 1)
-            .map_err(control_error)?
-            .is_empty()
-        {
-            last
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+    tenant
+        .blocking(true, move |tenant| {
+            let page = WorkerPageQuery::parse(query)?;
+            let limit = page.limit.unwrap_or(50);
+            let items = tenant
+                .store
+                .worker_usage_page(page.cursor.as_deref(), limit)
+                .map_err(control_error)?;
+            let next_cursor = if items.len() == limit as usize {
+                let last = items.last().map(|allocation| allocation.attempt_id.clone());
+                if !tenant
+                    .store
+                    .worker_usage_page(last.as_deref(), 1)
+                    .map_err(control_error)?
+                    .is_empty()
+                {
+                    last
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            Ok(Json(json!({"items":items,"next_cursor":next_cursor})))
+        })
+        .await
 }
 
 async fn list_events(
     ReadIdentity(tenant, _): ReadIdentity,
     Query(q): Query<EventQuery>,
 ) -> ApiResult<Json<Value>> {
-    let items = tenant.store.events(&q).map_err(|_| {
-        error(
-            StatusCode::BAD_REQUEST,
-            "Filtre invalide ou lecture indisponible.",
-        )
-    })?;
-    let next = if items.len() == q.limit.unwrap_or(100).clamp(1, 1000) {
-        items.last().map(|e| e.seq)
-    } else {
-        None
-    };
-    Ok(Json(json!({"items":items,"next_cursor":next})))
+    tenant
+        .blocking(true, move |tenant| {
+            let items = tenant.store.events(&q).map_err(|_| {
+                error(
+                    StatusCode::BAD_REQUEST,
+                    "Filtre invalide ou lecture indisponible.",
+                )
+            })?;
+            let next = if items.len() == q.limit.unwrap_or(100).clamp(1, 1000) {
+                items.last().map(|e| e.seq)
+            } else {
+                None
+            };
+            Ok(Json(json!({"items":items,"next_cursor":next})))
+        })
+        .await
 }
 async fn overview(
     ReadIdentity(tenant, _): ReadIdentity,
     State(s): State<GatewayState>,
 ) -> ApiResult<Json<Value>> {
-    let mut value = tenant.store.overview().map_err(unavailable)?;
-    value["health"]["jev"] = json!(if s.jev.is_some() {
-        "configured"
-    } else {
-        "disabled"
-    });
-    value["health"]["jev_details"] = s.jev.as_ref().map_or(Value::Null, |backend| {
-        let mut metadata = backend.metadata("configured");
-        metadata["reachability"] = json!(if backend.id() == "rust_rules" {
-            "not_applicable"
-        } else {
-            "not_checked"
-        });
-        metadata
-    });
-    Ok(Json(value))
+    tenant
+        .blocking(true, move |tenant| {
+            let mut value = tenant.store.overview().map_err(unavailable)?;
+            value["health"]["jev"] = json!(if s.jev.is_some() {
+                "configured"
+            } else {
+                "disabled"
+            });
+            value["health"]["jev_details"] = s.jev.as_ref().map_or(Value::Null, |backend| {
+                let mut metadata = backend.metadata("configured");
+                metadata["reachability"] = json!(if backend.id() == "rust_rules" {
+                    "not_applicable"
+                } else {
+                    "not_checked"
+                });
+                metadata
+            });
+            Ok(Json(value))
+        })
+        .await
 }
 async fn agents(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        json!({"items":tenant.store.entities(false).map_err(unavailable)?}),
-    ))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                json!({"items":tenant.store.entities(false).map_err(unavailable)?}),
+            ))
+        })
+        .await
 }
 async fn sandboxes(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        json!({"items":tenant.store.entities(true).map_err(unavailable)?}),
-    ))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                json!({"items":tenant.store.entities(true).map_err(unavailable)?}),
+            ))
+        })
+        .await
 }
 async fn integrity(ReadIdentity(tenant, _): ReadIdentity) -> ApiResult<Json<Value>> {
-    Ok(Json(
-        serde_json::to_value(tenant.store.integrity().map_err(unavailable)?)
-            .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible."))?,
-    ))
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                serde_json::to_value(tenant.store.integrity().map_err(unavailable)?).map_err(
+                    |_| error(StatusCode::SERVICE_UNAVAILABLE, "Intégrité indisponible."),
+                )?,
+            ))
+        })
+        .await
 }
 
 async fn identity(ReadIdentity(tenant, role): ReadIdentity) -> ApiResult<Json<Value>> {
@@ -876,16 +1087,19 @@ async fn stream(
         .get("last-event-id")
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
-    let mut cursor = q
-        .after
-        .or(header_cursor)
-        .unwrap_or(tenant.store.head().map_err(unavailable)?)
-        .max(0);
+    let start = q.after.or(header_cursor);
+    let mut cursor = tenant
+        .blocking(true, move |tenant| {
+            Ok(start
+                .unwrap_or(tenant.store.head().map_err(unavailable)?)
+                .max(0))
+        })
+        .await?;
     let events = async_stream::stream! {
         let _permit=permit;
         loop {
             let query=EventQuery{after:Some(cursor),limit:Some(200),order:Some("asc".into()),..Default::default()};
-            match tenant.store.events(&query) {
+            match tenant.blocking(true, move |tenant| tenant.store.events(&query).map_err(unavailable)).await {
                 Ok(batch)=>{
                     let full=batch.len()==200;
                     for event in batch {cursor=event.seq;yield Ok::<_,Infallible>(SseEvent::default().id(event.seq.to_string()).event("audit").json_data(&event).expect("serializable event"));}
@@ -919,7 +1133,9 @@ async fn export(
             ));
         }
     };
-    let head = tenant.store.head().map_err(unavailable)?;
+    let head = tenant
+        .blocking(true, |tenant| tenant.store.head().map_err(unavailable))
+        .await?;
     let mut filter = query;
     filter.order = Some("asc".into());
     filter.limit = Some(200);
@@ -929,7 +1145,8 @@ async fn export(
         let mut first=true;
         if json_format{yield Ok::<_,std::io::Error>("[".to_string());}
         loop {
-            match tenant.store.events(&filter) {
+            let page_filter = filter.clone();
+            match tenant.blocking(true, move |tenant| tenant.store.events(&page_filter).map_err(unavailable)).await {
                 Ok(items)=>{if items.is_empty(){break;}for item in items {filter.after=Some(item.seq);let prefix=if json_format{if first{""}else{","}}else{""};let suffix=if json_format{""}else{"\n"};first=false;yield Ok(format!("{prefix}{}{suffix}",serde_json::to_string(&item).expect("serializable event")));}},
                 Err(_)=>{yield Err(std::io::Error::other("audit export interrupted"));return;}
             }

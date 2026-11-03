@@ -1,6 +1,10 @@
 use super::*;
 use crate::oidc::{OidcClientKind, OidcError, TokenBundle};
 
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod admission_tests;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Version {
@@ -235,8 +239,21 @@ fn membership(
         .map_err(|_| credential_invalid())?;
     let mut allowed = false;
     let mut unavailable = false;
+    let mut admission_failure = None;
     for tenant in state.tenants.iter() {
-        let profile = match tenant.store.human_profile(&principal, &state.redactor) {
+        let profile = match state
+            .io_scope
+            .with_store(tenant, store_io::Lane::Read, true, |store| {
+                store.human_profile(&principal, &state.redactor)
+            }) {
+            Ok(profile) => profile,
+            Err(error) => {
+                unavailable = true;
+                admission_failure = Some(error);
+                continue;
+            }
+        };
+        let profile = match profile {
             Ok(profile) => profile,
             Err(_) => {
                 unavailable = true;
@@ -252,6 +269,9 @@ fn membership(
         }
     }
     if !allowed {
+        if let Some(error) = admission_failure {
+            return Err(error);
+        }
         if unavailable {
             return Err(audit_unavailable());
         }
@@ -333,6 +353,22 @@ fn install(
         browser_transaction,
     } = admission;
     let session_id = record.session_id.ok_or_else(invalid_request)?;
+    // The blocking queue cannot extend the lifetime of the provider proof or
+    // its browser exchange marker. Recheck before the first durable intention;
+    // the registry check below is repeated at the actual session mutation.
+    if access.expires_at() <= chrono::Utc::now().timestamp() {
+        return Err(credential_invalid());
+    }
+    if let Some((key, transaction)) = browser_transaction {
+        let registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+        if registry.exchanging.get(&key).is_none_or(|entry| {
+            entry.transaction_id != transaction
+                || entry.session_id != session_id
+                || entry.created.elapsed() >= Duration::from_secs(35)
+        }) {
+            return Err(conflict());
+        }
+    }
     // VerifiedAccess is produced only by the configured provider's verifier.
     // Reserve durable audit capacity now, before membership reads (which can
     // themselves produce business audit) or any session admission/mutation.
@@ -622,30 +658,35 @@ pub(super) async fn start(
     let tx = Uuid::new_v4();
     let operation = Uuid::new_v4();
     let session = Uuid::new_v4();
-    {
-        let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-        reap(&oidc, &mut registry)?;
-        if registry.transactions.contains_key(&key)
-            || registry.deliveries.contains_key(&key)
-            || registry.exchanging.contains_key(&key)
-        {
-            return Err(conflict());
-        }
-        reserve(&mut registry, true)?;
-        // A caller-created correlation cookie is not an authenticated identity.
-        // The durable intention is created only by install after verification.
-        registry.transactions.insert(
-            key,
-            BrowserTransaction {
-                pending: None,
-                expected_state: [0; 32],
-                transaction_id: tx,
-                operation_id: operation,
-                session_id: session,
-                created: Instant::now(),
-            },
-        );
-    }
+    let preparation = Arc::clone(&oidc);
+    state
+        .blocking_identity(move |_state| {
+            let oidc = preparation;
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            reap(&oidc, &mut registry)?;
+            if registry.transactions.contains_key(&key)
+                || registry.deliveries.contains_key(&key)
+                || registry.exchanging.contains_key(&key)
+            {
+                return Err(conflict());
+            }
+            reserve(&mut registry, true)?;
+            // A caller-created correlation cookie is not an authenticated identity.
+            // The durable intention is created only by install after verification.
+            registry.transactions.insert(
+                key,
+                BrowserTransaction {
+                    pending: None,
+                    expected_state: [0; 32],
+                    transaction_id: tx,
+                    operation_id: operation,
+                    session_id: session,
+                    created: Instant::now(),
+                },
+            );
+            Ok(())
+        })
+        .await?;
     let pending = async {
         oidc.provider.discover().await?;
         oidc.provider
@@ -653,42 +694,53 @@ pub(super) async fn start(
             .await
     }
     .await;
-    let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-    match pending {
-        Ok(pending) => {
-            let url = pending.authorization_url().to_owned();
-            let state = reqwest::Url::parse(&url)
-                .ok()
-                .and_then(|url| {
-                    url.query_pairs()
-                        .find(|(key, _)| key == "state")
-                        .map(|(_, value)| value.into_owned())
-                })
-                .ok_or_else(invalid_request)?;
-            let entry = registry
-                .transactions
-                .get_mut(&key)
-                .filter(|entry| entry.transaction_id == tx)
-                .ok_or_else(conflict)?;
-            entry.expected_state = raw_digest(&state);
-            entry.pending = Some(pending);
-            let mut response = Json(json!({"version":1,"authorization_url":url})).into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&cookie(
-                    &correlation,
-                    oidc.config.web_origin.starts_with("https://"),
-                    false,
-                ))
-                .map_err(|_| invalid_request())?,
-            );
-            Ok(response)
-        }
-        Err(error) => {
-            registry.transactions.remove(&key);
-            Err(provider_error(error))
-        }
-    }
+    state
+        .blocking_identity(move |_state| {
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            match pending {
+                Ok(pending) => {
+                    let url = pending.authorization_url().to_owned();
+                    let state = reqwest::Url::parse(&url)
+                        .ok()
+                        .and_then(|url| {
+                            url.query_pairs()
+                                .find(|(key, _)| key == "state")
+                                .map(|(_, value)| value.into_owned())
+                        })
+                        .ok_or_else(invalid_request)?;
+                    let entry = registry
+                        .transactions
+                        .get_mut(&key)
+                        .filter(|entry| {
+                            entry.transaction_id == tx
+                                && entry.created.elapsed()
+                                    < Duration::from_secs(
+                                        oidc.config.provider.limits.pkce_ttl_seconds,
+                                    )
+                        })
+                        .ok_or_else(conflict)?;
+                    entry.expected_state = raw_digest(&state);
+                    entry.pending = Some(pending);
+                    let mut response =
+                        Json(json!({"version":1,"authorization_url":url})).into_response();
+                    response.headers_mut().insert(
+                        header::SET_COOKIE,
+                        HeaderValue::from_str(&cookie(
+                            &correlation,
+                            oidc.config.web_origin.starts_with("https://"),
+                            false,
+                        ))
+                        .map_err(|_| invalid_request())?,
+                    );
+                    Ok(response)
+                }
+                Err(error) => {
+                    registry.transactions.remove(&key);
+                    Err(provider_error(error))
+                }
+            }
+        })
+        .await
 }
 
 pub(super) async fn callback(
@@ -730,23 +782,28 @@ pub(super) async fn callback(
         .get("state")
         .filter(|value| safe_text(value, 256))
         .ok_or_else(invalid_request)?;
-    let transaction = {
-        let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-        let entry = registry.transactions.get(&key).ok_or_else(conflict)?;
-        if entry.pending.is_none() || entry.expected_state != raw_digest(state_value) {
-            return Err(invalid_request());
-        }
-        let transaction = registry.transactions.remove(&key).ok_or_else(conflict)?;
-        registry.exchanging.insert(
-            key,
-            ExchangeMarker {
-                transaction_id: transaction.transaction_id,
-                session_id: transaction.session_id,
-                created: Instant::now(),
-            },
-        );
-        transaction
-    };
+    let expected_state = raw_digest(state_value);
+    let preparation = Arc::clone(&oidc);
+    let transaction = state
+        .blocking_identity(move |_state| {
+            let oidc = preparation;
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            let entry = registry.transactions.get(&key).ok_or_else(conflict)?;
+            if entry.pending.is_none() || entry.expected_state != expected_state {
+                return Err(invalid_request());
+            }
+            let transaction = registry.transactions.remove(&key).ok_or_else(conflict)?;
+            registry.exchanging.insert(
+                key,
+                ExchangeMarker {
+                    transaction_id: transaction.transaction_id,
+                    session_id: transaction.session_id,
+                    created: Instant::now(),
+                },
+            );
+            Ok(transaction)
+        })
+        .await?;
     let record = transaction_record(&oidc, &transaction);
     let expired = transaction.created.elapsed()
         >= Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds);
@@ -770,20 +827,27 @@ pub(super) async fn callback(
         {
             Ok(login) => {
                 let (access, tokens, logout) = login.into_session_parts();
-                let installed = install(
-                    &state,
-                    &oidc,
-                    NewAdmission {
-                        record,
-                        access,
-                        raw: tokens.access_token(),
-                        refresh: tokens.refresh_token(),
-                        logout_context: logout,
-                        kind: SessionKind::WebPkce,
-                        browser_transaction: Some((key, transaction.transaction_id)),
-                    },
-                );
-                match installed.and_then(|binding| delivery(&binding, tokens)) {
+                let transaction_id = transaction.transaction_id;
+                let installed = state
+                    .blocking_identity(move |state| {
+                        let oidc = configured(&state)?;
+                        let installed = install(
+                            &state,
+                            &oidc,
+                            NewAdmission {
+                                record,
+                                access,
+                                raw: tokens.access_token(),
+                                refresh: tokens.refresh_token(),
+                                logout_context: logout,
+                                kind: SessionKind::WebPkce,
+                                browser_transaction: Some((key, transaction_id)),
+                            },
+                        );
+                        installed.and_then(|binding| delivery(&binding, tokens))
+                    })
+                    .await;
+                match installed {
                     Ok(tokens) => Delivery::Tokens(tokens),
                     Err((_, Json(error))) => Delivery::Error(
                         error["error"]["code"]
@@ -800,31 +864,35 @@ pub(super) async fn callback(
             }),
         }
     };
-    let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-    if registry
-        .exchanging
-        .remove(&key)
-        .is_none_or(|entry| entry.transaction_id != transaction.transaction_id)
-    {
-        return Err(conflict());
-    }
-    if registry.deliveries.contains_key(&key) {
-        return Err(conflict());
-    }
-    registry.deliveries.insert(
-        key,
-        PendingDelivery {
-            result: outcome,
-            created: Instant::now(),
-        },
-    );
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = StatusCode::SEE_OTHER;
-    response.headers_mut().insert(
-        header::LOCATION,
-        HeaderValue::from_static("/auth/oidc/complete"),
-    );
-    Ok(response)
+    state
+        .blocking_identity(move |_state| {
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            if registry
+                .exchanging
+                .remove(&key)
+                .is_none_or(|entry| entry.transaction_id != transaction.transaction_id)
+            {
+                return Err(conflict());
+            }
+            if registry.deliveries.contains_key(&key) {
+                return Err(conflict());
+            }
+            registry.deliveries.insert(
+                key,
+                PendingDelivery {
+                    result: outcome,
+                    created: Instant::now(),
+                },
+            );
+            let mut response = Response::new(Body::empty());
+            *response.status_mut() = StatusCode::SEE_OTHER;
+            response.headers_mut().insert(
+                header::LOCATION,
+                HeaderValue::from_static("/auth/oidc/complete"),
+            );
+            Ok(response)
+        })
+        .await
 }
 fn safe_code(code: &str) -> Option<&'static str> {
     match code {
@@ -848,43 +916,47 @@ pub(super) async fn tokens(
     if body.version != 1 {
         return Err(invalid_request());
     }
-    let entry = oidc
-        .registry
-        .lock()
-        .map_err(|_| audit_unavailable())?
-        .deliveries
-        .remove(&key)
-        .ok_or_else(conflict)?;
-    let mut response = if entry.created.elapsed() >= Duration::from_secs(30) {
-        credential_invalid().into_response()
-    } else {
-        match entry.result {
-            Delivery::Tokens(tokens) => Json(tokens).into_response(),
-            Delivery::Error(code) => human::failure(
-                if code == "permission_denied" {
-                    StatusCode::FORBIDDEN
-                } else if code == "audit_unavailable" {
-                    StatusCode::SERVICE_UNAVAILABLE
-                } else {
-                    StatusCode::UNAUTHORIZED
-                },
-                code,
-                "The correlated login did not establish an authorized session.",
-                "authenticate",
-            )
-            .into_response(),
-        }
-    };
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        HeaderValue::from_str(&cookie(
-            "",
-            oidc.config.web_origin.starts_with("https://"),
-            true,
-        ))
-        .map_err(|_| invalid_request())?,
-    );
-    Ok(response)
+    state
+        .blocking_identity(move |_state| {
+            let entry = oidc
+                .registry
+                .lock()
+                .map_err(|_| audit_unavailable())?
+                .deliveries
+                .remove(&key)
+                .ok_or_else(conflict)?;
+            let mut response = if entry.created.elapsed() >= Duration::from_secs(30) {
+                credential_invalid().into_response()
+            } else {
+                match entry.result {
+                    Delivery::Tokens(tokens) => Json(tokens).into_response(),
+                    Delivery::Error(code) => human::failure(
+                        if code == "permission_denied" {
+                            StatusCode::FORBIDDEN
+                        } else if code == "audit_unavailable" {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::UNAUTHORIZED
+                        },
+                        code,
+                        "The correlated login did not establish an authorized session.",
+                        "authenticate",
+                    )
+                    .into_response(),
+                }
+            };
+            response.headers_mut().insert(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&cookie(
+                    "",
+                    oidc.config.web_origin.starts_with("https://"),
+                    true,
+                ))
+                .map_err(|_| invalid_request())?,
+            );
+            Ok(response)
+        })
+        .await
 }
 
 pub(super) async fn native_intent(
@@ -898,6 +970,16 @@ pub(super) async fn native_intent(
     if body.version != 1 {
         return Err(invalid_request());
     }
+    state
+        .blocking_identity(move |state| native_intent_sync(state, oidc, bearer, body))
+        .await
+}
+fn native_intent_sync(
+    state: GatewayState,
+    oidc: Arc<OidcGateway>,
+    bearer: Option<String>,
+    body: NativeRequest,
+) -> ApiResult<Json<Value>> {
     match body.action {
         NativeAction::Login => {
             let intent_id = Uuid::new_v4();
@@ -1017,40 +1099,53 @@ pub(super) async fn admit(
     if body.version != 1 {
         return Err(invalid_request());
     }
-    let intent = {
-        let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-        let entry = registry.native.get(&body.intent_id).ok_or_else(conflict)?;
-        if entry.action != Action::SessionAdmission
-            || entry.previous.is_some()
-            || entry.created.elapsed() >= Duration::from_secs(300)
-        {
-            return Err(conflict());
-        }
-        registry
-            .native
-            .remove(&body.intent_id)
-            .ok_or_else(conflict)?
-    };
+    let preparation = Arc::clone(&oidc);
+    let intent = state
+        .blocking_identity(move |_state| {
+            let oidc = preparation;
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            let entry = registry.native.get(&body.intent_id).ok_or_else(conflict)?;
+            if entry.action != Action::SessionAdmission
+                || entry.previous.is_some()
+                || entry.created.elapsed() >= Duration::from_secs(300)
+            {
+                return Err(conflict());
+            }
+            let intent = registry
+                .native
+                .remove(&body.intent_id)
+                .ok_or_else(conflict)?;
+            Ok(intent)
+        })
+        .await?;
     let record = native_record(&oidc, &intent);
+    let deadline = intent.created + Duration::from_secs(300);
     let access = match oidc.provider.verify_access(&raw).await {
         Ok(access) if access.client_id() == oidc.config.provider.cli_client_id => access,
         Ok(_) => return Err(credential_invalid()),
         Err(error) => return Err(provider_error(error)),
     };
-    let binding = install(
-        &state,
-        &oidc,
-        NewAdmission {
-            record,
-            access,
-            raw: &raw,
-            refresh: None,
-            logout_context: None,
-            kind: SessionKind::NativeCli,
-            browser_transaction: None,
-        },
-    )?;
-    Ok((StatusCode::CREATED, Json(session_dto(&binding))))
+    state
+        .blocking_identity(move |state| {
+            if Instant::now() >= deadline {
+                return Err(conflict());
+            }
+            let binding = install(
+                &state,
+                &oidc,
+                NewAdmission {
+                    record,
+                    access,
+                    raw: &raw,
+                    refresh: None,
+                    logout_context: None,
+                    kind: SessionKind::NativeCli,
+                    browser_transaction: None,
+                },
+            )?;
+            Ok((StatusCode::CREATED, Json(session_dto(&binding))))
+        })
+        .await
 }
 
 struct RefreshOperation {
@@ -1063,12 +1158,49 @@ struct RefreshOperation {
     created: Instant,
     owner: std::sync::Weak<OidcGateway>,
     cancel_on_drop: bool,
+    cleanup: Option<store_io::CleanupReservation>,
+    inline_cleanup: bool,
 }
-impl Drop for RefreshOperation {
-    fn drop(&mut self) {
-        if !self.cancel_on_drop {
-            return;
-        }
+impl RefreshOperation {
+    fn into_async(mut self) -> Self {
+        self.inline_cleanup = false;
+        self
+    }
+    fn enter_blocking(&mut self) {
+        self.inline_cleanup = true;
+    }
+}
+async fn complete_refresh<T, F>(
+    state: &GatewayState,
+    mut operation: RefreshOperation,
+    completion: F,
+) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(GatewayState, &RefreshOperation) -> ApiResult<T> + Send + 'static,
+{
+    // This obligation was reserved before refresh_pending/intent removal. Its
+    // completion must not reacquire a lane that could refuse its terminal write.
+    let reservation = operation.cleanup.take().ok_or_else(audit_unavailable)?;
+    let state = state.clone();
+    reservation
+        .dispatch(move || {
+            operation.enter_blocking();
+            completion(state, &operation)
+        })
+        .await
+        .map_err(|_| audit_unavailable())?
+}
+// No destructor on this payload: rejecting a queued task during shutdown must
+// never execute SQLite on the thread that drops that task.
+struct RefreshCleanup {
+    record: AuthenticationRecordV1,
+    receipt: AuthenticationReceiptV1,
+    binding: SessionBinding,
+    owner: std::sync::Weak<OidcGateway>,
+}
+impl RefreshCleanup {
+    fn run(self) {
         let Some(owner) = self.owner.upgrade() else {
             return;
         };
@@ -1117,6 +1249,26 @@ impl Drop for RefreshOperation {
         }
     }
 }
+impl Drop for RefreshOperation {
+    fn drop(&mut self) {
+        if !self.cancel_on_drop {
+            return;
+        }
+        let payload = RefreshCleanup {
+            record: self.record.clone(),
+            receipt: self.receipt.clone(),
+            binding: self.binding.clone(),
+            owner: self.owner.clone(),
+        };
+        if self.inline_cleanup {
+            // Only private synchronous preparation/completion segments use this
+            // mode. Crossing back to the HTTP future calls into_async first.
+            payload.run();
+        } else if let Some(reservation) = self.cleanup.take() {
+            let _task = reservation.dispatch(move || payload.run());
+        }
+    }
+}
 fn begin_refresh(
     oidc: &Arc<OidcGateway>,
     raw: &str,
@@ -1125,6 +1277,7 @@ fn begin_refresh(
     kind: SessionKind,
     refresh: Option<&str>,
 ) -> ApiResult<RefreshOperation> {
+    let cleanup = store_io::CleanupReservation::reserve(&oidc.cleanup_slots)?;
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
     reap(oidc, &mut registry)?;
     if kind == SessionKind::NativeCli {
@@ -1202,6 +1355,8 @@ fn begin_refresh(
         created,
         owner: Arc::downgrade(oidc),
         cancel_on_drop: true,
+        cleanup: Some(cleanup),
+        inline_cleanup: true,
     })
 }
 fn fail_refresh(
@@ -1408,52 +1563,62 @@ pub(super) async fn refresh(
         .ok_or_else(credential_invalid)?
         .to_owned();
     let body: Refresh = json_body(request).await?;
-    human::reject_control_collision(&state, &raw, None)?;
-    if state.credential_index.lookup(&raw).is_some() {
-        return Err(credential_invalid());
-    }
-    if body.version != 1
-        || !valid_private_token(
-            &body.refresh_token,
-            oidc.config.provider.limits.max_token_bytes,
-        )
-    {
-        return Err(invalid_request());
-    }
-    let operation = begin_refresh(
-        &oidc,
-        &raw,
-        body.authentication_id,
-        body.generation,
-        SessionKind::WebPkce,
-        Some(&body.refresh_token),
-    )?;
-    match oidc
-        .provider
-        .refresh(OidcClientKind::Web, &body.refresh_token, &operation.access)
-        .await
-    {
-        Ok(login) => {
-            let (access, tokens, logout) = login.into_session_parts();
-            let binding = install_rotation(
-                &state,
+    let (operation, refresh_token) = state
+        .blocking_identity(move |state| {
+            let oidc = configured(&state)?;
+            human::reject_control_collision(&state, &raw, None)?;
+            if state.credential_index.lookup(&raw).is_some() {
+                return Err(credential_invalid());
+            }
+            if body.version != 1
+                || !valid_private_token(
+                    &body.refresh_token,
+                    oidc.config.provider.limits.max_token_bytes,
+                )
+            {
+                return Err(invalid_request());
+            }
+            let operation = begin_refresh(
                 &oidc,
-                &operation,
-                RotatedAccess {
-                    access,
-                    raw: tokens.access_token(),
-                    refresh: tokens.refresh_token(),
-                    logout,
-                },
+                &raw,
+                body.authentication_id,
+                body.generation,
+                SessionKind::WebPkce,
+                Some(&body.refresh_token),
             )?;
-            Ok(Json(delivery(&binding, tokens)?))
+            Ok((operation.into_async(), body.refresh_token))
+        })
+        .await?;
+    let response = oidc
+        .provider
+        .refresh(OidcClientKind::Web, &refresh_token, &operation.access)
+        .await;
+    complete_refresh(&state, operation, move |state, operation| {
+        let oidc = configured(&state)?;
+        match response {
+            Ok(login) => {
+                let (access, tokens, logout) = login.into_session_parts();
+                let binding = install_rotation(
+                    &state,
+                    &oidc,
+                    operation,
+                    RotatedAccess {
+                        access,
+                        raw: tokens.access_token(),
+                        refresh: tokens.refresh_token(),
+                        logout,
+                    },
+                )?;
+                Ok(Json(delivery(&binding, tokens)?))
+            }
+            Err(error) => {
+                let (outcome, reason) = provider_result(error);
+                fail_refresh(&oidc, operation, outcome, reason)?;
+                Err(provider_error(error))
+            }
         }
-        Err(error) => {
-            let (outcome, reason) = provider_result(error);
-            fail_refresh(&oidc, &operation, outcome, reason)?;
-            Err(provider_error(error))
-        }
-    }
+    })
+    .await
 }
 fn valid_private_token(raw: &str, max: usize) -> bool {
     !raw.is_empty()
@@ -1478,71 +1643,94 @@ pub(super) async fn rotate(
     {
         return Err(invalid_request());
     }
-    let operation = {
-        let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-        let intent = registry.native.get(&body.intent_id).ok_or_else(conflict)?;
-        let previous = intent.previous.as_ref().ok_or_else(conflict)?;
-        if intent.action != Action::Refresh
-            || intent.created.elapsed() >= Duration::from_secs(15)
-            || previous.session_id != body.authentication_id
-            || previous.generation != body.generation
-            || previous.access_fingerprint != Fingerprint::access_token(&raw)
-        {
-            return Err(credential_invalid());
-        }
-        let session = registry
-            .sessions
-            .get(&body.authentication_id.to_string())
-            .ok_or_else(credential_invalid)?;
-        if session.binding != *previous
-            || !session.rotating
-            || session.proof.digest != raw_digest(&raw)
-        {
-            return Err(credential_invalid());
-        }
-        let record = native_record(&oidc, intent);
-        let binding = previous.clone();
-        let access = session.access.clone();
-        let maximum_expiry = session.maximum_expiry;
-        let created = intent.created;
-        let completion_deadline = Some(intent.created + Duration::from_secs(15));
-        let receipt = intent.intention.clone().ok_or_else(audit_unavailable)?;
-        registry
-            .native
-            .remove(&body.intent_id)
-            .ok_or_else(conflict)?;
-        RefreshOperation {
-            record,
-            receipt,
-            binding,
-            access,
-            maximum_expiry,
-            completion_deadline,
-            created,
-            owner: Arc::downgrade(&oidc),
-            cancel_on_drop: true,
-        }
-    };
-    let access = match oidc.provider.verify_access(&body.access_token).await {
-        Ok(access) => access,
-        Err(error) => {
-            let (outcome, reason) = provider_result(error);
-            fail_refresh(&oidc, &operation, outcome, reason)?;
-            return Err(provider_error(error));
-        }
-    };
-    let binding = install_rotation(
-        &state,
-        &oidc,
-        &operation,
-        RotatedAccess {
-            access,
-            raw: &body.access_token,
-            refresh: None,
-            logout: None,
-        },
-    )?;
-    Ok(Json(session_dto(&binding)))
+    let next_raw = body.access_token.clone();
+    let preparation = Arc::clone(&oidc);
+    let operation = state
+        .blocking_identity(move |_state| {
+            let oidc = preparation;
+            let cleanup = store_io::CleanupReservation::reserve(&oidc.cleanup_slots)?;
+            let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            let intent = registry.native.get(&body.intent_id).ok_or_else(conflict)?;
+            let previous = intent.previous.as_ref().ok_or_else(conflict)?;
+            if intent.action != Action::Refresh
+                || intent.created.elapsed() >= Duration::from_secs(15)
+                || previous.session_id != body.authentication_id
+                || previous.generation != body.generation
+                || previous.access_fingerprint != Fingerprint::access_token(&raw)
+            {
+                return Err(credential_invalid());
+            }
+            let session = registry
+                .sessions
+                .get(&body.authentication_id.to_string())
+                .ok_or_else(credential_invalid)?;
+            if session.binding != *previous
+                || !session.rotating
+                || session.proof.digest != raw_digest(&raw)
+            {
+                return Err(credential_invalid());
+            }
+            let record = native_record(&oidc, intent);
+            let binding = previous.clone();
+            let access = session.access.clone();
+            let maximum_expiry = session.maximum_expiry;
+            let created = intent.created;
+            let completion_deadline = Some(intent.created + Duration::from_secs(15));
+            let receipt = intent.intention.clone().ok_or_else(audit_unavailable)?;
+            registry
+                .native
+                .remove(&body.intent_id)
+                .ok_or_else(conflict)?;
+            Ok(RefreshOperation {
+                record,
+                receipt,
+                binding,
+                access,
+                maximum_expiry,
+                completion_deadline,
+                created,
+                owner: Arc::downgrade(&oidc),
+                cancel_on_drop: true,
+                cleanup: Some(cleanup),
+                inline_cleanup: true,
+            }
+            .into_async())
+        })
+        .await?;
+    let response = oidc.provider.verify_access(&next_raw).await;
+    complete_refresh(&state, operation, move |state, operation| {
+        let oidc = configured(&state)?;
+        let access = match response {
+            Ok(access) => access,
+            Err(error) => {
+                let (outcome, reason) = provider_result(error);
+                fail_refresh(&oidc, operation, outcome, reason)?;
+                return Err(provider_error(error));
+            }
+        };
+        let binding = install_rotation(
+            &state,
+            &oidc,
+            operation,
+            RotatedAccess {
+                access,
+                raw: &next_raw,
+                refresh: None,
+                logout: None,
+            },
+        )?;
+        Ok(Json(session_dto(&binding)))
+    })
+    .await
+}
+struct LogoutReady {
+    session: Session,
+    intention: AuthenticationRecordV1,
+    receipt: AuthenticationReceiptV1,
+}
+enum LogoutPreparation {
+    Complete(Json<Value>),
+    Ready(Box<LogoutReady>),
 }
 pub(super) async fn logout(
     State(state): State<GatewayState>,
@@ -1555,6 +1743,8 @@ pub(super) async fn logout(
     if body.version != 1 || body.generation == 0 {
         return Err(invalid_request());
     }
+    let prepared = state.blocking_identity(move |state| {
+    let oidc = configured(&state)?;
     let session = {
         let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
         let session = registry.sessions.get(&body.authentication_id.to_string());
@@ -1565,9 +1755,9 @@ pub(super) async fn logout(
                         && session.binding.access_fingerprint == Fingerprint::access_token(raw)
                 })
         }) else {
-            return Ok(Json(
+            return Ok(LogoutPreparation::Complete(Json(
                 json!({"version":1,"local_session":"unknown","provider_logout":"not_attempted","audit":"unavailable"}),
-            ));
+            )));
         };
         if session.binding.kind == SessionKind::WebPkce {
             web(&oidc, &headers)?;
@@ -1583,7 +1773,6 @@ pub(super) async fn logout(
             .retain(|_, intent| intent.session_id != body.authentication_id);
         session
     };
-    let mut session = session;
     let intention = record(
         &oidc,
         Action::Logout,
@@ -1596,11 +1785,18 @@ pub(super) async fn logout(
     let receipt = match oidc.audit.append_typed(intention.clone()) {
         Ok(receipt) => receipt,
         Err(_) => {
-            return Ok(Json(
+            return Ok(LogoutPreparation::Complete(Json(
                 json!({"version":1,"local_session":"closed","provider_logout":"not_attempted","audit":"unavailable"}),
-            ));
+            )));
         }
     };
+    Ok(LogoutPreparation::Ready(Box::new(LogoutReady {session, intention, receipt})))
+    }).await?;
+    let mut prepared = match prepared {
+        LogoutPreparation::Complete(response) => return Ok(response),
+        LogoutPreparation::Ready(prepared) => prepared,
+    };
+    let session = &mut prepared.session;
     let provider = if session.binding.kind == SessionKind::NativeCli {
         "not_attempted"
     } else if let Some(context) = session.logout_context.take() {
@@ -1613,6 +1809,9 @@ pub(super) async fn logout(
     } else {
         "unsupported"
     };
+    state.blocking_identity(move |state| {
+    let oidc = configured(&state)?;
+    let LogoutReady { session, intention, receipt } = *prepared;
     let audited = oidc
         .audit
         .close_session(
@@ -1630,4 +1829,5 @@ pub(super) async fn logout(
     Ok(Json(
         json!({"version":1,"local_session":"closed","provider_logout":provider,"audit":if audited {"recorded"}else{"unavailable"}}),
     ))
+    }).await
 }
