@@ -347,6 +347,8 @@ Le gateway consomme son callback et envoie le navigateur vers `/auth/oidc/comple
 
 Utilisez l’action de déconnexion de l’application. L’état local du navigateur est effacé même si contrôle/fournisseur ne peuvent confirmer le logout. Lisez séparément les résultats `local_session`, `provider_logout` et `audit` lorsqu’ils sont disponibles. `provider_logout:accepted` décrit la réponse de l’endpoint pris en charge ; ce n’est ni une révocation JWT globale ni la preuve de fermeture des autres sessions navigateur/client.
 
+Le message confirme d'abord l'effacement des jetons de cet onglet. Il confirme la fermeture auprès du contrôle seulement si `local_session` vaut `closed` ; un résultat inconnu reste explicitement non confirmé. Une réponse tardive à une ancienne déconnexion ne remplace pas une nouvelle connexion locale. Ce comportement du navigateur n'établit pas l'état des sessions conservées par le fournisseur d'identité.
+
 ## Se connecter et travailler dans le CLI au premier plan
 
 Compilez un CLI natif hôte depuis la même révision source si vous n'en avez pas déjà un. L'image de contrôle contient un binaire Linux ; ne l'extrayez pas pour un poste macOS. Depuis la racine du dépôt, avec la toolchain Rust du dépôt :

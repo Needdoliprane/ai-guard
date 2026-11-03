@@ -9,6 +9,16 @@ export interface OidcLogout {
   provider_logout: "accepted" | "failed" | "unavailable" | "unsupported" | "not_attempted";
   audit: "recorded" | "unavailable";
 }
+const tabTokensCleared = "Les jetons de connexion ont été effacés de cet onglet.";
+export function oidcLogoutMessage(result: OidcLogout | null): string {
+  if (!result) return `${tabTokensCleared} Résultat de fermeture du contrôle indisponible. Fermeture de la session locale non confirmée. Fournisseur et audit de fermeture non confirmés.`;
+  const local = result.local_session === "closed" ? "Session locale fermée auprès du contrôle." :
+    "Fermeture de la session locale auprès du contrôle non confirmée.";
+  const provider = result.provider_logout === "accepted" ? "Demande de fermeture auprès du fournisseur acceptée." :
+    "Fermeture auprès du fournisseur non confirmée ; sa session peut rester ouverte.";
+  const audit = result.audit === "recorded" ? "Audit de fermeture enregistré." : "Audit de fermeture indisponible.";
+  return `${tabTokensCleared} ${local} ${provider} ${audit}`;
+}
 interface SessionEvents { onChange?: () => void; onClose?: (message: string) => void }
 const errors: Record<string, string> = {
   oidc_not_configured: "La connexion SSO n’est pas activée sur ce contrôle.",
@@ -136,7 +146,8 @@ export class OidcSession {
     })(); return this.#renewal;
   }
   async logout(): Promise<OidcLogout> {
-    const current = this.#tokens; this.close();
+    const current = this.#tokens;
+    this.close(`${tabTokensCleared} Confirmation de fermeture auprès du contrôle en cours…`);
     if (!current) return { version: 1, local_session: "unknown", provider_logout: "not_attempted", audit: "unavailable" };
     const value = await this.#request("logout", "POST", { version: 1, authentication_id: current.authentication_id, generation: current.generation }, current.access_token, true);
     if (!object(value) || value.version !== 1 || !keys(value, ["version", "local_session", "provider_logout", "audit"]) ||

@@ -347,6 +347,8 @@ The gateway consumes its callback and sends the browser to `/auth/oidc/complete`
 
 Use the application's disconnect action. Local browser state is cleared even when the control/provider cannot confirm logout. Read the separate `local_session`, `provider_logout` and `audit` outcomes when available. `provider_logout:accepted` reports the supported endpoint response; it does not assert global JWT revocation or that every other browser/client session closed.
 
+The notice first confirms that this tab's tokens were erased. It confirms control-side session closure only when `local_session` is `closed`; an unknown result remains explicitly unconfirmed. A delayed reply from an earlier sign-out cannot replace a new local sign-in. This browser behavior does not establish the state of sessions held by the identity provider.
+
 ## Sign in and work in the foreground CLI
 
 Build a native host CLI from the same source revision if one is not already available. The control image contains a Linux binary; do not extract it for use on a macOS workstation. From the repository root, with the repository's Rust toolchain:

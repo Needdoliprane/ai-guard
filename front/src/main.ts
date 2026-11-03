@@ -6,7 +6,7 @@ import { ControlDashboard } from "./control-view.ts";
 import { HumanDashboard } from "./human-view.ts";
 import { HumanApiError } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
-import { OidcSession, OidcSessionError } from "./oidc-session.ts";
+import { OidcSession, OidcSessionError, oidcLogoutMessage } from "./oidc-session.ts";
 import { relatedAgents, relatedSandboxes, workerRelation } from "./control.ts";
 import type { WorkerRecord } from "./control.ts";
 import {
@@ -291,7 +291,7 @@ function onError(error: unknown, summaryClient: ApiClient | null = null) {
   setNotice(errorMessage(error), "error", summaryClient);
 }
 function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
-  const currentAuthenticationView = ++authenticationView;
+  let currentAuthenticationView = ++authenticationView;
   document.title = "ai-guard · Supervision locale";
   const access = el("select", "text-input login-access"); access.id = "access-mode";
   const technical = el("option", "", "Lecture technique (viewer)"); technical.value = "viewer";
@@ -364,6 +364,8 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
     event.preventDefault();
     const value = token.value.trim();
     if (!value) return;
+    const authenticationAttempt = ++authenticationView;
+    currentAuthenticationView = authenticationAttempt;
     submit.disabled = true;
     access.disabled = true;
     submit.textContent = "Connexion…";
@@ -371,13 +373,13 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
     if (access.value === "human") {
       token.value = "";
       const candidate = new HumanDashboard(root, value, { brand, themeButton }, (message) => {
-        if (humanSession !== candidate) return;
+        if (humanSession !== candidate || authenticationView !== authenticationAttempt) return;
         humanSession = null; login(message, "human");
       });
       humanSession = candidate;
       try { await candidate.start(); }
       catch (cause) {
-        if (humanSession !== candidate) return;
+        if (humanSession !== candidate || authenticationView !== authenticationAttempt) return;
         candidate.close(); humanSession = null; login(errorMessage(cause), "human");
       }
       return;
@@ -389,6 +391,7 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
     token.value = "";
     try {
       const authenticated = await candidate.identity();
+      if (authenticationView !== authenticationAttempt) { candidate.close(); return; }
       client = candidate;
       identity = authenticated;
       control = new ControlDashboard(candidate, () =>
@@ -398,6 +401,7 @@ function login(message = "", preferredAccess: "viewer" | "human" = "viewer") {
       await loadInitial();
     } catch (cause) {
       candidate.close();
+      if (authenticationView !== authenticationAttempt) return;
       error.textContent = errorMessage(cause);
       error.hidden = false;
       submit.disabled = false;
@@ -2207,11 +2211,9 @@ async function mountOidc(session: OidcSession): Promise<void> {
     const pending = session.logout(); const closedView = authenticationView;
     void pending.then((result) => {
       if (authenticationView !== closedView) return;
-      const provider = result.provider_logout === "accepted" ? "Fermeture auprès du fournisseur acceptée." :
-        "Fermeture auprès du fournisseur non confirmée ; sa session peut rester ouverte.";
-      login(`Session locale fermée. ${provider}${result.audit === "unavailable" ? " Audit de fermeture indisponible." : ""}`, "human");
+      login(oidcLogoutMessage(result), "human");
     }).catch(() => {
-      if (authenticationView === closedView) login("Session locale fermée. Fournisseur et audit de fermeture non confirmés.", "human");
+      if (authenticationView === closedView) login(oidcLogoutMessage(null), "human");
     });
   });
   humanSession = candidate;
