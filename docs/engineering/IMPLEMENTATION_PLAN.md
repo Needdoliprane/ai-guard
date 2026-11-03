@@ -11,8 +11,9 @@
    D intégré dans `b168784` après RED, corrections de revue, 59 fonctions
    uniques ciblées et contrôle composé de toutes les cibles PASS.
    Aucune sévérité ni performance déduite d'un délai sur le Mac sous pression.
-3. Préparer puis reproduire F sur D intégré avant budgets/réserves. Le risque
-   FD a un premier RED sur `a1fb518` ; revalider sur D avant correction et
+3. F est reproduit sur D intégré : head64 et contrôles refusés après lectures.
+   Concevoir puis implémenter ses budgets/réserves après revue. Le risque
+   FD est également revalidé sur `b168784` ; concevoir son correctif et
    préserver le témoin du commit connu. La conception FD via Daybreak attend
    l'authentification matérielle de session, sans bloquer les autres travaux.
    Rapprocher tout nouveau constat du rapport final

@@ -202,6 +202,29 @@ isolation moteur, capacité100 ni panne stockage physique n'est qualifié.
 Équité complète et absence de contention ne sont pas promises. F, FD, TTL
 initial et rapport externe restent ouverts.
 
+Après publication des branches source et intégration, le worktree D est
+retiré normalement : fichiers suivis/non suivis/ignorés propres, patches
+équivalents dans l'intégration et aucun consommateur détecté. La référence
+distante source est `3820bec`. Son dernier conteneur de test, déjà expiré
+RC0/nonOOM, est retiré par ID exact sans volume ; tous snapshots et preuves
+restent privés hors de ces ressources. Reçus dans le dossier de preuves D.
+
+### Suite F et FD — reproductions, correctifs encore ouverts
+
+F est reproduit sur `b168784` avec le vrai routeur et deux stores : un humain
+remplit les64événements A par48lectures après baseline16, puis empêche les
+contrôles et les lectures d'un pair ; B reste disponible. Le RED exige le
+head physique atteint après contrôles, pas un délai ou un throttle D.
+Conception des budgets/réserves en cours, aucun correctif livré.
+
+Le RED FD est aussi revalidé sur `b168784`, enfant seul en EMFILE réel puis
+FD restaurés : chaîne valide, Store interdit et append impossible. La revue
+de conception via Daybreak est suspendue par la demande d'authentification
+matérielle de la session ; une reprise après la réponse du mainteneur a
+renvoyé le même message. Aucune garde contournée, aucun code FD corrigé.
+Les [preuves et limites](VALIDATION.md) distinguent ces deux composants de
+leurs impacts réseau/runtime encore non qualifiés.
+
 ### Lot E — résultat intégré au candidat
 
 Source `0fce510`, intégrée avec traçabilité dans `808f08c` ; clarification du

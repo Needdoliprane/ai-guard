@@ -1,5 +1,30 @@
 # Validation courante
 
+## 3 novembre — lectures humaines, RED F sur D intégré
+
+Sur archive `b168784` plus le test formaté/revu :
+
+```text
+cargo test --offline --locked --test human_read_budget one_human_cannot_exhaust_control_revocation_or_another_humans_read_budget -- --exact --nocapture --test-threads=1
+```
+
+Compilation offline réussie, une fonction exécutée, RC101 sur l'assertion
+attendue `head < 64`. La baseline est16 ; 48 lectures A1 sont acceptées,
+head/count deviennent64. Refus `503 audit_unavailable` ; décision A,
+ingest A et lecture A2 retournent503, révocation échouée ; décision B200.
+Tous ces contrôles sont collectés avant l'assertion. Le refus n'est pas le
+plafond D200 et aucun délai n'est un oracle. **RED reproduit**, pas un PASS.
+
+Preuve privée `/private/tmp/ai-guard-f-budget-luna-20261103.u9oQwK/run2.log`,
+SHA `d48f7a9261ef352a93a2def1e918dc6acfe4903cae11fd327a076918c3b9beb4`.
+Test SHA `2be451d78658f716be4bb3fb7c7a0020be06851699736874bb48995c37e954b7`.
+Sources et registre readonly, manifests avant/après identiques ; un premier
+préflight de redirection échoue avant Cargo et n'est pas une reproduction.
+La capture mtime initiale du test est à la minute, pas une preuve d'égalité
+à la seconde ; le contenu hashé et le refus d'écriture EROFS sont vérifiés.
+Linux ARM64 isolé, aucun moteur, worker ou fournisseur. Budgets métier et
+canaris supplémentaires restent à implémenter ; aucune qualification générale.
+
 ## 3 novembre — stockage HTTP borné et déporté
 
 Lot D source `3820bec`, intégré dans `b168784` après revue indépendante.
@@ -66,8 +91,11 @@ correction**, pas un PASS.
 Preuves privées : `/private/tmp/ai-guard-fd-luna-20261103.c23yAU/FD-TEST-RESULT.md`
 et `FD-TEST.log`. SHA test :
 `6d7207f35b6adf98a8acaa658820e2b0d22e01d73ff6924ade93926cae6a6cb3`.
-Sandbox Linux ARM64 isolé, aucun épuisement de l'hôte. Le rejeu sur D reste
-requis ; HTTP, anonyme, inter-tenant, un FD libre, post-commit, macOS et
+Sandbox Linux ARM64 isolé, aucun épuisement de l'hôte. Le rejeu sur `b168784`
+confirme ensuite exactement le même RED, RC101, un parent. Preuve
+`ai-guard-fd-luna-20261103.c23yAU/FD-POST-D-RESULT.md`, log SHA
+`904961b8b9c60afc4beb7c7c0b3b1705d36b058dd612259ccb0ac1c5dd5549d5`.
+HTTP, anonyme, inter-tenant, un FD libre, post-commit, macOS et
 moteurs ne sont pas couverts. Aucun correctif FD livré.
 
 ## 3 novembre — initiation SSO après preuve vérifiée

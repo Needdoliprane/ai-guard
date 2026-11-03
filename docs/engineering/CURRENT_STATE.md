@@ -27,13 +27,15 @@ Les preuves, sources et limites sont dans [VALIDATION.md](VALIDATION.md#3-novemb
 Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
 épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
 
-Les quatre worktrees A/B/C/E sont fermés après intégration et contrôle
+Les cinq worktrees A/B/C/D/E sont fermés après intégration et contrôle
 des consommateurs ; preuves et références source sont préservées. Les RED de
 D ont précédé ses corrections, puis les unités/canaris et la revue finale.
-F prépare son oracle d'épuisement d'audit sur D intégré, sans métier modifié.
+F a son RED sur D intégré : baseline16, 48 lectures acceptées, head64 ; les
+contrôles et le second humain A échouent ensuite, B reste disponible.
+La conception de budgets/réserves avance, sans métier modifié pour l'instant.
 Le risque FD a son premier RED Store réel sur `a1fb518` : après restitution
 des descripteurs, chaîne valide mais autorité restant interdite. Le rejeu sur
-D reste requis avant correction. Son sous-agent de conception a été arrêté
+`b168784` confirme le même défaut. Son sous-agent de conception a été arrêté
 par la demande d'authentification matérielle Daybreak de cette session ;
 compilation, documentation et tâches indépendantes continuent.
 Le journal SSO déjà
