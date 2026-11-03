@@ -5,11 +5,13 @@
 1. A/B/C intégrés et poussés jusqu'à `2eeaa0d`, avec RED/GREEN ciblés, revues et
    guides EN/FR. Fermer les contrôles qualité manquants sans transformer ces
    correctifs logiciels en qualification production ; [preuves](AUDIT_FOLLOWUP.md).
-2. Poursuivre D (exécution Store hors workers Tokio, admission bornée et
-   intégrité incrémentale sûre) et E (nonces initiaux bornés, audit durable
-   après preuve) dans des worktrees distincts depuis cette intégration.
-   Reproduire avant métier ; aucune sévérité déduite d'un délai sur le Mac sous
-   pression. E a quatre RED de consommation durable ; D a son témoin préparé.
+2. E intégré dans `808f08c` et clarification API `14d5eb8` : quatre RED avant
+   correction, sept régressions et sept canaris OIDC GREEN, puis oracle renforcé
+   exact PASS avec production inchangée ; revue et guides EN/FR acceptés.
+   Poursuivre D (Store hors workers Tokio, admission bornée et intégrité
+   incrémentale sûre) : RED de thread et six GREEN intermédiaires, puis
+   correction du couplage d'admission voisin signalé en revue et raccord OIDC.
+   Aucune sévérité ni performance déduite d'un délai sur le Mac sous pression.
 3. Traiter F après D, puis rapprocher tout nouveau constat du rapport final
    avec le code courant, y compris les lots déjà intégrés. Le retry du runner
    reste une proposition séparée sans décision du mainteneur.

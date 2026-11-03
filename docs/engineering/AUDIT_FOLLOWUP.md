@@ -19,12 +19,34 @@ quatrième porte leur intégration. Le checkout principal et les travaux
 | A — export | Métadonnées actives filtrées à l'écriture, contrôles/limites conservés, fichiers 0644 et scan brut distinct. | Deux RED comportementaux, puis 11 fonctions ciblées GREEN ; revue indépendante acceptée. Code intégré au candidat `357b6e0`, guides EN/FR synchronisés. |
 | B — panne d'un tenant | Erreur voisine isolée, store propre fermé et refus des collisions préservés ; projection humaine partielle explicite. | Deux RED comportementaux, puis 7 tests Rust et 24 tests frontend GREEN ; TypeScript PASS. Revue indépendante acceptée, manifeste et guides EN/FR corrélés ; intégré dans `b4c2fee`. |
 | C — ingress | Pool upload distinct, lecture bornée avant acquisition de l'échange ; corps vides admis sans occuper le pool upload. | RED avec 64 uploads actifs et GET 429 ; deux régressions et six canaris ingress GREEN. Trois tests model_ingress locaux supplémentaires sélectionnés par le filtre, sans modèle ; revue indépendante et guides EN/FR acceptés, intégré dans `57fae74`. |
+| E — initiation SSO | État initial volatil borné ; intention durable après preuve vérifiée, avant lecture tenant/admission. | Quatre RED comportementaux puis sept régressions et sept canaris OIDC GREEN au premier gel ; oracle final renforcé PASS séparément. Revue et guides EN/FR acceptés ; intégré dans `808f08c`, clarification API `14d5eb8`. |
 
 Les tests de reproduction de l'audit passent lorsque le défaut existe : ils
 ne constituent pas des régressions sans inversion des assertions. Une erreur
 de compilation, zéro test sélectionné ou un dépassement du harnais n'est pas
 un RED comportemental. Les tests ciblés sont confiés à Luna ; chaque lot
 exige aussi une revue indépendante avant intégration, commit et push.
+
+### Réception intermédiaire du 3 novembre, 09 h 40
+
+Les fichiers externes `findings.json` et `HARDENING-AND-GUARANTEES.md` ont
+évolué pendant les corrections ; `REPORT.md` et `FINDINGS-DETAIL.md` portent
+encore leur version de 02 h 36. Une copie privée comparée aux sources est
+conservée dans `/private/tmp/ai-guard-audit-incoming-20261103.EgVnob/`.
+SHA-256 du JSON :
+`8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`.
+Ses 16 entrées portent les verdicts externes suivants : 13 `confirmed`,
+2 `needs_validation`, 1 `rejected`. Ces verdicts concernent les instantanés
+audités ; ils ne prouvent ni la présence ni la correction de chaque défaut
+dans le candidat courant.
+
+La confrontation reste ouverte, notamment pour les refus/reprises de claim,
+les rafales de stdout, le verrouillage après épuisement des descripteurs et
+les volumes non bornés. Aucun correctif de ces sujets n'est déduit de leur
+seul intitulé. L'outbox reste `needs_validation` dans ce JSON. Les lots D/E
+en cours et la préparation de F continuent ; les contrats et reproductions
+seront recontrôlés avant modification, sans changer les fichiers de l'audit
+ni les travaux D5 en parallèle. Aucun nouveau gate n'est fermé.
 
 Pour B, la conception suit la correction proposée dans le rapport provisoire :
 une erreur voisine ne choisit aucune identité et ne rend pas ses credentials
@@ -137,6 +159,55 @@ recette historique d'arrêt utilisait un moteur fixture ; aucun worker réel ni
 retry60s n'est qualifié ici. Un contrôle composé du candidat intégré reste
 distinct des tests exécutés sur chaque gel de lot.
 
+### Lot E — résultat intégré au candidat
+
+Source `0fce510`, intégrée avec traçabilité dans `808f08c` ; clarification du
+paragraphe natif API source `17ada11`, intégrée dans `14d5eb8`. Les quatre RED
+naturels RC101 constatent des écritures durables avant preuve : démarrage Web,
+intent/annulation natif, callback rejeté et saturation exacte du ledger.
+Une erreur préparatoire ou un autre motif de503 ne compterait pas comme RED.
+
+Premier gel :
+
+```text
+cargo test --offline --locked --test authentication_start_capacity
+cargo test --offline --locked --test oidc_gateway_flow
+```
+
+Les deux commandes finissent RC0, sept fonctions chacune. Les empreintes de
+production sont `d505903d…` pour `oidc.rs` et `aac25ba9…` pour `gateway.rs`.
+Après renforcement du seul test/fixture, commande exacte :
+
+```text
+cargo test --offline --locked --test authentication_start_capacity verified_proof_cannot_bypass_missing_durable_audit_capacity -- --exact
+```
+
+RC0, une fonction PASS, six filtrées, aucun warning. Le compte OIDC actif sans
+membership aurait produit un reçu de lecture tenant ; l'échec d'enregistrement
+de l'intention avec capacité1 laisse son `event_count` inchangé et l'intégrité
+valide, après vérification cryptographique de la preuve. Cela ne prétend pas
+qu'un échec plus tardif d'admission ne peut jamais être précédé d'un reçu tenant.
+Production inchangée ; les six autres fonctions de ce fichier et les sept
+canaris ne sont pas rejoués sur cette dernière fixture. Le rejeu n'est pas une
+quinzième fonction unique. L'inventaire antérieur sélectionnant zéro unité lib
+reste un inventaire, jamais un test réussi.
+
+Preuves privées : `/private/tmp/ai-guard-audit-e-luna-20261103/proofs/`, rapports
+`red-result.txt`, `green-results.txt` et `green-v2/result.txt`. Test final
+SHA-256 `0705555c32c33bdd664959ce1661d42b9612978394d0c4efce069fadd9e7df13` ;
+manifest complet1991entrées identique avant/après. Rust1.99.1/LinuxARM64 dans
+le sandbox Docker borné sans réseau externe, secret, socket ou checkout monté.
+Revue indépendante spécification/qualité acceptée après deux précisions API ;
+guides EN/FR synchronisés. Format durable, politique et bases non réécrits.
+
+Une tentative non vérifiée expirée/annulée ne consomme plus le ledger. Après
+preuve, l'audit obligatoire et les empreintes/fencing restent requis ; refresh,
+logout et expiration de session conservent leurs règles. Les marqueurs
+d'échange gardent la référence permettant de fermer une session installée
+avant interruption de remise. Un registre déjà plein n'est pas réparé.
+IdP réel, navigateur, CLI natif externe, moteurs workers, TTL initial complet,
+Clippy Linux et qualification SSO globale ne sont pas couverts par ce lot.
+
 ### Préparation vérifiable des régressions
 
 Pour C, la régression a été renforcée et relue indépendamment : un compteur
@@ -235,8 +306,15 @@ Le runner conserve son arrêt ciblé sur erreur de suivi. La
 [proposition de fenêtre transitoire](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md)
 est soumise séparément ; elle n'est ni approuvée ni implémentée.
 Après intégration de B, D et E avancent dans des worktrees distincts depuis
-`2eeaa0d` ; F attend D. E a quatre RED déterministes sur la consommation du
-ledger avant preuve ; D prépare un témoin d'exécution sans seuil de latence.
+`2eeaa0d` ; E est désormais intégré après revue et F attend D.
+D a reproduit l'exécution de l'intégrité
+sur le thread HTTP après vérification de sa fixture et d'un contrôle
+`spawn_blocking` : RC101 sur l'assertion de thread, sans seuil de latence.
+Six fonctions ciblées passent sur un gel intermédiaire ; la revue relève un
+couplage d'admission d'un profil voisin, à reproduire et corriger. Le raccord
+OIDC reste aussi ouvert. La [stratégie de test](TEST_STRATEGY.md#latence-et-pression-de-la-machine-de-développement)
+conserve les contraintes du MacBook Air M3/16Go, sans transformer la pression
+de la machine en verdict de sécurité.
 L'outbox et les autres candidats non établis restent hors correction sur la
 seule base de ce rapport provisoire.
 
@@ -263,7 +341,7 @@ Le canari existant de deadline de refresh authentifié ne qualifie pas à lui
 seul ce cas initial. Ce point reste ouvert dans le produit ; aucun SSO global
 ou délai d'authentification complet n'est déclaré qualifié par E.
 
-**Les trois lots A/B/C sont intégrés au candidat, après reproductions,
+**Les quatre lots A/B/C/E sont intégrés au candidat, après reproductions,
 tests ciblés et revues indépendantes. Aucun test worker/runtime réel exécuté
 pour ces lots, aucune qualification production déduite.** Les résultats historiques ci-dessous
 conservent leurs dates et leurs périmètres.

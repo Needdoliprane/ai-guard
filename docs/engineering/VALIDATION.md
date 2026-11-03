@@ -1,5 +1,26 @@
 # Validation courante
 
+## 3 novembre — initiation SSO après preuve vérifiée
+
+Lot E intégré dans `808f08c`, clarification API dans `14d5eb8`, après quatre
+RED comportementaux naturels puis revue indépendante. Les sept fonctions
+`authentication_start_capacity` et sept `oidc_gateway_flow` passent au premier
+gel, RC0. Après renforcement de la fixture, seul
+`verified_proof_cannot_bypass_missing_durable_audit_capacity -- --exact` est
+rejoué : une fonction PASS, six filtrées, RC0 ; aucun warning. Les empreintes
+de production restent inchangées. Ce rejeu ne s'ajoute pas aux14fonctions
+uniques et ne prétend pas rejouer les autres sur le nouveau fichier test.
+
+Le dernier oracle prouve qu'une intention non enregistrable refuse avant le
+reçu de profil d'un compte actif sans membership. Un échec d'admission plus
+tardif peut avoir été précédé de ce reçu. Guides EN/FR et API alignés, formats
+et données durables préservés ; un ledger déjà plein reste à prendre en charge.
+[Commandes, gels et limites](AUDIT_FOLLOWUP.md#lot-e--résultat-intégré-au-candidat).
+Rapports privés : `ai-guard-audit-e-luna-20261103/proofs/{red-result.txt,green-results.txt,green-v2/result.txt}`.
+Sandbox LinuxARM64/Rust1.99.1 hors réseau, limites et manifests avant/après
+conservés. Aucun IdP/modèle/worker réel ni E2E global ; Clippy Linux absent et
+TTL initial complet non qualifié. Aucun gate global fermé.
+
 ## 3 novembre — correctifs audit A/B/C et compilation composée
 
 Base de correction `0a41aac`, trois lots intégrés et poussés dans `2eeaa0d`.

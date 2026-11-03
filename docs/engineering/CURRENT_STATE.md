@@ -4,6 +4,11 @@
 
 Les lots export A, disponibilité multi-tenant B et admission ingress C sont
 intégrés et poussés sur `codex/audit-integration-20261103`, jusqu'à `2eeaa0d`.
+Le lot E est intégré dans `808f08c` et sa clarification API dans `14d5eb8` :
+les tentatives de connexion sans preuve vérifiée ne consomment plus le journal
+durable partagé. Sept régressions et sept canaris OIDC passent au premier gel ;
+le dernier oracle renforcé passe séparément après modification de sa fixture,
+avec production inchangée. Guides EN/FR et revue indépendante acceptés.
 Reproductions comportementales avant correction, tests ciblés et revues
 indépendantes sont consignés dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).
 Sur leurs gels respectifs : 26 fonctions Rust ciblées PASS, trois canaris
@@ -18,10 +23,14 @@ Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
 épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
 
 Les trois worktrees d'implémentation sont fermés après intégration et contrôle
-des consommateurs ; preuves et références source sont préservées. D et E
-continuent dans des worktrees distincts depuis `2eeaa0d` : D a son témoin
-d'exécution préparé, E a quatre RED déterministes sur l'audit des starts sans
-preuve et son correctif est en cours. F attend D. L'audit externe reste ouvert.
+des consommateurs ; preuves et références source sont préservées. D a son RED
+sur le thread d'exécution, puis six fonctions ciblées GREEN sur un gel
+intermédiaire. Sa revue détecte une régression d'admission d'un profil voisin ;
+ce point et le raccord OIDC restent à terminer avant intégration. F attend D ;
+sa préparation statique ne remplace pas une reproduction. Le journal SSO déjà
+plein et le TTL initial de bout en bout restent des écarts distincts.
+L'audit externe reste ouvert ; ses nouveaux verdicts sont rapprochés des
+instantanés et du candidat dans le suivi, sans qualification globale.
 G09 reste FAIL et **0/12 gates globaux sont fermés**.
 
 ## Historique du 2 novembre — D5 et SSO

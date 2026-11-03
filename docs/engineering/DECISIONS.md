@@ -18,6 +18,15 @@
   256Kio,5s/2s sont celles du code actuel, pas de nouvelles options publiques.
   Le runner conserve son arrêt sur erreur de suivi. La proposition60s reste
   soumise séparément ; aucun test de ces budgets ne qualifie le confinement.
+- L'initiation SSO initiale reste volatile, bornée et expirable jusqu'à une
+  preuve d'access token vérifiée. L'intention est alors durable avant lecture
+  du compte/memberships et admission. Cela remplace, pour le login initial,
+  l'ACK durable avant échange décrit dans la note historique du2novembre ;
+  le refresh authentifié conserve son intention durable et son fencing.
+  Une erreur d'enregistrement de cette intention refuse avant lecture tenant ;
+  une erreur ultérieure ne signifie pas qu'aucune lecture n'a été auditée.
+  Le format et les historiques existants restent conservés ; ce correctif ne
+  restaure pas un journal déjà plein et ne qualifie pas le TTL initial complet.
 
 Ces choix restent dans l'architecture autorisée. Les preuves et limitations
 sont liées aux gels et plateformes dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).

@@ -1,5 +1,26 @@
 # Stratégie de qualification
 
+## Latence et pression de la machine de développement
+
+La machine locale de référence du mainteneur est un MacBook Air M3 avec
+16 Go de RAM. Docker Desktop utilise une VM configurée à 12 Go ; ce réglage
+ne constitue pas une mémoire supplémentaire pour l'hôte. Les modèles locaux,
+dont Qwen, et les autres tâches peuvent fortement ralentir les essais.
+
+Privilégier les barrières, notifications, états durables et compteurs pour
+vérifier un comportement. Un délai de garde du harnais borne l'essai ; son
+expiration seule ne démontre ni vulnérabilité ni échec du comportement visé.
+Noter la phase atteinte et distinguer préparation, compilation, attente et
+inférence. Ne pas relâcher un délai contractuel du produit pour obtenir un
+résultat vert. Une mesure de performance exige son propre protocole, les
+versions, les ressources et la charge concomitante ; elle ne se déduit pas
+d'un test fonctionnel sur cette machine sous pression.
+
+Limiter les compilations lourdes concurrentes à une sur cette machine ;
+continuer en parallèle le code, les revues et la documentation. Pour une
+correction sans effet sur l'inférence, ne pas démarrer de modèle local ni
+relancer une recette fournisseur ou E2E complète.
+
 ## Préparation SSO locale — ciblage du 2 novembre
 
 `setup_prepare` couvre les vrais sous-processus de préparation et leurs fichiers/SQLite : publication neuve, refus, reprise exacte et stdin borné. `setup::tests::` vérifie les interruptions durables, la saturation d'audit et la reprise d'une vraie base>32Mio ; `closed_entry_sync_` vérifie la barrière fichiers sans élargir les lectures. Le parent temporaire des canaris est canonique pour respecter la même politique nofollow sur macOS et Linux. Choisir uniquement les cas touchés ; les résumés8+24 et les commandes finales4+2/fmt/Clippy ont des preuves distinctes, décrites dans [VALIDATION](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement).
