@@ -1,5 +1,15 @@
 # Décisions d'industrialisation
 
+## 3 novembre — Kubernetes local de référence dans Docker Desktop
+
+**ACCEPTED par le mainteneur :** utiliser le Kubernetes intégré à Docker Desktop, avec un cluster local basique à un nœud. Le mainteneur indique que sa création est en cours. Ce choix fixe l'environnement de développement et de qualification locale de l'adaptateur Kubernetes obligatoire ; Docker et Podman conservent leurs qualifications propres. Aucun provisioner, CNI, version serveur ou comportement réseau n'est déduit du seul nombre de nœuds.
+
+Le contexte local explicite `docker-desktop` est utilisé sans modifier le contexte global du poste. Avant les essais, vérifier l'endpoint local, TLS actif, la disponibilité réelle de l'API, le nœud Ready, versions/architecture/runtime, réseau, stockage et autorisations. Le relevé initial du client/contexte est complété par la lecture TLS du serveurv1.36.1 et d'un seul nœud Linux/ARM64 Ready ; les restrictions et workloads ont leurs preuves séparées. [Résultats et inconnus](VALIDATION.md#3-novembre--cible-kubernetes-docker-desktop-à-un-nœud). Aucun reset, remplacement de kubeconfig ou désactivation TLS n'est requis par cette décision.
+
+Le broker reste Rust dans la frontière de contrôle approuvée. Identités de workloads, permissions serveur, quotas, copies/exports et audit durable gardent leurs invariants. L'adaptateur devra lier les instances aux identités Kubernetes immuables, distinguer soumission/état observé/terminal/disparition et refuser les chemins dont l'isolation n'est pas établie. Un namespace, un label, un YAML accepté ou un retour de CLI ne suffit pas à prouver l'isolation ou la fin d'une exécution.
+
+La première recette utilise A1/A2 chez A et B1 chez B, avec services de contrôle séparés. Appliquer et tester effectivement les restrictions réseau/RBAC/volumes/processus, puis panne/reprise et comptage ; aucune preuve Docker/Podman ne remplace ces essais. Le nœud unique ne démontre ni haute disponibilité, ni capacité100, ni déploiement cloud qualifié. Les guides utilisateur EN/FR décrivent le mode d'emploi ; états d'implémentation et preuves restent dans le suivi d'ingénierie. Aucun flag, manifeste ou déploiement non implémenté n'est annoncé fonctionnel par cette rédaction.
+
 ## 2 novembre — navigation publique après le callback OIDC
 
 Le retour réel Keycloak révèle callback303 puis complete403 : [Fetch Metadata tient compte de toute la chaîne de redirections](https://www.w3.org/TR/fetch-metadata/#redirects), même après retour à l'origine du dashboard. Le dashboard autorise donc la navigation GET exacte vers `/auth/oidc/complete` lorsque SSO est configuré, sans query et avec une seule valeur `navigate`/`document` pour chaque métadonnée correspondante. Son contenu reste le fichier statique public index.html, avec CSP, frame-ancestors/FrameDENY et no-store ; garder cette page sans données d'identité, de session ou de secret.

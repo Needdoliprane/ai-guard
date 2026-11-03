@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-11-03 01:31:34 UTC",
+  "scope": "Docker Desktop local Kubernetes control-plane reachability and node readiness",
+  "docker_desktop_version": "4.97.0",
+  "client": {
+    "version": "1.36.1",
+    "platform": "darwin/arm64",
+    "exit_code": 0
+  },
+  "local_context_metadata": {
+    "context": "docker-desktop",
+    "approved_local_https_endpoint": true,
+    "tls_verification_enabled": true,
+    "exit_code": 0
+  },
+  "api": {
+    "context": "docker-desktop",
+    "endpoint_local_approved": true,
+    "tls_verification_enabled": true,
+    "api_version_exit_code": 0,
+    "server_version": "1.36.1",
+    "mutations": 0,
+    "nodes_exit_code": 0,
+    "node_count": 1,
+    "nodes": [
+      {
+        "ready": true,
+        "architecture": "arm64",
+        "operating_system": "linux",
+        "kubelet_version": "1.36.1",
+        "runtime_engine": "containerd",
+        "runtime_version": "2.3.1"
+      }
+    ]
+  },
+  "command_templates": [
+    "/Applications/Docker.app/Contents/Resources/bin/kubectl version --client --output=json",
+    "/Applications/Docker.app/Contents/Resources/bin/kubectl --context docker-desktop config view --minify -o <server-and-TLS-only-jsonpath>",
+    "/Applications/Docker.app/Contents/Resources/bin/kubectl --context docker-desktop --server=<approved-local-endpoint> --request-timeout=5s version --output=json",
+    "/Applications/Docker.app/Contents/Resources/bin/kubectl --context docker-desktop --server=<approved-local-endpoint> --request-timeout=5s get nodes --output=json"
+  ],
+  "command_templates_are_redacted": true,
+  "private_material_included": false,
+  "cluster_resources_modified": false,
+  "ai_guard_workloads_started_by_this_run": false,
+  "qualifications_not_performed": [
+    "CNI and NetworkPolicy enforcement",
+    "workload RBAC and identities",
+    "storage and filesystem semantics",
+    "worker lifecycle and crash recovery",
+    "A1/A2/B1",
+    "100 workers",
+    "high availability"
+  ],
+  "documentation_verification": {
+    "scope": "Seven read-only commands from the English/French platform preparation guides",
+    "executions_per_command": 1,
+    "commands": [
+      {
+        "operation": "config_view_tls_filtered",
+        "exit_code": 0
+      },
+      {
+        "operation": "config_get_contexts",
+        "exit_code": 0
+      },
+      {
+        "operation": "version",
+        "exit_code": 0
+      },
+      {
+        "operation": "get_nodes_wide",
+        "exit_code": 0
+      },
+      {
+        "operation": "wait_ready",
+        "exit_code": 0
+      },
+      {
+        "operation": "get_pods_kube_system",
+        "exit_code": 0
+      },
+      {
+        "operation": "get_nodes_allocatable",
+        "exit_code": 0
+      }
+    ],
+    "private_report_sha256": "58d686c55bf7c4d8b530c61271099e7576d8174961dae4e2be45e0b5c73b02c2",
+    "cluster_resources_modified": false,
+    "cni_or_network_policy_enforcement_proved": false,
+    "worker_capacity_proved": false
+  }
+}

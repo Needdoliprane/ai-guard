@@ -13,6 +13,7 @@ Le manuel utilisateur décrit le **contrat du produit complet**. L'avancement, l
 | Contexte | Guide | Exemple de configuration |
 |---|---|---|
 | Poste local, Docker ou Podman | [Installation locale](docs/setup/local/README.fr.md) | [.env.exemple.local](.env.exemple.local) |
+| Kubernetes Docker Desktop, un nœud local | [Préparer le cluster local](docs/setup/kubernetes/README.fr.md) | Docker Desktop et son contexte Kubernetes `docker-desktop` |
 | Codex / Claude Code, abonnement ou API | [Fournisseurs IA](docs/setup/providers/README.fr.md) | [.env.exemple.providers](.env.exemple.providers) |
 | Keycloak local, identité Web et CLI | [Keycloak et OIDC](docs/setup/keycloak/README.fr.md) | [.env.exemple.local-keycloak](.env.exemple.local-keycloak) |
 | Petit modèle local, inférence hors ligne | [IA locale](docs/setup/local-ai/README.fr.md) | [.env.exemple.local-qwen](.env.exemple.local-qwen) |
@@ -38,6 +39,12 @@ docker compose --env-file .env.exemple.local -f deploy/docker/compose.yaml up -d
 Ouvrir `http://127.0.0.1:4000`. Pour le parcours local par clé de contrôle, utiliser le credential viewer privé créé dans `$HOME/.ai-guard/secrets/viewer` ; conserver le credential runner dans le contrôle de confiance. Le [guide local](docs/setup/local/README.fr.md) explique première commande, refus de politique, export, données, arrêt et reprise.
 
 Le mode rootless est exigé par défaut. Docker Desktop et les moteurs qui ne déclarent pas ce mode demandent un choix explicite de l'opérateur avec `--allow-rootful-runtime` sur les commandes CLI concernées. Le guide couvre Podman, chemins de moteur, ports personnalisés et cette exception de sécurité tracée.
+
+## Kubernetes local avec Docker Desktop
+
+Utiliser le [guide Kubernetes à un nœud](docs/setup/kubernetes/README.fr.md) pour préparer Docker Desktop, sélectionner explicitement le contexte `docker-desktop`, vérifier TLS et la disponibilité du nœud, puis examiner ressources et images. Conserver le cluster existant et ses données pendant ce parcours.
+
+Suivre l'[installation locale Docker/Podman](docs/setup/local/README.fr.md) pour installer ai-guard, lancer les sessions d'agents et utiliser le broker. Le guide Kubernetes couvre la préparation et la vérification de la plateforme locale, en conservant son administration séparée des credentials et données applicatifs.
 
 ## Configuration et exploitation
 

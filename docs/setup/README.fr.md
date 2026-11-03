@@ -9,6 +9,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | Guide | Éléments configurés |
 |---|---|
 | [Poste local](local/README.fr.md) | CLI Rust, Docker/Podman, services de contrôle, premier worker, permissions, copie/export, données et reprise. |
+| [Kubernetes local](kubernetes/README.fr.md) | Docker Desktop à un nœud, contexte `docker-desktop` explicite, TLS, disponibilité, ressources, préparation des images et diagnostic. Utiliser le guide du poste local pour lancer ai-guard avec Docker/Podman. |
 | [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
 | [Fournisseurs IA](providers/README.fr.md) | Codex et Claude Code par abonnement ou API, sélection explicite, credentials privés et Jev optionnel. |
 | [Accès local nominatif](identity/README.fr.md) | Provisioning privé des comptes humains, permissions explicites, consultation authentifiée, export et reprise sans IdP. |
@@ -20,6 +21,8 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagnostic, arrêt et conservation des données. Versions anglaise/française et exemples évoluent ensemble lorsqu'un contrat change.
 
 ## Fichiers et consommateurs
+
+Pour l'accès au cluster Kubernetes, Docker Desktop prépare la configuration locale du cluster et `kubectl` lit le kubeconfig de l'opérateur. Suivre les [commandes d'inspection filtrées](kubernetes/README.fr.md#vérifier-le-contexte-et-tls) sans changer le contexte global. Le guide du cluster ne demande aucun fichier env Kubernetes ai-guard ; conserver les réglages applicatifs auprès de leurs consommateurs existants ci-dessous.
 
 | Fichier | Lecteur et usage |
 |---|---|

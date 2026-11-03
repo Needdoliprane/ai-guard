@@ -13,6 +13,7 @@ The user manual describes the **complete product contract**. Implementation prog
 | Context | Guide | Configuration example |
 |---|---|---|
 | Local workstation, Docker or Podman | [Local setup](docs/setup/local/README.md) | [.env.exemple.local](.env.exemple.local) |
+| Docker Desktop Kubernetes, one local node | [Prepare the local cluster](docs/setup/kubernetes/README.md) | Docker Desktop and its `docker-desktop` Kubernetes context |
 | Codex / Claude Code, subscription or API | [AI providers](docs/setup/providers/README.md) | [.env.exemple.providers](.env.exemple.providers) |
 | Local Keycloak, Web and CLI identity | [Keycloak and OIDC](docs/setup/keycloak/README.md) | [.env.exemple.local-keycloak](.env.exemple.local-keycloak) |
 | Small local model, offline inference | [Local AI](docs/setup/local-ai/README.md) | [.env.exemple.local-qwen](.env.exemple.local-qwen) |
@@ -38,6 +39,12 @@ docker compose --env-file .env.exemple.local -f deploy/docker/compose.yaml up -d
 Open `http://127.0.0.1:4000`. For the control-key local flow, use the private viewer credential created under `$HOME/.ai-guard/secrets/viewer`; keep the runner credential in the trusted control plane. The [local guide](docs/setup/local/README.md) covers the first command, policy refusal, workspace export, data, stopping and recovery.
 
 Rootless is the default requirement. Docker Desktop and other engines that do not report rootless require the operator's explicit `--allow-rootful-runtime` choice on relevant CLI commands. Follow the guide for Podman, custom engine paths, custom ports and this recorded security exception.
+
+## Local Kubernetes with Docker Desktop
+
+Use the [single-node Kubernetes guide](docs/setup/kubernetes/README.md) to prepare Docker Desktop, select the `docker-desktop` context explicitly, check TLS and node readiness, and inspect resources and images. Keep an existing cluster and its data when following the guide.
+
+Follow the [Docker/Podman local setup](docs/setup/local/README.md) for ai-guard installation, agent sessions and broker operations. The Kubernetes guide covers preparation and verification of the local platform, with its administration kept separate from application credentials and data.
 
 ## Configuration and operations
 

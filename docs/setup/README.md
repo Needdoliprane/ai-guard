@@ -9,6 +9,7 @@ This manual describes the complete product contract. The implementation and qual
 | Guide | What it configures |
 |---|---|
 | [Local workstation](local/README.md) | Rust CLI, Docker/Podman, control services, first worker, permissions, workspace/export, data and recovery. |
+| [Local Kubernetes](kubernetes/README.md) | Docker Desktop with one node, explicit `docker-desktop` context, TLS, readiness, resources, image preparation and diagnosis. Use the local workstation guide to launch ai-guard with Docker/Podman. |
 | [Trusted local broker](broker/README.md) | Private Registry2, Docker start profile, service/IPC, replay identities, approval, cancellation, recovery and export. |
 | [AI providers](providers/README.md) | Codex and Claude Code with subscription or API, explicit selection, private credentials and optional Jev. |
 | [Named local access](identity/README.md) | Private human account provisioning, explicit resource permissions, authenticated reads, export and recovery without an IdP. |
@@ -20,6 +21,8 @@ This manual describes the complete product contract. The implementation and qual
 Each guide contains prerequisites, configuration, startup, expected endpoints, diagnosis, stopping and data preservation. English/French versions and configuration examples change together when a contract changes.
 
 ## Files and consumers
+
+For Kubernetes cluster access, Docker Desktop prepares the local cluster configuration and `kubectl` reads the operator's kubeconfig. Follow the [filtered inspection commands](kubernetes/README.md#check-the-context-and-tls) without changing the global context. The cluster guide requires no ai-guard Kubernetes env file; keep application settings with their existing consumers below.
 
 | File | Reader and use |
 |---|---|
