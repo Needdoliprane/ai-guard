@@ -1,5 +1,102 @@
 # Validation courante
 
+## 3 novembre — deux régressions du candidat F1 détectées en revue
+
+Ces constats portent sur le candidat non intégré, pas de nouveaux défauts
+attribués à l'instantané de l'audit externe. Avant correction, deux commandes
+exactes atteignent chacune un RED métier après compilation réussie :
+
+- `audit_capacity_startup::invalid_later_tenant_capacity_policy_creates_no_database_or_supervised_backup` : refus de la politique version2 de B, mais DB A et deux entrées de backup déjà créées ; RC101 à la protection « aucune DB A ».
+- `supervision_api::ordinary_write_budget_reports_control_refusal_and_preserves_revocation_capacity` : vrai routeur, Prepare valide au head56 sous M64, aucun append partiel ; le mapper répond503 `control_unavailable` au lieu du429 de réserve attendu, RC101.
+
+Les tests gelés restent inchangés. Corrections étroites écrites et relues :
+validation globale avant bootstrap, politique offline avant ouverture et
+mapper commun contrôle/supervision ; diagnostic après ligne Gateway conservé.
+Leurs GREEN et les autres tests F1 restent en cours, aucune acceptation déduite.
+Preuves privées `/private/tmp/ai-guard-f1-r1r2-luna-20261103.xrcVaY/` :
+`r1.log` SHA `95456004bb2a447ea887f34970747dc315a41286ce18e60ebac77bb0eaed86e0`,
+`r2.log` SHA `5205d91dc6c6a49c360dc06c521ec57eb034595bd8202afa9b08cf1c5289210b`.
+Snapshot/registre hashes avant/après identiques. Sandbox Linux ARM64 isolé,
+aucun fournisseur ou moteur ; les gardes du harnais ne servent pas d'oracle.
+
+## 3 novembre — erreurs de capacité dans le client Web
+
+Correctif `f5b035a`, après RED puis revue indépendante des deux allowlists.
+Le nouveau test, avant correction, atteint le refus 429 SSE mais reçoit le
+fallback `identity_unavailable` au lieu de préserver code/action. Une fonction
+exécutée, RC non nul ; la boucle s'arrête au premier cas, les deux autres ne
+sont donc pas annoncés comme reproduits en RED.
+
+```text
+node --test --test-isolation=none --test-name-pattern='^les refus de capacité conservent leur code et leur action sans relance ni retrait du contexte$' front/tests/human-api.test.mjs
+node --test --test-isolation=none front/tests/human-api.test.mjs
+```
+
+**GREEN : 14 fonctions PASS**, aucun ignoré. Le nouveau cas vérifie trois
+couples code/action : saturation SSE/fermer les flux inutiles, admission SSE
+indisponible/contact opérateur et budget de lecture/contact opérateur. Une
+seule requête refusée par scénario, aucun contenu SSE, contexte conservé et
+aucune notification d'authentification/révocation indue. L'allowlist reste
+stricte ; aucune nouvelle autorité ou relance automatique n'est introduite.
+Le troisième couple teste le parsing client ; son émission backend appartient
+au candidat F1 distinct, encore en validation à ce point.
+
+Node24.22.2, sandbox sans réseau, source readonly, environnement vide/allowlist,
+0,5CPU/512MiB/64PID et scratch128MiB borné. Aucun npm install ni navigateur.
+Preuves privées `ai-guard-f-front-contract-luna-20261103.aEJ0E6/proofs/` dans
+`/private/tmp` : `red.log` SHA
+`594e81887ccdc0ab89ddfc3486914252dde9a381ad55553e48b4bab285ddd1a9`,
+`green.log` SHA
+`b39088935255e9ae9f3685286e95afacde8dd737d437e24ea8d2f9ec4d64f6af`.
+Revue privée `ai-guard-audit-f-f1-delta-review-20261103.md` sans bloquant pour
+ce delta. Typecheck/build frontend et navigateur NOT_RUN pour ce lot ciblé.
+
+## 3 novembre — admission SSE humaine par principal
+
+Source `279b5f2`, intégrée dans `297376f`, base `b168784`. Test RED relu et
+corrigé avant exécution : les anciens défauts de sélection A/B et de contexte
+périmé ont été détectés statiquement ; aucun essai de ces fixtures n'est compté.
+Gel RED SHA `60c0811825370f999d830db46e6828c978275761330a96aa8a19192498122703` :
+une fonction réellement exécutée, cinquième Body 200 au lieu de 429 après
+quatre Bodies détenus, RC101 à l'assertion métier. Aucun délai comme oracle.
+
+Après correction et revue indépendante :
+
+```text
+cargo test --offline --locked --test human_stream_capacity -- --test-threads=1
+cargo test --offline --locked --lib api::human_streams::tests -- --test-threads=1
+cargo test --offline --locked --test human_access human_stream_ -- --test-threads=1
+```
+
+**PASS : 3 + 2 + 3 fonctions uniques**, aucun ignoré. Les canaris couvrent
+reconnexion, plus de 64 lots/reprise et révocation durable. Les nouveaux tests
+couvrent principal/credentials/contextes, indépendance A/B, Body non pollé,
+terminal/EOF retenu, rollback des acquisitions et restitution de 24 places
+humaines plus 8 techniques. Unités de purge de la map et échec du total.
+
+Preuves privées `/private/tmp/ai-guard-f-sse-luna-20261103.JhuZYk/` :
+`run.log` SHA `4a3718110d0209b502cd31fe1e2d237b77dbf5684c3ebf4fcaf0775035dce3ad`,
+`green1.log` SHA `125a81624dec20450b9af1b8f87cd6bb552735ddccad76b0ceb22c240911a21b`,
+`green2.log` SHA `d69afb4f21bbde6ca1ea690a02b1a8900c3f39e4a225a6ff152fcd654a61ed7c`,
+`green3.log` SHA `0f04bf1859aee9351481261cc75eb2a11287c250e2c288ffae580a0b1ee19524`.
+Le test GREEN ajoute huit flux techniques au remplissage final ; sa première
+fonction RED reste inchangée. SHA GREEN
+`225f132f30f9e400591da65a04f4767544bc199b662e2008da95ed29df5da87e`.
+Sources et registre readonly ; manifests et mtimes avant/après identiques.
+Rustfmt natif statique ciblé et `git diff --check` PASS. Linux ARM64, vrai
+SQLite/routeur/Body dans le sandbox Docker sans réseau externe ; aucun moteur
+worker, fournisseur ou IdP réel. Clippy Linux reste NOT_RUN, composant absent.
+Revue privée `ai-guard-audit-f-sse-code-review-20261103.md` sans bloquant.
+Ni borne de tous les sockets HTTP, ni éviction autonome, ni qualification
+runtime/100 workers ne se déduit de cette correction. F durable reste ouvert.
+
+Worktree source SSE fermé normalement après push de `279b5f2`, équivalence
+dans l'intégration et état propre, ignorés inclus. Le premier contrôle lsof
+voit le shell de contrôle lui-même dans ce cwd ; le contrôle repris depuis
+l'intégration ne trouve aucun consommateur. Branches et preuves préservées,
+montages du sandbox indépendants du worktree. Reçus privés
+`/private/tmp/ai-guard-f-sse-worktree-close-20261103.ldXvIT/`.
+
 ## 3 novembre — lectures humaines, RED F sur D intégré
 
 Sur archive `b168784` plus le test formaté/revu :

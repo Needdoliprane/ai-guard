@@ -91,10 +91,10 @@ Propriétaire : agent API dans `audit-human-streams-20261103`, pour `api.rs`,
 `api/human.rs`, `api/human_streams.rs` et `tests/human_stream_capacity.rs`.
 La petite traduction des erreurs publiques F1 est raccordée après composition.
 
-- [ ] Écrire puis faire exécuter le RED : quatre Bodies A1 retenus, le
+- [x] Écrire puis faire exécuter le RED : quatre Bodies A1 retenus, le
   cinquième doit être refusé ; le code actuel accepte encore ce cinquième.
-- [ ] Implémenter admission non bloquante, RAII et registre canonique purgé.
-- [ ] Vérifier autres credentials/contextes, A2, réserve technique, acquisitions
+- [x] Implémenter admission non bloquante, RAII et registre canonique purgé.
+- [x] Vérifier autres credentials/contextes, A2, réserve technique, acquisitions
   partielles, drop avant poll et Body conservé après erreur terminale.
 
 ### Composition et clôture

@@ -32,9 +32,18 @@ des consommateurs ; preuves et références source sont préservées. Les RED de
 D ont précédé ses corrections, puis les unités/canaris et la revue finale.
 F a son RED sur D intégré : baseline16, 48 lectures acceptées, head64 ; les
 contrôles et le second humain A échouent ensuite, B reste disponible.
-La conception de budgets/réserves est relue ; deux agents implémentent les
-budgets durables et l'admission SSE dans des worktrees distincts. Ces deux
-sous-lots restent ouverts jusqu'aux tests et à la revue d'implémentation.
+La conception de budgets/réserves est relue ; les deux implémentations ont été
+menées dans des worktrees distincts, avec tests et revue indépendants.
+Le sous-lot SSE est désormais intégré dans `297376f` (source `279b5f2`) :
+4 flux par principal canonique, 24 humains dans les 32 du tenant, permis
+conservés jusqu'au drop du Body, même terminal/EOF. Huit fonctions ciblées
+passent après RED et revue indépendante. Les budgets durables restent ouverts.
+Deux régressions du candidat issues de revue ont été reproduites séparément
+(initialisation partielle et mapper générique), puis corrigées ; leurs GREEN
+et les tests de budgets sont en cours avant intégration.
+Le client Web conserve désormais leurs codes/actions de reprise (`f5b035a`,
+14 fonctions ciblées PASS après RED/revue). Ce test client ne prouve pas
+l'émission backend du budget durable, validée dans le chantier F1 séparé.
 Le risque FD a son premier RED Store réel sur `a1fb518` : après restitution
 des descripteurs, chaîne valide mais autorité restant interdite. Le rejeu sur
 `b168784` confirme le même défaut. Son sous-agent de conception a été arrêté

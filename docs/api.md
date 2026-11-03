@@ -126,6 +126,26 @@ Les limites sont1–100 éléments et256KiB pour l'enveloppe complète ; export 
 
 Limits apply to the complete envelope, not just items. Contexts and cursor positions expire or are revoked; restarting the gateway invalidates them. SSE advances its resumption ID only after a complete validated frame. Retries may duplicate events; possession proves neither receipt nor download. Each returned batch requires durable nominative audit before restitution. Revocation does not retract bytes already emitted. A stream error is terminal; an empty poll invents no business receipt.
 
+Les flux SSE humains partagent une limite de 4 par principal canonique et
+24 par tenant, dans le total de 32 flux techniques/humains de ce tenant.
+Changer de credential ou de contexte ne crée aucune nouvelle part. Un refus
+renvoie `429 capacity_exhausted` avec `retry_action:"close_unused_streams"` ;
+fermer les flux inutiles avant reprise. Un échec interne d'admission renvoie
+`503 stream_admission_unavailable`, action `contact_operator`. Les permis
+restent dans le Body admis jusqu'à son drop, même après erreur terminale/EOF.
+Un client non pollé peut retenir sa part. Ces permis ne sont pas ceux des
+segments I/O Store et ne bornent pas tous les sockets HTTP.
+
+Human SSE shares a limit of 4 streams per canonical principal and 24 per
+tenant, within that tenant's shared total of 32 technical/human streams.
+Changing credential or context does not create another share. Rejection is
+`429 capacity_exhausted` with `retry_action:"close_unused_streams"`; close
+unused streams before reconnecting. Internal admission failure returns
+`503 stream_admission_unavailable` with `contact_operator`. The admitted Body
+retains its permits until drop, including after a terminal error/EOF. An
+unpolled client can occupy its share. These permits are separate from Store
+I/O segments and do not bound all HTTP sockets.
+
 Les contextes/curseurs lient aussi méthode d'authentification, empreinte de la preuve, référence et révision/génération, révision du mapping OIDC, membership, organisation, mode et version d'autorisation. Chaque poll SSE revérifie l'admission et ces droits avant restitution : refresh pending, rotation, logout, expiration ou révocation termine l'ancien flux avec erreur. La nouvelle génération impose de demander `/identity` et sélectionner un contexte neuf ; aucun curseur ni export de l'ancienne génération ne se transfère. SSE and context bindings preserve the OIDC capability ceiling; a new generation cannot reuse the previous authorized view.
 
 Les erreurs humaines sont `{error:{code,message,retry_action}}`.401 ferme la session humaine, même après changement local de contexte ;403 de contexte retire ses données/curseurs et exige une nouvelle sélection ; un refus de ressource ne déconnecte pas toute la session.404 ne distingue pas objet absent et inaccessible.400 refuse entrée/curseur,429 indique capacité,503 contrôle/audit indisponible ; `migration_required`503 demande `contact_operator`, sans repli viewer. Les actions sont `authenticate|select_context|review_permissions|reduce_page|retry|contact_operator`.
@@ -329,7 +349,7 @@ Cette section concerne uniquement les lectures techniques `/api/events`, `/api/s
 
 Paramètres de lecture : `q`, `project_id`, `sandbox_id`, `agent_id`, `kind`, `decision`, `before`, `after`, `from`, `to`, `limit`, `order`. `before` et `after` sont exclusifs ; `from` et `to` s'appliquent au temps de réception et doivent être RFC3339. Ordre par défaut décroissant, `order=asc` pour l'ordre croissant. `limit` est borné entre1 et1000. La recherche texte est une recherche littérale, pas une expression SQL ou regex.
 
-Le flux SSE accepte `Last-Event-ID` ou `after`. Sans curseur, il commence après la tête actuelle. Un client charge d'abord l'historique, conserve son dernier `seq`, puis se connecte avec ce curseur. Au maximum32 flux par gateway ; le navigateur doit reconnecter avec temporisation et dédoublonner par séquence.
+Le flux SSE accepte `Last-Event-ID` ou `after`. Sans curseur, il commence après la tête actuelle. Un client charge d'abord l'historique, conserve son dernier `seq`, puis se connecte avec ce curseur. Au maximum 32 flux par tenant, partagés avec les flux humains ; le navigateur doit reconnecter avec temporisation et dédoublonner par séquence.
 
 L'export accepte les mêmes filtres et `format=jsonl` ou `format=json`. Il fixe une tête de lecture au début afin que les nouvelles écritures n'allongent pas indéfiniment l'export. Une erreur interrompt le flux ; le client doit signaler l'échec et ne pas présenter un export interrompu comme complet.
 

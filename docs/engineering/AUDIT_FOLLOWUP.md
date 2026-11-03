@@ -211,11 +211,31 @@ restent privés hors de ces ressources. Reçus dans le dossier de preuves D.
 
 ### Suite F et FD — reproductions, correctifs encore ouverts
 
+**F-SSE intégré** : `297376f`, source `279b5f2`, après RED réel du cinquième
+Body admis 200 au lieu de 429. Limites fixes par tenant : 4 par principal
+canonique, 24 humains dans le total 32 partagé. La lease demeure avec le Body
+jusqu'au drop, y compris après erreur/EOF ; pas de timer de restitution.
+Registre Weak purgé et acquisitions partielles annulées. Revue indépendante
+sans bloquant ; 3 nouvelles intégrations, 2 unités et 3 canaris passent.
+Ces preuves Router/SQLite/Body ne qualifient pas tous les sockets HTTP ni
+l'éviction d'un client non pollé. Le budget durable F reste ouvert : la revue
+a demandé une prévalidation globale des politiques avant bootstrap et un
+raccord du refus logique dans le mapper de contrôle. Les deux RED ciblés ont
+été atteints séparément, puis les corrections ont été écrites/revues. GREEN
+en cours ; cette partie n'est pas encore intégrée ni réputée validée.
+
+Raccord client Web dans `f5b035a` : après un RED de parsing, 14 fonctions
+passent, dont conservation des codes/actions de capacité SSE et de budget
+de lecture, sans nouvelle autorité ni relance. La validation frontend ne
+constitue pas une preuve d'émission backend du budget durable. Worktree SSE
+source fermé normalement, branche et preuves conservées.
+
 F est reproduit sur `b168784` avec le vrai routeur et deux stores : un humain
 remplit les64événements A par48lectures après baseline16, puis empêche les
 contrôles et les lectures d'un pair ; B reste disponible. Le RED exige le
 head physique atteint après contrôles, pas un délai ou un throttle D.
-Conception des budgets/réserves en cours, aucun correctif livré.
+Le candidat de budgets/réserves est écrit ; tests et corrections de revue
+restent requis avant intégration de cette partie.
 
 Le RED FD est aussi revalidé sur `b168784`, enfant seul en EMFILE réel puis
 FD restaurés : chaîne valide, Store interdit et append impossible. La revue
