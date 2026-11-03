@@ -98,6 +98,15 @@ indépendante de la proposition est traitée : reprise conservatrice après
 redémarrage et formulation conditionnelle du correctif C. Aucun de ces
 contrôles ne remplace les reproductions et tests Rust encore `NOT_RUN`.
 
+Analyse statique de formatage distincte : le `rustfmt --check --edition 2024`
+de la toolchain macOS1.99.1 disponible passe sur `src/workspace.rs`,
+`tests/audit_workspace_export.rs`, `tests/tenant_api.rs` et
+`tests/ingress_admission/slow_uploads.rs` (trois commandes RC0, aucune édition
+ni exécution du code projet). Les sondes dans l'image Linux ont en revanche
+montré l'absence du composant rustfmt : formatage Linux `NOT_RUN`, sans
+installation. Ces lectures statiques ne débloquent pas la compilation ou les
+reproductions comportementales Rust dans leur sandbox.
+
 Les huit anciens gardiens de tests orphelins cités par le mainteneur ont été
 identifiés par PID, propriétaire, naissance, programme et rôle, puis arrêtés
 par SIGTERM ciblé avec son autorisation. Aucun volume, worker, credential,
