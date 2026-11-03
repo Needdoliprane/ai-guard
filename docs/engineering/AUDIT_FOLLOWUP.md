@@ -17,8 +17,8 @@ quatrième porte leur intégration. Le checkout principal et les travaux
 | Lot | Code revérifié et critère | État constaté |
 |---|---|---|
 | A — export | Métadonnées actives filtrées à l'écriture, contrôles/limites conservés, fichiers 0644 et scan brut distinct. | Deux RED comportementaux, puis 11 fonctions ciblées GREEN ; revue indépendante acceptée. Code intégré au candidat `357b6e0`, guides EN/FR synchronisés. |
-| B — panne d'un tenant | Erreur voisine isolée, store propre fermé et refus des collisions préservés ; projection humaine partielle explicite. | Deux RED comportementaux, puis 7 tests Rust et 24 tests frontend GREEN ; TypeScript PASS. Candidat séparé, revue favorable sous corrélation des preuves et documentation ; pas encore intégré. |
-| C — ingress | Pool upload distinct, lecture bornée avant acquisition de l'échange ; corps vides admis sans occuper le pool upload. | RED avec 64 uploads actifs et GET 429 ; deux régressions et six canaris ingress GREEN. Trois tests model_ingress locaux supplémentaires ont été sélectionnés par le filtre ; revue source acceptée, documents en cours, pas encore intégré. |
+| B — panne d'un tenant | Erreur voisine isolée, store propre fermé et refus des collisions préservés ; projection humaine partielle explicite. | Deux RED comportementaux, puis 7 tests Rust et 24 tests frontend GREEN ; TypeScript PASS. Revue indépendante acceptée, manifeste et guides EN/FR corrélés ; intégré dans `b4c2fee`. |
+| C — ingress | Pool upload distinct, lecture bornée avant acquisition de l'échange ; corps vides admis sans occuper le pool upload. | RED avec 64 uploads actifs et GET 429 ; deux régressions et six canaris ingress GREEN. Trois tests model_ingress locaux supplémentaires sélectionnés par le filtre, sans modèle ; revue indépendante et guides EN/FR acceptés, intégré dans `57fae74`. |
 
 Les tests de reproduction de l'audit passent lorsque le défaut existe : ils
 ne constituent pas des régressions sans inversion des assertions. Une erreur
@@ -75,6 +75,67 @@ fichiers intégrés ; `Cargo.lock` reste
 `915e887ad3869bc20ed82cabad59ad16c2c58d9d26a2ac8acef9ae50c6afff98`.
 Tests Linux ARM64 dans Docker isolé, Rust1.99.1 ; aucun payload Git exécuté,
 worker réel, Podman, macOS, build release ou qualification production déduit.
+
+Le lot A et ses guides ont été poussés dans `197e394`, référence distante
+vérifiée. Son worktree a été fermé par `git worktree remove`, sans force,
+après inventaire suivi/non suivi/ignoré vide, équivalence du patch intégré et
+absence de consommateur ouvert. La référence source `54546d5` et les preuves
+hors checkout restent conservées ; aucun volume ni donnée utilisateur supprimé.
+
+### Lots B et C — résultats intégrés au candidat
+
+B : source `f1b4122`, intégration `b4c2fee`. Les deux RED ont observé 503 au
+lieu de200 pour B, après corruption de l'audit A puis sous verrou SQLite A.
+Après correction, `cargo test --offline --locked --test tenant_api` passe4/4,
+dont le refus503 pour le store propre verrouillé et la complétude rétablie
+après reprise. Trois filtres exacts passent chacun1/1 :
+
+```text
+--test human_access credential_collisions_between_tenants_and_classes_never_select_a_tenant
+--test oidc_gateway_flow oidc_subjects_read_only_their_durable_tenant_even_with_a_forged_tenant_claim
+--test sso_cli signed_native_session_reads_exports_resumes_and_rotates_without_token_files
+```
+
+Ces filtres sont exécutés avec `-- --exact`, pas comme une suite SSO entière.
+Le scénario OIDC vérifie aussi l'admission B malgré A indisponible, les
+contextes partiels et le refus503 d'un sujet dont les appartenances restent
+inconnues. Les collisions ajoutées après création du gateway restent refusées.
+Frontend : quatre fichiers ciblés, 24/24 PASS, et TypeScript5.9.3 `--noEmit`
+RC0 ; aucune vérification navigateur/DOM ou SSO réel déduite. Les nouveaux
+guides et le contrat API exigent la mise à jour coordonnée des clients.
+
+Preuves B : `test-b/reports/baseline-red.txt`, `green.txt` et
+`green-source-hashes-final.txt` sous le répertoire privé des corrections.
+Le manifeste complet est une vérification APRÈS tests, corrélée aux sept
+empreintes annoncées avant exécution et au worktree ; aucune preuve antérieure
+n'a été fabriquée. La copie GREEN est protégée de l'UID1001 par propriété1000,
+répertoires0555/fichiers0444 et parent1777 appartenant à root (sticky bit,
+caps effectives nulles, `no-new-privileges`). L'entrée RED bind readonly reste
+inchangée. Les tentatives de préparation ratées restent séparées des résultats.
+Les scans O(n) et attentes SQLite voisines subsistent : ce lot ne qualifie
+ni l'équité ni la latence ; le lot D doit traiter cette exécution synchrone.
+
+C : source `80fa688`, intégration `57fae74`. Le RED a gardé64 uploads en
+lecture et observé429 pour le monitor attendu200. GREEN :
+`cargo test --offline --locked --lib ingress::admission_tests:: -- --nocapture`
+passe2/2 ; le filtre `ingress::tests::` passe les six canaris visés et trois
+`model_ingress::tests::` supplémentaires par correspondance de sous-chaîne
+(neuf fonctions au total, aucun vrai modèle ni accès externe). Aucun rejeu
+inutile après ce constat ; les comptes restent distincts.
+Preuves : `test-c/baseline-corrected/` et `test-c/green/` dans le même
+répertoire privé. Les empreintes GREEN sont
+`3019844dd3074e33ce1b0e4f8bee3a17a601f4c98aac475c1900455616f53f6d`
+pour `src/ingress.rs` et
+`4278626804449bab857178712bc39181661da0c798822b8763ebc28a621def5c`
+pour la régression. Les preuves RED et les erreurs de montage `noexec`
+`NOT_RUN` restent préservées séparément.
+
+C ne neutralise pas toute saturation : des requêtes avec corps peuvent encore
+recevoir429 du pool upload ; requêtes complètes/SSE et connexions lentes ont
+leurs autres limites. Le runner conserve son arrêt sur erreur de suivi. La
+recette historique d'arrêt utilisait un moteur fixture ; aucun worker réel ni
+retry60s n'est qualifié ici. Un contrôle composé du candidat intégré reste
+distinct des tests exécutés sur chaque gel de lot.
 
 ### Préparation vérifiable des régressions
 
@@ -177,8 +238,9 @@ Les lots D/E/F attendent l'intégration de B et leurs propres reproductions.
 L'outbox et les autres candidats non établis restent hors correction sur la
 seule base de ce rapport provisoire.
 
-**Lot A intégré au candidat ; B/C restent séparés. Aucun test worker/runtime
-réel exécuté pour ces lots, aucune qualification production déduite.** Les résultats historiques ci-dessous
+**Les trois lots A/B/C sont intégrés au candidat, après reproductions,
+tests ciblés et revues indépendantes. Aucun test worker/runtime réel exécuté
+pour ces lots, aucune qualification production déduite.** Les résultats historiques ci-dessous
 conservent leurs dates et leurs périmètres.
 
 ---
