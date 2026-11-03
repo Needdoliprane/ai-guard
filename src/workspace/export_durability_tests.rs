@@ -201,7 +201,7 @@ impl Fixture {
             (
                 "implicit/a/tool.bin",
                 b"synthetic executable payload".as_slice(),
-                0o755,
+                0o644,
             ),
         ] {
             let path = destination.join(relative);

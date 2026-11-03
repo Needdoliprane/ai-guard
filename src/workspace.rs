@@ -111,6 +111,31 @@ fn excluded_name(name: &str) -> bool {
             .any(|suffix| name.ends_with(suffix))
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn excluded_export_path(path: &Path) -> bool {
+    let mut parent: Option<&str> = None;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        let Some(name) = name.to_str() else {
+            // validate_relative_path rejects this before the export policy.
+            return true;
+        };
+        if excluded_name(name)
+            || [".husky", ".envrc", ".idea"]
+                .iter()
+                .any(|excluded| name.eq_ignore_ascii_case(excluded))
+            || (parent.is_some_and(|parent| parent.eq_ignore_ascii_case(".vscode"))
+                && name.eq_ignore_ascii_case("tasks.json"))
+        {
+            return true;
+        }
+        parent = Some(name);
+    }
+    false
+}
+
 /// Read a project without following a symlink in any path component. The open
 /// directory descriptors also keep a concurrent rename from escaping the root.
 #[cfg(unix)]
@@ -452,6 +477,7 @@ fn read_workspace_archive<R: Read>(
     let mut manifest = Manifest::new();
     let mut total = 0_u64;
     let mut entries = 0_usize;
+    let mut omitted_entries = 0_usize;
     for entry in archive.entries()? {
         let mut entry = entry.context("invalid workspace archive")?;
         let path = validate_relative_path(&entry.path()?)?;
@@ -508,8 +534,14 @@ fn read_workspace_archive<R: Read>(
         {
             bail!("archive file conflicts with a directory path");
         }
+        // Filtering must not bypass archive validation or quota accounting.
+        // Read-only scans retain every observed file, including these names.
+        let omitted = staging.is_some() && excluded_export_path(&path);
+        if omitted {
+            omitted_entries += 1;
+        }
         if kind.is_dir() {
-            if let Some(staging) = staging {
+            if let Some(staging) = staging.filter(|_| !omitted) {
                 staging.create_directory(&path)?;
             }
             continue;
@@ -523,13 +555,11 @@ fn read_workspace_archive<R: Read>(
             bail!("export exceeds the total byte limit");
         }
         let mut file = staging
+            .filter(|_| !omitted)
             .map(|staging| staging.create_file(&path))
             .transpose()?;
-        let mode = if entry.header().mode()? & 0o111 != 0 {
-            0o755
-        } else {
-            0o644
-        };
+        // Validate the untrusted header, but never restore its executable bits.
+        entry.header().mode()?;
         let mut hasher = Sha256::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut written = 0_u64;
@@ -559,7 +589,7 @@ fn read_workspace_archive<R: Read>(
                 &path,
                 file,
             );
-            file.set_permissions(fs::Permissions::from_mode(mode))?;
+            file.set_permissions(fs::Permissions::from_mode(0o644))?;
             #[cfg(test)]
             export_durability_tests::record(
                 export_durability_tests::Stage::FileModeApplied,
@@ -575,13 +605,24 @@ fn read_workspace_archive<R: Read>(
                 file,
             )?;
         }
-        manifest.insert(
-            path.to_string_lossy().into_owned(),
-            Fingerprint {
-                sha256: hex::encode(hasher.finalize()),
-                bytes: size,
-            },
-        );
+        if !omitted {
+            manifest.insert(
+                path.to_string_lossy().into_owned(),
+                Fingerprint {
+                    sha256: hex::encode(hasher.finalize()),
+                    bytes: size,
+                },
+            );
+        }
+    }
+    if staging.is_some() {
+        // No worker-controlled names or contents reach the diagnostic. Failure
+        // to report the policy aborts before either export caller publishes.
+        writeln!(
+            std::io::stderr().lock(),
+            "Export contents remain untrusted: skipped {omitted_entries} policy-blocked archive entries; executable bits are removed. Review the content before using it."
+        )
+        .context("cannot report export safety policy")?;
     }
     Ok(manifest)
 }
@@ -1256,6 +1297,74 @@ pub struct FileChange {
     pub change: &'static str,
     pub before: Option<Fingerprint>,
     pub after: Option<Fingerprint>,
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod export_policy_regression_tests {
+    use super::*;
+    use std::{ffi::OsStr, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn authorized_export_filters_host_metadata_while_scan_keeps_observed_files() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let sources = base.join("sources");
+        let exports = base.join("exports");
+        for path in [&sources, &exports] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, data) in [
+            (
+                "./.git/config",
+                b"[core]\nfsmonitor = fixture-command\n".as_slice(),
+            ),
+            (
+                "./.git/hooks/pre-commit",
+                b"inert fixture; never execute".as_slice(),
+            ),
+            ("nested/.envrc", b"inert fixture; never execute".as_slice()),
+            ("nested/tool", b"ordinary source".as_slice()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            builder.append_data(&mut header, path, data).unwrap();
+        }
+        let bytes = builder.into_inner().unwrap();
+        let scanned = scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap();
+        assert_eq!(scanned.len(), 4);
+        assert!(scanned.contains_key(".git/config"));
+        assert!(scanned.contains_key("nested/.envrc"));
+        let parent = AuthorizedExportParent::open(
+            &exports,
+            std::slice::from_ref(&exports),
+            std::slice::from_ref(&sources),
+        )
+        .unwrap();
+        let manifest = parent
+            .extract(bytes.as_slice(), OsStr::new("result"), Limits::default())
+            .unwrap();
+        let destination = exports.join("result");
+        assert!(!destination.join(".git").exists());
+        assert!(!destination.join("nested/.envrc").exists());
+        assert_eq!(manifest.len(), 1);
+        assert_eq!(manifest["nested/tool"], scanned["nested/tool"]);
+        assert_eq!(
+            fs::read(destination.join("nested/tool")).unwrap(),
+            b"ordinary source"
+        );
+        assert_eq!(
+            fs::metadata(destination.join("nested/tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+    }
 }
 pub fn diff_manifests(before: &Manifest, after: &Manifest) -> Vec<FileChange> {
     let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
