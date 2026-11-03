@@ -25,6 +25,91 @@
    restent historiques ; les blocages DNS indiqués ci-dessous ont depuis été
    levés dans leur portée documentée.
 
+## Lot F — plan de correction après reproduction
+
+> Pour les agents : appliquer `superpowers:subagent-driven-development` ou
+> `superpowers:executing-plans`, avec tests Luna et revue indépendante.
+
+**But :** un lecteur humain ne doit pas épuiser la capacité nécessaire aux
+décisions, aux révocations ou aux autres lecteurs de son tenant.
+**Architecture :** même chaîne et schéma5 ; classes d'admission internes,
+compteurs reconstruits depuis les reçus validés et cache du seul préfixe
+committé. Les flux ont une admission distincte, sans retenir les permis I/O D.
+**Stack :** Rust, SQLite, Axum/Tokio existants, sans dépendance supplémentaire.
+La conception privée `ai-guard-audit-f-budget-design-20261103.md` et sa revue
+`ai-guard-audit-f-design-review-20261103.md` dans `/private/tmp` fixent les
+risques ; les arbitrages applicables sont repris ici. Aucune réalisation de
+ce plan n'est encore annoncée comme vérifiée.
+
+Contraintes et arbitrages :
+
+- Budgets cumulés événements/octets UTF-8 du payload préparé exact. Défauts :
+  contrôle 1/4, identité 1/8, humain tenant 1/2, humain principal 1/8 des capacités
+  physiques. Une configuration opérateur explicite peut les modifier après
+  validation ; elle ne remet jamais le cumul à zéro.
+- Admission par port Rust privé, jamais par `kind`, label ou JSON. Lecture
+  humaine sous réserves contrôle+identité ; écriture ordinaire sous réserve
+  identité ; maintenance d'identité sous plafond physique. Avant schéma5,
+  conserver le contrat physique historique.
+- Très petits plafonds : ouverture conservée, lectures humaines désactivées
+  explicitement si les défauts ne sont pas représentables ; aucun relèvement
+  de capacité. Une saturation physique existante reste 503.
+- Refus logique humain 429 `audit_read_budget_exhausted`, action opérateur,
+  sans `Retry-After`. Aucun rendu sans reçu ni effacement conseillé. Un profil
+  voisin refusé reste partiel selon B ; ne pas promettre 429 pour toute
+  agrégation OIDC.
+- Flux humains : 4 par principal canonique, 24 par tenant, dans les 32 totaux
+  existants. Les permis restent possédés jusqu'au drop réel du Body, même
+  après erreur terminale. Aucun timer de restitution. Un client non pollé peut
+  retenir sa part ; aucune borne de tous les sockets HTTP n'est revendiquée.
+
+Points de revue à prouver : rotation/contexte ne rechargeant pas le principal ;
+bytes nonASCII et limites inclusives ; rollback multi-append sans débit publié ;
+sibling/externe/`integrity()` sans cache périmé ; Body jamais pollé ou retenu
+après erreur sans fuite ni restitution anticipée.
+
+### F1 — budgets durables
+
+Propriétaire : agent core dans `audit-human-budget-20261103`, pour `audit.rs`,
+`audit/{capacity,capacity_tests,human,identity}.rs`, `gateway_config.rs`,
+`main.rs`, `identity_cli.rs` et la seule couture d'ouverture de
+`identity_cli/offline.rs`. Aucun fichier API ou doc partagé.
+
+- [x] Reproduire le défaut avec `tests/human_read_budget.rs` gelé, sans moteur
+  ni oracle de latence : head64 et contrôles refusés, RC101.
+- [ ] Implémenter les classes privées, coûts exacts et projection committée ;
+  conserver replay identique, conflits et témoins de D.
+- [ ] Exposer `AuditCapacityPolicyV1`, `AuditCapacityFailureV1` et
+  `Store::with_capacity_policy` ; raccorder registre et fichier privé CLI,
+  propager la politique aux siblings et afficher un diagnostic sans secret.
+- [ ] Faire exécuter par Luna le RED inchangé devenu GREEN et les unités
+  count/bytes, réserves, rollback/replay, reopen/sibling/externe et coût stable.
+
+### F2 — admission des flux, en parallèle
+
+Propriétaire : agent API dans `audit-human-streams-20261103`, pour `api.rs`,
+`api/human.rs`, `api/human_streams.rs` et `tests/human_stream_capacity.rs`.
+La petite traduction des erreurs publiques F1 est raccordée après composition.
+
+- [ ] Écrire puis faire exécuter le RED : quatre Bodies A1 retenus, le
+  cinquième doit être refusé ; le code actuel accepte encore ce cinquième.
+- [ ] Implémenter admission non bloquante, RAII et registre canonique purgé.
+- [ ] Vérifier autres credentials/contextes, A2, réserve technique, acquisitions
+  partielles, drop avant poll et Body conservé après erreur terminale.
+
+### Composition et clôture
+
+- [ ] Root compose les fichiers disjoints dans un staging dédié ; Luna exécute
+  les canaris pertinents (dont72pages/73reçus), pas une matrice fournisseur.
+- [ ] Revue indépendante d'implémentation, correction de ses bloquants,
+  formatage, contrôle des cibles touchées et guides EN/FR synchronisés.
+- [ ] Après preuves et revue seulement : commit, push, état/limites mis à jour,
+  contrôle des consommateurs et fermeture normale des worktrees sources.
+
+FD et le retry du runner ne font pas partie de cette correction. L'archivage
+qualifié reste un écart d'exploitation : aucun quota fini ne promet des
+lectures illimitées, ni une réserve historiquement consommée recréée.
+
 ## Priorités au 2 novembre
 
 1. Nouvelle image SSO `sha256:72bfb9119fe552c6100ffaeb07cbbd8bd86f9449270b19f3904e97ca2dd8c5c7` déployée après le correctif `complete` ; parcours Web réels user-1 (7contrôles PASS) et user-2 (8contrôles PASS) consignés avec leur portée. L'essai administration a rencontré un oracle de lecture vide dont l'attente source est invalide ; le harnais corrigé est préparé, sa recette reste ouverte. Les24tests CLI et leurs checks précédents restent des preuves historiques attachées à leurs gels. [État courant](CURRENT_STATE.md#préparation-sso-locale--intégrée-recette-complète-ouverte).

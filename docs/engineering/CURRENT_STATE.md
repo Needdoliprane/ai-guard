@@ -32,7 +32,9 @@ des consommateurs ; preuves et références source sont préservées. Les RED de
 D ont précédé ses corrections, puis les unités/canaris et la revue finale.
 F a son RED sur D intégré : baseline16, 48 lectures acceptées, head64 ; les
 contrôles et le second humain A échouent ensuite, B reste disponible.
-La conception de budgets/réserves avance, sans métier modifié pour l'instant.
+La conception de budgets/réserves est relue ; deux agents implémentent les
+budgets durables et l'admission SSE dans des worktrees distincts. Ces deux
+sous-lots restent ouverts jusqu'aux tests et à la revue d'implémentation.
 Le risque FD a son premier RED Store réel sur `a1fb518` : après restitution
 des descripteurs, chaîne valide mais autorité restant interdite. Le rejeu sur
 `b168784` confirme le même défaut. Son sous-agent de conception a été arrêté
