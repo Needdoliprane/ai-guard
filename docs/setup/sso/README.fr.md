@@ -280,6 +280,12 @@ Si `gateway.provider.limits` est présent, fournissez l’objet fermé complet d
 
 Le gateway borne en plus les tokens à 16 Kio et les transactions PKCE à 300 secondes. L’admission est bornée par l’expiration de l’access token, 1 heure absolue et 15 minutes d’inactivité ; un refresh ne prolonge pas l’échéance absolue. La remise Web doit être consommée en 30 secondes. Ce sont les bornes actuelles d’implémentation, pas des garanties mesurées de révocation de bout en bout ou de disponibilité.
 
+### Connexion en attente et audit durable
+
+Une connexion Web initiale ou une connexion CLI native réserve un état borné et expirable en mémoire du gateway. Son cookie, sa transaction PKCE ou son intention native corrèle une tentative ; il ne constitue pas une identité authentifiée. Démarrage, annulation, refus ou expiration d’une tentative avant preuve vérifiée par access token n’ajoutent aucun enregistrement à l’audit d’authentification durable. Un redémarrage du gateway perd les tentatives en attente : recommencez la connexion au lieu de rejouer l’ancien callback ou l’ancienne intention.
+
+Après vérification de l’access token, le gateway doit enregistrer durablement une intention d’authentification avant de consulter le compte et ses memberships ou d’admettre une session. Une capacité d’audit épuisée ou un échec d’écriture renvoie `503 audit_unavailable` ; aucune session n’est admise. L’audit des refresh authentifiés, déconnexions et expirations de session reste obligatoire. L’expiration d’une tentative en mémoire ne libère aucune capacité d’audit durable. Ce changement ne purge pas les enregistrements existants et ne répare pas un registre déjà rempli par d’anciennes tentatives : conservez-le avec sa politique originale, diagnostiquez le refus et résolvez la capacité par une procédure de maintenance approuvée. Ne supprimez ni ne remplacez l’audit pour rétablir la connexion.
+
 ## Établir comptes, memberships et ressources
 
 Dans le parcours manuel, l’opérateur doit créer un compte OIDC actif et un membership dans chaque base tenant voulue. Une connexion ne les provisionne pas. Le préparateur de DEMO neuve réalise déjà ces mutations de compte/membership pour son manifeste relu. Pour un stockage existant, utilisez ces modèles publics dans l’ordre :

@@ -280,6 +280,12 @@ If `gateway.provider.limits` is present, supply the complete closed object from 
 
 The gateway additionally limits tokens to 16 KiB and PKCE transactions to 300 seconds. Admission is bounded by access-token expiry, an absolute limit of 1 hour and an inactivity limit of 15 minutes; refresh does not extend the absolute deadline. Web token delivery must be redeemed within 30 seconds. These are current implementation bounds, not measured end-to-end revocation or availability guarantees.
 
+### Pending login and durable audit
+
+An initial Web login or native CLI login reserves bounded, expiring state in gateway memory. Its cookie, PKCE transaction or native intent correlates an attempt; it does not establish an authenticated user. Starting, cancelling, rejecting or expiring an attempt before verified access-token proof does not append to the durable authentication audit. A gateway restart loses pending attempts: begin a new login rather than replaying the old callback or intent.
+
+After verifying the access token, the gateway must durably record an authentication intention before consulting the account/memberships or admitting a session. Missing audit capacity or a failed write returns `503 audit_unavailable`; no session is admitted. Authenticated refresh, logout and session-expiry auditing remain required. Volatile login expiry does not reclaim durable audit capacity. This change neither purges existing records nor repairs a ledger already filled by earlier attempts: preserve it and its original policy, diagnose the refusal, and resolve capacity through an approved maintenance procedure. Do not delete or replace the audit to resume sign-in.
+
 ## Establish accounts, memberships and resources
 
 On the manual route, the operator must create an active OIDC account and membership in each intended tenant database. Sign-in does not provision either. The fresh DEMO preparer already performs these account/membership mutations for its reviewed manifest. For existing storage use these public templates in order:
