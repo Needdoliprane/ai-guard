@@ -208,6 +208,30 @@ test("migration_required conserve son action opérateur et le credential", async
   } finally { client.close(); }
 });
 
+test("les refus de capacité conservent leur code et leur action sans relance ni retrait du contexte", async () => {
+  for (const [status, code, action] of [
+    [429, "capacity_exhausted", "close_unused_streams"],
+    [503, "stream_admission_unavailable", "contact_operator"],
+    [429, "audit_read_budget_exhausted", "contact_operator"],
+  ]) {
+    let refusedCalls = 0;
+    const { client, notifications } = make(async (path) => {
+      if (identityRoute(path)) return Response.json(identity());
+      refusedCalls++; return errorResponse(status, code, action);
+    });
+    try {
+      await client.identity(); client.selectContext("context-a");
+      await assert.rejects(code === "audit_read_budget_exhausted" ? client.resources() :
+        client.listen({ view: "metadata" }, new AbortController().signal,
+          () => assert.fail("a refused stream must deliver no page"), () => {}),
+      (error) => error instanceof HumanApiError && error.status === status && error.code === code && error.retryAction === action);
+      assert.equal(refusedCalls, 1);
+      assert.equal(client.context.id, "context-a");
+      assert.deepEqual(notifications, []);
+    } finally { client.close(); }
+  }
+});
+
 test("SSE garde le dernier ID d’un frame complet après interruption d’un ID seul", async () => {
   const paths = []; let streams = 0;
   const { client } = make(async (path, options) => {

@@ -17,8 +17,8 @@ interface Handlers {
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
   "context_invalid", "context_expired", "context_revoked", "permission_denied", "not_found", "invalid_request", "invalid_cursor",
-  "capacity_exhausted", "identity_unavailable", "audit_unavailable", "migration_required"]);
-const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator"]);
+  "capacity_exhausted", "stream_admission_unavailable", "audit_read_budget_exhausted", "identity_unavailable", "audit_unavailable", "migration_required"]);
+const actions = new Set(["authenticate", "select_context", "review_permissions", "reduce_page", "retry", "contact_operator", "close_unused_streams"]);
 
 /** Separate trust boundary: a local human credential can never fall back to the viewer API. */
 export class HumanApiClient {
