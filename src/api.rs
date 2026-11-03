@@ -1,5 +1,5 @@
 use crate::{
-    audit::{DecisionFailure, EventQuery, Store},
+    audit::{AuditCapacityFailureV1, DecisionFailure, EventQuery, Store},
     control::{
         AdmissionRefusalV1, AdmissionV1, ControlFailure, DecisionPhaseV1, DecisionReceiptV1,
         QuotaPolicyV1, WorkerMutationV1,
@@ -37,6 +37,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+mod audit_capacity_tests;
 mod auth;
 mod human;
 mod human_state;
@@ -52,7 +54,30 @@ type ApiResult<T> = Result<T, (StatusCode, Json<Value>)>;
 fn error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error":message})))
 }
-fn unavailable(_: anyhow::Error) -> (StatusCode, Json<Value>) {
+fn audit_capacity_failure(failure: &anyhow::Error) -> Option<(StatusCode, Json<Value>)> {
+    let (code, message) = match failure.downcast_ref::<AuditCapacityFailureV1>()? {
+        AuditCapacityFailureV1::HumanReadBudgetExhausted => (
+            "audit_read_budget_exhausted",
+            "The cumulative human read audit budget is exhausted. Preserve the audit and contact the operator.",
+        ),
+        AuditCapacityFailureV1::HumanReadDisabled => (
+            "audit_read_budget_exhausted",
+            "The configured capacity cannot support protected human read audit budgets. Contact the operator.",
+        ),
+        AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted => (
+            "audit_write_budget_exhausted",
+            "The remaining audit capacity is reserved for identity maintenance. Preserve the audit and contact the operator.",
+        ),
+    };
+    Some((
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({"error":{"code":code,"message":message,"retry_action":"contact_operator"}})),
+    ))
+}
+fn unavailable(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if let Some(response) = audit_capacity_failure(&failure) {
+        return response;
+    }
     error(
         StatusCode::SERVICE_UNAVAILABLE,
         "Audit indisponible, incohérent ou plein : opération refusée.",
@@ -761,6 +786,9 @@ async fn fresh_policy(s: &GatewayState, request: &DecisionRequest) -> (Decision,
 }
 
 fn control_error(failure: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if let Some(response) = audit_capacity_failure(&failure) {
+        return response;
+    }
     let (status, code, message) = match failure.downcast_ref::<ControlFailure>() {
         Some(ControlFailure::InvalidRequest) => (
             StatusCode::BAD_REQUEST,

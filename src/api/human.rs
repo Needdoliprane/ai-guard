@@ -36,6 +36,9 @@ pub(super) fn failure(
     )
 }
 fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+    if let Some(response) = super::audit_capacity_failure(&error) {
+        return response;
+    }
     match error.downcast_ref::<IdentityFailureV1>() {
         Some(IdentityFailureV1::MigrationRequired) => failure(
             StatusCode::SERVICE_UNAVAILABLE,

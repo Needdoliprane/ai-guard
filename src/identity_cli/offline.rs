@@ -56,6 +56,14 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
         args.confirm_control_stopped,
         "offline identity maintenance requires --confirm-control-stopped"
     );
+    let capacity_policy = args
+        .audit_capacity_file
+        .as_deref()
+        .map(Store::load_capacity_policy)
+        .transpose()?;
+    if let Some(policy) = &capacity_policy {
+        policy.validate(args.max_events)?;
+    }
     let data_path = absolute_path(&args.data)?;
     let store = Store::open_existing_for_tenant(
         &data_path,
@@ -63,6 +71,27 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
         Redactor::new(vec![]),
         args.max_events,
     )?;
+    let store = if let Some(policy) = capacity_policy {
+        store.with_capacity_policy(policy)?
+    } else {
+        store
+    };
+    eprintln!(
+        "Audit capacity tenant={} source={} human_read_policy={} policy={} fingerprint={}",
+        store.tenant_id(),
+        if args.audit_capacity_file.is_some() {
+            "explicit_operator_policy"
+        } else {
+            "derived_defaults"
+        },
+        if store.capacity_policy().human_reads_enabled() {
+            "enabled"
+        } else {
+            "human_reads_disabled_insufficient_capacity"
+        },
+        serde_json::to_string(store.capacity_policy())?,
+        store.capacity_policy_fingerprint()?,
+    );
     let state = store.supervision_state()?;
     ensure!(
         matches!(state.schema_version, 4 | 5) && !state.active,

@@ -55,6 +55,9 @@ pub struct OfflineArgs {
     /// Audit capacity, including the mandatory identity mutation records.
     #[arg(long, default_value_t = 1_000_000)]
     pub max_events: u64,
+    /// Private audit capacity policy; cumulative usage remains in the same chain.
+    #[arg(long)]
+    pub audit_capacity_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

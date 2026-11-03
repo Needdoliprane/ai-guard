@@ -73,6 +73,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_max_events(10_000)
+    }
+
+    fn with_max_events(max_events: u64) -> Self {
         let directory = support::private_tempdir();
         let redactor = Redactor::new(vec![]);
         let a = Arc::new(
@@ -80,7 +84,7 @@ impl Fixture {
                 &directory.path().join("a.sqlite"),
                 "tenant-a",
                 redactor.clone(),
-                10_000,
+                max_events,
             )
             .unwrap(),
         );
@@ -91,7 +95,7 @@ impl Fixture {
                 &directory.path().join("b.sqlite"),
                 "tenant-b",
                 redactor.clone(),
-                10_000,
+                max_events,
             )
             .unwrap(),
         );
@@ -104,7 +108,7 @@ impl Fixture {
                 &directory.path().join("v2.sqlite"),
                 "tenant-v2",
                 redactor.clone(),
-                10_000,
+                max_events,
             )
             .unwrap(),
         );
@@ -654,6 +658,134 @@ async fn control_protocol_reports_authenticated_tenant_role_namespace_and_inacti
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_capacity() {
+    use agentsandbox::{audit::AuditCapacityFailureV1, identity::*};
+
+    let fixture = Fixture::with_max_events(64);
+    let path = fixture._directory.path();
+    fixture
+        .a
+        .migrate_identity_v4(&path.join("a-before-v4"))
+        .unwrap();
+    fixture
+        .a
+        .migrate_human_access_v5(&path.join("a-before-v5"))
+        .unwrap();
+    let principal = PrincipalRefV1::HumanLocal {
+        installation_id: Uuid::new_v4().to_string(),
+        account_id: Uuid::new_v4().to_string(),
+    };
+    let account_change = |expected_revision, active| IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "fixture-capacity-operator".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change: IdentityChangeV1::Account {
+            expected_revision,
+            account: HumanAccountV1 {
+                version: 1,
+                principal: principal.clone(),
+                display_name: "Capacity test account".into(),
+                revision: expected_revision + 1,
+                active,
+            },
+        },
+    };
+    fixture.a.mutate_identity(&account_change(0, true)).unwrap();
+    let admission = supervised(admission(&fixture.a));
+    let response = json_request(
+        &fixture.router,
+        Method::POST,
+        "/api/v1/workers/supervised-reservations",
+        Some(&fixture.runner_a),
+        &admission,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let reserved: AdmissionResultV1 = response_json(response).await;
+    let worker = reserved.worker.unwrap();
+
+    let mut reserved_capacity = false;
+    for _ in 0..64 {
+        match fixture
+            .a
+            .append(agentsandbox::model::Event::new("capacity.fill"))
+        {
+            Ok(_) => {}
+            Err(error) => {
+                assert_eq!(
+                    error.downcast_ref::<AuditCapacityFailureV1>(),
+                    Some(&AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted)
+                );
+                reserved_capacity = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        reserved_capacity,
+        "the logical reserve must be reached before the physical limit"
+    );
+    let before = fixture.a.integrity().unwrap();
+    assert!(before.valid && fixture.a.healthy());
+    assert_eq!(before.event_count, 56);
+    let mutation = WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        transition: WorkerTransitionV1::Prepare,
+    };
+    let response = json_request(
+        &fixture.router,
+        Method::POST,
+        &format!("/api/v1/workers/{}/transitions", worker.worker_id),
+        Some(&fixture.runner_a),
+        &mutation,
+    )
+    .await;
+    let status = response.status();
+    let body: Value = response_json(response).await;
+    let after = fixture.a.integrity().unwrap();
+    assert_eq!(
+        (after.event_count, &after.head_hash),
+        (before.event_count, &before.head_hash)
+    );
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "unexpected control refusal: {body}"
+    );
+    assert_eq!(body["error"]["code"], "audit_write_budget_exhausted");
+    assert_eq!(body["error"]["retry_action"], "contact_operator");
+    assert!(
+        fixture
+            .a
+            .worker_operation(&mutation.operation_id)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        fixture
+            .a
+            .worker(&worker.worker_id)
+            .unwrap()
+            .unwrap()
+            .revision,
+        worker.revision
+    );
+    let revocation = fixture
+        .a
+        .mutate_identity(&account_change(1, false))
+        .unwrap();
+    assert_eq!(revocation.audit_seq as u64, before.event_count + 1);
+    assert!(!fixture.a.human_account(&principal).unwrap().unwrap().active);
 }
 
 #[tokio::test]
