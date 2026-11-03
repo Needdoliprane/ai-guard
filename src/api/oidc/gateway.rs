@@ -311,7 +311,6 @@ fn fail_initial(
 }
 struct NewAdmission<'a> {
     record: AuthenticationRecordV1,
-    receipt: AuthenticationReceiptV1,
     access: VerifiedAccess,
     raw: &'a str,
     refresh: Option<&'a str>,
@@ -326,7 +325,6 @@ fn install(
 ) -> ApiResult<SessionBinding> {
     let NewAdmission {
         record,
-        receipt,
         access,
         raw,
         refresh,
@@ -334,6 +332,15 @@ fn install(
         kind,
         browser_transaction,
     } = admission;
+    let session_id = record.session_id.ok_or_else(invalid_request)?;
+    // VerifiedAccess is produced only by the configured provider's verifier.
+    // Reserve durable audit capacity now, before membership reads (which can
+    // themselves produce business audit) or any session admission/mutation.
+    // Anonymous nonce creation and rejected provider input never reach here.
+    let receipt = oidc
+        .audit
+        .append_typed(record.clone())
+        .map_err(audit_failure)?;
     if state.credential_index.lookup(raw).is_some()
         || human::reject_control_collision(state, raw, None).is_err()
     {
@@ -374,6 +381,7 @@ fn install(
     if let Some((key, transaction)) = browser_transaction
         && registry.exchanging.get(&key).is_none_or(|entry| {
             entry.transaction_id != transaction
+                || entry.session_id != session_id
                 || entry.created.elapsed() >= Duration::from_secs(35)
         })
     {
@@ -397,7 +405,6 @@ fn install(
     }
     let now = chrono::Utc::now().timestamp();
     let authenticated_at = Instant::now();
-    let session_id = record.session_id.ok_or_else(invalid_request)?;
     let maximum_expiry = now.saturating_add(3600);
     let expires_at = access.expires_at().min(maximum_expiry);
     if expires_at <= now {
@@ -501,48 +508,17 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
         .map(|(id, _)| *id)
         .collect();
     for id in expired {
-        if let Some(entry) = registry.exchanging.remove(&id) {
-            if let Some(session) = entry
-                .record
-                .session_id
-                .and_then(|id| registry.sessions.remove(&id.to_string()))
-            {
-                close_record(oidc, &session, Action::Expiration, Reason::Revoked)?;
-            } else {
-                oidc.audit
-                    .append_typed(result(
-                        entry.record,
-                        entry.receipt,
-                        Outcome::Unknown,
-                        Reason::Interrupted,
-                        None,
-                    ))
-                    .map_err(audit_failure)?;
-            }
+        if let Some(entry) = registry.exchanging.remove(&id)
+            && let Some(session) = registry.sessions.remove(&entry.session_id.to_string())
+        {
+            close_record(oidc, &session, Action::Expiration, Reason::Revoked)?;
         }
     }
-    let expired: Vec<_> = registry
-        .transactions
-        .iter()
-        .filter(|(_, entry)| {
-            entry.created.elapsed()
-                >= Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds)
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    for id in expired {
-        if let Some(entry) = registry.transactions.remove(&id) {
-            oidc.audit
-                .append_typed(result(
-                    transaction_record(oidc, &entry),
-                    entry.intention,
-                    Outcome::Unknown,
-                    Reason::Interrupted,
-                    None,
-                ))
-                .map_err(audit_failure)?;
-        }
-    }
+    // Unverified attempts release their volatile budget only. An installed
+    // session is handled above by its exchange marker or below by its lifetime.
+    registry.transactions.retain(|_, entry| {
+        entry.created.elapsed() < Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds)
+    });
     registry
         .deliveries
         .retain(|_, entry| entry.created.elapsed() < Duration::from_secs(30));
@@ -559,12 +535,13 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
         if let Some(entry) = registry.native.remove(&id) {
             let previous = entry.previous.clone();
             if let Some(binding) = previous {
+                let receipt = entry.intention.clone().ok_or_else(audit_unavailable)?;
                 registry.sessions.remove(&binding.session_id.to_string());
                 oidc.audit
                     .close_session(
                         result(
                             native_record(oidc, &entry),
-                            entry.intention,
+                            receipt,
                             Outcome::Unknown,
                             Reason::Interrupted,
                             Some(binding.principal.clone()),
@@ -572,16 +549,6 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
                         binding.generation,
                         binding.access_fingerprint,
                     )
-                    .map_err(audit_failure)?;
-            } else {
-                oidc.audit
-                    .append_typed(result(
-                        native_record(oidc, &entry),
-                        entry.intention,
-                        Outcome::Unknown,
-                        Reason::Interrupted,
-                        None,
-                    ))
                     .map_err(audit_failure)?;
             }
         }
@@ -655,15 +622,6 @@ pub(super) async fn start(
     let tx = Uuid::new_v4();
     let operation = Uuid::new_v4();
     let session = Uuid::new_v4();
-    let intention = record(
-        &oidc,
-        Action::Login,
-        session,
-        &oidc.config.provider.web_client_id,
-        None,
-        Some(tx),
-        operation,
-    );
     {
         let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
         reap(&oidc, &mut registry)?;
@@ -674,10 +632,8 @@ pub(super) async fn start(
             return Err(conflict());
         }
         reserve(&mut registry, true)?;
-        let receipt = oidc
-            .audit
-            .append_typed(intention.clone())
-            .map_err(audit_failure)?;
+        // A caller-created correlation cookie is not an authenticated identity.
+        // The durable intention is created only by install after verification.
         registry.transactions.insert(
             key,
             BrowserTransaction {
@@ -685,7 +641,6 @@ pub(super) async fn start(
                 expected_state: [0; 32],
                 transaction_id: tx,
                 operation_id: operation,
-                intention: receipt,
                 session_id: session,
                 created: Instant::now(),
             },
@@ -730,12 +685,7 @@ pub(super) async fn start(
             Ok(response)
         }
         Err(error) => {
-            if let Some(entry) = registry.transactions.remove(&key) {
-                let (outcome, reason) = provider_result(error);
-                oidc.audit
-                    .append_typed(result(intention, entry.intention, outcome, reason, None))
-                    .map_err(audit_failure)?;
-            }
+            registry.transactions.remove(&key);
             Err(provider_error(error))
         }
     }
@@ -791,15 +741,13 @@ pub(super) async fn callback(
             key,
             ExchangeMarker {
                 transaction_id: transaction.transaction_id,
-                record: transaction_record(&oidc, &transaction),
-                receipt: transaction.intention.clone(),
+                session_id: transaction.session_id,
                 created: Instant::now(),
             },
         );
         transaction
     };
     let record = transaction_record(&oidc, &transaction);
-    let receipt = transaction.intention.clone();
     let expired = transaction.created.elapsed()
         >= Duration::from_secs(oidc.config.provider.limits.pkce_ttl_seconds);
     let valid = params
@@ -808,25 +756,11 @@ pub(super) async fn callback(
         && params.contains_key("code") != params.contains_key("error")
         && params.get("code").is_none_or(|code| safe_text(code, 2048));
     let outcome = if expired || !valid || params.contains_key("error") {
-        let reason = if expired {
-            Reason::Expired
+        Delivery::Error(if expired {
+            "credential_expired"
         } else {
-            Reason::ProviderRejected
-        };
-        match oidc.audit.append_typed(result(
-            record.clone(),
-            receipt.clone(),
-            Outcome::Rejected,
-            reason,
-            None,
-        )) {
-            Ok(_) => Delivery::Error(if expired {
-                "credential_expired"
-            } else {
-                "login_cancelled"
-            }),
-            Err(_) => Delivery::Error("audit_unavailable"),
-        }
+            "login_cancelled"
+        })
     } else {
         let pending = transaction.pending.ok_or_else(conflict)?;
         match oidc
@@ -841,7 +775,6 @@ pub(super) async fn callback(
                     &oidc,
                     NewAdmission {
                         record,
-                        receipt,
                         access,
                         raw: tokens.access_token(),
                         refresh: tokens.refresh_token(),
@@ -860,20 +793,11 @@ pub(super) async fn callback(
                     ),
                 }
             }
-            Err(error) => {
-                let (outcome, reason) = provider_result(error);
-                match oidc
-                    .audit
-                    .append_typed(result(record, receipt, outcome, reason, None))
-                {
-                    Ok(_) => Delivery::Error(if matches!(error, OidcError::TransportUnavailable) {
-                        "provider_unavailable"
-                    } else {
-                        "credential_invalid"
-                    }),
-                    Err(_) => Delivery::Error("audit_unavailable"),
-                }
-            }
+            Err(error) => Delivery::Error(if matches!(error, OidcError::TransportUnavailable) {
+                "provider_unavailable"
+            } else {
+                "credential_invalid"
+            }),
         }
     };
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
@@ -981,22 +905,12 @@ pub(super) async fn native_intent(
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
             reap(&oidc, &mut registry)?;
             reserve(&mut registry, true)?;
-            let record = record(
-                &oidc,
-                Action::SessionAdmission,
-                session_id,
-                &oidc.config.provider.cli_client_id,
-                None,
-                None,
-                intent_id,
-            );
-            let intention = oidc.audit.append_typed(record).map_err(audit_failure)?;
             registry.native.insert(
                 intent_id,
                 NativeIntent {
                     session_id,
                     operation_id: intent_id,
-                    intention,
+                    intention: None,
                     action: Action::SessionAdmission,
                     previous: None,
                     created: Instant::now(),
@@ -1039,7 +953,7 @@ pub(super) async fn native_intent(
                 NativeIntent {
                     session_id: authentication_id,
                     operation_id: intent_id,
-                    intention: previous.receipt.clone(),
+                    intention: Some(previous.receipt.clone()),
                     action: Action::Refresh,
                     previous: Some(previous.binding.clone()),
                     created: previous.created,
@@ -1070,12 +984,13 @@ pub(super) async fn native_intent(
             };
             let record = native_record(&oidc, &entry);
             if let Some(binding) = &entry.previous {
+                let receipt = entry.intention.ok_or_else(audit_unavailable)?;
                 registry.sessions.remove(&binding.session_id.to_string());
                 oidc.audit
                     .close_session(
                         result(
                             record,
-                            entry.intention,
+                            receipt,
                             Outcome::Unknown,
                             Reason::Interrupted,
                             Some(binding.principal.clone()),
@@ -1083,16 +998,6 @@ pub(super) async fn native_intent(
                         binding.generation,
                         binding.access_fingerprint,
                     )
-                    .map_err(audit_failure)?;
-            } else {
-                oidc.audit
-                    .append_typed(result(
-                        record,
-                        entry.intention,
-                        Outcome::Unknown,
-                        Reason::Interrupted,
-                        None,
-                    ))
                     .map_err(audit_failure)?;
             }
             Ok(Json(json!({"version":1,"status":"finished"})))
@@ -1129,29 +1034,14 @@ pub(super) async fn admit(
     let record = native_record(&oidc, &intent);
     let access = match oidc.provider.verify_access(&raw).await {
         Ok(access) if access.client_id() == oidc.config.provider.cli_client_id => access,
-        Ok(_) => {
-            return Err(fail_initial(
-                &oidc,
-                record,
-                intent.intention,
-                credential_invalid(),
-                None,
-            ));
-        }
-        Err(error) => {
-            let (outcome, reason) = provider_result(error);
-            oidc.audit
-                .append_typed(result(record, intent.intention, outcome, reason, None))
-                .map_err(audit_failure)?;
-            return Err(provider_error(error));
-        }
+        Ok(_) => return Err(credential_invalid()),
+        Err(error) => return Err(provider_error(error)),
     };
     let binding = install(
         &state,
         &oidc,
         NewAdmission {
             record,
-            receipt: intent.intention,
             access,
             raw: &raw,
             refresh: None,
@@ -1616,13 +1506,14 @@ pub(super) async fn rotate(
         let maximum_expiry = session.maximum_expiry;
         let created = intent.created;
         let completion_deadline = Some(intent.created + Duration::from_secs(15));
-        let intent = registry
+        let receipt = intent.intention.clone().ok_or_else(audit_unavailable)?;
+        registry
             .native
             .remove(&body.intent_id)
             .ok_or_else(conflict)?;
         RefreshOperation {
             record,
-            receipt: intent.intention,
+            receipt,
             binding,
             access,
             maximum_expiry,
