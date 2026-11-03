@@ -20,11 +20,48 @@
    Rapprocher tout nouveau constat du rapport final
    avec le code courant, y compris les lots déjà intégrés. Le retry du runner
    reste une proposition séparée sans décision du mainteneur.
-4. Reprendre ensuite les chantiers produit et qualifications ci-dessous,
-   sans modifier les worktrees D5 protégés ni réduire les exigences cloud,
+4. Trois chantiers produit indépendants sont lancés en parallèle sur `2c40097` :
+   adaptateur Kubernetes, relais worker et registre broker/bindings workload.
+   Périmètres ci-dessous, sans modifier les worktrees D5 protégés ni réduire les exigences cloud,
    runtime, identité, exploitation et capacité100. Les résultats du 2 novembre
    restent historiques ; les blocages DNS indiqués ci-dessous ont depuis été
    levés dans leur portée documentée.
+
+## Cycle actif — trois périmètres de développement
+
+| Worktree | Propriétaire | Périmètre |
+|---|---|---|
+| `kubernetes-adapter-20261103` | Agent runtime | Nouveaux `runtime/kubernetes*` et tests dédiés ; premier sous-lot readonly, admission fermée tant que les garanties manquent. |
+| `worker-relay-20261103` | Agent relais | Nouveaux `relay.rs`, `audit/relay.rs` et tests API/contrats ; aucun fichier global partagé. |
+| `broker-registry-20261103` | Agent cœur | Nouveaux `broker_registry*`, `workload*`, audit/replay, migration6 et capacité workload ; helper historique worker et adaptation contrôlée des schémas. |
+| Intégration | Root | Contrats transverses, API/auth, `lib.rs`, `main.rs`, configuration, composition et clôture. |
+
+La migration publique prévue est `migrate_workload_v6`, explicite5→6 avec
+backup/rollback et validation de tous les objets. Elle ne réactive aucune
+autorité de supervision perdue. Une seule migration commune initialise
+registre, bindings et relais ; pas de schémas6 concurrents par agent.
+
+Les preuves broker/worker sont opaques et revalidées en transaction avant
+replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker
+ni crédit d'audit. Génération v1 fixée à1 par tentative UUID tant qu'aucune
+transition centrale durable n'existe. Le worker ne possède aucun runner/SSO
+ni socket moteur. La phase d'émission préparatoire du credential ne donne
+aucun accès avant Running observé, inspection, quota et lease active.
+
+Le budget workload est distinct du budget de lecture humaine, sous C+I,
+avec cumul par tenant et principal canonique worker/broker, cost UTF-8 exact
+et projection du préfixe committé. Grants/issue de contrôle sont ordinaires,
+révocations passent par une couture maintenance privée. Aucun JSON/kind ne
+sélectionne une classe privilégiée. Les erreurs de DB/audit ne deviennent
+pas un inbox vide ; ACK et heartbeat ne prouvent pas une exécution runtime.
+
+Chaque gel reçoit tests Luna ciblés et revue indépendante avant commit/push.
+Le premier gel Kube a huit parents PASS ; deux échecs préparatoires du harnais
+(shim rustup puis scratch noexec) n'ont exécuté aucun test et sont conservés
+séparément. Les compléments mTLS/cancellation restent ouverts. Les nouveaux
+modules relais/registre n'ont pas encore passé compilation ou tests : ne pas
+les annoncer comme un service livré. La qualification réelle A1/A2/B1,
+Podman/Kubernetes, reprise broker et charge100 garde ses propres gates.
 
 ## Lot F — plan de correction après reproduction
 

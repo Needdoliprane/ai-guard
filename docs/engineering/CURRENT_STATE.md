@@ -60,6 +60,35 @@ L'audit externe reste ouvert ; ses nouveaux verdicts sont rapprochés des
 instantanés et du candidat dans le suivi, sans qualification globale.
 G09 reste FAIL et **0/12 gates globaux sont fermés**.
 
+## Chantiers parallèles après les correctifs F
+
+Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
+
+- `kubernetes-adapter-20261103` : connexion HTTPS explicite, diagnostic et
+  observation liée aux UID. Premier gel : 8 tests parents HTTP/TLS/config
+  PASS ; helper interne non compté. Revue sans défaut source bloquant, mais
+  mTLS réel et fermeture des connexions à l'annulation restent à vérifier.
+  Ces compléments sont en développement. Aucun CREATE/STOP, lancement de
+  pod, exec/attach ou confinement Kubernetes n'est qualifié. L'inventaire
+  local read-only Docker Desktop montre kindnet ; la présence d'une API
+  NetworkPolicy ne prouve pas son application.
+- `worker-relay-20261103` : contrats, transactions SQLite, grants dirigés,
+  ACK/révocation, quotas et tests routeur écrits ; intégration et exécution
+  restent NOT_RUN. La revue source a relevé un bord de canonisation temporelle
+  à corriger et précisé le replay après révocation. Transport Unix/runtime et
+  recette de trois workers réels restent ouverts.
+- `broker-registry-20261103` : registre, incarnations, ownership des autorités
+  et bindings workload digest-only en développement. Cet agent possède aussi
+  la migration6, le replay et les budgets workload communs ; les tests ne
+  sont pas encore exécutés. Aucune fédération distante qualifiée.
+
+Root possède les contrats, les routes/authentification, les raccords CLI et
+la composition. Les producteurs utilisent des budgets workload sous les
+réserves contrôle/identité de F1 : un worker ne doit pas pouvoir consommer la
+réserve contrôle en étant classé comme une écriture de confiance. Les tests
+Luna et les revues sont parallélisés avec le code ; une seule compilation
+lourde est admise. Les worktrees D5 existants restent hors de ces périmètres.
+
 ## Historique du 2 novembre — D5 et SSO
 
 Dernier contrôle logiciel D5 : les 37 fonctions des fondations et les 31 fonctions composées précédentes passent dans leurs gels ciblés. Le FAIL acteur antérieur reste non reproduit, de cause indéterminée. Le nouveau test du pump **FAIL** sur le gel `Efq7q2` : dépôt du signal dans l'outbox, `JournalError::Io` après 10003 ms ; le second test est **NOT_RUN**. Compilation toutes cibles et harness **PASS** pour ce même gel. Le diagnostic du writer continue sans augmenter les délais. Les nettoyages de code et le nouveau test de saturation ont passé une revue de source ; leurs tests compilés restent à exécuter. Aucun moteur ni parcours vertical complet n'est qualifié. [Résultats et limites](VALIDATION.md#2-novembre--diagnostic-ciblé-du-writer-d5).
