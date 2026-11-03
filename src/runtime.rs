@@ -8,6 +8,7 @@ use tokio::{
 };
 use uuid::Uuid;
 mod invocation;
+pub mod kubernetes;
 pub(crate) mod launch_profile;
 mod managed;
 pub(crate) mod model_tls;
