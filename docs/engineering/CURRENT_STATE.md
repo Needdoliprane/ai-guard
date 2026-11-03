@@ -76,14 +76,18 @@ Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
   local read-only Docker Desktop montre kindnet ; la présence d'une API
   NetworkPolicy ne prouve pas son application.
 - `worker-relay-20261103` : contrats, transactions SQLite, grants dirigés,
-  ACK/révocation, quotas et tests routeur écrits ; intégration et exécution
-  restent NOT_RUN. La revue source a relevé un bord de canonisation temporelle
-  à corriger et précisé le replay après révocation. Transport Unix/runtime et
-  recette de trois workers réels restent ouverts.
+  ACK/révocation, quotas et modules HTTP composés avec le registre ; tests
+  fonctionnels en cours. Le bord de canonisation temporelle et le replay
+  après révocation ont leurs correctifs source, pas encore qualifiés par
+  exécution. La revue d'intégration demande requêtes indexées bornées et
+  plancher UTC durable : corrections parallèles, lot non accepté à ce stade.
+  Transport Unix/runtime et recette de trois workers réels restent ouverts.
 - `broker-registry-20261103` : registre, incarnations, ownership des autorités
   et bindings workload digest-only en développement. Cet agent possède aussi
-  la migration6, le replay et les budgets workload communs ; les tests ne
-  sont pas encore exécutés. Aucune fédération distante qualifiée.
+  la migration6, le replay, les budgets workload et le raccord CLI/configuration.
+  La compilation lib du deuxième gel passe après quatre conversions SQLite
+  corrigées ; les premiers tests ont identifié neuf fixtures non privées0700,
+  en correction sans relâcher le produit. Aucune fédération distante qualifiée.
 
 Root possède les contrats et la composition. Le propriétaire du relais écrit
 les nouveaux modules HTTP ; celui du registre raccorde CLI/configuration.

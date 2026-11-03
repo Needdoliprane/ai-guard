@@ -51,6 +51,14 @@ KD-R1/R2 sont fermés au niveau TLS loopback. Rapport final privé
 Formatage natif statique des sept fichiers Rust et vérification des SHA
 après copie d'intégration PASS. Clippy Linux/release NOT_RUN pour ce lot.
 
+Intégration et push vérifiés : `1b61f4d` sur
+`codex/audit-integration-20261103`, source `7fbd4a3` également poussée sur sa
+branche. Les sept fichiers Rust sont identiques entre ces commits. Worktree
+Kubernetes retiré normalement, sans force, après état propre/ignorés vides,
+référence distante et absence de consommateurs. Reçus privés conservés dans
+`/private/tmp/ai-guard-kubernetes-worktree-close-20261103.XYmo11/` ; aucune
+preuve ni donnée persistante supprimée.
+
 Le [guide EN/FR](../setup/kubernetes/README.fr.md) distingue l'API Rust de la
 CLI : aucun flag de lancement ou profil dotenv Kubernetes n'est annoncé.
 La cible reste Docker Desktop mono-nœud, mais ses workloads et son réseau
