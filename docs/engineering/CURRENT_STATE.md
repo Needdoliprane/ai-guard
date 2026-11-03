@@ -22,11 +22,17 @@ Les preuves, sources et limites sont dans [VALIDATION.md](VALIDATION.md#3-novemb
 Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
 épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
 
-Les trois worktrees d'implémentation sont fermés après intégration et contrôle
+Les quatre worktrees A/B/C/E sont fermés après intégration et contrôle
 des consommateurs ; preuves et références source sont préservées. D a son RED
 sur le thread d'exécution, puis six fonctions ciblées GREEN sur un gel
-intermédiaire. Sa revue détecte une régression d'admission d'un profil voisin ;
-ce point et le raccord OIDC restent à terminer avant intégration. F attend D ;
+intermédiaire. Sa première régression de voisinage est reproduite puis corrigée.
+Le raccord OIDC et huit unités finales passent ensuite, sans avertissement.
+La revue finale exige cependant que les transactions de résolution locale,
+de revalidation d'une source distincte du contexte et de profils OIDC soient
+couvertes par le permis du store réellement lu. Ces chemins échappent encore
+au plafond tenant ; leurs nouvelles régressions sont en préparation, sans
+reproduction d'exploitation ni sévérité déduite. D reste hors intégration et
+les canaris finaux d'intégration ne sont pas encore exécutés. F attend D ;
 sa préparation statique ne remplace pas une reproduction. Le journal SSO déjà
 plein et le TTL initial de bout en bout restent des écarts distincts.
 L'audit externe reste ouvert ; ses nouveaux verdicts sont rapprochés des

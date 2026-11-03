@@ -48,6 +48,15 @@ en cours et la préparation de F continuent ; les contrats et reproductions
 seront recontrôlés avant modification, sans changer les fichiers de l'audit
 ni les travaux D5 en parallèle. Aucun nouveau gate n'est fermé.
 
+Un triage statique ciblé sur `2bacbdb` retrouve le latch de pénurie FD et
+repère une perte de l'erreur OS typée dans un contrôle `openat`. Il ne vaut
+pas reproduction courante : **NOT_RUN**. La réparation exige aussi de garder
+le témoin du commit si une vérification de noms échoue après le commit durable ;
+ignorer seulement le latch pourrait affaiblir le refus de rollback. Rapport
+privé : `/private/tmp/ai-guard-audit-fd-triage-20261103.md`. Ce chantier attend
+le gel/intégration D, qui modifie les mêmes coutures. Aucun explorateur Python
+de l'audit n'est lancé sur l'hôte ni ajouté au produit.
+
 Pour B, la conception suit la correction proposée dans le rapport provisoire :
 une erreur voisine ne choisit aucune identité et ne rend pas ses credentials
 authentifiables ; toute collision lue dans un store sain reste refusée, y
@@ -208,6 +217,15 @@ avant interruption de remise. Un registre déjà plein n'est pas réparé.
 IdP réel, navigateur, CLI natif externe, moteurs workers, TTL initial complet,
 Clippy Linux et qualification SSO globale ne sont pas couverts par ce lot.
 
+Après push de l'intégration `2bacbdb` et de la branche source `17ada11`, les
+références distantes exactes sont vérifiées. Le worktree E, propre y compris
+les fichiers ignorés, sans consommateur détecté et dont les deux patches sont
+équivalents dans l'intégration, est retiré normalement. Son conteneur de test
+déjà expiré, RC0/nonOOM, est retiré par ID exact, sans volume. Branches,
+snapshots et preuves privées sont conservés ; reçus dans le dossier `proofs`.
+Le fichier `worktree-close-status-confirmed.txt` contrôle explicitement E ; le
+premier fichier de statut capturait l'intégration et ne sert pas de preuve E.
+
 ### Préparation vérifiable des régressions
 
 Pour C, la régression a été renforcée et relue indépendamment : un compteur
@@ -311,8 +329,28 @@ D a reproduit l'exécution de l'intégrité
 sur le thread HTTP après vérification de sa fixture et d'un contrôle
 `spawn_blocking` : RC101 sur l'assertion de thread, sans seuil de latence.
 Six fonctions ciblées passent sur un gel intermédiaire ; la revue relève un
-couplage d'admission d'un profil voisin, à reproduire et corriger. Le raccord
-OIDC reste aussi ouvert. La [stratégie de test](TEST_STRATEGY.md#latence-et-pression-de-la-machine-de-développement)
+couplage d'admission d'un profil voisin. Une nouvelle reproduction HTTP passe
+la baseline complète et le contrôle source saturée429, puis échoue RC101 sur
+voisin saturé429 au lieu du200 partiel attendu ; preuve privée
+`ai-guard-luna-D-20261103.dgTRqE/proofs/red-auth-neighbor.log`.
+Ce premier couplage est corrigé, puis le raccord OIDC et l'oracle de cleanup
+borné sont ajoutés. Les trois commandes lib ciblant
+`api::read_execution_tests::`, `api::store_io::tests::` et
+`audit::incremental_integrity_tests::` passent RC0 : respectivement 2, 3 et 3
+fonctions, huit uniques, sans warning. Preuves privées
+`ai-guard-luna-D-20261103.dgTRqE/proofs/d-final-{1,2,3}.log` ; manifeste et
+mtimes des 244 sources identiques avant/après. Ce sont les unités de ce gel,
+pas des canaris d'intégration ni une preuve de capacité 100.
+
+La revue finale source demande encore `D-REVIEW-01` : résolution de credential
+local, revalidation de la source B pour un contexte A, et profils OIDC réalisent
+des transactions sans permis du store effectivement consulté. Les bornes
+globales restent réelles ; le 429 terminal ne prouve pas l'absence d'I/O avant
+admission. Rapport privé
+`/private/tmp/ai-guard-d-final-review-20261103.3l6hSq/REVIEW.md`.
+Les régressions ciblées sont en préparation avant correction ; exploitation
+déployée et sévérité mesurée restent non établies. D n'est pas intégré et les
+canaris d'intégration restent **NOT_RUN**. La [stratégie de test](TEST_STRATEGY.md#latence-et-pression-de-la-machine-de-développement)
 conserve les contraintes du MacBook Air M3/16Go, sans transformer la pression
 de la machine en verdict de sécurité.
 L'outbox et les autres candidats non établis restent hors correction sur la
