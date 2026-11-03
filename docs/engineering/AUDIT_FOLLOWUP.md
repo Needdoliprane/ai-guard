@@ -37,6 +37,47 @@ preuve et la revue, sans prétendre à une vérification exhaustive d'une base
 indisponible. Un index construit au démarrage ne suffirait pas à suivre les
 mutations ultérieures. Les critères de B ne sont pas encore acceptés.
 
+### Préparation vérifiable des régressions
+
+Pour C, la régression a été renforcée et relue indépendamment : un compteur
+RAII prouve que **tous** les corps entrés en lecture restent incomplets avant
+et après chaque oracle HTTP, client de contrôle et SSE. Toute expiration,
+même d'un seul upload, rend le harnais inconclusif au lieu de produire un faux
+GREEN en libérant un slot. Le fichier préparé
+`tests/ingress_admission/slow_uploads.rs` a pour SHA-256
+`216dd33af61d68a36bddbc498e178a82d8340c57a03826063c0d96fb9d5c7663`.
+Acceptation de la revue : passage à l'exécution ciblée uniquement ; compilation
+et RED/GREEN C restent `NOT_RUN`. Les anciennes copies de préparation doivent
+être actualisées sans effacer leurs preuves.
+
+Pour B, deux tests du **nouveau contrat de complétude frontend** ont pu être
+exécutés sans dépendance téléchargée, sur le parser inchangé de `0a41aac` :
+
+```text
+node --test --test-isolation=none tests/human-identity-coverage.test.mjs
+Node v24.22.2 ; RC 1 ; 2 tests ; 0 PASS ; 2 FAIL attendus (RED).
+```
+
+Le parser perd `contexts_complete=false` et accepte l'absence du champ au lieu
+de refuser une réponse incompatible. Ce RED prépare la projection partielle
+requise par le correctif B ; **il ne reproduit ni ne confirme le défaut
+backend de collision/disponibilité**. Le gateway actuel n'émet pas ce champ.
+Le nouveau contrat nécessitera des versions coordonnées du gateway, du
+dashboard et des clients CLI stricts ; aucun changement de parser ou de DTO
+ni aucun correctif B n'est intégré à ce stade.
+
+Exécution par Luna dans une copie publique minimale et un conteneur dédié :
+réseau/IPC désactivés, racine/source en lecture seule, UID1000, aucune
+capability, `no-new-privileges`, CPU1, RAM512MiB, PID64, fichiers8MiB,
+scratch64MiB/8192inodes, environnement vide complété par allowlist, délai45s.
+Aucun secret, socket moteur, montage original, fournisseur, installation ou
+E2E. Conteneur attribué arrêté/supprimé après le résultat naturel ; preuves
+privées conservées dans `/private/tmp/ai-guard-luna-front-EHNOca/proofs`.
+SHA-256 du parser :
+`65edb8ad1027664f2d37b226ac7f2e46e4c994218dc4716a0ddf80ccd9c9bff5` ;
+du test :
+`e3378e86bd74712939fd7ede9bb6a39fbbd812f0bfcd89d4d67dfbb344919a64`.
+
 ### Dépendance de validation
 
 Le sandbox prévu utilise une image Rust locale Linux/ARM64, sans réseau,
