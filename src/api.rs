@@ -40,6 +40,7 @@ use std::{
 mod auth;
 mod human;
 mod human_state;
+mod human_streams;
 mod oidc;
 #[cfg(test)]
 mod read_execution_tests;
@@ -117,6 +118,7 @@ struct TenantState {
     tenant_id: String,
     store: Arc<Store>,
     streams: Arc<tokio::sync::Semaphore>,
+    human_streams: Arc<human_streams::Admission>,
     rate: Arc<Mutex<(Instant, u32)>>,
     worker_quota: QuotaPolicyV1,
     io: Arc<store_io::Gate>,
@@ -134,7 +136,10 @@ impl TenantState {
         Self {
             tenant_id: tenant.tenant_id,
             store: tenant.store,
-            streams: Arc::new(tokio::sync::Semaphore::new(32)),
+            streams: Arc::new(tokio::sync::Semaphore::new(
+                human_streams::TOTAL_STREAM_LIMIT,
+            )),
+            human_streams: Arc::new(human_streams::Admission::new()),
             rate: Arc::new(Mutex::new((Instant::now(), 0))),
             worker_quota: QuotaPolicyV1::default(),
             io: Arc::new(store_io::Gate::new(false)),

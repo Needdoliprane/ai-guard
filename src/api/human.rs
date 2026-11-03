@@ -1025,16 +1025,24 @@ async fn stream(
     let mut cursor = context
         .start(&key, query.cursor.as_deref())
         .map_err(state_failure)?;
-    let permit = tenant.streams.clone().try_acquire_owned().map_err(|_| {
-        failure(
-            StatusCode::TOO_MANY_REQUESTS,
-            "capacity_exhausted",
-            "Concurrent stream capacity is full.",
-            "retry",
-        )
-    })?;
+    let lease = tenant
+        .human_streams
+        .try_acquire(Arc::clone(&tenant.streams), &proof.credential.principal)
+        .map_err(|error| match error {
+            human_streams::AdmissionFailure::Capacity => failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                "capacity_exhausted",
+                "Concurrent stream capacity is full. Close unused streams before reconnecting.",
+                "close_unused_streams",
+            ),
+            human_streams::AdmissionFailure::Unavailable => failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stream_admission_unavailable",
+                "Stream admission is unavailable.",
+                "contact_operator",
+            ),
+        })?;
     let events = async_stream::stream! {
-        let _permit = permit;
         loop {
             let poll_context = Arc::clone(&context);
             let poll_scope = scope.clone();
@@ -1052,7 +1060,7 @@ async fn stream(
             if dense {tokio::task::yield_now().await;} else {tokio::time::sleep(Duration::from_secs(1)).await;}
         }
     };
-    Ok(Sse::new(events)
+    Ok(Sse::new(lease.bind(events))
         .keep_alive(
             KeepAlive::new()
                 .interval(Duration::from_secs(10))
