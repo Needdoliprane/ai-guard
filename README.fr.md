@@ -22,6 +22,8 @@ Le manuel utilisateur décrit le **contrat du produit complet**. L'avancement, l
 
 Commencer par l'[index de configuration](docs/setup/README.fr.md) : composant qui lit chaque fichier, combinaison des réglages, emplacement des secrets et conservation d'une installation existante.
 
+Pour la cible Kubernetes Docker Desktop, voir [autorité et inspection](docs/setup/kubernetes/README.fr.md). Le lancement de workers par cet adaptateur reste indisponible ; son diagnostic n'active pas l'admission.
+
 ## Premier démarrage local
 
 Depuis la racine du dépôt, avec la toolchain de `rust-toolchain.toml`, un moteur Docker démarré et Compose :

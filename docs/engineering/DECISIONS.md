@@ -1,5 +1,21 @@
 # Décisions d'industrialisation
 
+## 3 novembre — autorité Kubernetes explicite avant admission
+
+Le premier sous-lot Kubernetes utilise les dépendances HTTP/TLS existantes
+et une autorité retenue par le contrôle : origine HTTPS, AC, UID du namespace
+kube-system et UID du namespace tenant. Aucun kubeconfig/contexte/plugin ou
+proxy ambiant, aucun secret dans les workers. L'identité du tenant reste
+authentifiée par le contrôle ; ces ancres ne sont pas une preuve d'identité.
+
+Diagnostic et observation sont séparés de l'admission : UID/spec différents,
+404 et observations manquantes restent erreurs/inconnues. Les limites de
+ressources décrites par l'API ne deviennent pas une mesure effective. Aucun
+nouveau RuntimeKind ni lancement n'est ajouté. L'admission reste fermée tant
+que confinement, workspace, streaming et supervision durable ne sont pas
+implémentés et qualifiés. Cible locale Docker Desktop mono-nœud ; ne pas
+installer un CNI ou modifier le cluster pour rendre un test vert.
+
 ## 3 novembre — corrections de l'audit et périmètre des preuves
 
 - L'export publie des fichiers0644 et omet les noms sensibles connus et les

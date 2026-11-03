@@ -1,5 +1,63 @@
 # Validation courante
 
+## 3 novembre — diagnostic Kubernetes et durée de vie du transport
+
+Base `2c400976`, sans modification des dépendances. Le sous-lot ajoute le
+module Rust `runtime::kubernetes` et ses tests, sans modifier RuntimeKind ou
+le lancement Docker/Podman. Connexion HTTPS explicite, CA retenue, Bearer ou
+mTLS, diagnostic d'autorité et observation de Pod liée aux UID/spec. Admission
+fermée ; aucun CREATE/DELETE/exec/attach, worker ou secret de cluster utilisé.
+
+**PASS : 11 fonctions parentes uniques**, exécutées par Luna dans l'image
+Linux ARM64 `sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`,
+Rust/Cargo1.99.1 directs. Sources/registre/racine readonly, réseau/IPC coupés,
+UID1000, capabilities supprimées, no-new-privileges, CPU1, RAM/swap5Gio,
+PID256, nofile1024, fsize512Mio, scratch privé exécutable3Gio/65536inodes,
+environnement allowlist et garde5400s. Aucun Cargo ni binaire du dépôt sur
+l'hôte. Source et Cargo.lock vérifiés par SHA/mtime avant/après.
+
+```sh
+cargo test --offline --locked --test kubernetes_adapter -- --test-threads=1
+cargo test --offline --locked --test kubernetes_transport -- --test-threads=1
+cargo test --offline --locked --test kubernetes_transport_lifetime -- --test-threads=1 --nocapture
+```
+
+Premier gel : 4 contrats + 4 transports PASS, helper proxy ignoré explicitement
+appelé par son parent sans le recompter. Deuxième gel : 3 nouveaux parents
+PASS, seuls ajouts de test, six fichiers précédents inchangés. Le serveur
+mTLS exige effectivement un client de confiance avant HTTP ; absence,
+mauvaise AC, EKU incompatible et mauvaise clé sont refusées. L'annulation
+avant headers puis pendant corps partiel provoque EOF/reset observé par le
+pair avant réutilisation ; l'oracle ne dépend pas du teardown du serveur.
+Pod404 après ancres valides, corps lent et Content-Length excessif restent
+des erreurs typées, jamais un état terminal ou usage nul.
+
+**FAIL_SETUP conservés :** premier essai via shim rustup, synchronisation
+bloquée par le réseau coupé ; second essai direct, build script impossible
+sur scratch noexec. Zéro test produit exécuté lors de ces deux essais. Le
+harnais corrigé vérifie une copie/exécution de `/bin/true` avant Cargo ;
+aucune limite du produit n'est assouplie. Les logs ne sont pas effacés.
+
+Preuves privées : `/private/tmp/ai-guard-kubernetes-diagnostics-luna-20261103.5VDDCw/proofs/`.
+Log corrigé gel1 `run-exec-scratch.log`, SHA
+`9b5c7aca6007b2defbd2cfb97fea84ddf4e9e80d9c254ae0b7de2e443dec5179` ;
+gel2 `gel2-kubernetes-lifetime/run.log`, SHA
+`080056988156b49dd49c7b4fa0a0a0073b0d51a849e7f071b3b8a3449c2cd2bd`.
+Manifestes `/private/tmp/ai-guard-kubernetes-diagnostics-gel{1,2}-20261103.sha256`.
+Les deux revues indépendantes sont sans défaut bloquant dans ce périmètre ;
+KD-R1/R2 sont fermés au niveau TLS loopback. Rapport final privé
+`/private/tmp/ai-guard-kubernetes-final-evidence-review-20261103.md`, SHA
+`550b8f81d7831f01f93e178a1ab71bc91c21de29c38ca6e503b25e0cb8df3209`.
+Formatage natif statique des sept fichiers Rust et vérification des SHA
+après copie d'intégration PASS. Clippy Linux/release NOT_RUN pour ce lot.
+
+Le [guide EN/FR](../setup/kubernetes/README.fr.md) distingue l'API Rust de la
+CLI : aucun flag de lancement ou profil dotenv Kubernetes n'est annoncé.
+La cible reste Docker Desktop mono-nœud, mais ses workloads et son réseau
+ne sont pas qualifiés par des fixtures HTTPS. RBAC, identité workload,
+confinement/CNI, workspace, streaming, audit d'admission, échéances durables,
+reprise et charge100 restent ouverts. G09 FAIL, aucun gate global clos.
+
 ## 3 novembre — composition finale des budgets et flux
 
 Sur archive Git seule de `aa4eef9d8c0a1e21168a6148a3853daf90263ce1`, nouvelle

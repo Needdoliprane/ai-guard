@@ -65,10 +65,13 @@ G09 reste FAIL et **0/12 gates globaux sont fermés**.
 Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
 
 - `kubernetes-adapter-20261103` : connexion HTTPS explicite, diagnostic et
-  observation liée aux UID. Premier gel : 8 tests parents HTTP/TLS/config
-  PASS ; helper interne non compté. Revue sans défaut source bloquant, mais
-  mTLS réel et fermeture des connexions à l'annulation restent à vérifier.
-  Ces compléments sont en développement. Aucun CREATE/STOP, lancement de
+  observation liée aux UID. **11 tests parents PASS** : 8 HTTP/TLS/config,
+  puis 3 sur mTLS, fermeture des connexions à l'annulation et bornes du corps.
+  Helper interne non recompté. Les deux revues indépendantes ne signalent
+  aucun défaut bloquant dans ce sous-lot readonly ; deux anciens échecs du
+  harnais restent conservés. [Guide EN/FR](../setup/kubernetes/README.fr.md)
+  et [preuves](VALIDATION.md#3-novembre--diagnostic-kubernetes-et-durée-de-vie-du-transport).
+  Aucun CREATE/STOP, lancement de
   pod, exec/attach ou confinement Kubernetes n'est qualifié. L'inventaire
   local read-only Docker Desktop montre kindnet ; la présence d'une API
   NetworkPolicy ne prouve pas son application.
@@ -82,8 +85,9 @@ Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
   la migration6, le replay et les budgets workload communs ; les tests ne
   sont pas encore exécutés. Aucune fédération distante qualifiée.
 
-Root possède les contrats, les routes/authentification, les raccords CLI et
-la composition. Les producteurs utilisent des budgets workload sous les
+Root possède les contrats et la composition. Le propriétaire du relais écrit
+les nouveaux modules HTTP ; celui du registre raccorde CLI/configuration.
+Les producteurs utilisent des budgets workload sous les
 réserves contrôle/identité de F1 : un worker ne doit pas pouvoir consommer la
 réserve contrôle en étant classé comme une écriture de confiance. Les tests
 Luna et les revues sont parallélisés avec le code ; une seule compilation

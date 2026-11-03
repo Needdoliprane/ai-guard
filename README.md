@@ -22,6 +22,8 @@ The user manual describes the **complete product contract**. Implementation prog
 
 Start with the [configuration index](docs/setup/README.md): it explains which component reads each file, how settings compose, where secrets belong and how to preserve an existing installation.
 
+For the Docker Desktop Kubernetes target, see [authority and inspection](docs/setup/kubernetes/README.md). Worker launch through this adapter remains unavailable; its diagnostics do not enable admission.
+
 ## First local start
 
 From the repository root, with the Rust toolchain in `rust-toolchain.toml`, a running Docker engine and Compose:
