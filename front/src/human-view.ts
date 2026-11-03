@@ -177,11 +177,18 @@ export class HumanDashboard {
   }
   #renderContexts() {
     const contexts = this.#identity?.contexts ?? [];
+    const partial = this.#identity?.contexts_complete === false;
+    const coverage = partial ? el("div", "control-status",
+      badge("Liste des contextes partielle", "amber"),
+      el("p", "", "Certaines sources ne peuvent pas être consultées. D’autres contextes peuvent manquer. Réessayez pour actualiser la liste."),
+      action("Actualiser les contextes", "human-contexts-retry", () => { void this.#loadIdentity(); }, this.#identityLoading)) : null;
+    coverage?.setAttribute("role", "status");
     return el("section", "human-contexts",
-      el("p", "muted", `Identité locale : ${this.#identity?.display_name ?? "Inconnue"}. Les contextes personnel et administration sont proposés par le serveur selon vos appartenances.`),
+      el("p", "muted", `Identité authentifiée : ${this.#identity?.display_name ?? "Inconnue"}. Les contextes personnel et administration sont proposés par le serveur selon vos appartenances.`),
       this.#identityLoading ? el("p", "control-status", "Lecture des accès…") : "",
       this.#identityError ? this.#error(this.#identityError, () => { void this.#loadIdentity(); }) : "",
-      !contexts.length && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
+      coverage,
+      !contexts.length && this.#identity?.contexts_complete === true && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
       ...contexts.map((context, index) => el("article", "panel human-context-card",
         el("h2", "", `${modeName(context)} · ${context.tenant_id}`), el("p", "muted", `Organisation : ${context.organization_scope}`),
         el("p", "muted", `Valable jusqu’au ${formatDate(context.expires_at, true)}`),

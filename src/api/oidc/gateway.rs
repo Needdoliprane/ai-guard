@@ -234,11 +234,15 @@ fn membership(
         .capabilities(access.claims())
         .map_err(|_| credential_invalid())?;
     let mut allowed = false;
+    let mut unavailable = false;
     for tenant in state.tenants.iter() {
-        let profile = tenant
-            .store
-            .human_profile(&principal, &state.redactor)
-            .map_err(|_| audit_unavailable())?;
+        let profile = match tenant.store.human_profile(&principal, &state.redactor) {
+            Ok(profile) => profile,
+            Err(_) => {
+                unavailable = true;
+                continue;
+            }
+        };
         if profile.account.is_some()
             && profile.memberships.iter().any(|member| {
                 member.active && member.capabilities.intersection(&ceiling).next().is_some()
@@ -248,6 +252,9 @@ fn membership(
         }
     }
     if !allowed {
+        if unavailable {
+            return Err(audit_unavailable());
+        }
         return Err(human::failure(
             StatusCode::FORBIDDEN,
             "permission_denied",
@@ -328,7 +335,7 @@ fn install(
         browser_transaction,
     } = admission;
     if state.credential_index.lookup(raw).is_some()
-        || human::reject_control_collision(state, raw).is_err()
+        || human::reject_control_collision(state, raw, None).is_err()
     {
         return Err(fail_initial(
             oidc,
@@ -1004,7 +1011,7 @@ pub(super) async fn native_intent(
             generation,
         } => {
             let raw = bearer.ok_or_else(credential_invalid)?;
-            human::reject_control_collision(&state, &raw)?;
+            human::reject_control_collision(&state, &raw, None)?;
             if state.credential_index.lookup(&raw).is_some() {
                 return Err(credential_invalid());
             }
@@ -1372,7 +1379,7 @@ fn install_rotation(
             || access.issuer() != operation.binding.issuer
             || access.client_id() != operation.binding.client_id
             || state.credential_index.lookup(raw).is_some()
-            || human::reject_control_collision(state, raw).is_err()
+            || human::reject_control_collision(state, raw, None).is_err()
         {
             return Err(credential_invalid());
         }
@@ -1511,7 +1518,7 @@ pub(super) async fn refresh(
         .ok_or_else(credential_invalid)?
         .to_owned();
     let body: Refresh = json_body(request).await?;
-    human::reject_control_collision(&state, &raw)?;
+    human::reject_control_collision(&state, &raw, None)?;
     if state.credential_index.lookup(&raw).is_some() {
         return Err(credential_invalid());
     }

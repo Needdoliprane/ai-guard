@@ -11,7 +11,7 @@ const envelope = { version: 1, context_id: context.id, authorization_version: co
   read_receipt: { request_id: uuid, audit_event_id: uuid, received_at: "2026-11-01T12:00:00Z" } };
 
 test("l’identité conserve une version d’autorisation opaque et la révision propre d’appartenance", () => {
-  const identity = { version: 1, principal, display_name: "Alice", authentication: { method: "local_credential", credential_id: uuid, expires_at: null }, contexts: [context] };
+  const identity = { version: 1, principal, display_name: "Alice", authentication: { method: "local_credential", credential_id: uuid, expires_at: null }, contexts: [context], contexts_complete: true };
   assert.equal(parseHumanIdentity(identity).contexts[0].authorization_version, "a".repeat(64));
   for (const bad of [1, "01", "18446744073709551616", "g".repeat(64)])
     assert.throws(() => parseHumanIdentity({ ...identity, contexts: [{ ...context, authorization_version: bad }] }), /Contrat/);
@@ -61,7 +61,7 @@ test("un propriétaire OIDC invalide ou une identité de contrôle ne deviennent
 
 test("un propriétaire OIDC ne permet pas de se connecter avec une identité ou une méthode SSO non intégrée", () => {
   const identity = { version: 1, principal, display_name: "Alice locale",
-    authentication: { method: "local_credential", credential_id: uuid, expires_at: null }, contexts: [context] };
+    authentication: { method: "local_credential", credential_id: uuid, expires_at: null }, contexts: [context], contexts_complete: true };
   assert.deepEqual(parseHumanIdentity(identity).principal, principal);
   const oidc = { kind: "human_oidc", issuer: "https://identity.example.test/realms/a", subject: "user-1" };
   assert.throws(() => parseHumanIdentity({ ...identity, principal: oidc }), /Contrat/);

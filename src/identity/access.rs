@@ -36,6 +36,9 @@ pub struct HumanIdentityV1 {
     pub principal: PrincipalRefV1,
     pub display_name: String,
     pub authentication: HumanAuthenticationV1,
+    /// False when at least one tenant store could not supply its authorized
+    /// contexts. Missing contexts are unknown, not proof of absent membership.
+    pub contexts_complete: bool,
     pub contexts: Vec<HumanContextV1>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

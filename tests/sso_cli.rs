@@ -449,7 +449,7 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
             let version = "a".repeat(64);
             if path.ends_with("/identity") {
                 json!({"version":1,"principal":{"kind":"human_oidc","issuer":issuer,"subject":"subject-a"},
-                "display_name":"Fixture human","authentication":{"method":"oidc_access_token","credential_id":AUTH_ID,"expires_at":state.expires_at},
+                "display_name":"Fixture human","authentication":{"method":"oidc_access_token","credential_id":AUTH_ID,"expires_at":state.expires_at},"contexts_complete":true,
                 "contexts":[{"id":context,"tenant_id":"tenant-a","organization_scope":"org-a","mode":"personal",
                     "capabilities":["read_metadata","read_content","export"],"membership_revision":"1",
                     "authorization_version":version,"expires_at":state.expires_at}]})

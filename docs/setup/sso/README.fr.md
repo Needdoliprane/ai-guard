@@ -4,6 +4,8 @@
 
 Ce guide décrit la configuration OIDC Rust, la connexion Web et le CLI humain au premier plan. Utilisez-le avec le binaire ai-guard correspondant et le frontend compilé. Il ne configure pas l’authentification Codex ou Claude : choisissez séparément leur abonnement, clé API ou endpoint d’inférence approuvé dans le [guide fournisseurs](../providers/README.fr.md).
 
+Déployez des versions correspondantes du gateway, du dashboard compilé et du CLI natif pour adopter le champ obligatoire `contexts_complete` des réponses d’identité humaine. Un nouveau client strict refuse un champ absent ou mal typé ; un ancien client strict peut refuser le champ supplémentaire. Coordonnez la mise à jour des composants en conservant configuration, credentials et audits existants. Cette évolution du contrat de réponse n’ajoute aucune migration de base et ne justifie pas de remplacer un store existant.
+
 Choisissez la **DEMO locale neuve** ci-dessous pour préparer les nouvelles données du contrôle et les trois comptes applicatifs importés, ou la [procédure manuelle](#préparer-une-installation-existante-ou-dentreprise) avec un fournisseur existant. Utilisez une image de contrôle actuelle et son frontend compilé correspondants ; le [suivi d’ingénierie](../../engineering/VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) distingue les parcours Web connexion/lecture/logout observés des trois comptes des qualifications CLI natif, refus de permissions et cycle de session restantes. Un mapping de nom propre au navigateur ne prouve pas la résolution DNS hôte nécessaire au CLI natif. Préparation et résultats historiques gardent leur périmètre daté ; le [contrat d’identité](../../sso.md) décrit la cible produit complète.
 
 ## Préparer une DEMO locale neuve
@@ -347,6 +349,14 @@ Le gateway consomme son callback et envoie le navigateur vers `/auth/oidc/comple
 
 Utilisez l’action de déconnexion de l’application. L’état local du navigateur est effacé même si contrôle/fournisseur ne peuvent confirmer le logout. Lisez séparément les résultats `local_session`, `provider_logout` et `audit` lorsqu’ils sont disponibles. `provider_logout:accepted` décrit la réponse de l’endpoint pris en charge ; ce n’est ni une révocation JWT globale ni la preuve de fermeture des autres sessions navigateur/client.
 
+### Lorsque la liste des contextes est partielle
+
+La réponse d’identité contient le booléen obligatoire `contexts_complete`. `true` signifie que toutes les consultations des profils des tenants configurés pour cette réponse ont réussi. `false` indique qu’au moins une source est indisponible : les contextes proposés proviennent des sources consultables, sans nommer les tenants indisponibles ni deviner leurs appartenances. Cela concerne les credentials locaux nominatifs comme les identités OIDC admises. Aucun tenant fourni dans la requête ni panne voisine ne change votre périmètre.
+
+Le dashboard affiche **Liste des contextes partielle** et **Actualiser les contextes**. Utilisez cette action après réparation du store affecté par l’opérateur. Un contexte absent, voire une liste partielle vide, ne prouve pas une révocation d’accès. Choisissez seulement un contexte actuellement proposé par le contrôle. Son autorisation et son audit obligatoire sont revérifiés à l’utilisation ; un store sélectionné indisponible donne `503`, pas une liste de ressources vide. Le store source d’un credential local doit également rester consultable pour vous authentifier.
+
+Une connexion OIDC peut réussir lorsqu’une appartenance active et autorisée est établie dans une source saine. Si aucune appartenance autorisée ne peut être établie alors qu’une source est indisponible, l’erreur reste `503` ; ce n’est pas un résultat définitif `permission_denied`. Préservez le store et son audit, réparez la panne puis réessayez explicitement. Une absence d’appartenance établie sur des sources consultables reste un refus.
+
 ## Se connecter et travailler dans le CLI au premier plan
 
 Compilez un CLI natif hôte depuis la même révision source si vous n'en avez pas déjà un. L'image de contrôle contient un binaire Linux ; ne l'extrayez pas pour un poste macOS. Depuis la racine du dépôt, avec la toolchain Rust du dépôt :
@@ -381,6 +391,8 @@ logout
 
 `context` accepte seulement un ID proposé à cette identité. Les types de ressource sont `session`, `sandbox`, `agent` et `project` ; choisissez explicitement `metadata` ou `content`. Contenu et export nécessitent des permissions distinctes. La pagination reprend le `next_cursor` opaque exact avec sélection inchangée ; une page ne donne pas un total. Les commandes acceptent les guillemets mais aucun développement shell/environnement, substitution ou exécution. Ne préfixez pas les commandes au premier plan par `human` et ne collez aucun bearer.
 
+Vérifiez `contexts_complete` dans le résultat `identity` avant de considérer sa liste de contextes comme complète. Après reprise d’un store voisin, relancez `identity` puis choisissez un contexte proposé. Une liste partielle ne révoque pas une appartenance absente ; elle n’autorise pas non plus l’usage d’un contexte inventé ou non vérifié.
+
 Tokens et vérificateur PKCE restent dans ce processus ; aucun cache durable de tokens ou fichier de credential n’est créé. `refresh` est explicite dans le CLI. Après sa réussite, demandez `identity` et choisissez un nouveau contexte proposé ; anciens contextes/curseurs et générations d’export sont invalides. Un refresh échoué ou ambigu ferme la session au premier plan, sans retry automatique. `logout`, `quit`, `exit`, EOF et Ctrl-C effacent l’état local ; la connexion suivante est une nouvelle session. Un redémarrage gateway perd les admissions vivantes malgré l’audit durable.
 
 L’export demande un parent privé existant et une destination finale **neuve**. Son budget est de 25 pages, 4 Mio et 60 secondes depuis la préparation initiale. Après interruption, conservez le répertoire `.preparing` adjacent. `resume-export --output-dir /absolute/private/ai-guard/new-export` exige cette préparation exacte, le même contexte, la session au premier plan encore vivante et sa génération d’admission, dans l’échéance initiale. Refresh, arrêt/redémarrage du processus, autorisation expirée ou budget épuisé imposent un nouvel export explicitement autorisé vers une autre destination neuve ; conservez la préparation non résolue. Un reçu de lecture prouve l’enregistrement du contrôle, pas la livraison des octets ni la vérification d’un audit signé complet.
@@ -399,6 +411,8 @@ L’export demande un parent privé existant et une destination finale **neuve**
 | `migration_required` | Arrêtez les contrôles, conservez les sauvegardes et réalisez la migration de stockage suivante explicite. N’initialisez pas une base de remplacement. |
 | Échec TLS, discovery, signature ou fournisseur | Vérifiez DNS/routes approuvés, issuer/endpoints, chaîne publique/SAN/horloge, profil des tokens et rotation des clés. Réparez la source ; conservez validation et destinations fixes. |
 | `audit_unavailable` | Audit d’authentification/lecture obligatoire non fiable, non inscriptible ou capacité épuisée. Préservez les données et réparez stockage/configuration avant retry. Aucun contournement. |
+| Contextes partiels / `contexts_complete:false` | Préservez le store affecté et réparez sa disponibilité. Utilisez **Actualiser les contextes** ou relancez `identity` au premier plan ; une liste incomplète ne prouve ni absence ni révocation d’accès. Chaque contexte sélectionné exige toujours son propre store sain. |
+| Champ d’identité humaine absent ou incompatible | Déployez ensemble des versions correspondantes du gateway, du dashboard compilé et du CLI. Ne supprimez pas `contexts_complete`, ne substituez pas un tenant libre et ne remplacez pas la base pour contourner l’erreur de contrat. |
 | `capacity_exhausted` | Capacité d’authentification vivante bornée. Attendez l’expiration des tentatives puis réessayez explicitement ; ne créez pas un autre audit pour dépasser la borne. |
 | Connexion perdue / données périmées | Gardez un état déconnecté/périmé explicite. Reconnectez-vous et choisissez un contexte actuel avant reprise ; une perte n’est pas une activité nulle. |
 

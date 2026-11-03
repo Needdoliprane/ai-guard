@@ -343,7 +343,7 @@ impl GatewayState {
                 "Cette identité est en lecture seule.",
             ));
         }
-        human::reject_control_collision(self, token)?;
+        human::reject_control_collision(self, token, Some(binding.tenant_index))?;
         Ok((tenant.clone(), binding.role.as_str()))
     }
 }

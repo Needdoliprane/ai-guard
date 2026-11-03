@@ -4,6 +4,8 @@
 
 This guide describes the Rust OIDC configuration, the Web sign-in and the foreground human CLI. Use it with the matching ai-guard binary and built frontend. It does not configure Codex or Claude authentication: choose their subscription, API key or approved inference endpoint separately in the [provider guide](../providers/README.md).
 
+Deploy the gateway, built dashboard and native CLI from matching versions when adopting the required `contexts_complete` field in human identity responses. New strict clients reject a missing or malformed field; older strict clients may reject the added field. Coordinate the component update and retain the existing configuration, credentials and audit data. This response-contract change adds no database migration and does not justify replacing an existing store.
+
 Choose the **fresh local DEMO** below to prepare new control data and the three imported application accounts, or use the [manual installation procedure](#prepare-an-existing-or-enterprise-installation) with an existing provider. Use a matching current control image and built frontend; the [engineering record](../../engineering/VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) distinguishes the three accounts' observed Web sign-in/read/logout paths from the remaining native CLI, negative permission and lifecycle qualification. Browser-specific hostname mapping does not establish the host DNS resolution required by the native CLI. Preparation and historical results retain their dated scope; the [identity contract](../../sso.md) describes the complete product target.
 
 ## Prepare a fresh local DEMO
@@ -347,6 +349,14 @@ The gateway consumes its callback and sends the browser to `/auth/oidc/complete`
 
 Use the application's disconnect action. Local browser state is cleared even when the control/provider cannot confirm logout. Read the separate `local_session`, `provider_logout` and `audit` outcomes when available. `provider_logout:accepted` reports the supported endpoint response; it does not assert global JWT revocation or that every other browser/client session closed.
 
+### When the context list is partial
+
+The identity response includes the required boolean `contexts_complete`. `true` means all configured tenant profile lookups for that response succeeded. `false` means at least one source is unavailable: the offered contexts are usable candidates from readable sources, and the response does not name unavailable tenants or guess their memberships. This applies to named local credentials as well as admitted OIDC identities. No request-supplied tenant hint or neighboring outage changes your scope.
+
+The dashboard shows **Liste des contextes partielle** and **Actualiser les contextes**. Use that refresh action after the operator repairs the affected store. A missing context, or even an empty partial list, does not prove that access was revoked. Choose only a context currently offered by the control. Its own authorization and mandatory audit are checked again when used; an unavailable selected store returns `503` instead of an empty resource list. A local credential's source store must also remain readable before it can authenticate you.
+
+OIDC sign-in can succeed when an approved active membership is established in a healthy source. If no approved membership can be established while a source is unavailable, the error remains `503`; it is not a definitive `permission_denied` result. Preserve the store and its audit, repair the fault, then retry explicitly. A verified lack of membership across readable sources remains a refusal.
+
 ## Sign in and work in the foreground CLI
 
 Build a native host CLI from the same source revision if one is not already available. The control image contains a Linux binary; do not extract it for use on a macOS workstation. From the repository root, with the repository's Rust toolchain:
@@ -381,6 +391,8 @@ logout
 
 `context` accepts only an ID offered to this identity. Resource kinds are `session`, `sandbox`, `agent` and `project`; choose `metadata` or `content` explicitly. Content and export need separate permissions. Pagination uses the exact opaque `next_cursor` with unchanged selection; one page is not a total. Commands support quoting but no shell/environment expansion, substitution or execution. Do not prefix foreground commands with `human` or paste bearer tokens.
 
+Inspect `contexts_complete` in the `identity` result before treating its context list as complete. After a neighboring store recovers, run `identity` again and select an offered context. A partial list does not revoke a missing membership; it also does not authorize using an invented or unchecked context.
+
 Tokens and the PKCE verifier remain in this process; no durable token cache or credential file is created. `refresh` is explicit in the CLI. After it succeeds, request `identity` and select a newly offered context; old contexts/cursors and export generations are invalid. A failed or ambiguous refresh closes the foreground session without automatic retry. `logout`, `quit`, `exit`, EOF and Ctrl-C close local state; a later login is a new session. Gateway restart loses live admissions even though the audit remains durable.
 
 Export needs an existing private parent and a **new** final destination. It has a budget of 25 pages, 4 MiB and 60 seconds from the initial preparation. On interruption retain the adjacent `.preparing` directory. `resume-export --output-dir /absolute/private/ai-guard/new-export` works only with that exact preparation, context, still-live foreground session and admission generation, within the original deadline. Refresh, process exit/restart, expired authorization or an exhausted budget requires a new explicitly authorized export into another fresh destination; preserve the unresolved preparation. A read receipt records the control's audit, not proof that bytes reached their destination or a complete signed audit verification.
@@ -399,6 +411,8 @@ Export needs an existing private parent and a **new** final destination. It has 
 | `migration_required` | Stop controls, retain backups and perform the explicit next storage migration. Do not initialize a replacement store. |
 | TLS, discovery, signature or provider failure | Verify approved DNS/routes, issuer/endpoints, public chain/SAN/time, token profile and key rotation. Repair the source configuration; preserve verification and fixed destinations. |
 | `audit_unavailable` | Authentication or mandatory read audit cannot be trusted/written, or capacity is exhausted. Preserve data and repair storage/configuration before retrying. No bypass is available. |
+| Partial contexts / `contexts_complete:false` | Preserve the affected store and repair its availability. Use **Actualiser les contextes** or run foreground `identity` again; an incomplete list is not proof of absent or revoked access. Each selected context still requires its own healthy store. |
+| Missing or incompatible human identity field | Deploy matching gateway, built dashboard and CLI versions together. Do not drop `contexts_complete`, substitute a tenant hint or replace the database to bypass a contract error. |
 | `capacity_exhausted` | Live authentication capacity is bounded. Wait for pending attempts to expire and retry explicitly; do not create a new audit to evade the bound. |
 | Lost connection / stale data | Retain an explicit disconnected/stale state. Reauthenticate and select a current context before resuming; loss is not zero activity. |
 

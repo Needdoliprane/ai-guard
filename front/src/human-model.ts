@@ -10,7 +10,7 @@ export interface HumanContext {
 export interface HumanIdentity {
   version: 1; principal: Principal; display_name: string;
   authentication: { method: "local_credential" | "oidc_access_token"; credential_id: string; expires_at: string | null };
-  contexts: HumanContext[];
+  contexts: HumanContext[]; contexts_complete: boolean;
 }
 export interface ResourceRef { kind: ResourceKind; resource_id: string }
 export interface HumanResource {
@@ -77,7 +77,8 @@ function resource(value: unknown): ResourceRef {
 export function parseHumanIdentity(value: unknown): HumanIdentity {
   requireContract(object(value) && value.version === 1 && boundedText(value.display_name, 256) && object(value.authentication) &&
     ["local_credential", "oidc_access_token"].includes(String(value.authentication.method)) && uuid(value.authentication.credential_id) &&
-    (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000);
+    (value.authentication.expires_at === null || timestamp(value.authentication.expires_at)) && Array.isArray(value.contexts) && value.contexts.length <= 1000 &&
+    typeof value.contexts_complete === "boolean");
   const seen = new Set<string>();
   const contexts = value.contexts.map((item): HumanContext => {
     requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
@@ -94,7 +95,8 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
   requireContract((value.authentication.method === "local_credential" && authenticatedPrincipal.kind === "human_local") ||
     (value.authentication.method === "oidc_access_token" && authenticatedPrincipal.kind === "human_oidc" && timestamp(value.authentication.expires_at)));
   return { version: 1, principal: authenticatedPrincipal, display_name: value.display_name,
-    authentication: { method: value.authentication.method as HumanIdentity["authentication"]["method"], credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null }, contexts };
+    authentication: { method: value.authentication.method as HumanIdentity["authentication"]["method"], credential_id: value.authentication.credential_id, expires_at: value.authentication.expires_at as string | null },
+    contexts, contexts_complete: value.contexts_complete };
 }
 function page<T>(value: unknown, parse: (item: unknown) => T, streaming = false): HumanPage<T> {
   requireContract(object(value) && value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&

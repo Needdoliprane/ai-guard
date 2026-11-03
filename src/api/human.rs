@@ -186,7 +186,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
                 "authenticate",
             ));
         }
-        reject_control_collision(state, token)?;
+        reject_control_collision(state, token, None)?;
         let proof = oidc.authenticate(token)?;
         let expiry = chrono::DateTime::from_timestamp(proof.expires_at, 0)
             .ok_or_else(invalid_request)?
@@ -205,17 +205,29 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     let mut matches = Vec::new();
+    let mut unavailable = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        if tenant
-            .store
-            .local_credential_binding(&digest)
-            .map_err(store_failure)?
-            .is_some()
-        {
-            matches.push(index);
+        match tenant.store.local_credential_binding(&digest) {
+            Ok(Some(_)) => matches.push(index),
+            Ok(None) => {}
+            Err(error) => {
+                // The source is not known until a readable binding matches.
+                // Keep an error for an unresolved proof, without allowing an
+                // unrelated unavailable store to deny a verified source.
+                if unavailable.is_none() {
+                    unavailable = Some(error);
+                }
+            }
         }
     }
-    if state.credential_index.lookup(token).is_some() || matches.is_empty() {
+    let control_credential = state.credential_index.lookup(token).is_some();
+    if !control_credential
+        && matches.is_empty()
+        && let Some(error) = unavailable
+    {
+        return Err(store_failure(error));
+    }
+    if control_credential || matches.is_empty() {
         return Err(failure(
             StatusCode::UNAUTHORIZED,
             "credential_invalid",
@@ -256,24 +268,31 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
     })
 }
-pub(super) fn reject_control_collision(state: &GatewayState, token: &str) -> ApiResult<()> {
+pub(super) fn reject_control_collision(
+    state: &GatewayState,
+    token: &str,
+    own: Option<usize>,
+) -> ApiResult<()> {
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    for tenant in state.tenants.iter() {
-        if tenant
-            .store
-            .local_credential_binding(&digest)
-            .map_err(|_| {
-                error(
+    for (index, tenant) in state.tenants.iter().enumerate() {
+        match tenant.store.local_credential_binding(&digest) {
+            Ok(Some(_)) => {
+                return Err(error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Classes d'identité ambiguës : accès refusé.",
+                ));
+            }
+            Ok(None) => {}
+            Err(_) if own == Some(index) => {
+                return Err(error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "Configuration d'identité indisponible.",
-                )
-            })?
-            .is_some()
-        {
-            return Err(error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Classes d'identité ambiguës : accès refusé.",
-            ));
+                ));
+            }
+            // An unavailable sibling cannot authenticate its local bindings.
+            // Readable collisions are still checked on every request, including
+            // bindings provisioned after the gateway was constructed.
+            Err(_) => {}
         }
     }
     Ok(())
@@ -290,14 +309,12 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
         HumanProofSource::Local(source) => *source,
     };
     let mut count = 0usize;
-    for tenant in state.tenants.iter() {
-        count += usize::from(
-            tenant
-                .store
-                .local_credential_binding(&proof.digest)
-                .map_err(store_failure)?
-                .is_some(),
-        );
+    for (index, tenant) in state.tenants.iter().enumerate() {
+        match tenant.store.local_credential_binding(&proof.digest) {
+            Ok(binding) => count += usize::from(binding.is_some()),
+            Err(error) if index == source => return Err(store_failure(error)),
+            Err(_) => {}
+        }
     }
     if count != 1 {
         return Err(failure(
@@ -549,6 +566,7 @@ async fn identity(
     State(state): State<GatewayState>,
 ) -> ApiResult<Json<HumanIdentityV1>> {
     let mut contexts = Vec::new();
+    let mut contexts_complete = true;
     let mut display_name = None;
     let principal_key = proof.credential.principal.key().map_err(store_failure)?;
     let mut remaining = proof
@@ -572,10 +590,23 @@ async fn identity(
         remaining = remaining.min(oidc.deadline.saturating_duration_since(Instant::now()));
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let snapshot = tenant
+        let snapshot = match tenant
             .store
             .human_profile(&proof.credential.principal, &proof.redactor)
-            .map_err(store_failure)?;
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
+            {
+                return Err(store_failure(error));
+            }
+            Err(_) => {
+                // Do not reconcile an unreadable profile as an empty one: its
+                // existing contexts remain unknown and are revalidated against
+                // their own store before any use.
+                contexts_complete = false;
+                continue;
+            }
+        };
         state
             .human
             .contexts
@@ -668,6 +699,14 @@ async fn identity(
         version: 1,
         principal: proof.credential.principal.clone(),
         display_name: display_name.ok_or_else(|| {
+            if !contexts_complete {
+                return failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "audit_unavailable",
+                    "The required identity or audit store is unavailable.",
+                    "contact_operator",
+                );
+            }
             failure(
                 StatusCode::UNAUTHORIZED,
                 "identity_revoked",
@@ -680,6 +719,7 @@ async fn identity(
             credential_id: proof.credential.credential_id.clone(),
             expires_at: proof.credential.expires_at.clone(),
         },
+        contexts_complete,
         contexts,
     };
     let value = proof

@@ -817,6 +817,98 @@ async fn oidc_subjects_read_only_their_durable_tenant_even_with_a_forged_tenant_
         .0,
         StatusCode::UNAUTHORIZED
     );
+    assert_oidc_neighbor_fault_isolation(&f, &router, &proofs).await;
+}
+
+async fn assert_oidc_neighbor_fault_isolation(
+    fixture: &Fixture,
+    router: &Router,
+    proofs: &[(String, String, &str)],
+) {
+    // The controlled issuer and durable admissions above remain unchanged.
+    // Only tenant A's business audit is corrupted, using a separate SQLite
+    // connection just as the technical-credential regression does.
+    let db = rusqlite::Connection::open(fixture._files.path().join("tenant.sqlite")).unwrap();
+    assert!(db.execute("UPDATE events SET hash='tampered'", []).unwrap() > 0);
+    drop(db);
+
+    let (status, identity) = json_response(
+        router.clone(),
+        Request::get("/api/v1/human/identity")
+            .header("authorization", format!("Bearer {}", proofs[1].0))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(identity["principal"]["subject"], "subject-b");
+    assert_eq!(identity["contexts_complete"], false);
+    assert_eq!(identity["contexts"].as_array().unwrap().len(), 1);
+    assert_eq!(identity["contexts"][0]["tenant_id"], "tenant-b");
+    assert_eq!(identity["contexts"][0]["id"], proofs[1].1);
+
+    // A's previously issued context is not reclassified as revoked or empty.
+    // Both its identity and reads still require its now-unavailable store.
+    for (path, context) in [
+        ("/api/v1/human/identity", None),
+        ("/api/v1/human/resources", Some(proofs[0].1.as_str())),
+    ] {
+        let mut request =
+            Request::get(path).header("authorization", format!("Bearer {}", proofs[0].0));
+        if let Some(context) = context {
+            request = request.header("x-aiguard-context", context);
+        }
+        let (status, error) =
+            json_response(router.clone(), request.body(Body::empty()).unwrap()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error["error"]["code"], "audit_unavailable");
+        assert!(error.get("principal").is_none());
+        assert!(error.get("contexts").is_none());
+        assert!(error.get("items").is_none());
+    }
+
+    for (subject, salt, expected) in [
+        (
+            "subject-b",
+            "healthy-neighbor-admission",
+            StatusCode::CREATED,
+        ),
+        (
+            "unknown-during-neighbor-fault",
+            "unknown-neighbor-admission",
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let (status, intent) = json_response(
+            router.clone(),
+            post(
+                "/auth/oidc/native-intent",
+                json!({"version":1,"action":{"kind":"login"}}),
+                None,
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let token = fixture.issuer.token("cli-public", subject, None, &[], salt);
+        let (status, response) = json_response(
+            router.clone(),
+            post(
+                "/auth/oidc/admit",
+                json!({"version":1,"intent_id":intent["intent_id"]}),
+                Some(&token),
+                None,
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, expected);
+        if expected == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(response["error"]["code"], "audit_unavailable");
+            assert!(response.get("authentication_id").is_none());
+        }
+    }
 }
 
 #[tokio::test]

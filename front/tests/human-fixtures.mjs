@@ -6,7 +6,7 @@ export const context = (id = "context-a", mode = "personal") => ({ id, tenant_id
   membership_revision: "1", authorization_version: "a".repeat(64), expires_at: new Date(Date.now() + 240000).toISOString() });
 export const identity = () => ({ version: 1, principal, display_name: "Alice locale",
   authentication: { method: "local_credential", credential_id: uuid, expires_at: null },
-  contexts: [context(), context("context-admin", "administration"), context("context-b")] });
+  contexts: [context(), context("context-admin", "administration"), context("context-b")], contexts_complete: true });
 export const resource = (id = "session-a", permissions = { metadata: true, content: true, export: true }) => ({
   resource: { kind: "session", resource_id: id }, owner: principal, revision: "1", permissions,
 });
