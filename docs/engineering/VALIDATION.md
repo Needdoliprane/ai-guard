@@ -1,5 +1,59 @@
 # Validation courante
 
+## 3 et 4 novembre — composition workload, registre et relais en validation
+
+Base `2c400976`, travail composé dans `broker-registry-20261103`, aucun
+changement de donnée utilisateur. Les résultats suivants sont intermédiaires,
+pas une qualification des nouveaux modules ni une intégration terminée.
+
+- Gel1a : compilation lib FAIL sur quatre lectures rusqlite `u64: FromSql`,
+  zéro test. Correction relue : lire i64 puis conversion u64 contrôlée.
+- Gel2 : compilation lib PASS, filtre workload 2 PASS/9 FAIL_SETUP sur
+  répertoires temporaires non0700. Fixtures corrigées à la création, umask0022
+  inchangée ; fichiers de credential/configuration créés0600.
+- Gel2b : 10 PASS/1 FAIL de fixture ; une injection de corruption référençait
+  un credential inexistant et SQLite refusait la FK avant l'oracle. La fixture
+  altère désormais le digest par une valeur canonique neuve, sans désactiver
+  les FK ; refus d'intégrité et latch unhealthy restent les mêmes assertions.
+- Gel2c : correction exacte 1 PASS, broker7, CLI/config3, contrats3,
+  migration3, stockage5, CLI/config réelle4 et API11 PASS, deux FAIL d'attente
+  HTTP403 alors que les clés worker sont refusées401 sur routes runner-only.
+  Avec les dix fonctions déjà vertes du gel2b, **47 réussites uniques**.
+  Les deux seules attentes sont corrigées, sans autoriser un worker ; leurs
+  reprises et le gel produit final restent à exécuter. Un filtre lib de
+  configuration qui sélectionnait zéro fonction n'est pas compté ; la bonne
+  cible binaire a réellement passé ses deux fonctions.
+
+Preuves privées : `/private/tmp/ai-guard-workload-composition-luna-20261103.osokbm/proofs/`,
+rapports séparés `RESULT.md`, `gel2/RESULT.md`, `gel2b/RESULT.md`,
+`gel2c/RESULT.md` et logs conservés. Aucun modèle, fournisseur, IdP externe,
+worker Docker/Podman/Kubernetes ou E2E complet exécuté dans cette campagne.
+
+**Correction du harnais de validation :** le conteneur initial montait le
+premier snapshot en readonly, mais les gels suivants étaient copiés dans
+scratch puis chmod a-w. Le propriétaire UID1000 pouvait encore changer ces
+modes : ne pas appeler ces copies des sources protégées par montage OS.
+Les hashes/mtimes vérifiés et les résultats observés restent consignés, mais
+ne sont pas réattestés sous cette garantie. Le nouveau conteneur
+`ai-guard-workload-red-ro-20261104` monte le parent public `inputs/` en RO et
+Cargo travaille directement sous `/inputs/<snapshot>`, avec target privé
+neuf. Mounts RW=false, mountinfo ro, locate-project et probe sont enregistrés.
+Les RED utiles et les validations GREEN reprennent dans ce harnais durci,
+avec les mêmes bornes réseau/IPC/UID/capabilities/ressources et sans transfert
+de target entre conteneurs. Les corrections ne portent pas sur une limite
+du produit. Aucune réussite finale n'est déduite de cette préparation.
+
+Les revues source ont relevé WSI-Q01 (requêtes proportionnelles aux tombstones),
+WSI-V01 (recul UTC masqué par événement ultérieur bas), WSI-D01 (association
+des trois nouveaux index à leur table), B1 (collision workload admise côté
+humain) et la compatibilité schéma6 du client broker. Les préfixes RED sont
+conservés avant changement ; les corrections et revues sont en cours. Le
+coût historique WSI-Q02 des connexions sœurs/supervision reste un écart
+séparé, sans prétention de performance globale bornée. Aucun de ces constats
+source n'est présenté comme une vulnérabilité distante exploitée. La recette
+3 workers réels, transport worker, fédération, reprise D5 et charge100 restent
+ouverts ; G09 FAIL, aucun gate global clos.
+
 ## 3 novembre — diagnostic Kubernetes et durée de vie du transport
 
 Base `2c400976`, sans modification des dépendances. Le sous-lot ajoute le

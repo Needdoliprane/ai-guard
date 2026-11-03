@@ -1,4 +1,4 @@
-# État constaté — suivi au 3 novembre 2026
+# État constaté — suivi des 3 et 4 novembre 2026
 
 ## Correctifs initiaux de l'audit en cours
 
@@ -85,9 +85,25 @@ Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
 - `broker-registry-20261103` : registre, incarnations, ownership des autorités
   et bindings workload digest-only en développement. Cet agent possède aussi
   la migration6, le replay, les budgets workload et le raccord CLI/configuration.
-  La compilation lib du deuxième gel passe après quatre conversions SQLite
-  corrigées ; les premiers tests ont identifié neuf fixtures non privées0700,
-  en correction sans relâcher le produit. Aucune fédération distante qualifiée.
+  La compilation du deuxième gel passe après quatre conversions SQLite
+  corrigées. Le gel2c cumule **47 fonctions uniques PASS** et deux attentes
+  HTTP403 erronées sur des routes runner qui refusent401 ; leurs assertions
+  sont corrigées, validation finale encore en cours. Les défauts de fixtures
+  privées et d'injection FK sont conservés dans les preuves. Ces résultats
+  historiques utilisaient des copies source en scratch avec modes readonly,
+  sans montage OS readonly de la copie. Les validations finales reprennent
+  directement sur snapshots sous bind-RO, sans reprendre cette garantie
+  par simple chmod. Aucune fédération distante qualifiée.
+
+Revues du raccord : refus manquant de collision humain/workload, association
+des nouveaux index relay au schéma exact et compatibilité du client broker6
+ont été identifiés. Les corrections humaines et de compatibilité sont codées
+et relues, tests ciblés en cours ; le défaut d'association d'index est conservé
+pour reproduction avant correction. Les campagnes RED SQL/UTC sont rejouées
+sous montage source RO. Coût historique des reconstructions complètes après
+commits de connexions sœurs et mutations de supervision : **WSI-Q02 ouvert**,
+aucune garantie de coût global borné ou de capacité100. Le lot backend reste
+non accepté tant que ses vérifications composées ne sont pas terminées.
 
 Root possède les contrats et la composition. Le propriétaire du relais écrit
 les nouveaux modules HTTP ; celui du registre raccorde CLI/configuration.

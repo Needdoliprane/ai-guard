@@ -16,6 +16,7 @@ This manual describes the complete product contract. The implementation and qual
 | [Keycloak provider](keycloak/README.md) | Separate local identity-provider project, public Web/CLI clients, PKCE, claims and enterprise IdP preparation. |
 | [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |
 | [Enterprise](enterprise/README.md) | Shared control services, tenant boundaries, private CAs, internal inference and operations. |
+| [Kubernetes authority and inspection](kubernetes/README.md) | Explicit HTTPS trust and read-only Rust diagnostics for the Docker Desktop target; worker admission remains unavailable. |
 
 Each guide contains prerequisites, configuration, startup, expected endpoints, diagnosis, stopping and data preservation. English/French versions and configuration examples change together when a contract changes.
 

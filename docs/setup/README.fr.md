@@ -16,6 +16,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | [Fournisseur Keycloak](keycloak/README.fr.md) | Projet fournisseur local séparé, clients publics Web/CLI, PKCE, claims et préparation de l'IdP d'entreprise. |
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |
 | [Entreprise](enterprise/README.fr.md) | Services de contrôle partagés, frontières tenant, AC privées, inférence interne et exploitation. |
+| [Autorité et inspection Kubernetes](kubernetes/README.fr.md) | Confiance HTTPS explicite et diagnostic Rust en lecture seule pour la cible Docker Desktop ; admission de workers indisponible. |
 
 Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagnostic, arrêt et conservation des données. Versions anglaise/française et exemples évoluent ensemble lorsqu'un contrat change.
 
