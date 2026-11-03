@@ -1,5 +1,75 @@
 # Validation courante
 
+## 3 novembre — stockage HTTP borné et déporté
+
+Lot D source `3820bec`, intégré dans `b168784` après revue indépendante.
+RED de localisation sur le thread HTTP, de voisinage, puis de transactions
+hors permis avant correction. Barrières et compteurs sont les oracles,
+pas la latence du Mac sous pression.
+
+Douze unités PASS : `api::read_execution_tests` 4,
+`human::admission_tests` 1, `oidc::gateway::admission_tests` 1,
+`store_io::tests` 3 et `incremental_integrity_tests` 3. La retouche d'une
+valeur Json de contrôle est suivie du seul rejeu concerné, PASS sans warning ;
+ce rejeu ne crée pas une treizième fonction.
+
+Canaris finaux : `audit_integrity` 12, `audit_security` 3, `tenant_api` 4,
+cinq filtres exacts `human_access`, `authentication_start_capacity` 7,
+`oidc_gateway_flow` 7, trois filtres exacts `sso_cli`, `api_auth_boundary` 6.
+Soit 47 canaris et **59 fonctions uniques PASS**, RC0 naturels, sans warning
+final ni helper ignoré ajouté. Les CLI sont de vrais sous-processus avec
+issuer contrôlé local, sans fournisseur payant, moteur ou Keycloak réel.
+
+Logs privés : `ai-guard-luna-D-20261103.dgTRqE/proofs/`, préfixes
+`d-review-01-green-*`, `d-review-01-canaries-*` et
+`d-review-01-api-auth-boundary.log`. Les 14 fichiers Rust/tests et le lock
+correspondent au manifeste final ; hashes et mtimes des 245 sources avant/
+après concordent. Le cherry-pick conserve ces bytes et la correction API E
+antérieure du login initial volatil.
+
+Contrôle composé sur archive Git exacte `b168784`, Linux ARM64/Rust1.99.1 :
+
+```text
+cargo check --offline --locked --all-targets
+RC0, aucun warning, aucun test exécuté.
+```
+
+Preuves : `/private/tmp/ai-guard-composed-check-20261103.q1idlV/`.
+Cible Cargo neuve, aucun artefact D/FD partagé. Source/outils readonly,
+réseau/IPC absents, environnement vide puis borné, scratch privé. Un premier
+contrôle EROFS du harnais a échoué avant Cargo ; il reste préparatoire,
+sans compter comme invocation de compilation. Les manifests finaux sont
+conformes et les mtimes inchangés.
+
+**PASS** : ciblage ci-dessus, contrôle composé, formatage statique natif,
+revue spécification/qualité et guides EN/FR. **NOT_RUN** : Clippy Linux
+absent, build release, matrice générale et qualification des runtimes.
+TTL initial, FD, capacité d'audit et autres gates restent ouverts ; aucune
+qualification production déduite.
+
+## 3 novembre — descripteurs, premier RED local
+
+Sur `a1fb518` plus le test gelé :
+
+```text
+cargo test --offline --locked --test audit_fd_exhaustion temporary_emfile_refuses_append_without_permanently_latching_store -- --exact --nocapture --test-threads=1
+```
+
+Compilation réussie puis RC101 comportemental : un parent exécuté, helper
+ignoré lancé explicitement sans double comptage. Enfant seul limité à128FD,
+EMFILE réel, append refusé, restitution de121FD et de la limite avant les
+assertions. Même Store : `healthy=false`, `integrity_valid=true`,
+`append_ok=false`. L'assertion de récupération échoue après ces contrôles,
+sans timeout, sélection vide ou erreur préparatoire. **FAIL attendu avant
+correction**, pas un PASS.
+
+Preuves privées : `/private/tmp/ai-guard-fd-luna-20261103.c23yAU/FD-TEST-RESULT.md`
+et `FD-TEST.log`. SHA test :
+`6d7207f35b6adf98a8acaa658820e2b0d22e01d73ff6924ade93926cae6a6cb3`.
+Sandbox Linux ARM64 isolé, aucun épuisement de l'hôte. Le rejeu sur D reste
+requis ; HTTP, anonyme, inter-tenant, un FD libre, post-commit, macOS et
+moteurs ne sont pas couverts. Aucun correctif FD livré.
+
 ## 3 novembre — initiation SSO après preuve vérifiée
 
 Lot E intégré dans `808f08c`, clarification API dans `14d5eb8`, après quatre

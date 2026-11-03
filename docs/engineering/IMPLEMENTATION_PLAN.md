@@ -8,11 +8,14 @@
 2. E intégré dans `808f08c` et clarification API `14d5eb8` : quatre RED avant
    correction, sept régressions et sept canaris OIDC GREEN, puis oracle renforcé
    exact PASS avec production inchangée ; revue et guides EN/FR acceptés.
-   Poursuivre D (Store hors workers Tokio, admission bornée et intégrité
-   incrémentale sûre) : RED de thread et six GREEN intermédiaires, puis
-   correction du couplage d'admission voisin signalé en revue et raccord OIDC.
+   D intégré dans `b168784` après RED, corrections de revue, 59 fonctions
+   uniques ciblées et contrôle composé de toutes les cibles PASS.
    Aucune sévérité ni performance déduite d'un délai sur le Mac sous pression.
-3. Traiter F après D, puis rapprocher tout nouveau constat du rapport final
+3. Préparer puis reproduire F sur D intégré avant budgets/réserves. Le risque
+   FD a un premier RED sur `a1fb518` ; revalider sur D avant correction et
+   préserver le témoin du commit connu. La conception FD via Daybreak attend
+   l'authentification matérielle de session, sans bloquer les autres travaux.
+   Rapprocher tout nouveau constat du rapport final
    avec le code courant, y compris les lots déjà intégrés. Le retry du runner
    reste une proposition séparée sans décision du mainteneur.
 4. Reprendre ensuite les chantiers produit et qualifications ci-dessous,

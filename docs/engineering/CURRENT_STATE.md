@@ -9,6 +9,11 @@ les tentatives de connexion sans preuve vérifiée ne consomment plus le journal
 durable partagé. Sept régressions et sept canaris OIDC passent au premier gel ;
 le dernier oracle renforcé passe séparément après modification de sa fixture,
 avec production inchangée. Guides EN/FR et revue indépendante acceptés.
+Le lot D est intégré dans `b168784`, issu de `3820bec` : I/O SQLite HTTP
+hors Tokio, permis du store réellement consulté, révalidation au point d'I/O
+et cleanup borné. Revue finale et 59 fonctions uniques ciblées PASS.
+Le contrôle composé de toutes les cibles passe également, sans warning,
+sur une nouvelle cible privée ; aucun test exécuté par ce `cargo check`.
 Reproductions comportementales avant correction, tests ciblés et revues
 indépendantes sont consignés dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).
 Sur leurs gels respectifs : 26 fonctions Rust ciblées PASS, trois canaris
@@ -23,17 +28,15 @@ Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
 épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
 
 Les quatre worktrees A/B/C/E sont fermés après intégration et contrôle
-des consommateurs ; preuves et références source sont préservées. D a son RED
-sur le thread d'exécution, puis six fonctions ciblées GREEN sur un gel
-intermédiaire. Sa première régression de voisinage est reproduite puis corrigée.
-Le raccord OIDC et huit unités finales passent ensuite, sans avertissement.
-La revue finale exige cependant que les transactions de résolution locale,
-de revalidation d'une source distincte du contexte et de profils OIDC soient
-couvertes par le permis du store réellement lu. Ces chemins échappent encore
-au plafond tenant ; leurs nouvelles régressions sont en préparation, sans
-reproduction d'exploitation ni sévérité déduite. D reste hors intégration et
-les canaris finaux d'intégration ne sont pas encore exécutés. F attend D ;
-sa préparation statique ne remplace pas une reproduction. Le journal SSO déjà
+des consommateurs ; preuves et références source sont préservées. Les RED de
+D ont précédé ses corrections, puis les unités/canaris et la revue finale.
+F prépare son oracle d'épuisement d'audit sur D intégré, sans métier modifié.
+Le risque FD a son premier RED Store réel sur `a1fb518` : après restitution
+des descripteurs, chaîne valide mais autorité restant interdite. Le rejeu sur
+D reste requis avant correction. Son sous-agent de conception a été arrêté
+par la demande d'authentification matérielle Daybreak de cette session ;
+compilation, documentation et tâches indépendantes continuent.
+Le journal SSO déjà
 plein et le TTL initial de bout en bout restent des écarts distincts.
 L'audit externe reste ouvert ; ses nouveaux verdicts sont rapprochés des
 instantanés et du candidat dans le suivi, sans qualification globale.

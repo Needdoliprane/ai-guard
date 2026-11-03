@@ -20,6 +20,7 @@ quatrième porte leur intégration. Le checkout principal et les travaux
 | B — panne d'un tenant | Erreur voisine isolée, store propre fermé et refus des collisions préservés ; projection humaine partielle explicite. | Deux RED comportementaux, puis 7 tests Rust et 24 tests frontend GREEN ; TypeScript PASS. Revue indépendante acceptée, manifeste et guides EN/FR corrélés ; intégré dans `b4c2fee`. |
 | C — ingress | Pool upload distinct, lecture bornée avant acquisition de l'échange ; corps vides admis sans occuper le pool upload. | RED avec 64 uploads actifs et GET 429 ; deux régressions et six canaris ingress GREEN. Trois tests model_ingress locaux supplémentaires sélectionnés par le filtre, sans modèle ; revue indépendante et guides EN/FR acceptés, intégré dans `57fae74`. |
 | E — initiation SSO | État initial volatil borné ; intention durable après preuve vérifiée, avant lecture tenant/admission. | Quatre RED comportementaux puis sept régressions et sept canaris OIDC GREEN au premier gel ; oracle final renforcé PASS séparément. Revue et guides EN/FR acceptés ; intégré dans `808f08c`, clarification API `14d5eb8`. |
+| D — stockage HTTP | I/O hors Tokio, lanes bornées par store, droits revérifiés au point d'I/O et intégrité incrémentale. | RED puis corrections des constats de revue ; 59 fonctions uniques, revue finale et contrôle composé PASS. Intégré dans `b168784` ; aucune qualification de performance/runtime. |
 
 Les tests de reproduction de l'audit passent lorsque le défaut existe : ils
 ne constituent pas des régressions sans inversion des assertions. Une erreur
@@ -167,6 +168,39 @@ leurs autres limites. Le runner conserve son arrêt sur erreur de suivi. La
 recette historique d'arrêt utilisait un moteur fixture ; aucun worker réel ni
 retry60s n'est qualifié ici. Un contrôle composé du candidat intégré reste
 distinct des tests exécutés sur chaque gel de lot.
+
+### Lot D — résultat intégré au candidat
+
+Source `3820bec`, intégrée avec traçabilité dans `b168784`. Les 14 fichiers
+Rust/tests et le lock correspondent au gel revu ; le merge documentaire
+conserve la correction E du paragraphe `native-intent.action`.
+
+Après les RED de thread et de voisinage, les trois RED de revue observent
+7/4/1 transactions malgré saturation, avec fixture et preuve OIDC vérifiées.
+Le correctif lie réellement permis, store et lane. Source/contexte sont
+dédupliqués ; les métadonnées ont leur borne par store, les profils utilisent
+Read et le runner résolu garde Control. Aucun index de démarrage ne devient
+autorité ; indisponibilité et absence restent distinctes, collisions lisibles
+toujours refusées dynamiquement.
+
+Les cinq filtres lib passent 12 fonctions. Les canaris finaux ajoutent47 :
+intégrité12, sécurité3, tenants4, humain5, initiation SSO7, flow OIDC7, CLI3,
+frontière d'authentification6. **59 uniques PASS**, RC0 naturels. Le rejeu
+d'une unité après `let _ =` dans le contrôle de test n'est pas additionné.
+Aucun warning sur ce rejeu ni les canaris finaux. [Commandes et preuves](VALIDATION.md#3-novembre--stockage-http-borné-et-déporté).
+
+La revue indépendante accepte spécification, qualité, preuves et guides
+EN/FR. Cleanup OIDC réservé avant mutation, slot conservé jusqu'à fin réelle ;
+shutdown peut empêcher un job encore en queue, sans rendre Pending/rotating
+utilisable ni promettre un terminal durable. Les permis des pages ne
+traversent ni attente fournisseur/réseau ni retour de l'extracteur.
+
+`cargo check --offline --locked --all-targets` passe ensuite sur archive Git
+exacte `b168784`, cible neuve privée, sans warning et sans exécuter de test.
+Clippy Linux et build release restent NOT_RUN. Aucun worker/fournisseur réel,
+isolation moteur, capacité100 ni panne stockage physique n'est qualifié.
+Équité complète et absence de contention ne sont pas promises. F, FD, TTL
+initial et rapport externe restent ouverts.
 
 ### Lot E — résultat intégré au candidat
 
@@ -348,9 +382,21 @@ des transactions sans permis du store effectivement consulté. Les bornes
 globales restent réelles ; le 429 terminal ne prouve pas l'absence d'I/O avant
 admission. Rapport privé
 `/private/tmp/ai-guard-d-final-review-20261103.3l6hSq/REVIEW.md`.
-Les régressions ciblées sont en préparation avant correction ; exploitation
-déployée et sévérité mesurée restent non établies. D n'est pas intégré et les
-canaris d'intégration restent **NOT_RUN**. La [stratégie de test](TEST_STRATEGY.md#latence-et-pression-de-la-machine-de-développement)
+Les trois régressions ont ensuite atteint leurs assertions exactes, RC101 :
+7 transactions de découverte source, 4 de revalidation source/contexte et
+1 de profil OIDC malgré les permis retenus. Baselines, preuve cryptographique
+OIDC et intention durable préalable sont vérifiées ; aucune gravité ni
+performance déduite. Logs privés `proofs/d-review-01-red-{1,2,3}.log` dans
+le même dossier D ; sources et empreintes avant/après identiques. Les
+modifications du fixture OIDC partagé et de ses deux consommateurs sont
+limitées aux imports pour réemploi en unité. Un import test inutilisé est
+signalé, sans être confondu avec un échec de compilation.
+Le [contrat des lanes](DECISIONS.md#lot-d--périmètre-des-permis-de-lecture-décision-retenue)
+borne explicitement découverte et profils par store, sans nouvel index
+d'autorité. Ces RED précèdent la correction puis les unités/canaris et la
+revue acceptée du [lot D intégré](#lot-d--résultat-intégré-au-candidat).
+Exploitation déployée et sévérité mesurée ne sont pas déduites de ces tests.
+La [stratégie de test](TEST_STRATEGY.md#latence-et-pression-de-la-machine-de-développement)
 conserve les contraintes du MacBook Air M3/16Go, sans transformer la pression
 de la machine en verdict de sécurité.
 L'outbox et les autres candidats non établis restent hors correction sur la
@@ -379,7 +425,7 @@ Le canari existant de deadline de refresh authentifié ne qualifie pas à lui
 seul ce cas initial. Ce point reste ouvert dans le produit ; aucun SSO global
 ou délai d'authentification complet n'est déclaré qualifié par E.
 
-**Les quatre lots A/B/C/E sont intégrés au candidat, après reproductions,
+**Les cinq lots A/B/C/D/E sont intégrés au candidat, après reproductions,
 tests ciblés et revues indépendantes. Aucun test worker/runtime réel exécuté
 pour ces lots, aucune qualification production déduite.** Les résultats historiques ci-dessous
 conservent leurs dates et leurs périmètres.

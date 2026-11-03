@@ -31,6 +31,39 @@
 Ces choix restent dans l'architecture autorisée. Les preuves et limitations
 sont liées aux gels et plateformes dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).
 
+### Lot D — périmètre des permis de lecture, décision retenue
+
+Ruling : distinguer les lectures de profils/pages et la résolution des
+métadonnées d'identité, avec un plafond tenant pour chacune. La cible est
+Read4 et Discovery4 par tenant, sous les bornes globales existantes ; le contrôle
+runner conserve sa réserve. Read ne doit pas être présenté comme couvrant
+toutes les transactions d'authentification. Un lease doit correspondre au
+store réellement consulté ; une source connue distincte du contexte doit
+être couverte, sans double acquisition si les deux sont identiques.
+Après résolution de la source humaine, `authenticate_local_digest` relève
+déjà de Read dans l'extracteur initial. Un runner résolu revalide son propre
+store sous son lease Control existant, sans dépendance à Discovery ; cette
+réserve doit rester effective même lorsque les métadonnées sont saturées.
+
+La découverte doit pouvoir vérifier les collisions même si le budget des
+pages d'un voisin est saturé. Une lecture de métadonnées non admissible reste
+une indisponibilité explicite, jamais une absence de binding. Les collisions
+lisibles restent refusées dynamiquement ; la politique B d'erreurs voisines
+après authentification d'une source saine reste applicable. Si aucune source
+ne peut être authentifiée, la requête reste refusée. Aucun index de démarrage
+ne devient une autorité et aucun nouveau stockage/service n'est introduit.
+
+Ce choix ajoute une réserve bornée de métadonnées au plafond de pages ; il ne
+promet ni équité complète entre tenants ni disponibilité de la découverte
+quand son propre budget est saturé. Les profils OIDC restent des lectures
+Read, auditables et sujettes aux règles de couverture partielle. Les tests
+doivent observer les transactions effectivement exécutées sous saturation,
+pas seulement le statut HTTP final. Les trois reproductions ont atteint
+leurs assertions de transactions hors permis sans oracle temporel, puis le
+correctif a passé ses 59 fonctions ciblées, sa revue et le contrôle composé.
+Cette décision est implémentée dans `b168784`, sans qualification globale
+de disponibilité, de performance ou des runtimes.
+
 ## 2 novembre — navigation publique après le callback OIDC
 
 Le retour réel Keycloak révèle callback303 puis complete403 : [Fetch Metadata tient compte de toute la chaîne de redirections](https://www.w3.org/TR/fetch-metadata/#redirects), même après retour à l'origine du dashboard. Le dashboard autorise donc la navigation GET exacte vers `/auth/oidc/complete` lorsque SSO est configuré, sans query et avec une seule valeur `navigate`/`document` pour chaque métadonnée correspondante. Son contenu reste le fichier statique public index.html, avec CSP, frame-ancestors/FrameDENY et no-store ; garder cette page sans données d'identité, de session ou de secret.
