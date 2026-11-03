@@ -1,5 +1,83 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Correctifs initiaux de l'audit en cours — 3 novembre 2026
+
+L'audit courant reste ouvert. Ses sources sont `main@c4c4d2a` et
+`codex/broker-service@d6cb136` ; les correctifs repartent de
+`origin/codex/broker-service@0a41aac192f4139073a43830dbb71df01cb87abf`.
+Les pièces originales de `~/security-audit-skill/ai-guard/run-1/` restent en
+lecture seule. Les sévérités fournies sont provisoires ; les constats futurs
+seront rapprochés du code courant, y compris des lots déjà intégrés.
+
+Trois worktrees dédiés portent les lots export, tenants et ingress ; un
+quatrième porte leur intégration. Le checkout principal et les travaux
+`enforcer-full3`/`broker-supervision` ne sont pas modifiés. La page OIDC
+`complete`, déjà corrigée par `96fe9be`, n'est pas reprise.
+
+| Lot | Code revérifié et critère | État constaté |
+|---|---|---|
+| A — export | Le lecteur partagé réécrit les métadonnées Git et les modes. Filtrer les métadonnées actives à l'écriture, conserver les contrôles/limites et produire des fichiers 0644 ; scan brut distinct. | Régressions inversées préparées ; reproduction et correction `NOT_RUN`. |
+| B — panne d'un tenant | Les scans de collision et de profil humain interrogent tous les stores. Une erreur voisine ne doit pas bloquer une identité saine ; son propre store reste fermé et les refus de collision doivent être conservés. | Régression existante et variante credential local B préparées ; reproduction et correction `NOT_RUN`. La liste de contextes partielle doit être signalée. |
+| C — ingress | Le pool de 64 échanges est acquis avant lecture du corps. Des uploads incomplets ne doivent plus épuiser les échanges sans corps du contrôle. | Régression de contention préparée ; reproduction et correction `NOT_RUN`. La chaîne historique d'arrêt utilise un moteur fixture. |
+
+Les tests de reproduction de l'audit passent lorsque le défaut existe : ils
+ne constituent pas des régressions sans inversion des assertions. Une erreur
+de compilation, zéro test sélectionné ou un dépassement du harnais n'est pas
+un RED comportemental. Les tests ciblés sont confiés à Luna ; chaque lot
+exige aussi une revue indépendante avant intégration, commit et push.
+
+Pour B, la conception suit la correction proposée dans le rapport provisoire :
+une erreur voisine ne choisit aucune identité et ne rend pas ses credentials
+authentifiables ; toute collision lue dans un store sain reste refusée, y
+compris après mutation du provisioning. Une absence de collision dans une base
+illisible ne peut pas être prouvée. Cacher volontairement un binding dans une
+telle base nécessite déjà l'accès aux fichiers du contrôle de confiance, qui
+permet aussi de supprimer ce binding. Cette limite sera conservée dans la
+preuve et la revue, sans prétendre à une vérification exhaustive d'une base
+indisponible. Un index construit au démarrage ne suffirait pas à suivre les
+mutations ultérieures. Les critères de B ne sont pas encore acceptés.
+
+### Dépendance de validation
+
+Le sandbox prévu utilise une image Rust locale Linux/ARM64, sans réseau,
+secrets, socket moteur ou montage du dépôt original, avec source et toolchain
+en lecture seule et scratch borné. La préparation hors ligne du cache échoue :
+`cargo vendor --offline --locked` manque `android_system_properties 0.1.6`, et
+`cargo metadata --offline --locked --filter-platform aarch64-unknown-linux-gnu`
+manque `linux-raw-sys 0.12.1`. Les images locales sondées ne contiennent pas de
+cache Cargo exploitable. **Exécution des reproductions : BLOCKED par les
+dépendances Linux locales manquantes ; aucun repli de test sur l'hôte.**
+Une autorisation précise de préparer un cache public verrouillé a été demandée
+au mainteneur ; elle ne donne pas de réseau aux builds/tests.
+
+Validation documentaire seule : `git diff --check` et vérification des liens
+relatifs PASS (13 cibles présentes sur les deux documents). Le scan des deux
+fichiers candidats ne détecte aucun chemin interdit ni secret connu. La revue
+indépendante de la proposition est traitée : reprise conservatrice après
+redémarrage et formulation conditionnelle du correctif C. Aucun de ces
+contrôles ne remplace les reproductions et tests Rust encore `NOT_RUN`.
+
+Les huit anciens gardiens de tests orphelins cités par le mainteneur ont été
+identifiés par PID, propriétaire, naissance, programme et rôle, puis arrêtés
+par SIGTERM ciblé avec son autorisation. Aucun volume, worker, credential,
+preuve ou binaire conservé n'a été supprimé ; aucun autre processus n'a été
+arrêté. Ce nettoyage manuel n'est pas une preuve de supervision autonome.
+
+### Frontière de comportement et suite
+
+Le runner conserve son arrêt ciblé sur erreur de suivi. La
+[proposition de fenêtre transitoire](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md)
+est soumise séparément ; elle n'est ni approuvée ni implémentée.
+Les lots D/E/F attendent l'intégration de B et leurs propres reproductions.
+L'outbox et les autres candidats non établis restent hors correction sur la
+seule base de ce rapport provisoire.
+
+**Aucun lot correctif intégré, aucun test runtime réel exécuté pour ces lots,
+aucune qualification production déduite.** Les résultats historiques ci-dessous
+conservent leurs dates et leurs périmètres.
+
+---
+
 L'[audit importé](evidence/2026-10-29/independent-audit/REPORT.md) porte sur `/private/tmp/ai-guard-audit-20261029.n8ZxPB`,169 fichiers ; manifest annoncé `77876e6de40964096f90f458b07b872b7848f1a05257e2f763e5f57679641d34`. Ses originaux restent hors dépôt et inchangés. La copie de `findings.json` conserve **0 confirmé,19 needs_validation,0 rejeté**. Le workflow [Cloudflare security-audit](https://github.com/cloudflare/security-audit-skill) distingue confirmation, fait restant à vérifier et candidat réfuté ; aucune sévérité formelle n'est ajoutée ici.
 
 Le checkout a évolué indépendamment. Le candidat209 et ses essais Docker/navigateur ne sont pas une reproduction contrôlée des19 candidats. Ce suivi distingue le delta du code, les preuves de développement disponibles et la validation de sécurité manquante. Une correction n'authentifie pas rétroactivement l'instantané ni ses données. Le statut BLOCKED de l'audit concerne son environnement de validation, pas l'ensemble des travaux produit autorisés.
