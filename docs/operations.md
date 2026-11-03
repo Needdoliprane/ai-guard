@@ -287,6 +287,8 @@ agentsandbox export-workspace --session UUID_DE_LA_SESSION --output /autre/reper
 
 Le parent du répertoire de sortie doit déjà exister. La cible doit être absente et extérieure au projet original. L'export vérifie les chemins, rejette `..`, chemins absolus, formes Windows ambiguës, doublons, liens et fichiers spéciaux. Il extrait dans un répertoire temporaire privé avant publication sans remplacement. Aucun fichier préexistant de la destination n'est remplacé. Une archive hostile fait échouer l'opération et le répertoire temporaire est supprimé.
 
+À l'écriture, l'export omet les noms connus exclus à l'import et les métadonnées `.husky`, `.envrc`, `.idea`, `.vscode/tasks.json`, sans distinction de casse ASCII sur les composants. Il ne restaure pas `.git` ni ses hooks. Les fichiers réguliers publiés sont en `0644` ; aucun bit exécutable du worker n'est conservé implicitement. Le manifeste ne contient que les fichiers écrits ; le scan d'observation reste brut. Les entrées filtrées sont néanmoins validées et comptabilisées dans les bornes. Un avertissement générique indique leur nombre, sans leurs noms ; si son écriture échoue, la publication est refusée. Le contenu reste non fiable : lire les fichiers avant d'autoriser une configuration d'outil, des dépendances ou une exécution. La liste de noms n'est pas un assainissement universel des projets.
+
 ## Arrêt, interruption et conservation
 
 ```sh

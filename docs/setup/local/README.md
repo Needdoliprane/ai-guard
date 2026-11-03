@@ -126,6 +126,10 @@ AIGUARD_EXPORT="$HOME/ai-guard-export-new"
 
 Review the exported files and diff before applying selected changes to your project. ai-guard does not rewrite the original automatically. A failed export is not an empty diff; if a destination was published before a later error, inspect and preserve it before choosing a different new destination.
 
+Exports omit the known sensitive/cache names excluded on import, plus `.husky`, `.envrc`, `.idea` and `.vscode/tasks.json`; the check applies to path components without ASCII case sensitivity. Worker-authored `.git` configuration and hooks are therefore not restored. Exported regular files use `0644`, including files the worker marked executable. The export manifest describes the files actually written; the raw workspace scan remains separate. Ignored archive entries still undergo path, type, duplicate and size validation: filtering does not turn an invalid archive into a valid one.
+
+The control emits a generic warning with the number of omitted entries, without exposing their names. If this warning cannot be written, publication is refused. **Exported content remains untrusted.** This list does not neutralize every tool's configuration or detect arbitrary secrets. Inspect files as text before opening them in a tool that can run project configuration, installing dependencies or deliberately restoring executable permissions.
+
 The copy excludes known sensitive names and dependency/cache directories, but it is not a universal secret scanner. Review the source project's contents before import. Keep keys outside it. Bounds include 20,000 entries, 128 MiB total and 32 MiB per file; links and unsafe paths are rejected. A bound violation requires reducing the input or changing an approved limit, not silently treating a partial copy as complete.
 
 ## Diagnose a refusal or interruption

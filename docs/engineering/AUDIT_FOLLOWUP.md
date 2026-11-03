@@ -16,9 +16,9 @@ quatrième porte leur intégration. Le checkout principal et les travaux
 
 | Lot | Code revérifié et critère | État constaté |
 |---|---|---|
-| A — export | Le lecteur partagé réécrit les métadonnées Git et les modes. Filtrer les métadonnées actives à l'écriture, conserver les contrôles/limites et produire des fichiers 0644 ; scan brut distinct. | Régressions inversées préparées ; reproduction et correction `NOT_RUN`. |
-| B — panne d'un tenant | Les scans de collision et de profil humain interrogent tous les stores. Une erreur voisine ne doit pas bloquer une identité saine ; son propre store reste fermé et les refus de collision doivent être conservés. | Régression existante et variante credential local B préparées ; reproduction et correction `NOT_RUN`. La liste de contextes partielle doit être signalée. |
-| C — ingress | Le pool de 64 échanges est acquis avant lecture du corps. Des uploads incomplets ne doivent plus épuiser les échanges sans corps du contrôle. | Régression de contention préparée ; reproduction et correction `NOT_RUN`. La chaîne historique d'arrêt utilise un moteur fixture. |
+| A — export | Métadonnées actives filtrées à l'écriture, contrôles/limites conservés, fichiers 0644 et scan brut distinct. | Deux RED comportementaux, puis 11 fonctions ciblées GREEN ; revue indépendante acceptée. Code intégré au candidat `357b6e0`, guides EN/FR synchronisés. |
+| B — panne d'un tenant | Erreur voisine isolée, store propre fermé et refus des collisions préservés ; projection humaine partielle explicite. | Deux RED comportementaux, puis 7 tests Rust et 24 tests frontend GREEN ; TypeScript PASS. Candidat séparé, revue favorable sous corrélation des preuves et documentation ; pas encore intégré. |
+| C — ingress | Pool upload distinct, lecture bornée avant acquisition de l'échange ; corps vides admis sans occuper le pool upload. | RED avec 64 uploads actifs et GET 429 ; deux régressions et six canaris ingress GREEN. Trois tests model_ingress locaux supplémentaires ont été sélectionnés par le filtre ; revue source acceptée, documents en cours, pas encore intégré. |
 
 Les tests de reproduction de l'audit passent lorsque le défaut existe : ils
 ne constituent pas des régressions sans inversion des assertions. Une erreur
@@ -35,7 +35,46 @@ telle base nécessite déjà l'accès aux fichiers du contrôle de confiance, qu
 permet aussi de supprimer ce binding. Cette limite sera conservée dans la
 preuve et la revue, sans prétendre à une vérification exhaustive d'une base
 indisponible. Un index construit au démarrage ne suffirait pas à suivre les
-mutations ultérieures. Les critères de B ne sont pas encore acceptés.
+mutations ultérieures. Les tests du candidat B préservent cette distinction ;
+sa revue et son intégration ne qualifient pas la latence des scans voisins.
+
+### Lot A — résultat intégré au candidat
+
+Source d'implémentation `54546d5`, reprise avec traçabilité dans `357b6e0`.
+Les deux RED ont exécuté chacun une fonction et échoué sur la présence de
+`.git` après extraction, respectivement par le chemin public et le chemin
+autorisé. Les erreurs antérieures de préparation du sandbox sont conservées
+comme `NOT_RUN` dans les preuves, sans être comptées comme reproductions.
+
+Après correction, commandes ciblées hors ligne :
+
+```text
+cargo test --offline --locked --test audit_workspace_export
+cargo test --offline --locked --lib workspace::export_policy_regression_tests::authorized_export_filters_host_metadata_while_scan_keeps_observed_files -- --exact
+```
+
+Résultats naturels RC0 : six fonctions d'intégration, une fonction d'export
+autorisé, puis quatre canaris exacts `workspace::export_durability_tests::`
+sur les barrières succès, faute avant publication et faute après publication.
+Onze fonctions uniques PASS ; aucun test ignoré additionné. Le canari de
+profondeur hors sélection fsync n'a pas été exécuté dans cette campagne.
+
+La revue indépendante confirme filtres, validation et consommation des entrées
+ignorées, manifeste limité aux fichiers écrits, scan brut conservé et ordre
+flush/mode/fsync/publication. L'avertissement est émis sur le stderr du
+contrôle, sans noms ni contenus ; sa livraison au client IPC/dashboard n'est
+pas démontrée. Sa branche d'échec IO reste `NOT_RUN`, avec propagation avant
+publication vérifiée à la lecture. Aucun assainissement universel des projets
+n'est annoncé. Les guides locaux EN/FR et opérations décrivent ces limites.
+
+Preuves privées préservées sous
+`/private/tmp/ai-guard-audit-corrections-20261103.Wv9egg/test-a-retry.T2xgVv9X/` :
+snapshots RED/GREEN distincts et rapports `report/red-results.txt` et
+`report/green-results.txt`. Les trois empreintes GREEN correspondent aux
+fichiers intégrés ; `Cargo.lock` reste
+`915e887ad3869bc20ed82cabad59ad16c2c58d9d26a2ac8acef9ae50c6afff98`.
+Tests Linux ARM64 dans Docker isolé, Rust1.99.1 ; aucun payload Git exécuté,
+worker réel, Podman, macOS, build release ou qualification production déduit.
 
 ### Préparation vérifiable des régressions
 
@@ -46,9 +85,12 @@ même d'un seul upload, rend le harnais inconclusif au lieu de produire un faux
 GREEN en libérant un slot. Le fichier préparé
 `tests/ingress_admission/slow_uploads.rs` a pour SHA-256
 `216dd33af61d68a36bddbc498e178a82d8340c57a03826063c0d96fb9d5c7663`.
-Acceptation de la revue : passage à l'exécution ciblée uniquement ; compilation
-et RED/GREEN C restent `NOT_RUN`. Les anciennes copies de préparation doivent
-être actualisées sans effacer leurs preuves.
+Ce gel préparatoire a produit le RED attendu : 64 lectures actives, GET monitor
+429 attendu200, RC101 sans timeout ni OOM. Après correction, le nouveau test
+SHA-256 `4278626804449bab857178712bc39181661da0c798822b8763ebc28a621def5c`
+garde 16 uploads actifs et observe 48 refus par le budget dédié ; monitor,
+client de contrôle, POST vide et SSE passent. Les anciens snapshots restent
+distincts, sans effacer leurs preuves.
 
 Pour B, deux tests du **nouveau contrat de complétude frontend** ont pu être
 exécutés sans dépendance téléchargée, sur le parser inchangé de `0a41aac` :
@@ -61,10 +103,12 @@ Node v24.22.2 ; RC 1 ; 2 tests ; 0 PASS ; 2 FAIL attendus (RED).
 Le parser perd `contexts_complete=false` et accepte l'absence du champ au lieu
 de refuser une réponse incompatible. Ce RED prépare la projection partielle
 requise par le correctif B ; **il ne reproduit ni ne confirme le défaut
-backend de collision/disponibilité**. Le gateway actuel n'émet pas ce champ.
-Le nouveau contrat nécessitera des versions coordonnées du gateway, du
-dashboard et des clients CLI stricts ; aucun changement de parser ou de DTO
-ni aucun correctif B n'est intégré à ce stade.
+backend de collision/disponibilité**. Le gateway de base `0a41aac` n'émet pas
+ce champ. Le candidat B associe désormais DTO et parser stricts ; le nouveau
+contrat exige des versions coordonnées du gateway, du dashboard et des clients
+CLI stricts. Les quatre fichiers de tests frontend ciblés passent ensuite
+24/24, RC0 ; TypeScript5.9.3 `--noEmit` passe également. Navigateur/DOM et
+qualification SSO globale restent `NOT_RUN` pour ce lot.
 
 Exécution par Luna dans une copie publique minimale et un conteneur dédié :
 réseau/IPC désactivés, racine/source en lecture seule, UID1000, aucune
@@ -80,16 +124,27 @@ du test :
 
 ### Dépendance de validation
 
-Le sandbox prévu utilise une image Rust locale Linux/ARM64, sans réseau,
+Le sandbox utilise une image Rust locale Linux/ARM64, sans réseau,
 secrets, socket moteur ou montage du dépôt original, avec source et toolchain
 en lecture seule et scratch borné. La préparation hors ligne du cache échoue :
 `cargo vendor --offline --locked` manque `android_system_properties 0.1.6`, et
 `cargo metadata --offline --locked --filter-platform aarch64-unknown-linux-gnu`
 manque `linux-raw-sys 0.12.1`. Les images locales sondées ne contiennent pas de
-cache Cargo exploitable. **Exécution des reproductions : BLOCKED par les
-dépendances Linux locales manquantes ; aucun repli de test sur l'hôte.**
-Une autorisation précise de préparer un cache public verrouillé a été demandée
-au mainteneur ; elle ne donne pas de réseau aux builds/tests.
+cache Cargo exploitable. Ce blocage historique a été levé après l'accord
+explicite du mainteneur : copie privée des seuls répertoires publics de
+registre, puis `cargo fetch --locked --target aarch64-unknown-linux-gnu` depuis
+un environnement parent vide. Seul `linux-raw-sys 0.12.1` a été téléchargé ;
+la résolution complète Linux `--offline --locked` passe sans modifier le lock.
+Cache privé : `/private/tmp/ai-guard-linux-cache-20261103.DOKqBt/` ; aucun
+credential/configuration du home n'a été copié. Les builds/tests restent sans
+réseau, avec cache et cible propres à chaque lot, jamais sur l'hôte.
+
+Après redémarrage signalé par le mainteneur, Docker29.9.2 annonce 8CPU et
+`12585238528` octets de RAM ; le nœud Kubernetes local est Ready, mémoire
+`12290272Ki`, stockage `129759836Ki`. Cela confirme le réglage annoncé12GoRAM/
+128Godisque, pas un adaptateur Kubernetes ai-guard. Le MacBook Air M3/16Go est
+sous pression : aucun dépassement de délai de harnais n'est une preuve de
+vulnérabilité et aucun chiffre de performance n'est qualifié par ces tests.
 
 Validation documentaire seule : `git diff --check` et vérification des liens
 relatifs PASS (13 cibles présentes sur les deux documents). Le scan des deux
@@ -122,8 +177,8 @@ Les lots D/E/F attendent l'intégration de B et leurs propres reproductions.
 L'outbox et les autres candidats non établis restent hors correction sur la
 seule base de ce rapport provisoire.
 
-**Aucun lot correctif intégré, aucun test runtime réel exécuté pour ces lots,
-aucune qualification production déduite.** Les résultats historiques ci-dessous
+**Lot A intégré au candidat ; B/C restent séparés. Aucun test worker/runtime
+réel exécuté pour ces lots, aucune qualification production déduite.** Les résultats historiques ci-dessous
 conservent leurs dates et leurs périmètres.
 
 ---

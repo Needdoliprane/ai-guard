@@ -126,6 +126,10 @@ AIGUARD_EXPORT="$HOME/ai-guard-export-new"
 
 Examiner les fichiers exportés et leur diff avant de reporter des changements choisis dans le projet. ai-guard ne réécrit pas l'original automatiquement. Un export en erreur n'est pas un diff vide ; si une destination a été publiée avant une erreur ultérieure, l'examiner et la conserver avant de choisir une autre destination neuve.
 
+L'export omet les noms sensibles et de cache déjà exclus à l'import, ainsi que `.husky`, `.envrc`, `.idea` et `.vscode/tasks.json` ; le contrôle s'applique aux composants du chemin sans distinction de casse ASCII. La configuration et les hooks `.git` produits par le worker ne sont donc pas restaurés. Les fichiers réguliers exportés sont en `0644`, même si le worker les avait rendus exécutables. Le manifeste d'export décrit les fichiers effectivement écrits ; le scan brut du workspace reste distinct. Les entrées ignorées restent soumises aux contrôles de chemin, type, doublons et taille : le filtrage ne rend pas une archive invalide acceptable.
+
+Le contrôle émet un avertissement générique avec le nombre d'entrées omises, sans exposer leurs noms. Si cet avertissement ne peut pas être écrit, la publication est refusée. **Le contenu exporté reste non fiable.** Cette liste ne neutralise pas la configuration de tous les outils et ne détecte pas tous les secrets. Examiner les fichiers comme du texte avant de les ouvrir avec un outil qui peut exécuter une configuration de projet, d'installer des dépendances ou de rétablir volontairement des permissions exécutables.
+
 La copie exclut des noms sensibles connus et des répertoires de dépendances/cache, sans constituer un détecteur universel de secrets. Examiner le contenu source avant import et garder les clés à l'extérieur. Les bornes comprennent 20 000 entrées, 128 Mio au total et 32 Mio par fichier ; liens et chemins dangereux sont refusés. Un dépassement exige de réduire l'entrée ou de faire évoluer une limite approuvée, pas de traiter silencieusement une copie partielle comme complète.
 
 ## Diagnostiquer un refus ou une interruption
