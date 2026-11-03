@@ -234,9 +234,34 @@ arrêté. Ce nettoyage manuel n'est pas une preuve de supervision autonome.
 Le runner conserve son arrêt ciblé sur erreur de suivi. La
 [proposition de fenêtre transitoire](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md)
 est soumise séparément ; elle n'est ni approuvée ni implémentée.
-Les lots D/E/F attendent l'intégration de B et leurs propres reproductions.
+Après intégration de B, D et E avancent dans des worktrees distincts depuis
+`2eeaa0d` ; F attend D. E a quatre RED déterministes sur la consommation du
+ledger avant preuve ; D prépare un témoin d'exécution sans seuil de latence.
 L'outbox et les autres candidats non établis restent hors correction sur la
 seule base de ce rapport provisoire.
+
+Les worktrees B/C sont également fermés proprement après vérification de la
+référence distante, des fichiers suivis/non suivis/ignorés et des consommateurs.
+Leurs références source restent conservées. Les trois derniers conteneurs de
+tests B/C, ne contenant plus qu'un `sleep`, sont retirés par ID exact ; aucune
+preuve, volume, donnée utilisateur ou ressource D5 n'est supprimée. Le reçu
+privé `test-c/cleanup-receipt.txt` distingue cette fin de cycle des tests.
+Le [contrôle composé](VALIDATION.md#3-novembre--correctifs-audit-abc-et-compilation-composée)
+passe toutes les cibles Rust sur `2eeaa0d`, puis le seul test-cible de fixture
+après correction de deux warnings Linux, sans exécuter de tests supplémentaires.
+
+### Point SSO préexistant à valider séparément
+
+La revue E relève un point de contrat sur les TTL initiaux : les transactions
+Web et intentions natives sont contrôlées avant l'échange token/JWKS ; le point
+d'installation vérifie aussi le marqueur d'échange borné. La borne de bout en
+bout depuis l'intention initiale n'est pas démontrée. Ce comportement existait
+avant E et le déplacement de l'audit après preuve ne change pas ces horloges.
+Statut **NEEDS_VALIDATION**, sans sévérité attribuée : confronter le contrat de
+TTL par étape et reproduire avec une barrière locale avant tout correctif.
+Le canari existant de deadline de refresh authentifié ne qualifie pas à lui
+seul ce cas initial. Ce point reste ouvert dans le produit ; aucun SSO global
+ou délai d'authentification complet n'est déclaré qualifié par E.
 
 **Les trois lots A/B/C sont intégrés au candidat, après reproductions,
 tests ciblés et revues indépendantes. Aucun test worker/runtime réel exécuté

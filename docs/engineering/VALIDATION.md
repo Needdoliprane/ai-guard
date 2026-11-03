@@ -1,5 +1,53 @@
 # Validation courante
 
+## 3 novembre — correctifs audit A/B/C et compilation composée
+
+Base de correction `0a41aac`, trois lots intégrés et poussés dans `2eeaa0d`.
+[Suivi détaillé](AUDIT_FOLLOWUP.md) : cinq RED backend comportementaux avant
+correction, puis onze fonctions A, sept B et huit C PASS sur leurs gels
+respectifs. Trois tests model_ingress locaux ont aussi été sélectionnés par le
+filtre C ; ils ne sont ni un test Qwen ni une inférence. Front B : deux RED du
+nouveau contrat de complétude, puis24/24 PASS et TypeScript5.9.3 `--noEmit` RC0.
+Revues indépendantes source, contrats et guides EN/FR acceptées. Les recettes
+worker Docker/Podman, navigateur/DOM et capacité100 restent hors de ces preuves.
+
+Contrôle composé Linux ARM64/Rust1.99.1, dans Docker isolé et borné, sans
+réseau, secrets, socket moteur ou montage du checkout :
+
+```text
+cargo check --offline --locked --all-targets
+RC0 sur 2eeaa0d ; aucun test exécuté.
+```
+
+Deux warnings préexistants dans `tests/supervision_bootstrap.rs` sont observés :
+import `PathBuf` et `mut` utilisés seulement sous macOS. Correction mécanique
+relue : import dans le bloc conditionnel et construction du vecteur conservant
+les mêmes cas sur chaque plateforme. Seul delta du nouveau snapshot : ce
+fichier, SHA-256
+`30cb49353abb7857bde57584028ef1b579e11f7d62339eae2defd2d2861034a9`.
+
+```text
+cargo check --offline --locked --test supervision_bootstrap
+RC0 ; aucun avertissement ; aucun test exécuté.
+```
+
+Preuves privées : `/private/tmp/ai-guard-audit-integration-luna.ETxlNk/` puis
+`/private/tmp/ai-guard-audit-followup-luna.LI49DG/`. `Cargo.lock` reste
+`915e887ad3869bc20ed82cabad59ad16c2c58d9d26a2ac8acef9ae50c6afff98`.
+Sources et empreintes avant/après vérifiées. Les journaux gardent les erreurs
+de préparation séparées des RC finaux. Un incident du contrôleur a changé
+les modes du seul cache public privé (`a-w`, puis `u+w`) ; aucun inventaire
+initial ne permet d'affirmer une restauration exacte des modes. Aucun contenu
+du registre ni `~/.cargo` n'a été modifié par ces commandes ; le registre reste
+monté readonly dans les sandboxes. Les cibles d'intégration ne sont pas
+partagées avec les worktrees de correction.
+
+**PASS** : contrôles ci-dessus, formatage statique natif, liens et scans
+documentaires, revues dans leurs portées. **NOT_RUN** : Clippy Linux absent de
+l'image (autorisation de préparation épinglée demandée), build release,
+matrice complète et qualification production. La pression du MacBook Air
+M3/16Go et les modèles locaux ne sont pas confondus avec un verdict de latence.
+
 ## 2 novembre — DNS hôte Keycloak résolu
 
 Le mainteneur a autorisé l'édition et validé l'authentification administrateur macOS. L'entrée `127.0.0.1 keycloak.ai-guard.test` est présente dans `/etc/hosts`, sans remplacement du fichier ; propriétaire root et mode0644 conservés. Sauvegarde privée : `/private/var/tmp/ai-guard-hosts-backup.jZtiun/hosts`, répertoire root0700. L'appel administrateur AppleScript n'a pas rendu la main et son client exact a été arrêté après constat de l'écriture, RC143. Ce code n'est pas présenté comme un succès de commande : la validation porte sur l'état effectivement lu ensuite.

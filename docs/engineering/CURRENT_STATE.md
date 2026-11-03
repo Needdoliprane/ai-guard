@@ -1,4 +1,30 @@
-# État constaté — suivi au 2 novembre 2026
+# État constaté — suivi au 3 novembre 2026
+
+## Correctifs initiaux de l'audit en cours
+
+Les lots export A, disponibilité multi-tenant B et admission ingress C sont
+intégrés et poussés sur `codex/audit-integration-20261103`, jusqu'à `2eeaa0d`.
+Reproductions comportementales avant correction, tests ciblés et revues
+indépendantes sont consignés dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).
+Sur leurs gels respectifs : 26 fonctions Rust ciblées PASS, trois canaris
+model_ingress locaux supplémentaires PASS, 24 tests frontend et TypeScript
+PASS. Cela ne constitue ni une suite complète ni une qualification runtime.
+
+Le contrôle composé `cargo check --offline --locked --all-targets` passe sur
+`2eeaa0d`. Deux avertissements de fixture propres à Linux sont corrigés sans
+changer ses cas ; le contrôle ciblé correspondant passe sans avertissement.
+Les preuves, sources et limites sont dans [VALIDATION.md](VALIDATION.md#3-novembre--correctifs-audit-abc-et-compilation-composée).
+Clippy Linux reste `NOT_RUN` : composant absent de l'image, préparation
+épinglée soumise au mainteneur. Aucun test worker réel n'est ajouté par ces lots.
+
+Les trois worktrees d'implémentation sont fermés après intégration et contrôle
+des consommateurs ; preuves et références source sont préservées. D et E
+continuent dans des worktrees distincts depuis `2eeaa0d` : D a son témoin
+d'exécution préparé, E a quatre RED déterministes sur l'audit des starts sans
+preuve et son correctif est en cours. F attend D. L'audit externe reste ouvert.
+G09 reste FAIL et **0/12 gates globaux sont fermés**.
+
+## Historique du 2 novembre — D5 et SSO
 
 Dernier contrôle logiciel D5 : les 37 fonctions des fondations et les 31 fonctions composées précédentes passent dans leurs gels ciblés. Le FAIL acteur antérieur reste non reproduit, de cause indéterminée. Le nouveau test du pump **FAIL** sur le gel `Efq7q2` : dépôt du signal dans l'outbox, `JournalError::Io` après 10003 ms ; le second test est **NOT_RUN**. Compilation toutes cibles et harness **PASS** pour ce même gel. Le diagnostic du writer continue sans augmenter les délais. Les nettoyages de code et le nouveau test de saturation ont passé une revue de source ; leurs tests compilés restent à exécuter. Aucun moteur ni parcours vertical complet n'est qualifié. [Résultats et limites](VALIDATION.md#2-novembre--diagnostic-ciblé-du-writer-d5).
 

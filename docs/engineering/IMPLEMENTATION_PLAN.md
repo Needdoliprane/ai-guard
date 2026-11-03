@@ -1,5 +1,24 @@
 # Plan d'industrialisation
 
+## Priorités au 3 novembre — audit en cours
+
+1. A/B/C intégrés et poussés jusqu'à `2eeaa0d`, avec RED/GREEN ciblés, revues et
+   guides EN/FR. Fermer les contrôles qualité manquants sans transformer ces
+   correctifs logiciels en qualification production ; [preuves](AUDIT_FOLLOWUP.md).
+2. Poursuivre D (exécution Store hors workers Tokio, admission bornée et
+   intégrité incrémentale sûre) et E (nonces initiaux bornés, audit durable
+   après preuve) dans des worktrees distincts depuis cette intégration.
+   Reproduire avant métier ; aucune sévérité déduite d'un délai sur le Mac sous
+   pression. E a quatre RED de consommation durable ; D a son témoin préparé.
+3. Traiter F après D, puis rapprocher tout nouveau constat du rapport final
+   avec le code courant, y compris les lots déjà intégrés. Le retry du runner
+   reste une proposition séparée sans décision du mainteneur.
+4. Reprendre ensuite les chantiers produit et qualifications ci-dessous,
+   sans modifier les worktrees D5 protégés ni réduire les exigences cloud,
+   runtime, identité, exploitation et capacité100. Les résultats du 2 novembre
+   restent historiques ; les blocages DNS indiqués ci-dessous ont depuis été
+   levés dans leur portée documentée.
+
 ## Priorités au 2 novembre
 
 1. Nouvelle image SSO `sha256:72bfb9119fe552c6100ffaeb07cbbd8bd86f9449270b19f3904e97ca2dd8c5c7` déployée après le correctif `complete` ; parcours Web réels user-1 (7contrôles PASS) et user-2 (8contrôles PASS) consignés avec leur portée. L'essai administration a rencontré un oracle de lecture vide dont l'attente source est invalide ; le harnais corrigé est préparé, sa recette reste ouverte. Les24tests CLI et leurs checks précédents restent des preuves historiques attachées à leurs gels. [État courant](CURRENT_STATE.md#préparation-sso-locale--intégrée-recette-complète-ouverte).

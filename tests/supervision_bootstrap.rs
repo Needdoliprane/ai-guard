@@ -556,7 +556,7 @@ fn start_bootstrap_test_gateway(
 #[tokio::test]
 async fn cli_rejects_backup_root_overlapping_configured_credential_directory_before_database_creation()
  {
-    use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+    use std::{os::unix::fs::PermissionsExt, process::Command};
 
     let directory = support::private_tempdir();
     let root = directory.path();
@@ -607,7 +607,7 @@ async fn cli_rejects_backup_root_overlapping_configured_credential_directory_bef
     .unwrap();
     let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/default.json");
 
-    let mut overlap_cases = vec![
+    let overlap_cases = vec![
         ("same-directory-a", secrets_a.clone()),
         ("same-directory-b", secrets_b.clone()),
         ("ancestor", root.to_path_buf()),
@@ -616,8 +616,9 @@ async fn cli_rejects_backup_root_overlapping_configured_credential_directory_bef
     // Exercise a real Darwin /var alias only when both spellings resolve to
     // the same existing inode; Linux does not emulate this filesystem rule.
     #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::MetadataExt;
+    let overlap_cases = {
+        use std::{os::unix::fs::MetadataExt, path::PathBuf};
+        let mut overlap_cases = overlap_cases;
         let text = secrets_a.to_string_lossy();
         let alias = text
             .strip_prefix("/var/")
@@ -633,7 +634,8 @@ async fn cli_rejects_backup_root_overlapping_configured_credential_directory_bef
                 overlap_cases.push(("darwin-var-alias", alias));
             }
         }
-    }
+        overlap_cases
+    };
     for (label, backup_root) in overlap_cases {
         let mut command = Command::new(env!("CARGO_BIN_EXE_agentsandbox"));
         command

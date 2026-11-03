@@ -1,5 +1,27 @@
 # Décisions d'industrialisation
 
+## 3 novembre — corrections de l'audit et périmètre des preuves
+
+- L'export publie des fichiers0644 et omet les noms sensibles connus et les
+  métadonnées actives ciblées ; le scan conserve les observations brutes.
+  Les entrées omises restent validées et bornées. L'avertissement générique
+  doit pouvoir être écrit avant publication, sans exposer de noms ; ce stderr
+  n'est pas un reçu de livraison au client. Aucun assainissement universel ni
+  conservation implicite des bits exécutables.
+- L'erreur du store authentifié reste fermée. Les erreurs voisines n'empêchent
+  plus l'identité saine ; les collisions lisibles restent refusées, y compris
+  après provisioning. Une base illisible ne prouve aucune absence de collision
+  et n'authentifie pas ses credentials. `contexts_complete` rend la projection
+  partielle explicite ; gateway, dashboard et clients stricts se mettent à jour
+  ensemble. Aucun changement de stockage ou migration de données par ce lot.
+- Upload et échange ingress ont des budgets distincts. Les limites16/64,
+  256Kio,5s/2s sont celles du code actuel, pas de nouvelles options publiques.
+  Le runner conserve son arrêt sur erreur de suivi. La proposition60s reste
+  soumise séparément ; aucun test de ces budgets ne qualifie le confinement.
+
+Ces choix restent dans l'architecture autorisée. Les preuves et limitations
+sont liées aux gels et plateformes dans [AUDIT_FOLLOWUP.md](AUDIT_FOLLOWUP.md).
+
 ## 2 novembre — navigation publique après le callback OIDC
 
 Le retour réel Keycloak révèle callback303 puis complete403 : [Fetch Metadata tient compte de toute la chaîne de redirections](https://www.w3.org/TR/fetch-metadata/#redirects), même après retour à l'origine du dashboard. Le dashboard autorise donc la navigation GET exacte vers `/auth/oidc/complete` lorsque SSO est configuré, sans query et avec une seule valeur `navigate`/`document` pour chaque métadonnée correspondante. Son contenu reste le fichier statique public index.html, avec CSP, frame-ancestors/FrameDENY et no-store ; garder cette page sans données d'identité, de session ou de secret.
