@@ -54,7 +54,7 @@ async fn second_image_build_revalidates_the_same_engine_id() {
     let program = marker_program(temporary.path());
     fs::write(program.with_extension("case"), "engine-after-build").unwrap();
     let source = temporary.path().join("project");
-    fs::create_dir(&source).unwrap();
+    copy_public_build_source(&source);
     let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
         .args(["build", "--runtime-program"])
         .arg(&program)
@@ -73,6 +73,175 @@ async fn second_image_build_revalidates_the_same_engine_id() {
         1,
         "second build escaped authority revalidation: {calls}"
     );
+}
+
+#[tokio::test]
+async fn build_refuses_missing_worker_dockerfile_before_any_engine_call() {
+    let temporary = tempfile::tempdir().unwrap();
+    let program = marker_program(temporary.path());
+    let source = temporary.path().join("project");
+    copy_public_build_source(&source);
+    fs::remove_file(source.join("images/worker.Dockerfile")).unwrap();
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["build", "--runtime-program"])
+        .arg(&program)
+        .arg("--source")
+        .arg(&source)
+        .output()
+        .await
+        .unwrap();
+
+    assert!(!output.status.success(), "incomplete source was accepted");
+    assert!(
+        !program.with_extension("fixture").exists(),
+        "build spawned the engine before rejecting incomplete source"
+    );
+    assert!(
+        !program.with_extension("calls").exists(),
+        "build invoked the engine before rejecting incomplete source"
+    );
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("images/worker.Dockerfile"),
+        "missing-worker refusal omitted its relative-path diagnostic"
+    );
+}
+
+#[tokio::test]
+async fn build_refuses_malformed_public_source_inputs_before_any_engine_call() {
+    for case in [
+        "missing-lock",
+        "missing-ignore",
+        "lock-is-directory",
+        "images-is-file",
+        "missing-provider-entrypoint",
+        "linked-required-file",
+        "linked-required-parent",
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let program = marker_program(temporary.path());
+        let source = temporary.path().join("project");
+        copy_public_build_source(&source);
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+        match case {
+            "missing-lock" => fs::remove_file(source.join("Cargo.lock")).unwrap(),
+            "missing-ignore" => fs::remove_file(source.join(".dockerignore")).unwrap(),
+            "lock-is-directory" => {
+                fs::remove_file(source.join("Cargo.lock")).unwrap();
+                fs::create_dir(source.join("Cargo.lock")).unwrap();
+            }
+            "images-is-file" => {
+                fs::remove_dir_all(source.join("images")).unwrap();
+                fs::write(source.join("images"), "fixture").unwrap();
+            }
+            "missing-provider-entrypoint" => {
+                fs::remove_file(source.join("src/bin/ai-guard-provider.rs")).unwrap()
+            }
+            "linked-required-file" => {
+                fs::remove_file(source.join("Cargo.lock")).unwrap();
+                std::os::unix::fs::symlink(
+                    repository.join("Cargo.lock"),
+                    source.join("Cargo.lock"),
+                )
+                .unwrap();
+            }
+            "linked-required-parent" => {
+                fs::remove_dir_all(source.join("front/src")).unwrap();
+                std::os::unix::fs::symlink(repository.join("front/src"), source.join("front/src"))
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+            .args(["build", "--runtime-program"])
+            .arg(&program)
+            .arg("--source")
+            .arg(&source)
+            .output()
+            .await
+            .unwrap();
+
+        assert!(!output.status.success(), "accepted malformed case {case}");
+        assert!(
+            !program.with_extension("fixture").exists(),
+            "case {case} spawned the engine"
+        );
+        assert!(
+            !program.with_extension("calls").exists(),
+            "case {case} invoked the engine"
+        );
+        let expected_path = match case {
+            "missing-lock" | "lock-is-directory" | "linked-required-file" => "Cargo.lock",
+            "missing-ignore" => ".dockerignore",
+            "images-is-file" => "images",
+            "missing-provider-entrypoint" => "src/bin/ai-guard-provider.rs",
+            "linked-required-parent" => "front/src",
+            _ => unreachable!(),
+        };
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostic.contains(expected_path),
+            "case {case} omitted relative-path diagnostic {expected_path:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn build_accepts_complete_source_and_forwards_provider_versions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let program = marker_program(temporary.path());
+    let source = temporary.path().join("project");
+    copy_public_build_source(&source);
+
+    let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args(["build", "--runtime-program"])
+        .arg(&program)
+        .arg("--source")
+        .arg(&source)
+        .args(["--codex-version", "1.2.3", "--claude-code-version", "4.5.6"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "complete source rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = fs::read_to_string(program.with_extension("calls")).unwrap();
+    let builds = calls
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Vec<String>>(line).ok())
+        .filter(|args| args.iter().any(|arg| arg == "build"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        builds.len(),
+        2,
+        "expected exactly two image builds: {calls}"
+    );
+    let worker_build = builds
+        .iter()
+        .find(|args| args.iter().any(|arg| arg == "agentsandbox-worker:local"))
+        .expect("worker image build missing");
+    assert!(worker_build.iter().any(|arg| arg == "CODEX_VERSION=1.2.3"));
+    assert!(
+        worker_build
+            .iter()
+            .any(|arg| arg == "CLAUDE_CODE_VERSION=4.5.6")
+    );
+    assert!(builds.iter().all(|args| args.last().is_some_and(|path| {
+        Path::new(path).is_absolute() && Path::new(path).starts_with(&source)
+    })));
 }
 
 #[tokio::test]
@@ -127,6 +296,7 @@ async fn operators_keep_the_original_docker_endpoint_when_context_changes_after_
             fs::write(program.with_extension("case"), "compose-failure").unwrap();
         }
         let source = root.join("project");
+        copy_public_build_source(&source);
         fs::create_dir_all(source.join("deploy/docker")).unwrap();
         fs::write(source.join("deploy/docker/compose.yaml"), "services: {}\n").unwrap();
         let config = root.join("config");
@@ -188,6 +358,7 @@ async fn operators_refuse_an_engine_id_change_before_build_or_compose_effects() 
         )
         .unwrap();
         let source = root.join("project");
+        copy_public_build_source(&source);
         fs::create_dir_all(source.join("deploy/docker")).unwrap();
         fs::write(source.join("deploy/docker/compose.yaml"), "services: {}\n").unwrap();
         let config = root.join("config");
@@ -215,6 +386,45 @@ async fn operators_refuse_an_engine_id_change_before_build_or_compose_effects() 
             !calls.lines().any(|line| line.starts_with("effect ")),
             "{action}: effect before identity validation: {calls}"
         );
+    }
+}
+
+fn copy_public_build_source(destination: &Path) {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    fs::create_dir_all(destination).unwrap();
+    for directory in [
+        "images",
+        "src",
+        "src/bin",
+        "front",
+        "front/src",
+        "front/public",
+        "policies",
+    ] {
+        fs::create_dir_all(destination.join(directory)).unwrap();
+    }
+    for file in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".dockerignore",
+        "LICENSE",
+        "images/control.Dockerfile",
+        "images/worker.Dockerfile",
+        "src/main.rs",
+        "src/lib.rs",
+        "src/bin/ai-guard-provider.rs",
+        "front/package.json",
+        "front/package-lock.json",
+        "front/tsconfig.json",
+        "front/vite.config.ts",
+        "front/index.html",
+        "front/src/main.ts",
+        "front/src/style.css",
+        "front/public/favicon.svg",
+        "policies/default.json",
+    ] {
+        fs::copy(repository.join(file), destination.join(file)).unwrap();
     }
 }
 
@@ -254,6 +464,7 @@ fn main() {
   println!("fixture");
  }
 }
+
 "#).unwrap();
     let program = root.join("docker");
     let output =
@@ -336,6 +547,7 @@ async fn build_and_compose_use_the_same_program_and_absolute_source_paths() {
     fs::create_dir(&control).unwrap();
     let program = marker_program(&control);
     let source = temporary.path().join("project");
+    copy_public_build_source(&source);
     fs::create_dir_all(source.join("deploy/docker")).unwrap();
     fs::write(source.join("deploy/docker/compose.yaml"), "services: {}\n").unwrap();
     let config = temporary.path().join("config");
