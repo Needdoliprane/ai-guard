@@ -98,10 +98,12 @@ Le bootstrap s'applique à une base DEMO neuve. Ces valeurs ne sont jamais les v
 | Client | Contrat |
 |---|---|
 | `ai-guard-demo-web` | Public ; Authorization Code ; PKCE S256 obligatoire ; retour enregistré `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback` ; origine Web exacte et retour logout `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence loopback enregistrée `http://127.0.0.1:80/oidc/callback` ; aucune origine CORS. Le flux natif emploie un port loopback éphémère, la même IP et le chemin fixe. Le fournisseur doit accepter l'exception de port loopback. |
+| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence loopback enregistrée `http://127.0.0.1/oidc/callback` ; aucune origine CORS. Le flux natif emploie un port loopback éphémère, la même IP et le chemin fixe. Le fournisseur doit accepter l'exception de port loopback. |
 | `ai-guard-demo-api` | Serveur de ressources bearer-only et audience des access tokens ; aucun flux de connexion ou compte de service. |
 
 Aucun `client_secret` n'est distribué par les clients publics. Implicit, grants mot de passe, device flow, CIBA, comptes de service et token exchange sont désactivés. Ne remplacez pas un échec du flux navigateur par un grant mot de passe ou une copie manuelle de jeton.
+
+Enregistrez la référence CLI sous la forme canonique ci-dessus, sans `:80` explicite. Keycloak 26.8.1 retire le port HTTP par défaut lors de sa comparaison loopback native ; un littéral enregistré avec `:80` peut empêcher cet appariement. Le CLI écoute toujours sur un port local éphémère et l'inclut dans la demande d'autorisation réelle. Conservez l'IP littérale, le chemin exact `/oidc/callback` et S256 obligatoire, sans joker. Cette configuration seule ne prouve pas une connexion CLI réussie. L'import au démarrage saute les realms existants ; suivez la procédure de conservation des données ci-dessous pour modifier un enregistrement existant.
 
 Les deux clients publics ont exactement `basic` et `profile` comme client scopes par défaut, sans scope facultatif. `basic` fournit le mapper du sujet des access tokens Keycloak ; le jeton signé doit contenir un `sub` non vide. Son absence est une erreur de configuration du fournisseur, pas un motif d'assouplissement du validateur. `basic` peut être absent du champ textuel `scope` du jeton : il s'agit d'un client scope par défaut dont le mapper est appliqué par le fournisseur.
 
@@ -178,5 +180,5 @@ Les diagnostics ne conservent ni bearer, code d'autorisation, vérificateur, coo
 ## Références
 
 - [Conteneurs Keycloak](https://www.keycloak.org/server/containers), [import de realm](https://www.keycloak.org/server/importExport), [configuration hostname](https://www.keycloak.org/server/hostname).
-- [Source du client scope basic Keycloak 26.8.1](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCLoginProtocolFactory.java#L563-L579) et [traitement des redirects loopback](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java).
+- [Source du client scope basic Keycloak 26.8.1](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCLoginProtocolFactory.java#L563-L579), [traitement des redirects loopback](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java) et [constructeur d'URI canonique](https://github.com/keycloak/keycloak/blob/26.8.1/common/src/main/java/org/keycloak/common/util/KeycloakUriBuilder.java).
 - [OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html), [PKCE RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html), [clients natifs RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html), [sécurité OAuth RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html).

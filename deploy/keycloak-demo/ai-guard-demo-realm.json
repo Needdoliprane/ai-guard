@@ -113,7 +113,7 @@
       "serviceAccountsEnabled": false,
       "consentRequired": false,
       "fullScopeAllowed": false,
-      "redirectUris": ["http://127.0.0.1:80/oidc/callback"],
+      "redirectUris": ["http://127.0.0.1/oidc/callback"],
       "webOrigins": [],
       "attributes": {
         "pkce.code.challenge.method": "S256",
