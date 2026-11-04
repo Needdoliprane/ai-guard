@@ -5,7 +5,9 @@ mod support;
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{EventQuery, Store},
-    broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
+    broker_registry::{
+        BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1, BrokerStateV1,
+    },
     control::*,
     model::{CommandSpec, DecisionRequest},
     policy::{self, Policy},
@@ -269,9 +271,7 @@ impl Gateway {
                 if request.method() == axum::http::Method::POST {
                     post_counter.fetch_add(1, Ordering::SeqCst);
                 }
-                if !operation.join("credential").is_file()
-                    || !operation.join("recovery.json").is_file()
-                {
+                if !operation_has_required_private_material(&operation) {
                     missing.store(true, Ordering::SeqCst);
                 }
                 let post = request.method() == axum::http::Method::POST;
@@ -470,9 +470,7 @@ impl Gateway {
                 if request.method() == axum::http::Method::POST {
                     post_counter.fetch_add(1, Ordering::SeqCst);
                 }
-                if !operation.join("credential").is_file()
-                    || !operation.join("recovery.json").is_file()
-                {
+                if !operation_has_required_private_material(&operation) {
                     missing.store(true, Ordering::SeqCst);
                 }
                 async move { next.run(request).await }
@@ -514,6 +512,26 @@ async fn corrupt_transport_response(
             2 => value["role"] = json!("viewer"),
             3 => value["schema_version"] = json!(5),
             _ => unreachable!("owned fixture mode"),
+        }
+    } else if value.get("broker").is_some() {
+        match mode {
+            7 => value["broker"]["granted_at"] = json!("2200-01-01T00:00:00.000Z"),
+            8 => {
+                let received_at = chrono::Utc::now();
+                let incarnation_id = value["broker"]["incarnation_id"].clone();
+                value["broker"]["heartbeat_revision"] = json!(1);
+                value["broker"]["last_heartbeat"] = json!({
+                    "incarnation_id": incarnation_id,
+                    "sequence": 1,
+                    "received_at": received_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "lease_expires_at": (received_at + chrono::Duration::seconds(60))
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "heartbeat_provenance": "declared",
+                    "reception_provenance": "observed"
+                });
+                value["receipt"]["heartbeat_revision"] = json!(1);
+            }
+            _ => unreachable!("owned broker-result fixture mode"),
         }
     } else {
         match mode {
@@ -849,6 +867,118 @@ async fn prepare_named(root: &Path, name: &str, value: &Value, control: &Path) -
     private_write(&input, &serde_json::to_vec(value).unwrap());
     success(&run(prepare_command(&input, control, &operation), root).await);
     operation
+}
+
+fn operation_has_required_private_material(operation: &Path) -> bool {
+    let recovery = match fs::read(operation.join("recovery.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    {
+        Some(recovery) => recovery,
+        None => return false,
+    };
+    match recovery["action"].as_str() {
+        Some("issue" | "rotate") => operation.join("credential").is_file(),
+        Some("revoke" | "broker_grant" | "broker_revoke") => true,
+        _ => false,
+    }
+}
+
+fn broker_grant_manifest(
+    credential_id: &str,
+    incarnation_id: &str,
+    expected_revision: Option<u64>,
+    not_after: &str,
+) -> Value {
+    json!({
+        "version": 1,
+        "action": "broker_grant",
+        "broker_id": BROKER,
+        "expected_revision": expected_revision,
+        "credential_id": credential_id,
+        "incarnation_id": incarnation_id,
+        "authorities": [
+            {"authority_id":"local-prod","runtime_kind":"docker"},
+            {"authority_id":"remote-prod","runtime_kind":"podman"}
+        ],
+        "lease_seconds": 60,
+        "not_after": not_after
+    })
+}
+
+fn broker_revoke_manifest(expected_revision: u64) -> Value {
+    json!({
+        "version": 1,
+        "action": "broker_revoke",
+        "broker_id": BROKER,
+        "expected_revision": expected_revision
+    })
+}
+
+async fn issue_broker_binding(
+    root: &Path,
+    control: &Path,
+    name: &str,
+    incarnation_id: &str,
+) -> (String, String) {
+    let manifest = json!({
+        "version": 1,
+        "action": "issue",
+        "expected_revision": 0,
+        "subject": {"kind":"broker", "broker_id":BROKER, "incarnation_id":incarnation_id},
+        "expires_at":"2100-01-01T00:00:00.000Z"
+    });
+    let operation = prepare_named(root, &format!("{name}-binding"), &manifest, control).await;
+    let applied = run(operation_command("apply", &operation, Some(control)), root).await;
+    let report = success(&applied);
+    let key = fs::read_to_string(operation.join("credential")).unwrap();
+    let key = key.trim_end_matches('\n').to_owned();
+    no_secret(&applied, &key);
+    (report["credential_id"].as_str().unwrap().to_owned(), key)
+}
+
+async fn prepare_broker_grant(
+    root: &Path,
+    control: &Path,
+    name: &str,
+    credential_id: &str,
+    incarnation_id: &str,
+    expected_revision: Option<u64>,
+    not_after: &str,
+) -> PathBuf {
+    prepare_named(
+        root,
+        name,
+        &broker_grant_manifest(credential_id, incarnation_id, expected_revision, not_after),
+        control,
+    )
+    .await
+}
+
+async fn heartbeat_broker(gateway: &Gateway, key: &str, incarnation_id: &str) -> Value {
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .post(format!("{}api/v1/brokers/heartbeat", gateway.url))
+        .bearer_auth(key)
+        .json(&json!({
+            "version": 1,
+            "operation_id": Uuid::new_v4().to_string(),
+            "expected_heartbeat_revision": 0,
+            "incarnation_id": incarnation_id,
+            "sequence": 1
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let result: Value = response.json().await.unwrap();
+    assert!(
+        !serde_json::to_string(&result).unwrap().contains(key),
+        "broker metadata response must not disclose its workload credential"
+    );
+    result
 }
 
 async fn broker_self(gateway: &Gateway, key: &str) -> reqwest::StatusCode {
@@ -1675,6 +1805,636 @@ async fn prepare_persists_a_private_broker_key_and_exact_request_without_http() 
         "prepare must not authenticate or connect to its configured gateway"
     );
 }
+
+#[tokio::test]
+async fn prepare_persists_a_broker_grant_without_http_or_credential_generation() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let operation = root.join("broker-grant");
+    let gateway = Gateway::new(root, operation.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let before = gateway.store.head().unwrap();
+    let neighbor_before = gateway.neighbor.head().unwrap();
+    let input = root.join("broker-grant.json");
+    private_write(
+        &input,
+        &serde_json::to_vec(&json!({
+            "version": 1,
+            "action": "broker_grant",
+            "broker_id": BROKER,
+            "expected_revision": null,
+            "credential_id": "44444444-4444-4444-8444-444444444444",
+            "incarnation_id": INCARNATION,
+            "authorities": [{"authority_id":"local-prod","runtime_kind":"docker"}],
+            "lease_seconds": 60,
+            "not_after": "2100-01-01T00:00:00.000Z"
+        }))
+        .unwrap(),
+    );
+
+    let prepared = run(prepare_command(&input, &control, &operation), root).await;
+    let report = success(&prepared);
+    assert_eq!(report["status"], "prepared");
+    assert_eq!(report["action"], "broker_grant");
+    assert_eq!(
+        report["credential_id"],
+        "44444444-4444-4444-8444-444444444444"
+    );
+    let operation_id = report["operation_id"]
+        .as_str()
+        .expect("prepared grant reports its retained operation ID");
+    let parsed_operation_id = Uuid::parse_str(operation_id).unwrap();
+    assert!(!parsed_operation_id.is_nil());
+    assert_eq!(parsed_operation_id.to_string(), operation_id);
+
+    assert!(!operation.join("credential").exists());
+    assert_eq!(fs::read_dir(&operation).unwrap().count(), 1);
+    assert_eq!(gateway.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(gateway.store.head().unwrap(), before);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+
+    let recovery: Value =
+        serde_json::from_slice(&fs::read(operation.join("recovery.json")).unwrap()).unwrap();
+    let request = recovery["request"].clone();
+    let prepared_request: BrokerGrantMutationV1 = serde_json::from_value(request.clone()).unwrap();
+    prepared_request.validate().unwrap();
+    assert_eq!(prepared_request.operation_id, operation_id);
+    assert_eq!(prepared_request.broker_id, BROKER);
+    assert_eq!(prepared_request.expected_revision, None);
+    assert_eq!(
+        prepared_request.credential_id,
+        "44444444-4444-4444-8444-444444444444"
+    );
+    assert_eq!(prepared_request.incarnation_id, INCARNATION);
+    assert_eq!(prepared_request.lease_seconds, 60);
+    assert_eq!(prepared_request.not_after, "2100-01-01T00:00:00.000Z");
+    assert_eq!(prepared_request.authorities.len(), 1);
+    assert_eq!(prepared_request.authorities[0].authority_id, "local-prod");
+    assert_eq!(
+        prepared_request.authorities[0].runtime_kind,
+        BrokerRuntimeKindV1::Docker
+    );
+    assert_eq!(
+        recovery["request_sha256"],
+        hex::encode(Sha256::digest(
+            serde_json::to_vec(&prepared_request).unwrap()
+        ))
+    );
+
+    let status = success(&run(operation_command("status", &operation, None), root).await);
+    assert_eq!(status["status"], "prepared");
+    assert_eq!(status["operation_id"], operation_id);
+    assert_eq!(gateway.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(gateway.store.head().unwrap(), before);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+}
+
+#[tokio::test]
+async fn broker_grant_rejects_inconsistent_initial_receipts_without_publishing_them() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let mut accepted_invalid_receipts = Vec::new();
+
+    for (mode, label) in [
+        (7, "grant_time_after_expiry"),
+        (8, "initial_grant_with_heartbeat_history"),
+    ] {
+        let directory = support::private_tempdir();
+        let root = directory.path();
+        let operation = root.join("broker-grant");
+        let gateway = Gateway::new(root, operation.clone()).await;
+        let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+        let (credential_id, broker_key) =
+            issue_broker_binding(root, &control, "initial", INCARNATION).await;
+        let grant = prepare_named(
+            root,
+            "broker-grant",
+            &broker_grant_manifest(
+                &credential_id,
+                INCARNATION,
+                None,
+                "2100-01-01T00:00:00.000Z",
+            ),
+            &control,
+        )
+        .await;
+        assert!(!grant.join("credential").exists());
+        let head_before_grant = gateway.store.head().unwrap();
+        let neighbor_before = gateway.neighbor.head().unwrap();
+        let posts_before_grant = gateway.posts.load(Ordering::SeqCst);
+        gateway.preparation_missing.store(false, Ordering::SeqCst);
+        gateway.receipt_corruption.store(mode, Ordering::SeqCst);
+
+        let attempted = run(operation_command("apply", &grant, Some(&control)), root).await;
+        no_secret(&attempted, RUNNER);
+        no_secret(&attempted, &broker_key);
+        let receipt_published = grant.join("receipt").exists();
+        if attempted.status.success() || receipt_published {
+            accepted_invalid_receipts.push(label);
+        }
+        assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before_grant + 1);
+        assert_eq!(gateway.store.head().unwrap(), head_before_grant + 1);
+        assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+        assert!(!gateway.preparation_missing.load(Ordering::SeqCst));
+
+        let events = gateway
+            .store
+            .events(&EventQuery {
+                after: Some(head_before_grant),
+                limit: Some(2),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(events.len(), 1, "the real gateway committed the grant once");
+        assert_eq!(events[0].event.kind, "control.broker_registry.grant");
+
+        if !attempted.status.success() && !receipt_published {
+            let recovered_output =
+                run(operation_command("resume", &grant, Some(&control)), root).await;
+            no_secret(&recovered_output, &broker_key);
+            let recovered = success(&recovered_output);
+            assert_eq!(recovered["status"], "operation_recorded");
+            assert!(recovered["receipt"]["audit_seq"].is_number());
+            assert_eq!(gateway.store.head().unwrap(), head_before_grant + 1);
+            assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before_grant + 2);
+        }
+    }
+
+    assert!(
+        accepted_invalid_receipts.is_empty(),
+        "broker grant accepted inconsistent initial response categories: {accepted_invalid_receipts:?}"
+    );
+}
+
+#[tokio::test]
+async fn broker_operation_preparation_requires_closed_explicit_cas_fields() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let gateway = Gateway::new(root, root.join("unused-operation")).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let head = gateway.store.head().unwrap();
+    let neighbor_head = gateway.neighbor.head().unwrap();
+
+    let mut missing_grant_revision = broker_grant_manifest(
+        "44444444-4444-4444-8444-444444444444",
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    );
+    missing_grant_revision
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_revision");
+    let zero_grant_revision = broker_grant_manifest(
+        "44444444-4444-4444-8444-444444444444",
+        INCARNATION,
+        Some(0),
+        "2100-01-01T00:00:00.000Z",
+    );
+    let mut unknown_grant_field = broker_grant_manifest(
+        "44444444-4444-4444-8444-444444444444",
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    );
+    unknown_grant_field["tenant_id"] = json!("tenant-b");
+    let mut missing_revoke_revision = broker_revoke_manifest(1);
+    missing_revoke_revision
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_revision");
+    let zero_revoke_revision = broker_revoke_manifest(0);
+
+    for (name, value) in [
+        ("missing-grant-cas", missing_grant_revision),
+        ("zero-grant-cas", zero_grant_revision),
+        ("unknown-grant-field", unknown_grant_field),
+        ("missing-revoke-cas", missing_revoke_revision),
+        ("zero-revoke-cas", zero_revoke_revision),
+    ] {
+        let input = root.join(format!("{name}.json"));
+        private_write(&input, &serde_json::to_vec(&value).unwrap());
+        let operation = root.join(name);
+        let refused = run(prepare_command(&input, &control, &operation), root).await;
+        assert_eq!(refused.status.code(), Some(1), "{name} must be refused");
+        assert!(refused.stdout.is_empty());
+        no_secret(&refused, RUNNER);
+        assert!(
+            !operation.exists(),
+            "{name} must not create preparation state"
+        );
+    }
+
+    assert_eq!(gateway.requests.load(Ordering::SeqCst), 0);
+    assert_eq!(gateway.store.head().unwrap(), head);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_head);
+}
+
+#[tokio::test]
+async fn broker_grant_wrong_authenticated_scope_stops_before_post() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let operation = root.join("broker-grant");
+    let gateway = Gateway::new(root, operation.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let (credential_id, broker_key) =
+        issue_broker_binding(root, &control, "initial", INCARNATION).await;
+    let grant = prepare_broker_grant(
+        root,
+        &control,
+        "broker-grant",
+        &credential_id,
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    )
+    .await;
+    let wrong_control = gateway.control_file(
+        root,
+        "neighbor-control",
+        "public-workload-cli-neighbor-runner-0000000000000000",
+        "tenant-a",
+    );
+    let head = gateway.store.head().unwrap();
+    let neighbor_head = gateway.neighbor.head().unwrap();
+    let posts = gateway.posts.load(Ordering::SeqCst);
+    gateway.preparation_missing.store(false, Ordering::SeqCst);
+
+    let refused = run(
+        operation_command("apply", &grant, Some(&wrong_control)),
+        root,
+    )
+    .await;
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(refused.stdout.is_empty());
+    no_secret(&refused, RUNNER);
+    no_secret(&refused, &broker_key);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts);
+    assert_eq!(gateway.store.head().unwrap(), head);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_head);
+    assert!(!grant.join("receipt").exists());
+
+    let applied = success(&run(operation_command("apply", &grant, Some(&control)), root).await);
+    assert_eq!(applied["status"], "operation_recorded");
+    assert_eq!(applied["receipt"]["broker_id"], BROKER);
+    assert_eq!(applied["receipt"]["grant_revision"], 1);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts + 1);
+    assert_eq!(gateway.store.head().unwrap(), head + 1);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_head);
+    assert_eq!(
+        broker_self(&gateway, &broker_key).await,
+        reqwest::StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn broker_grant_and_revoke_cas_divergence_do_not_mutate_the_registry() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let first_grant = root.join("initial-grant");
+    let gateway = Gateway::new(root, first_grant.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let (first_credential, first_key) =
+        issue_broker_binding(root, &control, "initial", INCARNATION).await;
+    let grant = prepare_broker_grant(
+        root,
+        &control,
+        "initial-grant",
+        &first_credential,
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    )
+    .await;
+    success(&run(operation_command("apply", &grant, Some(&control)), root).await);
+    assert_eq!(
+        broker_self(&gateway, &first_key).await,
+        reqwest::StatusCode::OK
+    );
+
+    let next_incarnation = "55555555-5555-4555-8555-555555555555";
+    let (next_credential, next_key) =
+        issue_broker_binding(root, &control, "replacement", next_incarnation).await;
+    let head = gateway.store.head().unwrap();
+    let neighbor_head = gateway.neighbor.head().unwrap();
+    let posts = gateway.posts.load(Ordering::SeqCst);
+
+    let stale_grant = prepare_broker_grant(
+        root,
+        &control,
+        "stale-grant",
+        &next_credential,
+        next_incarnation,
+        Some(2),
+        "2100-01-01T00:00:00.000Z",
+    )
+    .await;
+    assert!(!stale_grant.join("credential").exists());
+    let stale_grant_result = run(
+        operation_command("apply", &stale_grant, Some(&control)),
+        root,
+    )
+    .await;
+    assert_eq!(stale_grant_result.status.code(), Some(1));
+    assert!(stale_grant_result.stdout.is_empty());
+    no_secret(&stale_grant_result, RUNNER);
+    no_secret(&stale_grant_result, &next_key);
+    assert!(!stale_grant.join("receipt").exists());
+    assert_eq!(gateway.store.head().unwrap(), head);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_head);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts + 1);
+
+    let stale_revoke =
+        prepare_named(root, "stale-revoke", &broker_revoke_manifest(2), &control).await;
+    assert!(!stale_revoke.join("credential").exists());
+    let stale_revoke_result = run(
+        operation_command("apply", &stale_revoke, Some(&control)),
+        root,
+    )
+    .await;
+    assert_eq!(stale_revoke_result.status.code(), Some(1));
+    assert!(stale_revoke_result.stdout.is_empty());
+    no_secret(&stale_revoke_result, RUNNER);
+    no_secret(&stale_revoke_result, &next_key);
+    assert!(!stale_revoke.join("receipt").exists());
+    assert_eq!(gateway.store.head().unwrap(), head);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_head);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts + 2);
+
+    let current = gateway.store.broker(BROKER).unwrap().unwrap();
+    assert_eq!(current.broker.grant_revision, 1);
+    assert_eq!(current.broker.credential_id, first_credential);
+    assert!(!current.broker.revoked);
+    assert_eq!(
+        broker_self(&gateway, &first_key).await,
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        broker_self(&gateway, &next_key).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn broker_grant_lost_ack_resumes_the_same_receipt_after_expiry() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let operation = root.join("broker-grant");
+    let gateway = Gateway::new(root, operation.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let (credential_id, broker_key) =
+        issue_broker_binding(root, &control, "initial", INCARNATION).await;
+    let not_after = (chrono::Utc::now() + chrono::Duration::seconds(90))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let grant = prepare_broker_grant(
+        root,
+        &control,
+        "broker-grant",
+        &credential_id,
+        INCARNATION,
+        None,
+        &not_after,
+    )
+    .await;
+    assert!(!grant.join("credential").exists());
+    gateway.preparation_missing.store(false, Ordering::SeqCst);
+    let request: Value =
+        serde_json::from_slice(&fs::read(grant.join("recovery.json")).unwrap()).unwrap();
+    let operation_id = request["request"]["operation_id"].as_str().unwrap();
+    let head_before = gateway.store.head().unwrap();
+    let neighbor_before = gateway.neighbor.head().unwrap();
+    let posts_before = gateway.posts.load(Ordering::SeqCst);
+    gateway
+        .drop_next_post_response
+        .store(true, Ordering::SeqCst);
+
+    let lost = run(operation_command("apply", &grant, Some(&control)), root).await;
+    assert_eq!(lost.status.code(), Some(1));
+    assert!(lost.stdout.is_empty());
+    no_secret(&lost, RUNNER);
+    no_secret(&lost, &broker_key);
+    assert!(!grant.join("receipt").exists());
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before + 1);
+    assert_eq!(gateway.store.head().unwrap(), head_before + 1);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+
+    tokio::time::timeout(Duration::from_secs(105), async {
+        loop {
+            let broker = gateway.store.broker(BROKER).unwrap().unwrap();
+            if broker.state == BrokerStateV1::Expired {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .expect("the real grant reaches its bounded expiry");
+    assert_eq!(
+        broker_self(&gateway, &broker_key).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    let resumed_output = run(operation_command("resume", &grant, Some(&control)), root).await;
+    no_secret(&resumed_output, &broker_key);
+    let resumed = success(&resumed_output);
+    assert_eq!(resumed["status"], "operation_recorded");
+    assert_eq!(resumed["current_state"], "not_observed");
+    assert_eq!(resumed["receipt"]["operation_id"], operation_id);
+    assert_eq!(resumed["receipt"]["broker_id"], BROKER);
+    assert_eq!(resumed["receipt"]["grant_revision"], 1);
+    assert_eq!(resumed["receipt"]["heartbeat_revision"], 0);
+    assert_eq!(gateway.store.head().unwrap(), head_before + 1);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before + 2);
+
+    let events = gateway
+        .store
+        .events(&EventQuery {
+            after: Some(head_before),
+            limit: Some(2),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event.kind, "control.broker_registry.grant");
+    assert_eq!(resumed["receipt"]["audit_seq"], events[0].seq);
+    assert_eq!(resumed["receipt"]["audit_hash"], events[0].hash);
+    assert_eq!(
+        resumed["receipt"]["input_hash"],
+        events[0].event.data["input_hash"]
+    );
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains(&broker_key)
+    );
+
+    let requests_before_status = gateway.requests.load(Ordering::SeqCst);
+    let status_output = run(operation_command("status", &grant, None), root).await;
+    no_secret(&status_output, &broker_key);
+    let status = success(&status_output);
+    assert_eq!(status["receipt"], resumed["receipt"]);
+    assert_eq!(status["current_state"], "not_observed");
+    assert_eq!(
+        gateway.requests.load(Ordering::SeqCst),
+        requests_before_status
+    );
+}
+
+#[tokio::test]
+async fn broker_revoke_stops_broker_authentication_and_preserves_historical_receipts() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let grant_operation = root.join("grant");
+    let gateway = Gateway::new(root, grant_operation.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let (credential_id, broker_key) =
+        issue_broker_binding(root, &control, "initial", INCARNATION).await;
+    let grant = prepare_broker_grant(
+        root,
+        &control,
+        "grant",
+        &credential_id,
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    )
+    .await;
+    let grant_output = run(operation_command("apply", &grant, Some(&control)), root).await;
+    no_secret(&grant_output, &broker_key);
+    let grant_report = success(&grant_output);
+    assert_eq!(grant_report["receipt"]["grant_revision"], 1);
+    assert_eq!(
+        broker_self(&gateway, &broker_key).await,
+        reqwest::StatusCode::OK
+    );
+
+    let revoke = prepare_named(root, "revoke", &broker_revoke_manifest(1), &control).await;
+    assert!(!revoke.join("credential").exists());
+    let before_revoke = gateway.store.head().unwrap();
+    let neighbor_before = gateway.neighbor.head().unwrap();
+    let posts_before = gateway.posts.load(Ordering::SeqCst);
+    let revoked_output = run(operation_command("apply", &revoke, Some(&control)), root).await;
+    no_secret(&revoked_output, &broker_key);
+    let revoked = success(&revoked_output);
+    assert_eq!(revoked["credential_id"], Value::Null);
+    assert_eq!(revoked["broker_id"], BROKER);
+    assert_eq!(revoked["receipt"]["grant_revision"], 2);
+    assert_eq!(revoked["current_state"], "not_observed");
+    assert_eq!(gateway.store.head().unwrap(), before_revoke + 1);
+    assert_eq!(gateway.neighbor.head().unwrap(), neighbor_before);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before + 1);
+
+    let current = gateway.store.broker(BROKER).unwrap().unwrap();
+    assert!(current.broker.revoked);
+    assert_eq!(current.broker.grant_revision, 2);
+    assert_eq!(current.state, BrokerStateV1::Revoked);
+    assert_eq!(
+        broker_self(&gateway, &broker_key).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    let replay_output = run(operation_command("resume", &revoke, Some(&control)), root).await;
+    no_secret(&replay_output, &broker_key);
+    let replay = success(&replay_output);
+    assert_eq!(replay["receipt"], revoked["receipt"]);
+    assert_eq!(gateway.store.head().unwrap(), before_revoke + 1);
+    assert_eq!(gateway.posts.load(Ordering::SeqCst), posts_before + 2);
+    assert_eq!(
+        broker_self(&gateway, &broker_key).await,
+        reqwest::StatusCode::FORBIDDEN
+    );
+
+    let requests_before_status = gateway.requests.load(Ordering::SeqCst);
+    let historical_output = run(operation_command("status", &grant, None), root).await;
+    no_secret(&historical_output, &broker_key);
+    let historical = success(&historical_output);
+    assert_eq!(historical["receipt"], grant_report["receipt"]);
+    assert_eq!(historical["current_state"], "not_observed");
+    assert_eq!(
+        gateway.requests.load(Ordering::SeqCst),
+        requests_before_status
+    );
+}
+
+#[tokio::test]
+async fn broker_regrant_preserves_heartbeat_history_and_normalizes_expiry_precision() {
+    let _serial = GATEWAY_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let root = directory.path();
+    let grant_operation = root.join("first-grant");
+    let gateway = Gateway::new(root, grant_operation.clone()).await;
+    let control = gateway.control_file(root, "control", RUNNER, "tenant-a");
+    let (first_credential, first_key) =
+        issue_broker_binding(root, &control, "initial", INCARNATION).await;
+    let initial_grant = prepare_broker_grant(
+        root,
+        &control,
+        "first-grant",
+        &first_credential,
+        INCARNATION,
+        None,
+        "2100-01-01T00:00:00.000Z",
+    )
+    .await;
+    let initial_output = run(
+        operation_command("apply", &initial_grant, Some(&control)),
+        root,
+    )
+    .await;
+    no_secret(&initial_output, &first_key);
+    success(&initial_output);
+    let heartbeat = heartbeat_broker(&gateway, &first_key, INCARNATION).await;
+    assert_eq!(heartbeat["replayed"], false);
+    let before_regrant = gateway.store.broker(BROKER).unwrap().unwrap();
+    assert_eq!(before_regrant.broker.heartbeat_revision, 1);
+    let old_heartbeat = before_regrant.broker.last_heartbeat.clone().unwrap();
+    assert_eq!(old_heartbeat.incarnation_id, INCARNATION);
+
+    let next_incarnation = "55555555-5555-4555-8555-555555555555";
+    let (next_credential, next_key) =
+        issue_broker_binding(root, &control, "replacement", next_incarnation).await;
+    let regrant = prepare_broker_grant(
+        root,
+        &control,
+        "regrant",
+        &next_credential,
+        next_incarnation,
+        Some(1),
+        "2100-01-01T00:00:00.123456Z",
+    )
+    .await;
+    assert!(!regrant.join("credential").exists());
+    let regrant_output = run(operation_command("apply", &regrant, Some(&control)), root).await;
+    no_secret(&regrant_output, &next_key);
+    let report = success(&regrant_output);
+    assert_eq!(report["receipt"]["grant_revision"], 2);
+    assert_eq!(report["receipt"]["heartbeat_revision"], 1);
+    assert_eq!(
+        broker_self(&gateway, &next_key).await,
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        broker_self(&gateway, &first_key).await,
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+
+    let current = gateway.store.broker(BROKER).unwrap().unwrap();
+    assert_eq!(current.broker.grant_revision, 2);
+    assert_eq!(current.broker.credential_id, next_credential);
+    assert_eq!(current.broker.incarnation_id, next_incarnation);
+    assert_eq!(current.broker.heartbeat_revision, 1);
+    assert_eq!(current.broker.last_heartbeat, Some(old_heartbeat.clone()));
+    assert_eq!(current.state, BrokerStateV1::Unseen);
+    assert_eq!(current.broker.not_after, "2100-01-01T00:00:00.123Z");
+    assert_eq!(current.broker.authorities.len(), 2);
+}
+
 fn decision_admission(store: &Store) -> AdmissionV1 {
     let session_id = Uuid::new_v4().to_string();
     let request = DecisionRequest {
