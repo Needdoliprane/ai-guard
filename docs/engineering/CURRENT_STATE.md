@@ -32,9 +32,19 @@ les outils Linux manquants ont une préparation de cache épinglé soumise au
 mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
 workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
 
-Un essai SSO CLI avec un vrai Keycloak local est préparé indépendamment des
-outils frontend absents, en utilisant les images déjà en cache et un realm
-temporaire isolé. Driver Rust privé en cours, revue et exécution `NOT_RUN`.
+Un premier essai SSO CLI avec un vrai Keycloak local a été exécuté sur le
+gel privé D, indépendamment des outils frontend absents. Compilation et
+quatre tests du harnais PASS ; le prédicat réseau corrigé accepte les
+interfaces tunnel DOWN sans adresse et refuse interfaces actives/adresses
+non-loopback. Le scénario réel passe préflight, installation neuve et
+démarrage du gateway, puis échoue sur `authorization_html_status`, avant
+admission. Son rapport fermé est validé après terminaison des acteurs ;
+sources et binaires restent inchangés. La connexion et le logout ne sont
+donc pas qualifiés. L'analyse indépendante établit une incompatibilité du
+`:80` enregistré dans le profil Keycloak ; retrait ciblé et guides EN/FR en
+correction. Le statut HTTP précis de l'essai reste inconnu, sans nouvelle
+campagne automatique. Les gels B/C et leurs résultats sont préservés.
+[Preuves et limites](VALIDATION.md#4-novembre--prétests-du-driver-sso-cli-privé).
 Le DNS hôte Keycloak est revalidé : le blocage historique est levé, sans
 preuve de CLI natif macOS. WSI-Q02 reste ouvert : l'analyse confirme des
 revalidations complètes et propose une mesure à compteurs avant optimisation,

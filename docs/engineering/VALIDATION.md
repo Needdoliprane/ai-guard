@@ -1,5 +1,111 @@
 # Validation courante
 
+## 4 novembre — prétests du driver SSO CLI privé
+
+Source produit figée : `9ee05ccb9806b2d0667c0d6ae6571a21d1416fbf` ;
+les trois fichiers du driver Rust sont des outils privés hors Git. Aucune
+suite Keycloak auxiliaire n'est ajoutée au dépôt. Image Linux ARM64 en cache
+`2115d432…`, sources et registre publics RO, réseau/IPC none, UID1000,
+cap-drop ALL/no-new-privileges, env-i explicite, CPU1, RAM=swap5Gio,
+PID256, nofile1024, fsize512Mio, scratch tmpfs3Gio/65536inodes et garde
+PID1 sleep1800 fixe. Aucun téléchargement, fournisseur IA ou compte réel.
+
+- `PASS` : sur gel C, `cargo build --offline --locked --manifest-path
+  /inputs/sso-cli-combined-9ee05ccb-gel-c/Cargo.toml --bin agentsandbox
+  --example sso_cli_real_keycloak` RC0 ; puis `cargo test --offline --locked
+  --manifest-path /inputs/sso-cli-combined-9ee05ccb-gel-c/Cargo.toml
+  --example sso_cli_real_keycloak -- --test-threads=1`, trois tests PASS,
+  aucun ignoré/filtré, RC0. Sources42, trois helpers et lock inchangés après
+  essai. Ce sont des prétests du harnais, pas une connexion SSO réussie.
+- `FAIL` conservé : gel B, deux parseurs PASS/un FAIL, RC101. Deux regex
+  Unicode dépassaient la limite de compilation de l'automate ; C conserve
+  les bornes HTML/attributs et teste la cause sans appel réseau.
+- `BLOCKED` pour le driver C avant service : le relevé du nouvel owner
+  énumère neuf interfaces tunnel DOWN, sans adresse IPv4/IPv6 assignée ;
+  routes et résolution observées restent loopback. Le code C refuse pourtant
+  tout nom autre que lo : incompatibilité statique, sans exécuter le driver C.
+  À ce stade, le gel D est préparé ; revue et tests restent à exécuter, sans déduire
+  l'absence de connectivité des seuls noms ou compteurs réseau.
+- `NOT_RUN` sur le gel C : vrai Keycloak/gateway/CLI, navigateur,
+  CLI macOS, entreprise, worker, fournisseur IA et runtime Kubernetes.
+
+Reçu C privé
+`/private/tmp/ai-guard-sso-cli-qa-20261104.5j99ro/proofs/variant-b-build/gel-c-report.md`,
+SHA `7276b601c77f31768d8134914dbe71746718cf4d2fb4922a445cc6ff1f05a3fc`.
+Le premier owner est retiré sans transfert de binaire après le seuil de
+temps manqué ; fermeture du sleep seul avec escalade Docker, exit137,
+reçu SHA `e44185906fb73b44bd55efad3d3e03da47e786f963cffbe38fe124eb033d42f4`.
+Nouveau préflight sans Cargo/service dans `proofs/gel-c-runtime-luna/` ;
+relevé des flags/adresses SHA
+`cc15a15190a3198b260e207c35f5826a0f7fd8e9e69de88290be40b836a15eb6`.
+Ces résultats ne ferment aucun gate global ; le contrôle d'interopération
+et sa revue restent requis.
+
+### Gel D — premier essai réel, échec conservé
+
+Même source produit9ee05cc et mêmes42hashes, nouveau driver privé gel D
+`05a85ea3a82ce5bb44c4a9df5e79dce12690805cf3e2af221125fe4d2fb7d053`.
+Le delta remplace le refus de noms d'interfaces par deux inventaires
+getifaddrs/proc bornés : refus de toute interface non-lo UP/RUNNING/LOWER_UP,
+de toute adresse non-loopback et des routes externes. Pas de sysfs hôte,
+nouvelle dépendance ou ouverture réseau. Revue indépendante D SHA
+`7d330fd2ff25824145f3ca6c79eccde86ba54045567bf78e863ec991f28cffd3`.
+Compilation offline/locked puis **4 tests ciblés PASS**, RC0, aucun ignoré
+ou filtré ; les trois parseurs C sont rejoués et ne constituent pas trois
+nouvelles fonctions. Log privé `proofs/gel-d-runtime-luna/cargo-parse-tests.log`,
+SHA `d52b45c32ae059eef3abd5df7ba2730fdb1598accc5dcd5470455bcbc1ca4ff9`.
+
+Le contrôle indépendant Root confirme les limites effectives de l'owner,
+les binds publics RO, la barrière Cargo et le peer Keycloak26.8.1ARM64
+dans le même namespace issu de network none. Le peer garde sa propre limite
+CPU1/RAM=swap1Gio, PID256, nofile1024, fsize64Mio, tmpfs data256Mio/4096inodes
+et tmp64Mio/4096inodes noexec/nosuid/nodev ; seul le realm public est monté
+RO. Reçu public figé SHA
+`90d798d1101f9fa1c0035d48de241b337828de56879e5da663e05cbb8091fa6d`,
+gate05:04:39UTC,1183secondes avant l'échéance owner fixe. Un peer sleep-only
+antérieur est fermé avant service pour conserver le budget complet ;
+aucun essai IdP n'y a été lancé.
+
+Un seul scénario réel est exécuté. Keycloak répond200 sur `/realms/master`
+(readiness seulement), puis le vrai CLI tente le flux Code/PKCE. Le rapport
+fermé admis constate `PASS` pour préflight, installation offline neuve,
+gateway prêt et intégrité après cleanup ; **`FAIL authorization_html_status`**
+avant admission. Ce code confond statut non200 et Content-Type inattendu :
+aucun statut précis, corps, header, URL ou message fournisseur n'est retenu.
+Setup sort naturellement0 ; gateway s'arrête gracieusement0 ; le CLI est
+terminé par SIGTERM après l'échec. Ni connexion complète, lecture humaine,
+logout ni corrélation finale des audits ne sont qualifiés.
+
+Le canal borné termine naturellement avec docker_exit1, limiteur stdout0,
+consumer stderr0 et compteur stderr0 ;2325octets. Après fermeture des deux
+conteneurs exacts, Root confirme leur absence, applique le schéma fermé
+à206codes et réencode uniquement les champs admis. Rapport dérivé privé
+`/private/tmp/ai-guard-sso-cli-qa-20261104.5j99ro/ADMITTED-REPORT-D.json`,
+SHA `64486132f2b2731159238f5b1314653b0832b3a9037ac81387c91cde0eb4aaf7`.
+Reçu de canal `proofs/gel-d-runtime-luna/channel-result.md`, SHA
+`d4b9492d055770b6d34556a57be84fd5377d8925db8d8d9c3ed3c23728163dff`.
+Les16hashes admis correspondent aux entrées/binaires observés ; le contrôle
+source42 postérieur passe42/42. Le premier contrôle metadata avait un cwd
+incorrect : son échec est conservé, puis recontrôle au chemin D exact.
+Fermetures des seuls conteneurs QA avec exit137 du hold, distinct du code1
+du driver ; aucun volume/image/service existant supprimé. Reçu fermeture
+SHA `920b60174245c7f41890c3c9fb3437df536296b990bc510ec5e901da01eb049a`.
+
+La revue source indépendante identifie une incompatibilité distincte du
+profil : la référence loopback enregistrée contient explicitement`:80`,
+alors que le fallback de
+[Keycloak26.8.1](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java#L117)
+normalise ce port par défaut avant la comparaison ; ses
+[tests officiels](https://github.com/keycloak/keycloak/blob/26.8.1/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/oauth/OAuthRedirectUriTest.java#L399)
+enregistrent la forme sans port. Le retrait seul du port est justifié,
+sans wildcard ni changement du callback natif. Cela ne prouve pas encore
+que l'essai D a reçu400. Diagnostic privé SHA
+`42d8e5f467eab075c224b4e0b0112527cc05e6787674f5a33e7907314100a525` ;
+rejeu ciblé après correction et diagnostic fermé, `NOT_RUN`.
+Le candidat local `ad22d33bef92ba176383bf2a6981d3001d59d860` porte uniquement
+le realm corrigé et ses deux guides ; il n'est ni intégré ni qualifié ici.
+Tous les gates globaux et les autres plateformes/parcours restent ouverts.
+
 ## 4 novembre — composition conservée et prérequis SSO CLI
 
 La branche de validation `codex/human-brokers-validation-20261104` part de
