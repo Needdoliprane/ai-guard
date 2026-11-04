@@ -1,5 +1,47 @@
 # Décisions d'industrialisation
 
+## 4 novembre — contrat de lecture humaine du registre brokers
+
+Contrat technique de lot retenu après revue indépendante, **à implémenter**
+après intégration du correctif proxy/F1 séparé. Il conserve gateway Rust,
+identités existantes, SQLite par tenant et dashboard TypeScript ; aucun
+service, accès moteur ou mécanisme de fédération n'est ajouté.
+
+La nouvelle capacité administrative explicite `read_broker_registry` porte
+sur les métadonnées d'infrastructure du tenant authentifié. Elle n'est pas
+accordée automatiquement aux comptes, grants ou mappings OIDC existants.
+`ReadTenantMetadata` conserve ses filtres d'organisation historiques.
+Seul le contrôle authentifié/hors ligne peut accorder ou réactiver le nouveau
+droit ; un administrateur d'organisation peut le conserver dormant ou le
+retirer sous ses anciens droits, jamais l'ajouter/réactiver. Principal et
+organisation du membership restent immuables. OIDC exige à la fois grant
+local explicite et plafond configuré ; aucun rôle IdP seul ne suffit.
+
+L'audit de lecture brokers possède un nouveau type/kind versionné, sans
+élargir le V1 historique des lectures de ressources. Migration6→7 explicite
+sauvegardée, atomique et sans activation ; mêmes tables/index, nouveau
+marqueur de capacité hash-linked. Pas de signature externe déduite. Lecture,
+autorisation, projection bornée et reçu durable partagent une transaction,
+avec les mêmes budgets humains F1 et une nouvelle réauthentification avant
+publication. Les lecteurs/protocoles7 sont mis à jour ensemble ; les anciens
+formats et leurs refus restent vérifiés.
+
+Le DTO humain exclut credentials, digests et grants bruts. Sa pagination
+broker distincte réutilise l'AEAD et l'unique compteur de nonce contextuel,
+sans détourner un curseur de ressources. Le registre reste une lecture live,
+pas un inventaire runtime complet. Un contexte ne possédant que ce droit
+ouvre Brokers sans lecture automatique de ressources, événements, export
+ou SSE, ni attribution implicite de ReadMetadata. Les refus F1 durables
+arrêtent les lectures automatiques ; navigation ou visibilité ne réarment
+pas ce refus. Perte de droits/contextes : abort et purge des données.
+
+Gel privé du contrat révisé : SHA
+`a97f70c5d29b515b0be5ffc268a463e2942c074880f530085a45df002569e28d` ;
+revue de conception finale SHA
+`3b462025da139b175fbe3954705633d4f3fb323202850fec3924b5e1a94ae968`.
+Tous les tests de ce nouveau lot restent NOT_RUN ; le registre humain seul
+ne qualifie ni travailleurs, ni fédération, ni release.
+
 ## 4 novembre — proposition de transport des workers sans réseau, décision attendue
 
 **Proposition uniquement : aucun accord, code ou test runtime de ce canal.**

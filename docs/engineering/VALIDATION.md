@@ -1,5 +1,53 @@
 # Validation courante
 
+## 4 novembre — refus F1 conservé par le proxy du dashboard
+
+Base `b8fc2a7`, quatre overlays, source `bedf3de` intégrée par `167ff85`.
+**RED réel avant correction :** Store SQLite privé, compte/contexte valides,
+gateway HTTP et vrai dashboard proxy. Après budget principal épuisé, le
+gateway répond429 `audit_read_budget_exhausted/contact_operator`, le proxy
+503 `identity_unavailable/retry` ; head15, assertion503≠429, RC101.
+Le correctif ne reconnaît que le tuple fermé429/code/action : réponse locale
+fixe, enveloppe JSON stricte≤4096octets et délai de requête3s existant.
+Message, corps et headers amont ne sont jamais relayés par ce précontrôle.
+401 et validation positive de l'identité restent inchangés ; les réponses
+inconnues/malformées/hors borne gardent le refus503 générique.
+
+**PASS ciblé :** `cargo test --offline --locked --test human_proxy_capacity
+-- --test-threads=1`,3fonctions/0FAIL/0ignoré,RC0,3,17s. Vrai F1 now429→429
+sans append au refus, dix cas contrôlés d'erreur/écho et corps suspendu
+borné par le délai existant. Ces cas négatifs sont des fixtures de transport,
+pas des données produit. Un canari historique `--test human_access
+dashboard_proxy_forwards_human_context_without_viewer_fallback -- --exact
+--test-threads=1` passe,1PASS/21filtrés/RC0,0,17s. Total4fonctions uniques.
+`cargo check --offline --locked --all-targets` RC0 sans warning,50,78s sur
+cible neuve. Formatage statique des2sources, diff, scan des3secrets connus
+et18liens des guides identité EN/FR PASS. Revue indépendante acceptée sur
+les quatre SHA gelés, identiques après intégration.
+
+Preuves privées :
+`/private/tmp/ai-guard-human-proxy-capacity-luna-20261104.13ul3b/proofs/`.
+Manifeste GREEN SHA
+`7f2cd5f59f49cf2a5b8c747ac4ff7831dd4a2a8aebe3d28099fe60986357fa31` ;
+log RED SHA `3e83bf1ec0c3c15063e0f7b84373bfe37f353afe2bd2ce4c1420cd00d0be504b`,
+GREEN SHA `e018a450b2d4b34eb361c02dd0b71c001d3e62e63a1ff9daa5fa6d251f4a6fb6`,
+check SHA `6f9258588ab7243517454a13ddf4027b8e533217e8d901848178cd710a6cb108`,
+canari SHA `f97dc80b0312a235b9f96dd16c932249e07b2ca71678b51fbf6ffffd96ebcdb0`.
+Revue `/private/tmp/ai-guard-human-proxy-capacity-review-20261104.md`, SHA
+`bce801a2b21b08f2050a9d13d6f51767a64f3385fda7af55615172d388c7296a`.
+Snapshot public RO, registre RO et scratch privé dans un sandbox neuf
+image/toolchain identiques aux lots précédents ; contraintes CPU/RAM/PID/
+fsize/inodes/wall et env allowlist conservées. SHA/mtimes/Cargo.lock stables.
+Une syntaxe docker-exec erronée avant préflight n'a lancé aucun Cargo ;
+diagnostic INVALID conservé, remplacé par préflight vérifié. L'ancien
+conteneur ne contenant que sleep est fermé précisément, sans volume/image
+ni preuve supprimée ; reçu `proofs/previous-container-closure.txt`.
+
+**NOT_RUN :** Clippy Linux absent, release/image, navigateur/arrêt visuel
+du polling, IdP réel, runtime/cloud et autres plateformes. Ce correctif rend
+le refus exploitable par le client ; ses tests ne qualifient pas l'UI entière.
+Aucun nouveau schéma, endpoint brokers ou gate production par ce lot.
+
 ## 4 novembre — maintenance humaine après migration workload6
 
 Régression de compatibilité détectée pendant la préparation de la vue humaine,
@@ -48,6 +96,10 @@ mono-fichier du test est utilisé, SHA final `088ba7bb…1ad65e8`.
 distante de révocation, autres plateformes, panne disque/restauration et
 runtime. Confirmation d'arrêt = attestation, aucune nouvelle garantie de
 fencing. Gates globaux inchangés.
+Le worktree donneur propre est fermé après vérification des cinq SHA
+intégrés, du commit source poussé et des consommateurs accessibles ; reçu
+privé `/private/tmp/ai-guard-human-schema6-worktree-close-20261104.OM4sbg/`.
+Branches, sauvegardes et preuves sont conservées, aucun retrait forcé.
 
 ## 4 novembre — commande CLI de diagnostic Kubernetes
 

@@ -62,6 +62,16 @@ Cette lecture doit conserver audit de lecture, budgets, pagination liée au
 contexte et révocation ; aucun accès runner dans le front ni faux inventaire
 multi-hôtes. Ses contrats/code/tests restent à livrer séparément.
 
+Le [contrat humain du registre](DECISIONS.md#4-novembre--contrat-de-lecture-humaine-du-registre-brokers)
+est maintenant relu : nouvelle capacité explicite sans élargissement des
+grants historiques, audit distinct et migration7. Avant son code, intégrer
+le correctif existant du proxy qui masquait le429 F1 en503/retry. Il est
+intégré dans `167ff85` après RED/GREEN ciblés et revue. Ensuite propriétaires
+disjoints backend Rust (API/audit/migration/compatibilité) et frontend
+TypeScript (modèle/client/vue humaine/états), Root aux contrats/intégration,
+Luna aux tests ciblés et second regard indépendant. Aucun raccord de workers
+ou accès physique aux moteurs n'est implicitement livré par cette vue.
+
 Les preuves broker/worker sont opaques et revalidées en transaction avant
 replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker
 ni crédit d'audit. Génération v1 fixée à1 par tentative UUID tant qu'aucune

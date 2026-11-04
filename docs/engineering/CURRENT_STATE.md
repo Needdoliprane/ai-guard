@@ -66,6 +66,11 @@ réel du garde4/5 périmé. Quatre régressions CLI/SQLite, un canari historique
 et all-targets passent ; revue indépendante et guides EN/FR synchronisés.
 Les barrières tenant/filesystem/audit/confirmation/inactivité sont conservées,
 sans activer la supervision ni migrer implicitement. [Preuves et limites](VALIDATION.md#4-novembre--maintenance-humaine-après-migration-workload6).
+Le proxy dashboard conserve aussi le refus F1 durable (`167ff85`) après
+RED réel gateway429/proxy503, puis trois régressions et un canari de contexte
+PASS, all-targets sans warning et revue indépendante. Réponse locale fermée
+sans corps/headers amont ; aucune modification des contrôles d'identité.
+[Preuves et limites](VALIDATION.md#4-novembre--refus-f1-conservé-par-le-proxy-du-dashboard).
 
 ## Chantiers parallèles après les correctifs F
 
