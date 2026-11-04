@@ -87,6 +87,11 @@ struct Record {
     input: Input,
     worker_record: Option<ControlRecord>,
 }
+pub(super) fn worker_snapshot(stored: &StoredEvent) -> anyhow::Result<Option<WorkerV1>> {
+    let record: Record = serde_json::from_value(stored.event.data.clone())?;
+    invalid(record.version == 2 && stored.event.kind == record.input.kind())?;
+    Ok(record.worker_record.and_then(|record| record.worker))
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Binding {
@@ -220,7 +225,7 @@ pub(super) fn operation_receipt(
 }
 fn require_v3(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [3, 4, 5].contains(&version) {
+    if [3, 4, 5, 6].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -367,7 +372,7 @@ impl Replay {
         Ok(state)
     }
     pub(super) fn new(db: &Connection, version: i64, namespace: String) -> anyhow::Result<Self> {
-        let (genesis_seq, genesis_hash) = if [3, 4, 5].contains(&version) {
+        let (genesis_seq, genesis_hash) = if [3, 4, 5, 6].contains(&version) {
             let row: (i64, String) = db.query_row(
                 "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                 [],
@@ -939,12 +944,12 @@ impl Store {
             } else {
                 None
             },
-            protocols: if [3, 4, 5].contains(&schema_version) {
+            protocols: if [3, 4, 5, 6].contains(&schema_version) {
                 vec![SupervisionProtocolV1::BrokerSupervisionV1]
             } else {
                 vec![]
             },
-            active: [3, 4, 5].contains(&schema_version) && tx.lease.active,
+            active: [3, 4, 5, 6].contains(&schema_version) && tx.lease.active,
         };
         state.validate()?;
         self.commit_checked(tx)?;

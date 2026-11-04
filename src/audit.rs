@@ -20,7 +20,9 @@ use std::{
 
 pub mod authentication;
 mod capacity;
+pub use capacity::WorkloadAuditPolicyV1;
 pub use capacity::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+mod broker_registry;
 #[cfg(test)]
 mod capacity_tests;
 mod control;
@@ -28,6 +30,8 @@ mod human;
 mod identity;
 #[cfg(test)]
 pub(crate) mod read_test_observer;
+mod relay;
+mod workload;
 pub(crate) use control::expected_worker_transition;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 mod storage;
@@ -66,6 +70,8 @@ pub struct Store {
     redactor: Redactor,
     max_events: u64,
     capacity_policy: AuditCapacityPolicyV1,
+    workload_audit_policy: WorkloadAuditPolicyV1,
+    workload_audit_policy_explicit: bool,
     unhealthy: AtomicBool,
     validated_data_version: AtomicI64,
     validated_total_changes: AtomicU64,
@@ -211,6 +217,54 @@ const AUTO_INDEX_COUNTS: [(&str, u32); 8] = [
     ("worker_allocations", 3),
     ("worker_mutations", 2),
 ];
+const WORKLOAD_INDEX_SCHEMA: [(&str, &str, &str); 1] = [(
+    "index",
+    "worker_mutations_worker_sequence",
+    "CREATE INDEX worker_mutations_worker_sequence ON worker_mutations(worker_id,event_seq) WHERE action IN ('admit','prepare','create_issued','created','start_claim','observe','unknown','stop','cancel_reserved','cleanup_result','supervised_admit','armed_start_claim')",
+)];
+const WORKER_SNAPSHOT_PREDICATE: &str = "action IN ('admit','prepare','create_issued','created','start_claim','observe','unknown','stop','cancel_reserved','cleanup_result','supervised_admit','armed_start_claim')";
+
+fn schema_objects(
+    version: i64,
+) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+    SCHEMA
+        .iter()
+        .chain(if version >= 2 {
+            control::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if [3, 4, 5, 6].contains(&version) {
+            control::supervision::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if [4, 5, 6].contains(&version) {
+            identity::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            workload::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            broker_registry::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            relay::SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            WORKLOAD_INDEX_SCHEMA.iter()
+        } else {
+            [].iter()
+        })
+}
 
 fn normalized_schema(sql: &str) -> String {
     let normalized = sql
@@ -232,7 +286,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        [1, 2, 3, 4, 5].contains(&version) || (allow_legacy && version == 0),
+        [1, 2, 3, 4, 5, 6].contains(&version) || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
@@ -255,13 +309,28 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     }
     let automatic = AUTO_INDEX_COUNTS
         .iter()
-        .chain(if [3, 4, 5].contains(&version) {
+        .chain(if [3, 4, 5, 6].contains(&version) {
             control::supervision::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [4, 5].contains(&version) {
+        .chain(if [4, 5, 6].contains(&version) {
             identity::AUTO_INDEX_COUNTS.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            workload::AUTO_INDEX_COUNTS.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            broker_registry::AUTO_INDEX_COUNTS.iter()
+        } else {
+            [].iter()
+        })
+        .chain(if version == 6 {
+            relay::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
@@ -293,26 +362,9 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             );
             continue;
         }
-        let expected = SCHEMA
-            .iter()
-            .chain(if version >= 2 {
-                control::SCHEMA.iter()
-            } else {
-                [].iter()
-            })
-            .chain(if [3, 4, 5].contains(&version) {
-                control::supervision::SCHEMA.iter()
-            } else {
-                [].iter()
-            })
-            .chain(if [4, 5].contains(&version) {
-                identity::SCHEMA.iter()
-            } else {
-                [].iter()
-            })
-            .find(|(expected_kind, expected_name, _)| {
-                kind == expected_kind && name == expected_name
-            });
+        let expected = schema_objects(version).find(|(expected_kind, expected_name, _)| {
+            kind == expected_kind && name == expected_name
+        });
         anyhow::ensure!(
             expected.is_some_and(|(_, _, expected_sql)| sql
                 .as_ref()
@@ -332,30 +384,26 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                         "identity_resources"
                     } else if name == "identity_shares_principal" {
                         "identity_shares"
+                    } else if name == "worker_mutations_worker_sequence" {
+                        "worker_mutations"
+                    } else if name == "workload_binding_history_prefix" {
+                        "workload_binding_history"
+                    } else if name == "workload_bindings_subject" {
+                        "workload_bindings"
+                    } else if name == "broker_registry_operations_prefix" {
+                        "broker_registry_operations"
+                    } else if matches!(
+                        name.as_str(),
+                        "relay_messages_retained" | "relay_messages_rate" | "relay_messages_inbox"
+                    ) {
+                        "relay_messages"
                     } else {
                         "events"
                     },
             "unexpected audit schema object"
         );
     }
-    for &(kind, name, _) in SCHEMA
-        .iter()
-        .chain(if version >= 2 {
-            control::SCHEMA.iter()
-        } else {
-            [].iter()
-        })
-        .chain(if [3, 4, 5].contains(&version) {
-            control::supervision::SCHEMA.iter()
-        } else {
-            [].iter()
-        })
-        .chain(if [4, 5].contains(&version) {
-            identity::SCHEMA.iter()
-        } else {
-            [].iter()
-        })
-    {
+    for &(kind, name, _) in schema_objects(version) {
         if allow_legacy && version == 0 && name == "tenant_binding" {
             continue;
         }
@@ -377,7 +425,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "internal audit schema index is missing"
         );
     }
-    if [4, 5].contains(&version) {
+    if [4, 5, 6].contains(&version) {
         identity::validate_human_access_capability(db, version)?;
     }
     Ok(false)
@@ -628,6 +676,11 @@ impl Store {
             redactor,
             max_events,
             capacity_policy: AuditCapacityPolicyV1::resolved(max_events),
+            workload_audit_policy: WorkloadAuditPolicyV1::resolved(
+                max_events,
+                &AuditCapacityPolicyV1::resolved(max_events),
+            ),
+            workload_audit_policy_explicit: false,
             unhealthy: AtomicBool::new(!initial_valid),
             validated_data_version: AtomicI64::new(validated_data_version),
             validated_total_changes: AtomicU64::new(validated_total_changes),
@@ -672,6 +725,8 @@ impl Store {
         // The parent's resolved policy is immutable, including disabled defaults
         // for small stores. Do not resolve defaults again on this connection.
         sibling.capacity_policy = self.capacity_policy.clone();
+        sibling.workload_audit_policy = self.workload_audit_policy.clone();
+        sibling.workload_audit_policy_explicit = self.workload_audit_policy_explicit;
         anyhow::ensure!(
             sibling.backing.identity_key() == self.backing.identity_key(),
             "sibling backing differs from live origin"
@@ -904,6 +959,76 @@ impl Store {
         }
         result
     }
+    /// Logical clock failures happen before publication and never latch Store.
+    fn commit_authorized(
+        &self,
+        tx: CheckedTransaction<'_>,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<()> {
+        workload::validate_fresh_control_time(&tx, clock)?;
+        self.commit_checked(tx)
+    }
+    fn append_authorized_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_authorized_capacity_class_at(
+            tx,
+            event,
+            payload,
+            capacity::Class::OrdinaryWrite,
+            clock,
+            chrono::Utc::now(),
+        )
+    }
+    fn append_authorized_identity_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_authorized_capacity_class_at(
+            tx,
+            event,
+            payload,
+            capacity::Class::IdentityMaintenance,
+            clock,
+            chrono::Utc::now(),
+        )
+    }
+    fn append_authorized_workload_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        principal: capacity::WorkloadAuditPrincipalV1,
+        clock: &workload::AuthorizedControlTimeV1,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_authorized_capacity_class_at(
+            tx,
+            event,
+            payload,
+            capacity::Class::Workload(principal),
+            clock,
+            chrono::Utc::now(),
+        )
+    }
+    fn append_with_authorized_capacity_class_at(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        class: capacity::Class<'_>,
+        clock: &workload::AuthorizedControlTimeV1,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) -> anyhow::Result<StoredEvent> {
+        workload::validate_fresh_control_time_at(tx, clock, received_at)?;
+        self.append_with_capacity_class_at(tx, event, payload, class, received_at)
+    }
     fn append_in_transaction(
         &self,
         tx: &Transaction<'_>,
@@ -920,6 +1045,16 @@ impl Store {
     ) -> anyhow::Result<StoredEvent> {
         self.append_with_capacity_class(tx, event, payload, capacity::Class::IdentityMaintenance)
     }
+    #[cfg(test)]
+    fn append_workload_in_transaction(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        principal: capacity::WorkloadAuditPrincipalV1,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_capacity_class(tx, event, payload, capacity::Class::Workload(principal))
+    }
     fn append_human_in_transaction(
         &self,
         tx: &Transaction<'_>,
@@ -935,6 +1070,16 @@ impl Store {
         event: Event,
         payload: String,
         class: capacity::Class<'_>,
+    ) -> anyhow::Result<StoredEvent> {
+        self.append_with_capacity_class_at(tx, event, payload, class, chrono::Utc::now())
+    }
+    fn append_with_capacity_class_at(
+        &self,
+        tx: &Transaction<'_>,
+        event: Event,
+        payload: String,
+        class: capacity::Class<'_>,
+        received_at: chrono::DateTime<chrono::Utc>,
     ) -> anyhow::Result<StoredEvent> {
         let existing = tx
             .query_row(
@@ -973,32 +1118,66 @@ impl Store {
             "audit byte capacity exhausted"
         );
         let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if schema == 5 {
+        // During the explicit5→6 migration the projection is created/seeded
+        // before its genesis events, while user_version still correctly is5.
+        let project_time = schema == 6 || (schema == 5 && workload::time_floors_present(tx)?);
+        if [5, 6].contains(&schema) {
             let mut cache = self
                 .supervision_lease
                 .capacity
                 .lock()
                 .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
             let pending = cache.prepare(tx)?;
-            cache.admit(
-                &pending,
-                &self.capacity_policy,
-                AuditCapacityV1 {
-                    events: self.max_events,
-                    bytes: capacity::PHYSICAL_BYTES,
-                },
-                AuditCapacityV1 {
-                    events: count,
-                    bytes: used_bytes,
-                },
-                AuditCapacityV1 {
-                    events: 1,
-                    bytes: payload_bytes,
-                },
-                class,
-            )?;
+            let physical = AuditCapacityV1 {
+                events: self.max_events,
+                bytes: capacity::PHYSICAL_BYTES,
+            };
+            let total = AuditCapacityV1 {
+                events: count,
+                bytes: used_bytes,
+            };
+            let cost = AuditCapacityV1 {
+                events: 1,
+                bytes: payload_bytes,
+            };
+            if let capacity::Class::Workload(principal) = &class {
+                anyhow::ensure!(schema == 6, "workload audit requires schema6");
+                let event_principal = capacity::workload_identity(&event)?
+                    .context("workload event attribution missing")?;
+                anyhow::ensure!(
+                    &event_principal == principal,
+                    "workload audit class differs from typed actor"
+                );
+                cache.admit_workload(
+                    &pending,
+                    &self.capacity_policy,
+                    &self.workload_audit_policy,
+                    physical,
+                    total,
+                    cost,
+                    principal,
+                )?;
+            } else {
+                cache.admit(
+                    &pending,
+                    &self.capacity_policy,
+                    AuditCapacityV1 {
+                        events: self.max_events,
+                        bytes: capacity::PHYSICAL_BYTES,
+                    },
+                    AuditCapacityV1 {
+                        events: count,
+                        bytes: used_bytes,
+                    },
+                    AuditCapacityV1 {
+                        events: 1,
+                        bytes: payload_bytes,
+                    },
+                    class,
+                )?;
+            }
         }
-        let received = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let received = received_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let seq = last.checked_add(1).context("audit sequence overflow")?;
         let stored_payload_bytes =
             i64::try_from(payload_bytes).context("audit payload too large")?;
@@ -1017,6 +1196,9 @@ impl Store {
                 "UPDATE quota SET bytes=bytes+?1 WHERE id=1",
                 [stored_payload_bytes],
             )?;
+            if project_time {
+                workload::advance_time_floor(tx, seq, &received)?;
+            }
             let persisted: Option<(i64, String)> = tx.query_row("SELECT seq,payload FROM events WHERE id=?1 AND received_at=?2 AND prev_hash=?3 AND hash=?4", params![event.id,received,prev,hash], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
             let quota_after: i64 =
                 tx.query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get(0))?;
@@ -1309,10 +1491,17 @@ impl Store {
         Ok(())
     }
     fn check_integrity(db: &Connection) -> anyhow::Result<Integrity> {
-        let mut stmt=db.prepare("SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq")?;
+        let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let query = if schema == 6 {
+            "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload,e.id,e.kind,e.agent_id,e.sandbox_id,e.project_id,e.decision,f.max_received_at FROM events e LEFT JOIN audit_time_floors f ON f.event_seq=e.seq ORDER BY e.seq"
+        } else {
+            "SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq"
+        };
+        let mut stmt = db.prepare(query)?;
         let mut rows = stmt.query([])?;
         let mut prev = "0".repeat(64);
         let mut count = 0;
+        let mut time_floor: Option<chrono::DateTime<chrono::Utc>> = None;
         while let Some(row) = rows.next()? {
             let seq: i64 = row.get(0)?;
             let received: String = row.get(1)?;
@@ -1338,10 +1527,22 @@ impl Store {
             } else {
                 false
             };
+            let time_valid = if schema == 6 {
+                let received = workload::canonical_control_time(
+                    crate::broker_registry::parse_time(&received)?,
+                )?;
+                let maximum = time_floor.map_or(received, |previous| previous.max(received));
+                time_floor = Some(maximum);
+                row.get::<_, Option<String>>(11)?
+                    == Some(crate::broker_registry::format_time(maximum))
+            } else {
+                true
+            };
             if seq != count + 1
                 || previous != prev
                 || hash != digest(seq, &received, &previous, &payload)
                 || !projection_valid
+                || !time_valid
             {
                 return Ok(Integrity {
                     valid: false,
@@ -1352,6 +1553,16 @@ impl Store {
             }
             prev = hash;
             count += 1;
+        }
+        if schema == 6 {
+            let floors: i64 =
+                db.query_row("SELECT COUNT(*) FROM audit_time_floors", [], |row| {
+                    row.get(0)
+                })?;
+            anyhow::ensure!(
+                floors == count,
+                "control time floor projection has unexpected rows"
+            );
         }
         Ok(Integrity {
             valid: true,

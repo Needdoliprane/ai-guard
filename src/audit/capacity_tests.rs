@@ -188,6 +188,8 @@ fn head_and_byte_reserve_boundaries_are_checked_in_each_dimension() {
         namespace: None,
         tenant: AuditCapacityV1::default(),
         principals: Default::default(),
+        workload_tenant: AuditCapacityV1::default(),
+        workload_principals: Default::default(),
     };
     let policy = AuditCapacityPolicyV1 {
         version: 1,

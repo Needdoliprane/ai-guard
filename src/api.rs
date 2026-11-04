@@ -40,14 +40,17 @@ use std::{
 #[cfg(test)]
 mod audit_capacity_tests;
 mod auth;
+mod brokers;
 mod human;
 mod human_state;
 mod human_streams;
 mod oidc;
 #[cfg(test)]
 mod read_execution_tests;
+mod relay;
 mod store_io;
 mod supervision;
+mod workload;
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 pub use oidc::{OidcClaimRuleV1, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1};
 
@@ -68,6 +71,14 @@ fn audit_capacity_failure(failure: &anyhow::Error) -> Option<(StatusCode, Json<V
         AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted => (
             "audit_write_budget_exhausted",
             "The remaining audit capacity is reserved for identity maintenance. Preserve the audit and contact the operator.",
+        ),
+        AuditCapacityFailureV1::WorkloadAuditBudgetExhausted => (
+            "audit_workload_budget_exhausted",
+            "The cumulative workload audit budget is exhausted. Preserve the audit and contact the operator.",
+        ),
+        AuditCapacityFailureV1::WorkloadAuditDisabled => (
+            "audit_workload_budget_exhausted",
+            "The configured capacity cannot support protected workload audit budgets. Contact the operator.",
         ),
     };
     Some((
@@ -451,6 +462,7 @@ impl GatewayState {
             store_io::Lane::Read
         };
         human::reject_control_collision(self, token, Some((binding.tenant_index, lane)))?;
+        workload::reject_control_collision(self, token, Some((binding.tenant_index, lane)))?;
         let mut proof_headers = HeaderMap::new();
         if let Some(value) = headers.get(header::AUTHORIZATION) {
             proof_headers.insert(header::AUTHORIZATION, value.clone());
@@ -636,6 +648,9 @@ pub fn gateway_router(state: GatewayState) -> Router {
             routes
                 .clone()
                 .merge(supervision::routes())
+                .merge(workload::routes())
+                .merge(relay::routes())
+                .merge(brokers::routes())
                 .merge(human::routes()),
         )
         .nest("/api", routes)

@@ -197,6 +197,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         }
         reject_control_collision(state, token, None)?;
         let proof = oidc.authenticate(token)?;
+        super::workload::reject_human_collision(state, &proof.digest, None)?;
         let expiry = chrono::DateTime::from_timestamp(proof.expires_at, 0)
             .ok_or_else(invalid_request)?
             .to_rfc3339();
@@ -270,6 +271,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
                 "authenticate",
             )
         })?;
+    super::workload::reject_human_collision(state, &digest, Some(source))?;
     Ok(VerifiedHuman {
         credential: HumanAuthenticationProof {
             principal: credential.principal,
@@ -348,11 +350,12 @@ pub(super) fn reject_control_collision(
 fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> {
     let source = match &proof.source {
         HumanProofSource::Oidc(oidc_proof) => {
-            return state
+            state
                 .oidc
                 .as_ref()
                 .ok_or_else(|| context_failure("context_revoked"))?
-                .reauthenticate(oidc_proof);
+                .reauthenticate(oidc_proof)?;
+            return super::workload::reject_human_collision(state, &proof.digest, None);
         }
         HumanProofSource::Local(source) => *source,
     };
@@ -407,7 +410,7 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
     if verified.revision != proof.credential.revision {
         return Err(context_failure("context_revoked"));
     }
-    Ok(())
+    super::workload::reject_human_collision(state, &proof.digest, Some(source))
 }
 
 fn state_failure(error: StateFailure) -> (StatusCode, Json<Value>) {
@@ -1136,6 +1139,10 @@ fn stream_poll(
         .map_err(|_| invalid_request())?;
     Ok((Some((event, has_more)), cursor))
 }
+
+#[cfg(test)]
+#[path = "human_workload_tests.rs"]
+mod workload_collision_tests;
 
 #[cfg(test)]
 mod admission_tests {

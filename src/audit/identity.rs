@@ -156,7 +156,7 @@ fn conflict(ok: bool) -> anyhow::Result<()> {
 }
 pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [4, 5].contains(&version) {
+    if [4, 5, 6].contains(&version) {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -164,7 +164,7 @@ pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
 }
 pub(super) fn require_human_access(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 5 {
+    if [5, 6].contains(&version) {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -509,7 +509,7 @@ pub(super) fn validate_human_access_capability(
     db: &Connection,
     version: i64,
 ) -> anyhow::Result<()> {
-    if version == 5 {
+    if [5, 6].contains(&version) {
         human_access_genesis(db)?;
     } else {
         let forbidden:bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind IN ('control.identity.access','control.identity.human_access.genesis'))",[],|r|r.get(0))?;
@@ -521,7 +521,7 @@ pub(super) fn validate_human_access_capability(
 /// Full replay is an integrity/startup operation, never a human read query.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![4, 5].contains(&version) {
+    if ![4, 5, 6].contains(&version) {
         return Ok(());
     }
     let genesis = genesis(db)?;
@@ -544,7 +544,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         if stored.event.kind == "control.identity.human_access.genesis" {
             let (expected, marker) = human_access_genesis(db)?;
             invalid(
-                version == 5
+                [5, 6].contains(&version)
                     && seen_genesis
                     && !seen_human_access
                     && stored.seq == expected.seq
@@ -556,7 +556,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == "control.identity.access" {
             invalid(
-                version == 5
+                [5, 6].contains(&version)
                     && seen_genesis
                     && seen_human_access
                     && stored.event.source == "gateway"
@@ -602,7 +602,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         invalid(record.authorization_revision == projection.revision)?;
     }
     invalid(seen_genesis)?;
-    invalid((version == 5) == seen_human_access)?;
+    invalid(([5, 6].contains(&version)) == seen_human_access)?;
     let mut expected = projection.rows(&genesis)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
