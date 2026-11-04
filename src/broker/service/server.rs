@@ -652,6 +652,43 @@ impl Service {
         }))
     }
 
+    async fn recovery_inventory_for_profile(
+        &self,
+        profile: &ControlProfileV1,
+        scope: &JournalScopeV1,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Response, BrokerErrorCodeV1> {
+        if !(1..=100).contains(&limit) || after.is_some_and(|id| id.is_nil()) {
+            return Err(BrokerErrorCodeV1::InvalidInput);
+        }
+        // A normal service must not change admission/fence state because of a
+        // cold inventory read. Only explicit recovery mode may bootstrap Stops;
+        // an already-retained Full/Stops queue is reused without conversion.
+        if !self.recovery_only() && self.profile_jobs(&profile.id)?.writer.get().is_none() {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        let capabilities = self.profile_writers(&profile.id, scope, false).await?;
+        let page = capabilities
+            .stops()
+            .recovery_inventory(after, limit)
+            .await
+            .map_err(jobs::journal_error)?;
+        if canonical(page.scope()).map_err(jobs::journal_error)?
+            != canonical(scope).map_err(jobs::journal_error)?
+        {
+            return Err(BrokerErrorCodeV1::Conflict);
+        }
+        let mode = if capabilities.is_stop_only() {
+            JournalModeV1::StopOnly
+        } else {
+            JournalModeV1::Full
+        };
+        Ok(Response::reply(BrokerReplyV1::RecoveryInventory {
+            inventory: super::recovery_inventory::project(&page, mode),
+        }))
+    }
+
     async fn context(
         &self,
         mut verified: VerifiedProfile,
@@ -733,6 +770,7 @@ impl Service {
             BrokerCommandV1::Status { .. }
                 | BrokerCommandV1::List { .. }
                 | BrokerCommandV1::RecoveryStatus { .. }
+                | BrokerCommandV1::RecoveryInventory { .. }
         );
         let stop_only = matches!(envelope.request, BrokerCommandV1::Cancel { .. });
         let verified = VerifiedProfile::authenticate(
@@ -760,6 +798,11 @@ impl Service {
         if let BrokerCommandV1::RecoveryStatus { operation_id } = &envelope.request {
             return self
                 .recovery_status_for_profile(&profile, &verified.scope, *operation_id)
+                .await;
+        }
+        if let BrokerCommandV1::RecoveryInventory { after, limit } = &envelope.request {
+            return self
+                .recovery_inventory_for_profile(&profile, &verified.scope, *after, *limit)
                 .await;
         }
         if let BrokerCommandV1::Cancel {
@@ -840,9 +883,9 @@ impl Service {
                 self.approve(request, operation_id, command_id, request_hash)
                     .await
             }
-            BrokerCommandV1::Cancel { .. } | BrokerCommandV1::RecoveryStatus { .. } => {
-                Err(BrokerErrorCodeV1::InvalidInput)
-            }
+            BrokerCommandV1::Cancel { .. }
+            | BrokerCommandV1::RecoveryStatus { .. }
+            | BrokerCommandV1::RecoveryInventory { .. } => Err(BrokerErrorCodeV1::InvalidInput),
             BrokerCommandV1::Resume {
                 operation_id,
                 command_id,

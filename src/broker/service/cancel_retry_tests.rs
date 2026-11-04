@@ -139,11 +139,24 @@ impl Fixture {
         arm_count: usize,
         identity: Option<(&str, Uuid)>,
     ) -> Self {
+        Self::with_manual_binding_and_arm_count_and_identity(arm_count > 0, arm_count, identity)
+    }
+    fn with_manual_binding_and_identity(identity: (&str, Uuid)) -> Self {
+        Self::with_manual_binding_and_arm_count_and_identity(true, 0, Some(identity))
+    }
+    fn with_manual_binding_and_arm_count_and_identity(
+        manual: bool,
+        arm_count: usize,
+        identity: Option<(&str, Uuid)>,
+    ) -> Self {
         assert!(
             arm_count <= 2,
             "this fixture qualifies only zero, one or two Arms"
         );
-        let manual = arm_count > 0;
+        assert!(
+            manual || arm_count == 0,
+            "Arm fixtures require their manual binding"
+        );
         let temp = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -160,7 +173,7 @@ impl Fixture {
             fs::set_permissions(base.join(name), fs::Permissions::from_mode(0o700)).unwrap();
         }
         let installation = Uuid::from_u128(0x11111111111141118111111111111111);
-        let store = manual.then(|| {
+        let store = (arm_count > 0).then(|| {
             let store =
                 Store::open(&base.join("audit.sqlite"), Redactor::new(vec![]), 1000).unwrap();
             store
@@ -279,7 +292,7 @@ impl Fixture {
                 &CheckpointPayloadV1::initial(&intent).unwrap(),
             )
             .unwrap();
-        let manual_blob = store.as_ref().map(|store| {
+        if let Some(store) = &store {
             prepare_manual_arm(
                 &journal,
                 store,
@@ -289,17 +302,10 @@ impl Fixture {
                 accepted.binding_manifest(),
                 arm_count,
             );
-            let scope_root = fs::read_dir(journal_root.join("broker-journal-v1"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path();
-            scope_root
-                .join("jobs")
-                .join(operation.to_string())
-                .join("bindings/manual-env-v1.bin")
-        });
+        }
+        let manual_blob = accepted
+            .binding_source()
+            .map(|source| source.path().to_owned());
         drop(accepted);
         let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(10)).unwrap();
         let jobs = Arc::new(ProfileJobs::new());
@@ -831,16 +837,22 @@ fn recovery_child_with_faults(
     }
 }
 fn recovery_role_fixture() -> (tempfile::TempDir, Directory) {
-    #[cfg(target_os = "macos")]
-    let temporary_root = "/private/tmp";
-    #[cfg(not(target_os = "macos"))]
-    let temporary_root = "/tmp";
+    // The harness owns its writable namespace (TMPDIR in the OS sandbox).
+    // Canonicalize that existing parent rather than reaching a global /tmp.
+    let temporary_root = std::env::temp_dir().canonicalize().unwrap();
     let temp = tempfile::Builder::new()
         .prefix("srf-")
         .permissions(fs::Permissions::from_mode(0o700))
         .tempdir_in(temporary_root)
         .unwrap();
     let root = Directory::open_existing(&temp.path().canonicalize().unwrap()).unwrap();
+    // Same portable UDS pathname cap as local_ipc; fail as a fixture prerequisite
+    // before starting a child, without weakening the product's path checks.
+    let socket_path = root.path().join("endpoints/i-0000000000000000/s");
+    assert!(
+        socket_path.as_os_str().as_encoded_bytes().len() <= 103,
+        "recovery fixture requires TMPDIR to be a shorter private writable directory"
+    );
     root.persistent_create("auth", &[0x5a; 32]).unwrap();
     root.persistent_create(".owner.lock", &[]).unwrap();
     root.persistent_child("endpoints", true).unwrap().unwrap();

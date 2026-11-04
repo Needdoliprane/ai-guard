@@ -43,6 +43,17 @@ enum BrokerCommand {
     /// Read confirmed recovery metadata, including when business loading fails.
     /// Does not inspect the runtime or establish that a worker has stopped.
     RecoveryStatus(OperationArgs),
+    /// Discover accepted job UUIDs from confirmed journal metadata, even in STOP-only mode.
+    /// No runtime probe or recovery action is performed.
+    /// Cold discovery requires a broker explicitly started with serve --recovery-only.
+    RecoveryInventory {
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        after: Option<Uuid>,
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+    },
     /// List this profile's journal without hiding incomplete or corrupt data.
     List {
         #[command(flatten)]
@@ -160,6 +171,7 @@ async fn control_info(gateway: String, token_file: PathBuf) -> Result<()> {
 }
 
 async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()> {
+    let recovery_inventory = matches!(&command, BrokerCommandV1::RecoveryInventory { .. });
     let file = PrivateFile::open(&connection.token_file, 4096)
         .map_err(|_| anyhow!("private broker credential file is unavailable or unsafe"))?;
     let credential = std::str::from_utf8(file.bytes())
@@ -169,6 +181,18 @@ async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()
         .map_err(|_| anyhow!("broker credential file changed"))?;
     let reply =
         service::request(&connection.root, &connection.profile, credential, command).await?;
+    if recovery_inventory
+        && matches!(
+            &reply,
+            BrokerReplyV1::Error {
+                code: service::protocol::BrokerErrorCodeV1::NeedsReconciliation
+            }
+        )
+    {
+        eprintln!(
+            "Cold profile discovery requires a broker explicitly started with broker serve --config <config> --recovery-only; inspect other reconciliation errors before retrying."
+        );
+    }
     if let BrokerReplyV1::Accepted {
         provider_resolution: Some(resolution),
         ..
@@ -276,6 +300,17 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             )
             .await
         }
+        BrokerCommand::RecoveryInventory {
+            connection,
+            after,
+            limit,
+        } => {
+            send(
+                connection,
+                BrokerCommandV1::RecoveryInventory { after, limit },
+            )
+            .await
+        }
         BrokerCommand::List {
             connection,
             after,
@@ -347,6 +382,56 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: BrokerArgs,
+    }
+
+    #[test]
+    fn broker_recovery_inventory_is_available_without_a_known_operation_uuid() {
+        let discovered = TestCli::try_parse_from([
+            "broker",
+            "recovery-inventory",
+            "--root",
+            "/private/fixture",
+            "--profile",
+            "fixture",
+            "--token-file",
+            "/private/token",
+            "--limit",
+            "1",
+        ]);
+        assert!(
+            discovered.is_ok(),
+            "discovery must be available before its UUID is known"
+        );
+        assert!(
+            TestCli::try_parse_from([
+                "broker",
+                "recovery-status",
+                "--root",
+                "/private/fixture",
+                "--profile",
+                "fixture",
+                "--token-file",
+                "/private/token",
+                "--operation-id",
+                "11111111-1111-4111-8111-111111111111",
+            ])
+            .is_ok(),
+            "positive control: known-UUID recovery status exists already"
+        );
+        assert!(
+            TestCli::try_parse_from([
+                "broker",
+                "recovery-status",
+                "--root",
+                "/private/fixture",
+                "--profile",
+                "fixture",
+                "--token-file",
+                "/private/token",
+            ])
+            .is_err(),
+            "existing status still requires an explicit operation UUID"
+        );
     }
 
     #[test]

@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 use uuid::Uuid;
 
+pub use super::recovery_inventory::{
+    RecoveryInventoryCoverageV1, RecoveryInventoryEntryV1, RecoveryInventoryIssueCodeV1,
+    RecoveryInventoryIssueV1, RecoveryInventoryPhaseV1, RecoveryInventoryV1,
+};
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EnvelopeV1 {
@@ -29,6 +34,11 @@ pub enum BrokerCommandV1 {
     /// Confirmed metadata only; available independently of business loading.
     RecoveryStatus {
         operation_id: Uuid,
+    },
+    /// Discover accepted job UUIDs from confirmed STOP metadata only.
+    RecoveryInventory {
+        after: Option<Uuid>,
+        limit: u32,
     },
     List {
         after: Option<Uuid>,
@@ -241,6 +251,9 @@ pub enum BrokerReplyV1 {
     },
     RecoveryStatus {
         status: RecoveryStatusV1,
+    },
+    RecoveryInventory {
+        inventory: RecoveryInventoryV1,
     },
     Page {
         entries: Vec<JobStatusV1>,

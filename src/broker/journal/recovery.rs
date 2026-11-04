@@ -30,6 +30,7 @@ pub struct StopRecoveryReportV1 {
     jobs: Vec<RecoveredJobV1>,
     issues: Vec<StopRecoveryIssueV1>,
     incomplete: bool,
+    issues_truncated: bool,
     observed_jobs: HashSet<Uuid>,
     rejected_floors: HashMap<Uuid, String>,
     actor_claimed: AtomicBool,
@@ -136,6 +137,8 @@ opaque!(
     StopJournal,
     StopJobSnapshotV1
 );
+
+pub mod inventory;
 
 impl StopJobSnapshotV1 {
     pub fn scope(&self) -> &JournalScopeV1 {
@@ -731,6 +734,8 @@ impl StopRecoveryReportV1 {
                 phase,
                 error,
             });
+        } else {
+            self.issues_truncated = true;
         }
     }
 }
@@ -930,6 +935,7 @@ impl StopRecoveryReaderV1 {
             jobs: Vec::new(),
             issues: Vec::new(),
             incomplete: false,
+            issues_truncated: false,
             observed_jobs: HashSet::new(),
             rejected_floors: HashMap::new(),
             actor_claimed: AtomicBool::new(false),

@@ -3,6 +3,7 @@ mod client;
 mod jobs;
 mod profile;
 pub mod protocol;
+mod recovery_inventory;
 mod server;
 mod targets;
 pub use client::{encode_submit, request};
