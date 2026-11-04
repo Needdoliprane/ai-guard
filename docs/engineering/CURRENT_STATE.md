@@ -13,6 +13,11 @@ Guides et exemples EN/FR synchronisés. Les guides fournisseurs expliquent
 aussi le choix API explicite après quota abonnement ; aucun appel modèle.
 Code `fe3b558` composé en `0962231`, avec fichiers égaux au gel vérifié.
 La documentation fournisseurs `0c4cbf1` est composée en `e6e0b25` et poussée.
+Guides/preuves `b0eb665` composés en `d47b7f6`, poussés sur les deux branches
+avec références distantes exactes et arbres suivis égaux. Après retour des
+trois agents, état propre et relevé lsof vide, le worktree donneur est retiré
+normalement ; sa branche et les preuves privées restent conservées. Le
+conteneur QA est clos, sans changement applicatif après les vérifications.
 
 Ce lot complète le provisionnement opérateur du registre, sans fournir le
 transport worker, la fédération de jobs, Kubernetes ou une qualification

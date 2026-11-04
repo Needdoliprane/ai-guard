@@ -126,6 +126,17 @@ Revue indépendante source/tests et corrections traitées ; les guides EN/FR
 décrivent aussi le choix API explicite après quota d'abonnement, sans appel
 fournisseur. G09 reste FAIL et 0/12 gates globaux sont clos.
 
+**Clôture Git et suivi :** code `fe3b558`→`0962231`, documentation du lot
+`b0eb665`→`d47b7f6`, guides fournisseurs `0c4cbf1`→`e6e0b25`. Push des
+branches donneur/intégration vérifié par `ls-remote` exact ; arbres suivis
+égaux à `badb63e8a3c7a474115e56b5b2d3ad0e4c5315ff` avant cette clôture.
+Contrôle de liens : 655 cibles relatives, aucune absente sur 10 fichiers Markdown ;
+scan des 3 littéraux de secrets connus : 0 correspondance dans 6 sources puis
+12 documents/exemples (et 2 guides fournisseurs séparément). Ce n'est pas un
+audit général de secrets ni de liens externes/ancres. Donneur propre retiré
+sans force après fin des agents et lsof sans sortie ; branche distante,
+cache et preuves préservés. Cette clôture ne modifie que la documentation.
+
 ## 4 novembre — prérequis de build avant tout appel moteur
 
 Base `dbc5afa`, donneur `codex/build-input-preflight-20261104`. Le CLI
