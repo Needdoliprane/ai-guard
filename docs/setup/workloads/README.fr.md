@@ -20,6 +20,8 @@ Utiliser le binaire de contrôle relu, la base existante du tenant et son compte
 
 La compatibilité broker exige aussi namespace, tenant, rôle runner et `broker_supervision_v1` configurés. Submit, approve, resume et export frais exigent une supervision active. **Migrer ou rouvrir une base ne l'active pas.** Une réouverture ordinaire des schémas 3–6 reste en maintenance inactive ; aucune procédure de réactivation sûre n'est livrée. Ne pas éditer les métadonnées, supprimer le stockage ou réutiliser l'initialisation exclusive d'une base neuve pour contourner cette condition. Voir [contrôle actif et reprise](../broker/README.fr.md#exiger-un-contrôle-compatible-et-actif).
 
+La maintenance humaine hors ligne (`human provision`, `human resume-provision` et `human apply`) accepte une base existante validée de schéma 4, 5 ou 6 avec supervision inactive. Après la migration explicite 5→6, utiliser le même système de fichiers privé du contrôle, le binding du tenant et l'attestation `--confirm-control-stopped`. Ces commandes ne créent ni ne migrent la base et ne réactivent pas la supervision. Préserver credentials privés et fichiers de reprise ; reprendre uniquement la préparation exacte conservée, sans renouveler son credential ni écraser ses fichiers. Suivre [la création du compte et sa reprise](../identity/README.fr.md#créer-le-compte-et-conserver-sa-reprise) et conserver la même politique de capacité d'audit entre consommateurs.
+
 Pour une base existante de schéma 5, remplacer chaque référence d'installation ci-dessous. La destination de sauvegarde doit être neuve ; son parent privé doit déjà exister. La migration vérifie une sauvegarde et avance d'une seule version. Sa cible par défaut reste 2 : indiquer explicitement 6 :
 
 ```sh

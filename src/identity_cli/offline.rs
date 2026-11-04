@@ -94,8 +94,8 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
     );
     let state = store.supervision_state()?;
     ensure!(
-        matches!(state.schema_version, 4 | 5) && !state.active,
-        "offline identity maintenance requires an existing validated schema4 or schema5 database and inactive supervision; migrate explicitly with controls stopped"
+        matches!(state.schema_version, 4..=6) && !state.active,
+        "offline identity maintenance requires an existing validated schema4, schema5 or schema6 database and inactive supervision; migrate explicitly with controls stopped"
     );
     let namespace = state
         .control_namespace_uuid
