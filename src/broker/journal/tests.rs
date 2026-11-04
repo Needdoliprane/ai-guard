@@ -644,6 +644,7 @@ async fn measure_writer_cost<T>(
 ) -> (T, crate::control_fs::cost_probe::Snapshot) {
     use crate::control_fs::cost_probe::Measurement;
 
+    let _exclusive = crate::control_fs::cost_probe::EXCLUSIVE.lock().await;
     let measurement = Measurement::start(root).unwrap();
     let started = Instant::now();
     let result = call.await;

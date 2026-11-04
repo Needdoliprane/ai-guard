@@ -542,6 +542,7 @@ mod tests {
         // without its durability barrier. Do not replace sync_all with a mock.
         fs::write(path.join("credential"), key).unwrap();
         fs::write(path.join("recovery.json"), recovery).unwrap();
+        let _exclusive = crate::control_fs::cost_probe::EXCLUSIVE.blocking_lock();
         let measurement = Measurement::start(&path).unwrap();
         let reopened = Operation::open(&path).unwrap();
         let sample = measurement.finish().unwrap();
