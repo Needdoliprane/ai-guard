@@ -1,5 +1,51 @@
 # Validation courante
 
+## 4 novembre — composition conservée et prérequis SSO CLI
+
+La branche de validation `codex/human-brokers-validation-20261104` part de
+`253db04`, reprend le backend par `266a735`, le frontend par `cd319b1`, puis
+les douze guides/index relus par `9ee05ccb9806b2d0667c0d6ae6571a21d1416fbf`.
+Ce HEAD est poussé et vérifié par `ls-remote`. Luna a comparé exactement
+les34sources backend,8frontend et12documents à leurs gels :54/54identiques,
+diff-check RC0,280cibles relatives sans manquant et0occurrence des trois
+secrets littéraux connus. Reçu privé
+`/private/tmp/ai-guard-human-brokers-composition-source-check-20261104.md`, SHA
+`306df196db0ee5206ed694cc760e430d8a982322835a2f076c721a167210c8fa`.
+**Aucun test/build exécuté par cette comparaison.** Les résultats64Rust,
+35Node/TypeScript conservent les attributions du lot ci-dessous ; Clippy,
+build/navigateur et parcours composé restent ouverts.
+
+Après préflight indépendant et recontrôle Root, les deux worktrees donneurs
+sont retirés par `git worktree remove`, sans force. Leurs branches d3baf0c/
+514ca12, la composition9ee05cc et toutes les preuves sont conservées. Les
+contrôles positifs lsof PID/FD/fichier passent RC0 ; les scans récursifs sans
+consommateur ont une sémantique documentée distincte, pas un succès déduit de
+RC1 seul. Reçu Root
+`/private/tmp/ai-guard-human-brokers-worktree-close-root-20261104.md`, SHA
+`ce3e51bb9b35780eb1e46165d63a596ffe941f241c6b655b21968bdd9d00d68e`.
+Le draft des douze documents est retiré de l'ancien worktree d'audit par
+application inverse du patch conservé, après leur commit/push et égalité
+vérifiée ; ce checkout redevient propre. Main et travaux protégés inchangés.
+
+Préconditions SSO réel, **métadonnées seulement** : `/etc/hosts` contient
+`keycloak.ai-guard.test` vers127.0.0.1, et dscacheutil ne retourne que ce
+loopback. Le DNS corrigé le2novembre est donc revalidé. Images cached exactes
+Rust `2115d432…` et Keycloak26.8.1ARM64 `74dfae33…` disponibles ; les anciens
+services/volumes/realms ne sont ni appelés ni modifiés. Faisabilité privée
+`/private/tmp/ai-guard-sso-cli-local-feasibility-20261104.md`, SHA
+`7367097957c19f71a9a60f1380c4d55606ac394b6d985d0ab80813b6dbde11a6`.
+Prochaine preuve : driver Rust privé relu, build offline du code actuel,
+prouve namespace loopback/limites avant service, puis vrai Code/PKCE,
+admission, lecture et logout. Tout ce parcours reste `NOT_RUN`, sans preuve
+de navigateur/macOS/entreprise ou transfert de l'ancienne image Web72bfb911.
+
+Diagnostic WSI-Q02 privé SHA
+`df3ae0b0c891e39e9433d4c8c04256fe4b545c2c7ba14812f8d396ea87d4cb60`,
+`/private/tmp/ai-guard-wsi-q02-source-diagnosis-20261104.md` : les marqueurs
+indexés/cache de capacité ne comptent pas tous les replays. Source analysée
+à253db04, aucun test/performance ni correctif exécuté ; Q02 reste ouvert.
+Décision de [conserver les contrôles avant mesure](DECISIONS.md#4-novembre--revalidation-sqlite-mesurer-avant-optimisation).
+
 ## 4 novembre — vue humaine des brokers, gels en cours
 
 **Non intégré.** Deux worktrees issus de `5b6dfc1`, contrats relus dans
@@ -11,8 +57,9 @@ Checkpoints de développement poussés et vérifiés par `ls-remote` :
 `codex/human-brokers-core-20261104` à
 `d3baf0c0bae43cccd01b87b12427dbf58a2e6a26`, et
 `codex/human-brokers-front-20261104` à
-`514ca126c1ddeb9bad47aca7921c1b495f23633b`. Les worktrees sont propres ;
-aucun de ces commits n'est intégré au candidat d'audit par ce checkpoint.
+`514ca126c1ddeb9bad47aca7921c1b495f23633b`. Lors de ce checkpoint, leurs
+worktrees étaient propres ; ils sont depuis retirés après la composition
+décrite ci-dessus. Aucun de ces commits n'est intégré au candidat d'audit.
 
 **Bilan logiciel ciblé :64 fonctions Rust uniques PASS sur les gels
 successifs**, avec code produit inchangé pendant les derniers correctifs
@@ -54,11 +101,12 @@ favorable au checkpoint logiciel ciblé, pas à l'intégration produit tant que
 les contrôles manquants restent ouverts. Les douze guides/index ont une
 revue documentaire séparée, SHA
 `71937d42ffad43d8c7e95dfa34c9d556abcea1230e4d31cbc810d7cfad994f0f` ;
-ils restent draft dans le worktree d'intégration, sans publication d'une
-fonction absente de ce candidat. Leur patch de continuité privé est conservé
+Lors de ce checkpoint, les guides restaient draft dans le worktree d'audit ;
+ils ont depuis été conservés avec les sources sur la branche de validation,
+sans publication d'une fonction absente du candidat d'audit. Leur patch de continuité privé est conservé
 à `/private/tmp/ai-guard-human-brokers-docs-draft-20261104.agDk7d`, SHA
 `a20c6ec4771219b0efcaaff80e2c81cb76ae49f51be8fe733b14733a1550a7f1` ;
-`git apply --reverse --check` confirme les12fichiers actuels sans les modifier.
+`git apply --reverse --check` avait confirmé les12fichiers du checkpoint sans les modifier.
 Le conteneur Rust, confirmé sleep-only,
 est fermé précisément ; reçus `container-close-precheck.txt` et
 `container-close-stop.txt` conservés, aucun volume/image/preuve supprimé.

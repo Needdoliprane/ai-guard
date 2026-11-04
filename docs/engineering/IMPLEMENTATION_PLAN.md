@@ -85,18 +85,28 @@ Ces livrables sont en développement, pas disponibles par la seule commission.
 Le contrôle de manifeste setup est dans `src/setup.rs` : refuser la nouvelle
 capacité avant publication sous5, sans modifier l'installation5 existante.
 
-Checkpoints source poussés : backend `d3baf0c`, frontend `514ca12`. Les
+Checkpoints source poussés : backend `d3baf0c`, frontend `514ca12`, maintenant
+composés avec les douze guides/index EN/FR sur la branche de validation
+`codex/human-brokers-validation-20261104` à `9ee05cc`. Les
 64fonctions Rust uniques ciblées,35Node et all-targets passent dans les gels
 attribués par [VALIDATION](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
-Douze guides/index EN/FR sont rédigés et relus, conservés comme draft pour
-intégration avec les sources. Prochaine étape : préparer les seuls outils
+Luna a vérifié54hashes, sans test supplémentaire. Les deux worktrees donneurs
+sont fermés après contrôle, branches/proofs conservées ; le worktree de
+validation possède le prochain cycle. Prochaine étape : préparer les outils
 publics épinglés après l'accord déjà demandé, puis Clippy, build et navigateur
-ciblé, enfin parcours Web composé et revue de composition. Les deux worktrees
-source propres restent attribués à ce lot jusqu'à ces contrôles ; les retirer
-normalement après composition et vérification des consommateurs, sans perdre
+ciblé, enfin parcours Web composé et revue de composition. Retirer le worktree
+de validation après intégration et vérification des consommateurs, sans perdre
 branches ni preuves. Aucun lancement, fédération ou runtime n'est qualifié par
 ces checkpoints. Les travaux indépendants du registre ne valent pas décision
 sur le transport worker soumis au mainteneur.
+
+En parallèle, préparer un seul scénario CLI SSO avec le Keycloak déjà en cache,
+driver Rust privé et contrôles du sandbox vérifiés avant tout service ; les
+essais auxiliaires restent hors distribution. Ce parcours ne dépend pas de
+Playwright/Vite et ne doit pas réutiliser les services ou données existants.
+L'analyse WSI-Q02 conserve les garanties et exige une caractérisation à
+compteurs avant choix d'une optimisation ; ne pas échanger intégrité contre
+un coût constant supposé. La capacité100 reste à qualifier réellement.
 
 La parallélisation s'applique aussi à la validation et aux guides : l'auteur
 traite un échec isolé pendant que Luna exécute les tranches indépendantes

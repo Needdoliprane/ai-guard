@@ -1,5 +1,32 @@
 # Décisions d'industrialisation
 
+## 4 novembre — revalidation SQLite, mesurer avant optimisation
+
+L'analyse source WSI-Q02 confirme des traversées complètes après un commit
+d'une autre connexion et dans le chemin de supervision ; les seules mesures
+des SQL indexés ou du cache de capacité ne les comptent pas. Aucun coût global
+borné, gain de latence ou capacité100 n'est déduit des résultats du registre.
+La mesure suivante doit séparer chaîne, projections, supervision et capacité
+à N/2N, avec un canari d'altération externe interposée après un commit connu.
+Les délais du Mac sous pression ne constituent pas cet oracle.
+
+Conserver la validation requise. Une égalité du head ou une génération
+partagée ne suffit pas à exclure un writer externe ayant modifié une ancienne
+projection. SQLite définit `data_version` comme une propriété locale à la
+connexion ; ses valeurs ne se comparent qu'au sein de cette connexion.
+`total_changes` ne compte pas les écritures des autres connexions.
+[PRAGMA officiel](https://www.sqlite.org/pragma.html#pragma_data_version),
+[compteur officiel](https://www.sqlite.org/c3ref/total_changes.html).
+Aucun compteur de commits authentifiés n'est inféré de ces valeurs.
+
+Pas de cache partagé supplémentaire ni de changement de persistance à ce
+stade. Une future optimisation exige preuve d'invalidation, snapshot exact,
+rollback et débits conservés ; la cible de capacité demeure obligatoire.
+Diagnostic privé du4novembre SHA
+`df3ae0b0c891e39e9433d4c8c04256fe4b545c2c7ba14812f8d396ea87d4cb60`.
+WSI-Q02 reste ouvert ; aucun changement produit ou mesure exécutée par ce
+diagnostic.
+
 ## 4 novembre — contrat de lecture humaine du registre brokers
 
 Contrat technique de lot retenu après revue indépendante, **à implémenter**
@@ -39,8 +66,12 @@ Gel privé du contrat révisé : SHA
 `a97f70c5d29b515b0be5ffc268a463e2942c074880f530085a45df002569e28d` ;
 revue de conception finale SHA
 `3b462025da139b175fbe3954705633d4f3fb323202850fec3924b5e1a94ae968`.
-Tous les tests de ce nouveau lot restent NOT_RUN ; le registre humain seul
-ne qualifie ni travailleurs, ni fédération, ni release.
+À cette conception, ses tests restaient NOT_RUN. Depuis, les gels source
+Rust/frontend ont les résultats ciblés consignés dans
+[VALIDATION](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
+La composition9ee05cc n'a reçu qu'une comparaison des54hashes, pas un rejeu.
+Build/navigateur/Clippy restent ouverts ; le registre humain seul ne qualifie
+ni travailleurs, ni fédération, ni release.
 
 ## 4 novembre — proposition de transport des workers sans réseau, décision attendue
 

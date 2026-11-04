@@ -10,6 +10,14 @@ La commande `kubernetes doctor` est désormais raccordée :
 [quatre tests CLI/TLS ciblés, all-targets et revue PASS](VALIDATION.md#4-novembre--commande-cli-de-diagnostic-kubernetes).
 Ce résultat n'ajoute aucune admission ni qualification de cluster.
 
+Mise à jour du4novembre : la composition humaine9ee05cc conserve les preuves
+logicielles ciblées, sans build/navigateur/Clippy qualifiés. Le DNS hôte
+`keycloak.ai-guard.test` est résolu depuis le2novembre et revalidé en lecture
+seule ; les mentions `BLOCKED DNS hôte/admin` des gels ci-dessous restent
+historiques. Le CLI natif macOS n'est toujours pas qualifié. Un essai CLI
+Linux avec Keycloak temporaire est préparé, **NOT_RUN** ; ni l'ancien Web,
+ni l'inventaire d'images ne le remplacent. [État et prérequis actuels](VALIDATION.md#4-novembre--composition-conservée-et-prérequis-sso-cli).
+
 Préparateur SSO intégré par `586c17e` : configuration Rust hors ligne, reprise durable, profils locaux et guides EN/FR. [Validation ciblée](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement) et revues passent dans leurs portées documentées. Après les échecs Web historiques, [image 72bfb911 depuis 96fe9be et recettes Keycloak réelles](VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) : build/rollout RC0 sans réinitialiser le volume, user-1 PASS 7/7/RC0, user-2 PASS 8/8 dans la première recette de rôles, puis admin PASS 13/13/RC0 sur la même image ; connexion, lecture autorisée et logout prouvés pour les trois comptes. Les trois échecs administratifs antérieurs restent FAIL ; seul le prédicat impossible de la troisième capture est démontré/corrigé dans le harness privé. DNS limité au navigateur dédié, CLI natif BLOCKED DNS hôte/admin ; refus adverses de permissions, refresh/révocation, délégation et qualification SSO globale ouverts. G09 FAIL, 0/12 gates clos. Les paragraphes suivants conservent les gels précédents.
 
 Dernier essai G09 sur d6cb136 : [FAIL avant claim](VALIDATION.md#2-novembre--g09-release-courant-refus-avant-claim), worker Created, Arm5s expirée avant première vérification Ready. Aucun Running ni SIGKILL au point prévu ; effet d'arrêt autonome NOT_RUN, pas de fail-open démontré. Release courante et preuves conservées, instrumentation du chemin d'armement prioritaire. Aucun gate clos par cette nouvelle tentative.
