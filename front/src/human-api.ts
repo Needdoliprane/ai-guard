@@ -1,5 +1,5 @@
 import { createSseParser } from "./sse.ts";
-import { HumanContractError, boundedText, humanUrl, object, opaque, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
+import { HumanContractError, boundedText, humanBrokersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
 import type { HumanContext, HumanEventPage, HumanIdentity, HumanSelection, ResourceRef } from "./human-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
@@ -10,10 +10,11 @@ export class HumanApiError extends Error {
   }
 }
 export const HUMAN_EXPORT_LIMITS = Object.freeze({ pages: 25, bytes: 4 * 1024 * 1024, milliseconds: 60000 });
-interface Snapshot { generation: number; context: HumanContext | null }
+interface Snapshot { generation: number; context: HumanContext | null; operatorRetry?: boolean }
 interface Handlers {
   onAuthentication: (error: HumanApiError) => void;
   onContextInvalidated: (error: HumanApiError) => void;
+  onReadBudgetExhausted?: (error: HumanApiError) => void;
 }
 const codes = new Set(["authentication_required", "credential_invalid", "credential_expired", "identity_revoked", "context_required",
   "context_invalid", "context_expired", "context_revoked", "permission_denied", "not_found", "invalid_request", "invalid_cursor",
@@ -33,10 +34,15 @@ export class HumanApiClient {
   #context: HumanContext | null = null;
   #expiry: ReturnType<typeof setTimeout> | undefined;
   #credentialExpiry: ReturnType<typeof setTimeout> | undefined;
+  #readBudgetStopped = false;
+  #operatorReadAllowed = false;
   constructor(token: string, handlers: Handlers, fetcher: typeof fetch = fetch) {
     this.#token = token; this.#handlers = handlers; this.#fetcher = fetcher;
   }
   get context() { return this.#context ? structuredClone(this.#context) : null; }
+  get readBudgetStopped() { return this.#readBudgetStopped; }
+  /** One attempt after the user confirms an operator intervention; no server budget is reset. */
+  allowReadAfterOperatorAction() { if (this.#readBudgetStopped) this.#operatorReadAllowed = true; }
   close() {
     this.#token = ""; this.#identity = null;
     this.clearContext(); this.#lifetime.abort(); clearTimeout(this.#credentialExpiry);
@@ -57,6 +63,9 @@ export class HumanApiClient {
   }
   #assert(snapshot: Snapshot) { if (!this.#current(snapshot)) throw new HumanSuperseded(); }
   #reject(error: HumanApiError): never {
+    if (error.status === 429 && error.code === "audit_read_budget_exhausted" && error.retryAction === "contact_operator") {
+      this.#readBudgetStopped = true; this.#operatorReadAllowed = false; this.#handlers.onReadBudgetExhausted?.(error);
+    }
     if (error.status === 401) { this.close(); this.#handlers.onAuthentication(error); }
     else if (["context_required", "context_invalid", "context_expired", "context_revoked"].includes(error.code)) {
       this.clearContext(); this.#handlers.onContextInvalidated(error);
@@ -96,7 +105,11 @@ export class HumanApiClient {
   }
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
-    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+    if (this.#readBudgetStopped) {
+      if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
+      this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
+    }
     const headers: Record<string, string> = { Authorization: `Bearer ${this.#token}`, Accept: stream ? "text/event-stream" : "application/json" };
     if (snapshot.context) headers["X-AiGuard-Context"] = snapshot.context.id;
     const signals = [this.#lifetime.signal, this.#scope.signal];
@@ -129,6 +142,13 @@ export class HumanApiClient {
       this.#reject(new HumanApiError(403, "context_revoked", "Les autorisations ont changé. Les données du contexte ont été retirées.", "select_context"));
     return page;
   }
+  #finishRead<T>(value: T, snapshot: Snapshot, signal?: AbortSignal): T {
+    this.#assert(snapshot);
+    if (signal?.aborted) throw new HumanSuperseded();
+    // Recovery commits only after the endpoint has validated the complete requested selection.
+    if (snapshot.operatorRetry) this.#readBudgetStopped = false;
+    return value;
+  }
   async identity(): Promise<HumanIdentity> {
     const snapshot = this.#snapshot(false); const request = ++this.#identityRequest;
     const body = await this.#json(await this.#request("/api/v1/human/identity", snapshot), snapshot);
@@ -148,6 +168,16 @@ export class HumanApiClient {
     };
     if (expires) checkExpiry();
     if (!this.#token) throw new HumanSuperseded();
+    const selected = this.#context;
+    const current = selected && identity.contexts.find((context) => context.id === selected.id);
+    if (selected && (!current || current.authorization_version !== selected.authorization_version ||
+      current.membership_revision !== selected.membership_revision || current.tenant_id !== selected.tenant_id ||
+      current.organization_scope !== selected.organization_scope || current.mode !== selected.mode ||
+      [...current.capabilities].sort().join(",") !== [...selected.capabilities].sort().join(",") || Date.parse(current.expires_at) <= Date.now())) {
+      const error = new HumanApiError(403, "context_revoked", "Les accès ont changé. Choisissez à nouveau un contexte autorisé.", "select_context");
+      this.clearContext(); this.#handlers.onContextInvalidated(error);
+    }
+    if (snapshot.operatorRetry) this.#readBudgetStopped = false;
     return identity;
   }
   selectContext(id: string): HumanContext {
@@ -171,7 +201,12 @@ export class HumanApiClient {
   async resources(cursor: string | null = null, signal?: AbortSignal) {
     const snapshot = this.#snapshot(true);
     const body = await this.#json(await this.#request(humanUrl("resources", { view: "metadata", cursor }), snapshot, signal), snapshot);
-    return this.#validatePage(parseResourcePage(body.value), snapshot);
+    return this.#finishRead(this.#validatePage(parseResourcePage(body.value), snapshot), snapshot, signal);
+  }
+  async brokers(cursor: string | null = null, signal?: AbortSignal) {
+    const snapshot = this.#snapshot(true);
+    const body = await this.#json(await this.#request(humanBrokersUrl(cursor), snapshot, signal), snapshot);
+    return this.#finishRead(this.#validatePage(parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
   }
   async events(selection: HumanSelection, signal?: AbortSignal): Promise<HumanEventPage> {
     const snapshot = this.#snapshot(true);
@@ -180,7 +215,7 @@ export class HumanApiClient {
     const ref = selection.resource;
     if (page.view !== selection.view || ref && page.items.some((item) =>
       item.metadata.resource.kind !== ref.kind || item.metadata.resource.resource_id !== ref.resource_id)) throw new HumanContractError();
-    return page;
+    return this.#finishRead(page, snapshot, signal);
   }
   async event(id: string, view: HumanSelection["view"], signal?: AbortSignal) {
     if (!uuid(id)) throw new HumanContractError();
@@ -188,7 +223,7 @@ export class HumanApiClient {
     const body = await this.#json(await this.#request(`/api/v1/human/events/${id}?view=${view}`, snapshot, signal), snapshot);
     const page = this.#validatePage(parseHumanEventPage(body.value), snapshot);
     if (page.view !== view || page.items.length !== 1 || page.has_more || page.items[0]?.metadata.id !== id) throw new HumanContractError();
-    return page;
+    return this.#finishRead(page, snapshot, signal);
   }
   async exportSelection(selection: { view: HumanSelection["view"]; resource: ResourceRef }, signal: AbortSignal,
     onProgress: (pages: number, bytes: number) => void): Promise<Blob> {
@@ -212,7 +247,7 @@ export class HumanApiClient {
           tenant_id: snapshot.context?.tenant_id, organization_scope: snapshot.context?.organization_scope, mode: snapshot.context?.mode },
           authorization_version: page.authorization_version, coverage: "authorized_selection", selection_complete: true, pages })], { type: "application/json" });
         if (blob.size > HUMAN_EXPORT_LIMITS.bytes) throw new Error("Export arrêté à 4 Mio. Réduisez la sélection.");
-        return blob;
+        return this.#finishRead(blob, snapshot, cancel);
       }
       cursor = page.next_cursor;
       if (!cursor || cursors.has(cursor)) throw new HumanContractError(); cursors.add(cursor);

@@ -1,6 +1,6 @@
 export type HumanView = "metadata" | "content";
 export type ResourceKind = "session" | "sandbox" | "agent" | "project";
-export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants";
+export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants" | "read_broker_registry";
 export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
   { kind: "human_oidc"; issuer: string; subject: string };
 export interface HumanContext {
@@ -30,6 +30,19 @@ export interface HumanEvent {
 }
 export interface HumanEventPage extends HumanPage<HumanEvent> { view: HumanView; selection_complete?: boolean }
 export interface HumanSelection { view: HumanView; resource?: ResourceRef; cursor?: string | null }
+export interface HumanBroker {
+  broker_id: string; incarnation_id: string; grant_revision: string; heartbeat_revision: string;
+  state: "unseen" | "current" | "stale" | "expired" | "revoked" | "clock_uncertain";
+  authorities: { authority_id: string | null; runtime_kind: "docker" | "podman" | "kubernetes"; authority_id_redacted: boolean }[];
+  granted_at: string; not_after: string; revoked_at: string | null;
+  last_heartbeat: { incarnation_id: string; sequence: string; received_at: string; lease_expires_at: string;
+    heartbeat_provenance: "declared"; reception_provenance: "observed" } | null;
+}
+export interface HumanBrokerPage {
+  version: 1; context_id: string; authorization_version: string; source: "tenant_broker_registry";
+  consistency: "live_keyset"; evaluated_at: string; runtime_inventory: "unknown"; items: HumanBroker[];
+  has_more: boolean; next_cursor: string | null; read_receipt: ReadReceipt;
+}
 
 export class HumanContractError extends Error {
   constructor() { super("Contrat de consultation humaine incomplet ou incompatible. Vérifiez les versions du contrôle et du dashboard."); }
@@ -84,8 +97,8 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
       boundedText(item.organization_scope, 1024) && ["personal", "administration"].includes(String(item.mode)) &&
       revision(item.membership_revision) && authorizationVersion(item.authorization_version) && timestamp(item.expires_at) &&
-      Array.isArray(item.capabilities) && item.capabilities.length <= 6 && item.capabilities.every((capability) =>
-        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants"].includes(String(capability))));
+      Array.isArray(item.capabilities) && item.capabilities.length <= 7 && new Set(item.capabilities).size === item.capabilities.length && item.capabilities.every((capability) =>
+        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants", "read_broker_registry"].includes(String(capability))));
     seen.add(item.id);
     return { id: item.id, tenant_id: item.tenant_id, organization_scope: item.organization_scope,
       mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,
@@ -166,4 +179,59 @@ export function humanUrl(endpoint: "resources" | "events" | "export" | "stream",
   }
   if (selection?.cursor != null) { requireContract(opaque(selection.cursor)); query.set("cursor", selection.cursor); }
   return `/api/v1/human/${endpoint}?${query}`;
+}
+
+function closed(value: unknown, fields: string[]): asserts value is Record<string, unknown> {
+  requireContract(object(value) && Object.keys(value).length === fields.length && fields.every((field) => Object.hasOwn(value, field)));
+}
+function brokerUuid(value: unknown): value is string {
+  return uuid(value) && value === value.toLowerCase() && value !== "00000000-0000-0000-0000-000000000000";
+}
+function brokerRevision(value: unknown, positive = false): value is string {
+  return typeof value === "string" && /^(0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= 9223372036854775807n && (!positive || value !== "0");
+}
+/** Registry metadata has its own closed projection; resource ACL coverage does not apply. */
+export function parseHumanBrokerPage(value: unknown): HumanBrokerPage {
+  closed(value, ["version", "context_id", "authorization_version", "source", "consistency", "evaluated_at", "runtime_inventory", "items", "has_more", "next_cursor", "read_receipt"]);
+  requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
+    value.source === "tenant_broker_registry" && value.consistency === "live_keyset" && timestamp(value.evaluated_at) &&
+    value.runtime_inventory === "unknown" && Array.isArray(value.items) && value.items.length <= 100 &&
+    typeof value.has_more === "boolean" && (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null));
+  closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
+  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  const items = value.items.map((item): HumanBroker => {
+    closed(item, ["broker_id", "incarnation_id", "grant_revision", "heartbeat_revision", "state", "authorities", "granted_at", "not_after", "revoked_at", "last_heartbeat"]);
+    requireContract(brokerUuid(item.broker_id) && brokerUuid(item.incarnation_id) && brokerRevision(item.grant_revision, true) &&
+      brokerRevision(item.heartbeat_revision) && ["unseen", "current", "stale", "expired", "revoked", "clock_uncertain"].includes(String(item.state)) &&
+      timestamp(item.granted_at) && timestamp(item.not_after) && (item.revoked_at === null || timestamp(item.revoked_at)) &&
+      Array.isArray(item.authorities) && item.authorities.length >= 1 && item.authorities.length <= 16);
+    const authorities = item.authorities.map((authority): HumanBroker["authorities"][number] => {
+      closed(authority, ["authority_id", "runtime_kind", "authority_id_redacted"]);
+      requireContract(typeof authority.authority_id_redacted === "boolean" && ["docker", "podman", "kubernetes"].includes(String(authority.runtime_kind)) &&
+        (authority.authority_id_redacted === true ? authority.authority_id === null : authority.authority_id_redacted === false && utf8Text(authority.authority_id, 256)));
+      return { authority_id: authority.authority_id as string | null, runtime_kind: authority.runtime_kind as HumanBroker["authorities"][number]["runtime_kind"], authority_id_redacted: authority.authority_id_redacted };
+    });
+    let heartbeat: HumanBroker["last_heartbeat"] = null;
+    if (item.last_heartbeat !== null) {
+      closed(item.last_heartbeat, ["incarnation_id", "sequence", "received_at", "lease_expires_at", "heartbeat_provenance", "reception_provenance"]);
+      const h = item.last_heartbeat;
+      requireContract(brokerUuid(h.incarnation_id) && brokerRevision(h.sequence, true) && timestamp(h.received_at) && timestamp(h.lease_expires_at) &&
+        h.heartbeat_provenance === "declared" && h.reception_provenance === "observed");
+      heartbeat = { incarnation_id: h.incarnation_id, sequence: h.sequence, received_at: h.received_at, lease_expires_at: h.lease_expires_at,
+        heartbeat_provenance: "declared", reception_provenance: "observed" };
+    }
+    return { broker_id: item.broker_id, incarnation_id: item.incarnation_id, grant_revision: item.grant_revision,
+      heartbeat_revision: item.heartbeat_revision, state: item.state as HumanBroker["state"], authorities,
+      granted_at: item.granted_at, not_after: item.not_after, revoked_at: item.revoked_at as string | null, last_heartbeat: heartbeat };
+  });
+  requireContract(new Set(items.map((item) => item.broker_id)).size === items.length);
+  return { version: 1, context_id: value.context_id, authorization_version: value.authorization_version, source: "tenant_broker_registry",
+    consistency: "live_keyset", evaluated_at: value.evaluated_at, runtime_inventory: "unknown", items,
+    has_more: value.has_more, next_cursor: value.next_cursor as string | null,
+    read_receipt: { request_id: value.read_receipt.request_id, audit_event_id: value.read_receipt.audit_event_id, received_at: value.read_receipt.received_at } };
+}
+export function humanBrokersUrl(cursor: string | null = null): string {
+  const query = new URLSearchParams({ limit: "25" });
+  if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
+  return `/api/v1/human/brokers?${query}`;
 }
