@@ -1,5 +1,41 @@
 # Décisions d'industrialisation
 
+## 4 novembre — provisionnement des identités techniques par CLI
+
+Choix d'implémentation dans les frontières existantes, relu avant code :
+client Rust dédié aux deux routes HTTP workload présentes, plutôt qu'écriture
+SQLite hors ligne ou client POST arbitraire. Aucun nouveau service, rôle,
+endpoint, stockage ou autorité de provisioning. Le tenant reste dérivé du
+runner authentifié. Le parent attend le RED ciblé avant code applicatif.
+
+`workload prepare` fixe localement origine, namespace et tenant attendus
+comme gardes d'égalité, génère une fois les identités/credentials nécessaires,
+puis synchronise secret privé et requête exacte dans une destination neuve.
+Aucun HTTP à cette étape. `apply`/`resume` authentifient le runner courant
+explicitement fourni, comparent le protocole serveur et publient durablement
+le scope avant un POST unique. Aucun retry transparent, CAS deviné,
+changement d'expiry ou régénération en reprise ; un nouveau credential
+runner peut reprendre la même opération dans le même scope. `status` lit
+seulement la préparation locale validée. Fichiers/parents retenus par FD,
+verrou exclusif, revalidation et reçu publié par directory privée staging
+et publication exclusive ; les écritures partielles restent conservées.
+
+Le manifeste fermé porte issue/rotate/revoke et CAS explicite ; ni tenant
+mutateur, actor, secret brut, digest choisi ou route libre. Input privé ou
+stdin borné16Kio/5s. HTTPS vérifié ou HTTP sur IP loopback numérique,
+sans proxy/redirection/retry. AC explicite facultative certificate-only
+64Kio/8certificats via le parseur existant, remplaçant les racines intégrées,
+sans désactiver chaîne/nom ; les fichiers courants sont revalidés par requête.
+
+Un reçu prouve une mutation historique durable, même rejouée après rotation,
+révocation ou expiration. Le résultat reste `operation_recorded` avec état
+courant `not_observed`, sans promettre clé active, remise au worker, lancement
+ou arrêt. Le client compare credential/révision/audit et le contexte de la
+requête ; le reçu n'a pas de liaison cryptographique operation/sujet/tenant.
+Le préflight GET puis POST n'est pas une CAS serveur contre reconfiguration
+concurrente du contrôle de confiance. Aucun de ces faits ne qualifie encore
+transport worker, fédération, reprise runtime ou release production.
+
 ## 4 novembre — accusé OIDC lié à chaque client et opération
 
 Conserver le gateway comme propriétaire de l'admission Web et la CLI comme

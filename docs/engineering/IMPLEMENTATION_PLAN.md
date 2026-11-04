@@ -1,5 +1,38 @@
 # Plan d'industrialisation
 
+## Lot en cours au4novembre — CLI des identités techniques
+
+Base73707d1 dans un worktree dédié. Contrat existant issue/revoke et reçu
+workload conservés ; [décision et limites](DECISIONS.md#4-novembre--provisionnement-des-identités-techniques-par-cli).
+Propriétaires : CORE nouveaux `src/workload_cli.rs`, `src/workload_cli/*`,
+`tests/workload_cli.rs` ; Root seul pour exports lib/main, intégration et
+guides/preuves ; Luna exécute dans un OS isolé ; second regard indépendant.
+Pas de compilation native, téléchargement ou campagne fournisseur/runtime.
+
+1. RED : nouvelle CLI prepare invoquée par un test sur le binaire réel
+   de73707d1 ; échec attendu commande absente, compilation du test réussie.
+2. Implémenter types fermés et prepare locale : CAS/UUID/sujet/expiry,
+   secrets CSPRNG durables, destination neuve, bornes, stdin, refus sûrs.
+3. Implémenter apply/resume/status avec scope immuable et runner courant,
+   un POST exact, erreurs opaques, résultat historique, publication du reçu
+   et comparaison en normalisant seulement `replayed`. Une expiry passée
+   en reprise ne bloque pas la récupération d'un reçu historique.
+4. Vérifier par vraie CLI, gateway/SQLite et TLS possédés : préparation avant
+   HTTP, perte de réponse après commit/restart/replay, rotation/révocation,
+   replay après mutations/expiry, CAS/contenu divergent, isolement A/B,
+   audit indisponible, reçu invalide/bornes, liens/substitutions/verrou,
+   publication interrompue et confiance/nom TLS, sans mock métier permanent.
+5. Rustfmt ciblé, tests sélectionnés avec comptes réels et all-targets ;
+   Clippy seulement si disponible sans installer. Revue indépendante puis
+   traitement des constats et contrôle composé, sans rejouer la matrice.
+6. Guides EN/FR et exemples de manifeste/control, rotation/reprise/révocation,
+   capacités et limites ; preuves/gates actualisés, commit/push vérifiés,
+   fermeture du worktree donneur après contrôle des consommateurs.
+
+Ces critères ne livrent pas l'activation automatique d'un consommateur ni
+le transport réseau des workers. Ils demeurent des chantiers obligatoires
+distincts ; la cible produit complète et les gates restent inchangés.
+
 ## Priorités au 4 novembre — validations et raccords parallèles
 
 1. L'inventaire STOP est intégré dans la branche de validation par3acd5cc :
