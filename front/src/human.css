@@ -16,20 +16,40 @@
 .human-resource-row p, .human-event-row p { margin-top: 8px; font-size: 13px; }
 .human-resource-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; max-width: 480px; }
 .human-resource-actions .badge, .human-page .control-status .badge, .human-page .detail-badges .badge { white-space: normal; }
-.human-resource-panel > .control-status, .human-event-panel > .control-status { padding: 0 24px; }
+.human-resource-panel > .control-status, .human-event-panel > .control-status, .human-broker-panel > .control-status { padding: 0 24px; }
 .human-export { border-top: 1px solid var(--line); padding: 24px; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
 .human-export h3, .human-export > p { flex-basis: 100%; }
 .human-export p { font-size: 13px; line-height: 1.7; }
 .human-page .button { max-width: 100%; white-space: normal; }
 .human-page .control-page-summary { overflow-wrap: anywhere; }
 .login-access { font-size: 14px; }
+.human-broker-scroll { max-width: 100%; overflow-x: auto; border-top: 1px solid var(--line); }
+.human-broker-scroll:focus-visible { outline: 2px solid var(--focus, #5555ff); outline-offset: -2px; }
+.human-broker-table { width: 100%; min-width: 1050px; border-collapse: collapse; text-align: left; }
+.human-broker-table caption { padding: 18px 24px; text-align: left; color: var(--muted); font: 12px "Courier New", monospace; }
+.human-broker-table th { padding: 14px 18px; font-size: 12px; border-block: 1px solid var(--line); color: var(--muted); }
+.human-broker-table td { padding: 20px 18px; vertical-align: top; border-bottom: 1px solid var(--line); font-size: 13px; }
+.human-broker-table td:first-child { min-width: 230px; }
+.human-broker-table p + p { margin-top: 8px; }
+.human-broker-table .badge { white-space: normal; }
+.human-broker-authorities { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; overflow-wrap: anywhere; }
+.human-broker-evaluation, .human-broker-footnote { padding: 16px 24px; font-size: 13px; line-height: 1.7; }
+.human-broker-details { display: grid; margin: 22px 0; }
+.human-broker-details > div { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(0, 2fr); gap: 20px; padding: 14px 0; border-top: 1px solid var(--line); }
+.human-broker-details dt { font-size: 13px; color: var(--muted); }
+.human-broker-details dd { margin: 0; font: 13px/1.7 "Courier New", monospace; overflow-wrap: anywhere; }
+.human-budget-stop { margin-bottom: 24px; }
 @media (max-width: 740px) {
   .human-shell { --dock-height: 124px; }
   .human-toolbar { display: grid; grid-template-columns: 1fr; gap: 8px; padding: 12px var(--gutter); }
   .human-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .human-nav:has(> :nth-child(4)) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .human-shell:has(.human-nav > :nth-child(4)) { --dock-height: 164px; }
   .human-toolbar .button { padding: 8px 6px; font-size: 11px; min-width: 0; }
   .human-shell .stream-pill { white-space: normal; max-width: 44%; text-align: right; }
   .human-resource-row, .human-event-row { flex-direction: column; padding: 18px; gap: 16px; }
   .human-context-card, .human-export { padding: 18px; }
-  .human-resource-panel > .control-status, .human-event-panel > .control-status { padding: 0 18px; }
+  .human-resource-panel > .control-status, .human-event-panel > .control-status, .human-broker-panel > .control-status { padding: 0 18px; }
+  .human-broker-evaluation, .human-broker-footnote { padding: 14px 18px; }
+  .human-broker-details > div { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 }

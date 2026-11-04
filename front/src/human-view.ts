@@ -3,7 +3,7 @@ import { formatDate } from "./model.ts";
 import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
 import "./human.css";
-import type { HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
+import type { HumanBroker, HumanBrokerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 
 interface ReadState<T> {
   value: T | null; loading: boolean; error: string; loadedAt: string | null; stale: boolean;
@@ -13,6 +13,8 @@ interface HumanChrome { brand: () => HTMLElement; themeButton: () => HTMLButtonE
 const readState = <T>(): ReadState<T> => ({ value: null, loading: false, error: "", loadedAt: null, stale: false, cursor: null, history: [] });
 const modeName = (context: HumanContext) => context.mode === "administration" ? "Administration" : "Personnel";
 const kindName: Record<HumanResource["resource"]["kind"], string> = { session: "Session", sandbox: "Sandbox", agent: "Agent", project: "Projet" };
+const brokerStateName: Record<HumanBroker["state"], string> = { unseen: "Heartbeat non reçu", current: "Bail courant", stale: "Bail périmé", expired: "Autorisation expirée", revoked: "Autorisation révoquée", clock_uncertain: "Horloge incertaine" };
+type DashboardMode = "contexts" | "resources" | "events" | "brokers";
 function badge(label: string, tone = "neutral") { return el("span", `badge badge-${tone}`, label); }
 function action(label: string, key: string, call: () => void, disabled = false) {
   const node = button(label, "button button-secondary", call); node.dataset.focusKey = key; node.disabled = disabled; return node;
@@ -37,8 +39,13 @@ export class HumanDashboard {
   #context: HumanContext | null = null;
   #resources = readState<HumanPage<HumanResource>>();
   #events = readState<HumanEventPage>();
+  #brokers = readState<HumanBrokerPage>();
+  #brokerAbort = new AbortController();
+  #brokerGeneration = 0;
+  #brokerForbidden = false;
+  #brokerLastLaunch = 0;
   #selection: { item: HumanResource; view: HumanView } | null = null;
-  #mode: "contexts" | "resources" | "events" = "contexts";
+  #mode: DashboardMode = "contexts";
   #generation = 0;
   #selectionGeneration = 0;
   #invalidation = 0;
@@ -68,13 +75,30 @@ export class HumanDashboard {
   #refreshTimer: ReturnType<typeof setTimeout> | undefined;
   #closed = false;
   #mounted = false;
+  #visibility = () => {
+    if (document.visibilityState !== "visible") { this.#streamAbort.abort(); return; }
+    if (this.#closed || this.#api.readBudgetStopped || this.#mode === "brokers" && this.#brokerForbidden) return;
+    const generation = this.#generation;
+    void this.#loadIdentity().then((success) => {
+      if (!success || this.#closed || generation !== this.#generation || !this.#context) return;
+      if (["resources", "events"].includes(this.#mode)) this.#startStream();
+      this.#refreshActive(true);
+    });
+  };
   constructor(root: HTMLElement, token: string, chrome: HumanChrome, onLogout: (message: string) => void) {
     this.#root = root; this.#chrome = chrome; this.#onLogout = onLogout;
     this.#api = new HumanApiClient(token, {
       onAuthentication: (error) => { if (this.#mounted && !this.#closed) this.logout(error.message); },
       onContextInvalidated: (error) => {
         if (!this.#mounted || this.#closed) return;
-        this.#purgeContext(); this.#message = error.message; this.#mode = "contexts"; this.#render(); void this.#loadIdentity();
+        const readingIdentity = this.#identityLoading;
+        this.#purgeContext(); this.#message = error.message; this.#mode = "contexts"; this.#render();
+        if (!readingIdentity && !this.#api.readBudgetStopped) void this.#loadIdentity();
+      },
+      onReadBudgetExhausted: () => {
+        this.#streamAbort.abort(); this.#exportAbort.abort(); clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
+        this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true;
+        this.#streamStatus = "Lecture automatique suspendue"; this.#render();
       },
     });
   }
@@ -82,14 +106,13 @@ export class HumanDashboard {
     this.#identity = await this.#api.identity();
     if (this.#closed) throw new HumanSuperseded();
     this.#mounted = true; this.#shell(); this.#render();
-    this.#poll = setInterval(() => {
-      if (!this.#context) return;
-      void this.#loadResources(); if (this.#selection) void this.#loadEvents();
-    }, 30000);
+    this.#poll = setInterval(() => this.#refreshActive(true), 30000);
+    document.addEventListener("visibilitychange", this.#visibility);
   }
   close() {
     this.#closed = true; this.#purgeContext(); this.#api.close(); this.#identity = null;
     clearInterval(this.#poll); this.#page?.replaceChildren(); if (this.#mounted) this.#root.replaceChildren();
+    document.removeEventListener("visibilitychange", this.#visibility);
   }
   logout(message?: string) {
     const detail = message ?? (this.#identity?.authentication.method === "oidc_access_token" ?
@@ -103,12 +126,56 @@ export class HumanDashboard {
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort();
     clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
     this.#context = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
+    this.#purgeBrokers(); this.#brokerForbidden = false; this.#brokerLastLaunch = 0;
     if (this.#identity) this.#identity = { ...this.#identity, contexts: [] };
     this.#identityLoading = false;
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
     this.#streamStatus = "Flux arrêté"; this.#streamError = "";
     this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
+  }
+  #canResources() {
+    return !!this.#context && (this.#context.capabilities.includes("read_metadata") ||
+      this.#context.mode === "administration" && this.#context.capabilities.includes("read_tenant_metadata"));
+  }
+  #canBrokers() { return this.#context?.mode === "administration" && this.#context.capabilities.includes("read_broker_registry"); }
+  #purgeBrokers() {
+    this.#brokerGeneration++; this.#brokerAbort.abort(); this.#brokerAbort = new AbortController(); this.#brokers = readState();
+    if (this.#mode === "brokers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
+  }
+  #stopViewReads() {
+    this.#generation++; this.#selectionGeneration++; this.#scope.abort(); this.#scope = new AbortController();
+    this.#selectionAbort.abort(); this.#selectionAbort = new AbortController(); this.#streamAbort.abort();
+    this.#exportAbort.abort(); this.#detailAbort.abort(); this.#detailGeneration++;
+    this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
+    clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
+    if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
+    this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
+  }
+  #openView(mode: DashboardMode) {
+    if (mode === "contexts") {
+      this.#api.clearContext(); this.#purgeContext(); this.#mode = mode;
+      if (!this.#api.readBudgetStopped) void this.#loadIdentity();
+    } else if (mode === "brokers" && this.#canBrokers()) {
+      if (this.#mode !== mode) {
+        this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
+        this.#purgeBrokers(); this.#mode = mode;
+      }
+      this.#streamStatus = "Registre · sans flux temps réel"; this.#refreshActive(false);
+    } else if (mode === "resources" && this.#canResources()) {
+      this.#stopViewReads(); this.#purgeBrokers(); this.#mode = mode; this.#resources = readState();
+      this.#events = readState(); this.#selection = null;
+      this.#startStream(); this.#refreshActive(false);
+    } else if (mode === "events" && this.#selection && this.#canResources()) {
+      this.#mode = mode; this.#startStream(); this.#refreshActive(false);
+    }
+    this.#render(); this.#page?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
+  }
+  #refreshActive(automatic: boolean) {
+    if (this.#closed || this.#api.readBudgetStopped || automatic && document.visibilityState !== "visible") return;
+    if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) void this.#loadBrokers(undefined, undefined, automatic);
+    else if (this.#mode === "resources" && this.#canResources()) void this.#loadResources();
+    else if (this.#mode === "events" && this.#selection && this.#canResources()) void this.#loadEvents();
   }
   #shell() {
     const logout = action("Se déconnecter", "human-logout", () => this.logout());
@@ -134,28 +201,32 @@ export class HumanDashboard {
     this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte personnel"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message; this.#notice.textContent = this.#message;
-    const nav = (["contexts", "resources", "events"] as const).map((mode, index) => {
-      const label = ["Contextes", "Ressources", "Événements"][index]!;
-      const node = action(label, `human-nav-${mode}`, () => {
-        if (mode === "contexts") { this.#api.clearContext(); this.#purgeContext(); this.#mode = mode; void this.#loadIdentity(); }
-        else this.#mode = mode;
-        this.#render(); this.#page?.querySelector<HTMLElement>("h1")?.focus({ preventScroll: true });
-      }, mode === "resources" && !this.#context || mode === "events" && !this.#selection);
+    const destinations: DashboardMode[] = ["contexts", "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : [])];
+    const nav = destinations.map((mode) => {
+      const label = { contexts: "Contextes", resources: "Ressources", events: "Événements", brokers: "Brokers" }[mode];
+      const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
+        mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canResources()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     this.#navigation.replaceChildren(el("div", "human-nav", ...nav), action("Actualiser", "human-refresh", () => {
-      if (!this.#context) void this.#loadIdentity(); else if (this.#mode === "events") void this.#loadEvents(); else void this.#loadResources();
-    }, this.#identityLoading));
-    const heading = el("h1", "", this.#mode === "contexts" ? "Choisir un contexte." : this.#mode === "resources" ? "Ressources autorisées." : "Événements autorisés.");
+      if (this.#mode === "contexts") void this.#loadIdentity(); else this.#refreshActive(false);
+    }, this.#identityLoading || this.#api.readBudgetStopped || this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden)));
+    const heading = el("h1", "", { contexts: "Choisir un contexte.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant." }[this.#mode]);
     heading.tabIndex = -1;
     this.#page.replaceChildren(el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
-      el("p", "page-description", "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
+      el("p", "page-description", this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
+        "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
+      ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
+        action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
+          this.#api.allowReadAfterOperatorAction();
+          void this.#refreshAfterOperatorAction();
+        }, this.#identityLoading || this.#brokers.loading || this.#resources.loading || this.#events.loading))] : []),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
         el("p", "", `Contexte valable jusqu’au ${formatDate(this.#context.expires_at, true)}. Source : identité authentifiée du contrôle.`))) : "",
-      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#renderEvents());
+      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#renderEvents());
     if (active && focusScope) {
       const replacement = key ? [...focusScope.querySelectorAll<HTMLElement>("[data-focus-key]")]
         .find((node) => node.dataset.focusKey === key && node.isConnected && !node.matches(":disabled") &&
@@ -165,15 +236,37 @@ export class HumanDashboard {
       (replacement ?? fallback ?? heading).focus({ preventScroll: true });
     }
   }
-  async #loadIdentity() {
-    if (this.#closed || this.#identityLoading) return;
+  async #refreshAfterOperatorAction() {
+    if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) {
+      await this.#loadBrokers(undefined, undefined, false, true); return;
+    }
+    const generation = this.#generation; const mode = this.#mode;
+    const success = mode === "resources" && this.#canResources() ? await this.#loadResources(undefined, undefined, true) :
+      mode === "events" && this.#selection && this.#canResources() ? await this.#loadEvents(undefined, undefined, true) : null;
+    if (success && !this.#closed && generation === this.#generation && mode === this.#mode && !this.#api.readBudgetStopped && this.#canResources()) {
+      this.#startStream(); return;
+    }
+    if (success !== null || this.#closed) return;
+    // A refused destination must regain a current offered context before another page read.
+    this.#api.clearContext(); this.#purgeContext(); this.#mode = "contexts"; this.#render();
+    await this.#loadIdentity(true);
+  }
+  async #loadIdentity(operatorRetry = false) {
+    if (this.#closed || this.#identityLoading || this.#api.readBudgetStopped && !operatorRetry) return;
     this.#identityLoading = true; this.#render(); const generation = this.#generation;
     try {
       const identity = await this.#api.identity();
-      if (this.#closed || generation !== this.#generation) return;
+      if (this.#closed || generation !== this.#generation && this.#context) return;
       this.#identity = identity; this.#identityError = "";
-    } catch (error) { if (!this.#closed && generation === this.#generation && !(error instanceof HumanSuperseded)) this.#identityError = failure(error); }
-    finally { if (!this.#closed && generation === this.#generation) { this.#identityLoading = false; this.#render(); } }
+      return true;
+    } catch (error) {
+      if (!this.#closed && generation === this.#generation && !(error instanceof HumanSuperseded)) {
+        this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true;
+        this.#message = this.#context ? `Revalidation des accès impossible. ${failure(error)}` : this.#message;
+      }
+      return false;
+    }
+    finally { if (!this.#closed && (generation === this.#generation || !this.#context)) { this.#identityLoading = false; this.#render(); } }
   }
   #renderContexts() {
     const contexts = this.#identity?.contexts ?? [];
@@ -188,7 +281,7 @@ export class HumanDashboard {
       this.#identityLoading ? el("p", "control-status", "Lecture des accès…") : "",
       this.#identityError ? this.#error(this.#identityError, () => { void this.#loadIdentity(); }) : "",
       coverage,
-      !contexts.length && this.#identity?.contexts_complete === true && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
+      !this.#context && !contexts.length && this.#identity?.contexts_complete === true && !this.#identityLoading && !this.#identityError ? empty("Aucun contexte autorisé", "Votre compte est authentifié mais aucun contexte actif n’est proposé. Faites vérifier vos appartenances par l’opérateur.") : "",
       ...contexts.map((context, index) => el("article", "panel human-context-card",
         el("h2", "", `${modeName(context)} · ${context.tenant_id}`), el("p", "muted", `Organisation : ${context.organization_scope}`),
         el("p", "muted", `Valable jusqu’au ${formatDate(context.expires_at, true)}`),
@@ -196,13 +289,15 @@ export class HumanDashboard {
         action(`Ouvrir ${modeName(context).toLowerCase()} · ${context.tenant_id}`, `context-${index}`, () => {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = "";
-            this.#mode = "resources"; this.#render(); this.#startStream(); void this.#loadResources();
+            if (this.#canResources()) this.#openView("resources");
+            else if (this.#canBrokers()) this.#openView("brokers");
+            else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune vue de consultation disponible avec ses capacités. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, this.#identityLoading || Date.parse(context.expires_at) <= Date.now()))),
       el("p", "field-help", "La déconnexion efface ce jeton de l’onglet. Sa révocation et ses permissions restent contrôlées côté serveur."));
   }
   #error(message: string, retry: () => void) {
-    const node = el("div", "control-error", icon("alert"), el("p", "", message), action("Réessayer", "human-retry", retry));
+    const node = el("div", "control-error", icon("alert"), el("p", "", message), this.#api.readBudgetStopped ? null : action("Réessayer", "human-retry", retry));
     node.setAttribute("role", "alert"); return node;
   }
   #status<T extends { read_receipt: { received_at: string } }>(state: ReadState<T>) {
@@ -212,17 +307,103 @@ export class HumanDashboard {
       state.value ? el("span", "muted", `Reçu du contrôle : ${formatDate(state.value.read_receipt.received_at, true)}`) : null);
     node.setAttribute("role", "status"); return node;
   }
-  #pagination<T extends HumanPage<unknown>>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void) {
+  #pagination<T extends { items: unknown[]; has_more: boolean; next_cursor: string | null }>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void) {
+    const blocked = state.loading || this.#api.readBudgetStopped;
     return el("div", "table-footer control-pagination", el("span", "control-page-summary",
       state.value ? `${state.value.items.length} résultat(s) sur cette page · page ${state.history.length + 1}${state.value.has_more || state.history.length ? " · lecture partielle" : ""}` : "Sélection autorisée inconnue"),
       el("div", "control-page-actions",
-        state.history.length || state.error ? action("Première page", "human-first", () => load(null, []), state.loading) : null,
-        state.history.length ? action("Page précédente", "human-previous", () => load(state.history.at(-1) ?? null, state.history.slice(0, -1)), state.loading) : null,
-        state.value?.next_cursor ? action("Page suivante", "human-next", () => load(state.value?.next_cursor ?? null, [...state.history, state.cursor]), state.loading || state.history.length >= 100) :
+        state.history.length || state.error ? action("Première page", "human-first", () => load(null, []), blocked) : null,
+        state.history.length ? action("Page précédente", "human-previous", () => load(state.history.at(-1) ?? null, state.history.slice(0, -1)), blocked) : null,
+        state.value?.next_cursor ? action("Page suivante", "human-next", () => load(state.value?.next_cursor ?? null, [...state.history, state.cursor]), blocked || state.history.length >= 100) :
           state.value ? el("span", "muted", "Fin de cette sélection à cette lecture") : null));
   }
-  async #loadResources(cursor = this.#resources.cursor, history = this.#resources.history) {
-    if (!this.#context || this.#closed || this.#resources.loading) return;
+  async #loadBrokers(cursor = this.#brokers.cursor, history = this.#brokers.history, automatic = false, operatorRetry = false) {
+    if (!this.#canBrokers() || this.#mode !== "brokers" || this.#closed || this.#brokers.loading || this.#brokerForbidden ||
+      this.#api.readBudgetStopped && !operatorRetry || automatic && (document.visibilityState !== "visible" || Date.now() - this.#brokerLastLaunch < 30000)) return;
+    const state = this.#brokers; const generation = this.#generation; const request = this.#brokerGeneration;
+    this.#brokerLastLaunch = Date.now(); state.loading = true; this.#render();
+    try {
+      const page = await this.#api.brokers(cursor, this.#brokerAbort.signal);
+      if (this.#closed || generation !== this.#generation || request !== this.#brokerGeneration || this.#mode !== "brokers" || !this.#canBrokers()) return;
+      state.value = page; state.cursor = cursor; state.history = [...history]; state.loadedAt = new Date().toISOString(); state.error = ""; state.stale = false;
+    } catch (error) {
+      if (this.#closed || generation !== this.#generation || request !== this.#brokerGeneration || error instanceof HumanSuperseded) return;
+      if (error instanceof HumanApiError && error.status === 403) {
+        this.#purgeBrokers(); this.#brokerForbidden = true; this.#brokers.error = failure(error); this.#brokers.stale = true;
+      } else { state.error = failure(error); state.stale = true; }
+    } finally {
+      state.loading = false;
+      if (!this.#closed && generation === this.#generation && this.#mode === "brokers") this.#render();
+    }
+  }
+  #brokerAuthorities(item: HumanBroker) {
+    return el("ul", "human-broker-authorities", ...item.authorities.map((authority) => el("li", "",
+      el("span", "mono", authority.authority_id_redacted ? "Identifiant masqué" : authority.authority_id),
+      el("span", "muted", ` · ${authority.runtime_kind}`))));
+  }
+  #renderBrokers() {
+    const state = this.#brokers;
+    const table = el("table", "human-broker-table");
+    const caption = el("caption", "", "Registre central du tenant · métadonnées enregistrées");
+    const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", "Détails"].map((label) => {
+      const cell = el("th", "", label); cell.scope = "col"; return cell;
+    });
+    table.append(caption, el("thead", "", el("tr", "", ...headers)), el("tbody", "", ...(state.value?.items ?? []).map((item, index) => {
+      const heartbeat = item.last_heartbeat;
+      return el("tr", "", el("td", "", el("p", "mono control-id", item.broker_id), el("p", "muted", "Incarnation courante"), el("p", "mono control-id", item.incarnation_id)),
+        el("td", "", badge(brokerStateName[item.state], item.state === "current" ? "neutral" : "amber")),
+        el("td", "", this.#brokerAuthorities(item)),
+        el("td", "", heartbeat ? el("div", "", el("p", "", formatDate(heartbeat.received_at, true)), el("p", "muted", "Heartbeat déclaré · réception observée"),
+          heartbeat.incarnation_id !== item.incarnation_id ? badge("Heartbeat d’une ancienne incarnation", "amber") : null) : el("p", "muted", "Aucun heartbeat reçu dans le registre")),
+        el("td", "", el("p", "muted", `Autorisation : ${formatDate(item.not_after, true)}`),
+          heartbeat ? el("p", "muted", `Bail déclaré : ${formatDate(heartbeat.lease_expires_at, true)}`) : null),
+        el("td", "", action("Détails du broker", `broker-detail-${index}`, () => this.#showBroker(item))));
+    })));
+    const scroll = el("div", "human-broker-scroll", table); scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Tableau des brokers enregistrés, défilement horizontal");
+    return el("section", "panel human-broker-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Registre des brokers"),
+      el("p", "", "Source : registre central du tenant. Inventaire runtime inconnu ; aucun worker ni état de fonctionnement n’est déduit du bail."),
+      el("p", "", "Lecture live paginée : les lignes peuvent changer entre deux pages. Le flux des ressources ne couvre pas ce registre."))),
+      this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset.`) : null,
+      this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :
+        state.error ? this.#error(state.error, () => { void this.#loadBrokers(); }) : null,
+      !state.value ? empty(state.loading ? "Chargement du registre…" : "Registre indisponible", this.#brokerForbidden ? "L’accès a été refusé. Les données, détails et positions de lecture ont été retirés." :
+        "Une lecture réussie est nécessaire pour connaître les brokers enregistrés. L’inventaire runtime reste inconnu.") :
+        !state.value.items.length ? empty(state.history.length ? "Fin de cette traversée live" : "Aucun broker enregistré à cette lecture", "Cette page décrit le registre à l’heure d’évaluation. L’inventaire runtime reste inconnu.") : scroll,
+      this.#brokerForbidden ? null : this.#pagination(state, (next, previous) => { void this.#loadBrokers(next, previous); }),
+      el("p", "human-broker-footnote muted", "Actualisation automatique au plus toutes les 30 secondes lorsque cette vue est visible. Ce rythme ne garantit aucun délai de réponse, notification ou retrait des droits."));
+  }
+  #showBroker(item: HumanBroker) {
+    const page = this.#brokers.value;
+    if (!page || this.#mode !== "brokers" || !this.#canBrokers() || this.#brokerForbidden) return;
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    this.#dialog?.close(); this.#dialog?.remove();
+    const heading = el("h2", "", "Détails du broker"); heading.id = "human-broker-detail-title";
+    const dialog = el("dialog", "detail-dialog human-broker-dialog"); dialog.setAttribute("aria-labelledby", heading.id);
+    const close = button("", "icon-button", () => dialog.close(), "x"); close.setAttribute("aria-label", "Fermer les détails");
+    const detail = (name: string, value: string | HTMLElement) => el("div", "", el("dt", "", name), el("dd", "", value));
+    const h = item.last_heartbeat;
+    dialog.append(el("div", "detail-header", heading, close), el("div", "detail-body",
+      el("p", "muted", `Métadonnées de la page évaluée le ${formatDate(page.evaluated_at, true)}. Inventaire runtime inconnu.`),
+      el("dl", "human-broker-details", detail("Broker", item.broker_id), detail("Incarnation courante", item.incarnation_id),
+        detail("État du bail", brokerStateName[item.state]), detail("Révision de l’autorisation", item.grant_revision), detail("Révision du heartbeat", item.heartbeat_revision),
+        detail("Autorisation accordée", formatDate(item.granted_at, true)), detail("Expiration de l’autorisation", formatDate(item.not_after, true)),
+        detail("Révocation", item.revoked_at ? formatDate(item.revoked_at, true) : "Aucune révocation enregistrée"), detail("Autorités déclarées", this.#brokerAuthorities(item)),
+        detail("Heartbeat déclaré", h ? `Séquence ${h.sequence} · incarnation ${h.incarnation_id}${h.incarnation_id !== item.incarnation_id ? " · ancienne incarnation" : ""}` : "Aucun heartbeat reçu"),
+        detail("Réception observée", h ? formatDate(h.received_at, true) : "Inconnue"), detail("Expiration du bail déclaré", h ? formatDate(h.lease_expires_at, true) : "Inconnue"),
+        detail("Demande de lecture", page.read_receipt.request_id), detail("Événement du reçu", page.read_receipt.audit_event_id),
+        detail("Reçu durable du contrôle", formatDate(page.read_receipt.received_at, true))),
+      el("p", "muted", "Le reçu atteste l’enregistrement de la lecture, sans prouver sa livraison ni une exécution runtime. Kubernetes reste une autorité déclarée.")));
+    document.body.append(dialog); this.#dialog = dialog; dialog.showModal();
+    dialog.addEventListener("close", () => {
+      if (this.#dialog === dialog) this.#dialog = null; dialog.remove();
+      if (this.#closed || document.querySelector("dialog[open]")) return;
+      const key = trigger?.dataset.focusKey;
+      const replacement = key ? [...this.#page?.querySelectorAll<HTMLElement>("[data-focus-key]") ?? []].find((node) => node.dataset.focusKey === key) : null;
+      (trigger?.isConnected ? trigger : replacement ?? this.#page?.querySelector<HTMLElement>("h1"))?.focus({ preventScroll: true });
+    }, { once: true });
+  }
+  async #loadResources(cursor = this.#resources.cursor, history = this.#resources.history, operatorRetry = false) {
+    if (!this.#canResources() || this.#mode !== "resources" || this.#closed || this.#resources.loading || this.#api.readBudgetStopped && !operatorRetry) return;
     const state = this.#resources; const generation = this.#generation; const invalidation = this.#invalidation;
     state.loading = true; this.#render();
     try {
@@ -240,6 +421,7 @@ export class HumanDashboard {
           if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
         }
       }
+      return true;
     } catch (error) {
       if (this.#closed || generation !== this.#generation || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && error.code === "permission_denied") {
@@ -267,6 +449,7 @@ export class HumanDashboard {
       this.#pagination(state, (next, previous) => { void this.#loadResources(next, previous); }));
   }
   #select(item: HumanResource, view: HumanView) {
+    if (!this.#canResources() || this.#mode !== "resources" || !item.permissions.metadata || view === "content" && !item.permissions.content) return;
     this.#selectionGeneration++; this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort(); this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
@@ -279,17 +462,18 @@ export class HumanDashboard {
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort(); this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
     this.#selection = null; this.#events = readState(); this.#exporting = false; this.#exportMessage = "";
-    this.#message = message; this.#mode = "resources"; this.#render(); this.#startStream();
+    this.#message = message; this.#mode = this.#canResources() ? "resources" : "contexts"; this.#render(); this.#startStream();
   }
-  async #loadEvents(cursor = this.#events.cursor, history = this.#events.history) {
+  async #loadEvents(cursor = this.#events.cursor, history = this.#events.history, operatorRetry = false) {
     const selection = this.#selection;
-    if (!selection || this.#closed || this.#events.loading) return;
+    if (!selection || this.#mode !== "events" || !this.#canResources() || this.#closed || this.#events.loading || this.#api.readBudgetStopped && !operatorRetry) return;
     const state = this.#events; const generation = this.#generation; const selected = this.#selectionGeneration; const invalidation = this.#invalidation;
     state.loading = true; this.#render();
     try {
       const page = await this.#api.events({ view: selection.view, resource: selection.item.resource, cursor }, this.#selectionAbort.signal);
       if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration) return;
       state.value = page; state.cursor = cursor; state.history = history; state.error = ""; state.loadedAt = new Date().toISOString(); state.stale = invalidation !== this.#invalidation;
+      return true;
     } catch (error) {
       if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && ["permission_denied", "not_found"].includes(error.code)) {
@@ -318,15 +502,16 @@ export class HumanDashboard {
   }
   #startStream() {
     this.#streamAbort.abort(); this.#streamAbort = new AbortController(); this.#streamError = "";
-    if (!this.#context || this.#closed) return;
+    if (!this.#canResources() || !["resources", "events"].includes(this.#mode) || this.#closed || this.#api.readBudgetStopped || document.visibilityState !== "visible") return;
     const generation = this.#generation; const selected = this.#selectionGeneration;
+    const mode = this.#mode;
     const signal = this.#streamAbort.signal;
     const selection = this.#selection ? { view: this.#selection.view, resource: this.#selection.item.resource } : { view: "metadata" as const };
     void this.#api.listen(selection, signal, () => {
-      if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration) return;
+      if (signal.aborted || this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || mode !== this.#mode || this.#api.readBudgetStopped) return;
       this.#invalidation++; this.#resources.stale = true; this.#events.stale = true; this.#render(); this.#schedule();
     }, (status) => {
-      if (this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration) return;
+      if (signal.aborted || this.#closed || generation !== this.#generation || selected !== this.#selectionGeneration || mode !== this.#mode || this.#api.readBudgetStopped) return;
       this.#streamStatus = ({ connecting: "Connexion au flux autorisé", live: "Flux autorisé connecté", retrying: "Flux déconnecté · reconnexion", closed: "Flux arrêté" })[status];
       if (status === "retrying") { this.#resources.stale = true; this.#events.stale = true; }
       this.#render();
@@ -340,14 +525,15 @@ export class HumanDashboard {
     });
   }
   #schedule() {
-    if (this.#refreshTimer !== undefined || this.#closed) return;
+    if (this.#refreshTimer !== undefined || this.#closed || this.#api.readBudgetStopped || !this.#canResources() || !["resources", "events"].includes(this.#mode)) return;
+    const generation = this.#generation; const mode = this.#mode;
     this.#refreshTimer = setTimeout(() => {
-      this.#refreshTimer = undefined; if (!this.#context || this.#closed) return;
-      void this.#loadResources(); if (this.#selection) void this.#loadEvents();
+      this.#refreshTimer = undefined; if (generation !== this.#generation || mode !== this.#mode) return;
+      this.#refreshActive(true);
     }, 1000);
   }
   async #showEvent(item: HumanEvent) {
-    const selection = this.#selection; if (!selection) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || this.#api.readBudgetStopped) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -388,7 +574,7 @@ export class HumanDashboard {
       !permitted ? el("p", "muted", "Le contrôle n’accorde pas le droit d’export pour cette ressource.") : null, status);
   }
   async #export() {
-    const selection = this.#selection; if (!selection || !selection.item.permissions.export || this.#exporting) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#exporting || this.#api.readBudgetStopped) return;
     this.#exportAbort.abort(); this.#exportAbort = new AbortController(); const signal = this.#exportAbort.signal;
     const generation = this.#generation; const selected = this.#selectionGeneration;
     this.#exporting = true; this.#exportPages = 0; this.#exportBytes = 0; this.#exportMessage = ""; this.#render();

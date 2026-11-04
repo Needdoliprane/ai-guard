@@ -1,7 +1,130 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { HumanApiClient, HumanApiError, HumanSuperseded, HUMAN_EXPORT_LIMITS } from "../src/human-api.ts";
+import { HumanContractError } from "../src/human-model.ts";
 import { identity, page, resource, event, errorResponse, uuid } from "./human-fixtures.mjs";
+import { brokerIdentity, brokerPage } from "./human-fixtures.mjs";
+
+for (const recovery of [
+  { name: "events/view", invoke: (client) => client.events({ view: "metadata", resource: resource().resource }),
+    wrong: () => page("context-brokers", [event("content")], { view: "content" }) },
+  { name: "events/resource", invoke: (client) => client.events({ view: "metadata", resource: resource().resource }),
+    wrong: () => page("context-brokers", [event("metadata", "foreign-resource")], { view: "metadata" }) },
+  { name: "event/view", invoke: (client) => client.event(uuid, "metadata"),
+    wrong: () => page("context-brokers", [event("content")], { view: "content" }) },
+  { name: "event/id", invoke: (client) => client.event(uuid, "metadata"),
+    wrong: () => page("context-brokers", [{ ...event(), metadata: { ...event().metadata, id: "00000000-0000-4000-8000-000000000002" } }], { view: "metadata" }) },
+  { name: "export/view", invoke: (client) => client.exportSelection({ view: "metadata", resource: resource().resource }, new AbortController().signal, () => {}),
+    wrong: () => page("context-brokers", [event("content")], { view: "content", selection_complete: true }) },
+  { name: "export/resource", invoke: (client) => client.exportSelection({ view: "metadata", resource: resource().resource }, new AbortController().signal, () => {}),
+    wrong: () => page("context-brokers", [event("metadata", "foreign-resource")], { view: "metadata", selection_complete: true }) },
+]) {
+  test(`la reprise ${recovery.name} conserve le latch si la sélection reçue est incorrecte`, async () => {
+    let phase = "exhausted"; let calls = 0;
+    const { client } = make(async (path) => {
+      calls++;
+      if (identityRoute(path)) return Response.json(brokerIdentity(true));
+      if (phase === "exhausted") return errorResponse(429, "audit_read_budget_exhausted", "contact_operator");
+      return Response.json(phase === "wrong" ? recovery.wrong() : page("context-brokers", [event()], { view: "metadata", selection_complete: true }));
+    });
+    try {
+      await client.identity(); client.selectContext("context-brokers");
+      await assert.rejects(client.brokers(), (error) => error.code === "audit_read_budget_exhausted");
+      phase = "wrong"; client.allowReadAfterOperatorAction();
+      await assert.rejects(recovery.invoke(client), HumanContractError);
+      assert.equal(client.readBudgetStopped, true, "Une sélection rejetée n’est pas une reprise réussie");
+      const stopped = calls;
+      for (const automatic of [() => client.identity(), () => client.resources(), () => client.brokers(),
+        () => client.listen({ view: "metadata" }, new AbortController().signal, () => {}, () => {})])
+        await assert.rejects(automatic(), (error) => error.code === "audit_read_budget_exhausted");
+      assert.equal(calls, stopped, "Les lectures automatiques restent bloquées avant fetch");
+      phase = "valid"; client.allowReadAfterOperatorAction(); await recovery.invoke(client);
+      assert.equal(client.readBudgetStopped, false); assert.equal(calls, stopped + 1);
+    } finally { client.close(); }
+  });
+}
+
+test("une reprise broker annulée pendant fetch ne réarme pas le budget durable", async () => {
+  let phase = "exhausted"; let calls = 0; let entered; let release;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const { client } = make(async (path) => {
+    calls++; if (identityRoute(path)) return Response.json(brokerIdentity());
+    if (phase === "exhausted") return errorResponse(429, "audit_read_budget_exhausted", "contact_operator");
+    if (phase === "held") { entered(); await new Promise((resolve) => { release = resolve; }); }
+    return Response.json(brokerPage());
+  });
+  try {
+    await client.identity(); client.selectContext("context-brokers");
+    await assert.rejects(client.brokers(), (error) => error.code === "audit_read_budget_exhausted");
+    phase = "held"; client.allowReadAfterOperatorAction(); const cancel = new AbortController();
+    const pending = client.brokers(null, cancel.signal); await started; cancel.abort(); release();
+    await assert.rejects(pending, HumanSuperseded); assert.equal(client.readBudgetStopped, true);
+    const stopped = calls; await assert.rejects(client.identity(), (error) => error.code === "audit_read_budget_exhausted"); assert.equal(calls, stopped);
+    phase = "valid"; client.allowReadAfterOperatorAction(); await client.brokers(); assert.equal(client.readBudgetStopped, false);
+  } finally { client.close(); }
+});
+
+test("le client broker seul ne lit que l’identité et le registre humain GET", async () => {
+  const requests = [];
+  const { client } = make(async (path, options) => {
+    requests.push({ path, options }); return Response.json(identityRoute(path) ? brokerIdentity() : brokerPage());
+  });
+  try {
+    await client.identity(); client.selectContext("context-brokers");
+    assert.equal(typeof client.brokers, "function", "Le registre dispose de sa propre lecture");
+    assert.equal((await client.brokers()).source, "tenant_broker_registry");
+    assert.deepEqual(requests.map(({ path }) => path), ["/api/v1/human/identity", "/api/v1/human/brokers?limit=25"]);
+    assert.equal(requests[1].options.method, "GET"); assert.equal(requests[1].options.headers["X-AiGuard-Context"], "context-brokers");
+    assert.equal(requests[1].options.credentials, "omit");
+  } finally { client.close(); }
+});
+
+test("le registre refuse contexte/version divergents et réponse retardée après retrait", async () => {
+  let mismatch = true; let release; let entered;
+  const started = new Promise((resolve) => { entered = resolve; });
+  const { client, notifications } = make(async (path) => {
+    if (identityRoute(path)) return Response.json(brokerIdentity());
+    if (!mismatch) { entered(); await new Promise((resolve) => { release = resolve; }); }
+    return Response.json(brokerPage([], mismatch ? { authorization_version: "b".repeat(64) } : {}));
+  });
+  try {
+    await client.identity(); client.selectContext("context-brokers");
+    await assert.rejects(client.brokers(), (error) => error.code === "context_revoked");
+    assert.equal(client.context, null); assert.equal(notifications.length, 1);
+    mismatch = false; await client.identity(); client.selectContext("context-brokers");
+    const pending = client.brokers(); await started; client.clearContext(); release();
+    await assert.rejects(pending, HumanSuperseded);
+  } finally { client.close(); }
+});
+
+test("le budget durable bloque toutes les lectures et survit aux changements de contexte", async () => {
+  let exhausted = true; let reads = 0;
+  const { client } = make(async (path) => {
+    reads++; if (identityRoute(path)) return Response.json(brokerIdentity());
+    return exhausted ? errorResponse(429, "audit_read_budget_exhausted", "contact_operator") : Response.json(brokerPage());
+  });
+  try {
+    await client.identity(); client.selectContext("context-brokers");
+    await assert.rejects(client.brokers(), (error) => error.code === "audit_read_budget_exhausted");
+    assert.equal(client.readBudgetStopped, true); const before = reads;
+    client.clearContext(); client.selectContext("context-brokers");
+    await assert.rejects(client.brokers(), (error) => error.retryAction === "contact_operator");
+    await assert.rejects(client.identity(), (error) => error.code === "audit_read_budget_exhausted");
+    await assert.rejects(client.resources(), (error) => error.code === "audit_read_budget_exhausted");
+    assert.equal(reads, before, "Aucune navigation ni lecture automatique ne réarme le budget");
+    exhausted = false; client.allowReadAfterOperatorAction(); await client.brokers();
+    assert.equal(client.readBudgetStopped, false); assert.equal(reads, before + 1);
+  } finally { client.close(); }
+});
+
+test("une identité relue retirant le cap invalide le contexte sans sélection de remplacement", async () => {
+  let removed = false;
+  const { client, notifications } = make(async () => { const value = brokerIdentity(); if (removed) value.contexts[0].capabilities = []; return Response.json(value); });
+  try {
+    await client.identity(); client.selectContext("context-brokers"); removed = true; await client.identity();
+    assert.equal(client.context, null); assert.deepEqual(notifications, [["context", "context_revoked"]]);
+  } finally { client.close(); }
+});
 
 function make(fetcher) {
   const notifications = [];
