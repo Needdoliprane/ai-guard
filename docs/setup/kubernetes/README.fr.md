@@ -8,6 +8,110 @@ Kubernetes fournit actuellement diagnostic HTTPS et inspection, pas le
 lancement de workers. Il n'existe pas d'option de lancement
 `--runtime kubernetes` ni de profil dotenv Kubernetes.
 
+## Lancer le diagnostic CLI en lecture seule
+
+Utiliser `agentsandbox kubernetes doctor` avec une autorité retenue explicite
+et soit un fichier de jeton Bearer statique, soit une paire certificat/clé
+client. La commande effectue seulement trois GET authentifiés : Namespace
+`kube-system`, Namespace tenant exact et `/version`. Elle ne crée aucun Pod,
+ne configure pas RBAC, n'admet aucune charge, n'exécute ni exec ni attach et
+ne modifie pas le cluster. Le produit ne découvre aucun kubeconfig, contexte,
+plugin de credentials ni configuration d'environnement.
+
+Pour la cible Docker Desktop, faire d'abord approuver par le propriétaire du
+cluster l'endpoint API exact, l'AC, l'identité et les permissions de lecture.
+Obtenir avec un outil opérateur autorisé séparément le `metadata.uid` de
+`kube-system` et du Namespace tenant voulu. Remplacer les deux placeholders
+explicites de ces commandes opérateur ; `doctor` ne les exécute ni ne les
+importe :
+
+```sh
+kubectl --context <authorized-desktop-context> get namespace kube-system -o jsonpath='{.metadata.uid}'
+kubectl --context <authorized-desktop-context> get namespace <tenant-namespace> -o jsonpath='{.metadata.uid}'
+shasum -a 256 /absolute/private/control/kubernetes/ca.pem
+```
+
+L'empreinte porte sur les octets exacts de l'AC préparée, espaces PEM compris ;
+sous Linux, `sha256sum` permet le même calcul. Retenir un UUID d'autorité neuf
+non nul attribué par le contrôle de confiance. Ni UID ni label de Namespace
+n'authentifie un tenant. Ne pas inventer d'UID, accepter silencieusement son
+changement ou choisir une identité administrateur par commodité. L'identité
+restreinte doit être provisionnée hors de ce diagnostic.
+
+Préparer un **nouveau** répertoire privé et ses fichiers sans remplacer les
+credentials ni la confiance existants. Le JSON d'autorité suit le contrat
+existant `KubernetesAuthorityV1`, refuse champs inconnus/doublons et reste
+limité à 16 Kio. Toutes les valeurs suivantes sont illustratives et doivent
+être remplacées par les valeurs approuvées ; le placeholder d'empreinte est
+volontairement invalide :
+
+```json
+{
+  "version": 1,
+  "authority_id": "00000000-0000-4000-8000-000000000001",
+  "endpoint": "https://127.0.0.1:6443/",
+  "cluster_namespace_uid": "11111111-1111-4111-8111-111111111111",
+  "namespace": "tenant-a",
+  "namespace_uid": "22222222-2222-4222-8222-222222222222",
+  "trust_sha256": "<64-lowercase-hex-sha256-of-prepared-ca-bytes>"
+}
+```
+
+Utiliser des chemins absolus sans symlinks. Chaque entrée est un fichier
+ordinaire à lien unique, propriété de l'UID effectif et en `0600`, sous des
+ancêtres appartenant à root/UID effectif sans écriture groupe/autres, avec les
+contrôles ACL/filesystem du stockage privé. Un temporaire sticky de root est
+l'exception contrôlée existante. Préférer un nouveau répertoire de contrôle
+`0700` ; la commande ne répare aucun droit. AC/certificat limités à 64 Kio,
+clé privée à 16 Kio, jeton à 8 Kio. Le jeton contient 32–8192 caractères ASCII
+de jeton, sans espace ni saut de ligne ; la paire PEM certificat/clé est
+validée pour la correspondance des clés et la compatibilité TLS.
+
+```sh
+agentsandbox kubernetes doctor \
+  --authority-file /absolute/private/control/kubernetes/authority.json \
+  --ca-file /absolute/private/control/kubernetes/ca.pem \
+  --token-file /absolute/private/control/kubernetes/token
+```
+
+Pour mTLS, remplacer `--token-file` par les deux options liées :
+
+```sh
+agentsandbox kubernetes doctor \
+  --authority-file /absolute/private/control/kubernetes/authority.json \
+  --ca-file /absolute/private/control/kubernetes/ca.pem \
+  --client-cert-file /absolute/private/control/kubernetes/client-chain.pem \
+  --client-key-file /absolute/private/control/kubernetes/client.key
+```
+
+Les deux authentifications ensemble, ou une seule moitié de paire
+certificat/clé, sont refusées. AC explicite et validation du nom d'hôte sont
+obligatoires : aucune option insecure, découverte de proxy ou identité de
+repli. Le produit n'extrait aucun credential kubeconfig et ne lance aucun
+plugin d'authentification.
+
+Le succès sort en `0` et écrit un rapport JSON unique avec `version: 1`,
+`admission_available: false`, les vrais `diagnostics` et une entrée
+`admission_gap_reasons` pour chaque écart rapporté. Les observations incluent
+empreinte d'autorité, version serveur, UID des Namespaces, label Pod Security
+reconnu et date d'observation. Réserver ces métadonnées à leur audience
+autorisée. Ce n'est ni une autorisation de charge, ni une preuve d'application
+du confinement, ni un reçu d'audit durable du contrôle. Les trois lectures
+sont successives et non atomiques. Les bornes par requête ci-dessous
+s'appliquent ; plusieurs requêtes de huit secondes peuvent être nécessaires.
+Huit secondes n'est donc ni la borne totale de la commande ni un benchmark
+de latence sur une machine de développement chargée.
+
+Une erreur d'inspection/configuration sort en `1` sans rapport JSON ; arguments
+incomplets ou contradictoires sortent en `2`. Les erreurs utilisent des
+catégories fermées sans chemin, corps de réponse ni chaîne d'erreur
+transport/JSON. Selon la catégorie, vérifier fichiers privés, identités
+retenues, endpoint/AC/SAN et droits de lecture autorisés. Si une observation
+typée contient un credential retenu, le rapport entier est refusé : aucune
+identité n'est remplacée par une valeur masquée inventée. Corriger la source
+en privé avant de réessayer. Des credentials modifiés exigent une nouvelle
+invocation préparée.
+
 ## Configurer l'intégration Rust
 
 Le contrôle de confiance utilise
@@ -62,6 +166,7 @@ Les cibles de régression produit sont :
 cargo test --locked --test kubernetes_adapter -- --test-threads=1
 cargo test --locked --test kubernetes_transport -- --test-threads=1
 cargo test --locked --test kubernetes_transport_lifetime -- --test-threads=1
+cargo test --locked --test kubernetes_cli -- --test-threads=1
 ```
 
 Elles exercent le vrai transport HTTPS Rust contre des fixtures TLS locales,

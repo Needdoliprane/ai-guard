@@ -10,6 +10,7 @@ pub mod identity;
 pub mod identity_cli;
 pub mod ingress;
 pub mod jev;
+pub mod kubernetes_cli;
 pub mod model;
 pub mod model_ingress;
 pub mod model_tls;
