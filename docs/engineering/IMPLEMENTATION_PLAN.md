@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## Lot intégré — diagnostic de récupération sans journal
+
+Base `26ab9e7`, worktree dédié `codex/recovery-journal-diagnostic-20261104`.
+Core possède `server.rs`, Luna les régressions ciblées ; Root possède
+contrats, documentation, sandbox et intégration ; revue source indépendante.
+Le RED réel précède le correctif. Le contrat conserve authentification,
+refus des UUID nuls et inconnues, sans initialiser l'historique de récupération.
+[Preuves et limites](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
+Sept parents ciblés, compilation toutes cibles et revue PASS ; code
+`3f8b33d` composé en `0281bb1` sans delta applicatif supplémentaire.
+
+La prochaine priorité de reprise dépend du gel coordonné du travail D5
+externe ; ses fichiers protégés restent préservés. Continuer les travaux
+indépendants, sans déclarer le contrôle réactivable ou Kubernetes livré.
+
 ## Lot intégré — compteurs fiables et snapshot de présence
 
 Base00876e3, donneur `codex/presence-cost-20261104`. Root intègre et possède

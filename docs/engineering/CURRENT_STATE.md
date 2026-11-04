@@ -1,5 +1,20 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — diagnostic d'un journal de récupération absent
+
+Le broker distingue un historique requis absent d'une entrée invalide :
+`needs_reconciliation` remplace le refus trompeur sur les ouvertures sans
+création. Aucun inventaire vide, nouveau journal ou droit d'exécution n'en
+est déduit. Les UUID nuls de Cancel restent refusés après authentification,
+avant ouverture. Les guides opérateur EN/FR indiquent les preuves à préserver.
+[Vérification et limites](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
+Sept fonctions ciblées et compilation toutes cibles PASS, revue traitée ;
+code `3f8b33d` intégré en `0281bb1`, sources égales au gel vérifié.
+
+La reprise D5, le transport des workers, la fédération multi-hôtes,
+Kubernetes et les qualifications réelles restent ouverts. G09 demeure FAIL ;
+aucun gate global n'est clos par ce correctif de diagnostic.
+
 ## 4 novembre — coût mesuré et relecture redondante retirée
 
 Les synchronisations des ancêtres, absentes du compteur de test, sont

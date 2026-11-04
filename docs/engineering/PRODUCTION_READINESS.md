@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Diagnostic broker du 4 novembre : journal requis absent distingué d'une
+entrée invalide, sans création en récupération ; sept fonctions ciblées et
+compilation toutes cibles PASS après RED, revue indépendante et guides EN/FR.
+[Preuves et limites](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
+Ce résultat logiciel ne qualifie ni restauration, ni réactivation, ni runtime.
+G09 reste FAIL, 0/12 gates globaux clos ; Clippy Linux BLOCKED.
+
 Coût publisher du4novembre : compteur d'ancêtres corrigé après RED, sept
 parents ciblés uniques PASS sur les gels reliés et all-targets final PASS.
 Le getter non autorisant évite un scan ; les contrôles avant effet restent
