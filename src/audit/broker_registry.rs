@@ -614,6 +614,28 @@ fn replay(db: &Connection, change: &Change) -> anyhow::Result<Option<BrokerMutat
 }
 
 impl Store {
+    /// Compute the existing grant commitment without opening or mutating a Store.
+    pub(crate) fn broker_grant_input_hash(
+        mutation: &BrokerGrantMutationV1,
+    ) -> anyhow::Result<String> {
+        mutation.validate()?;
+        Change::Grant {
+            mutation: mutation.clone(),
+        }
+        .input_hash()
+    }
+
+    /// Compute the existing revocation commitment; this does not authorize it.
+    pub(crate) fn broker_revocation_input_hash(
+        mutation: &BrokerRevocationV1,
+    ) -> anyhow::Result<String> {
+        mutation.validate()?;
+        Change::Revoke {
+            mutation: mutation.clone(),
+        }
+        .input_hash()
+    }
+
     /// Compute the existing heartbeat commitment from checked DTO evidence.
     /// This does not authenticate the DTO, open a Store, or construct a current
     /// BrokerIdentityV1 proof. The original private Change serialization is

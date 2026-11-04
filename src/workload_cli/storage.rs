@@ -3,6 +3,8 @@ use super::{
     manifest::{self, Action, Control, Manifest, Request},
 };
 use crate::{
+    audit::Store,
+    broker_registry::{BrokerMutationResultV1, parse_time, registry_uuid, revision},
     control::{ControlProtocolV1, SupervisionProtocolV1},
     control_fs::{Directory, PrivateFile, absolute_path},
     workload::WorkloadBindingReceiptV1,
@@ -47,7 +49,37 @@ struct Scope {
 struct Receipt {
     version: u32,
     request_sha256: String,
-    receipt: WorkloadBindingReceiptV1,
+    receipt: RecordedReceipt,
+}
+
+// Untagged preserves the exact serialized binding-receipt shape in V1 records.
+// The recovery action selects and validates the appropriate closed DTO.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum RecordedReceipt {
+    Binding(WorkloadBindingReceiptV1),
+    Broker(BrokerMutationResultV1),
+}
+
+impl RecordedReceipt {
+    pub fn revision(&self) -> u64 {
+        match self {
+            Self::Binding(value) => value.revision,
+            Self::Broker(value) => value.receipt.grant_revision,
+        }
+    }
+    pub fn replayed(&self) -> bool {
+        match self {
+            Self::Binding(value) => value.replayed,
+            Self::Broker(value) => value.replayed,
+        }
+    }
+    pub fn normalize(&mut self) {
+        match self {
+            Self::Binding(value) => value.replayed = false,
+            Self::Broker(value) => value.replayed = false,
+        }
+    }
 }
 
 pub(super) struct Operation {
@@ -232,7 +264,7 @@ impl Operation {
                     return Err(E::UnsafeState);
                 }
             }
-            (Request::Revoke(_), None) => {}
+            (Request::Revoke(_) | Request::BrokerGrant(_) | Request::BrokerRevoke(_), None) => {}
             _ => return Err(E::IncompletePreparation),
         }
         if let Some(scope) = self.read_record::<Scope>("scope", "scope.json")? {
@@ -284,7 +316,7 @@ impl Operation {
         Ok(self.read_record::<Scope>("scope", "scope.json")?.is_some())
     }
 
-    pub fn receipt(&self) -> Result<Option<WorkloadBindingReceiptV1>> {
+    pub fn receipt(&self) -> Result<Option<RecordedReceipt>> {
         self.revalidate()?;
         let Some(record) = self.read_record::<Receipt>("receipt", "receipt.json")? else {
             return Ok(None);
@@ -296,13 +328,13 @@ impl Operation {
             return Err(E::UnsafeState);
         }
         validate_receipt(&self.recovery, &record.receipt)?;
-        if record.receipt.replayed {
+        if record.receipt.replayed() {
             return Err(E::UnsafeState);
         }
         Ok(Some(record.receipt))
     }
 
-    pub fn save_receipt(&self, receipt: &WorkloadBindingReceiptV1) -> Result<()> {
+    pub fn save_receipt(&self, receipt: &RecordedReceipt) -> Result<()> {
         self.revalidate()?;
         validate_receipt(&self.recovery, receipt)?;
         if let Some(previous) = self.receipt()? {
@@ -402,7 +434,7 @@ impl Operation {
     pub fn report(
         &self,
         status: &str,
-        receipt: Option<&WorkloadBindingReceiptV1>,
+        receipt: Option<&RecordedReceipt>,
         extra_secrets: &[&str],
     ) -> Result<()> {
         self.revalidate()?;
@@ -410,18 +442,30 @@ impl Operation {
         if let Some(file) = &self.credential {
             secrets.push(key(file)?);
         }
-        super::print_json(
-            &serde_json::json!({
-                "version":1, "status":status, "action":self.recovery.action.name(),
-                "operation_id":self.recovery.request.operation_id(), "credential_id":self.recovery.request.id(),
-                "revision":receipt.map(|v|v.revision), "receipt":receipt,
-                "current_state":"not_observed", "consumer_delivery":"not_observed",
-                "credential_file":self.credential.as_ref().map(|_|self.directory.path().join("credential")),
-                "recovery_file":self.directory.path().join("recovery.json"),
-                "operation_dir":self.directory.path(),
-            }),
-            &secrets,
-        )
+        let mut report = serde_json::json!({
+            "version":1, "status":status, "action":self.recovery.action.name(),
+            "operation_id":self.recovery.request.operation_id(), "credential_id":self.recovery.request.id(),
+            "revision":receipt.map(RecordedReceipt::revision), "receipt":receipt,
+            "current_state":"not_observed", "consumer_delivery":"not_observed",
+            "credential_file":self.credential.as_ref().map(|_|self.directory.path().join("credential")),
+            "recovery_file":self.directory.path().join("recovery.json"),
+            "operation_dir":self.directory.path(),
+        });
+        match &self.recovery.request {
+            Request::BrokerGrant(request) => {
+                report["broker_id"] = serde_json::json!(request.broker_id);
+                report["credential_id"] = serde_json::json!(request.credential_id);
+            }
+            Request::BrokerRevoke(request) => {
+                report["broker_id"] = serde_json::json!(request.broker_id);
+                report["credential_id"] = serde_json::Value::Null;
+            }
+            Request::Issue(_) | Request::Revoke(_) => {}
+        }
+        if let Some(RecordedReceipt::Broker(result)) = receipt {
+            report["receipt"] = serde_json::to_value(&result.receipt).map_err(|_| E::Output)?;
+        }
+        super::print_json(&report, &secrets)
     }
 
     pub fn protect(&self, value: &impl Serialize, current_runner: &str) -> Result<()> {
@@ -477,10 +521,19 @@ fn inventory(directory: &Directory) -> Result<usize> {
     Ok(stages)
 }
 
-pub(super) fn validate_receipt(
-    recovery: &Recovery,
-    receipt: &WorkloadBindingReceiptV1,
-) -> Result<()> {
+pub(super) fn validate_receipt(recovery: &Recovery, receipt: &RecordedReceipt) -> Result<()> {
+    match (&recovery.request, receipt) {
+        (Request::Issue(_) | Request::Revoke(_), RecordedReceipt::Binding(receipt)) => {
+            validate_binding_receipt(recovery, receipt)
+        }
+        (Request::BrokerGrant(_) | Request::BrokerRevoke(_), RecordedReceipt::Broker(result)) => {
+            validate_broker_receipt(recovery, result)
+        }
+        _ => Err(E::Protocol),
+    }
+}
+
+fn validate_binding_receipt(recovery: &Recovery, receipt: &WorkloadBindingReceiptV1) -> Result<()> {
     if receipt.version != 1
         || receipt.credential_id != recovery.request.id()
         || receipt.revision
@@ -499,6 +552,106 @@ pub(super) fn validate_receipt(
         return Err(E::Protocol);
     }
     manifest::canonical_uuid(&receipt.audit_event_id).map_err(|_| E::Protocol)
+}
+
+fn validate_broker_receipt(recovery: &Recovery, result: &BrokerMutationResultV1) -> Result<()> {
+    let broker = &result.broker;
+    let receipt = &result.receipt;
+    let expected = crate::broker_registry::next_revision(recovery.request.revision())
+        .map_err(|_| E::Protocol)?;
+    if broker.version != 1
+        || broker.broker_id != recovery.request.id()
+        || receipt.broker_id != broker.broker_id
+        || receipt.operation_id != recovery.request.operation_id()
+        || broker.grant_revision != expected
+        || receipt.grant_revision != expected
+        || receipt.heartbeat_revision != broker.heartbeat_revision
+        || receipt.audit_seq <= 0
+        || !digest_shape(&receipt.audit_hash)
+    {
+        return Err(E::Protocol);
+    }
+    for id in [
+        &broker.broker_id,
+        &broker.credential_id,
+        &broker.incarnation_id,
+    ] {
+        registry_uuid(id).map_err(|_| E::Protocol)?;
+    }
+    revision(broker.heartbeat_revision).map_err(|_| E::Protocol)?;
+    let granted = parse_time(&broker.granted_at).map_err(|_| E::Protocol)?;
+    if parse_time(&broker.not_after).map_err(|_| E::Protocol)? <= granted {
+        return Err(E::Protocol);
+    }
+    if !(1..=300).contains(&broker.lease_seconds)
+        || broker.authorities.is_empty()
+        || broker.authorities.len() > 16
+    {
+        return Err(E::Protocol);
+    }
+    let mut authorities = std::collections::BTreeSet::new();
+    for authority in &broker.authorities {
+        authority.validate().map_err(|_| E::Protocol)?;
+        if !authorities.insert(&authority.authority_id) {
+            return Err(E::Protocol);
+        }
+    }
+    match (broker.revoked, &broker.revoked_at) {
+        (false, None) => {}
+        (true, Some(at)) if parse_time(at).map_err(|_| E::Protocol)? >= granted => {}
+        _ => return Err(E::Protocol),
+    }
+    match &broker.last_heartbeat {
+        None if broker.heartbeat_revision == 0 => {}
+        Some(heartbeat) if broker.heartbeat_revision > 0 => {
+            registry_uuid(&heartbeat.incarnation_id).map_err(|_| E::Protocol)?;
+            revision(heartbeat.sequence).map_err(|_| E::Protocol)?;
+            if heartbeat.sequence == 0
+                || parse_time(&heartbeat.lease_expires_at).map_err(|_| E::Protocol)?
+                    < parse_time(&heartbeat.received_at).map_err(|_| E::Protocol)?
+            {
+                return Err(E::Protocol);
+            }
+        }
+        _ => return Err(E::Protocol),
+    }
+    let input_hash = match &recovery.request {
+        Request::BrokerGrant(request) => {
+            if broker.revoked
+                || (request.expected_revision.is_none()
+                    && (broker.heartbeat_revision != 0 || broker.last_heartbeat.is_some()))
+                || broker.credential_id != request.credential_id
+                || broker.incarnation_id != request.incarnation_id
+                || broker.authorities != request.authorities
+                || broker.lease_seconds != request.lease_seconds
+                || parse_time(&broker.not_after)
+                    .map_err(|_| E::Protocol)?
+                    .timestamp_millis()
+                    != parse_time(&request.not_after)
+                        .map_err(|_| E::Protocol)?
+                        .timestamp_millis()
+            {
+                return Err(E::Protocol);
+            }
+            Store::broker_grant_input_hash(request)
+        }
+        Request::BrokerRevoke(request) if broker.revoked => {
+            Store::broker_revocation_input_hash(request)
+        }
+        _ => return Err(E::Protocol),
+    }
+    .map_err(|_| E::Protocol)?;
+    if receipt.input_hash != input_hash {
+        return Err(E::Protocol);
+    }
+    Ok(())
+}
+
+fn digest_shape(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(test)]

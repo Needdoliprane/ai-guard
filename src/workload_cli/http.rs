@@ -1,11 +1,9 @@
 use super::{
     Result, WorkloadCliError as E,
     manifest::{Control, Request},
-    storage::{Recovery, validate_receipt},
+    storage::{RecordedReceipt, Recovery, validate_receipt},
 };
-use crate::{
-    control::ControlProtocolV1, control_fs::PrivateFile, workload::WorkloadBindingReceiptV1,
-};
+use crate::{control::ControlProtocolV1, control_fs::PrivateFile};
 use futures_util::StreamExt;
 use reqwest::{StatusCode, header};
 use serde::de::DeserializeOwned;
@@ -128,12 +126,14 @@ impl Client {
         Ok(value)
     }
 
-    pub async fn post(&self, recovery: &Recovery) -> Result<WorkloadBindingReceiptV1> {
+    pub async fn post(&self, recovery: &Recovery) -> Result<RecordedReceipt> {
         let path = match &recovery.request {
             Request::Issue(_) => "/api/v1/workload-bindings".to_owned(),
             Request::Revoke(value) => {
                 format!("/api/v1/workload-bindings/{}/revoke", value.credential_id)
             }
+            Request::BrokerGrant(_) => "/api/v1/brokers/grants".to_owned(),
+            Request::BrokerRevoke(value) => format!("/api/v1/brokers/{}/revoke", value.broker_id),
         };
         let bytes = recovery.request.bytes()?;
         if bytes.len() > 16_384 {
@@ -150,17 +150,22 @@ impl Client {
         if !status.is_success() {
             return Err(public_error(status, &bytes));
         }
-        let mut receipt: WorkloadBindingReceiptV1 = decode(&bytes)?;
+        let mut receipt = match &recovery.request {
+            Request::Issue(_) | Request::Revoke(_) => RecordedReceipt::Binding(decode(&bytes)?),
+            Request::BrokerGrant(_) | Request::BrokerRevoke(_) => {
+                RecordedReceipt::Broker(decode(&bytes)?)
+            }
+        };
         validate_receipt(recovery, &receipt)?;
         match &recovery.request {
-            Request::Issue(_)
-                if (status == StatusCode::CREATED && !receipt.replayed)
-                    || (status == StatusCode::OK && receipt.replayed) => {}
-            Request::Revoke(_) if status == StatusCode::OK => {}
+            Request::Issue(_) | Request::BrokerGrant(_)
+                if (status == StatusCode::CREATED && !receipt.replayed())
+                    || (status == StatusCode::OK && receipt.replayed()) => {}
+            Request::Revoke(_) | Request::BrokerRevoke(_) if status == StatusCode::OK => {}
             _ => return Err(E::Protocol),
         }
         // Retain canonical historical evidence; an exact replay changes only this bit.
-        receipt.replayed = false;
+        receipt.normalize();
         Ok(receipt)
     }
 }

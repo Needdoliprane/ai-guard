@@ -1,5 +1,6 @@
 use super::{Result, WorkloadCliError as E};
 use crate::{
+    broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRevocationV1},
     control_fs::{PrivateFile, absolute_path},
     workload::{WorkloadBindingIssueV1, WorkloadBindingRevocationV1, WorkloadSubjectV1},
 };
@@ -23,6 +24,8 @@ pub(super) enum Action {
     Issue,
     Rotate,
     Revoke,
+    BrokerGrant,
+    BrokerRevoke,
 }
 
 impl Action {
@@ -31,6 +34,8 @@ impl Action {
             Self::Issue => "issue",
             Self::Rotate => "rotate",
             Self::Revoke => "revoke",
+            Self::BrokerGrant => "broker_grant",
+            Self::BrokerRevoke => "broker_revoke",
         }
     }
 }
@@ -56,6 +61,28 @@ pub(super) enum Manifest {
         credential_id: String,
         expected_revision: u64,
     },
+    BrokerGrant {
+        version: u32,
+        broker_id: String,
+        #[serde(deserialize_with = "required_revision")]
+        expected_revision: Option<u64>,
+        credential_id: String,
+        incarnation_id: String,
+        authorities: Vec<BrokerAuthorityV1>,
+        lease_seconds: u32,
+        not_after: String,
+    },
+    BrokerRevoke {
+        version: u32,
+        broker_id: String,
+        expected_revision: u64,
+    },
+}
+
+fn required_revision<'de, D: serde::Deserializer<'de>>(
+    decoder: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Option::<u64>::deserialize(decoder)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -63,6 +90,8 @@ pub(super) enum Manifest {
 pub(super) enum Request {
     Issue(WorkloadBindingIssueV1),
     Revoke(WorkloadBindingRevocationV1),
+    BrokerGrant(BrokerGrantMutationV1),
+    BrokerRevoke(BrokerRevocationV1),
 }
 
 impl Request {
@@ -76,18 +105,24 @@ impl Request {
         match self {
             Self::Issue(v) => &v.credential_id,
             Self::Revoke(v) => &v.credential_id,
+            Self::BrokerGrant(v) => &v.broker_id,
+            Self::BrokerRevoke(v) => &v.broker_id,
         }
     }
     pub fn operation_id(&self) -> &str {
         match self {
             Self::Issue(v) => &v.operation_id,
             Self::Revoke(v) => &v.operation_id,
+            Self::BrokerGrant(v) => &v.operation_id,
+            Self::BrokerRevoke(v) => &v.operation_id,
         }
     }
     pub fn revision(&self) -> u64 {
         match self {
             Self::Issue(v) => v.expected_revision,
             Self::Revoke(v) => v.expected_revision,
+            Self::BrokerGrant(v) => v.expected_revision.unwrap_or(0),
+            Self::BrokerRevoke(v) => v.expected_revision,
         }
     }
     pub fn validate(&self, action: Action) -> Result<()> {
@@ -95,6 +130,8 @@ impl Request {
             (Self::Issue(v), Action::Issue) if v.expected_revision == 0 => v.validate(),
             (Self::Issue(v), Action::Rotate) if v.expected_revision > 0 => v.validate(),
             (Self::Revoke(v), Action::Revoke) => v.validate(),
+            (Self::BrokerGrant(v), Action::BrokerGrant) => v.validate(),
+            (Self::BrokerRevoke(v), Action::BrokerRevoke) => v.validate(),
             _ => return Err(E::UnsafeState),
         }
         .map_err(|_| E::UnsafeState)
@@ -119,6 +156,51 @@ impl Manifest {
 
     pub fn prepare(self) -> Result<(Action, Request, Option<String>)> {
         let (action, request, secret) = match self {
+            Self::BrokerGrant {
+                version,
+                broker_id,
+                expected_revision,
+                credential_id,
+                incarnation_id,
+                authorities,
+                lease_seconds,
+                not_after,
+            } => {
+                let expiry =
+                    crate::broker_registry::parse_time(&not_after).map_err(|_| E::InvalidInput)?;
+                if expiry.timestamp_millis() <= chrono::Utc::now().timestamp_millis() {
+                    return Err(E::InvalidInput);
+                }
+                (
+                    Action::BrokerGrant,
+                    Request::BrokerGrant(BrokerGrantMutationV1 {
+                        version,
+                        operation_id: Uuid::new_v4().to_string(),
+                        broker_id,
+                        expected_revision,
+                        credential_id,
+                        incarnation_id,
+                        authorities,
+                        lease_seconds,
+                        not_after,
+                    }),
+                    None,
+                )
+            }
+            Self::BrokerRevoke {
+                version,
+                broker_id,
+                expected_revision,
+            } => (
+                Action::BrokerRevoke,
+                Request::BrokerRevoke(BrokerRevocationV1 {
+                    version,
+                    operation_id: Uuid::new_v4().to_string(),
+                    broker_id,
+                    expected_revision,
+                }),
+                None,
+            ),
             Self::Revoke {
                 version,
                 credential_id,

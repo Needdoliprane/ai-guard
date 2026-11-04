@@ -1,4 +1,4 @@
-//! Explicit operator provisioning through the existing workload binding API.
+//! Explicit operator provisioning through the workload binding and broker APIs.
 //! Private preparations survive the process; receipts describe historical recording.
 use clap::{Args, Subcommand};
 use serde::Serialize;
@@ -18,7 +18,7 @@ pub struct WorkloadArgs {
 
 #[derive(Subcommand)]
 enum WorkloadCommand {
-    /// Prepare a private key and immutable request locally, without HTTP.
+    /// Prepare an immutable request locally; credential issue/rotation also creates a private key.
     Prepare {
         /// Private closed manifest, or '-' for bounded public standard input.
         #[arg(long)]
