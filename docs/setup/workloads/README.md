@@ -20,6 +20,8 @@ Use the reviewed control binary, the existing tenant database and its private co
 
 Broker compatibility also requires the configured namespace, tenant, runner role and `broker_supervision_v1`. Fresh Submit, approve, resume and export require active supervision. **Migrating or reopening a store does not activate it.** Ordinary reopen of schemas 3–6 remains inactive maintenance; safe reactivation is not delivered. Do not edit metadata, delete storage or reuse exclusive fresh-store initialization to bypass that condition. See [active control and recovery](../broker/README.md#require-an-active-compatible-control).
 
+Offline human maintenance (`human provision`, `human resume-provision` and `human apply`) accepts an existing validated schema 4, 5 or 6 database with inactive supervision. After the explicit 5→6 migration, use the same private control filesystem, tenant binding and `--confirm-control-stopped` attestation. The commands do not create or migrate the database or reactivate supervision. Preserve private credentials and recovery files; resume only the exact retained preparation, without rotating its credential or overwriting its files. Follow [account provisioning and recovery](../identity/README.md#provision-an-account-and-retain-its-recovery) and keep the same audit capacity policy across consumers.
+
 For an existing schema 5 store, replace every installation reference below. The backup destination must be new; its private parent must already exist. Migration verifies a backup and upgrades exactly one step. Its default target is still 2, so spell out 6:
 
 ```sh
