@@ -9,13 +9,17 @@ les dix écarts d'admission et la reprise de vrais workers restent ouverts.
 [Preuves et périmètres](VALIDATION.md#4-novembre--préflight-kubernetes-audité).
 
 Le CLI réel avec Keycloak local a atteint login/PKCE, identité/contexte et
-lecture autorisée au gel F ; le logout reste non qualifié. Le gel G refuse
+lecture autorisée au gel F ; son logout restait non qualifié. Le gel G refuse
 plus tôt un cookie dans le harnais ; son résultat ne remplace pas F. Une
 compatibilité de cookie quoté est reproduite puis corrigée hors ligne et
 le raccord d'accusé de déconnexion passe27tests ciblés, avec profils/guides
 EN/FR relus, trois profils validés et compilation composée PASS. Le setup
 stdin passe ; son chemin fichier échoue sans cause établie. Aucun nouveau
-fait IdP n'est déduit de ces contrôles logiciels.
+fait IdP n'est déduit de ces contrôles logiciels. Séparément, la recette H
+passe sur le vrai Keycloak local : connexion, lectures, refresh/rotation,
+logout et audits durables,13phases après17tests du harnais. Le périmètre
+LinuxARM64 isolé ne qualifie pas Web composé/macOS/TTY/entreprise ou runtime.
+[Preuve réelle et limites](VALIDATION.md#4-novembre--sso-cli-réel-renouvellement-et-déconnexion).
 Les paragraphes suivants conservent leurs résultats historiques ; ils ne
 redéfinissent pas ces portées. G09 FAIL,0/12 gates globaux clos.
 

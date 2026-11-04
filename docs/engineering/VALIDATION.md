@@ -1,5 +1,78 @@
 # Validation courante
 
+## 4 novembre — SSO CLI réel, renouvellement et déconnexion
+
+**PASS**, un seul scénario H sur le vrai Keycloak26.8.1 local neuf,
+source Git5f508cf et profils d'accusé explicites. LinuxARM64 dans le
+confinement Docker, sans navigateur, TTY, fournisseur IA ou worker.
+Les13phases du report couvrent préflight, préparation privée par stdin,
+gateway, vrai formulaire/code/PKCE/callback, admission native, identité
+personnelle complète, sélection offerte, lecture autorisée/reçu, refresh
+avec génération suivante et contexte renouvelé/deuxième lecture, logout
+avec sortie naturelle CLI, arrêt gracieux gateway, audits corrélés durables
+et intégrité après cleanup. Local_session fermé, audit enregistré et accusé
+fournisseur accepté sont contrôlés séparément ; le contrôle ne contacte pas
+le fournisseur pour la session native (`control_provider_logout:not_attempted`).
+
+Préalablement, Luna compile le binaire et le helper privé puis exécute
+`cargo test --offline --locked --manifest-path
+/inputs/sso-cli-combined-5f508cf-gel-h/Cargo.toml
+--example sso_cli_real_keycloak -- --test-threads=1` : **17PASS/0FAIL/0ignoré**,
+dont6main,2audit,9web. Ces17tests du harnais ne sont pas des tests produit
+supplémentaires. Logs privés
+`/private/tmp/ai-guard-sso-h-offline-luna-20261104.TK1Psz/` :
+build26602538e82a51faab0e7abdeec9be74c7ce7840c962bee0ab3462f6eaaa50f0,
+tests007aa2b6c16eda7ce4f546359f375abfab824b8b4ac7b8d4ba67e4183ba47a9c.
+Main31ced1dd5268d797a62b1575f42ef817f6b68e40252eb0b9e581e8b06d727ecf ;
+audit65d9892c66d34188c6d659053d793b1a4ce9ec8596fdaf6e379af502fc8e9780 ;
+web0e01b9cd05c05e81f19163a8c6fac1f35ffe3b670d4f87a4175ca00990fbf6b9.
+Source/binaire/fixtures sont recoupés par Root avant/après. Le manifeste42
+garde son périmètre humain historique ; l'archive Git et les sept hashes
+OIDC contrôlés séparément établissent la composition. Aucun test auxiliaire
+Keycloak/PKI/modèle n'entre dans Git.
+
+Nouveau owner d2b35f7a, image2115d432, fixé1800s à10:19:29UTC,
+réseau none/UID1000/root/source/registre RO, env-i/caps0/nnp, CPU1,
+mémoire5Gio/swap0, PID256/nofile1024/fsize512Mio,
+scratch3Gio/65536inodes. Peer f837bff1, image74dfae33/Keycloak26.8.1,
+fixé600s à10:23:39UTC, même netns loopback, rootRO/UID1000/caps0/nnp,
+CPU1/mémoire1Gio/swap0/PID256/nofile1024/fsize64Mio,
+tmpfs data256Mio/4096inodes et tmp64Mio/4096inodes noexec.
+Seul realm public RO monté ; ni port/socket/credential utilisateur ni réseau
+externe. Root inspecte les contrôles effectifs ; compilations terminées
+avant IdP/session, propriétaire>=900s au gate et>=600s avant driver,
+peer>=330s. Aucun délai allongé ou ancien reçu/acteur réutilisé.
+
+Scène Luna10:25:58→10:26:12UTC, RC naturel0 ; head stdout0,
+consumer stderr réel58215/wait0/EOF/0octet. Métadonnées privées dans
+`/private/tmp/ai-guard-sso-h-scene-luna-20261104.JnRTsJ/` ; pas de lecture
+ou hash de la quarantaine par les agents de test/implémentation.
+Root attend fermeture des enfants/drains, observe sleep seul, ferme les
+deux containers normalement : Runningfalse/Pid0, hold137 respectivement
+10:27:33 et10:27:46UTC ; exec Keycloak reaped137, inventaire exact vide.
+Ces137 de cleanup ne sont pas des sorties forcées du driver/CLI/gateway.
+Aucune donnée, image, volume ou preuve préexistante supprimée.
+
+Seulement ensuite, lecteur parent de fichier privé régulier/single-link
+borné/nofollow et stable, validation stricte version3/13phases/codes fermés,
+quatre hashes attendus indépendants obligatoires pour PASS **et** FAIL,
+puis DTO neuf normalisé. Revue indépendante du helper et du validateur,
+durcissement expected/EOF traité ; aucune donnée libre admise.
+`ADMITTED-REPORT-H.json`, SHA
+64c99598bca140da32e1b99833b12d2c7df26e958d6b4e7662775c7fd111b7c4 ;
+reçu `H-ROOT-CLOSURE.md`, SHA
+b26370215ca6f38b00fc4fea9a221bb20442f82a1ac3d473b777aea80ffca933,
+dans `/private/tmp/ai-guard-sso-cli-qa-20261104.5j99ro/`.
+
+**Limites :** refus de l'ancien contexte déclaré par la CLI, sans replay
+HTTP indépendant ; deux reçus distincts vérifiés, sans génération dans
+les événements de lecture. Projection native finale génération2 fermée
+et chaîne d'audit vérifiées. Les FAIL F/G restent conservés, sans attribution
+rétrospective de cause. `NOT_RUN` : nouveau profil Web réel, CLI natif macOS,
+TTY, entreprise/TLS, autres comptes/mappings/scénarios adverses, réauth après
+panne, runtime/cluster/100workers. Aucun benchmark déduit des14secondes.
+G09 reste FAIL,0/12 gates globaux clos ; `billable=false`.
+
 ## 4 novembre — accusé de déconnexion OIDC et profils explicites
 
 Base d2d254a, donneur a99325d, intégration1b2d34f ; profils/guides
@@ -89,11 +162,27 @@ Aucun fichier généré ou erreur n'est relu ; la première destination reste
 intacte. Le contrôle de toutes les cibles précède cette réussite stdin ;
 aucune compilation supplémentaire ensuite. Le succès stdin n'efface pas
 l'échec fichier, qui reste à diagnostiquer pour le mode d'entrée fichier.
+Un prérequis manquant est ensuite constaté en métadonnées dans l'owner H :
+`stat -f -c '%t %T' /inputs /scratch` donne6a656a63 pour le bind
+fakeowner et01021994 pour tmpfs. Le premier type est absent de la politique
+Linux de `control_fs::validate_filesystem_permissions` ; le parcours fichier
+le contrôle via `walk`, contrairement à stdin. Le refus de ce support est
+attendu selon le code ; sans stderr conservé, le contrôle effectivement
+déclencheur reste inféré. La documentation recommandait déjà stdin en
+conteneur et précise maintenant les deux prérequis propriétaire/filesystem.
+Validation du manifeste et destination privée restent inchangées.
 Root compare les seize hashes source/profils/helper post-commandes puis
 ferme normalement l'owner, hold137 à10:18:52UTC, Runningfalse/Pid0 et
 inventaire exact vide. Reçu `ROOT_COMPOSED_VALIDATION.md` dans
 `/private/tmp/ai-guard-logout-compose-inputs-20261104.VMxr7E/`,
 SHA89f8d53d0a3a3e314475d7cb6ace135bcfcf77edf6da444c3cc40f6402ed4a3c.
+
+Les deux donneurs OIDC propres/poussés sont retirés normalement après
+contrôle des consommateurs : probes cwd possédés58094/58095 visibles,
+sortie naturelle0, scans récursifs finaux vides sans diagnostic, puis
+`git worktree remove` sans force. Branches locale/distante et preuves
+préservées. Reçu privé `OIDC_WORKTREE_CLOSURE.md` dans le même parent,
+SHAcacc800752d157980057eda8f552a7c4a3f24c6fdf87bf8c09586bbc2369b7b0.
 
 `NOT_RUN` ici : nouvel échange Keycloak,
 CLI macOS, navigateur, concurrence/échec d'entropie à l'exécution et toutes

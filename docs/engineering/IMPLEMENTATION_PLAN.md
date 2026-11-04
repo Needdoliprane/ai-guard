@@ -14,12 +14,14 @@
    Compléter ensuite le vrai lancement/reprise de pods, sans confondre cette
    inspection avec le runtime obligatoire.
 3. Le vrai SSO CLI a franchi login/PKCE, identité/contexte et lecture autorisée.
-   Le logout reste non qualifié. L'accusé OIDC explicite est intégré avec
+   L'accusé OIDC explicite est intégré avec
    27tests produit ciblés PASS et revue ; profils/guides EN/FR sont intégrés,
    trois profils Rust/build/all-targets composés PASS. Préparation stdin PASS,
    chemin fichier RC1 à diagnostiquer séparément. Le cookie privé quoté passe11tests
-   après RED, sans reclasser G. Prochain jalon : une seule recette Keycloak
-   réelle login/lecture/refresh/rotation/lecture/logout après ses tests purs.
+   après RED, sans reclasser G. H passe ensuite sur le vrai Keycloak local :
+   login/lecture/refresh/rotation/lecture/logout et audits,13phases ;17tests
+   purs du harnais PASS avant cette unique scène LinuxARM64. Restent
+   nouveau profil Web composé, CLI macOS/TTY, entreprise/TLS et refus adverses.
 4. Poursuivre relais runtime, fédération multi-hôtes et qualifications réelles.
    Les worktrees D5 protégés restent intacts. Tests Luna ciblés et compilations
    sérielles sur le Mac sous pression ; aucune matrice E2E systématique.

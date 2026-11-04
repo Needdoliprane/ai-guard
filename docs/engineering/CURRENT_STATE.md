@@ -1,5 +1,19 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — parcours natif SSO vérifié dans son périmètre Linux
+
+La recette H contre un vrai Keycloak local neuf passe sur5f508cf :
+Code/PKCE/callback, admission, identité/contexte, deux lectures avec reçus,
+refresh/génération suivante/contexte renouvelé, logout confirmé côté
+fournisseur et contrôle, sorties CLI/gateway et audits durables vérifiés.
+Treize phases, un scénario réel ;17tests purs du harnais passent avant lui.
+Les résultats et FAIL historiques restent distincts. Le contrôle ferme
+sa session et trace l'opération ; la CLI possède son appel fournisseur.
+[Preuves, sources et fermeture des acteurs](VALIDATION.md#4-novembre--sso-cli-réel-renouvellement-et-déconnexion).
+Ce résultat LinuxARM64 isolé ne qualifie ni navigateur composé, CLI macOS,
+TTY, entreprise/TLS, révocation globale des JWT, worker ou autre runtime.
+La matrice SSO, D5, relais, fédération et Kubernetes complet restent ouverts.
+
 ## 4 novembre — déconnexion OIDC explicite
 
 Le protocole d'accusé configuré Web/CLI est intégré dans la branche de
@@ -11,9 +25,9 @@ validés par Rust, build et all-targets composés passent. La préparation
 neuve hors ligne passe via stdin ; le mode fichier échoue RC1 sans cause
 établie et reste à diagnostiquer, sans effacer cet échec par le succès stdin.
 Le cookie quoté du harnais privé passe11tests après un RED synthétique.
-Le FAIL réel G reste conservé ; aucun nouveau succès IdP/logout n'est
-déduit de ces tests. La recette réelle suivante couvrira aussi le refresh
-et la rotation du contexte. [Preuves et limites](VALIDATION.md#4-novembre--accusé-de-déconnexion-oidc-et-profils-explicites).
+Le FAIL réel G reste conservé ; aucun succès IdP/logout n'est déduit de
+ces seuls tests. La recette H ci-dessus apporte séparément la preuve réelle
+du refresh et de la rotation du contexte. [Preuves et limites](VALIDATION.md#4-novembre--accusé-de-déconnexion-oidc-et-profils-explicites).
 Les gates globaux restent ouverts, G09 FAIL et0/12 clos.
 
 ## 4 novembre — découverte des jobs en récupération
