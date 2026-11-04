@@ -7,6 +7,71 @@
 Les résultats ci-dessous portent sur leurs gels, pas sur le candidat poussé.
 Sources publiques RO, dépendances verrouillées RO, scratch privé et limites
 OS conservées ; ni Cargo/Node natifs, ni appel fournisseur ou IdP réel.
+Checkpoints de développement poussés et vérifiés par `ls-remote` :
+`codex/human-brokers-core-20261104` à
+`d3baf0c0bae43cccd01b87b12427dbf58a2e6a26`, et
+`codex/human-brokers-front-20261104` à
+`514ca126c1ddeb9bad47aca7921c1b495f23633b`. Les worktrees sont propres ;
+aucun de ces commits n'est intégré au candidat d'audit par ce checkpoint.
+
+**Bilan logiciel ciblé :64 fonctions Rust uniques PASS sur les gels
+successifs**, avec code produit inchangé pendant les derniers correctifs
+de tests :12API,4migration,4OIDC/TLS/HTTP/A-B,11CLI/setup/protocole/relais/
+proxy/contrats humains,32unités de curseurs/audit/publication/STOP/capacité/
+I/O, puis1plancher temporel. Les trois migrations déjà passées au stage4
+ne sont pas comptées deux fois. `cargo check --offline --locked
+--manifest-path /inputs/human-brokers-core-stage7/Cargo.toml --all-targets`
+RC0, sans warning,51,33s ; ce contrôle n'exécute aucun test.
+
+Le gel final stage7 conserve34/34hashes après essai et Cargo.lock SHA
+`915e887ad3869bc20ed82cabad59ad16c2c58d9d26a2ac8acef9ae50c6afff98`.
+Preuves finales
+`/private/tmp/ai-guard-human-brokers-core-stage7-luna-r2-20261104/proofs/` :
+manifeste SHA `690af39cbe66ce0e8baa3b1ced848bea11d6b8e200b97042a0c9a6a654f89b3b`,
+test plancher SHA `501fd73c4cb43d4c10eccf9464f03d4e2d0b3a0d4901ed3d9b0861033b92e7ee`,
+all-targets SHA `91e39588257de17701953dead379160a2c6759a08e2130d4abbd23bf925dc913`.
+Les intégrations sont attribuées à leurs logs stage4/stage5 ; les unités
+indépendantes au stage6, puis le test corrigé au stage7. Aucun rejeu fictif
+de toute la suite sur stage7. Native rustfmt statique des33sources, diff et
+scan des trois secrets littéraux connus sur34overlays PASS ; reçu Root SHA
+`10b948566b327ddbf190cb40c9fa8ec6a3091765319ffc0ccbb359263edaff6d`,
+`/private/tmp/ai-guard-human-brokers-root-statics-20261104.md`.
+
+Contraintes du sandbox final, image
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207` :
+UID1000, network/ipc none, root et sources/dépendances RO, env-i allowlist,
+CPU1, RAM/swap5Gio, PID256, nofile1024, fsize512Mio, scratch tmpfs3Gio et
+65536inodes, cap-dropALL/no-new-privileges/lognone, garde fixe5400s.
+Reçus complets dans les preuves stage6, `sandbox-receipt.txt` et
+`exec-env-allowlist.txt`. Le contrôle de source post-test garde le montage RO.
+Ledger final privé `proofs/final-ledger.md` dans les preuves stage7, SHA
+`2883ce3de27a25ecc71cbce614b0a57f24ca74d61f067808920cdbf19faefceb` ;
+registre des logs `proof-log-sha256.txt`, SHA
+`3a55b136653d03ed2f865d0a3688bb4146c68674fa014108b06f4d7b37fd998f`.
+Revue finale `/private/tmp/ai-guard-human-brokers-core-review-20261104.md`,
+SHA `3b08bca5fd21133ce3ef03bf96228bbe49da9de3f8a32c7c67383f217cb14cd5` :
+favorable au checkpoint logiciel ciblé, pas à l'intégration produit tant que
+les contrôles manquants restent ouverts. Les douze guides/index ont une
+revue documentaire séparée, SHA
+`71937d42ffad43d8c7e95dfa34c9d556abcea1230e4d31cbc810d7cfad994f0f` ;
+ils restent draft dans le worktree d'intégration, sans publication d'une
+fonction absente de ce candidat. Leur patch de continuité privé est conservé
+à `/private/tmp/ai-guard-human-brokers-docs-draft-20261104.agDk7d`, SHA
+`a20c6ec4771219b0efcaaff80e2c81cb76ae49f51be8fe733b14733a1550a7f1` ;
+`git apply --reverse --check` confirme les12fichiers actuels sans les modifier.
+Le conteneur Rust, confirmé sleep-only,
+est fermé précisément ; reçus `container-close-precheck.txt` et
+`container-close-stop.txt` conservés, aucun volume/image/preuve supprimé.
+
+**Historique conservé des erreurs de test :** compilation cfg(test) E0433
+AuditClient manquant, aucune assertion exécutée ; import seul corrigé au
+stage6. Deux filtres STOP abrégés sélectionnent zéro test : `NOT_RUN`, puis
+les chemins complets passent chacun1fonction. Le test de plancher stage6
+échoue sur un second oracle `open(...).is_err()` : seule la branche plancher
+abaissé est atteinte. Stage7 vérifie la corruption exacte, `!healthy`,
+l'intégrité invalide à la séquence attendue, les refus réels d'opérations et
+la tête inchangée ; ses branches abaissé/supprimé passent dans la même
+fonction. Aucun correctif produit ou contournement établi pour ces oracles.
 
 Backend stage4, manifeste34overlays SHA
 `3fafeabd6e2db53b0ef2ae18697b7596aa2b9dfce19017994c733f2aeb4318cc` :
@@ -22,8 +87,9 @@ autorité acceptée. La source conserve pourtant un handle diagnostique
 l'erreur d'intégrité précise et le refus des opérations. Aucun succès ou
 contournement du garde de migration n'est déduit de ce seul résultat.
 La revue a également demandé un client OIDC valide pour isoler le test
-d'absence d'admission. Les tranches suivantes restent à consigner après
-exécution ; aucune matrice complète ni test runtime n'est lancé par ce lot.
+d'absence d'admission ; cet oracle corrigé passe au stage5. Le bilan ci-dessus
+supersède les attentes historiques, sans les effacer. Aucune matrice complète
+ni test runtime n'est lancé par ce lot.
 
 Frontend : la revue a isolé le verrou F1 réarmé avant vérification complète
 de la sémantique d'une réponse. Stage4 RED :35fonctions,28PASS/7FAIL ; après
@@ -31,6 +97,13 @@ correction,35/35PASS. Deux erreurs de typage ont ensuite été corrigées sans
 coercition permissive. Stage5 :35/35Node PASS et `tsc --noEmit` RC0, reçu
 direct conservé dans
 `/private/tmp/ai-guard-human-brokers-front-stage5-luna-20261104/proofs/tsc-exit-receipt.txt`.
+Le stage6 n'a changé que fixtures/scénarios navigateur ; ses35tests Node
+passent de nouveau,RC0,0ignoré, sur8/8hashes inchangés après essai.
+Preuve `/private/tmp/ai-guard-human-brokers-front-stage6-luna-20261104/proofs/node-tests.log`,
+SHA `d18fd6f944eb61cd77a35d5ad5c9d409314ab3be24612d6aa71a8b84c6ebe827`.
+Les scénarios navigateur nouveaux et existants demeurent non exécutés ;
+ils ne sont pas comptés parmi ces35tests. Le conteneur Node sleep-only est
+fermé précisément après postflight, sans volume/image/preuve supprimé.
 Revue source indépendante : aucun défaut bloquant restant dans ce delta ;
 cela ne remplace pas l'exécution de la vue DOM. **NOT_RUN :** Vite, navigateur,
 captures, parcours composé réel et Clippy Linux. Préparation des seuls outils

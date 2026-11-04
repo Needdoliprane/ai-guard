@@ -5,20 +5,27 @@
 Backend Rust et frontend TypeScript travaillent depuis `5b6dfc1` dans deux
 worktrees distincts. La capacité explicite `read_broker_registry`, la
 migration7 et la vue humaine ne sont pas encore disponibles dans le candidat
-intégré. Luna exécute les tests ciblés dans le sandbox ; la documentation
-opérateur EN/FR avance séparément, puis les revues indépendantes conditionnent
-l'intégration. Un seul Cargo lourd tourne à la fois sur le Mac sous pression.
+intégré. Les checkpoints sont poussés sur leurs branches propres : Rust
+`d3baf0c` et frontend `514ca12`. Douze documents opérateur/index EN/FR sont
+rédigés et relus, conservés comme draft avant intégration des sources.
+Tests Luna, guides et revues indépendantes ont avancé en parallèle, avec
+un seul Cargo lourd à la fois sur le Mac sous pression. Les deux worktrees
+source sont propres, conservés pour la composition et les contrôles manquants.
 
-Sur le gel backend stage4 : **12 fonctions API PASS**, puis **3 migrations
-PASS et 1 FAIL**. L'échec attendait un refus d'ouverture ; le code existant
-peut renvoyer un handle diagnostique sans autorité lorsque son rejeu est
-invalide. L'oracle est en correction pour vérifier l'intégrité et les refus
-effectifs, sans annoncer un défaut d'autorisation ni modifier la production
-sur cette seule assertion. Les autres tranches ont leur résultat propre.
+Sur les gels backend successifs : **64 fonctions Rust uniques ciblées PASS**.
+Le gel final stage7 passe aussi `cargo check --all-targets`, sans warning.
+Deux oracles ont été corrigés pour vérifier le refus effectif d'un Store
+diagnostique invalide, et un import manquant des tests unitaires est rétabli ;
+aucune correction produit n'est alléguée pour ces erreurs de test. Les échecs
+et les filtres sélectionnant zéro test sont préservés séparément, sans les
+compter comme succès. Clippy Linux reste `BLOCKED`, outil absent.
 
-Sur le gel frontend stage5 : **35 tests Node et TypeScript PASS**. La revue
-a fait corriger un verrou de budget levé avant validation complète de la
-réponse. Build Vite, navigateur et parcours composé réels restent `NOT_RUN` :
+Sur le gel frontend stage6 : **35 tests Node PASS** ; TypeScript a passé sur
+le code applicatif byte-identique du stage5. La revue a fait corriger un
+verrou de budget levé avant validation complète de la réponse. Les nouveaux
+scénarios couvrent aussi vide/indisponible/dense et réponses tardives après
+perte d'identité/expiration/logout, mais restent non exécutés au navigateur.
+Build Vite, navigateur et parcours Web composé réels restent `NOT_RUN` :
 les outils Linux manquants ont une préparation de cache épinglé soumise au
 mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
 workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).

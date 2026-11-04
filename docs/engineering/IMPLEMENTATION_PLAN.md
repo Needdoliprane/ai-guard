@@ -85,6 +85,19 @@ Ces livrables sont en développement, pas disponibles par la seule commission.
 Le contrôle de manifeste setup est dans `src/setup.rs` : refuser la nouvelle
 capacité avant publication sous5, sans modifier l'installation5 existante.
 
+Checkpoints source poussés : backend `d3baf0c`, frontend `514ca12`. Les
+64fonctions Rust uniques ciblées,35Node et all-targets passent dans les gels
+attribués par [VALIDATION](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
+Douze guides/index EN/FR sont rédigés et relus, conservés comme draft pour
+intégration avec les sources. Prochaine étape : préparer les seuls outils
+publics épinglés après l'accord déjà demandé, puis Clippy, build et navigateur
+ciblé, enfin parcours Web composé et revue de composition. Les deux worktrees
+source propres restent attribués à ce lot jusqu'à ces contrôles ; les retirer
+normalement après composition et vérification des consommateurs, sans perdre
+branches ni preuves. Aucun lancement, fédération ou runtime n'est qualifié par
+ces checkpoints. Les travaux indépendants du registre ne valent pas décision
+sur le transport worker soumis au mainteneur.
+
 La parallélisation s'applique aussi à la validation et aux guides : l'auteur
 traite un échec isolé pendant que Luna exécute les tranches indépendantes
 sur un snapshot immuable, et un troisième agent prépare les guides EN/FR
