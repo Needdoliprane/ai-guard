@@ -1,5 +1,54 @@
 # Validation courante
 
+## 4 novembre — maintenance humaine après migration workload6
+
+Régression de compatibilité détectée pendant la préparation de la vue humaine,
+distincte des constats de l'audit externe. Sur la base `71fef43`, `human
+provision`, `resume-provision` et `apply` passent par un garde resté en4/5.
+**RED reproduit avant correction** : vraie migration SQLite privée jusqu'à6,
+fermeture/réouverture inactive, subprocess provision exit1 et garde historique
+identifié ; une assertion échoue, RC101. Test SHA initial
+`397e4b7c7f235a8c2849745de3ee0872ad2d3dc46e22fd03ca805dc078a7c239`.
+Le correctif source `4eb848d`, intégré par `99c2ce2`, accepte exactement4..=6.
+Confirmation, base existante/binding tenant, filesystem privé, audit,
+namespace/acteur UID et `!active` restent inchangés. Aucun schéma7 ni
+activation, migration automatique ou fencing de processus n'est ajouté.
+
+**PASS :** `cargo test --offline --locked --test human_cli_workload_schema
+-- --test-threads=1`,4fonctions/0FAIL/0ignoré,RC0,0,47s. Provision/reçus
+durables, reprise exacte sans rotation, révocation idempotente, tenant/
+confirmation refusés, schéma3 non migré, budget transactionnel insuffisant
+sans compte partiel puis reprise de la préparation conservée. Un reçu de
+completion déplacé est un oracle de reprise, pas un crash ou une panne I/O.
+Un seul canari historique `--test human_cli
+schema_five_maintenance_replays_schema_four_preparation_without_rotation
+-- --exact --test-threads=1` passe : préparation4 puis reprise/apply5,
+1PASS/13filtrés/RC0,0,18s. Total5fonctions uniques ciblées.
+`cargo check --offline --locked --all-targets` RC0 sans warning,26,58s.
+Native rustfmt statique des3sources et diff/scan des3secrets connus PASS.
+Guides workload, identité et SSO EN/FR synchronisés ; revue indépendante
+acceptée sur les cinq sources et le complément documentaire.
+
+Preuves privées :
+`/private/tmp/ai-guard-human-schema6-luna-20261104.nttOK5/proofs/`.
+Manifeste des cinq overlays `green/source.sha256` SHA
+`2294a2860c222aa28f7a131aa5d531967d8d69dd61d1ad534b3c650e395a2263` ;
+log RED SHA `03e70e2b02ca9dca859d864ef0e2c8f036a24394494d270256ae7a6dfd20a95f`,
+GREEN SHA `573ac00d5d8c96be4118d0d7a0c0d03a3f8987bcbfc545022ca44cbc058bc155`,
+check SHA `917cc9918dafcd7f9c681e1c80dd3c400fb7ab3d3a590013de7092ee56e8f0df`,
+canari SHA `b9770d55692366c347ddb8ca5dd4787c31e229b8de4bef07b99c8a1c0f2ac1d0`.
+Source RO compilée au chemin attendu, clean du seul package entre gels,
+SHA/mtimes et Cargo.lock inchangés. Revue privée
+`/private/tmp/ai-guard-human-maintenance-schema6-review-20261104.md` ; elle
+accepte les4GREEN et la source, le check et le canari sont vérifiés par Root.
+Un output rustfmt récursif invalide est conservé/exclu ; seul le formatage
+mono-fichier du test est utilisé, SHA final `088ba7bb…1ad65e8`.
+
+**NOT_RUN :** Clippy Linux absent, release/image, UI/SSO réel, propagation
+distante de révocation, autres plateformes, panne disque/restauration et
+runtime. Confirmation d'arrêt = attestation, aucune nouvelle garantie de
+fencing. Gates globaux inchangés.
+
 ## 4 novembre — commande CLI de diagnostic Kubernetes
 
 Base `7835392`, six overlays : nouveau `src/kubernetes_cli.rs`, raccords
@@ -39,6 +88,12 @@ mais explicitement INVALID dans `base-diff-status.txt`, exclue des preuves.
 Revue indépendante acceptée sans correctif sur ces six SHA, rapport privé
 `/private/tmp/ai-guard-kubernetes-cli-review-20261104.md`, SHA
 `2b0aea192d82bb6a1d69a180322ba034307c32e3ab2e93f997813728928ddfbe`.
+Les six sources intégrées sont identiques au donneur poussé `1e84807` ;
+après contrôles Git propres, aucun ignoré et absence de consommateurs dans
+le périmètre lsof accessible, le worktree est retiré sans force. Reçu privé
+`/private/tmp/ai-guard-kubernetes-cli-worktree-close-20261104.yBy9vW/`.
+Le premier chemin lsof erroné n'avait effectué aucun retrait ; son diagnostic
+est conservé, puis le vrai `/usr/sbin/lsof` a permis le contrôle final.
 
 **NOT_RUN :** Clippy Linux absent, build release/image, vrai cluster,
 lancement/arrêt/exec de pod, confinement/CNI et autres plateformes. Les

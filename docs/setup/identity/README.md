@@ -21,7 +21,7 @@ AIGUARD_PRIVATE="/absolute/private/ai-guard"
   --target-version 5 --confirm-control-stopped
 ```
 
-Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision/apply can maintain schema4 or5; HTTP human reads require5 and report `migration_required` before emitting their read audit on an older store.
+Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision, resume-provision and apply can maintain validated schemas4,5 or6 with inactive supervision; HTTP human reads support5/6 and report `migration_required` before emitting their read audit on an older store. The [workload guide](../workloads/README.md) covers the separate explicit5→6 migration.
 
 For a container-owned database, run offline maintenance as the existing control UID/GID against its existing data volume, with every other consumer stopped. A host CLI cannot assume ownership of a Docker Desktop volume. The one-shot container needs only that data volume and its trusted image; it needs neither a socket, runner credential, provider secret nor network. Preserve the original Compose project/volume identity. Do not initialize a replacement database to bypass a failed upgrade.
 
@@ -200,7 +200,7 @@ prepared UTF-8 payload stored in the audit, rather than response bytes or SQLite
 file size. The physical payload limit is 256 MiB; `--max-events` sets the event
 limit. Very small automatic capacities that cannot represent protected human
 budgets disable new human reads explicitly, without raising the physical limit
-or invalidating existing storage. Human reads still require schema5.
+or invalidating existing storage. Human reads still require validated schema5 or6.
 
 [audit-capacity.json](examples/audit-capacity.json) gives the resolved defaults
 for `--max-events 100000`. Copy it into your existing private control directory

@@ -60,6 +60,13 @@ L'audit externe reste ouvert ; ses nouveaux verdicts sont rapprochés des
 instantanés et du candidat dans le suivi, sans qualification globale.
 G09 reste FAIL et **0/12 gates globaux sont fermés**.
 
+Un raccord fonctionnel postérieur est corrigé dans `99c2ce2` : la maintenance
+humaine hors ligne accepte désormais une base6 validée inactive, après RED
+réel du garde4/5 périmé. Quatre régressions CLI/SQLite, un canari historique4/5
+et all-targets passent ; revue indépendante et guides EN/FR synchronisés.
+Les barrières tenant/filesystem/audit/confirmation/inactivité sont conservées,
+sans activer la supervision ni migrer implicitement. [Preuves et limites](VALIDATION.md#4-novembre--maintenance-humaine-après-migration-workload6).
+
 ## Chantiers parallèles après les correctifs F
 
 Les trois chantiers partis de `2c40097` ont leurs propriétaires distincts.
@@ -108,8 +115,9 @@ EN/FR documentent la distinction entre ce backend et le transport worker.
 Les worktrees donneurs du registre et du relais sont fermés après contrôle
 des sources intégrées, références poussées et consommateurs accessibles.
 Le brouillon antérieur du relais reste conservé sous une référence Git dédiée ;
-aucune preuve, donnée ou branche n'a été supprimée. Le prochain lot CLI
-Kubernetes dispose d'un worktree distinct ; son diagnostic n'autorise aucun pod.
+aucune preuve, donnée ou branche n'a été supprimée. Le worktree donneur du CLI
+Kubernetes est également fermé après intégration et contrôle ; son diagnostic
+n'autorise aucun pod.
 Le candidat reste non qualifié production : reprise D5, vrais workers,
 transport, fédération, Kubernetes et les autres gates conservent leurs écarts.
 

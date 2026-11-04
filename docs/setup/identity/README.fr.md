@@ -21,7 +21,7 @@ AIGUARD_PRIVATE="/chemin/prive/ai-guard"
   --target-version 5 --confirm-control-stopped
 ```
 
-Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision/apply acceptent les schémas4 et5 ; les lectures HTTP humaines exigent5 et renvoient `migration_required` avant d'émettre leur audit de lecture sur une ancienne base.
+Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision, resume-provision et apply acceptent les schémas4,5 ou6 validés avec supervision inactive ; les lectures HTTP humaines prennent en charge5/6 et renvoient `migration_required` avant d'émettre leur audit de lecture sur une ancienne base. Le [guide workload](../workloads/README.fr.md) décrit la migration explicite5→6 séparée.
 
 Pour une base appartenant à un conteneur, exécuter la maintenance avec l'UID/GID du contrôle sur son volume existant, après arrêt de tous les autres consommateurs. Le CLI hôte ne peut pas supposer qu'il possède un volume Docker Desktop. Le conteneur ponctuel n'a besoin que de ce volume et de son image de confiance, sans socket, credential runner, secret fournisseur ou réseau. Conserver l'identité du projet Compose et de son volume ; ne pas initialiser une autre base pour contourner une migration refusée.
 
@@ -203,7 +203,7 @@ physique de payload est 256 Mio ; `--max-events` règle celui des événements.
 Les capacités automatiques trop petites pour représenter les budgets protégés
 désactivent explicitement les nouvelles lectures humaines, sans relever le
 plafond physique ni invalider le stockage existant. Les lectures exigent aussi
-le schéma5.
+un schéma5 ou6 validé.
 
 [audit-capacity.json](examples/audit-capacity.json) donne les défauts résolus pour
 `--max-events 100000`. Copier ce fichier dans le répertoire de contrôle privé
