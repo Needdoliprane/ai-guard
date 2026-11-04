@@ -138,6 +138,17 @@ un média matériel persistant. Le profil runner32–512 correspond au gateway
 CLI actuel ; la borne4096 de l'API/bibliothèque reste distincte et inchangée.
 G09 FAIL,0/12 gates globaux clos ; `billable=false`.
 
+Intégration : plan3986283 et donneurcf4ca4d deviennent c5c6a31 et7cfbc05
+sur la branche de validation, les deux tips distants vérifiés après push.
+Arbres Git suivis intégralement identiques et sept hashes exécutés conformes ;
+aucun replay nécessaire pour cette composition byte-identique. Le donneur
+propre sans fichier ignoré est retiré normalement après probe cwd positif
+94125, fin naturelle0 et scan final vide sans diagnostic. Branches, preuves
+et worktree de validation préservés ; aucun checkout protégé modifié.
+Reçu privé `WORKTREE_CLOSURE.md` dans le parent du lot ; la continuité suivante
+est documentaire et ne change aucun source testé. SHA-256 du reçu :
+`320d83097c7eb9d5d7fe2e2b287473d214c8315eb5d7c6e2fc84cafc46b844a8`.
+
 ## 4 novembre — SSO CLI réel, renouvellement et déconnexion
 
 **PASS**, un seul scénario H sur le vrai Keycloak26.8.1 local neuf,
