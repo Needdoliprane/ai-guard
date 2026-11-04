@@ -146,6 +146,22 @@ Le rapport externe reste `in_progress`, findings SHA
 `8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`
 inchangé : aucune conclusion finale inventée. G09 FAIL,0/12 gates clos.
 
+### Fermeture des worktrees donneurs
+
+Les contrôles Git/consommateurs puis le retrait normal du worktree registre
+passent après comparaison des45sources et vérification de ses références
+locale/distante `567a673` et intégrée `7835392`. Reçu privé :
+`/private/tmp/ai-guard-broker-registry-worktree-close-20261104.26Tbnn/`.
+Le brouillon du relais comportait huit fichiers publics ; scan des trois
+secrets connus négatif, aucun ignoré. Il est conservé par stash et référence
+`refs/ai-guard/retained-relay-draft-20261104` pointant sur
+`58ca0031cb21c43bbb4d9b8ab1db4f0fbe226f5a`, puis le worktree propre est
+retiré normalement. Reçu privé :
+`/private/tmp/ai-guard-relay-worktree-close-20261104.L2gZgu/`.
+Les contrôles négatifs de consommateurs restent limités au périmètre lsof
+accessible. Branches, stash, preuves, données et worktrees D5 sont préservés ;
+aucun retrait forcé, prune global ou suppression de volume.
+
 ## 3 et 4 novembre — composition workload, registre et relais en validation
 
 Base `2c400976`, travail composé dans `broker-registry-20261103`, aucun

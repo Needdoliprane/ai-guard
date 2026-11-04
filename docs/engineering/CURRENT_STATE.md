@@ -102,6 +102,11 @@ SQL/UTC, puis GREEN, ont leurs preuves sous montage source RO. Coût historique 
 commits de connexions sœurs et mutations de supervision : **WSI-Q02 ouvert**,
 aucune garantie de coût global borné ou de capacité100. Les guides opérateur
 EN/FR documentent la distinction entre ce backend et le transport worker.
+Les worktrees donneurs du registre et du relais sont fermés après contrôle
+des sources intégrées, références poussées et consommateurs accessibles.
+Le brouillon antérieur du relais reste conservé sous une référence Git dédiée ;
+aucune preuve, donnée ou branche n'a été supprimée. Le prochain lot CLI
+Kubernetes dispose d'un worktree distinct ; son diagnostic n'autorise aucun pod.
 Le candidat reste non qualifié production : reprise D5, vrais workers,
 transport, fédération, Kubernetes et les autres gates conservent leurs écarts.
 
