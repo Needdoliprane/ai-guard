@@ -36,6 +36,7 @@ pub(super) struct Registry {
     pub(super) source_directory: Directory,
     pub(super) data: RegistryWireV1,
     start_profiles: BTreeMap<String, PrearmedStartProfile>,
+    presence_profiles: BTreeMap<String, PathBuf>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -96,9 +97,11 @@ struct ControlProfileV2 {
     source_roots: Vec<PathBuf>,
     export_roots: Vec<PathBuf>,
     prearmed_start_profile: StartProfileWireV1,
+    #[serde(default)]
+    presence_file: Option<PathBuf>,
 }
 impl ControlProfileV2 {
-    fn resolve(self) -> Result<(ControlProfileV1, PrearmedStartProfile)> {
+    fn resolve(self) -> Result<(ControlProfileV1, PrearmedStartProfile, Option<PathBuf>)> {
         ensure!(
             self.prearmed_start_profile.version == 1,
             "unsupported broker start profile"
@@ -113,6 +116,7 @@ impl ControlProfileV2 {
                 PrearmedStartProfile::DockerMinimal
             }
         };
+        let presence = self.presence_file.as_deref().map(normalized).transpose()?;
         Ok((
             ControlProfileV1 {
                 id: self.id,
@@ -137,6 +141,7 @@ impl ControlProfileV2 {
                 export_roots: self.export_roots,
             },
             selection,
+            presence,
         ))
     }
 }
@@ -162,6 +167,7 @@ impl Registry {
         let version: Version = serde_json::from_slice(source.bytes())
             .map_err(|_| anyhow!("invalid private broker configuration"))?;
         let mut start_profiles = BTreeMap::new();
+        let mut presence_profiles = BTreeMap::new();
         let mut data: RegistryWireV1 = match version.version {
             1 => serde_json::from_slice(source.bytes())
                 .map_err(|_| anyhow!("invalid private broker configuration"))?,
@@ -170,13 +176,16 @@ impl Registry {
                     .map_err(|_| anyhow!("invalid private broker configuration"))?;
                 let mut profiles = Vec::with_capacity(wire.profiles.len());
                 for profile in wire.profiles {
-                    let (profile, selection) = profile.resolve()?;
+                    let (profile, selection, presence) = profile.resolve()?;
                     ensure!(
                         start_profiles
                             .insert(profile.id.clone(), selection)
                             .is_none(),
                         "duplicate broker profile identity"
                     );
+                    if let Some(path) = presence {
+                        presence_profiles.insert(profile.id.clone(), path);
+                    }
                     profiles.push(profile);
                 }
                 RegistryWireV1 {
@@ -226,6 +235,7 @@ impl Registry {
             source_directory,
             data,
             start_profiles,
+            presence_profiles,
         })
     }
 
@@ -238,6 +248,9 @@ impl Registry {
     }
     pub(super) fn start_profile(&self, id: &str) -> PrearmedStartProfile {
         self.start_profiles.get(id).copied().unwrap_or_default()
+    }
+    pub(super) fn presence_path(&self, id: &str) -> Option<&Path> {
+        self.presence_profiles.get(id).map(PathBuf::as_path)
     }
 }
 
