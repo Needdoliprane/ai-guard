@@ -291,10 +291,11 @@ impl Stream {
         fs(self.anchor.persistent_revalidate())?;
         Ok(())
     }
-    pub(super) fn head(&self, p: &PreparedPresence) -> Result<Head> {
+    /// Process-local recovery data, never permission to POST. Mutation paths
+    /// separately validate and synchronize the complete retained history.
+    pub(super) fn cached_head(&self) -> Result<Head> {
         self.revalidate()?;
         let head = self.head.lock().map_err(|_| PresenceError::UnsafeState)?;
-        self.check_history(p, &head)?;
         Ok(head.clone())
     }
     fn check_history(&self, p: &PreparedPresence, head: &Head) -> Result<()> {

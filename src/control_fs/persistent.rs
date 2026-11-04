@@ -236,7 +236,7 @@ impl Directory {
         );
         self.revalidate()?;
         for file in files.iter().rev() {
-            file.sync_all()
+            measure_control_fs!(DirectorySyncAll, self.path(), |_| 0, { file.sync_all() })
                 .context("persistent ancestor synchronization failed")?;
         }
         self.revalidate()
@@ -917,5 +917,49 @@ mod closed_entry_sync_tests {
                 .len(),
             MAX_PRIVATE_FILE_BYTES + 1
         );
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_cost_tests {
+    use super::*;
+    use crate::control_fs::cost_probe::{Measurement, Operation};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn durable_bootstrap_attributes_every_ancestor_sync_to_the_selected_root() {
+        // Break caught: real ancestor sync_all calls are absent from the
+        // scoped collector, or wrongly attributed to ancestor physical paths.
+        let temporary = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
+            .unwrap();
+        let root = Directory::open_existing(temporary.path()).unwrap();
+        let selected = root.persistent_child("selected", true).unwrap().unwrap();
+        let sibling = root.persistent_child("sibling", true).unwrap().unwrap();
+        // This independent pathname count includes the selected directory and
+        // filesystem root. Do not derive the oracle from the retained chain.
+        let ancestor_count = selected.path().ancestors().count() as u64;
+        assert!(ancestor_count > 1);
+
+        let _exclusive = crate::control_fs::cost_probe::EXCLUSIVE.blocking_lock();
+        let measurement = Measurement::start(selected.path()).unwrap();
+        sibling.sync().unwrap();
+        selected.sync().unwrap();
+        selected.durable_bootstrap().unwrap();
+        let snapshot = measurement.finish().unwrap();
+
+        let sync = snapshot.metric(Operation::DirectorySyncAll);
+        assert_eq!(
+            sync.calls,
+            ancestor_count + 1,
+            "all ancestor syscalls must be attributed to the selected caller"
+        );
+        assert_eq!(sync.succeeded, ancestor_count + 1);
+        assert_eq!(sync.failed, 0);
+        assert_eq!(sync.abandoned, 0);
+        assert_eq!(sync.bytes, 0);
+        assert_eq!(snapshot.outstanding, 0);
+        assert_eq!(snapshot.metric(Operation::FileSyncAll).calls, 0);
     }
 }

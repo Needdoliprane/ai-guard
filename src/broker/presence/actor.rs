@@ -85,7 +85,7 @@ async fn run_owned(
             })
             .await?;
             let attempt = async {
-                let head = disk(&p, &io, shutdown, |p| stream(p)?.head(p)).await?;
+                let head = disk(&p, &io, shutdown, |p| stream(p)?.cached_head()).await?;
                 let identity = interrupt(shutdown, client.identity(&p)).await?;
                 let view = interrupt(shutdown, client.view(&p)).await?;
                 validate_handshake(&p, &identity, &view)?;

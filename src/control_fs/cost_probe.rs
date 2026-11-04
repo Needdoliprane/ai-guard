@@ -83,6 +83,13 @@ struct Active {
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
 static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
+/// Test harness ownership around a complete scoped measurement. Async callers
+/// await this gate; synchronous #[test] callers may use blocking_lock. Keep the
+/// guard until after Measurement::finish or Drop has disarmed the collector.
+/// This does not change start's explicit AlreadyActive error or create another
+/// collector, and never exists in non-test builds.
+pub(crate) static EXCLUSIVE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[derive(Debug)]
 pub(crate) enum ProbeError {
     AlreadyActive,

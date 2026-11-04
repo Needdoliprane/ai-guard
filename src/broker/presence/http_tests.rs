@@ -1,4 +1,7 @@
 //! Real gateway/SQLite regressions. The sole fault injection is the HTTP ACK.
+#[path = "cost_tests.rs"]
+mod cost_tests;
+
 use super::preparation_tests::{Fixture, OWN_TOKEN};
 use super::{PreparedPresence, PresenceError, PresenceScope};
 use crate::{
