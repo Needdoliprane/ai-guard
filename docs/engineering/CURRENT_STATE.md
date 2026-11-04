@@ -14,6 +14,10 @@ Aucun worker produit n'est lancé. Ce constat ne qualifie ni canal,
 handoff, arrêt/reprise, Podman ou Kubernetes ; G09 FAIL, aucun gate clos.
 Les guides de tenancy et de recette distinguent désormais les contrats
 backend livrés du transport manquant, sans déclarer à nouveau OIDC absent.
+Proposition/preuves `5f853f3` intégrées en `a8c16e0` et poussées, références
+distantes conformes. Demande de direction soumise au mainteneur ; aucun
+accord déduit du silence. Donneur propre retiré normalement, branches et
+preuves conservées ; travaux indépendants poursuivis.
 
 ## 4 novembre — diagnostic d'un journal de récupération absent
 

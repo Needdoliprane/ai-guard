@@ -75,6 +75,14 @@ Ces faits n'établissent aucun parcours produit ou gate de production.
 L'accord de direction et les contrats manquants conditionnent le nouveau
 canal ; les travaux indépendants continuent. G09 FAIL, aucun gate global clos.
 
+Proposition et preuves `5f853f3` intégrées en `a8c16e0`, différence complète
+nulle et références distantes exactes vérifiées après push. Demande de
+direction soumise au mainteneur après revue, sans déduire son accord du
+silence. Arbres propres, relevé externe du donneur sans entrée/diagnostic,
+retrait normal par Git sans force. Branches, captures et notes privées
+conservées ; checkout d'intégration et arbres protégés préservés. Aucun
+hook cible exécuté nativement ni résultat CI/release déduit du push.
+
 ## 4 novembre — journal requis absent et diagnostic de récupération
 
 Base `26ab9e7`, donneur `codex/recovery-journal-diagnostic-20261104`.

@@ -15,6 +15,9 @@ durable des mutations, tests ciblés/revue puis vraie recette A1/A2/B1.
 L'activation reste refusée tant que les prérequis ne sont pas prouvés.
 Aucun contournement du contrôle inactif ni modification de D5 externe.
 Les corrections documentaires de tenancy/recette avancent indépendamment.
+Proposition relue et preuves `5f853f3` composées en `a8c16e0`, push vérifié ;
+demande de direction soumise au mainteneur, aucun accord reçu à ce gel.
+Conteneur de probe et donneur fermés normalement, preuves/branches gardées.
 
 ## Lot intégré — diagnostic de récupération sans journal
 
