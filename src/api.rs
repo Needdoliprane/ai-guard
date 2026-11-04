@@ -1644,12 +1644,7 @@ async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResul
         ));
     }
     if !response.status().is_success() {
-        return Err(human::failure(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "identity_unavailable",
-            "Human identity verification was refused.",
-            "retry",
-        ));
+        return Err(dashboard_human_preflight_failure(response).await);
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| {
@@ -1710,6 +1705,67 @@ async fn verify_dashboard_human(state: &DashboardState, token: &str) -> ApiResul
         ));
     }
     Ok(())
+}
+
+async fn dashboard_human_preflight_failure(
+    mut response: reqwest::Response,
+) -> (StatusCode, Json<Value>) {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Envelope {
+        error: Rejection,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Rejection {
+        code: String,
+        #[serde(rename = "message")]
+        _message: String,
+        retry_action: String,
+    }
+    let unavailable = || {
+        human::failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "identity_unavailable",
+            "Human identity verification was refused.",
+            "retry",
+        )
+    };
+    let status = response.status();
+    let mut bytes = Vec::new();
+    loop {
+        // The original request's three-second total timeout also covers chunks.
+        let chunk = match response.chunk().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(_) => return unavailable(),
+        };
+        if bytes
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|size| size > 4096)
+        {
+            return unavailable();
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    let Ok(envelope) = serde_json::from_slice::<Envelope>(&bytes) else {
+        return unavailable();
+    };
+    if status == StatusCode::TOO_MANY_REQUESTS
+        && envelope.error.code == "audit_read_budget_exhausted"
+        && envelope.error.retry_action == "contact_operator"
+    {
+        // Both exhausted and disabled human-read budgets use this closed tuple.
+        // Neither the upstream message nor any upstream header is forwarded.
+        return human::failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            "audit_read_budget_exhausted",
+            "The human read audit budget does not permit this read. Preserve the audit and contact the operator.",
+            "contact_operator",
+        );
+    }
+    unavailable()
 }
 
 async fn verify_dashboard_viewer(s: &DashboardState, token: &str) -> ApiResult<()> {
