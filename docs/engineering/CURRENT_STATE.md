@@ -75,6 +75,9 @@ décrits dans [VALIDATION](VALIDATION.md#4-novembre--backend-workload-registre-e
   aucun défaut bloquant dans ce sous-lot readonly ; deux anciens échecs du
   harnais restent conservés. [Guide EN/FR](../setup/kubernetes/README.fr.md)
   et [preuves](VALIDATION.md#3-novembre--diagnostic-kubernetes-et-durée-de-vie-du-transport).
+  La commande `kubernetes doctor` est intégrée par `bebdd90` : quatre tests
+  CLI/TLS ciblés et all-targets PASS, revue indépendante acceptée, guides EN/FR
+  à jour. [Preuves propres au CLI](VALIDATION.md#4-novembre--commande-cli-de-diagnostic-kubernetes).
   Aucun CREATE/STOP, lancement de
   pod, exec/attach ou confinement Kubernetes n'est qualifié. L'inventaire
   local read-only Docker Desktop montre kindnet ; la présence d'une API

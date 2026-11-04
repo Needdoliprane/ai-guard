@@ -1,5 +1,51 @@
 # Validation courante
 
+## 4 novembre — commande CLI de diagnostic Kubernetes
+
+Base `7835392`, six overlays : nouveau `src/kubernetes_cli.rs`, raccords
+`lib.rs`/`main.rs`, `tests/kubernetes_cli.rs` et guides Kubernetes EN/FR.
+Source commit `1e84807`, intégrée par `bebdd90`, six SHA identiques au gel.
+**RED attendu :** archive de la base + seul test help initial, compilation
+confirmée depuis `/inputs/kube-cli-red` ; commande absente/exit2, assertion
+échouée, une fonction exécutée, RC101. Ce défaut précède l'implémentation.
+
+**PASS logiciel ciblé :** `cargo test --offline --locked --test kubernetes_cli
+-- --test-threads=1`, quatre fonctions/0FAIL/0ignoré, RC0,1,64s ; compilation
+depuis `/inputs/kube-cli-green`. Vrais sous-processus du CLI et connexions TLS
+loopback : diagnostic et gaps réels de l'adaptateur, Bearer/mTLS obligatoire,
+refus de CA/clé/authentification, fichiers privés invalides/liens/hardlinks,
+configuration inconnue/hors borne et écho de credential. Les serveurs/API
+sont des fixtures, pas un cluster ou une preuve de confinement.
+`cargo check --offline --locked --all-targets` passe ensuite sans warning,
+RC0,26,65s. Aucun autre test historique rejoué. Ces durées ne sont pas des
+benchmarks. Formatage natif statique des quatre sources modifiées PASS ;
+diff, scan des trois secrets connus et10liens des deux guides PASS.
+
+Preuves privées :
+`/private/tmp/ai-guard-kubernetes-cli-luna-20261104.86Lnr7/proofs/`.
+Manifeste GREEN des six fichiers `green/source.sha256`, SHA
+`26850e09a9b6a4f2f72a4683cf98c47926cf0718269ac784de7841223494abea`.
+Logs `red-test.log` SHA
+`0e77d3b5fb3fb2dff35d5be34d9f3babcb97820bc2ac239ba96d2bf9063e5009`,
+`green/test.log` SHA
+`0e557d398b6000a5bc624a7b77666aa0995043a74e5431b50bc64707e4561f11`,
+`green/check-all-targets.log` SHA
+`faa0393c824afaa1bed82311ad7954a2f44ffedc400951f1245513f6095301c1`.
+Hashes/mtimes et Cargo.lock inchangés ; source et registre sous bind-RO dans
+le même sandbox non privilégié/offline que le lot workload ci-dessous.
+Clean du seul package entre RED/GREEN pour empêcher un binaire périmé.
+Une ancienne pièce `base-diff.diff` compare le mauvais snapshot : conservée
+mais explicitement INVALID dans `base-diff-status.txt`, exclue des preuves.
+Revue indépendante acceptée sans correctif sur ces six SHA, rapport privé
+`/private/tmp/ai-guard-kubernetes-cli-review-20261104.md`, SHA
+`2b0aea192d82bb6a1d69a180322ba034307c32e3ab2e93f997813728928ddfbe`.
+
+**NOT_RUN :** Clippy Linux absent, build release/image, vrai cluster,
+lancement/arrêt/exec de pod, confinement/CNI et autres plateformes. Les
+arguments n'importent ni kubeconfig, plugin, proxy ou credential ambiant.
+Le rapport ne possède pas de reçu d'audit contrôle et maintient
+`admission_available=false`. Aucune gate production fermée par ce sous-lot.
+
 ## 4 novembre — backend workload, registre et relais intégré
 
 Source `567a673`, intégrée par `c762a24` ; base `2c400976`. Le Store reste

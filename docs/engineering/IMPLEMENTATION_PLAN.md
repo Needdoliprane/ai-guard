@@ -52,6 +52,16 @@ Le backend seul ne clôture pas ce chantier. Reprise D5, fédération/UI humaine
 admission Kubernetes, rétention/WSI-Q02 et qualification réelle restent au
 plan ; aucune obligation n'est reportée sous une étiquette MVP/V2.
 
+Au4novembre, la proposition du canal exec fermé est relue et soumise au
+mainteneur dans [DECISIONS](DECISIONS.md#4-novembre--proposition-de-transport-des-workers-sans-réseau-décision-attendue).
+Aucune implémentation/probe de ce canal avant sa décision. Deux travaux
+indépendants avancent en parallèle : CLI Kubernetes readonly désormais
+intégré (`bebdd90`, quatre tests et all-targets PASS après RED/revue), puis
+conception de la lecture des brokers depuis un contexte humain autorisé.
+Cette lecture doit conserver audit de lecture, budgets, pagination liée au
+contexte et révocation ; aucun accès runner dans le front ni faux inventaire
+multi-hôtes. Ses contrats/code/tests restent à livrer séparément.
+
 Les preuves broker/worker sont opaques et revalidées en transaction avant
 replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker
 ni crédit d'audit. Génération v1 fixée à1 par tentative UUID tant qu'aucune

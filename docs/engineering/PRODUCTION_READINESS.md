@@ -6,6 +6,9 @@ avertissement. Migrations, autorisation, budgets et échanges HTTP/SQLite
 ont leurs preuves logicielles ; le [diagnostic Kubernetes](../setup/kubernetes/README.fr.md)
 reste en lecture seule. Aucun transport worker, fédération ou confinement
 runtime n'est qualifié par ces résultats. G09 FAIL,0/12 gates globaux clos.
+La commande `kubernetes doctor` est désormais raccordée :
+[quatre tests CLI/TLS ciblés, all-targets et revue PASS](VALIDATION.md#4-novembre--commande-cli-de-diagnostic-kubernetes).
+Ce résultat n'ajoute aucune admission ni qualification de cluster.
 
 Préparateur SSO intégré par `586c17e` : configuration Rust hors ligne, reprise durable, profils locaux et guides EN/FR. [Validation ciblée](VALIDATION.md#2-novembre--préparateur-sso-privé-et-profils-de-lancement) et revues passent dans leurs portées documentées. Après les échecs Web historiques, [image 72bfb911 depuis 96fe9be et recettes Keycloak réelles](VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) : build/rollout RC0 sans réinitialiser le volume, user-1 PASS 7/7/RC0, user-2 PASS 8/8 dans la première recette de rôles, puis admin PASS 13/13/RC0 sur la même image ; connexion, lecture autorisée et logout prouvés pour les trois comptes. Les trois échecs administratifs antérieurs restent FAIL ; seul le prédicat impossible de la troisième capture est démontré/corrigé dans le harness privé. DNS limité au navigateur dédié, CLI natif BLOCKED DNS hôte/admin ; refus adverses de permissions, refresh/révocation, délégation et qualification SSO globale ouverts. G09 FAIL, 0/12 gates clos. Les paragraphes suivants conservent les gels précédents.
 
