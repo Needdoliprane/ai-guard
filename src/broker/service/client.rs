@@ -25,6 +25,12 @@ pub async fn request(
     credential: &str,
     command: BrokerCommandV1,
 ) -> Result<BrokerReplyV1> {
+    if let BrokerCommandV1::RecoveryInventory { after, limit } = &command {
+        ensure!(
+            (1..=100).contains(limit) && after.is_none_or(|id| !id.is_nil()),
+            "invalid recovery inventory bounds"
+        );
+    }
     ensure!(
         !credential.is_empty()
             && credential.len() <= 4096

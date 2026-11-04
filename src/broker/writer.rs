@@ -7,7 +7,7 @@ use super::{
         Journal, JournalError, JournalLimitsV1, JournalPageV1, JournalResult, JournalScopeV1,
         JournalStatusV1, RejectionCodeV1, RejectionPhaseV1, RejectionReceiptV1, ReservationTicket,
         ReserveResult, RevisionRefV1, StopJobSnapshotV1, StopJournal,
-        recovery::{StopRecoveryReaderV1, StopRecoveryReportV1},
+        recovery::{StopRecoveryReaderV1, StopRecoveryReportV1, inventory::StopInventoryPageV1},
     },
     lifecycle::{BrokerCheckpointV3, LocalCommandReceiptV1, LocalCommandRequestV1, LocalCommandV1},
     outbox::{BrokerCheckpointV4, OutboxEventV1, OutboxReceiptV1},
@@ -16,13 +16,33 @@ use crate::{control_fs::Directory, model::Event, runner::broker::PreparedSubmiss
 use std::{
     collections::HashSet,
     fmt,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 type Reply<T> = oneshot::Sender<JournalResult<T>>;
+
+/// Owned by the queued scan, so a caller timeout cannot admit another scan.
+struct InventoryPermit(Arc<AtomicBool>);
+impl InventoryPermit {
+    fn acquire(pending: &Arc<AtomicBool>) -> JournalResult<Self> {
+        pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| JournalError::Busy)?;
+        Ok(Self(Arc::clone(pending)))
+    }
+}
+impl Drop for InventoryPermit {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
 
 pub struct AcceptInput {
     ticket: ReservationTicket,
@@ -166,6 +186,12 @@ enum Command {
         operation_id: Uuid,
         reply: Reply<Option<StopJobSnapshotV1>>,
     },
+    RecoveryInventory {
+        after: Option<Uuid>,
+        limit: u32,
+        reply: Reply<StopInventoryPageV1>,
+        _permit: InventoryPermit,
+    },
     EnqueueEvents {
         operation_id: Uuid,
         events: Vec<Event>,
@@ -182,6 +208,7 @@ struct ClientState {
     sender: mpsc::SyncSender<Command>,
     scope: JournalScopeV1,
     timeout: Duration,
+    inventory_pending: Arc<AtomicBool>,
 }
 
 enum Backend {
@@ -227,6 +254,7 @@ impl ClientState {
             sender,
             scope,
             timeout,
+            inventory_pending: Arc::new(AtomicBool::new(false)),
         }))
     }
     async fn call<T: Send + 'static>(
@@ -387,6 +415,24 @@ impl StopWriterClient {
             .call(move |reply| Command::RecoveryStatus {
                 operation_id,
                 reply,
+            })
+            .await
+    }
+    pub async fn recovery_inventory(
+        &self,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> JournalResult<StopInventoryPageV1> {
+        if !(1..=100).contains(&limit) || after.is_some_and(|id| id.is_nil()) {
+            return Err(JournalError::InvalidInput);
+        }
+        let permit = InventoryPermit::acquire(&self.0.inventory_pending)?;
+        self.0
+            .call(move |reply| Command::RecoveryInventory {
+                after,
+                limit,
+                reply,
+                _permit: permit,
             })
             .await
     }
@@ -795,6 +841,20 @@ fn serve_backend(backend: Backend, receiver: mpsc::Receiver<Command>) {
                 };
                 let _ = reply.send(result);
             }
+            Command::RecoveryInventory {
+                after,
+                limit,
+                reply,
+                _permit,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => {
+                        StopJournal::from_full(journal).recovery_inventory(after, limit)
+                    }
+                    Backend::Stops(journal) => journal.recovery_inventory(after, limit),
+                };
+                let _ = reply.send(result);
+            }
             Command::EnqueueEvents {
                 operation_id,
                 events,
@@ -983,13 +1043,17 @@ fn acknowledge_events(
 }
 
 #[cfg(all(test, unix))]
+#[path = "writer_inventory_tests.rs"]
+mod inventory_tests;
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::control_fs::Directory;
     use std::os::unix::fs::PermissionsExt;
     use tokio::sync::oneshot;
 
-    fn private_journal() -> (tempfile::TempDir, Journal) {
+    pub(super) fn private_journal() -> (tempfile::TempDir, Journal) {
         let root = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -1014,7 +1078,7 @@ mod tests {
         (root, journal)
     }
 
-    fn paused_client(
+    pub(super) fn paused_client(
         journal: &Journal,
         capacity: usize,
         timeout: Duration,
@@ -1025,6 +1089,7 @@ mod tests {
                 sender,
                 scope: journal.scope().clone(),
                 timeout,
+                inventory_pending: Arc::new(AtomicBool::new(false)),
             })),
             receiver,
         )
@@ -1142,6 +1207,7 @@ mod tests {
             sender: writer.0.sender.clone(),
             scope: writer.0.scope.clone(),
             timeout: Duration::from_secs(2),
+            inventory_pending: Arc::clone(&writer.0.inventory_pending),
         }));
         let worker = std::thread::spawn(move || serve(journal, receiver));
 
@@ -1286,6 +1352,7 @@ mod tests {
             sender: writer.0.sender.clone(),
             scope: writer.0.scope.clone(),
             timeout: Duration::from_secs(2),
+            inventory_pending: Arc::clone(&writer.0.inventory_pending),
         }));
         let worker_journal = journal.clone();
         let worker = std::thread::spawn(move || serve(worker_journal, receiver));

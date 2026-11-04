@@ -11,6 +11,9 @@ const B_RUNNER: &str = "runner-b-cccccccccccccccccccccccccccccccc";
 const B_VIEWER: &str = "viewer-b-dddddddddddddddddddddddddddddddd";
 const TENANT: &str = "tenant-cancel-retry-test";
 
+#[path = "recovery_inventory_tests.rs"]
+mod recovery_inventory_tests;
+
 struct Gateway {
     _root: tempfile::TempDir,
     url: String,
@@ -304,32 +307,36 @@ async fn human_broker_schema7_keeps_stop_identity_and_inactive_admission_guards(
     }
 }
 
-async fn dispatch(
-    service: &Arc<Service>,
-    gateway: &Gateway,
-    credential: &str,
+fn dispatch<'a>(
+    service: &'a Arc<Service>,
+    gateway: &'a Gateway,
+    credential: &'a str,
     request: BrokerCommandV1,
-) -> Result<Response, BrokerErrorCodeV1> {
-    let before = gateway.identities.load(Ordering::SeqCst);
-    let pending = service.dispatch(EnvelopeV1 {
-        version: 1,
-        profile_id: "cancel_retry_test".into(),
-        credential: credential.into(),
-        request,
-    });
-    eprintln!(
-        "unboxed_dispatch_future_bytes={}",
-        std::mem::size_of_val(&pending)
-    );
-    // Keep the matrix's outer future bounded instead of embedding a copy of
-    // the complete dispatcher state at every await site in this debug test.
-    let result = Box::pin(pending).await;
-    assert_eq!(
-        gateway.identities.load(Ordering::SeqCst),
-        before + 1,
-        "every request authenticates afresh against the actual gateway"
-    );
-    result
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<Response, BrokerErrorCodeV1>> + Send + 'a>,
+> {
+    // Allocate the whole test helper off the matrix's future, including the
+    // dispatch construction/temporaries before its inner Box::pin.
+    Box::pin(async move {
+        let before = gateway.identities.load(Ordering::SeqCst);
+        let pending = service.dispatch(EnvelopeV1 {
+            version: 1,
+            profile_id: "cancel_retry_test".into(),
+            credential: credential.into(),
+            request,
+        });
+        eprintln!(
+            "unboxed_dispatch_future_bytes={}",
+            std::mem::size_of_val(&pending)
+        );
+        let result = Box::pin(pending).await;
+        assert_eq!(
+            gateway.identities.load(Ordering::SeqCst),
+            before + 1,
+            "every request authenticates afresh against the actual gateway"
+        );
+        result
+    })
 }
 
 fn fresh_namespace_fixture(gateway: &Gateway, namespace: Uuid) -> Fixture {
