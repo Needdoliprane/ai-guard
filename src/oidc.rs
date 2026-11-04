@@ -311,6 +311,8 @@ impl OidcProvider {
         cache.metadata.clone().ok_or(OidcError::NotConfigured)
     }
     /// Caller must erase its local session regardless of this separately reported IdP outcome.
+    /// Success acknowledges only the selected OP protocol response, never global token revocation
+    /// or execution of a post-logout callback. This operation never visits a return URI.
     pub async fn logout_idp(&self, context: OidcLogoutContext) -> Result<(), OidcError> {
         let _operation = self
             .operations
@@ -333,6 +335,7 @@ impl OidcProvider {
                         endpoint,
                         self.config.client_id(context.kind),
                         &context.id_token,
+                        self.config.post_logout_redirect_uri(context.kind),
                     )
                     .await
             },

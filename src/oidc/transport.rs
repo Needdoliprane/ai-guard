@@ -1,8 +1,17 @@
 use super::{OidcConfigV1, OidcError};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures_util::StreamExt;
 use openidconnect::{AsyncHttpClient, HttpRequest, HttpResponse};
 use std::{future::Future, pin::Pin, time::Duration};
 use tokio::sync::Semaphore;
+
+const MAX_LOGOUT_LOCATION_BYTES: usize = 4096;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResponsePurpose {
+    Json,
+    Logout,
+}
 
 pub(super) struct Transport {
     client: reqwest::Client,
@@ -59,10 +68,25 @@ impl Transport {
         endpoint: &str,
         client_id: &str,
         id_token: &str,
+        post_logout_redirect_uri: Option<&str>,
     ) -> Result<(), OidcError> {
-        let body =
-            serde_urlencoded::to_string([("client_id", client_id), ("id_token_hint", id_token)])
-                .map_err(|_| OidcError::InvalidLogin)?;
+        // Correlation is independent per operation, private in memory, and bound to this
+        // exact request's endpoint/client/context and configured static return URI.
+        let acknowledgement = match post_logout_redirect_uri {
+            Some(uri) => Some((
+                uri,
+                URL_SAFE_NO_PAD.encode(
+                    crate::identity::random_bytes().map_err(|_| OidcError::TransportUnavailable)?,
+                ),
+            )),
+            None => None,
+        };
+        let mut fields = vec![("client_id", client_id), ("id_token_hint", id_token)];
+        if let Some((uri, state)) = &acknowledgement {
+            fields.push(("post_logout_redirect_uri", *uri));
+            fields.push(("state", state.as_str()));
+        }
+        let body = serde_urlencoded::to_string(fields).map_err(|_| OidcError::InvalidLogin)?;
         let request = axum::http::Request::builder()
             .method("POST")
             .uri(endpoint)
@@ -70,7 +94,27 @@ impl Transport {
             .header("accept", "application/json")
             .body(body.into_bytes())
             .map_err(|_| OidcError::InvalidConfiguration)?;
-        let response = self.call(request).await?;
+        let response = self.execute(request, ResponsePurpose::Logout).await?;
+        if let Some((uri, state)) = acknowledgement {
+            if !matches!(response.status().as_u16(), 302 | 303) || !response.body().is_empty() {
+                return Err(OidcError::ProviderRejected);
+            }
+            let all_locations = response.headers().get_all("location");
+            let mut locations = all_locations.iter();
+            let location = locations.next().ok_or(OidcError::ProviderRejected)?;
+            // The configured URI is already canonical and query-free; state is URL-safe.
+            // Byte equality also rejects aliases, fragments, missing/duplicate/unknown query
+            // fields and relative URLs. Never resolve, log, persist or follow this Location.
+            let expected = format!("{uri}?state={state}");
+            return if locations.next().is_none()
+                && location.as_bytes().len() <= MAX_LOGOUT_LOCATION_BYTES
+                && location.as_bytes() == expected.as_bytes()
+            {
+                Ok(())
+            } else {
+                Err(OidcError::ProviderRejected)
+            };
+        }
         if response.status() == 204 && response.body().is_empty() {
             return Ok(());
         }
@@ -84,7 +128,11 @@ impl Transport {
         // Redirects, interactive HTML and ambiguous bodies are never confirmation of IdP logout.
         Err(OidcError::ProviderRejected)
     }
-    async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, OidcError> {
+    async fn execute(
+        &self,
+        request: HttpRequest,
+        purpose: ResponsePurpose,
+    ) -> Result<HttpResponse, OidcError> {
         let url = request.uri().to_string();
         let logout = request.method() == "POST"
             && self.config.end_session_endpoint.as_deref() == Some(url.as_str());
@@ -136,7 +184,7 @@ impl Transport {
                 bytes.extend_from_slice(&chunk);
             }
             // Protocol parsing never gets duplicate-field ambiguity or a text/error body.
-            if !(logout && bytes.is_empty())
+            if !(purpose == ResponsePurpose::Logout && logout && bytes.is_empty())
                 && result
                     .headers_ref()
                     .and_then(|h| h.get("content-type"))
@@ -164,6 +212,46 @@ impl<'a> AsyncHttpClient<'a> for Transport {
     type Error = OidcError;
     type Future = Pin<Box<dyn Future<Output = Result<HttpResponse, OidcError>> + Send + 'a>>;
     fn call(&'a self, request: HttpRequest) -> Self::Future {
-        Box::pin(self.execute(request))
+        Box::pin(self.execute(request, ResponsePurpose::Json))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // JSON exchanges retain their own MIME contract even when endpoint URLs coincide.
+    #[tokio::test]
+    async fn token_json_contract_is_preserved_when_logout_endpoint_aliases_token_endpoint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}/realm", listener.local_addr().unwrap());
+        let endpoint = format!("{issuer}/token");
+        let config: OidcConfigV1 = serde_json::from_value(serde_json::json!({
+            "version": 1, "issuer": issuer,
+            "web_client_id": "web-public", "cli_client_id": "cli-public", "api_audience": "guard-api",
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": endpoint, "jwks_uri": format!("{issuer}/keys"),
+            "web_redirect_uri": "http://127.0.0.1:18100/auth/oidc/callback",
+            "cli_callback_path": "/oidc/callback", "end_session_endpoint": endpoint,
+            "transport": {"kind": "isolated_demo_http", "exact_issuer": issuer}
+        }))
+        .unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().fallback(|| async { axum::http::StatusCode::NO_CONTENT }),
+            )
+            .await
+            .unwrap();
+        });
+        let transport = Transport::new(&config, None).unwrap();
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(&endpoint)
+            .body(Vec::new())
+            .unwrap();
+        let result = transport.call(request).await;
+        server.abort();
+        assert!(matches!(result, Err(OidcError::ProviderRejected)));
     }
 }
