@@ -6,6 +6,8 @@ This guide describes the Rust OIDC configuration, the Web sign-in and the foregr
 
 Deploy the gateway, built dashboard and native CLI from matching versions when adopting the required `contexts_complete` field in human identity responses. New strict clients reject a missing or malformed field; older strict clients may reject the added field. Coordinate the component update and retain the existing configuration, credentials and audit data. This response-contract change adds no database migration and does not justify replacing an existing store.
 
+The examples also opt in to provider logout acknowledgements through `web_post_logout_redirect_uri` and `cli_post_logout_redirect_uri`. Install matching updated gateway and native CLI versions before activating these fields: older binaries reject unknown configuration/profile fields. Existing configurations that omit both options retain the legacy logout behaviour. Follow the [configuration upgrade procedure](#upgrade-logout-configuration-without-replacing-data) for an existing installation.
+
 Choose the **fresh local DEMO** below to prepare new control data and the three imported application accounts, or use the [manual installation procedure](#prepare-an-existing-or-enterprise-installation) with an existing provider. Use a matching current control image and built frontend; the [engineering record](../../engineering/VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) distinguishes the three accounts' observed Web sign-in/read/logout paths from the remaining native CLI, negative permission and lifecycle qualification. Browser-specific hostname mapping does not establish the host DNS resolution required by the native CLI. Preparation and historical results retain their dated scope; the [identity contract](../../sso.md) describes the complete product target.
 
 ## Prepare a fresh local DEMO
@@ -231,7 +233,8 @@ Register distinct Web and CLI public clients with Authorization Code and require
 | Access-token profile | RS256; header `typ=JWT`, nonempty `kid`; claims `typ=Bearer`, `iss`, `sub`, `aud`, positive integer `iat` and `exp`; `azp` is one of the two configured public clients. `nbf` is checked when present. ID tokens are not API bearers. |
 | Role projection | Operator-controlled array of strings in the verified access token, at the configured claim path. Profile fields editable by a user must not grant permissions. |
 | Refresh policy | Provider-side rotation/reuse protection and suitably short token lifetimes. ai-guard also records admission and refresh generations durably; configure and qualify the provider's policy separately. |
-| Logout | Optional exact end-session endpoint. The implemented operation posts `client_id` and `id_token_hint`; it does not perform an interactive logout redirect. |
+| Logout endpoint | Optional exact end-session endpoint. The private POST includes `client_id` and `id_token_hint`; it does not open an interactive logout page. |
+| Logout returns | When configured, register the exact static HTTPS `web_post_logout_redirect_uri` on the Web client and `cli_post_logout_redirect_uri` on the CLI client. These are separate from login callbacks and the CLI's ephemeral port. See [logout acknowledgements](#configure-provider-logout-acknowledgements). |
 
 The current access-token profile is narrower than OIDC in general. An Entra ID or other provider configuration is usable only if its actual signed tokens and discovery responses satisfy this profile; its name or general OIDC support does not prove compatibility.
 
@@ -241,7 +244,7 @@ Start from one public example and copy it into a new private operator file outsi
 
 | Example | Use |
 |---|---|
-| [gateway.https.json](examples/gateway.https.json) | HTTPS shape with deliberately nonfunctional `example.invalid` addresses. Replace issuer, endpoints, client IDs, audience, origin, role rule and installation UUID with approved values. |
+| [gateway.https.json](examples/gateway.https.json) | HTTPS shape with deliberately nonfunctional `example.invalid` addresses. Replace issuer, endpoints, both logout return URIs, client IDs, audience, origin, role rule and installation UUID with approved values. |
 | [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Exact defaults of the distributed isolated HTTP DEMO provider. Requires separate account/membership setup and an approved gateway route to that provider. Replace the sample installation UUID. |
 
 These files contain public example values, not credentials or existing identities. Generate a fresh canonical lowercase non-nil installation UUID for a new audit. Keep it unchanged when reopening that audit. The JSON parser does **not** expand environment variables: `${NAME}` is not a configuration mechanism. The `.env.exemple.*` Keycloak variables configure its Compose services; they do not enable gateway SSO.
@@ -255,13 +258,38 @@ The configuration is version 1 and rejects unknown fields at every declared obje
 | `authentication_audit` | `path`, `installation_id` and `policy`. A separate private authentication database, distinct from every tenant database. |
 | `ca_bundle_file` | Optional/null, or a path to approved **public** PEM CA certificates for the OIDC provider. |
 
-The provider object in the examples shows every required field. `end_session_endpoint` is optional/null, and omitted `limits` uses the defaults below. `transport` is exactly `{"kind":"https_only"}` for normal installations. The isolated DEMO uses `{"kind":"isolated_demo_http","exact_issuer":"..."}`; its exact issuer must match `issuer`. HTTP is limited to literal loopback issuers or the fixed distributed DEMO issuer. Its Web origin/redirect must be a literal HTTP loopback address. This exception cannot approve an arbitrary intranet HTTP provider.
+The provider object in the examples shows every required field. `end_session_endpoint`, `web_post_logout_redirect_uri` and `cli_post_logout_redirect_uri` are optional/null; either configured logout return requires `end_session_endpoint`. Omitted `limits` uses the defaults below. `transport` is exactly `{"kind":"https_only"}` for normal installations. The isolated DEMO uses `{"kind":"isolated_demo_http","exact_issuer":"..."}`; its exact issuer must match `issuer`. HTTP is limited to literal loopback issuers or the fixed distributed DEMO issuer. Its Web origin/redirect must be a literal HTTP loopback address. This exception cannot approve an arbitrary intranet HTTP provider.
 
 Authorization, token, JWKS and optional logout endpoints are exact operator-approved URLs. Discovery must confirm them; it cannot add destinations. URLs cannot carry userinfo, queries or fragments. The provider HTTP client disables ambient proxies, redirects and automatic retries. Approve DNS and outbound destinations in the deployment too: the URL allowlist is not a container firewall.
 
 Paths in `authentication_audit.path` and `ca_bundle_file` are absolute or relative to the OIDC file's parent. Parent traversal and symlinks are refused. Prepare files as the actual control UID, with private files `0600`, private directories `0700` and protected ancestors/ACLs. The authentication database parent must be writable by that UID; making the configuration file read-only does not make its whole parent suitable as a read-only audit destination. The OIDC input is limited to 1 MiB.
 
 For an enterprise CA, set `ca_bundle_file` to a checked file containing only the approved public certificates, at most 64 KiB and 8 certificates. These roots replace the OIDC client's built-in roots while preserving chain, name and validity checks. The gateway also publishes these public certificates in the CLI profile. This option does not change the browser's trust store or the human CLI's TLS trust for the **gateway**. There is currently no custom gateway-CA flag on `human sso`; use an already trusted gateway certificate and qualify that route. Never supply a private key or disable TLS verification.
+
+### Configure provider logout acknowledgements
+
+Set the optional fields under `gateway.provider`, using exact provider registrations on their respective public clients:
+
+| Field | Distributed DEMO value |
+|---|---|
+| `web_post_logout_redirect_uri` | `https://127.0.0.1/oidc/logout-complete/web` |
+| `cli_post_logout_redirect_uri` | `https://127.0.0.1/oidc/logout-complete/cli` |
+
+Each URI must be canonical, static HTTPS, without userinfo, query, fragment or wildcard, and distinct from the Web login callback. Do not derive the native value from its login callback or ephemeral listener port. The HTTPS template instead uses `https://guard.example.invalid/oidc/logout-complete/web` and `/cli`; replace both placeholders with approved registrations. The [Keycloak guide](../keycloak/README.md#register-logout-acknowledgement-returns) documents its explicit per-client entries.
+
+For a client with a configured return, ai-guard sends the private end-session POST with `client_id`, its retained `id_token_hint`, `post_logout_redirect_uri` and a fresh private `state`. Confirmation requires a direct `302` or `303`, an empty body and exactly one `Location`, byte-for-byte equal to that configured URI followed only by `?state=<that request's state>`. A `200`, `204`, HTML confirmation page, different return, extra parameter, missing/duplicate `Location` or wrong state is not confirmation. No fallback to legacy acceptance occurs while that client's return is configured. These strict response/body rules are ai-guard's supported product profile, not a universal OIDC requirement; see [RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html).
+
+ai-guard compares this acknowledgement URI but never follows or contacts it, opens a browser for it, or handles a logout callback. No HTTPS listener, certificate, DNS change or OS service is created for these DEMO values. The issuer/end-session transport remains the isolated HTTP DEMO; an HTTPS acknowledgement URI does not make it enterprise HTTPS compliant. Provider policy must permit direct completion with the supplied ID-token hint; an interactive confirmation page remains unconfirmed. Do not weaken that policy installation-wide merely to force a successful result.
+
+When the option for that client is absent/null, the legacy operation sends neither return URI nor state and retains its supported noninteractive response profile: empty `204`, or `200` with an empty body or empty JSON object. A redirect or interactive HTML remains unconfirmed. Real Web/native CLI interoperability for the new acknowledgement profile is **NOT_RUN** in this documentation/template lot; historical logout observations do not qualify it.
+
+### Upgrade logout configuration without replacing data
+
+Startup import skips an existing Keycloak realm. Updating the realm template or rebuilding its image does not update stored clients. Use the [manual client-registration procedure](../keycloak/README.md#update-existing-logout-registrations) rather than deleting a realm or volume.
+
+Before activation, inventory the existing client registrations, private OIDC configuration and exact component versions. Preserve coherent provider/control backups under their approved procedures, including authentication audit identity/policy, credentials and memberships. Prepare the two scoped client registrations and a reviewed private OIDC file with matching return values; do not rerun `setup prepare`, edit its recovery records or replace `authentication.sqlite`. An unfinished preparation must use its original retained input and [resume procedure](#stop-restart-and-resume-a-failed-preparation).
+
+Deploy matching updated gateway/dashboard/CLI components and apply the reviewed configuration using the installation's existing stop/restart procedure. Keep its UID, data paths, audit UUID/policy and volumes. A gateway restart loses live admissions and pending logins, so users must sign in again. No database migration is introduced by these two options. Retain the previous configuration for a coordinated rollback; an older binary requires these fields to be absent and must not consume a newer public CLI profile. Check local closure, durable audit and provider acknowledgement separately before recording a result; real qualification remains open.
 
 ### Request and session limits
 
@@ -391,7 +419,16 @@ Open the exact configured dashboard origin. The connection screen checks SSO sta
 
 The gateway consumes its callback and sends the browser to `/auth/oidc/complete` without forwarding code/state query parameters. Tokens are delivered once and kept in memory, outside URLs, Web Storage, logs and exports. Reloading, closing the page or restarting the gateway requires a new explicit sign-in. Do not copy tokens from developer tools into a file or another CLI command. The browser coordinates refresh when a refresh token is available; a refusal or ambiguous result closes the local session. New generations replace the authorized view rather than retaining old context data.
 
-Use the application's disconnect action. Local browser state is cleared even when the control/provider cannot confirm logout. Read the separate `local_session`, `provider_logout` and `audit` outcomes when available. `provider_logout:accepted` reports the supported endpoint response; it does not assert global JWT revocation or that every other browser/client session closed.
+Use the application's disconnect action. Local browser state is cleared even when the control/provider cannot confirm logout. Keep the outcomes separate:
+
+| Outcome | Meaning |
+|---|---|
+| `local_session` | `closed` confirms closure of this ai-guard admission by the control; `unknown` does not confirm that closure. Clearing browser/process memory is a separate local action. |
+| `audit` | `recorded` or `unavailable` reports the control's mandatory logout audit; a provider response cannot substitute for it. |
+| `provider_logout` | `accepted` means the component attempting provider logout received its configured supported response. `failed`, `unavailable`, `unsupported` or `not_attempted` does not confirm provider logout. |
+| `control_provider_logout` | Native CLI report of the gateway's provider outcome. It stays `not_attempted` for native sessions: the CLI retains the ID-token hint privately and makes its own provider call, reported in `provider_logout`. The gateway does not recover or receive that hint for native logout. |
+
+An accepted acknowledgement does not assert global JWT revocation, closure of every other browser/client session or delivery of a browser redirect. JWTs validated offline can remain valid under the installation's token/revocation policy.
 
 ### When the context list is partial
 
@@ -441,6 +478,8 @@ Inspect `contexts_complete` in the `identity` result before treating its context
 
 Tokens and the PKCE verifier remain in this process; no durable token cache or credential file is created. `refresh` is explicit in the CLI. After it succeeds, request `identity` and select a newly offered context; old contexts/cursors and export generations are invalid. A failed or ambiguous refresh closes the foreground session without automatic retry. `logout`, `quit`, `exit`, EOF and Ctrl-C close local state; a later login is a new session. Gateway restart loses live admissions even though the audit remains durable.
 
+The native CLI uses its own retained ID-token hint and configured CLI logout return; the login listener is not reused. Read `provider_logout` alongside `control_provider_logout`, `local_session` and `audit` using the [separate outcome meanings](#sign-in-from-the-browser). A failed provider acknowledgement does not restore the foreground session or trigger a browser/callback fallback.
+
 Export needs an existing private parent and a **new** final destination. It has a budget of 25 pages, 4 MiB and 60 seconds from the initial preparation. On interruption retain the adjacent `.preparing` directory. `resume-export --output-dir /absolute/private/ai-guard/new-export` works only with that exact preparation, context, still-live foreground session and admission generation, within the original deadline. Refresh, process exit/restart, expired authorization or an exhausted budget requires a new explicitly authorized export into another fresh destination; preserve the unresolved preparation. A read receipt records the control's audit, not proof that bytes reached their destination or a complete signed audit verification.
 
 ## Diagnose and recover
@@ -456,6 +495,7 @@ Export needs an existing private parent and a **new** final destination. It has 
 | `credential_invalid` / `session_conflict` | The admission is expired, revoked, rotated, consumed or lost on restart. Clear the view and sign in again. Do not retry an ambiguous exchange. |
 | `migration_required` | Stop controls, retain backups and perform the explicit next storage migration. Do not initialize a replacement store. |
 | TLS, discovery, signature or provider failure | Verify approved DNS/routes, issuer/endpoints, public chain/SAN/time, token profile and key rotation. Repair the source configuration; preserve verification and fixed destinations. |
+| Logout provider `failed` / `unavailable` | Check the exact per-client post-logout registration and direct-completion policy, end-session endpoint and approved transport. HTML, a wrong `Location`/state or a body-bearing redirect is unconfirmed; preserve local closure and audit outcomes. Do not follow the returned URI, log its state/hint or retry through an interactive fallback. |
 | `audit_unavailable` | Authentication or mandatory read audit cannot be trusted/written, or capacity is exhausted. Preserve data and repair storage/configuration before retrying. No bypass is available. |
 | Partial contexts / `contexts_complete:false` | Preserve the affected store and repair its availability. Use **Actualiser les contextes** or run foreground `identity` again; an incomplete list is not proof of absent or revoked access. Each selected context still requires its own healthy store. |
 | Missing or incompatible human identity field | Deploy matching gateway, built dashboard and CLI versions together. Do not drop `contexts_complete`, substitute a tenant hint or replace the database to bypass a contract error. |

@@ -64,7 +64,8 @@
       "webOrigins": ["${AI_GUARD_DEMO_WEB_ORIGIN}"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "${AI_GUARD_DEMO_WEB_ORIGIN}/",
+        "post.logout.redirect.uris": "${AI_GUARD_DEMO_WEB_ORIGIN}/##https://127.0.0.1/oidc/logout-complete/web",
+        "logout.confirmation.enabled": "false",
         "oauth2.device.authorization.grant.enabled": "false",
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"
@@ -117,6 +118,8 @@
       "webOrigins": [],
       "attributes": {
         "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "https://127.0.0.1/oidc/logout-complete/cli",
+        "logout.confirmation.enabled": "false",
         "oauth2.device.authorization.grant.enabled": "false",
         "oidc.ciba.grant.enabled": "false",
         "standard.token.exchange.enabled": "false"

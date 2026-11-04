@@ -97,13 +97,21 @@ The bootstrap applies to a fresh DEMO database. These values are never installat
 
 | Client | Contract |
 |---|---|
-| `ai-guard-demo-web` | Public; Authorization Code; PKCE S256 required; registered return `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback`; exact Web origin and logout return `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered loopback reference `http://127.0.0.1/oidc/callback`; no CORS origin. The native flow uses an ephemeral loopback port, the same IP and fixed path. Provider support for the loopback port exception is required. |
+| `ai-guard-demo-web` | Public; Authorization Code; PKCE S256 required; registered login return `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback`; exact Web origin. Explicit logout returns preserve `${AI_GUARD_DEMO_WEB_ORIGIN}/` and add `https://127.0.0.1/oidc/logout-complete/web`. |
+| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered login reference `http://127.0.0.1/oidc/callback`; no CORS origin. Native login uses an ephemeral loopback port, the same IP and fixed path, requiring provider support for the port exception. Its explicit logout return is `https://127.0.0.1/oidc/logout-complete/cli`, without port inheritance. |
 | `ai-guard-demo-api` | Bearer-only resource server and access-token audience; no login flow or service account. |
 
 Neither public client distributes a `client_secret`. Implicit, password grants, device flow, CIBA, service accounts and token exchange are disabled. Do not replace a failed browser flow with a password grant or manual token copy.
 
 Register the CLI reference in the canonical form above, without explicit `:80`. Keycloak 26.8.1 normalizes the default HTTP port away during its native-loopback comparison; a registered literal containing `:80` can prevent that match. The CLI still binds an ephemeral local port and includes it in the actual authorization request. Keep the literal IP, exact `/oidc/callback` path and required S256, without a wildcard. This configuration alone does not prove a successful CLI sign-in. Startup import skips existing realms; use the data-preservation procedure below when changing an existing registration.
+
+### Register logout acknowledgement returns
+
+The [realm template](../../../deploy/keycloak-demo/ai-guard-demo-realm.json) uses the client attribute `post.logout.redirect.uris`. Keycloak 26.8.1 stores multiple values in one string separated by `##`: the Web value is `${AI_GUARD_DEMO_WEB_ORIGIN}/##https://127.0.0.1/oidc/logout-complete/web`. The CLI has the single explicit `https://127.0.0.1/oidc/logout-complete/cli`. Do not use `+`, inherit login redirects, add wildcards or copy the CLI's ephemeral login port. The old Web logout registration is retained. See the pinned [multivalue encoding](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/AbstractClientConfigWrapper.java#L60-L71), [delimiter](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/models/Constants.java#L140-L147) and [logout registration handling](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCAdvancedConfigWrapper.java#L439-L469).
+
+Both public clients explicitly set `logout.confirmation.enabled` to the string `false`, the pinned version's default ([attribute key](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/protocol/oidc/OIDCConfigAttributes.java#L65), [default](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCAdvancedConfigWrapper.java#L369-L374)). Provider policy must permit direct completion with the supplied ID-token hint; this setting alone does not prove the response. An interactive HTML confirmation remains unconfirmed by ai-guard. Preserve the installation's approved policy rather than weakening it globally.
+
+The matching [local manifest](../sso/examples/local-demo.json) and [gateway example](../sso/examples/gateway.keycloak-demo.json) select these two HTTPS URIs as protocol acknowledgements only. ai-guard compares a direct `302`/`303` with one exact `Location` containing only its fresh request state and an empty body; it never follows that URI, opens a browser for it or installs a logout callback. No TLS listener, certificate, DNS entry or OS service is needed or created at those paths. This is ai-guard's supported response profile, not a universal OIDC body rule. The issuer and end-session endpoint remain isolated HTTP DEMO endpoints; HTTPS acknowledgement URIs do not qualify this deployment for enterprise HTTPS. See the [full response and compatibility contract](../sso/README.md#configure-provider-logout-acknowledgements). Real Web/native CLI qualification of this new profile is **NOT_RUN** in this template/documentation lot.
 
 Both public clients have exactly `basic` and `profile` as default client scopes, with no optional scopes. `basic` supplies Keycloak's access-token subject mapper; the signed token must contain a non-empty `sub`. Its absence is a provider configuration error, not a reason to weaken validation. `basic` need not appear in the token's textual `scope` field: it is a default client scope whose mapper is applied by the provider.
 
@@ -117,8 +125,9 @@ Record the following in a separate, versioned JSON OIDC installation configurati
 |---|---|
 | Issuer | Exact issuer above; one spelling across browser, CLI and control. |
 | Client IDs | Separate Web/CLI IDs above; required Code+S256. |
-| Web returns | Exact configured origin, callback and post-logout return; no wildcard. |
-| CLI return | Literal loopback IP, ephemeral listener port, fixed `/oidc/callback` path; close after success, error or deadline. |
+| Web login return | Exact configured origin and callback; no wildcard. |
+| CLI login return | Literal loopback IP, ephemeral listener port, fixed `/oidc/callback` path; close after success, error or deadline. |
+| Logout acknowledgement returns | Optional `gateway.provider.web_post_logout_redirect_uri` and `cli_post_logout_redirect_uri`, both requiring `end_session_endpoint`; exact static canonical HTTPS registrations above, without query, fragment, userinfo or wildcard. Distinct from login callbacks. |
 | API validation | RS256, issuer and audience exact, mandatory `exp`, `iss`, `sub`, `aud`, `nbf` checked when present; bounded clock tolerance. DEMO token profile: JWT header `typ=JWT`, payload `typ=Bearer`, allowed `azp` restricted to the two public clients. |
 | Requested scopes | `openid` and the minimum profile information; provider default client scopes `basic`+`profile`. |
 | Administrator mapping | Verified access-token claim path `resource_access.ai-guard-demo-api.roles`, value `admin-ai-guard`; apply only to explicitly assigned application scopes. |
@@ -137,6 +146,8 @@ Configure the DEMO's explicit memberships and administration scope in the contro
 Submit a short, non-destructive task through the trusted broker. Inspect its request, authorisation, execution and result in the audit; keep the initiator distinct from the broker and agent actors. Review changes and export only into a new destination. Use `user-2` to check that private resources and unauthorized contexts are refused, then use `admin-ai-guard` to inspect only its assigned administration scope. The master account must not gain application access implicitly.
 
 On logout, clear the local identity and private transaction state, cancel pending requests and close subscriptions. Confirm the provider logout separately; local sign-out must remain possible during a provider outage. A role or membership removal must also withdraw formerly visible data and subscriptions within the configured revocation bound. SSO failure never switches to another identity or to a paid inference provider.
+
+Read `local_session` (ai-guard admission closure), `audit` (control audit) and `provider_logout` (supported provider response) independently. In native CLI output, `control_provider_logout:not_attempted` means the gateway did not attempt provider logout: the native CLI retains the hint privately and reports its own provider call in `provider_logout`. An `accepted` acknowledgement does not assert global JWT revocation or closure of every other session. The [SSO guide](../sso/README.md#sign-in-from-the-browser) explains failure and unknown outcomes.
 
 ## Connect an enterprise provider and HTTPS
 
@@ -163,6 +174,13 @@ Startup import skips an existing realm. Editing the realm JSON, changing the Web
 
 Before a provider upgrade, preserve a coherent backup and the exact prior image/configuration under the provider's supported backup procedure. A realm JSON export alone is not a complete database backup. Restore into a fresh isolated destination first, then verify issuer, users, mappings and the application's authorization policy. Keep the previous data and identities until recovery is confirmed.
 
+### Update existing logout registrations
+
+1. Keep the current realm, users, subjects, credentials, mappings and volumes. Inventory the two clients' existing settings and take the coherent provider/control backups described above and in the [SSO recovery guide](../sso/README.md#diagnose-and-recover).
+2. Through the operator's approved Keycloak administration interface, add the exact Web acknowledgement URI to that client's **Valid post logout redirect URIs**, preserving its existing exact Web return. Add the explicit CLI acknowledgement URI to the native client's post-logout list. For the DEMO use the literal HTTPS values above; replace `${AI_GUARD_DEMO_WEB_ORIGIN}/` with the installation's actual origin plus `/` when editing a stored client. `##` is the serialized attribute separator, not part of either URI entered separately in the console. Preserve other approved exact entries; do not use `+`, login-list inheritance or wildcards. Do not change the canonical native login registration, public-client flags, Code/S256, disabled grants or token mappers.
+3. Verify the clients' approved direct-completion policy (`logout.confirmation.enabled:false` in the distributed DEMO). Do not change unrelated realm-wide session policy. Prepare a reviewed private OIDC configuration with matching `web_post_logout_redirect_uri` and `cli_post_logout_redirect_uri` and the existing exact end-session endpoint.
+4. Activate only with matching updated gateway and native CLI binaries, following the [existing-installation upgrade procedure](../sso/README.md#upgrade-logout-configuration-without-replacing-data), approved restart and reauthentication. Older binaries reject these new fields; omitting them retains legacy operation. Do not rerun fresh preparation, reset the realm, delete a volume or replace an audit to apply this change. Check closure, audit and provider response separately; no real logout result is supplied by editing these settings.
+
 ## Diagnose a refused connection
 
 | Symptom | Check and recovery |
@@ -174,6 +192,7 @@ Before a provider upgrade, preserve a coherent backup and the exact prior image/
 | Callback rejected | Exact origin/path, selected client, transaction expiry, state and nonce. Begin a fresh login; do not replay a code. |
 | TLS rejected | SAN, chain, validity and the client's explicit CA bundle. Repair trust or certificates; keep TLS verification active. |
 | Provider unavailable or session expired | Show the connection error, preserve audit provenance and request authentication when required. Do not show a disconnected view as empty activity. |
+| Logout unconfirmed | Check the exact per-client post-logout URI and direct-completion policy. A confirmation page or nonmatching/body-bearing redirect is not an accepted acknowledgement. Preserve the separate local/audit result; never follow or log the returned Location, state or hint. |
 
 Keep diagnostics free of bearer tokens, authorization codes, verifiers, cookies and callback queries. Do not persist raw provider replies or complete environment/inspection dumps. Local auxiliary test harnesses are not distributed product commands.
 

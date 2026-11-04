@@ -6,6 +6,8 @@ Ce guide décrit la configuration OIDC Rust, la connexion Web et le CLI humain a
 
 Déployez des versions correspondantes du gateway, du dashboard compilé et du CLI natif pour adopter le champ obligatoire `contexts_complete` des réponses d’identité humaine. Un nouveau client strict refuse un champ absent ou mal typé ; un ancien client strict peut refuser le champ supplémentaire. Coordonnez la mise à jour des composants en conservant configuration, credentials et audits existants. Cette évolution du contrat de réponse n’ajoute aucune migration de base et ne justifie pas de remplacer un store existant.
 
+Les exemples activent aussi l’accusé de déconnexion fournisseur via `web_post_logout_redirect_uri` et `cli_post_logout_redirect_uri`. Installez des versions mises à jour correspondantes du gateway et du CLI natif avant d’activer ces champs : les anciens binaires refusent les champs de configuration/profil inconnus. Les configurations existantes qui omettent ces deux options conservent le comportement de déconnexion antérieur. Suivez la [procédure de mise à jour de configuration](#mettre-à-jour-la-configuration-logout-sans-remplacer-les-données) pour une installation existante.
+
 Choisissez la **DEMO locale neuve** ci-dessous pour préparer les nouvelles données du contrôle et les trois comptes applicatifs importés, ou la [procédure manuelle](#préparer-une-installation-existante-ou-dentreprise) avec un fournisseur existant. Utilisez une image de contrôle actuelle et son frontend compilé correspondants ; le [suivi d’ingénierie](../../engineering/VALIDATION.md#2-novembre--sso-web-réel-sur-la-page-de-fin-corrigée) distingue les parcours Web connexion/lecture/logout observés des trois comptes des qualifications CLI natif, refus de permissions et cycle de session restantes. Un mapping de nom propre au navigateur ne prouve pas la résolution DNS hôte nécessaire au CLI natif. Préparation et résultats historiques gardent leur périmètre daté ; le [contrat d’identité](../../sso.md) décrit la cible produit complète.
 
 ## Préparer une DEMO locale neuve
@@ -231,7 +233,8 @@ Enregistrez deux clients publics Web et CLI distincts, avec Authorization Code e
 | Profil d’access token | RS256 ; header `typ=JWT`, `kid` non vide ; claims `typ=Bearer`, `iss`, `sub`, `aud`, entiers positifs `iat` et `exp` ; `azp` est l’un des deux clients publics configurés. `nbf` est contrôlé s’il est présent. Un ID token n’est pas un bearer API. |
 | Projection de rôle | Tableau de chaînes administré par l’opérateur dans l’access token vérifié, au chemin de claim configuré. Un attribut de profil modifiable par l’utilisateur ne doit pas conférer de permission. |
 | Renouvellement | Rotation/protection contre la réutilisation côté fournisseur et tokens de durée adaptée et courte. ai-guard conserve aussi les générations d’admission et de refresh durablement ; configurez et qualifiez séparément la politique du fournisseur. |
-| Déconnexion | Endpoint end-session exact facultatif. L’opération implémentée envoie `client_id` et `id_token_hint` par POST ; elle ne réalise pas de redirect de déconnexion interactif. |
+| Endpoint de déconnexion | Endpoint end-session exact facultatif. Le POST privé contient `client_id` et `id_token_hint` ; il n’ouvre pas de page de déconnexion interactive. |
+| Retours de déconnexion | Lorsqu’ils sont configurés, enregistrez le `web_post_logout_redirect_uri` HTTPS statique exact sur le client Web et le `cli_post_logout_redirect_uri` sur le client CLI. Ils sont distincts des callbacks de connexion et du port éphémère du CLI. Voir les [accusés de déconnexion](#configurer-les-accusés-de-déconnexion-fournisseur). |
 
 Le profil d’access token actuel est plus étroit qu’OIDC en général. Entra ID ou un autre fournisseur n’est utilisable que si ses tokens signés et réponses discovery satisfont réellement ce profil ; son nom ou sa conformité OIDC générale ne prouve pas sa compatibilité.
 
@@ -241,7 +244,7 @@ Partez d’un exemple public et copiez-le dans un nouveau fichier privé d’op�
 
 | Exemple | Usage |
 |---|---|
-| [gateway.https.json](examples/gateway.https.json) | Format HTTPS avec adresses `example.invalid` volontairement non fonctionnelles. Remplacez issuer, endpoints, IDs clients, audience, origine, règle de rôle et UUID d’installation par les valeurs approuvées. |
+| [gateway.https.json](examples/gateway.https.json) | Format HTTPS avec adresses `example.invalid` volontairement non fonctionnelles. Remplacez issuer, endpoints, les deux URI de retour logout, IDs clients, audience, origine, règle de rôle et UUID d’installation par les valeurs approuvées. |
 | [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Valeurs exactes par défaut du fournisseur HTTP DEMO isolé distribué. Nécessite une préparation distincte des comptes/memberships et un trajet gateway→fournisseur approuvé. Remplacez l’UUID d’installation d’exemple. |
 
 Ces fichiers contiennent des valeurs publiques d’exemple, aucun credential ni identité existante. Générez un UUID d’installation canonique en minuscules, non nul et neuf pour un nouvel audit. Conservez-le lors des réouvertures de cet audit. Le parseur JSON ne développe **pas** les variables d’environnement : `${NAME}` n’est pas un mécanisme de configuration. Les variables Keycloak des `.env.exemple.*` configurent ses services Compose ; elles n’activent pas le SSO du gateway.
@@ -255,13 +258,38 @@ La configuration est en version 1 et refuse les champs inconnus dans chaque obje
 | `authentication_audit` | `path`, `installation_id` et `policy`. Base privée d’authentification distincte de chaque base tenant. |
 | `ca_bundle_file` | Facultatif/null, ou chemin vers les certificats PEM d’AC **publics** approuvés pour le fournisseur OIDC. |
 
-L’objet provider des exemples montre tous les champs obligatoires. `end_session_endpoint` est facultatif/null ; omettre `limits` applique les valeurs ci-dessous. `transport` vaut exactement `{"kind":"https_only"}` dans une installation normale. La DEMO isolée utilise `{"kind":"isolated_demo_http","exact_issuer":"..."}` ; cet issuer exact doit correspondre à `issuer`. HTTP est limité aux issuers sur IP loopback littérale ou à l’issuer fixe de la DEMO distribuée. Son origine/redirect Web doit être une adresse loopback HTTP littérale. Cette exception n’approuve pas un fournisseur HTTP intranet arbitraire.
+L’objet provider des exemples montre tous les champs obligatoires. `end_session_endpoint`, `web_post_logout_redirect_uri` et `cli_post_logout_redirect_uri` sont facultatifs/null ; tout retour logout configuré exige `end_session_endpoint`. Omettre `limits` applique les valeurs ci-dessous. `transport` vaut exactement `{"kind":"https_only"}` dans une installation normale. La DEMO isolée utilise `{"kind":"isolated_demo_http","exact_issuer":"..."}` ; cet issuer exact doit correspondre à `issuer`. HTTP est limité aux issuers sur IP loopback littérale ou à l’issuer fixe de la DEMO distribuée. Son origine/redirect Web doit être une adresse loopback HTTP littérale. Cette exception n’approuve pas un fournisseur HTTP intranet arbitraire.
 
 Les endpoints d’autorisation, token, JWKS et logout facultatif sont des URL exactes approuvées par l’opérateur. Discovery doit les confirmer ; il n’ajoute pas de destination. Les URL ne contiennent ni userinfo, query ni fragment. Le client HTTP du fournisseur désactive proxies ambiants, redirects et retries automatiques. Approuvez également DNS et destinations sortantes dans le déploiement : la liste d’URL n’est pas un pare-feu de conteneur.
 
 Les chemins `authentication_audit.path` et `ca_bundle_file` sont absolus ou relatifs au parent du fichier OIDC. Traversées parent et liens symboliques sont refusés. Préparez les fichiers sous l’UID réel du contrôle, fichiers privés `0600`, répertoires privés `0700` et ancêtres/ACL protégés. Le parent de la base d’authentification doit être inscriptible par cet UID ; rendre le fichier de configuration en lecture seule ne rend pas son parent entier adapté à un audit en lecture seule. L’entrée OIDC est limitée à 1 Mio.
 
 Pour une AC d’entreprise, donnez à `ca_bundle_file` un fichier vérifié contenant uniquement les certificats publics approuvés, au plus 64 Kio et 8 certificats. Ces racines remplacent les racines intégrées du seul client OIDC, avec contrôle de chaîne, nom et validité conservé. Le gateway publie aussi ces certificats publics dans le profil CLI. Cette option ne change ni le magasin de confiance du navigateur ni la confiance TLS du CLI humain pour le **gateway**. `human sso` n’expose actuellement aucun drapeau d’AC gateway spécifique ; utilisez un certificat gateway déjà reconnu et qualifiez ce trajet. Ne fournissez aucune clé privée et ne désactivez pas TLS.
+
+### Configurer les accusés de déconnexion fournisseur
+
+Placez les champs facultatifs dans `gateway.provider`, avec des enregistrements fournisseur exacts sur leurs clients publics respectifs :
+
+| Champ | Valeur de la DEMO distribuée |
+|---|---|
+| `web_post_logout_redirect_uri` | `https://127.0.0.1/oidc/logout-complete/web` |
+| `cli_post_logout_redirect_uri` | `https://127.0.0.1/oidc/logout-complete/cli` |
+
+Chaque URI doit être canonique, statique, HTTPS, sans userinfo, query, fragment ou joker, et distincte du callback de connexion Web. Ne déduisez pas la valeur native de son callback de connexion ou de son port d’écoute éphémère. Le modèle HTTPS emploie `https://guard.example.invalid/oidc/logout-complete/web` et `/cli` ; remplacez ces deux exemples par les enregistrements approuvés. Le [guide Keycloak](../keycloak/README.fr.md#enregistrer-les-retours-daccusé-de-déconnexion) décrit les entrées explicites par client.
+
+Pour un client dont le retour est configuré, ai-guard envoie le POST privé end-session avec `client_id`, son `id_token_hint` conservé, `post_logout_redirect_uri` et un `state` privé neuf. La confirmation exige un `302` ou `303` direct, un corps vide et un seul `Location`, identique octet par octet à l’URI configurée suivie uniquement de `?state=<state de cette requête>`. Un `200`, `204`, une page HTML de confirmation, un autre retour, un paramètre supplémentaire, un `Location` absent/dupliqué ou un mauvais state ne confirme rien. Aucun repli vers l’acceptation antérieure n’a lieu tant que le retour de ce client est configuré. Ces règles strictes de réponse/corps sont le profil produit pris en charge par ai-guard, pas une exigence OIDC universelle ; voir [RP-Initiated Logout](https://openid.net/specs/openid-connect-rpinitiated-1_0.html).
+
+ai-guard compare cette URI d’accusé, sans jamais la suivre ni la contacter, ouvrir un navigateur pour elle ou traiter un callback logout. Aucun listener HTTPS, certificat, changement DNS ou service OS n’est créé pour ces valeurs DEMO. Le transport issuer/end-session reste celui de la DEMO HTTP isolée ; une URI d’accusé HTTPS ne la rend pas conforme au profil HTTPS d’entreprise. La politique fournisseur doit permettre une fin directe avec l’ID-token hint fourni ; une page de confirmation interactive reste non confirmée. N’assouplissez pas cette politique pour toute l’installation afin de forcer un résultat réussi.
+
+Lorsque l’option de ce client est absente/null, l’opération antérieure n’envoie ni URI de retour ni state et conserve son profil de réponse non interactif : `204` vide, ou `200` à corps vide ou objet JSON vide. Un redirect ou du HTML interactif reste non confirmé. L’interopérabilité réelle Web/CLI natif du nouveau profil d’accusé est **NOT_RUN** dans ce lot documentation/modèles ; les observations historiques de logout ne la qualifient pas.
+
+### Mettre à jour la configuration logout sans remplacer les données
+
+L’import au démarrage saute un realm Keycloak existant. Modifier le modèle de realm ou reconstruire son image ne met pas à jour les clients stockés. Suivez la [procédure manuelle d’enregistrement des clients](../keycloak/README.fr.md#mettre-à-jour-les-enregistrements-logout-existants), sans supprimer de realm ou de volume.
+
+Avant activation, inventoriez enregistrements clients existants, configuration OIDC privée et versions exactes des composants. Conservez des sauvegardes cohérentes du fournisseur/contrôle selon leurs procédures approuvées, dont identité/politique de l’audit d’authentification, credentials et appartenances. Préparez les deux enregistrements clients bornés et un fichier OIDC privé relu avec les mêmes retours ; ne rejouez pas `setup prepare`, ne modifiez pas ses enregistrements de reprise et ne remplacez pas `authentication.sqlite`. Une préparation inachevée doit conserver son entrée d’origine et suivre sa [procédure de reprise](#arrêter-redémarrer-et-reprendre-une-préparation-échouée).
+
+Déployez des composants gateway/dashboard/CLI mis à jour correspondants et appliquez la configuration relue par la procédure d’arrêt/redémarrage existante de l’installation. Gardez UID, chemins de données, UUID/politique d’audit et volumes. Un redémarrage gateway perd admissions vivantes et connexions en attente : les utilisateurs doivent se reconnecter. Ces deux options n’introduisent aucune migration de base. Conservez la configuration antérieure pour un retour coordonné ; un ancien binaire exige l’absence de ces champs et ne doit pas consommer un profil CLI public plus récent. Vérifiez séparément fermeture locale, audit durable et accusé fournisseur avant de consigner un résultat ; la qualification réelle reste ouverte.
 
 ### Limites des requêtes et sessions
 
@@ -391,7 +419,16 @@ Ouvrez l’origine exacte du dashboard configuré. L’écran vérifie l’état
 
 Le gateway consomme son callback et envoie le navigateur vers `/auth/oidc/complete` sans transmettre les paramètres code/state. Les tokens sont remis une seule fois puis gardés en mémoire, hors URL, Web Storage, logs et exports. Rechargement, fermeture de page ou redémarrage gateway exigent une nouvelle connexion explicite. Ne recopiez pas un token des outils développeur dans un fichier ou une autre commande CLI. Le navigateur coordonne le refresh lorsqu’un refresh token est disponible ; un refus ou résultat ambigu ferme la session locale. Une nouvelle génération remplace la vue autorisée au lieu de conserver l’ancien contexte.
 
-Utilisez l’action de déconnexion de l’application. L’état local du navigateur est effacé même si contrôle/fournisseur ne peuvent confirmer le logout. Lisez séparément les résultats `local_session`, `provider_logout` et `audit` lorsqu’ils sont disponibles. `provider_logout:accepted` décrit la réponse de l’endpoint pris en charge ; ce n’est ni une révocation JWT globale ni la preuve de fermeture des autres sessions navigateur/client.
+Utilisez l’action de déconnexion de l’application. L’état local du navigateur est effacé même si contrôle/fournisseur ne peuvent confirmer le logout. Distinguez les résultats :
+
+| Résultat | Signification |
+|---|---|
+| `local_session` | `closed` confirme la fermeture de cette admission ai-guard par le contrôle ; `unknown` ne la confirme pas. Effacer la mémoire du navigateur/processus est une action locale distincte. |
+| `audit` | `recorded` ou `unavailable` décrit l’audit obligatoire du logout côté contrôle ; une réponse fournisseur ne le remplace pas. |
+| `provider_logout` | `accepted` signifie que le composant tentant le logout fournisseur a reçu la réponse prise en charge configurée. `failed`, `unavailable`, `unsupported` ou `not_attempted` ne confirme pas ce logout. |
+| `control_provider_logout` | Résultat fournisseur du gateway rapporté par le CLI natif. Il reste `not_attempted` pour les sessions natives : le CLI conserve l’ID-token hint en privé et réalise son propre appel fournisseur, décrit par `provider_logout`. Le gateway ne récupère ni ne reçoit ce hint pour le logout natif. |
+
+Un accusé accepté ne prouve ni révocation JWT globale, fermeture de toutes les autres sessions navigateur/client ou livraison d’un redirect navigateur. Les JWT validés hors ligne peuvent rester valides selon la politique de durée/révocation de l’installation.
 
 ### Lorsque la liste des contextes est partielle
 
@@ -441,6 +478,8 @@ Vérifiez `contexts_complete` dans le résultat `identity` avant de considérer 
 
 Tokens et vérificateur PKCE restent dans ce processus ; aucun cache durable de tokens ou fichier de credential n’est créé. `refresh` est explicite dans le CLI. Après sa réussite, demandez `identity` et choisissez un nouveau contexte proposé ; anciens contextes/curseurs et générations d’export sont invalides. Un refresh échoué ou ambigu ferme la session au premier plan, sans retry automatique. `logout`, `quit`, `exit`, EOF et Ctrl-C effacent l’état local ; la connexion suivante est une nouvelle session. Un redémarrage gateway perd les admissions vivantes malgré l’audit durable.
 
+Le CLI natif utilise son propre ID-token hint conservé et le retour logout CLI configuré ; le listener de connexion n’est pas réutilisé. Lisez `provider_logout` avec `control_provider_logout`, `local_session` et `audit` selon les [significations distinctes](#se-connecter-dans-le-navigateur). Un accusé fournisseur échoué ne restaure pas la session au premier plan et ne déclenche aucun repli navigateur/callback.
+
 L’export demande un parent privé existant et une destination finale **neuve**. Son budget est de 25 pages, 4 Mio et 60 secondes depuis la préparation initiale. Après interruption, conservez le répertoire `.preparing` adjacent. `resume-export --output-dir /absolute/private/ai-guard/new-export` exige cette préparation exacte, le même contexte, la session au premier plan encore vivante et sa génération d’admission, dans l’échéance initiale. Refresh, arrêt/redémarrage du processus, autorisation expirée ou budget épuisé imposent un nouvel export explicitement autorisé vers une autre destination neuve ; conservez la préparation non résolue. Un reçu de lecture prouve l’enregistrement du contrôle, pas la livraison des octets ni la vérification d’un audit signé complet.
 
 ## Diagnostiquer et reprendre
@@ -456,6 +495,7 @@ L’export demande un parent privé existant et une destination finale **neuve**
 | `credential_invalid` / `session_conflict` | Admission expirée, révoquée, renouvelée, consommée ou perdue au redémarrage. Effacez la vue et reconnectez-vous. Ne rejouez pas un échange ambigu. |
 | `migration_required` | Arrêtez les contrôles, conservez les sauvegardes et réalisez la migration de stockage suivante explicite. N’initialisez pas une base de remplacement. |
 | Échec TLS, discovery, signature ou fournisseur | Vérifiez DNS/routes approuvés, issuer/endpoints, chaîne publique/SAN/horloge, profil des tokens et rotation des clés. Réparez la source ; conservez validation et destinations fixes. |
+| Logout fournisseur `failed` / `unavailable` | Vérifiez enregistrement post-logout exact par client, politique de fin directe, endpoint end-session et transport approuvé. HTML, mauvais `Location`/state ou redirect à corps non vide reste non confirmé ; conservez les résultats de fermeture locale et d’audit. Ne suivez pas l’URI reçue, ne journalisez ni state/hint et ne réessayez pas via un repli interactif. |
 | `audit_unavailable` | Audit d’authentification/lecture obligatoire non fiable, non inscriptible ou capacité épuisée. Préservez les données et réparez stockage/configuration avant retry. Aucun contournement. |
 | Contextes partiels / `contexts_complete:false` | Préservez le store affecté et réparez sa disponibilité. Utilisez **Actualiser les contextes** ou relancez `identity` au premier plan ; une liste incomplète ne prouve ni absence ni révocation d’accès. Chaque contexte sélectionné exige toujours son propre store sain. |
 | Champ d’identité humaine absent ou incompatible | Déployez ensemble des versions correspondantes du gateway, du dashboard compilé et du CLI. Ne supprimez pas `contexts_complete`, ne substituez pas un tenant libre et ne remplacez pas la base pour contourner l’erreur de contrat. |
