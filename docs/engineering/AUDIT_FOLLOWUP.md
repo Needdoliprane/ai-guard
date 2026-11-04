@@ -1,5 +1,17 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Diagnostic opérateur après intégration — 4 novembre 2026
+
+Le refus trompeur d'un journal requis absent est reproduit puis corrigé dans
+la frontière existante du broker, avec revue et régressions ciblées
+[consignées séparément](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
+Il s'agit d'un défaut de diagnostic, sans nouvelle vulnérabilité confirmée
+ni nouvel audit global. Les métadonnées et empreintes des pièces externes
+revérifiées le 4 novembre restent inchangées (`findings` SHA `8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`,
+metadata SHA `6865e7e4ffd5dac4b4a35e05b6e66db23488697ce4470d70db3df84fefe296a6`).
+Tout rapport final doit encore être rapproché du code courant. FD/Daybreak,
+WSI-Q02 et qualifications runtime restent ouverts ; aucun gate global clos.
+
 ## Raccord produit après correctifs — 4 novembre 2026
 
 Le backend workload/registre/relais est intégré par `c762a24`, après86tests

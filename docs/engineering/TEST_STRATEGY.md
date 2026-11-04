@@ -1,5 +1,18 @@
 # Stratégie de qualification
 
+## Diagnostic de récupération sans historique
+
+Pour un delta sur l'ouverture d'historique du broker, sélectionner les six
+parents de `broker::service::server::cancel_retry_tests::stop_auth_tests::recovery_inventory_tests`
+et le canari exact `inactive_real_gateway_allows_fresh_stop_and_recovery_metadata_only`
+du module parent. Ils couvrent les absences à trois niveaux, le chemin normal
+sans namespace de journal, les refus d'identité et d'UUID, le retry de la
+cellule lazy puis un vrai journal vide, ainsi que la récupération/annulation
+existante. Le gateway HTTP et SQLite sont réels ; le gardien natif de fixture
+est détenu et fermé sans lancer de worker. Ce périmètre logiciel ne qualifie
+ni panne de disque ni reprise runtime. Les commandes et gels sont dans
+[VALIDATION](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
+
 ## Coût de la présence — compteur et échantillons manuels
 
 Le compteur test attribue chaque sync d'ancêtre de `durable_bootstrap` au

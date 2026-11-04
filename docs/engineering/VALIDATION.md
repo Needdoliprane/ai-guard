@@ -1,5 +1,90 @@
 # Validation courante
 
+## 4 novembre — journal requis absent et diagnostic de récupération
+
+Base `26ab9e7`, donneur `codex/recovery-journal-diagnostic-20261104`.
+Code `3f8b33d` intégré en `0281bb1`, différence applicative nulle entre
+donneur et composition ; sources égales au gel exécuté.
+Le chemin `profile_writers(false)` classait quatre absences explicites comme
+`InvalidInput` : répertoire des journaux, profil, lecteur STOP et ouverture
+Full sans création. Il répond désormais `NeedsReconciliation`, sans créer
+d'historique ni produire d'inventaire vide. Les autres erreurs continuent
+dans leurs chemins existants. Le chemin créant Full et le probe optionnel
+de démarrage sont inchangés ; aucune activation du contrôle ni mutation de
+claim, quota ou autorité runtime.
+
+La revue a repéré une régression possible de priorité des erreurs : Cancel
+validait ses UUID après ouverture. `check_ids` est donc également appelé
+après authentification et avant cette ouverture ; son contrôle interne reste
+en place. Une trame malformée peut être refusée avant authentification.
+Les guides EN/FR distinguent ce cas des UUID nuls après authentification.
+
+**PASS : sept fonctions uniques ciblées**, trois nouvelles et quatre
+canaris existants. Le RED est conservé séparément : compilation 1 min 29 s
+réussie, puis une fonction échoue sur l'oracle du journal absent (Cargo 101,
+0 ignorée, 375 filtrées, 0,12 s). Il prouve la mauvaise classification
+non-`NeedsReconciliation` ; son assertion n'affiche pas le code brut.
+L'ancienne branche `InvalidInput` et le précédent essai CLI sont des
+preuves distinctes. Les assertions ultérieures du parent RED ne sont pas
+déclarées atteintes.
+
+Commandes ciblées, avec dépendances verrouillées déjà disponibles :
+
+```sh
+cargo test --locked --offline --lib broker::service::server::cancel_retry_tests::stop_auth_tests::recovery_inventory_tests:: -- --test-threads=1
+cargo test --locked --offline --lib broker::service::server::cancel_retry_tests::stop_auth_tests::inactive_real_gateway_allows_fresh_stop_and_recovery_metadata_only -- --exact --test-threads=1
+cargo check --locked --offline --all-targets
+```
+
+| Contrôle | Résultat constaté |
+|---|---|
+| Module récupération, gel final | 6/6 PASS, 0 ignorée, 371 filtrées, Cargo 0 ; compilation 36,94 s, tests 0,51 s. |
+| Canari STOP logiciel existant | 1/1 PASS, 0 ignorée, 376 filtrées, Cargo 0 ; tests 0,09 s. |
+| Compilation toutes cibles | PASS, Cargo 0, 53,11 s ; aucune suite complète ou release déduite. |
+| Formatage statique des deux fichiers modifiés et diff | PASS. |
+
+Les nouveaux cas utilisent le vrai service, l'authentification HTTP et
+SQLite, avec trois niveaux physiques d'absence, les UUID nuls de Cancel,
+RecoveryStatus, une cellule lazy non empoisonnée puis List autorisé créant
+normalement un journal réellement vide. Les refus d'identité/namespace,
+l'inventaire froid normal sans fencing et le chemin STOP existant restent
+couverts. Le gardien natif de fixture est détenu et fermé ; le canari STOP
+utilise un DeliveryProbe logiciel. Aucun worker ou moteur n'est lancé ni
+observé arrêté par ces tests.
+
+Exécution par Luna dans le sandbox Linux ARM64 Rust 1.99.1, image cache
+`2115d432`, UID 1000, réseau none avec loopback de fixture, cap 0, NNP,
+source/registry/root RO ; CPU 1, RAM 6 GiB sans swap supplémentaire, PID 256,
+fsize 512 MiB, nofile 1024, scratch tmpfs 3 GiB/65 536 inodes, hold 1 800 s.
+Env-i explicite avec HOME/TMP/CARGO/TARGET/RUSTC/RUSTDOC, offline, locked,
+jobs 1, incremental 0 et dev debug 0. Aucun téléchargement ou exécution
+native cible sur le Mac. Les durées sous tmpfs ne qualifient pas le disque
+physique. Owner terminé sans processus restant hors sleep, puis arrêté et
+retiré normalement ; pic mémoire 3 983 319 040 octets, événements OOM nuls.
+Le code 137 du sleep lors de ce nettoyage n'est pas un échec Cargo.
+
+Sources finales vérifiées contre le gel RO : `server.rs` SHA
+`0c33e72e3399689cd86b30a580b55ab34a52187c64eba19c264c7ec9d440d6db`,
+tests SHA `5f9858ee744af37487e936c029d220f99b306708ea6af46db317adbfc79323a2`.
+Journaux privés conservés hors dépôt : RED SHA
+`a37156b10b3eeea16ff2344aac61bde26e14739b2234c1a881bf10242c158110`,
+GREEN six parents SHA `7443e0c6ce4108eceed10a9e06ef58bc03ed33ac85be9cdf57fcb1f431ed7a4e`,
+canari SHA `be438a1ccb1a8a97b75f25d68aa04dd5706ecbcdecfecf1ef6bb6e0090b72be6`,
+all-targets SHA `dc60dbc53a1503a1eb2473060ef0733b6b885a8d48b329860822c01f356b005e`.
+Ledger Root scellé SHA `55a32bd6067377138e4d0c29542348b75a38e09de04698ad6d719f15f6eabf98` ;
+avis final indépendant favorable SHA `0f9773253fed515acf5a27fadffaf322859cc9894075b7fadde4953465fa695c`.
+Les deux réserves de prélecture ont été traitées ; aucun test exécuté par
+le reviewer. Contrôle des huit documents : 551 cibles relatives présentes,
+sans validation de leurs ancres, sites externes ou rendu navigateur ; scan
+des dix fichiers contre trois secrets connus : zéro correspondance, sans
+prétendre à une détection universelle.
+
+**BLOCKED** : Clippy absent de l'image épinglée. **NOT_RUN** : suite complète,
+release, fournisseur, navigateur, moteur Docker/Podman/Kubernetes, panne
+physique et reprise D5. FD/Daybreak et WSI-Q02 restent ouverts ; G09 FAIL,
+aucun gate global clos. Ce lot ne constitue pas une nouvelle qualification
+de sécurité ou de production.
+
 ## 4 novembre — compteurs de durabilité et snapshot du publisher
 
 Base00876e3, donneur `codex/presence-cost-20261104`. Le compteur de test
@@ -227,9 +312,9 @@ Ledger Root fermé après ces contrôles, SHA
 **BLOCKED** : Clippy Linux absent de l'image épinglée. **NOT_RUN** : release,
 coût soutenu de rétention/quatre scans par cycle, fautes physiques/électriques,
 TLS client réel, CLI macOS/TTY, transport workers, fédération, Kubernetes et
-qualifications runtime. Sans journal préparé, RecoveryInventory retourne
-actuellement InvalidInput ; un diagnostic opérateur plus précis reste à
-améliorer, sans transformer un journal absent en activité vide. G09 FAIL,
+qualifications runtime. Au gel historique du publisher, sans journal préparé,
+RecoveryInventory retournait InvalidInput ; le correctif de diagnostic
+ci-dessus distingue désormais cette absence sans inventer d'activité vide. G09 FAIL,
 aucun gate global clos, `billable=false`.
 
 ## 4 novembre — identité Broker liée au même périmètre serveur
