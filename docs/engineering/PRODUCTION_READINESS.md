@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Publisher du4novembre :21 fonctions uniques ciblées PASS sur les gels
+reliés (19bibliothèque,2vraies CLI), puis compilation composée PASS.
+Les défauts de reprise/capacité/historique trouvés
+en revue ont leurs RED et corrections. L'historique reste relu/synchronisé
+quatre fois par cycle ; durée soutenue, rétention et effet runtime ne sont
+pas qualifiés. [Preuves](VALIDATION.md#4-novembre--présence-émise-par-le-service-broker).
+G09 FAIL,0/12 gates globaux clos.
+
 Complément Broker du4novembre : portée de la même preuve serveur, transaction
 unique et refus de réponse contenant un secret intégrés en87e902d ; six
 fonctions ciblées et all-targets PASS, revue traitée. Le profil Kubernetes

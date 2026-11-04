@@ -1,5 +1,28 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — publisher possédé par le service broker
+
+Le raccord Rust de `broker serve` utilise une clé Broker distincte et les
+trois routes existantes identity/self/heartbeat. Son activation par profil
+wire2 est explicite ; état privé, pending/reçu durables et acteurs possédés
+par le service. Les guides [EN](../setup/broker/PRESENCE.md)/[FR](../setup/broker/PRESENCE.fr.md)
+et l'exemple typé couvrent autorité, fichiers privés, reprise et capacité.
+
+21 fonctions uniques passent sur les gels reliés :19 bibliothèque et2
+parcours de vraie CLI Full/Recovery, puis all-targets sur le gel final.
+Le dernier parcours prépare le journal via List authentifié, ferme le
+helper Full vide, possède son enfant StopsOnly et exige un vrai RPC avec
+la configuration présence absente. Les FAIL des fixtures/protocoles et
+leurs corrections restent consignés. Aucun job ou worker n'est lancé.
+[Résultats et limites](VALIDATION.md#4-novembre--présence-émise-par-le-service-broker).
+
+Les RED ont aussi vérifié deux défauts de capacité/historique et la
+séparation publication/admission avant leurs corrections. Panne de flux
+seule ne tue pas les jobs ; matériel privé dangereux ferme l'admission.
+Coût des quatre scans par cycle, rétention, fautes physiques, reprise D5,
+transports workers, fédération et qualifications runtime restent ouverts.
+Clippy Linux BLOCKED ; G09 FAIL, aucun gate global clos.
+
 ## 4 novembre — portée courante authentifiée du broker
 
 Le nouveau `GET /api/v1/brokers/identity` lie la même preuve Broker au tenant,

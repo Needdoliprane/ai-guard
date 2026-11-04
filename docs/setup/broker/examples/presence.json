@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "broker_id": "<approved-broker-uuid>",
+  "credential_id": "<issued-broker-credential-uuid>",
+  "incarnation_id": "<approved-incarnation-uuid>",
+  "authority_id": "<approved-authority-label>",
+  "broker_token_file": "/absolute/private/ai-guard/credentials/broker",
+  "ca_bundle_file": null,
+  "state_dir": "/absolute/private/ai-guard/presence-state",
+  "interval_seconds": 30,
+  "max_operations": 8192,
+  "max_state_bytes": 67108864
+}

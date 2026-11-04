@@ -2,7 +2,7 @@
 
 [Français](README.fr.md) · [Setup index](../README.md) · [Local broker](../broker/README.md) · [Named access](../identity/README.md) · [SSO](../sso/README.md)
 
-This guide describes the Rust gateway's technical HTTP contracts for workload credentials, broker declarations and directed worker messages. They use one existing SQLite database per tenant. These endpoints do not start workers or connect remote brokers. Workers retain `network: "none"`; the private Unix/runtime transport that would connect them to this relay is not wired or qualified. Do not attach a worker to the control network to make these examples reachable.
+This guide describes the Rust gateway's technical HTTP contracts for workload credentials, broker declarations and directed worker messages. They use one existing SQLite database per tenant. These endpoints do not start workers. An explicitly configured trusted broker can [publish its own presence](../broker/PRESENCE.md); this does not supply remote job control or complete federation. Workers retain `network: "none"`; the private Unix/runtime transport that would connect them to this relay is not wired or qualified. Do not attach a worker to the control network to make these examples reachable.
 
 Use the [engineering ledger](../../engineering/CURRENT_STATE.md), [validation](../../engineering/VALIDATION.md) and [gates](../../engineering/PRODUCTION_READINESS.md) for qualification. HTTP backend behavior alone does not establish the A1/A2/B1 three-worker recipe, federation, multiple hosts, complete human administration or measured capacity for 100 workers.
 
@@ -260,8 +260,9 @@ than accepting a substituted namespace or retrying blindly.
 Compare every expected identity field and keep the response control-private.
 The response is a current snapshot, not a signed portable credential, runtime
 health check or authorization for a future mutation. Revalidate at the next
-action. `broker serve` does not yet publish heartbeats automatically; reading
-identity or self metadata does not register a live host or complete federation.
+action. `broker serve` publishes only with an explicit [presence configuration](../broker/PRESENCE.md)
+and preapproved binding/grant; reading identity or self metadata alone does
+not publish presence, prove runtime health or complete federation.
 
 ## Grant a broker and interpret its heartbeat
 

@@ -1,5 +1,41 @@
 # Plan d'industrialisation
 
+## Lot en cours — présence émise par le vrai service broker
+
+Basea76730c, donneur `codex/broker-publisher-20261104`. Le prochain raccord
+est le publisher de `broker serve`, avec clé Broker distincte, périmètre
+frais issu de la même preuve, ancre locale privée et pending/reçu durables.
+Le service possède et joint ses acteurs ; panne réseau/auth/budget de
+présence ne modifie ni admission ni STOP/quota. Des exclusions de secrets
+devenues non fiables interdisent les nouvelles actions par leur contrôle
+de sûreté existant. Le mode recovery-only n'ouvre pas la configuration
+présence et ne démarre aucun publisher.
+
+Root possède les raccords profil/serveur et les guides, CORE le module Rust
+et le calcul partagé du hash exact, Luna le test de vraie CLI et l'exécution
+isolée ciblée, reviewer indépendant la conception puis le delta. Les owners
+sont distincts dans le donneur ; les checkouts D5/FD restent intacts.
+
+- [x] RED sur la vraie CLI de base, config Registry2 avec `presence_file` ;
+  vrai gateway/Store et aucun job/moteur/modèle. Puis implémenter le raccord.
+- [x] Load en lecture seule, état0700 précréé, union de toutes les clés et
+  protections avant persistance ; caps64 existants préflightés, sans
+  élargissement ni troncature. Journaux bornés, FD historiques non retenus.
+- [x] Pending complet synchronisé avant POST, réserve du reçu avant effet,
+  reprise du même UUID sans nouveau battement/audit ; un quota atteint
+  n'interdit pas l'ACK du pending déjà compté. Hash serde historique conservé.
+- [x] Nouvelle incarnation : conserver la révision heartbeat globale et
+  commencer séquence1 seulement sans heartbeat de cette incarnation. Une
+  preuve tournée avec pending ambigu exige réconciliation explicite.
+- [x] Tests pertinents FS/HTTP/Store et vrai cycle `serve`, contrôle composé,
+  revue traitée, guides/exemple EN/FR et preuves :21fonctions uniques PASS,
+  all-targets PASS, sans replay systématique des parents inchangés.
+- [ ] Commit/push, composition vérifiée et retrait sûr du donneur.
+
+Le plafond local et les budgets d'audit sont cumulatifs : aucune présence
+indéfinie ou purge qualifiée n'est annoncée. Worker relay, fédération complète,
+reprise runtime et qualification production gardent leurs critères entiers.
+
 ## Lot en cours au4novembre — portée authentifiée du broker
 
 Base1da19fd, donneur dédié `codex/broker-presence-20261104`. Le backend

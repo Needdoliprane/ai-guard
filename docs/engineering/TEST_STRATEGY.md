@@ -1,5 +1,31 @@
 # Stratégie de qualification
 
+## Présence du service broker — validation ciblée
+
+`broker::presence::` couvre le vrai gateway/Store et les fichiers privés :
+replay après commit/réponse perdue, CAS et hash exact, nouvelle incarnation,
+rotation explicite, grant changé/révoqué, budgets, tampering historique et
+capacité réservée avant un POST repris. Les corruptions passent par des
+entrées de fixture locales ; elles ne démontrent pas une panne électrique.
+Les trois `broker::service::server::presence_material_tests` vérifient les
+exclusions de copie réelles, la capacité cumulée avant ancre et la séparation
+entre flux indisponible et matériel privé dangereux.
+
+`tests/broker_presence_cli.rs` lance le vrai binaire `broker serve`, un
+gateway SQLite isolé et un gardien du même binaire. Aucun moteur, job,
+fournisseur ou modèle n'est lancé. Le parcours Full exige heartbeat durable,
+arrêt/reap du service et absence d'avancement après son arrêt ; le parcours
+Recovery exige un RPC authentifié et aucune ouverture/publication de
+présence quand sa configuration est absente. Un refus sûr de démarrage ne
+remplace pas ce contrôle positif. Voir les échecs et résultats actuels dans
+[VALIDATION](VALIDATION.md).
+
+Ne rejouer que les parents concernés par un delta : une correction de
+classification HTTP justifie les canaris de refus/200, pas toute la suite.
+Une erreur de compilation de fixture n'est pas un défaut produit reproduit.
+Les délais de garde90s/45s des enfants ne modifient ni drain produit15s ni
+échéance worker ; aucune performance n'est déduite de cette machine chargée.
+
 ## Portée de la preuve Broker et préparation Kubernetes
 
 Pour une modification de `GET /api/v1/brokers/identity`, sélectionner

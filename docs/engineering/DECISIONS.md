@@ -1,5 +1,38 @@
 # Décisions d'industrialisation
 
+## 4 novembre — publication possédée par le service broker
+
+Raccord dans le processus Rust et les trois API Broker existants, sans
+service, rôle, stockage serveur ou frontière nouvelle. `presence_file`
+est facultatif dans les profils Registry wire2 ; wire1 et les profils
+sans activation gardent leur comportement. Le service possède les acteurs,
+les signale et les rejoint avant de libérer sa lease. Recovery-only n'ouvre
+pas les fichiers de présence et ne lance pas ce raccord.
+
+Le chargement privé reste en lecture seule jusqu'au préflight cumulatif des
+fichiers/secrets de tous les profils. Pending synchronisé et reçu immuable
+encadrent le POST exact. Le hash réutilise la sérialisation historique du
+Store, sans reconstruire une preuve de travail courante depuis des données
+locales. Une nouvelle incarnation ne réinitialise pas la révision heartbeat
+globale du serveur. Rotation de binding avec pending non résolu, histoire
+manquante/substituée et divergence de contenu exigent une réconciliation.
+
+Une panne de publication réseau/auth/budget/flux laisse sa présence périmer
+sans tuer un job ou modifier STOP/quota. Une configuration ou exclusion
+de contrôle devenue dangereuse ferme l'admission métier. Les réponses
+HTTP non200 restent des catégories opaques sans prose distante persistée ;
+les enveloppes200 sont contrôlées avant décodage strict. Le retry transport
+est borné à trois reprises, avec backoff100/250/500ms ; un429 n'est pas
+rejoué périodiquement. Les limites d'audit sont cumulées par broker, même
+après rotation ou changement d'incarnation.
+
+L'historique est relu/synchronisé quatre fois par cycle réussi ; coût et
+rétention soutenue restent à mesurer, sans promesse de présence indéfinie
+ni procédure de purge qualifiée. Les guides [EN](../setup/broker/PRESENCE.md)
+et [FR](../setup/broker/PRESENCE.fr.md) distinguent ces limites de la reprise
+runtime, du relais et de la fédération complète. Les résultats exécutés
+sont consignés séparément dans [VALIDATION](VALIDATION.md).
+
 ## 4 novembre — projection de portée depuis la preuve Broker
 
 Raccord additif dans le gateway existant : `GET /api/v1/brokers/identity`

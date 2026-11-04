@@ -1,5 +1,113 @@
 # Validation courante
 
+## 4 novembre — présence émise par le service broker
+
+Basea76730c, donneur `codex/broker-publisher-20261104`. Opt-in
+`presence_file` par profil wire2, sans nouveau service,
+rôle, route ou stockage serveur. Les appels utilisent les API existantes,
+une preuve Broker distincte et un état privé ancré au périmètre. Le service
+signale et joint ses acteurs avant libération de sa lease ; recovery-only
+n'ouvre ni configuration ni état présence. La séparation entre panne de
+publication et matériel privé dangereux est vérifiée explicitement.
+Code donneur8ead8cc intégré en2949b54, sans modification applicative lors
+de la composition ; seuls les guides/preuves restent distincts.
+
+**PASS logiciel ciblé :21 fonctions uniques,19bibliothèque et2CLI.**
+Les deux canaris HTTP rejoués après modification de leur chemin ne sont
+pas recomptés comme nouveaux tests. Recovery et all-targets passent sur
+le gel finalGREEN5 ; les autres succès restent attachés à leurs sources.
+
+```sh
+cargo test --locked --lib broker::presence:: -- --test-threads=1
+cargo test --locked --lib broker::presence::http_tests::unresolved_pending_does_not_cross_a_changed_or_revoked_grant -- --exact --test-threads=1
+cargo test --locked --lib broker::presence::http_tests::cumulative_audit_budget_refusal_stops_without_retry_or_new_operation -- --exact --test-threads=1
+cargo test --locked --lib broker::presence::http_tests::response_with_wrong_input_commitment_cannot_ack_or_mint_another_operation -- --exact --test-threads=1
+cargo test --locked --lib broker::service::server::presence_material_tests -- --test-threads=1
+cargo test --locked --test broker_presence_cli -- --test-threads=1
+cargo test --locked --test broker_presence_cli recovery_serve_answers_authenticated_rpc_without_opening_missing_presence -- --exact --test-threads=1
+cargo check --locked --all-targets
+```
+
+Ces sélections sont exécutées par Luna sur les gels précisés ci-dessous,
+dans LinuxARM64 Rust1.99.1, image cache2115d432 : source/registry/root RO,
+UID1000, network none/loopback de fixture, caps0/nnp, CPU1, RAM6GiB/swap0,
+PID256, nofile1024/fsize512MiB, scratch3GiB/65536inodes/nosuid/nodev et
+hold1800s. Env vide puis allowlist HOME/TMP/CARGO/TARGET/RUSTC/RUSTDOC,
+offline/locked/incremental0/jobs1/debug0 ; outils absolus. Aucun code cible
+natif Mac, téléchargement, worker, moteur, provider ou modèle réel. Les
+tests Full/Recovery lancent le vrai binaire et le gateway SQLite local.
+
+| Étape | Résultat constaté |
+|---|---|
+| Harnais initial | Shim/env RC1 avant build, puis fixture UUID E0308, RC non capturé ; aucun RED comportemental déduit. |
+| RED CLI base | Compilation OK,1FAIL101/0ignored : registre refusé avant heartbeat. |
+| RED revue capacité/historique | Deux exacts compilent puis FAIL101 : reprise pending envoie1POST au lieu0 avec capacité réduite ; historique live altéré laisse2POST au lieu1. |
+| RED préparation service |1FAIL101 : une preuve de flux invalide faisait échouer tout le service. Le correctif conserve les protections statiques et sépare les erreurs de flux des erreurs de configuration/FS. |
+| GREEN1 bibliothèque |15PASS/1FAIL/0ignored/355filtered. Diagnostic exact confirme Protocol/revoke=false après grant changé ; cela n'est pas la première branche de la boucle[true,false]. |
+| Correctif HTTP et GREEN2 | Non200 borné classé en erreur opaque avant contrôle du succès200. Trois exacts HTTP PASS, puis3tests Material PASS, quatre commandes RC0. Corps distant non affiché/persisté, assertions inchangées. |
+| CLI GREEN2 | Compilation FAIL101, argument panic redondant ; aucun parent CLI exécuté. |
+| CLI GREEN3 | Compilation OK, FullPASS/RecoveryFAIL,0ignored, RC101. Full : heartbeat durable, SIGINT/reap, aucun avancement après sortie, aucun worker/quota. Recovery conservait le helper Full vivant, incompatible avec StopsOnly ; aucune adaptation produit/protocole faite. |
+| CLI GREEN4 | Recovery seul : compilation OK,1FAIL101/0ignored/1filtered. Helpers possédés, arrêts/reap/leases, service Recovery et absence de publication passent, mais réponse non attendue. |
+| Diagnostic2 Recovery |1FAIL101 : réponse fermée service_error/InvalidInput, sans corps affiché. Journal absent : prérequis ensuite préparé par vrai List authentifié avant arrêt Full. Aucun oracle élargi. |
+| GREEN5 Recovery exact | Compilation39,72s PASS ;1PASS/0FAIL/0ignored/1filtered, Cargo0,6,44s de test. Préparation réelle List, vrai RPC Recovery, arrêts/reap/leases, absence de présence nouvelle et compteurs worker/quota conservés. Full déjà vert n'est pas rejoué. |
+| GREEN5 toutes les cibles | `cargo check --locked --all-targets` RC0,53,95s. Aucune matrice complète de tests ou compilation release déduite. |
+
+Les19 parents bibliothèque couvrent readonly load, erreurs/préservation FS,
+union des secrets/exclusions, limites avant ancre, replay après vrai commit
+et réponse perdue, hash de mutation historique, refus de mauvaise portée,
+tampering d'historique, capacité de reçu avant POST, incarnation à révision
+globale conservée, rotation explicite et refus d'audit cumulatif429.
+La fixture Recovery possède son enfant StopsOnly, le nettoie après le
+service sans aucun job ; son SIGKILL de nettoyage ne qualifie pas D5.
+La sonde de lease partagée ne passe qu'après nouvelle annonce, pour ne pas
+faire échouer elle-même l'acquisition exclusive du helper.
+
+Journaux privés sous
+`/private/tmp/ai-guard-broker-publisher-luna-20261104.VwI5wi` :
+RED CLI `5b46f09e31410b03529fbebfee1dfb6f543ec9401f9232464213a7b764405ba2`,
+RED capacité `45b2f1805bfa2031dcd036c63841702af6bc22285dd43d00df1b9d0d8fd5c4af`,
+RED historique `60ecf4a2dc47c721070f5285834614eac40f030670735e9cbe65d19f0d7ef6cb`,
+RED Material `7a2ee837c95a0353ba07a7f63ac740038666907bac9b9edb391890183f292ee1`,
+GREEN1 `34e97d135782350d473350ed551ae9dab8fe44be6956db3a7c942163a2703bf9`,
+diagnostic grant `d5172f9b473cf4ff5ab4f4c089367e610c77d4a218d5d0e47deb4ef59c98f417`,
+GREEN2 exact grant `a234a88fbcd72dd29e1b115e732b09bba1b1edb8ba010fafc187a454e60d67fd`,
+budget `2917824245b70e06cea163782b0027d595a3db4c121df5ba037234baafc2b2b0`,
+response `503e9ecf3669960b0bc26ed2bd92a8d05d1a5d2c2facb6039e909554b07fcaad`,
+Material `fb4199b00e1962b3026c7b71c7bc9aded275bc12eb98ea1d67341b7b2fa47720`,
+CLI compile `abcde93a7089ab35a4bbb11403026d7c12e06463a549d1983a00b37a2279eaca`,
+CLI GREEN3 `c0175522e6f5dc746a038f36fa65841fa07f8b647e59c633261ead4d23a42b57`,
+CLI GREEN4 `6eb2d57d27a63281b07b5a4d4b967f5345f5971d2f79637df21d659e621a9408`,
+diagnostic2 `c6129ae903deffa5ce298ae24f39424cbedeeab08cf5b51074c681eed217c45a`.
+Recovery GREEN5 `12910f45a1de9342a1b103c9a58d68deed8021de78ced52b172d9f1a281d77eb`,
+all-targets `199a35e8fd10d772815b2d3d7faed4230ade57f0b6f93e2067f1cb9347cd7213`.
+Manifeste final des13fichiers :
+`0c09754c9c64738472c8873e258e9574a41e74f1154f78217d08c056f9673bba` ;
+Root compare13/13hashes du donneur au gel final, sans écart. Seul le test
+CLI change après GREEN2 ; le code applicatif reste identique à ce gel.
+Sources et ledger Root privés sous
+`/private/tmp/ai-guard-broker-publisher-inputs-20261104.XglUOC` et
+`/private/tmp/ai-guard-broker-publisher-plan-20261104.L3XboK/ROOT_VALIDATION.md`.
+
+Revue indépendante du code/fixtures/guides traitée dans ces périmètres,
+sans transfert de son avis source vers un résultat de test. Static rustfmt
+et diff check PASS ; scan des13fichiers modifiés contre les trois secrets
+locaux connus : zéro correspondance, pas une garantie de scanner universel.
+Les quatre propriétaires QA sont fermés normalement après jobs terminés,
+seul sleep et inspection des contrôles effectifs ; logs/sources host
+préservés. Owner4 ferme15:12:16UTC, Pid0/OOMfalse, pic3712004096octets,
+tous compteurs OOM à0. Son hold137 de nettoyage est distinct des Cargo0.
+La fermeture du donneur reste à effectuer après intégration/push.
+Note indépendante privée `FINAL_REVIEW.md`, mode0600, SHA
+`915ba8f697aea45342d373acd6677723e456e4d4707e1407ea17633247ec6684`.
+
+**BLOCKED** : Clippy Linux absent de l'image épinglée. **NOT_RUN** : release,
+coût soutenu de rétention/quatre scans par cycle, fautes physiques/électriques,
+TLS client réel, CLI macOS/TTY, transport workers, fédération, Kubernetes et
+qualifications runtime. Sans journal préparé, RecoveryInventory retourne
+actuellement InvalidInput ; un diagnostic opérateur plus précis reste à
+améliorer, sans transformer un journal absent en activité vide. G09 FAIL,
+aucun gate global clos, `billable=false`.
+
 ## 4 novembre — identité Broker liée au même périmètre serveur
 
 Base1da19fd, donneur `codex/broker-presence-20261104` commité/poussé en

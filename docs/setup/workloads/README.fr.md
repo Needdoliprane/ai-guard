@@ -2,7 +2,7 @@
 
 [English](README.md) · [Index de configuration](../README.fr.md) · [Broker local](../broker/README.fr.md) · [Accès nominatif](../identity/README.fr.md) · [SSO](../sso/README.fr.md)
 
-Ce guide décrit les contrats HTTP techniques du gateway Rust pour les credentials workload, les déclarations de brokers et les messages dirigés entre workers. Ils utilisent une base SQLite existante distincte par tenant. Ces endpoints ne démarrent pas de worker et ne connectent pas de broker distant. Les workers conservent `network: "none"` ; le transport privé Unix/runtime qui les raccorderait au relais n'est ni raccordé ni qualifié. Ne pas joindre un worker au réseau du contrôle pour rendre ces exemples accessibles.
+Ce guide décrit les contrats HTTP techniques du gateway Rust pour les credentials workload, les déclarations de brokers et les messages dirigés entre workers. Ils utilisent une base SQLite existante distincte par tenant. Ces endpoints ne démarrent pas de worker. Un broker de confiance configuré explicitement peut [publier sa propre présence](../broker/PRESENCE.fr.md) ; cela ne fournit ni contrôle de jobs distant ni fédération complète. Les workers conservent `network: "none"` ; le transport privé Unix/runtime qui les raccorderait au relais n'est ni raccordé ni qualifié. Ne pas joindre un worker au réseau du contrôle pour rendre ces exemples accessibles.
 
 Consulter [l'état constaté](../../engineering/CURRENT_STATE.md), [la validation](../../engineering/VALIDATION.md) et [les gates](../../engineering/PRODUCTION_READINESS.md) pour la qualification. Le backend HTTP seul ne démontre ni la recette à trois workers A1/A2/B1, ni la fédération, le fonctionnement multi-hôtes, une administration humaine complète ou une capacité mesurée de 100 workers.
 
@@ -266,9 +266,10 @@ un namespace substitué ou réessayer aveuglément.
 Comparer tous les champs attendus et conserver cette réponse dans le contrôle
 privé. C'est un snapshot courant, pas une preuve signée transportable, un
 diagnostic de santé runtime ou une autorisation pour une mutation future.
-Revalider à l'action suivante. `broker serve` ne publie pas encore de
-heartbeats automatiques ; lire identité ou métadonnées self n'enregistre pas
-un hôte vivant et ne livre pas la fédération.
+Revalider à l'action suivante. `broker serve` publie seulement avec une
+[configuration de présence explicite](../broker/PRESENCE.fr.md) et un binding/grant
+approuvés ; lire identité ou métadonnées self seul ne publie pas de présence,
+ne prouve pas la santé runtime et ne livre pas la fédération.
 
 ## Autoriser un broker et interpréter son heartbeat
 
