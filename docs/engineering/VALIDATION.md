@@ -1,5 +1,75 @@
 # Validation courante
 
+## 4 novembre — préflight Kubernetes audité
+
+Base44cb51e, donneurc9a1089, intégration96bf8ed dans la branche de
+validation. Neuf fichiers source/tests et quatre guides/exemples EN/FR.
+La CLI `kubernetes preflight` authentifie le runner auprès du gateway,
+retient le tenant serveur et exige le namespace de contrôle attendu. Le
+target fermé et sa réception durable sont liés avant l'unique POST
+`dryRun=All&fieldValidation=Strict`. Le résultat audité précède tout succès.
+Ni propriété exclusive du Namespace par le tenant, ni lancement de worker
+ne sont établis ; `admission_available=false` et dix écarts restent.
+
+Luna utilise le snapshot public `/inputs/kube1` dans le même owner isolé
+que le lot broker, uniquement après ses commandes terminées et avant toute
+session/secret réel. Source/registre RO et env-i ; aucun accès cluster,
+socket moteur, modèle, IdP, téléchargement ou serveur utilisateur.
+
+- `PASS` : `cargo test --offline --locked --manifest-path /inputs/kube1/Cargo.toml
+  --test kubernetes_preflight -- --test-threads=1` :2/2.
+- `PASS` : même commande `--test kubernetes_transport` :13PASS,
+  1entrée helper ignorée non additionnée,0FAIL. Vrai client/serveur HTTPS
+  local, query exacte, redirection avec trap, mutations de profil et ancres,
+  credentials remplacés et refus du garde avant POST.
+- `PASS` : `--test kubernetes_preflight_cli` :9/9 sur vraie CLI,
+  gateway Axum/SQLite et fixture TLS possédée. Audit absent/divergent,
+  champs inconnus et clés dupliquées, rôle/namespace/tenant client refusés,
+  erreur après POST, audit result refusé, fichiers substitués et credential
+  dans l'image empêchent un faux succès. La PKI Rust n'est qu'un producteur
+  de fixtures dans le confinement, pas une qualification PKI.
+- `PASS` : `cargo check --offline --locked --manifest-path /inputs/kube1/Cargo.toml
+  --all-targets`,RC0. Rustfmt explicite sur neuf fichiers et diffcheck PASS.
+
+**24 parents uniques PASS, dont20nouveaux** ; l'entrée helper ignorée
+ne constitue pas un PASS supplémentaire. Logs privés
+`/private/tmp/ai-guard-recovery-luna-kube1-20261104.Mbs3DF/`.
+SHA preflight1a77dd07769bcbce610399efdb56bdb94e4d3df3f4dc2bbae6113cdfb637a070 ;
+transport78f1248bf26527bd3cdc5d02a337432f144f86a68435538991ea80b2b178c323 ;
+CLIc75123475bf5c5080bb10a9844aa108c952bd6f28bf0a77cacc7a78bb2886a93 ;
+all-targetsf62ccd5979d1e0fdfde4a3e73287bd1e45f3b25336a3278263f106fca8c17408.
+Manifest source9 SHA
+b00575107eb85595a67f064fc00d6503b221d1918e6e1ea6998adef33c80ce62.
+Revue indépendante source puis guides, aucun blocage établi :
+`/private/tmp/ai-guard-kubernetes-preflight-bridge-review-20261104.md`,
+SHA finalb6f3d2743afda694855a5de2ea3494686d5b6c77aeae507b70f209ebac0e44ce.
+Guides/liens locaux et exemples vérifiés, aucune valeur réelle dans les
+templates ; les placeholders exigent une configuration opérateur.
+
+Root recoupe les neuf hashes post-tests et sur l'intégration. Les deux
+lots sont aussi assemblés dans un snapshot Git96bf8ed :
+`cargo check --offline --locked --manifest-path /inputs/composed96/Cargo.toml
+--all-targets` passe RC0 sans warning, aucune suite test rejouée.
+Log privé `/private/tmp/ai-guard-composed96-luna-20261104.zPZKBL/check-all-targets.log`,
+SHA7ae29f95b46847fb1400e500e9553b13b4e7af925e1bd7f1ae42f460e25ca7ef.
+Nouveau owner fixé900s, mêmes contrôles OS inspectés par Root ; seule
+compilation, aucune session/worker/API. Les24hashes sources correspondent
+aux deux gels exécutés avant/après. Après sommeil seul observé, arrêt
+borné et suppression normale du conteneur exact70ac4b77 ; Runningfalse/Pid0,
+hold137 à09:00:49UTC, inventaire exact vide, aucun volume/image/proof supprimé.
+Le donneur propre/poussé est retiré normalement après contrôle positif
+des consommateurs, fin naturelle du probe puis scan vide sans erreur.
+Reçu privé `KUBERNETES_WORKTREE_CLOSURE.md` dans le parentynic4v,
+SHAf21e644deed2e59aa4f50e02fd8772404757c28efe3a49817b71ba105db7bb9d.
+
+`NOT_RUN` : cluster Docker Desktop réel/defaults/CNI/RBAC, effet runtime,
+cycle worker, inter-tenant sur ce parcours CLI, reprise après réouverture
+du Store, expiration exacte60s et toutes ruptures de réponse/re-GET.
+`BLOCKED` : Clippy Linux absent du cache. Ni reçu API ni inspection de
+spec ne prouve une chaîne indépendante, un quota, un PID/tmpfs effectif,
+une échéance exécutée, la sécurité d'un webhook ou une reprise de pod.
+Les dix écarts d'admission et les gates globaux restent ouverts.
+
 ## 4 novembre — inventaire STOP du broker
 
 Source de base44cb51e, donneur1df111e, intégration3acd5cc. Quinze fichiers
@@ -281,7 +351,32 @@ Le gel F six fichiers est archivé inchangé sous
 `driver-src/archives/gel-f-53150200/`. Nouvelle copie publique sous
 `/private/tmp/ai-guard-sso-cli-inputs-g-20261104.ofLTlw/inputs/` ;
 les42hashes et trois fixtures y correspondent aux références. Compilation,
-sept tests et scénario G restent `NOT_RUN` ; aucun acteur G créé.
+sept tests et scénario étaient `NOT_RUN` au moment du gel.
+
+### Gel G — garde cookie refusé avant le logout
+
+Build RC0 et **sept tests privés PASS**,0ignoré. Un seul scénario réel
+produit ensuite `FAIL cookie_value`, avant callback/admission. Ce code
+compose encore nom, taille et ponctuation : aucune cause plus fine, aucun
+cookie réel ni callsite GET/POST n'est établi. Cela n'invalide pas les
+observations F sur leur gel ; le logout ne reçoit aucune nouvelle preuve.
+
+Root ferme tous les acteurs avant admission du canal : driver naturel1,
+head0,consumer0,stderr0,2312octets ; owner/peer arrêtés bornés puis retirés
+normalement, exacts inventaires vides, aucun volume/image/proof supprimé.
+Le compteur PID initial mal recopié par l'agent est corrigé25061 dans les
+métadonnées avant admission. Rapport normalisé fermé224codes et16hashes
+publics attendus :
+`ADMITTED-REPORT-G.json`,SHA
+`a29d4b68d529974bfc31b3460b618e54f3f14361d79a0ff99f0c49f3bbb2896f`.
+Phases PASS : préflight, installation neuve, gateway prêt et intégrité
+après cleanup ; setup0naturel,gateway0SIGTERM,CLI15SIGTERM après refus.
+Logs hors ligne `/private/tmp/ai-guard-sso-g-luna-20261104.cUgoDR/`,
+canal/métadonnées `/private/tmp/ai-guard-sso-g-scene-luna-20261104.cLTYg7/`.
+Fermeture/contrôles Root `G-ROOT-CLOSURE.md` dans le parent5j99ro,
+SHAf71ea005dc665bf34e9e7296629bdd753d84962ba5031b705100ebcb3e836d3c.
+La prochaine analyse précise ces gardes hors ligne sans lire de cookie
+réel ni relâcher leur acceptation. Aucun nouvel E2E avant ses prétests.
 
 Les trois fichiers URI+guides sont intégrés/poussés par44cb51e : hashes
 realmf004, guideENc08a, guideFR11b3 identiques àad22 testé. Seuls les deux

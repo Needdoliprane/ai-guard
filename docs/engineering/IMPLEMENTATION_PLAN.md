@@ -6,15 +6,17 @@
    découverte des UUID, auth fraîche, lecture partielle explicite et limite
    d'un scan en file ;24tests uniques ciblés et all-targets PASS. Le mode
    récupération froid est explicite. Cela ne ferme ni D5 ni G09.
-2. Raccorder et vérifier le préflight Kubernetes Rust déjà écrit sur un
-   worktree distinct : identité serveur, audit avant POST dry-run et résultat
-   avant succès.24tests ciblés et all-targets PASS, revue sans blocage
-   statique ; guides/intégration en cours, aucun cluster sondé.
+2. Qualifier le préflight Kubernetes Rust sur la cible Desktop : identité
+   serveur, audit avant POST dry-run et résultat avant succès sont intégrés
+   par96bf8ed,24tests ciblés et all-targets PASS,
+   revue sans blocage statique, guides/exemples EN/FR livrés ; compilation
+   composée broker+Kubernetes PASS, aucun cluster sondé.
    Compléter ensuite le vrai lancement/reprise de pods, sans confondre cette
    inspection avec le runtime obligatoire.
 3. Le vrai SSO CLI a franchi login/PKCE, identité/contexte et lecture autorisée.
-   Le logout reste en échec composé ; le diagnostic privé G gelé sépare
-   seulement ses gardes, à critères inchangés, avant correction produit.
+   Le logout reste en échec composé. Le diagnostic privé G passe sept tests
+   puis refuse un cookie plus tôt ; préciser ce parseur hors ligne, à
+   critères inchangés, avant nouveau scénario ou correction produit.
 4. Poursuivre relais runtime, fédération multi-hôtes et qualifications réelles.
    Les worktrees D5 protégés restent intacts. Tests Luna ciblés et compilations
    sérielles sur le Mac sous pression ; aucune matrice E2E systématique.

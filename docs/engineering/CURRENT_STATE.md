@@ -18,19 +18,24 @@ blocage statique. L'inventaire ne sonde pas le runtime, ne prouve aucun arrêt,
 ne renouvelle aucun délai et ne libère aucun quota. Il ne clôture ni D5 ni G09.
 [Commandes, gels et limites](VALIDATION.md#4-novembre--inventaire-stop-du-broker).
 
-Le préflight Kubernetes avec CLI et audit réel est développé dans un autre
-worktree :24tests logiciels ciblés et all-targets passent, revue indépendante
-sans blocage statique ; documentation/intégration en cours, aucun appel cluster.
-Le diagnostic privé SSO G est gelé à critères inchangés et reste `NOT_RUN`.
+Le préflight Kubernetes avec CLI et audit réel est intégré par96bf8ed :
+24tests logiciels ciblés et all-targets passent, revue indépendante sans
+blocage statique, guides et exemples EN/FR livrés. La compilation de toutes
+les cibles de la composition broker+Kubernetes passe également sur96bf8ed.
+Aucun appel cluster ; le lancement de pods reste indisponible.
+Le diagnostic privé SSO G passe ses sept tests mais sa scène réelle refuse
+`cookie_value` avant callback. Cette garde composée doit être précisée hors
+ligne ; aucun nouveau résultat de logout n'est établi.
 Les prochaines étapes sont ces validations puis le lancement/reprise réels,
 le relais runtime et la fédération multi-hôtes ; aucun gate global clos.
 
-## Vue humaine des brokers — développement parallèle non intégré
+## Vue humaine des brokers — composition partiellement validée
 
 Backend Rust et frontend TypeScript ont été développés depuis `5b6dfc1`
 dans deux worktrees distincts. La capacité explicite `read_broker_registry`, la
-migration7 et la vue humaine ne sont pas encore disponibles dans le candidat
-intégré. Les checkpoints Rust `d3baf0c` et frontend `514ca12` sont maintenant
+migration7 et la vue humaine sont composées sur la branche de validation ;
+elles ne sont pas reportées au checkout principal/protégé et leur parcours
+Web complet reste à qualifier. Les checkpoints Rust `d3baf0c` et frontend `514ca12` sont
 composés avec les douze guides/index EN/FR sur la branche de validation
 `codex/human-brokers-validation-20261104`, à `9ee05cc`, poussée. Luna a vérifié
 les42hashes source et12hashes documentaires, sans rejouer les tests. Les deux
@@ -74,8 +79,9 @@ hashes correspondent à la source testée `ad22d33` ; seules les preuves
 engineering diffèrent. Son worktree donneur est retiré normalement après
 contrôle des consommateurs, sans effacer branches ni preuves. Les gels D/E
 et leurs échecs antérieurs restent conservés. La prochaine étape est un
-diagnostic fermé par champ du logout, à critères inchangés, avant toute
-correction produit. Aucun navigateur/macOS natif/SSO entreprise ni worker
+diagnostic fermé à critères inchangés, avant toute correction produit.
+Le dernier gel G s'arrête plus tôt sur le parseur de cookie du harnais ;
+les observations F restent attachées à leur gel. Aucun navigateur/macOS natif/SSO entreprise ni worker
 réel n'est qualifié par ce scénario.
 [Preuves et limites](VALIDATION.md#4-novembre--prétests-du-driver-sso-cli-privé).
 Le DNS hôte Keycloak est revalidé : le blocage historique est levé, sans
