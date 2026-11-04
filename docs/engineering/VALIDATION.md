@@ -1,5 +1,80 @@
 # Validation courante
 
+## 4 novembre — primitives Docker du futur canal de relais
+
+Source de conception `f7129cf`, aucun changement de code applicatif.
+Trois agents ont examiné les contrats et leurs preuves : implémentation,
+Luna pour les probes et revue indépendante. Le backend fournit déjà les
+routes worker send/inbox/ACK ; aucun canal ne les raccorde encore aux
+conteneurs `network:none`. La proposition versionnée et ses prérequis
+restent [soumis à décision](DECISIONS.md#4-novembre--proposition-de-transport-des-workers-sans-réseau-décision-attendue).
+
+Deux probes d'outils OS, sans programme métier, ont été exécutés sur
+Docker Desktop client/serveur 29.9.2, Linux ARM64 dans la VM du Mac :
+
+| Probe | Résultat observé |
+|---|---|
+| `exec -i` vers `cat`, entrée fixe avec NUL puis EOF | PASS : CLI 0, comparaison exacte 0, 27 octets. |
+| Sortie pendant que stdin reste ouvert, puis EOF | PASS : Luna observe la réponse avant Ctrl-D, CLI 0 ; comparaison finale exacte 0, 23 octets. PTY seulement côté hôte, `test ! -t 0 && test ! -t 1` dans le conteneur. |
+| Résolution Cargo non nécessaire au probe | RC 127 avec PATH réduit ; cela ne démontre pas l'absence de Cargo dans l'image. Aucun build/test produit. |
+
+Root a inspecté le conteneur avant admission : image cache épinglée
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`,
+UID 1000, root RO, aucune capacité, NNP, network none sans routes, aucun
+montage/port/socket/credential, scratch tmpfs noexec 16 MiB/256 inodes,
+CPU 0,5, RAM 256 MiB sans swap supplémentaire, PID 32, fichier 1 MiB,
+nofile 128, restart/log désactivés. Hold 300 s, du 17:20:07 au nettoyage
+17:23:44 UTC, sans prolongation. Les programmes démarrent via `env -i`,
+avec seulement PATH=/usr/bin:/bin, HOME=/scratch et TMPDIR=/scratch.
+
+Commandes d'usage du probe, pour un conteneur de test **neuf et possédé**
+avec cette enveloppe, jamais un worker existant. `PROBE_CONTAINER` désigne
+son CID exact ; l'image doit être déjà disponible, sans téléchargement :
+
+```sh
+printf 'worker-relay-stdin-v1\000tail\n' |
+  docker exec -i --user 1000:1000 "$PROBE_CONTAINER" \
+  /usr/bin/env -i PATH=/usr/bin:/bin HOME=/scratch TMPDIR=/scratch /bin/cat
+```
+
+Pour le duplex, Luna a utilisé une session PTY hôte privée avec echo coupé,
+jamais l'option Docker `-t`, et lancé :
+
+```sh
+docker exec -i --user 1000:1000 "$PROBE_CONTAINER" \
+  /usr/bin/env -i PATH=/usr/bin:/bin HOME=/scratch TMPDIR=/scratch \
+  /bin/sh -c 'test ! -t 0 && test ! -t 1 && exec /bin/cat'
+```
+
+Elle a envoyé `worker-relay-duplex-v1` suivi de LF, observé la sortie,
+puis fermé stdin. La capture avant transformation PTY conserve LF exact ;
+l'affichage hôte CRLF n'est pas une mutation des octets du flux. Root a
+indépendamment comparé les captures finales aux deux entrées fixes.
+
+Captures privées hors dépôt, mode 0600 sous parent 0700 : 27 octets SHA
+`841995350690791fbd3487651d8e414b087d43995e571bb95fe743d032e08221`,
+23 octets SHA `05d8105da6b68bc08df0279a9d61107f224a50b7b3ef155e08c43e304c74d572`.
+Note des commandes et handles Luna SHA
+`8d0844931f5ef15271c7cebb2722a5544ddee14887a1f6a9b93393762984239b`.
+Ledger Root SHA `d8e40e6696b768b3b6493d2fa2fdd9666a5bf3d4649e1cd976b303dd9a5dde0d` ;
+revue indépendante favorable à la soumission de la proposition SHA
+`e3a2636a5e15ed2c6386798d3e0a6cb026ca03590fc5bd29a9d7b7993d5b52a1`.
+Six documents relus, 485 cibles relatives présentes ; ni ancres/sites externes
+ni navigateur qualifiés. Scan contre trois secrets connus : zéro
+correspondance dans ces six fichiers, sans garantie universelle de détection.
+Après fin naturelle des commandes, seul sleep restait. Pic cgroup
+10 813 440 octets et événements OOM nuls ; arrêt normal puis retrait du seul
+conteneur possédé, running=false/PID=0/OOM=false. Le code 137 du sleep de
+nettoyage n'est pas un résultat applicatif. Aucun volume ou preuve existant
+n'est supprimé.
+
+**NOT_RUN** : interruption du client et survie/terminaison de l'exec distant,
+join/reap, framing HTTP, ownership central exclusif, handoff d'identité,
+libération unique, worker applicatif, recette A1/A2/B1, Podman et Kubernetes.
+Ces faits n'établissent aucun parcours produit ou gate de production.
+L'accord de direction et les contrats manquants conditionnent le nouveau
+canal ; les travaux indépendants continuent. G09 FAIL, aucun gate global clos.
+
 ## 4 novembre — journal requis absent et diagnostic de récupération
 
 Base `26ab9e7`, donneur `codex/recovery-journal-diagnostic-20261104`.

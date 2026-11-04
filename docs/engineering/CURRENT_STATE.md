@@ -1,5 +1,20 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — canal de relais étudié, primitives Docker observées
+
+Le relais HTTP/SQLite et ses identités existent, sans raccord depuis les
+workers sans réseau. La [proposition de canal versionné](DECISIONS.md#4-novembre--proposition-de-transport-des-workers-sans-réseau-décision-attendue)
+précise ownership exclusif, wrapper/ENTRYPOINT, durabilité et terminaison
+distante ; elle attend une décision avant code. Deux probes OS sur Docker
+Desktop transmettent exactement stdin/NUL/EOF et une réponse avant EOF,
+sans TTY distant, réseau ou credential. Le conteneur jetable est fermé.
+[Preuves et limites](VALIDATION.md#4-novembre--primitives-docker-du-futur-canal-de-relais).
+
+Aucun worker produit n'est lancé. Ce constat ne qualifie ni canal,
+handoff, arrêt/reprise, Podman ou Kubernetes ; G09 FAIL, aucun gate clos.
+Les guides de tenancy et de recette distinguent désormais les contrats
+backend livrés du transport manquant, sans déclarer à nouveau OIDC absent.
+
 ## 4 novembre — diagnostic d'un journal de récupération absent
 
 Le broker distingue un historique requis absent d'une entrée invalide :
