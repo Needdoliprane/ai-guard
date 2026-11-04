@@ -680,12 +680,19 @@ impl Service {
             .writer
             .get_or_try_init(|| async {
                 self.filesystem(move || {
+                    // Missing required history is not evidence of an empty
+                    // journal. Keep the creating Full path's defensive error.
+                    let missing_history = if allow_create {
+                        BrokerErrorCodeV1::InvalidInput
+                    } else {
+                        BrokerErrorCodeV1::NeedsReconciliation
+                    };
                     let journals = root
                         .persistent_child("journals", allow_create)?
-                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+                        .ok_or(missing_history)?;
                     let profile = journals
                         .persistent_child(open_scope.profile_id(), allow_create)?
-                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+                        .ok_or(missing_history)?;
                     let control = ControlSecrets::new(material.literals.clone())?;
                     if recovery_only {
                         let reader = StopRecoveryReaderV1::open_existing(
@@ -695,7 +702,7 @@ impl Service {
                             JournalLimitsV1::default(),
                             control,
                         )?
-                        .ok_or(BrokerErrorCodeV1::InvalidInput)?;
+                        .ok_or(missing_history)?;
                         let report = reader.scan();
                         return Ok(ProfileWriterCapabilities::from_recovery_report(
                             &report,
@@ -715,7 +722,7 @@ impl Service {
                     )? {
                         return Ok(existing);
                     }
-                    ensure!(allow_create, BrokerErrorCodeV1::InvalidInput);
+                    ensure!(allow_create, missing_history);
                     let journal = Journal::open(
                         &profile,
                         open_scope,
@@ -1391,6 +1398,7 @@ impl Service {
         operation: Uuid,
         command: Uuid,
     ) -> Result<Response, BrokerErrorCodeV1> {
+        check_ids(operation, command)?;
         let writer = self
             .profile_writers(&profile.id, scope, false)
             .await?
