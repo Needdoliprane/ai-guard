@@ -33,18 +33,18 @@ sans pouvoir en ajouter après création. Elles contrôlent la disponibilité
 pour le scheduler, pas l'autorisation ai-guard.
 [Contrat officiel des scheduling gates](https://v1-36.docs.kubernetes.io/docs/concepts/scheduling-eviction/pod-scheduling-readiness/).
 
-## Décision demandée et premier lot
+## Direction approuvée et premier lot à implémenter
 
-Autoriser la conception détaillée, le code Rust et les tests locaux d'un
+Le mainteneur a autorisé la conception détaillée, le code Rust et les tests locaux d'un
 **profil Kubernetes versionné de création retenue**, avec admission réelle
 toujours fermée jusqu'aux preuves environnementales et à leur revue.
-L'accord ne vaudrait ni autorisation de modifier le cluster, ni accord sur
+L'accord ne vaut ni autorisation de modifier le cluster, ni accord sur
 le canal worker, ni activation d'un start/release.
 
 Le premier lot ajouterait une vraie opération persistante CREATE et sa
 reprise, distinctes du préflight. Profil fermé : gate imposée, `nodeName`
 absent, scheduler attendu, image approuvée par digest et commande non métier
-fixe à arrêter lors de la conception détaillée ; aucun manifest libre.
+fixe selon l'addendum ci-dessous ; aucun manifest libre.
 Aucune donnée métier, aucun credential, aucun montage du projet original,
 hostPath, volume externe ou accès moteur. Aucun transfert workspace,
 exec/attach, patch de libération ou commande métier dans ce lot.
@@ -144,3 +144,310 @@ reprise et fencing qualifiés ; un ACK de release ne vaut pas Running.
 Ces dépendances ne sont ni levées par la gate ni déléguées à D5/Daybreak.
 Le nouveau canal reste [une proposition distincte](DECISIONS.md#4-novembre--proposition-de-transport-des-workers-sans-réseau-décision-attendue).
 Aucun gate de qualification ne change de statut par cette proposition.
+
+## Addendum du 4 novembre — contrat du lot local CREATE retenu
+
+**Conception dans la direction approuvée ; code, migration et tests ci-dessous
+absents de la base inspectée `6b5c834`.** Les noms nouveaux désignent le travail
+à réaliser. Aucun endpoint, CLI de création, factory d'activation, effet cluster
+ou qualification ne résulte de cet addendum. Le lot doit être revu avant intégration.
+
+### Coutures existantes et périmètre
+
+Réutiliser l'autorité et les capabilities privées de
+[`KubernetesAuthorityV1` / `KubernetesCredentials`](../../src/runtime/kubernetes.rs),
+le transport HTTPS fixe sans proxy, redirect ni retry de
+[`Transport::new`](../../src/runtime/kubernetes/transport.rs), et les engagements
+de spec de [`KubernetesPodHandle::configuration_digest`](../../src/runtime/kubernetes/observation.rs).
+`KubernetesPodHandle::from_control_checkpoint` n'est aujourd'hui qu'un constructeur
+de données d'inspection : il ne doit jamais créer une permission de mutation.
+Le plan et le guard de [`preflight`](../../src/runtime/kubernetes/preflight.rs)
+restent spécifiques au dry-run ; ne pas les convertir par suppression d'une query.
+
+[`AdmissionV1`, `LaunchSpecV1`, `RuntimeKindV1`](../../src/control.rs),
+[`ArmV1`](../../src/control/supervision.rs) et
+[`SupervisionOperationV1`](../../src/broker/checkpoint.rs) restent inchangés :
+leurs liens au conteneur déjà possédé et leurs hashes Docker/Podman ne décrivent
+pas ce CREATE avant UID. Le type privé
+[`FreshStartPermission`](../../src/runner/broker.rs) fournit un patron de consommation,
+pas une permission réutilisable. Aucun nouveau `RuntimeKind::Kubernetes` exposé.
+
+### Profil et valeurs fermées
+
+`profile = kubernetes_held_pod_v1`, `version = 1`, gate unique
+`ai-guard.io/held-create-v1`, `schedulerName = default-scheduler`, aucun `nodeName`.
+Nom exact : `ai-guard-held-` suivi des 32 chiffres hexadécimaux minuscules du
+`create_id` UUID sans tirets. Un seul conteneur `worker`, `command = ["/usr/bin/id"]`,
+aucun `args`, `env`, `envFrom`, init/sidecar/ephemeral container, credential,
+imagePullSecret ou manifest libre. La commande fixe est non métier ; son
+exécutabilité dans une image donnée reste à vérifier avant tout essai autorisé.
+
+Reprendre explicitement les déclarations de sécurité, ressources, DNS et les
+deux `emptyDir` mémoire du profil de préflight existant, sans importer de contenu.
+Image approuvée `nom@sha256:<64 hex minuscules>`, `imagePullPolicy = Never`,
+`restartPolicy = Never`, `automountServiceAccountToken = false`, aucun volume
+externe, hôte ou moteur. Les labels portent uniquement managed-by, session,
+opération et `purpose = held-create` ; ils n'authentifient aucune identité.
+Le rendu est une fonction fermée ; la spec reçue doit conserver la gate et
+respecter la même normalisation explicite des seuls défauts Kubernetes permis
+par `preflight::validate_admitted`, sans élargir ce validateur historique.
+
+Bornes du nouveau profil : requête Pod sérialisée ≤ 32 KiB, intention ≤ 16 KiB,
+spec admise sérialisée ≤ 32 KiB, réponse HTTPS ≤ 1 MiB, profondeur JSON ≤ 64,
+resourceVersion non vide ≤ 128 octets selon le validateur existant. Chaque
+enveloppe de mutation ≤ 64 KiB ; l'événement complet doit aussi respecter les
+128 KiB de `Store::prepare_event`. Tout dépassement ou redaction changeant le
+contenu est refusé, sans troncature. Réutiliser 4 requêtes transport simultanées
+au maximum, connexion 3 s, requête totale 8 s, zéro retry automatique.
+Les ressources conservent les bornes de `KubernetesPreflightResourcesV1::validate`
+et les quotas résolus du tenant, sans nouveaux seuils permissifs.
+
+### DTO et identités immuables
+
+Tous les DTO nouveaux sont `version = 1`, `deny_unknown_fields`, UUID canoniques
+non nuls, SHA-256 de 64 caractères hexadécimaux minuscules. Les entiers de révision
+et d'epoch sont bornés à `i64::MAX` et utilisent une addition vérifiée.
+
+| DTO proposé | Champs exacts supplémentaires à `version` et rôle |
+|---|---|
+| `KubernetesCreateIntentV1` | `create_id`, `session_id`, `control_namespace_uuid`, `broker_id`, `incarnation_id`, `authority: KubernetesAuthorityV1`, `profile`, `image`, `resources: KubernetesPreflightResourcesV1`. Entrée immuable privée du contrôle ; aucun tenant sélectionnable ni donnée métier. |
+| `KubernetesCreateTargetV1` | `create_id`, `session_id`, `authority_fingerprint`, `pod_name`, `request_sha256`, `configuration_sha256`. Dérivé du rendu exact de l'intention ; jamais accepté comme remplacement du rendu. |
+| `KubernetesCreateClaimV1` | `operation_id`, `create_id`, `intent_hash`, `expected_revision`, `expected_create_epoch`, `emitter_id`. Consomme au plus une émission, jamais un start. |
+| `KubernetesCreateResultV1` | `operation_id`, `create_id`, `intent_hash`, `claim_operation_id`, `expected_revision`, `expected_create_epoch`, `outcome`. Rapporte le même CREATE possible. |
+| `KubernetesCreateCancelV1` | `operation_id`, `create_id`, `intent_hash`, `expected_revision`, `expected_create_epoch`. Invalide les claims futurs ; aucune suppression de Pod. |
+| `KubernetesCreateReceiptV1` | `operation_id`, `input_hash`, `control_namespace_uuid`, `audit_seq`, `audit_hash`, `emission_window`. Reçu descriptif, sans pouvoir d'émission ; fenêtre `None` sauf pour un claim. |
+
+`emission_window`, quand présente, contient exactement `issued_at` et
+`not_after`, dates UTC RFC3339 canoniques du contrôle. À la transaction du
+claim : `not_after = min(grant.not_after, issued_at + 8 secondes)`, avec une
+durée strictement positive. Cette fenêtre borne la première émission, sans
+modifier le timeout HTTPS ni la durée de vie ou le quota du Pod.
+
+`outcome` est une union fermée : `created_held` contient `pod_uid`,
+`resource_version`, `admitted_spec`, `admitted_configuration_sha256`,
+`observed_at` ; `ownership_unknown` contient uniquement `reason` parmi
+`transport_unknown`, `api_rejected`, `response_invalid`, `profile_changed`,
+`authority_changed`, `cancelled_after_claim`, `recovered_after_claim`,
+avec `http_status: Option<u16>` présent seulement pour `api_rejected`.
+Une réponse HTTP d'erreur ne prouve pas ici l'absence d'effet.
+Le résultat local non ACKé est aussi une inconnue : aucun champ secret ou corps
+d'erreur serveur n'est conservé. Une mutation dangereuse constatée est signalée
+comme incident `profile_changed`, sans état de succès.
+
+`intent_hash` emploie le domaine `ai-guard:kubernetes-create-intent:v1\0` sur
+le JSON canonique de l'intention ; `request_sha256` emploie
+`ai-guard:kubernetes-create-request:v1\0`, l'empreinte d'autorité puis les
+octets exacts conservés pour le POST. La spec conserve le domaine existant de
+`configuration_digest`. Le JSON canonique trie récursivement les clés des
+objets, conserve l'ordre des tableaux et n'ajoute aucun espace ; pas de float
+dans l'intention. Le rendu, les bytes et les domaines doivent avoir un golden
+indépendant avant code d'émission.
+Les `input_hash` des mutations utilisent le même encodage canonique avec les
+domaines distincts `ai-guard:kubernetes-create-claim:v1\0`,
+`ai-guard:kubernetes-create-result:v1\0` et
+`ai-guard:kubernetes-create-cancel:v1\0` ; la réservation utilise `intent_hash`.
+Le snapshot a le domaine `ai-guard:kubernetes-create-snapshot:v1\0`.
+Ne pas changer `control::content_hash` ni ses engagements historiques.
+
+**`create_epoch` est un epoch durable propre au CREATE**, initialisé à 1,
+incrémenté par une annulation acceptée. Il est distinct de
+[`WorkloadSubjectV1::Worker.generation`](../../src/workload.rs), actuellement
+contraint à 1, et du compteur mémoire du service broker. Ce protocole d'epoch
+reste à implémenter ; aucune garantie de génération centrale n'est déjà livrée.
+
+### Une projection tenant et des transactions auditées
+
+Ajouter une seule table `kubernetes_creates` : `create_id` PRIMARY KEY,
+`session_id` UNIQUE, `intent_hash` UNIQUE, `state`, `create_epoch`, `revision`,
+`quota_held`, `cpu_millis`, `memory_bytes`, `snapshot_json`, `snapshot_hash`,
+`last_event_seq` UNIQUE REFERENCES `events(seq)`, plus un index sur `quota_held`.
+Colonnes toutes NOT NULL, `quota_held` CHECK IN (0,1), état fermé aux cinq
+valeurs ci-dessous, epoch/révision ≥ 1 et ressources strictement positives.
+`snapshot_json` conserve intention, cible dérivée, claim éventuel, outcome
+éventuel et métadonnées d'annulation. Cette table permet CAS, lecture et quota
+sans nouveau stockage. Chaque colonne est reconstruite et comparée à l'audit.
+
+Réutiliser `events.id` UNIQUE comme `operation_id` de chaque mutation :
+réservation avec `operation_id = create_id`, UUID distinct pour claim, résultat
+et annulation. L'événement conserve entrée exacte, `input_hash`, preuve
+d'identité authentifiée, date de contrôle, révision précédente et snapshot
+résultant ; réservation/claim conservent aussi les `QuotaPolicyV1` et engagements
+des choix de contrôle effectivement vérifiés, afin de rejouer la décision
+historique sans lui appliquer une configuration actuelle. Son kind appartient à `control.kubernetes.create.` suivi de
+`reserved`, `emission_possible`, `result` ou `cancelled`. Une table d'opérations
+ou un second ledger ne sont pas nécessaires : lookup par `events.id`, puis
+validation du kind et du payload exact avant tout replay. Le replay retourne
+le résultat historique ; un identifiant réutilisé avec contenu divergent
+est un conflit, y compris s'il appartient à une autre famille d'événements.
+La preuve d'identité auditable ne contient que tenant retenu, identifiants
+broker/incarnation/credential et révisions binding/grant, selon le patron privé
+`IdentityEvidence` du registre. Préserver le refus des événements `control.*`
+par `Store::append` : l'API générique d'événements ne peut produire ni état
+CREATE, ni reçu typé, même avec un payload ressemblant.
+
+| État central | Justification et transitions admises |
+|---|---|
+| `reserved` | Quota réservé, aucun droit d'émission émis ; vers `emission_possible` ou `cancelled_before_emission`. |
+| `emission_possible` | Claim durable pouvant précéder un POST ; vers `created_held` ou `ownership_unknown`, jamais vers `reserved`. |
+| `created_held` | Réponse sûre reçue et résultat central durable ; son ACK peut être perdu côté broker. Quota conservé, aucune transition de release dans ce lot. |
+| `ownership_unknown` | Effet ou attribution non établi ; quota conservé, aucune adoption, nettoyage ou réémission automatique. |
+| `cancelled_before_emission` | Annulation gagnant le CAS avant tout claim ; seule transition qui libère la réservation dans ce lot. |
+
+Chaque transition nouvelle augmente `revision` de 1. L'annulation après claim
+augmente aussi `create_epoch`, conserve le quota et conduit à
+`ownership_unknown` ; après `created_held`, elle conserve cet état/UID et
+invalide seulement l'epoch, sans prétendre arrêter quoi que ce soit.
+Une réponse tardive pour un epoch périmé reste une donnée d'incident du même
+CREATE ; elle ne promeut pas un état et n'autorise jamais une autre émission.
+Une seconde mutation `result` différente est un conflit : pas de remplacement
+de l'UID/spec ou d'effacement de l'inconnue dans ce lot.
+Une nouvelle annulation sur `cancelled_before_emission` est refusée ; seul
+le replay de l'annulation exacte reste permis. Une perte d'ACK laisse le
+checkpoint local inconnu sans réécrire un résultat central déjà durable.
+
+Transactions prévues, dans le même Store tenant et sans appel réseau sous lock :
+
+1. `reserve_kubernetes_create` : vérifier l'autorisation centrale explicite de
+   cette intention non métier, le tenant authentifié, le contrôle live, le
+   namespace de contrôle, les binding/grant/incarnation broker et le scope
+   d'autorité Kubernetes ; rendre et hasher le profil exact. Vérifier quota et
+   capacité d'audit, puis insérer `reserved`, quota et événement dans une seule
+   transaction contrôlée. Un refus ne crée aucune permission ni réservation.
+2. `claim_kubernetes_create` : après tous les awaits de préparation locale,
+   refaire les contrôles d'identité, de scope, de temps et d'autorisation,
+   vérifier `reserved`, les deux CAS et l'intention. Commiter
+   `emission_possible` avec audit avant de répondre. Seule la première réponse
+   fraîche exacte, dans sa fenêtre d'émission, peut porter une disposition
+   `emit_once` ; tout replay porte `observe_only`, même si l'ancien événement
+   expose le claim accepté.
+3. `record_kubernetes_create_result` : vérifier le lien au claim, les CAS et
+   l'identité ; contrôler UID/spec/profil/absence de placement et de statut
+   d'exécution avant `created_held`. Persister résultat et audit atomiquement.
+   Perte du reçu ou échec de persistance : conserver la réponse privée si
+   disponible et l'inconnue, sans exposer de handle possédé autorisant un effet.
+   Le rejeu **du résultat exact** peut obtenir son ACK ; il ne refait pas le POST.
+4. `cancel_kubernetes_create` : mêmes contrôles centraux, CAS et audit, puis
+   incrément d'epoch et transition ci-dessus. La concurrence avec le claim est
+   sérialisée par la transaction ; une annulation perdante ne suppose pas
+   l'absence de POST. Les replays n'incrémentent ni révision ni epoch.
+
+Les méthodes nouvelles reprennent
+[`Store::begin_checked` / `commit_checked`](../../src/audit.rs),
+[`revalidate_broker_identity`](../../src/audit/workload.rs) et les contrôles
+grant/temps **avant replay** de
+[`Store::persist_broker_change`](../../src/audit/broker_registry.rs).
+Les contrôles rôle runner et preuve broker doivent être reliés explicitement
+par l'adaptateur de confiance ; aucun champ JSON ni `BrokerIdentityViewV1`
+ne les remplace. Aucun raccord HTTP nouveau n'est déclaré disponible ici.
+Le reçu d'événement générique du préflight n'est pas cette autorisation typée.
+
+La réservation compte un worker, `cpu_millis` et `memory_mib × 1 048 576`,
+additionnés avec arithmétique vérifiée aux lignes `workers.quota_held = 1`.
+Modifier **le même** [`quota_usage`](../../src/audit/control.rs) pour inclure
+`kubernetes_creates.quota_held = 1` sous schéma 8 : admission Docker/Podman,
+admission Kubernetes et lecture du quota voient la même somme transactionnelle.
+Les états conservateurs gardent leur réservation, sans CPU consommé, allocation
+runtime, durée terminale ou usage zéro inventé. Les politiques d'audit physique,
+tenant et broker existantes s'appliquent à chaque append ; le lot ne garantit
+pas de capacité future pour un résultat si l'audit se remplit après claim.
+Dans ce cas l'effet reste inconnu, le quota tenu et l'ACK de succès impossible.
+
+Migration explicite `Store::migrate_kubernetes_create_v8`, **7→8**, via le
+backup neuf vérifié de `migrate_control_version` : création de la projection
+vide et événement `control.kubernetes.create.genesis` liant précédent head et
+namespace, puis validation schéma/intégrité avant commit. Adapter les listes
+fermées de versions et les validateurs existants à 8 sans changer les règles
+de 1–7. Rejouer les événements dans l'ordre : identités/grants historiques au
+préfixe concerné, rendu/hashes, CAS, quota partagé à la réservation et colonnes
+exactes. Table absente, ligne modifiée, suppression d'inconnue ou divergence
+audit/projection invalide le Store ; aucune réparation silencieuse.
+Migration et réouverture ne recréent aucune autorité live ni permission.
+
+### Journal privé et dernier contrôle avant effet
+
+Le nouveau journal privé versionné du CREATE conserve exactement intention,
+cible, bytes du Pod, reçus centraux, révision/epoch et réponse éventuelle ;
+aucun credential. Réutiliser les capabilities privées et barrières de
+[`control_fs`](../../src/control_fs.rs), sans charger ce format dans les anciens
+plans/checkpoints Docker. Une intention `prepared` est durable avant le claim.
+Après son ACK, persister localement `emission_possible` **avant** `send`.
+Une erreur de cette persistance interdit le POST, même avec un claim central.
+
+`FreshKubernetesCreatePermission` est un type privé, consommé par valeur,
+sans Clone, serde ou constructeur public. Il lie le reçu du claim frais,
+son émetteur, le scope, l'epoch, la fenêtre et les bytes exacts. Échantillonner
+[`HostClock::sample`](../../src/broker/clock.rs) avant d'envoyer la demande
+centrale de claim ; retenir ce boot/méthode/temps continu dans la permission
+mémoire. Au dernier guard, le temps écoulé depuis cet échantillon doit être
+strictement inférieur à `not_after - issued_at` (au plus 8 s). Compter aussi
+l'attente de l'ACK et les fsync ; aucun nouveau délai à réception du reçu.
+Boot/méthode différents, horloge régressive, calcul invalide ou fenêtre expirée
+interdisent l'émission, sans recréer un claim. Ce raccord d'horloge et ses
+propriétés de suspension restent à tester et qualifier.
+
+Le guard final synchrone revalide aussi capabilities privées, annulation locale
+et cible après acquisition du permis transport et construction de la requête ;
+aucun `await` ne sépare ce guard du `send`. Le point central d'autorisation est
+le claim : cette couture ne prétend pas rendre une révocation distante atomique
+avec le POST.
+
+Tout disque relu avec claim ou `emission_possible` donne seulement
+`observe_only` / `ownership_unknown` : **aucun second POST, même si zéro octet
+semble avoir été envoyé**, même après 404/409 ou reboot. Après résultat validé,
+retenir la réponse privée, obtenir l'ACK central, puis commiter le checkpoint
+local `created_held` avant de publier le handle pour inspection seulement.
+Un crash à chaque frontière peut donc conserver une inconnue ; un même nom,
+label ou spec ne permet jamais d'adopter un UID découvert ultérieurement.
+
+**Aucune factory de permission de production dans ce lot.** Les prérequis
+NamespaceUID stable, droits exclusifs, chaîne d'admission et audit cluster
+restent non prouvés : `require_workload_admission` conserve son refus.
+La capacité d'activation future sera opaque, indépendante des DTO sérialisables
+de preuves et liée à leur périmètre/durée ; une case `enabled`, un bool passé
+au constructeur, une variable d'environnement ou un préflight ne peut la
+fabriquer. Les tests locaux utilisent uniquement une couture privée `cfg(test)`
+et un serveur de test explicitement possédé, sans endpoint cluster réel.
+La rétention reste bornée par quotas/capacité d'audit, sans TTL qui libérerait
+une inconnue ; diagnostic et procédure de réconciliation/cleanup exact restent
+des prérequis d'activation, pas une suppression implémentée par ce lot.
+
+### Répartition et acceptation du lot
+
+| Propriétaire de périmètre | Fichiers proposés ou existants à modifier |
+|---|---|
+| Contrats/Store/API, agent principal | Nouveaux `src/control/kubernetes_admission.rs`, `src/audit/kubernetes_admission.rs` ; raccords dans `src/control.rs`, `src/audit.rs`, `src/audit/control.rs` et validateurs de schéma concernés. Aucun endpoint sans contrat séparément revu. |
+| Runtime CREATE, agent dédié | Nouveau `src/runtime/kubernetes/admission.rs` ; raccords `src/runtime/kubernetes.rs`, `src/runtime/kubernetes/transport.rs` ; nouveau journal privé CREATE dans ce périmètre, sans mutation des anciens checkpoints. |
+| Validation ciblée, Luna | Tests produit Rust de ces frontières, sur le gel intégré et une cible de compilation propre au checkout ; aucun moteur ou fournisseur. |
+| Documentation/revue indépendante | Ce document, puis guides Kubernetes EN/FR et preuves/écarts lors du lot de code ; second regard sur audit, quota, émission et reprise. |
+
+Scénarios nécessaires, avec vrais Store SQLite/fichiers et transport local
+compté lorsque pertinent ; ils restent **NOT_RUN** à ce stade :
+
+1. Sans autorité live, rôle, preuve broker courante, scope, quota, capacité
+   d'audit ou activation : zéro POST ; l'erreur d'audit rollbacke réservation
+   et projection. Ancien reçu préflight et bool sérialisé restent refusés.
+2. Deux claims concurrents donnent au plus un `emit_once` ; annulation avant
+   claim donne zéro POST/quota libéré, annulation après claim garde le quota.
+   Mauvais epoch/révision, autre broker/incarnation/tenant et contenu divergent
+   sont refusés ; le replay exact revalide encore identité et expiration.
+   ACK/fsync dépassant la fenêtre, expiration à la borne exacte, changement
+   de boot/méthode ou recul du temps continu donnent zéro POST sans nouveau délai.
+3. Arrêts injectés après chaque vraie frontière durable : réservation, claim,
+   checkpoint d'émission, POST, réponse, ACK central, checkpoint local. Au
+   redémarrage, aucun second POST dès qu'un claim a pu réussir. ACK perdu du
+   résultat se réconcilie par son replay exact, sans émettre ni adopter.
+4. UID remplacé au même nom, NamespaceUID divergent, gate retirée, `nodeName`,
+   conteneur/volume/credential injecté, statut d'exécution, spec trop grande
+   ou JSON invalide : jamais `created_held`, incident opaque et quota conservé.
+5. Concurrence réservations Docker/Kubernetes à la dernière unité du quota :
+   une seule réservation acceptée. Réouverture/reconstruction gardent la somme
+   et les inconnues ; mutation SQL, audit manquant et replay divergent échouent.
+6. Migration 7→8 avec backup exact, ancien schéma préservé, table absente refusée,
+   reopen sans activation ; limites bytes/profondeur/temps et panne après
+   réponse vérifiées sans tronquer ni masquer en succès. Contrôle statique et
+   transport compté : aucune méthode PATCH/release/start/DELETE disponible.
+
+Critère du lot logiciel : ces propriétés sont implémentées, vérifiées sur le
+gel et relues, avec diagnostics et guides cohérents. Ce résultat laissera
+séparément **BLOCKED** l'activation et **NOT_RUN** tous les effets cluster,
+sans fermer de gate production ni qualifier une session Kubernetes.
