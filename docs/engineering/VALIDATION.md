@@ -1,5 +1,106 @@
 # Validation courante
 
+## 4 novembre — accusé de déconnexion OIDC et profils explicites
+
+Base d2d254a, donneur a99325d, intégration1b2d34f ; profils/guides
+donneur4048175, intégration5f508cf. Sept fichiers Rust/tests et huit
+configurations/guides EN/FR. Les deux URI HTTPS statiques sont facultatives
+et propres au client Web/CLI. Une opération configurée exige une réponse
+directe302/303, un seul Location exact avec son state privé frais et un corps
+vide. Aucun suivi de redirection, listener ou nouvelle requête vers l'URI.
+Sans option, le protocole historique200/204 est conservé. Le DTO public
+absent reste byte-identique ; les anciens clients stricts doivent être mis
+à jour avant l'ajout des nouvelles clés. Voir les guides SSO/Keycloak.
+
+Luna exécute les tests ciblés dans un owner neuf isolé, image LinuxARM64
+2115d432/Rust1.99.1, réseau none, env-i, UID1000, root/source/registre RO,
+caps0/nnp, CPU1, mémoire5Gio/swap0, PID256, nofile1024, fsize512Mio,
+scratch3Gio/65536inodes, sommeil1800s fixé avant exécution. Root inspecte
+les contrôles et recoupe les sept hashes avant/après. Aucun téléchargement,
+service utilisateur, IdP, moteur worker ou modèle dans ce lot logiciel.
+
+- `FAIL` attendu RED : test neuf de logout configuré transplanté sur
+  d2d254a, RC101/champ inconnu ; test d'alias token/end-session, RC101.
+  Ces deux échecs sont reproduits avant correction du comportement.
+- `PASS` : `cargo test --offline --locked --test oidc_transport` :24/24,
+  zéro ignoré ; Web/CLI, compatibilité historique, state absent/divergent/
+  précédent, URI/query/Location non exacts, doublons, corps interactif,
+  bornes et timeout sans retry. Log privé
+  `/private/tmp/ai-guard-oidc-green-luna-20261104.mB5VZt/green-oidc-transport.log`,
+  SHA8a0d37a35433c958306217150d7e64a11c5fd3aee61c1b23620fc37404a9e9fc.
+- `PASS` : unité ciblée d'alias1/1 et projection publique2/2 dans
+  `oidc_gateway_flow`, soit27fonctions produit uniques en tout.
+  Le premier lancement d'alias utilise un RUSTC mal saisi et n'atteint pas
+  la compilation : `NOT_RUN`, conservé. Seules les commandes manquantes
+  reprennent ; les24tests transport ne sont pas rejoués.
+- `PASS` : `cargo check --offline --locked --all-targets`, RC0 sans warning
+  sur le gel sept fichiers. Logs repris dans
+  `/private/tmp/ai-guard-oidc-green-resume-luna-20261104.RWTVdf/` ;
+  alias45ea2e0ad60af9cddff9451b68ca44a0cfd1ba7e70f548d009df64d2266c7c8f,
+  projection71ceb4446ea5d57de391074b0c8ee2ab0cc596bbb712fd7253752e22eb941292,
+  check7280b38ea99454b3418f4acc0cdc12294c584aad0ff2ddcac375810d6c6d19e0.
+- `PASS` statique : rustfmt sur les sept fichiers, diffcheck, revue source
+  indépendante puis revue des profils/guides, aucun bloqueur identifié.
+  Revues privées `ai-guard-oidc-logout-ack-review-20261104.md`
+  SHA5aab4bfcd99d4356f8e4c0dfbcb3ed0351232d45e8e2958a532f249c0be8d48d
+  et `ai-guard-oidc-logout-profile-review-20261104.md`
+  SHA32db42d18a8d2426c2acfdf182e8d122e3d7c4f4e243574468ec3882a80ff774,
+  sous `/private/tmp/`. Liens locaux100/100, JSON syntaxique et scan borné
+  des trois secrets littéraux connus : zéro correspondance ; ce dernier
+  contrôle n'est pas une preuve universelle d'absence de secrets.
+
+Le harnais privé Keycloak garde séparément le FAIL réel G `cookie_value`.
+Un cas synthétique de cookie quoté reproduit RC101, puis la seule branche
+RFC cookie-octet quotée passe11/11tests hors ligne. Les bytes/quotes restent
+inchangés, sans décodage, élargissement de scope ou retrait des limites.
+Logs dans `/private/tmp/ai-guard-oidc-transport-red-luna-20261104.vf1RrN/` :
+RED8043d501d992257a46316d267bfcfc02311d2622eb3ad5021e7c6c543a55e25c,
+GREEN3abb7b5bb94fdb194829907ca252290f9ffbd794cb4612f897402d7fcabbc97c.
+Cette compatibilité privée ne prouve pas la cause du cookie réel G et ne
+transforme pas ce résultat en succès. Aucun test auxiliaire Keycloak ajouté
+au dépôt. La nouvelle recette complète reste distincte et à exécuter.
+
+Root observe seulement le sommeil final, arrête puis retire normalement
+l'owner exact5777a70e : Runningfalse/Pid0, hold137 à09:48:59UTC,
+inventaire exact vide. Aucun volume/image/preuve/donnée préexistant supprimé.
+Reçu privé `ROOT_CLOSURE.md` dans le parent
+`/private/tmp/ai-guard-oidc-red-inputs-20261104.feiTHF/`,
+SHA43f026202183c74b90b5556e2862b2dc698965aa0a535416fea6253518c2362b.
+
+Contrôle composé séparé sur l'archive Git5f508cf, nouveau owner2f2d1f89
+aux mêmes limites inspectées par Root : les trois exemples passent le
+vrai `OidcGatewayConfigV1::validate`, les URI attendues et la désérialisation
+du manifeste local. Helper Rust privé, jamais ajouté au dépôt.
+`cargo run --offline --locked --example qa_oidc_profiles`, build du binaire
+et `cargo check --offline --locked --all-targets` passent RC0, sans warning.
+Logs privés `/private/tmp/ai-guard-oidc-compose-resume-20261104.hrYZj8/` :
+typed-validation-v2.log03df0e8b32335c13b3b0195c611af748f6c3653753a048a1dbcd9ee2d3ed6e6b,
+build-v2.log5c972043839127a1261cfe9af4367d433d07c8858ef4962654d1734c1a6384a6,
+check-v2.log9a14a3fb88f76387fdfcbfc1dd0dafe647f2797232cb360152e5a3973fd9b773.
+Les premières erreurs d'orchestration restent conservées : lien du cache
+absent, puis répertoires temporaires absents. Root corrige uniquement ces
+raccords privés ; aucune dépendance téléchargée ou règle produit assouplie.
+
+**`FAIL` séparé :** vrai `setup prepare --input <fichier>` RC1 dans une
+destination neuve, cause non établie : ses deux flux ont été jetés avant
+capture. **`PASS` :** même binaire/manifeste, chemin stdin explicitement
+livré `setup prepare --input -`, autre destination privée neuve, RC0.
+Aucun fichier généré ou erreur n'est relu ; la première destination reste
+intacte. Le contrôle de toutes les cibles précède cette réussite stdin ;
+aucune compilation supplémentaire ensuite. Le succès stdin n'efface pas
+l'échec fichier, qui reste à diagnostiquer pour le mode d'entrée fichier.
+Root compare les seize hashes source/profils/helper post-commandes puis
+ferme normalement l'owner, hold137 à10:18:52UTC, Runningfalse/Pid0 et
+inventaire exact vide. Reçu `ROOT_COMPOSED_VALIDATION.md` dans
+`/private/tmp/ai-guard-logout-compose-inputs-20261104.VMxr7E/`,
+SHA89f8d53d0a3a3e314475d7cb6ace135bcfcf77edf6da444c3cc40f6402ed4a3c.
+
+`NOT_RUN` ici : nouvel échange Keycloak,
+CLI macOS, navigateur, concurrence/échec d'entropie à l'exécution et toutes
+qualifications runtime. `BLOCKED` : Clippy Linux absent de l'image épinglée.
+Un accusé accepté ne prouve ni révocation globale des JWT, ni clôture de
+toutes les sessions IdP, ni visite d'un callback. G09 FAIL,0/12 gates clos.
+
 ## 4 novembre — préflight Kubernetes audité
 
 Base44cb51e, donneurc9a1089, intégration96bf8ed dans la branche de

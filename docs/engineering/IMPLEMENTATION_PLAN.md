@@ -14,9 +14,12 @@
    Compléter ensuite le vrai lancement/reprise de pods, sans confondre cette
    inspection avec le runtime obligatoire.
 3. Le vrai SSO CLI a franchi login/PKCE, identité/contexte et lecture autorisée.
-   Le logout reste en échec composé. Le diagnostic privé G passe sept tests
-   puis refuse un cookie plus tôt ; préciser ce parseur hors ligne, à
-   critères inchangés, avant nouveau scénario ou correction produit.
+   Le logout reste non qualifié. L'accusé OIDC explicite est intégré avec
+   27tests produit ciblés PASS et revue ; profils/guides EN/FR sont intégrés,
+   trois profils Rust/build/all-targets composés PASS. Préparation stdin PASS,
+   chemin fichier RC1 à diagnostiquer séparément. Le cookie privé quoté passe11tests
+   après RED, sans reclasser G. Prochain jalon : une seule recette Keycloak
+   réelle login/lecture/refresh/rotation/lecture/logout après ses tests purs.
 4. Poursuivre relais runtime, fédération multi-hôtes et qualifications réelles.
    Les worktrees D5 protégés restent intacts. Tests Luna ciblés et compilations
    sérielles sur le Mac sous pression ; aucune matrice E2E systématique.

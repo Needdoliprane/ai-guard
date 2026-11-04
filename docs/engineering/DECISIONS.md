@@ -1,5 +1,26 @@
 # Décisions d'industrialisation
 
+## 4 novembre — accusé OIDC lié à chaque client et opération
+
+Conserver le gateway comme propriétaire de l'admission Web et la CLI comme
+propriétaire de son échange fournisseur natif. Ajouter uniquement deux URI
+de retour statiques HTTPS facultatives, Web/CLI, dans le contrat existant.
+Ce sont des valeurs d'accusé comparées exactement ; aucun service ni
+callback supplémentaire, listener TLS, changement DNS ou accès à ces URI
+n'est nécessaire. La corrélation fraîche reste privée à chaque opération.
+Une erreur refuse l'accusé, sans retry ou repli vers le protocole historique.
+L'absence des options conserve ce protocole et la sérialisation existante.
+
+Le profil supporté exige302/303, Location unique exact et corps vide ; ce
+choix produit n'est pas présenté comme une règle universelle OIDC. Les
+profils Keycloak fournissent les registrations explicites correspondantes,
+distinctes des callbacks de login. Un realm existant se met à jour sans
+réimportation destructive, en conservant utilisateurs, identités, données,
+audit et registrations encore utilisées. Les deux versions gateway/CLI
+doivent accepter les nouveaux champs avant activation. Aucun accusé ne
+vaut révocation globale des JWT ou preuve de visite du retour.
+[Preuves et limites](VALIDATION.md#4-novembre--accusé-de-déconnexion-oidc-et-profils-explicites).
+
 ## 4 novembre — inventaire de récupération sans admission implicite
 
 Retenir la queue STOP, son reader et ses planchers pour découvrir les UUID

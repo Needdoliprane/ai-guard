@@ -1,5 +1,21 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — déconnexion OIDC explicite
+
+Le protocole d'accusé configuré Web/CLI est intégré dans la branche de
+validation par1b2d34f, avec27fonctions produit ciblées PASS, contrôle de
+toutes les cibles et revue indépendante. Les champs restent facultatifs ;
+le comportement historique est conservé en leur absence. Les profils et
+guides EN/FR suivent dans5f508cf, avec revue indépendante ; trois profils
+validés par Rust, build et all-targets composés passent. La préparation
+neuve hors ligne passe via stdin ; le mode fichier échoue RC1 sans cause
+établie et reste à diagnostiquer, sans effacer cet échec par le succès stdin.
+Le cookie quoté du harnais privé passe11tests après un RED synthétique.
+Le FAIL réel G reste conservé ; aucun nouveau succès IdP/logout n'est
+déduit de ces tests. La recette réelle suivante couvrira aussi le refresh
+et la rotation du contexte. [Preuves et limites](VALIDATION.md#4-novembre--accusé-de-déconnexion-oidc-et-profils-explicites).
+Les gates globaux restent ouverts, G09 FAIL et0/12 clos.
+
 ## 4 novembre — découverte des jobs en récupération
 
 Le lot `RecoveryInventory` est intégré dans la branche de validation par
@@ -25,7 +41,8 @@ les cibles de la composition broker+Kubernetes passe également sur96bf8ed.
 Aucun appel cluster ; le lancement de pods reste indisponible.
 Le diagnostic privé SSO G passe ses sept tests mais sa scène réelle refuse
 `cookie_value` avant callback. Cette garde composée doit être précisée hors
-ligne ; aucun nouveau résultat de logout n'est établi.
+ligne à ce gel ; le complément courant ci-dessus reproduit et corrige la
+grammaire quotée hors ligne, sans nouveau résultat réel de logout.
 Les prochaines étapes sont ces validations puis le lancement/reprise réels,
 le relais runtime et la fédération multi-hôtes ; aucun gate global clos.
 
