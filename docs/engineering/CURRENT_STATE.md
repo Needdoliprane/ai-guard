@@ -2,15 +2,17 @@
 
 ## Vue humaine des brokers — développement parallèle non intégré
 
-Backend Rust et frontend TypeScript travaillent depuis `5b6dfc1` dans deux
-worktrees distincts. La capacité explicite `read_broker_registry`, la
+Backend Rust et frontend TypeScript ont été développés depuis `5b6dfc1`
+dans deux worktrees distincts. La capacité explicite `read_broker_registry`, la
 migration7 et la vue humaine ne sont pas encore disponibles dans le candidat
-intégré. Les checkpoints sont poussés sur leurs branches propres : Rust
-`d3baf0c` et frontend `514ca12`. Douze documents opérateur/index EN/FR sont
-rédigés et relus, conservés comme draft avant intégration des sources.
-Tests Luna, guides et revues indépendantes ont avancé en parallèle, avec
-un seul Cargo lourd à la fois sur le Mac sous pression. Les deux worktrees
-source sont propres, conservés pour la composition et les contrôles manquants.
+intégré. Les checkpoints Rust `d3baf0c` et frontend `514ca12` sont maintenant
+composés avec les douze guides/index EN/FR sur la branche de validation
+`codex/human-brokers-validation-20261104`, à `9ee05cc`, poussée. Luna a vérifié
+les42hashes source et12hashes documentaires, sans rejouer les tests. Les deux
+worktrees donneurs sont retirés normalement après contrôle des consommateurs ;
+branches/proofs préservées. Le worktree de validation conserve les sources
+pour les contrôles manquants. L'ancien worktree d'audit a retrouvé son état
+propre ; aucun checkout protégé n'est modifié.
 
 Sur les gels backend successifs : **64 fonctions Rust uniques ciblées PASS**.
 Le gel final stage7 passe aussi `cargo check --all-targets`, sans warning.
@@ -29,6 +31,14 @@ Build Vite, navigateur et parcours Web composé réels restent `NOT_RUN` :
 les outils Linux manquants ont une préparation de cache épinglé soumise au
 mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
 workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
+
+Un essai SSO CLI avec un vrai Keycloak local est préparé indépendamment des
+outils frontend absents, en utilisant les images déjà en cache et un realm
+temporaire isolé. Driver Rust privé en cours, revue et exécution `NOT_RUN`.
+Le DNS hôte Keycloak est revalidé : le blocage historique est levé, sans
+preuve de CLI natif macOS. WSI-Q02 reste ouvert : l'analyse confirme des
+revalidations complètes et propose une mesure à compteurs avant optimisation,
+sans garantie de coût global ni capacité100 déduite.
 
 ## Correctifs initiaux de l'audit en cours
 
