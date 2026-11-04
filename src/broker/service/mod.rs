@@ -56,7 +56,7 @@ impl AuthenticatedBatchContext {
         let identity = client.supervision_identity().await?;
         ensure!(
             identity.active
-                && [3, 4, 5, 6].contains(&identity.schema_version)
+                && [3, 4, 5, 6, 7].contains(&identity.schema_version)
                 && identity.protocols == [SupervisionProtocolV1::BrokerSupervisionV1]
                 && identity.role == "runner"
                 && identity.tenant_id == scope.tenant_id()
@@ -177,7 +177,7 @@ impl VerifiedProfile {
         {
             return Err(Code::Forbidden);
         }
-        if ![3, 4, 5, 6].contains(&protocol.schema_version)
+        if ![3, 4, 5, 6, 7].contains(&protocol.schema_version)
             || !protocol
                 .protocols
                 .contains(&SupervisionProtocolV1::BrokerSupervisionV1)

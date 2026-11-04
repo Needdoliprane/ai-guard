@@ -337,7 +337,7 @@ impl Cache {
             );
             prepared.head = (seq, row.get(1)?);
             let kind: String = row.get(2)?;
-            if kind != "control.identity.access"
+            if !human_brokers::is_human_read(&kind)
                 && !kind.starts_with("control.broker_registry.")
                 && !kind.starts_with("control.relay.")
             {
@@ -349,7 +349,7 @@ impl Cache {
                 events: 1,
                 bytes: u64::try_from(payload.len())?,
             };
-            if kind != "control.identity.access" {
+            if !human_brokers::is_human_read(&kind) {
                 if let Some(identity) = workload_identity(&event)? {
                     let key = identity.key()?;
                     prepared.workload_tenant = prepared.workload_tenant.add(cost)?;
@@ -363,9 +363,7 @@ impl Cache {
                 }
                 continue;
             }
-            let record: human::HumanReadAuditV1 = serde_json::from_value(event.data)?;
-            human::validate_read(&record)?;
-            let key = record.principal.key()?;
+            let key = human_brokers::read_principal(&event)?.key()?;
             let cost = AuditCapacityV1 {
                 events: 1,
                 bytes: u64::try_from(payload.len())?,

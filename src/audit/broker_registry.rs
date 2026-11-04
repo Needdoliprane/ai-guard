@@ -331,7 +331,7 @@ impl Projection {
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 6 {
+    if [6, 7].contains(&version) {
         Ok(())
     } else {
         Err(BrokerRegistryFailureV1::MigrationRequired.into())
@@ -392,7 +392,7 @@ fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version != 6 {
+    if ![6, 7].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(

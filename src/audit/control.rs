@@ -240,7 +240,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        [2, 3, 4, 5, 6].contains(&version),
+        [2, 3, 4, 5, 6, 7].contains(&version),
         "unsupported control schema"
     );
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
@@ -293,12 +293,15 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             || stored.event.kind.starts_with("control.broker_registry.")
             || stored.event.kind.starts_with("control.relay.")
         {
-            anyhow::ensure!(version == 6, "workload control event requires schema6");
+            anyhow::ensure!(
+                [6, 7].contains(&version),
+                "workload control event requires schema6"
+            );
             continue;
         }
         if stored.event.kind.starts_with("control.identity.") {
             anyhow::ensure!(
-                [4, 5, 6].contains(&version),
+                [4, 5, 6, 7].contains(&version),
                 "identity event requires schema4 or5"
             );
             continue;
@@ -552,7 +555,7 @@ pub(in crate::audit) fn worker_at(
     uuid(worker_id)?;
     invalid(before_seq > 0)?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    invalid(version == 6)?;
+    invalid([6, 7].contains(&version))?;
     // The partial compound index excludes helper/Arm/export records, which
     // cannot alter WorkerV1. This seeks one snapshot without scanning them.
     let query = format!(
@@ -579,7 +582,7 @@ pub(in crate::audit) fn worker_at(
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4, 5, 6].contains(&version) {
+    if [2, 3, 4, 5, 6, 7].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -1120,6 +1123,13 @@ impl Store {
     pub fn migrate_workload_v6(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 5, 6)
     }
+    /// Explicit offline maintenance; preserves schema6 and never activates supervision.
+    pub fn migrate_human_brokers_v7(
+        &self,
+        backup_path: &Path,
+    ) -> anyhow::Result<MigrationReportV1> {
+        self.migrate_control_version(backup_path, 6, 7)
+    }
     pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
@@ -1212,6 +1222,7 @@ impl Store {
                     tx.execute_batch(sql)?;
                 }
             }
+            7 => self.initialize_human_brokers(&tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1231,6 +1242,7 @@ impl Store {
                     "SELECT seq,hash FROM events WHERE kind='control.identity.human_access.genesis'"
                 }
                 6 => "SELECT genesis_seq,genesis_hash FROM workload_meta WHERE singleton=1",
+                7 => "SELECT seq,hash FROM events WHERE kind='control.identity.brokers_access.genesis'",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1290,7 +1302,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if [3, 4, 5, 6].contains(&version) {
+        if [3, 4, 5, 6, 7].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,

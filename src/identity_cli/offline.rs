@@ -94,8 +94,8 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
     );
     let state = store.supervision_state()?;
     ensure!(
-        matches!(state.schema_version, 4..=6) && !state.active,
-        "offline identity maintenance requires an existing validated schema4, schema5 or schema6 database and inactive supervision; migrate explicitly with controls stopped"
+        matches!(state.schema_version, 4..=7) && !state.active,
+        "offline identity maintenance requires an existing validated schema4, schema5, schema6 or schema7 database and inactive supervision; migrate explicitly with controls stopped"
     );
     let namespace = state
         .control_namespace_uuid
@@ -225,6 +225,14 @@ fn preparation(
 
 pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
     let control = open(&args.offline)?;
+    ensure!(
+        !args
+            .capabilities
+            .iter()
+            .any(|cap| matches!(cap, super::Capability::ReadBrokerRegistry))
+            || control.store.supervision_state()?.schema_version == 7,
+        "read-broker-registry requires explicit migration6→7 before preparing a local identity"
+    );
     let secret = generate_local_credential()
         .map_err(|_| anyhow::anyhow!("credential generation failed; no identity was activated"))?;
     let (parent, leaf) = destination(&args.output_dir)?;

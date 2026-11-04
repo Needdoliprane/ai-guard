@@ -11,18 +11,46 @@ use crate::{
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
+mod brokers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
 pub(super) struct HumanAccessState {
     contexts: ContextRegistry,
+    #[cfg(test)]
+    broker_publication_pause: std::sync::Mutex<Option<BrokerPublicationPause>>,
+}
+#[cfg(test)]
+struct BrokerPublicationPause {
+    reached: std::sync::mpsc::SyncSender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
 }
 impl HumanAccessState {
     pub(super) fn new() -> Self {
         Self {
             contexts: ContextRegistry::new(),
+            #[cfg(test)]
+            broker_publication_pause: std::sync::Mutex::new(None),
         }
     }
+    #[cfg(test)]
+    fn pause_broker_publication(&self) -> ApiResult<()> {
+        let pause = self
+            .broker_publication_pause
+            .lock()
+            .map_err(|_| cursor_unavailable())?
+            .take();
+        if let Some(pause) = pause {
+            pause.reached.send(()).map_err(|_| cursor_unavailable())?;
+            pause
+                .resume
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| cursor_unavailable())?;
+        }
+        Ok(())
+    }
 }
+#[cfg(test)]
+mod brokers_tests;
 
 pub(super) fn failure(
     status: StatusCode,
@@ -664,6 +692,7 @@ fn finish_page<T: Serialize>(
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
+        .route("/human/brokers", get(brokers::brokers))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
         .route("/human/events/{id}", get(event))

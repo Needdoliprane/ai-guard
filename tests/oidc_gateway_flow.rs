@@ -34,11 +34,19 @@ struct Fixture {
     audit: Arc<AuthenticationAudit>,
     router: Router,
     config: OidcGatewayConfigV1,
+    ca_bundle_pem: Option<String>,
 }
 impl Fixture {
     async fn new() -> Self {
         let files = support::private_tempdir();
         let issuer = ControlledIssuer::new().await;
+        Self::with_issuer(files, issuer, None).await
+    }
+    async fn with_issuer(
+        files: tempfile::TempDir,
+        issuer: ControlledIssuer,
+        ca_bundle_pem: Option<String>,
+    ) -> Self {
         let path = files.path().join("tenant.sqlite");
         let store =
             Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10000).unwrap();
@@ -74,14 +82,19 @@ impl Fixture {
             version: 1,
             provider: issuer.config(),
             provider_label: "Controlled issuer".into(),
-            web_origin: ORIGIN.into(),
+            web_origin: if issuer.issuer.starts_with("https:") {
+                "https://127.0.0.1:18100"
+            } else {
+                ORIGIN
+            }
+            .into(),
             mapping: OidcClaimsMappingV1 {
                 revision: "mapping-1".into(),
                 default_capabilities: BTreeSet::from([HumanCapabilityV1::ReadMetadata]),
                 rules: vec![],
             },
         };
-        let router = Self::router(&store, &audit, &config);
+        let router = Self::router_with_ca(&store, &audit, &config, ca_bundle_pem.clone());
         Self {
             _files: files,
             issuer,
@@ -89,12 +102,21 @@ impl Fixture {
             audit,
             router,
             config,
+            ca_bundle_pem,
         }
     }
     fn router(
         store: &Arc<Store>,
         audit: &Arc<AuthenticationAudit>,
         config: &OidcGatewayConfigV1,
+    ) -> Router {
+        Self::router_with_ca(store, audit, config, None)
+    }
+    fn router_with_ca(
+        store: &Arc<Store>,
+        audit: &Arc<AuthenticationAudit>,
+        config: &OidcGatewayConfigV1,
+        ca: Option<String>,
     ) -> Router {
         gateway_router(
             GatewayState::new(
@@ -105,7 +127,7 @@ impl Fixture {
                 None,
                 Redactor::new(vec![]),
             )
-            .with_oidc(OidcGateway::new(config.clone(), audit.clone(), None).unwrap())
+            .with_oidc(OidcGateway::new(config.clone(), audit.clone(), ca).unwrap())
             .unwrap(),
         )
     }
@@ -1030,6 +1052,14 @@ async fn native_rotation_crossing_ticket_deadline_during_jwks_verification_close
 }
 
 async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String) {
+    web_delivery_roles(f, subject, salt, &[]).await
+}
+async fn web_delivery_roles(
+    f: &Fixture,
+    subject: &str,
+    salt: &str,
+    roles: &[&str],
+) -> (Value, String) {
     let seeded = f
         .router
         .clone()
@@ -1054,7 +1084,7 @@ async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String)
             json!({"version":1}),
             None,
             Some(&cookie),
-            Some(ORIGIN),
+            Some(&f.config.web_origin),
         ),
     )
     .await;
@@ -1064,7 +1094,8 @@ async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String)
         .query_pairs()
         .collect::<std::collections::HashMap<_, _>>();
     let nonce = params["nonce"].to_string();
-    f.issuer.login_response(&nonce, subject, salt);
+    f.issuer
+        .login_response_with_roles(&nonce, subject, salt, roles);
     let callback = f
         .router
         .clone()
@@ -1088,12 +1119,250 @@ async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String)
             json!({"version":1}),
             None,
             Some(&cookie),
-            Some(ORIGIN),
+            Some(&f.config.web_origin),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     (delivery, nonce)
+}
+
+#[tokio::test]
+async fn tls_pkce_broker_reads_require_both_explicit_membership_and_verified_claim_ceiling() {
+    let files = support::private_tempdir();
+    let pki = files.path().join("pki");
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_ai-guard-demo-pki"))
+        .env_clear()
+        .arg("--out")
+        .arg(&pki)
+        .args(["--dns", "localhost"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(120), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let ca = std::fs::read_to_string(pki.join("root-ca.pem")).unwrap();
+    let identity = agentsandbox::tls::ServerIdentity::from_pem(
+        &std::fs::read(pki.join("server-chain.pem")).unwrap(),
+        &std::fs::read(pki.join("server.key")).unwrap(),
+    )
+    .unwrap();
+    let issuer = ControlledIssuer::with_tls(identity).await;
+    let mut f = Fixture::with_issuer(files, issuer, Some(ca)).await;
+    f.store
+        .migrate_workload_v6(&f._files.path().join("before-v6"))
+        .unwrap();
+    f.store
+        .migrate_human_brokers_v7(&f._files.path().join("before-v7"))
+        .unwrap();
+    f.member("explicit-broker-reader");
+    f.member("other-reader");
+    let broker = HumanCapabilityV1::ReadBrokerRegistry;
+    let rule = |capability| agentsandbox::api::OidcClaimRuleV1 {
+        claim_path: vec!["roles".into()],
+        equals: "broker-reader".into(),
+        capabilities: BTreeSet::from([capability]),
+    };
+    f.config.mapping.rules = vec![rule(broker)];
+    f.config.mapping.revision = "broker-mapping-1".into();
+    f.router = Fixture::router_with_ca(&f.store, &f.audit, &f.config, f.ca_bundle_pem.clone());
+    let request = |path: &str, token: &str, context: Option<&str>| {
+        let mut request = Request::get(path).header("authorization", format!("Bearer {token}"));
+        if let Some(context) = context {
+            request = request.header("x-aiguard-context", context);
+        }
+        request.body(Body::empty()).unwrap()
+    };
+    let selected = |identity: &Value, mode: &str| {
+        identity["contexts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|context| context["mode"] == mode)
+            .map(|context| context["id"].as_str().unwrap().to_owned())
+    };
+    // Mapping alone cannot promote the historical membership.
+    let (delivery, _) = web_delivery_roles(
+        &f,
+        "explicit-broker-reader",
+        "mapping-alone",
+        &["broker-reader"],
+    )
+    .await;
+    let token = delivery["access_token"].as_str().unwrap();
+    let (status, identity) = json_response(
+        f.router.clone(),
+        request("/api/v1/human/identity", token, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(selected(&identity, "administration").is_none());
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            request(
+                "/api/v1/human/brokers",
+                token,
+                selected(&identity, "personal").as_deref()
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let principal = PrincipalRefV1::HumanOidc {
+        issuer: f.issuer.issuer.clone(),
+        subject: "explicit-broker-reader".into(),
+    };
+    let mut membership = f.store.identity_memberships(&principal).unwrap().remove(0);
+    membership.revision += 1;
+    membership.capabilities.insert(broker);
+    let mutation = |membership: MembershipV1| IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "fixture-operator".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change: IdentityChangeV1::Membership {
+            expected_revision: membership.revision - 1,
+            membership,
+        },
+    };
+    f.store
+        .mutate_identity(&mutation(membership.clone()))
+        .unwrap();
+    // Membership alone with an old verified ceiling still cannot read brokers.
+    f.config.mapping.rules = vec![rule(HumanCapabilityV1::ReadTenantMetadata)];
+    f.config.mapping.revision = "broker-old-ceiling".into();
+    f.router = Fixture::router_with_ca(&f.store, &f.audit, &f.config, f.ca_bundle_pem.clone());
+    let (delivery, _) = web_delivery_roles(
+        &f,
+        "explicit-broker-reader",
+        "membership-alone",
+        &["broker-reader"],
+    )
+    .await;
+    let token = delivery["access_token"].as_str().unwrap();
+    let (status, identity) = json_response(
+        f.router.clone(),
+        request("/api/v1/human/identity", token, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let before = f.store.head().unwrap();
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            request(
+                "/api/v1/human/brokers",
+                token,
+                selected(&identity, "administration").as_deref()
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(f.store.head().unwrap(), before);
+    f.config.mapping.rules = vec![rule(broker)];
+    f.config.mapping.revision = "broker-explicit-both".into();
+    f.router = Fixture::router_with_ca(&f.store, &f.audit, &f.config, f.ca_bundle_pem.clone());
+    let (delivery, _) = web_delivery_roles(
+        &f,
+        "explicit-broker-reader",
+        "both-grants",
+        &["broker-reader"],
+    )
+    .await;
+    let token = delivery["access_token"].as_str().unwrap().to_owned();
+    let (status, identity) = json_response(
+        f.router.clone(),
+        request("/api/v1/human/identity", &token, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let context = selected(&identity, "administration").unwrap();
+    let (status, page) = json_response(
+        f.router.clone(),
+        request("/api/v1/human/brokers", &token, Some(&context)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["source"], "tenant_broker_registry");
+    assert!(page["read_receipt"]["audit_event_id"].is_string());
+    let (other, _) =
+        web_delivery_roles(&f, "other-reader", "foreign-proof", &["broker-reader"]).await;
+    let before = f.store.head().unwrap();
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            request(
+                "/api/v1/human/brokers",
+                other["access_token"].as_str().unwrap(),
+                Some(&context)
+            )
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    // A signed token which has no real PKCE admission is never a human proof.
+    let unadmitted = f.issuer.token(
+        "web-public",
+        "explicit-broker-reader",
+        None,
+        &["broker-reader"],
+        "fresh-valid-client-without-admission",
+    );
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            request("/api/v1/human/brokers", &unadmitted, Some(&context))
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(f.store.head().unwrap(), before);
+    membership.revision += 1;
+    membership.capabilities.remove(&broker);
+    f.store.mutate_identity(&mutation(membership)).unwrap();
+    let before = f.store.head().unwrap();
+    assert_eq!(
+        json_response(
+            f.router.clone(),
+            request("/api/v1/human/brokers", &token, Some(&context))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(f.store.head().unwrap(), before);
+    let mut forbidden_default = f.config.clone();
+    forbidden_default
+        .mapping
+        .default_capabilities
+        .insert(broker);
+    let requests = f.issuer.requests().len();
+    assert!(forbidden_default.validate().is_err());
+    assert_eq!(f.issuer.requests().len(), requests);
+    assert!(
+        f.issuer
+            .requests()
+            .iter()
+            .any(|(path, body)| path.ends_with("/token") && body.contains("code_verifier=")),
+        "real PKCE exchange must use its private verifier"
+    );
+    assert!(f.store.integrity().unwrap().valid);
 }
 
 #[tokio::test]

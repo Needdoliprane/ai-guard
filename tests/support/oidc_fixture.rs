@@ -89,8 +89,15 @@ impl Drop for ControlledIssuer {
 }
 impl ControlledIssuer {
     pub async fn new() -> Self {
+        Self::with_transport(None).await
+    }
+    pub async fn with_tls(identity: super::test_product::tls::ServerIdentity) -> Self {
+        Self::with_transport(Some(identity)).await
+    }
+    async fn with_transport(identity: Option<super::test_product::tls::ServerIdentity>) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let issuer = format!("http://{}/realm", listener.local_addr().unwrap());
+        let scheme = if identity.is_some() { "https" } else { "http" };
+        let issuer = format!("{scheme}://{}/realm", listener.local_addr().unwrap());
         let state = Arc::new(Mutex::new(Behavior::default()));
         let base = issuer.clone();
         let endpoint_state = state.clone();
@@ -115,7 +122,18 @@ impl ControlledIssuer {
             }
         }).with_state(endpoint_state);
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            if let Some(identity) = identity {
+                super::test_product::tls::serve(
+                    listener,
+                    app,
+                    identity,
+                    std::future::pending::<()>(),
+                )
+                .await
+                .unwrap();
+            } else {
+                axum::serve(listener, app).await.unwrap();
+            }
         });
         Self {
             issuer,
@@ -133,11 +151,20 @@ impl ControlledIssuer {
             authorization_endpoint: format!("{}/authorize", self.issuer),
             token_endpoint: format!("{}/token", self.issuer),
             jwks_uri: format!("{}/keys", self.issuer),
-            web_redirect_uri: "http://127.0.0.1:18100/auth/oidc/callback".into(),
+            web_redirect_uri: if self.issuer.starts_with("https:") {
+                "https://127.0.0.1:18100/auth/oidc/callback"
+            } else {
+                "http://127.0.0.1:18100/auth/oidc/callback"
+            }
+            .into(),
             cli_callback_path: "/oidc/callback".into(),
             end_session_endpoint: None,
-            transport: OidcTransportModeV1::IsolatedDemoHttp {
-                exact_issuer: self.issuer.clone(),
+            transport: if self.issuer.starts_with("https:") {
+                OidcTransportModeV1::HttpsOnly
+            } else {
+                OidcTransportModeV1::IsolatedDemoHttp {
+                    exact_issuer: self.issuer.clone(),
+                }
             },
             limits: OidcLimitsV1::default(),
         }
@@ -168,9 +195,18 @@ impl ControlledIssuer {
         .unwrap()
     }
     pub fn login_response(&self, nonce: &str, subject: &str, salt: &str) -> String {
-        let access = self.token("web-public", subject, None, &[], salt);
+        self.login_response_with_roles(nonce, subject, salt, &[])
+    }
+    pub fn login_response_with_roles(
+        &self,
+        nonce: &str,
+        subject: &str,
+        salt: &str,
+        roles: &[&str],
+    ) -> String {
+        let access = self.token("web-public", subject, None, roles, salt);
         self.state.lock().unwrap().response = json!({"token_type":"Bearer","access_token":access,"refresh_token":format!("private-refresh-{salt}"),
-            "id_token":self.token("web-public",subject,Some(nonce),&[],salt),"expires_in":120});
+            "id_token":self.token("web-public",subject,Some(nonce),roles,salt),"expires_in":120});
         access
     }
     pub fn requests(&self) -> Vec<(String, String)> {

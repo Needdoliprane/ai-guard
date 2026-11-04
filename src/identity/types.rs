@@ -74,13 +74,17 @@ pub enum HumanCapabilityV1 {
     ReadTenantMetadata,
     ManageMemberships,
     ManageGrants,
+    ReadBrokerRegistry,
 }
 
 impl HumanCapabilityV1 {
     pub(crate) fn is_administration(self) -> bool {
         matches!(
             self,
-            Self::ReadTenantMetadata | Self::ManageMemberships | Self::ManageGrants
+            Self::ReadTenantMetadata
+                | Self::ManageMemberships
+                | Self::ManageGrants
+                | Self::ReadBrokerRegistry
         )
     }
 }

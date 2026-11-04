@@ -182,3 +182,96 @@ pub(crate) struct VerifiedLocalCredentialV1 {
 pub const HUMAN_MAX_PAGE_ITEMS: usize = 100;
 pub const HUMAN_MAX_PAGE_BYTES: usize = 262_144;
 pub(crate) const HUMAN_PAGE_ENVELOPE_RESERVE: usize = 4096;
+pub(crate) const HUMAN_CURSOR_HEX_BYTES: usize = (1 + 12 + 512 + 16) * 2;
+
+/// Tenant-wide infrastructure metadata, distinct from resource ACL projections.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanBrokerRegistryPageV1 {
+    pub version: u32,
+    pub context_id: String,
+    pub authorization_version: String,
+    pub source: String,
+    pub consistency: String,
+    pub evaluated_at: String,
+    pub runtime_inventory: String,
+    pub items: Vec<HumanBrokerItemV1>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub read_receipt: HumanReadReceiptV1,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanBrokerAuthorityV1 {
+    pub authority_id: Option<String>,
+    pub runtime_kind: crate::broker_registry::BrokerRuntimeKindV1,
+    pub authority_id_redacted: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanBrokerHeartbeatV1 {
+    pub incarnation_id: String,
+    pub sequence: String,
+    pub received_at: String,
+    pub lease_expires_at: String,
+    pub heartbeat_provenance: crate::broker_registry::BrokerClaimProvenanceV1,
+    pub reception_provenance: crate::broker_registry::BrokerReceptionProvenanceV1,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanBrokerItemV1 {
+    pub broker_id: String,
+    pub incarnation_id: String,
+    pub grant_revision: String,
+    pub heartbeat_revision: String,
+    pub state: crate::broker_registry::BrokerStateV1,
+    pub authorities: Vec<HumanBrokerAuthorityV1>,
+    pub granted_at: String,
+    pub not_after: String,
+    pub revoked_at: Option<String>,
+    pub last_heartbeat: Option<HumanBrokerHeartbeatV1>,
+}
+impl HumanBrokerItemV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        use crate::broker_registry::{parse_time, registry_uuid};
+        registry_uuid(&self.broker_id)?;
+        registry_uuid(&self.incarnation_id)?;
+        broker_decimal(&self.grant_revision, false)?;
+        broker_decimal(&self.heartbeat_revision, true)?;
+        parse_time(&self.granted_at)?;
+        parse_time(&self.not_after)?;
+        if let Some(time) = &self.revoked_at {
+            parse_time(time)?;
+        }
+        anyhow::ensure!(
+            (1..=16).contains(&self.authorities.len()),
+            "invalid broker authority count"
+        );
+        for authority in &self.authorities {
+            match (&authority.authority_id, authority.authority_id_redacted) {
+                (None, true) => {}
+                (Some(id), false) => crate::broker_registry::BrokerAuthorityV1 {
+                    authority_id: id.clone(),
+                    runtime_kind: authority.runtime_kind,
+                }
+                .validate()?,
+                _ => anyhow::bail!("inconsistent broker authority redaction"),
+            }
+        }
+        if let Some(heartbeat) = &self.last_heartbeat {
+            registry_uuid(&heartbeat.incarnation_id)?;
+            broker_decimal(&heartbeat.sequence, false)?;
+            parse_time(&heartbeat.received_at)?;
+            parse_time(&heartbeat.lease_expires_at)?;
+        }
+        Ok(())
+    }
+}
+fn broker_decimal(value: &str, zero: bool) -> anyhow::Result<()> {
+    let number: u64 = value.parse()?;
+    anyhow::ensure!(
+        number.to_string() == value && number <= i64::MAX as u64 && (zero || number > 0),
+        "invalid broker decimal"
+    );
+    Ok(())
+}

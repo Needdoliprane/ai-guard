@@ -352,6 +352,20 @@ fn resume_replays_exact_durable_receipts_and_credentials_after_missing_completio
 }
 
 #[test]
+fn broker_registry_membership_is_refused_before_any_setup_publication() {
+    let parent = support::private_tempdir();
+    let root = parent.path().join("installation");
+    let mut input = manifest();
+    input["tenants"][0]["identities"][0]["capabilities"] = json!(["read_broker_registry"]);
+    let refused = prepare(&input, &root);
+    assert!(!refused.status.success());
+    let diagnostic = String::from_utf8_lossy(&refused.stderr);
+    assert!(diagnostic.contains("prepare without read_broker_registry"));
+    assert!(diagnostic.contains("migrate6→7"));
+    assert_no_setup_files(parent.path(), &root);
+}
+
+#[test]
 fn malformed_duplicates_cross_issuer_and_unsafe_destination_fail_before_publication() {
     let parent = support::private_tempdir();
     let mut cases = Vec::new();
