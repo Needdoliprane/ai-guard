@@ -1,0 +1,79 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Namespace",
+      "metadata": {
+        "name": "ai-guard-preflight",
+        "labels": {
+          "app.kubernetes.io/part-of": "ai-guard",
+          "app.kubernetes.io/component": "local-preflight",
+          "pod-security.kubernetes.io/enforce": "restricted",
+          "pod-security.kubernetes.io/enforce-version": "v1.36"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "ai-guard-inspector",
+        "namespace": "ai-guard-preflight"
+      },
+      "automountServiceAccountToken": false
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole",
+      "metadata": {
+        "name": "ai-guard-local-inspection"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "namespaces"
+          ],
+          "resourceNames": [
+            "kube-system",
+            "ai-guard-preflight"
+          ],
+          "verbs": [
+            "get"
+          ]
+        },
+        {
+          "nonResourceURLs": [
+            "/version"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRoleBinding",
+      "metadata": {
+        "name": "ai-guard-local-inspection"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "ai-guard-inspector",
+          "namespace": "ai-guard-preflight"
+        }
+      ],
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "ClusterRole",
+        "name": "ai-guard-local-inspection"
+      }
+    }
+  ]
+}

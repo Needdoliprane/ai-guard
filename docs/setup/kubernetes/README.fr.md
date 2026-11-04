@@ -9,6 +9,69 @@ pas le lancement de workers. La qualification sur ce cluster réel reste
 `NOT_RUN`. Il n'existe pas d'option de lancement
 `--runtime kubernetes` ni de profil dotenv Kubernetes.
 
+## Préparer l'identité d'inspection Docker Desktop
+
+Le [profil public de lecture](../../../deploy/kubernetes/local-inspection.json)
+crée le Namespace dédié `ai-guard-preflight`, le ServiceAccount
+`ai-guard-inspector` sans automount de token, et les seules lectures de ce
+Namespace, de `kube-system` et de `/version`. Il ne contient ni credential ni
+worker. Pod Security `restricted` est épinglé à `v1.36`, cible locale de
+qualification ; revoir cette version lors d'un changement de cluster.
+Confirmer le contexte Docker Desktop local avant de provisionner :
+
+```sh
+kubectl config current-context
+kubectl --context docker-desktop --request-timeout=10s create -f deploy/kubernetes/local-inspection.json
+```
+
+Depuis la racine du dépôt, utiliser une identité opérateur autorisée séparée.
+`create` refuse de remplacer une ressource existante. Une création multi-objets
+peut réussir partiellement : conserver sa sortie et examiner ces objets exacts
+avant de poursuivre ; ne pas supprimer/recréer un Namespace pour effacer une
+erreur. Si ces noms sont déjà utilisés, préparer une copie possédée et adapter
+ensemble Namespace, sujets, rôles et noms de ressources.
+
+Seul le préflight d'admission exige le
+[grant distinct de création Pod](../../../deploy/kubernetes/local-preflight.json) :
+
+```sh
+kubectl --context docker-desktop --request-timeout=10s create -f deploy/kubernetes/local-preflight.json
+```
+
+Cela permet réellement `create pods` dans ce Namespace, **pas seulement un
+dry-run**. Aucun droit API direct exec, logs, Secrets, autre Namespace ou
+suppression n'est ajouté. Créer un Pod peut néanmoins permettre de consommer
+des Secrets ou service accounts existants du Namespace selon son admission.
+Le réserver à cet essai ; automount désactivé sur le ServiceAccount ne confine
+pas tous les Pods. RBAC Kubernetes ne limite pas une création principale au nom
+de l'objet ou au dry-run ; conserver cette identité dans le contrôle de
+confiance. Voir les [règles RBAC officielles](https://kubernetes.io/docs/reference/access-authn-authz/rbac/).
+
+Préparer un nouveau répertoire privé `0700` hors des arbres source/export,
+puis demander un token court directement dans un nouveau fichier privé :
+
+```sh
+(
+  umask 077
+  set -C
+  kubectl --context docker-desktop --request-timeout=10s \
+    --namespace ai-guard-preflight create token ai-guard-inspector \
+    --duration=10m --allow-missing-template-keys=false \
+    -o jsonpath='{.status.token}' > /absolute/private/control/kubernetes/token
+)
+```
+
+Vérifier le code de sortie ; garder toute sortie incomplète privée et choisir
+un autre chemin neuf après échec. JSONPath évite le saut de ligne terminal.
+Le serveur choisit la durée effective ; aucun renouvellement automatique
+n'est fourni. La [commande TokenRequest](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_create/kubectl_create_token/)
+utilise par défaut l'audience du serveur API. Ne pas créer de Secret token
+permanent ni donner le kubeconfig opérateur au produit. Renseigner l'AC
+approuvée et les UID exacts dans le fichier d'autorité ci-dessous, avec
+`namespace:ai-guard-preflight`. Ces profils ne prouvent ni propriété tenant,
+confinement effectif ou lancement de worker. Leur application et les sondes
+réelles du produit sont des étapes de qualification distinctes.
+
 ## Lancer le diagnostic CLI en lecture seule
 
 Utiliser `agentsandbox kubernetes doctor` avec une autorité retenue explicite

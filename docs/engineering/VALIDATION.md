@@ -1,5 +1,60 @@
 # Validation courante
 
+## 4 novembre — préparation RBAC Kubernetes Docker Desktop
+
+**PASS opérateur local, pas test du produit.** Luna confirme contexte Engine
+`desktop-linux`, Docker29.9.2 Linux/aarch64,8CPU/12585238528octets de RAM ;
+contexte Kubernetes `docker-desktop`, endpoint loopback53145, client/serveur
+1.36.1 et un nœud Ready,8CPU/12290272Ki/110Pods. MemoryPressure,
+DiskPressure et PIDPressure sont False. Seuls ces champs sont lus ; aucun
+kubeconfig complet, credential, Secret ou autre contexte n'est consulté.
+Note privée commandes/sorties :
+`/private/tmp/ai-guard-broker-identity-luna-20261104.p1cXpB/docker-desktop-metadata.txt`,
+SHA256 `aeabc3a136b31ba64ab74c70a2cdd7983c72e2bb731a3bb1eb7d6fb4eeef24ec`.
+Une option de format client-only invalide est conservée comme échec du
+harnais ; la lecture JSON suivante fournit les versions, sans résultat produit.
+
+Root fournit deux profils publics JSON et guides EN/FR. Inspection
+`ffcc78a9c966fb72b9a773693271377f1f2068c2ff775727c2f5916f4fe8ca99`
+crée Namespace/ServiceAccount et ClusterRole/Binding ; le profil distinct
+Pod-create `ae6b1f196065f32ef30c1361b1bf5a7cfa16805e33cde0b33b09b782c98285cb`
+reste opt-in. Parse JSON, liens et revue source passent. La revue fait préciser
+que l'absence de permission API Secrets ne prévient pas toute consommation
+de Secrets/service accounts par un créateur de Pods ; aucun confinement
+général n'est annoncé. Le rôle de création ne distingue pas dry-run/réel.
+
+Après trois lectures exactes `--ignore-not-found -o name` vides/RC0 pour
+Namespace/ClusterRole/Binding, Root exécute sur le seul serveur local retenu :
+
+```sh
+kubectl --context docker-desktop --server https://127.0.0.1:53145 \
+  --request-timeout=10s create -f deploy/kubernetes/local-inspection.json
+```
+
+**PASS RC0**, quatre objets créés normalement, aucune ressource préexistante
+remplacée. Namespace `ai-guard-preflight` UID
+`d4b077f9-365f-48e6-8e74-df769807b7f3`, ServiceAccount
+`ai-guard-inspector` UID `10db6a40-c833-4892-9cbf-9690de4ad5e5`,
+automount false, PSA restricted épinglé v1.36. Ils sont conservés pour la
+prochaine qualification locale, hors du conteneur de test Rust et sans Pod.
+
+Luna vérifie ensuite sept décisions réelles `kubectl auth can-i` sous
+impersonation de ce ServiceAccount, même contexte/serveur explicites :
+GET kube-system et GET Namespace QA yes/RC0 ; GET default, LIST Namespaces,
+GET Secrets QA, CREATE Pods QA et CREATE pods/exec QA no/RC1 attendus.
+**7/7 critères d'autorisation PASS** ; les RC1 sont des refus attendus,
+pas sept tests Rust ni une authentification réelle par token. Commandes
+privées `local-inspection.commands.txt`, SHA256
+`b13927aed8538fdc5b63ca60ed952e06e2d8fa4a9b2b608e737c92d15f717450` ;
+sorties `local-inspection.log`, SHA256
+`88216c6d2d07a1f83a64390f657085732c4efb79adc5474a5153a96e6c2936d4`,
+dans le même parent privé. Aucune nouvelle lecture de Secret ou de token.
+
+**NOT_RUN** : application du profil Pod-create, TokenRequest/authentification
+SA réelle, doctor/préflight du produit, lancement/arrêt de Pod, CNI,
+confinement, reprise et capacité100. La préparation locale est à poursuivre,
+pas un blocage d'autorisation cloud. Aucun gate global clos ; G09 reste FAIL.
+
 ## 4 novembre — CLI durable des identités techniques
 
 Base73707d1, plan3986283, worktree dédié `workload-cli-20261104`.

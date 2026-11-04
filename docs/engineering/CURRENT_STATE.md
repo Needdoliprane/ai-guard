@@ -1,5 +1,20 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — cible Kubernetes locale préparée en lecture
+
+Docker Desktop expose le cluster local1.36.1, un nœud Ready et environ12Go
+de RAM, sans pression signalée au relevé. Deux profils publics et guides
+EN/FR séparent inspection et création Pod. Le seul profil lecture est créé
+dans un Namespace neuf, sans remplacer de ressource. Ses sept décisions
+RBAC sous impersonation passent : deux lectures Namespace autorisées,
+lecture default/list global/Secrets/Pod-create/exec refusés. Les quatre
+objets sont conservés pour poursuivre l'essai local ; aucun Pod ni token
+n'est créé. [Commandes, résultats et limites](VALIDATION.md#4-novembre--préparation-rbac-kubernetes-docker-desktop).
+
+Ce contrôle opérateur ne teste pas encore doctor/préflight, une authentification
+ServiceAccount réelle, le runtime Pod ou l'isolation CNI. Ces qualifications
+restent NOT_RUN, sans blocage cloud artificiel ni fermeture d'un gate.
+
 ## 4 novembre — opérations CLI des identités techniques
 
 Le client Rust workload fournit préparation privée sans HTTP, émission/
