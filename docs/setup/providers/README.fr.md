@@ -131,6 +131,18 @@ Client, mode et profil explicites sont prioritaires. Choix public, modèle, imag
 
 Les références de credentials sont des données privées du contrôle. Seul le credential sélectionné est préparé pour le worker. Modifier la source ne réécrit pas une demande en attente déjà autorisée : obtenir une nouvelle décision pour d'autres credentials ou réglages d'exécution. Conserver plans et bindings en attente pour réconciliation au lieu de les modifier pour forcer un redémarrage.
 
+### Quota abonnement épuisé
+
+Si le fournisseur signale une limite d'usage de l'abonnement, examiner la session existante avant de réessayer ; conserver son plan/binding et réconcilier un runtime incertain. Credential API, budget de facturation et quota API disponible sont des prérequis distincts. Ni le refus de l'abonnement ni `providers status` ne prouvent la disponibilité de l'API.
+
+Si vous choisissez explicitement l'API facturée, préparer les [credentials et profils API](#credentials-api) privés, puis examiner la configuration API elle-même :
+
+```sh
+"$AIGUARD_BIN" providers status --config-dir "$AIGUARD_CONFIG" --providers-file "$AIGUARD_CONFIG/providers.json" --json
+```
+
+Utiliser le fichier qui contient effectivement `claude-api` ou `codex-api` ; un fichier limité aux abonnements ne les fournit pas et `providers init` ne fusionne pas de profils dans un fichier existant. Préserver les entrées d'abonnement existantes. Pour la nouvelle tâche, reprendre la commande API ci-dessus avec `--providers-file` désignant ce fichier examiné et les choix explicites `--client claude-code --auth-mode api --client-profile claude-api` (ou `--client codex --auth-mode api --client-profile codex-api`). Garder un modèle approuvé et un budget de tâche. Cette nouvelle tâche passe par la décision habituelle du policy engine ai-guard ; cela ne reprend pas la session d'abonnement précédente et ne permet aucun repli automatique si l'API est refusée.
+
 ## Choisir le moteur de décision
 
 | Moteur | Usage et limites |
@@ -196,6 +208,7 @@ L'adaptateur utilise l'[API System One](https://docs.typesafe.ai/api/system-one)
 | Client absent ou incompatible | Reconstruire le worker approuvé avec une version exacte compatible et vérifier l'image résolue. Un client hôte n'installe pas celui du worker. |
 | Credential absent, dangereux ou connexion requise | Vérifier fichier explicitement référencé, propriétaire, permissions privées et mode choisi. Suivre la connexion officielle ou renouveler la clé API sélectionnée. Ne jamais substituer un autre mode silencieusement. |
 | Modèle indisponible ou compte refusé | Vérifier modèle exact et droits du compte auprès du fournisseur ; faire un nouveau choix explicite et demander une nouvelle autorisation. |
+| Quota abonnement épuisé | Suivre la [procédure API explicite](#quota-abonnement-épuisé) seulement si vous choisissez sa facturation et ses prérequis distincts. |
 | Auto ambigu | Choisir explicitement un profil ou définir défaut/priorité compatibles dans une nouvelle configuration relue. |
 | Erreur réseau ou TLS | Vérifier destination approuvée et chaîne publique d'AC de confiance. Ne pas désactiver TLS ni ouvrir toutes les destinations workers pour réparer un certificat. |
 | Délai dépassé ou sortie partielle | Examiner l'état session/runtime avant de réessayer. Conserver tentative et incertitude ; une nouvelle requête API peut être facturée. |

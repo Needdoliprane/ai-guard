@@ -131,6 +131,18 @@ An explicit client, mode and profile take precedence. The public choice, model, 
 
 Credential references are private control data. Only the selected credential is prepared for the worker. A changed source file does not rewrite an already authorized pending request: obtain a new decision for new credentials or changed execution settings. Preserve pending plans and bindings for reconciliation instead of editing them to force a restart.
 
+### Subscription quota exhausted
+
+If the provider reports a subscription usage limit, inspect the existing session before retrying; preserve its plan/binding and reconcile an uncertain runtime. An API credential, billing budget and available API quota are separate prerequisites. Neither the subscription refusal nor `providers status` establishes API availability.
+
+If you explicitly choose billed API use, prepare the private [API credential and profiles](#api-credentials), then inspect the API configuration itself:
+
+```sh
+"$AIGUARD_BIN" providers status --config-dir "$AIGUARD_CONFIG" --providers-file "$AIGUARD_CONFIG/providers.json" --json
+```
+
+Use the file that actually contains `claude-api` or `codex-api`; a subscriptions-only file cannot supply them, and `providers init` does not merge profiles into an existing file. Preserve existing subscription inputs. For the new task, use the API command above with `--providers-file` naming that inspected file and explicit `--client claude-code --auth-mode api --client-profile claude-api` (or `--client codex --auth-mode api --client-profile codex-api`). Keep an approved model and task budget. The new task passes through ai-guard's normal policy authorization; it does not resume the previous subscription session or permit an automatic fallback if the API is refused.
+
 ## Choose the decision engine
 
 | Engine | Intended use and boundaries |
@@ -196,6 +208,7 @@ The adapter uses the authenticated [System One API](https://docs.typesafe.ai/api
 | Client missing or incompatible | Rebuild the approved worker with an exact compatible version; check the resolved image. A host installation does not install the worker client. |
 | Credential missing, unsafe or login required | Check the explicitly referenced file, owner/private modes and chosen authentication mode. Complete the provider's official login or rotate the selected API key. Never substitute another mode silently. |
 | Model unavailable or account refused | Verify that exact model and account entitlement with the provider; make a new explicit choice and request authorization again. |
+| Subscription quota exhausted | Follow the [explicit API procedure](#subscription-quota-exhausted) only if you choose its separate billing and prerequisites. |
 | Auto ambiguous | Select a profile explicitly or set a compatible default/priority in a new reviewed configuration. |
 | Network or TLS error | Check the approved destination and trusted public CA chain. Do not disable TLS verification or open all worker destinations to repair a certificate error. |
 | Timeout or partial output | Inspect session/runtime status before retrying. Preserve the original attempt and its uncertainty; an API retry may incur another charge. |
