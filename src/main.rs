@@ -44,6 +44,8 @@ enum Command {
     Human(agentsandbox::identity_cli::HumanArgs),
     /// Prepare or recover a new private local OIDC installation offline.
     Setup(agentsandbox::setup::SetupArgs),
+    /// Inspect an explicitly configured Kubernetes authority without admitting workers.
+    Kubernetes(agentsandbox::kubernetes_cli::KubernetesArgs),
     #[command(name = "__broker-enforcer", hide = true)]
     InternalBrokerEnforcer {
         #[arg(long)]
@@ -441,6 +443,7 @@ async fn main() -> Result<()> {
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
         Command::Setup(args) => agentsandbox::setup::execute(args)?,
+        Command::Kubernetes(args) => agentsandbox::kubernetes_cli::execute(args).await?,
         Command::ModelTls(args) => {
             agentsandbox::model_tls::execute(args, shutdown_signal()?).await?
         }
