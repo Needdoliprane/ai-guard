@@ -1,24 +1,39 @@
-//! Explicit read-only Kubernetes diagnostics for the trusted control CLI.
+//! Explicit Kubernetes diagnostics and audited admission dry-run for control.
 //! No ambient configuration, credential discovery or workload admission.
 use crate::{
     control_fs::PrivateFile,
+    model::Event,
     redaction::Redactor,
+    runner::{
+        AuditClient, ControlIdentityError, kubernetes_preflight::KubernetesPreflightAuditReceiptV1,
+    },
     runtime::kubernetes::{
-        KubernetesAdmissionGapV1, KubernetesAuthorityV1, KubernetesCredentials,
-        KubernetesDiagnosticsV1, KubernetesError, KubernetesRuntime,
+        BeforeKubernetesPreflightGuard, KubernetesAdmissionGapV1, KubernetesAuthorityV1,
+        KubernetesCredentials, KubernetesDiagnosticsV1, KubernetesError,
+        KubernetesPreflightObservationV1, KubernetesPreflightPlanV1, KubernetesPreflightTargetV1,
+        KubernetesRuntime,
     },
 };
 use clap::{ArgGroup, Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 const MAX_AUTHORITY_BYTES: u64 = 16 * 1024;
 const MAX_CERTIFICATE_BYTES: u64 = 64 * 1024;
 const MAX_KEY_BYTES: u64 = 16 * 1024;
 const MAX_TOKEN_BYTES: u64 = 8192;
+const MAX_CONTROL_BYTES: u64 = 16 * 1024;
+const MAX_PLAN_BYTES: u64 = 16 * 1024;
+const PREFLIGHT_GUARD_LIFETIME: Duration = Duration::from_secs(60);
 
 #[derive(Args)]
 pub struct KubernetesArgs {
@@ -30,6 +45,29 @@ pub struct KubernetesArgs {
 enum KubernetesCommand {
     /// Inspect an explicit Kubernetes authority over HTTPS; never admit work.
     Doctor(DoctorArgs),
+    /// Audit and inspect a closed Pod profile using server-side dry-run; never start work.
+    Preflight(PreflightArgs),
+}
+
+#[derive(Args)]
+struct PreflightArgs {
+    #[command(flatten)]
+    connection: DoctorArgs,
+    /// Absolute path to a private closed KubernetesPreflightPlanV1 JSON file.
+    #[arg(long, value_name = "FILE")]
+    plan_file: PathBuf,
+    /// Absolute path to the private gateway/namespace/runner-file configuration.
+    #[arg(long, value_name = "FILE")]
+    control_file: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KubernetesPreflightControlV1 {
+    version: u32,
+    gateway: String,
+    control_namespace_uuid: Uuid,
+    runner_token_file: PathBuf,
 }
 
 #[derive(Args)]
@@ -73,6 +111,15 @@ pub enum KubernetesCliError {
     Inspection(KubernetesError),
     ProtectedOutput,
     OutputUnavailable,
+    InvalidPlan,
+    InvalidControl,
+    ControlIdentity(ControlIdentityError),
+    ControlScopeMismatch,
+    AuditUnavailable,
+    ResultAuditUnavailable,
+    PreflightFailed(KubernetesError),
+    PreflightReportUnavailable,
+    ProtectedPreflightInput,
 }
 impl std::fmt::Display for KubernetesCliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -82,6 +129,15 @@ impl std::fmt::Display for KubernetesCliError {
             Self::Inspection(error) => std::fmt::Display::fmt(error, f),
             Self::ProtectedOutput => f.write_str("Kubernetes diagnostic output contains protected credential material; inspect the source privately"),
             Self::OutputUnavailable => f.write_str("Kubernetes diagnostic output is unavailable"),
+            Self::InvalidPlan => f.write_str("Kubernetes admission preflight plan is invalid or unavailable; use a private closed plan bound to this authority"),
+            Self::InvalidControl => f.write_str("Kubernetes preflight control configuration or runner credential is invalid or unavailable; use unchanged private files"),
+            Self::ControlIdentity(error) => std::fmt::Display::fmt(error,f),
+            Self::ControlScopeMismatch => f.write_str("Kubernetes preflight requires the configured authenticated control namespace and a compatible runner protocol"),
+            Self::AuditUnavailable => f.write_str("Kubernetes preflight request audit has no verified durable receipt; reception is unknown, no admission dry-run was requested and no retry was attempted"),
+            Self::ResultAuditUnavailable => f.write_str("Kubernetes preflight result audit has no verified durable receipt; admission effect is unknown or possible, no success can be reported and no retry was attempted"),
+            Self::PreflightFailed(error) => write!(f,"Kubernetes preflight failed: {error}; admission effect is unknown or possible and no retry was attempted"),
+            Self::PreflightReportUnavailable => f.write_str("Kubernetes preflight report is unavailable after result audit; admission effect is possible, no success can be reported and no retry was attempted"),
+            Self::ProtectedPreflightInput => f.write_str("Kubernetes preflight configuration contains protected credential material; remove it from authority, image or gateway fields; nothing was transmitted"),
         }
     }
 }
@@ -119,10 +175,17 @@ fn protect(file: &PrivateFile, values: &mut Vec<String>) -> Result<(), Kubernete
 pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
     match args.command {
         KubernetesCommand::Doctor(args) => doctor(args).await,
+        KubernetesCommand::Preflight(args) => preflight(args).await,
     }
 }
 
-async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
+struct LoadedConnection {
+    source: PrivateFile,
+    runtime: KubernetesRuntime,
+    protected: Vec<String>,
+}
+
+fn load_connection(args: DoctorArgs) -> Result<LoadedConnection, KubernetesCliError> {
     let source = PrivateFile::open(&args.authority_file, MAX_AUTHORITY_BYTES)
         .map_err(|_| KubernetesCliError::InvalidAuthority)?;
     let authority: KubernetesAuthorityV1 =
@@ -149,12 +212,25 @@ async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
         }
         _ => return Err(KubernetesCliError::InvalidCredentials),
     };
-    let redactor = Redactor::new(protected);
     source
         .revalidate()
         .map_err(|_| KubernetesCliError::InvalidAuthority)?;
     let runtime = KubernetesRuntime::connect(authority, credentials)
         .map_err(KubernetesCliError::Inspection)?;
+    Ok(LoadedConnection {
+        source,
+        runtime,
+        protected,
+    })
+}
+
+async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
+    let LoadedConnection {
+        source,
+        runtime,
+        protected,
+    } = load_connection(args)?;
+    let redactor = Redactor::new(protected);
     let diagnostics = runtime
         .doctor()
         .await
@@ -189,4 +265,277 @@ async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
         .write_all(&bytes)
         .and_then(|()| stdout.flush())
         .map_err(|_| KubernetesCliError::OutputUnavailable)
+}
+
+/// These typed payloads describe the control's assertion and API receipt,
+/// never independent observation or exclusive ownership of a Kube namespace.
+#[derive(Serialize)]
+struct PreflightRequestedDataV1<'a> {
+    version: u32,
+    tenant_id: &'a str,
+    control_namespace_uuid: &'a str,
+    target: &'a KubernetesPreflightTargetV1,
+    guard_lifetime_seconds: u64,
+    admission_available: bool,
+}
+#[derive(Serialize)]
+struct PreflightResultDataV1<'a> {
+    version: u32,
+    tenant_id: &'a str,
+    control_namespace_uuid: &'a str,
+    target: &'a KubernetesPreflightTargetV1,
+    request_receipt: &'a KubernetesPreflightAuditReceiptV1,
+    outcome: &'static str,
+    admission_effect: &'static str,
+    emission_guard_consumed: bool,
+    runtime_error: Option<&'static str>,
+    api_status: Option<u16>,
+    observation: Option<&'a KubernetesPreflightObservationV1>,
+    admission_available: bool,
+}
+#[derive(Serialize)]
+struct PreflightReportV1<'a> {
+    version: u32,
+    tenant_id: &'a str,
+    control_namespace_uuid: &'a str,
+    admission_available: bool,
+    request_receipt: &'a KubernetesPreflightAuditReceiptV1,
+    result_receipt: &'a KubernetesPreflightAuditReceiptV1,
+    observation: &'a KubernetesPreflightObservationV1,
+}
+
+struct AuditedPreflightGuard {
+    target: KubernetesPreflightTargetV1,
+    request_event: Event,
+    receipt: KubernetesPreflightAuditReceiptV1,
+    files: Vec<PrivateFile>,
+    expires_at: Instant,
+    consumed: Arc<AtomicBool>,
+}
+impl BeforeKubernetesPreflightGuard for AuditedPreflightGuard {
+    fn check_before_dry_run(
+        self: Box<Self>,
+        target: &KubernetesPreflightTargetV1,
+    ) -> Result<(), KubernetesError> {
+        if target != &self.target
+            || !self.receipt.matches_event(&self.request_event)
+            || self.request_event.id != target.operation_id.to_string()
+            || Instant::now() >= self.expires_at
+            || self.files.iter().any(|file| file.revalidate().is_err())
+        {
+            return Err(KubernetesError::PreflightAuthorizationDenied);
+        }
+        self.consumed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn preflight_event(
+    kind: &str,
+    target: &KubernetesPreflightTargetV1,
+    data: impl Serialize,
+) -> Result<Event, KubernetesCliError> {
+    let mut event = Event::new(kind);
+    if kind.ends_with(".requested") {
+        event.id = target.operation_id.to_string();
+    }
+    event.source = "trusted-control".into();
+    event.provenance = "declared".into();
+    event.coverage = "partial".into();
+    event.session_id = Some(target.session_id.to_string());
+    event.correlation_id = Some(target.operation_id.to_string());
+    event.data = serde_json::to_value(data).map_err(|_| KubernetesCliError::OutputUnavailable)?;
+    Ok(event)
+}
+
+fn runtime_failure(error: KubernetesError) -> (&'static str, Option<u16>) {
+    use KubernetesError::*;
+    (
+        match error {
+            InvalidAuthority => "invalid_authority",
+            InvalidCredentials => "invalid_credentials",
+            TransportUnavailable => "transport_unavailable",
+            Timeout => "timeout",
+            Busy => "busy",
+            ResponseTooLarge => "response_too_large",
+            ApiRejected(_) => "api_rejected",
+            InvalidResponse => "invalid_response",
+            AuthorityChanged => "authority_changed",
+            PodChanged => "pod_changed",
+            InvalidPreflightPlan => "invalid_preflight_plan",
+            PreflightAuthorizationDenied => "preflight_authorization_denied",
+            PreflightProfileChanged => "preflight_profile_changed",
+            WorkloadAdmissionUnavailable => "workload_admission_unavailable",
+        },
+        if let ApiRejected(status) = error {
+            Some(status)
+        } else {
+            None
+        },
+    )
+}
+
+async fn preflight(args: PreflightArgs) -> Result<(), KubernetesCliError> {
+    let mut connection = load_connection(args.connection)?;
+    let plan_source = PrivateFile::open(&args.plan_file, MAX_PLAN_BYTES)
+        .map_err(|_| KubernetesCliError::InvalidPlan)?;
+    let plan: KubernetesPreflightPlanV1 =
+        serde_json::from_slice(plan_source.bytes()).map_err(|_| KubernetesCliError::InvalidPlan)?;
+    let target = plan
+        .target(connection.runtime.binding())
+        .map_err(|_| KubernetesCliError::InvalidPlan)?;
+    let control_source = PrivateFile::open(&args.control_file, MAX_CONTROL_BYTES)
+        .map_err(|_| KubernetesCliError::InvalidControl)?;
+    let control: KubernetesPreflightControlV1 = serde_json::from_slice(control_source.bytes())
+        .map_err(|_| KubernetesCliError::InvalidControl)?;
+    if control.version != 1
+        || control.control_namespace_uuid.is_nil()
+        || !control.runner_token_file.is_absolute()
+    {
+        return Err(KubernetesCliError::InvalidControl);
+    }
+    let runner_source = PrivateFile::open(&control.runner_token_file, 4096)
+        .map_err(|_| KubernetesCliError::InvalidControl)?;
+    let runner = std::str::from_utf8(runner_source.bytes())
+        .map_err(|_| KubernetesCliError::InvalidControl)?
+        .trim();
+    protect(&runner_source, &mut connection.protected)
+        .map_err(|_| KubernetesCliError::InvalidControl)?;
+    connection.protected.push(runner.into());
+    let redactor = Redactor::new(connection.protected.clone());
+    let audit = AuditClient::new(&control.gateway, runner)
+        .map_err(|_| KubernetesCliError::InvalidControl)?
+        .with_secrets(connection.protected);
+    let input = serde_json::json!({"plan":&plan,"authority":connection.runtime.binding(),"gateway":&control.gateway});
+    if redactor.value_unclipped(&input) != input {
+        return Err(KubernetesCliError::ProtectedPreflightInput);
+    }
+    let files = vec![
+        connection.source.clone(),
+        plan_source,
+        control_source.clone(),
+        runner_source.clone(),
+    ];
+    for file in &files {
+        file.revalidate()
+            .map_err(|_| KubernetesCliError::InvalidControl)?;
+    }
+    let identity = audit
+        .supervision_identity()
+        .await
+        .map_err(KubernetesCliError::ControlIdentity)?;
+    let expected_namespace = control.control_namespace_uuid.to_string();
+    if identity.role != "runner"
+        || !(3..=7).contains(&identity.schema_version)
+        || identity.protocols != [crate::control::SupervisionProtocolV1::BrokerSupervisionV1]
+        || identity.control_namespace_uuid.as_deref() != Some(expected_namespace.as_str())
+    {
+        return Err(KubernetesCliError::ControlScopeMismatch);
+    }
+    let identity_value =
+        serde_json::to_value(&identity).map_err(|_| KubernetesCliError::InvalidControl)?;
+    if redactor.value_unclipped(&identity_value) != identity_value {
+        return Err(KubernetesCliError::ProtectedOutput);
+    }
+    let namespace = identity
+        .control_namespace_uuid
+        .as_deref()
+        .ok_or(KubernetesCliError::ControlScopeMismatch)?;
+    let request_event = preflight_event(
+        "runtime.kubernetes.preflight.requested",
+        &target,
+        PreflightRequestedDataV1 {
+            version: 1,
+            tenant_id: &identity.tenant_id,
+            control_namespace_uuid: namespace,
+            target: &target,
+            guard_lifetime_seconds: PREFLIGHT_GUARD_LIFETIME.as_secs(),
+            admission_available: false,
+        },
+    )?;
+    for file in &files {
+        file.revalidate()
+            .map_err(|_| KubernetesCliError::InvalidControl)?;
+    }
+    let request_receipt = audit
+        .append_kubernetes_preflight_event(&request_event)
+        .await
+        .map_err(|_| KubernetesCliError::AuditUnavailable)?;
+    let consumed = Arc::new(AtomicBool::new(false));
+    let guard = AuditedPreflightGuard {
+        target: target.clone(),
+        request_event,
+        receipt: request_receipt.clone(),
+        files: files.clone(),
+        expires_at: Instant::now() + PREFLIGHT_GUARD_LIFETIME,
+        consumed: consumed.clone(),
+    };
+    let result = connection.runtime.preflight(&plan, Box::new(guard)).await;
+    let (failure, status) = match &result {
+        Ok(_) => (None, None),
+        Err(error) => {
+            let (code, status) = runtime_failure(*error);
+            (Some(code), status)
+        }
+    };
+    let result_event = preflight_event(
+        "runtime.kubernetes.preflight.result",
+        &target,
+        PreflightResultDataV1 {
+            version: 1,
+            tenant_id: &identity.tenant_id,
+            control_namespace_uuid: namespace,
+            target: &target,
+            request_receipt: &request_receipt,
+            outcome: if result.is_ok() { "accepted" } else { "error" },
+            admission_effect: if result.is_ok() {
+                "dry_run_response_validated"
+            } else {
+                "unknown_possible"
+            },
+            emission_guard_consumed: consumed.load(Ordering::SeqCst),
+            runtime_error: failure,
+            api_status: status,
+            observation: result.as_ref().ok(),
+            admission_available: false,
+        },
+    )
+    .map_err(|_| KubernetesCliError::ResultAuditUnavailable)?;
+    // Even a runtime error requires a result attempt. Replaced control files
+    // prevent sending with a credential that the operator may have revoked.
+    control_source
+        .revalidate()
+        .and_then(|()| runner_source.revalidate())
+        .map_err(|_| KubernetesCliError::ResultAuditUnavailable)?;
+    let result_receipt = audit
+        .append_kubernetes_preflight_event(&result_event)
+        .await
+        .map_err(|_| KubernetesCliError::ResultAuditUnavailable)?;
+    let observation = result.map_err(KubernetesCliError::PreflightFailed)?;
+    for file in &files {
+        file.revalidate()
+            .map_err(|_| KubernetesCliError::PreflightReportUnavailable)?;
+    }
+    let report = PreflightReportV1 {
+        version: 1,
+        tenant_id: &identity.tenant_id,
+        control_namespace_uuid: namespace,
+        admission_available: false,
+        request_receipt: &request_receipt,
+        result_receipt: &result_receipt,
+        observation: &observation,
+    };
+    let value = serde_json::to_value(&report)
+        .map_err(|_| KubernetesCliError::PreflightReportUnavailable)?;
+    if redactor.value_unclipped(&value) != value {
+        return Err(KubernetesCliError::PreflightReportUnavailable);
+    }
+    let mut bytes =
+        serde_json::to_vec(&report).map_err(|_| KubernetesCliError::PreflightReportUnavailable)?;
+    bytes.push(b'\n');
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&bytes)
+        .and_then(|()| stdout.flush())
+        .map_err(|_| KubernetesCliError::PreflightReportUnavailable)
 }

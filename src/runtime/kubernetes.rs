@@ -1,7 +1,7 @@
-//! Explicit Kubernetes API authority and read-only inspection.
+//! Explicit Kubernetes API authority, inspection and server-side preflight.
 //!
 //! This is a first adapter slice, not a workload launcher. It deliberately has
-//! no CREATE, exec, attach, DELETE, kubeconfig or ambient context interface.
+//! no persisted CREATE, exec, attach, DELETE, kubeconfig or ambient context interface.
 //! Pod API configuration is not proof of runtime enforcement or CPU usage.
 use crate::control_fs::PrivateFile;
 use serde::{Deserialize, Serialize};
@@ -9,10 +9,15 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 mod observation;
+mod preflight;
 mod transport;
 pub use observation::{
     KubernetesConfiguredLimitsV1, KubernetesPodHandle, KubernetesPodObservationV1,
     KubernetesProcessObservationV1, KubernetesProcessStateV1,
+};
+pub use preflight::{
+    BeforeKubernetesPreflightGuard, KubernetesPreflightObservationV1, KubernetesPreflightPlanV1,
+    KubernetesPreflightResourcesV1, KubernetesPreflightTargetV1,
 };
 use transport::Transport;
 
@@ -31,6 +36,9 @@ pub enum KubernetesError {
     InvalidResponse,
     AuthorityChanged,
     PodChanged,
+    InvalidPreflightPlan,
+    PreflightAuthorizationDenied,
+    PreflightProfileChanged,
     WorkloadAdmissionUnavailable,
 }
 impl std::fmt::Display for KubernetesError {
@@ -46,6 +54,9 @@ impl std::fmt::Display for KubernetesError {
             Self::InvalidResponse => f.write_str("Kubernetes API inspection response is invalid or incomplete"),
             Self::AuthorityChanged => f.write_str("Kubernetes cluster or namespace identity differs from the retained authority"),
             Self::PodChanged => f.write_str("Kubernetes Pod identity or configuration differs from the retained handle"),
+            Self::InvalidPreflightPlan => f.write_str("Kubernetes admission preflight plan is invalid or differs from the retained authority"),
+            Self::PreflightAuthorizationDenied => f.write_str("Kubernetes admission preflight was not durably authorized by the control"),
+            Self::PreflightProfileChanged => f.write_str("Kubernetes admission changed the closed preflight profile; review the cluster admission configuration"),
             Self::WorkloadAdmissionUnavailable => f.write_str("Kubernetes workload admission is unavailable: confinement, workspace transfer and durable supervision remain unqualified"),
         }
     }
@@ -283,7 +294,7 @@ pub struct KubernetesDiagnosticsV1 {
     pub admission_gaps: Vec<KubernetesAdmissionGapV1>,
 }
 
-/// No mutation operations are available in this slice.
+/// No persisted mutation operations are available in this slice.
 pub struct KubernetesRuntime {
     binding: KubernetesAuthorityV1,
     transport: Transport,
@@ -353,7 +364,6 @@ impl KubernetesRuntime {
         {
             return Err(KubernetesError::InvalidResponse);
         }
-        use KubernetesAdmissionGapV1::*;
         Ok(KubernetesDiagnosticsV1 {
             authority_fingerprint: self.binding.fingerprint(),
             server_version: version.git_version,
@@ -367,18 +377,7 @@ impl KubernetesRuntime {
                 .filter(|value| matches!(value.as_str(), "restricted" | "baseline" | "privileged"))
                 .cloned(),
             observed_at: chrono::Utc::now(),
-            admission_gaps: vec![
-                NetworkEnforcementNotProven,
-                ContainerConfinementNotQualified,
-                PerPodPidLimitNotProven,
-                TemporaryFilesystemNoexecNotProven,
-                WorkerLogPersistenceNotPrevented,
-                WorkspaceTransferNotImplemented,
-                ExecAttachNotImplemented,
-                DurableDeadlineNotImplemented,
-                ControlAuditAdmissionNotConnected,
-                ServiceAccountRbacNotQualified,
-            ],
+            admission_gaps: admission_gaps(),
         })
     }
     pub async fn observe_owned(
@@ -397,6 +396,22 @@ impl KubernetesRuntime {
             .await?;
         observation::parse(&self.binding, handle, pod)
     }
+}
+
+fn admission_gaps() -> Vec<KubernetesAdmissionGapV1> {
+    use KubernetesAdmissionGapV1::*;
+    vec![
+        NetworkEnforcementNotProven,
+        ContainerConfinementNotQualified,
+        PerPodPidLimitNotProven,
+        TemporaryFilesystemNoexecNotProven,
+        WorkerLogPersistenceNotPrevented,
+        WorkspaceTransferNotImplemented,
+        ExecAttachNotImplemented,
+        DurableDeadlineNotImplemented,
+        ControlAuditAdmissionNotConnected,
+        ServiceAccountRbacNotQualified,
+    ]
 }
 
 #[derive(Deserialize)]

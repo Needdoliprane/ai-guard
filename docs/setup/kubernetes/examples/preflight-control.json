@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "gateway": "<replace-with-authorized-https-or-loopback-http-gateway-origin>",
+  "control_namespace_uuid": "<replace-with-authenticated-control-namespace-uuid>",
+  "runner_token_file": "/absolute/private/control/<replace-with-runner-token-filename>"
+}

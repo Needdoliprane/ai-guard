@@ -1,11 +1,12 @@
-# Kubernetes : autorité et inspection
+# Kubernetes : autorité, inspection et préflight d'admission
 
 [English](README.md) · [Français](README.fr.md) · [Index de configuration](../README.fr.md)
 
 La cible locale de qualification est le cluster Kubernetes à un nœud de Docker
 Desktop. Utiliser Docker/Podman pour les sessions d'agents : l'adaptateur Rust
-Kubernetes fournit actuellement diagnostic HTTPS et inspection, pas le
-lancement de workers. Il n'existe pas d'option de lancement
+Kubernetes fournit diagnostic HTTPS, inspection et dry-run d'admission audité,
+pas le lancement de workers. La qualification sur ce cluster réel reste
+`NOT_RUN`. Il n'existe pas d'option de lancement
 `--runtime kubernetes` ni de profil dotenv Kubernetes.
 
 ## Lancer le diagnostic CLI en lecture seule
@@ -112,6 +113,153 @@ identité n'est remplacée par une valeur masquée inventée. Corriger la source
 en privé avant de réessayer. Des credentials modifiés exigent une nouvelle
 invocation préparée.
 
+## Lancer un préflight d'admission audité
+
+`agentsandbox kubernetes preflight` soumet un profil Pod fermé à la chaîne
+d'admission de l'API sans persister de Pod ni exécuter image, commande ou
+worker. Il utilise les mêmes fichiers explicites d'autorité Kubernetes, d'AC
+et d'authentification que `doctor`, plus un plan privé et une configuration
+privée du contrôle. Il ne provisionne pas RBAC, n'installe aucun service et
+n'active pas le lancement de sessions Kubernetes.
+
+Retenir d'abord un rapport `doctor` réussi pour l'autorité approuvée. Faire
+provisionner par le propriétaire du cluster les lectures existantes et
+`create` sur `pods` dans le Namespace exact. Kubernetes associe ce POST à
+`create` et applique la même autorisation au dry-run qu'à une création réelle.
+Ce credential peut donc aussi créer de vrais Pods avec d'autres outils ;
+ce **n'est pas un credential limité au dry-run**. Le garder dans le stockage
+du contrôle de confiance, hors des workers. Voir les contrats officiels
+d'[autorisation dry-run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run-authorization)
+et de [correspondance des verbes](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#determine-the-request-verb).
+
+Préparer deux **nouveaux** fichiers à partir des
+[exemples de plan](examples/preflight-plan.json) et de
+[contrôle](examples/preflight-control.json). Ce sont des modèles, pas des
+configurations utilisables telles quelles : remplacer chaque placeholder
+entre chevrons. Ils ne contiennent ni autorité, ni digest d'image, UUID,
+endpoint ou credential réels. Fichiers et credentials restent en `0600`, avec
+les contrôles de propriété, d'ancêtres et d'ACL décrits ci-dessus ; chemins
+absolus sans symlinks. Plan et contrôle JSON sont limités chacun à 16 Kio.
+Champs inconnus et doublons de champs typés sont refusés. Ne pas remplacer
+une configuration existante pour préparer cet essai.
+
+Le plan version 1 contient :
+
+- `authority_fingerprint` : la valeur exacte
+  `diagnostics.authority_fingerprint` de `doctor` pour ce fichier d'autorité
+  inchangé, pas l'empreinte de l'AC.
+- `session_id` et `operation_id` : UUID neufs non nuls pour cet essai. L'UUID
+  d'opération identifie l'événement d'audit demandé ; sa réutilisation avec un
+  contenu divergent est un conflit, pas une autre permission de dry-run.
+- `image` : une vraie référence de dépôt choisie par l'opérateur, avec
+  `@sha256:` immuable et digest hexadécimal minuscule de 64 caractères. Un tag
+  seul est refusé ; ne placer ici ni secret ni credential. Un préflight réussi
+  ne prouve pas que l'image est disponible ou exécutable ; ce profil ne la
+  télécharge ni ne l'exécute et déclare `imagePullPolicy: Never`.
+- `resources` : `cpu_millis` de 1 à 200000, `memory_mib` de 1 à 102400,
+  `workspace_mib` et `temporary_mib` positifs dont la somme est strictement
+  inférieure à `memory_mib`, et `deadline_seconds` de 1 à 86400. L'exemple
+  déclare 2000 milliCPU, 1024 Mio de mémoire, 128/64 Mio de workspace/tmp et
+  60 secondes. Ces bornes et déclarations ne qualifient ni capacité ni délai.
+
+Le fichier de contrôle version 1 ne contient que `gateway`,
+`control_namespace_uuid` et `runner_token_file`, avec `version: 1`. Obtenir le
+namespace du contrôle existant authentifié, par exemple avec cette commande
+après remplacement du gateway et du chemin d'exemple :
+
+```sh
+agentsandbox broker control-info \
+  --gateway https://gateway.example.invalid \
+  --token-file /absolute/private/control/runner
+```
+
+Utiliser son `control_namespace_uuid` exact, une identité runner et un schéma
+compatible 3–7 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
+ou une origine HTTP loopback explicitement choisie ; ce fichier n'ajoute pas
+d'options AC privée ou mTLS à la connexion gateway. `runner_token_file` est
+un chemin absolu vers un fichier privé contenant au plus 4 Kio, pas la valeur du jeton. Le runner du
+contrôle et les credentials Kubernetes sont distincts. Il n'existe **aucun
+champ `tenant_id`** : le serveur authentifié fournit le tenant. L'empreinte de
+l'autorité Kubernetes choisie est liée à la demande auditée ; cela ne prouve
+ni propriété exclusive de ce Namespace par ce tenant, ni droit de lancement.
+
+Lancer l'essai préparé :
+
+```sh
+agentsandbox kubernetes preflight \
+  --authority-file /absolute/private/control/kubernetes/authority.json \
+  --ca-file /absolute/private/control/kubernetes/ca.pem \
+  --token-file /absolute/private/control/kubernetes/token \
+  --plan-file /absolute/private/control/kubernetes/preflight-plan.json \
+  --control-file /absolute/private/control/kubernetes/preflight-control.json
+```
+
+Pour mTLS Kubernetes, remplacer `--token-file` par les deux options de
+certificat ; le fichier de contrôle et son credential runner restent requis :
+
+```sh
+agentsandbox kubernetes preflight \
+  --authority-file /absolute/private/control/kubernetes/authority.json \
+  --ca-file /absolute/private/control/kubernetes/ca.pem \
+  --client-cert-file /absolute/private/control/kubernetes/client-chain.pem \
+  --client-key-file /absolute/private/control/kubernetes/client.key \
+  --plan-file /absolute/private/control/kubernetes/preflight-plan.json \
+  --control-file /absolute/private/control/kubernetes/preflight-control.json
+```
+
+Le contrôle vérifie d'abord l'identité/namespace du serveur et un reçu durable
+exact de `runtime.kubernetes.preflight.requested`. Ensuite seulement, un guard
+privé consommable lié à la cible et au reçu peut permettre le dry-run. Il
+revérifie les fichiers retenus d'autorité, de plan, de contrôle et de jeton
+runner et expire 60 secondes après l'accusé. L'adaptateur effectue les GET des
+deux ancres Namespace avant et après son unique POST :
+
+```text
+POST /api/v1/namespaces/{retained-namespace}/pods?dryRun=All&fieldValidation=Strict
+```
+
+Le profil Pod comporte une commande fixe `/usr/bin/id`, sans argv ni
+environnement métier fournis par l'appelant, UID/GID 1000, racine en lecture
+seule, capacités supprimées, sans élévation de privilèges, seccomp
+RuntimeDefault, sans namespaces hôte ni
+jeton de service account monté, avec workspace/tmp mémoire bornés et limites
+déclarées de ressources et de durée. Il n'accepte pas de manifeste Pod libre.
+Les injections ou changements d'admission hors des défauts relus sont
+refusés : sidecars, init containers, credentials, volumes hôte et sûreté
+affaiblie notamment. Seuls l'alias de service account par défaut, les défauts
+de priorité/préemption et les deux tolérances NoExecute standard de 300
+secondes sont admis comme ajouts ; les défauts booléens faux omis sont
+normalisés. Examiner un refus avec le propriétaire du cluster sans contourner
+le profil. Le Pod envoyé utilise la validation API stricte. Le reçu d'audit
+exige son enveloppe fermée complète, refuse les champs racine inconnus et les
+membres JSON dupliqués à toute profondeur.
+
+Selon le [contrat dry-run Kubernetes](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run),
+admission et valeurs par défaut sont évaluées sans stockage du Pod. Cette
+commande ne télécharge ni n'exécute d'image. L'UID retourné n'est pas retenu
+comme handle de Pod possédé. Les vérifications successives de Namespace
+détectent un remplacement mais ne sont pas une précondition UID atomique du
+POST. Une admission dry-run ne prouve ni isolation CNI ni intégrité des
+webhooks d'admission tiers.
+
+Avant d'annoncer un succès, le contrôle doit recevoir un reçu durable exact de
+`runtime.kubernetes.preflight.result`. Les deux événements ont la source
+`trusted-control`, la provenance `declared` et la couverture `partial` :
+l'API accuse réception durable, pas une observation runtime indépendante.
+Le code `0` renvoie un JSON avec tenant serveur, namespace de contrôle, deux
+reçus, observation et **`admission_available: false`**. Les dix écarts
+d'admission restent ouverts.
+
+Une erreur sort en `1` sans JSON de succès ; arguments CLI invalides en `2`.
+Aucun retry automatique. Un reçu de demande absent ou divergent bloque le
+dry-run, même si l'événement a déjà pu être stocké. Après une erreur runtime,
+d'audit du résultat ou de rapport final, l'admission a pu recevoir le dry-run :
+l'erreur ne prouve pas zéro POST. Examiner l'audit autorisé par UUID
+d'opération et réconcilier cette réception possible avant de préparer un
+nouvel essai explicite avec un UUID d'opération neuf. Garder inconnus les
+effets inconnus ; un résultat dry-run ne libère aucun quota et n'enregistre
+pas d'usage worker.
+
 ## Configurer l'intégration Rust
 
 Le contrôle de confiance utilise
@@ -167,15 +315,19 @@ cargo test --locked --test kubernetes_adapter -- --test-threads=1
 cargo test --locked --test kubernetes_transport -- --test-threads=1
 cargo test --locked --test kubernetes_transport_lifetime -- --test-threads=1
 cargo test --locked --test kubernetes_cli -- --test-threads=1
+cargo test --locked --test kubernetes_preflight -- --test-threads=1
+cargo test --locked --test kubernetes_preflight_cli -- --test-threads=1
 ```
 
 Elles exercent le vrai transport HTTPS Rust contre des fixtures TLS locales,
 dont mTLS et annulation observée par le pair. Elles ne qualifient ni Docker
-Desktop ni un autre cluster. Voir les
-[preuves datées](../../engineering/VALIDATION.md#3-novembre--diagnostic-kubernetes-et-durée-de-vie-du-transport).
+Desktop ni un autre cluster. Consulter les
+[preuves datées](../../engineering/VALIDATION.md) pour les sources, dates et
+portées de chaque exécution ; les anciens diagnostics ne qualifient pas le préflight.
 
 L'admission des workers exige encore transfert du workspace, exec/attach,
-audit obligatoire du contrôle, échéances indépendantes, reprise et tests de
-confinement réels. La présence d'une NetworkPolicy ne prouve notamment pas que
+audit du lancement/autorisation de start, échéances indépendantes, reprise et
+tests de confinement réels. La présence d'une NetworkPolicy ne prouve notamment pas que
 le CNI local isole workers et tenants. Ce diagnostic ne modifie aucune
-configuration du cluster.
+configuration du cluster, pas plus que le préflight. La qualification réelle
+Docker Desktop single-node, dont les effets CNI/RBAC/admission, reste `NOT_RUN`.

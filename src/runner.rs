@@ -16,6 +16,7 @@ use std::{
 };
 use uuid::Uuid;
 pub mod broker;
+pub(crate) mod kubernetes_preflight;
 mod managed;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
