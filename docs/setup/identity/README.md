@@ -170,7 +170,8 @@ Select named local access in the dashboard connection form, enter only the perso
 | Context expired/revoked | Discard that context's data and cursors; read identity again and choose a currently offered context. |
 | Resource not found/refused | Check explicit resource rights. An inaccessible identifier does not reveal whether another user owns it. |
 |503 `migration_required` | Stop controls, preserve a verified backup and apply the explicit storage migration; no viewer fallback. |
-|429 capacity or page limit | Follow the stated retry/reduce-page action; do not widen permissions. |
+|429 `audit_read_budget_exhausted`, `contact_operator` | Stop automatic retries and ask the operator to inspect the durable audit budget. |
+| Other 429 capacity or page limit | Follow the stated retry/reduce-page action; do not widen permissions. |
 | Audit/storage unavailable | Reads requiring audit fail closed. Repair storage/capacity before retrying. |
 
 The SSE client resumes only after a complete validated frame. Retries may duplicate events; possession of a cursor proves neither delivery nor download. Revocation stops future authorized reads, not bytes already received. Local identity, OIDC identity, workload identity and AI-provider authentication remain independent concerns.
@@ -223,6 +224,13 @@ reserves allow it. No qualified archive/purge operation is supplied here;
 deleting events or restarting is not recovery. Physical exhaustion or unavailable
 mandatory storage remains503. A neighboring unavailable profile may produce a
 partial identity response; it must not be treated as proof that access vanished.
+
+The dashboard preserves this 429 and `contact_operator` action when its human
+identity preflight reaches the budget refusal, including when the configured
+capacity disables human reads. It supplies a fixed local message and no
+`Retry-After` header. Temporary transport failures and unrecognized preflight
+errors remain 503 `identity_unavailable` with `retry`; they do not establish that
+the durable budget is exhausted.
 
 Human SSE admission allows four live streams per canonical principal and
 24 human streams per tenant, within the existing shared total32. Eight places

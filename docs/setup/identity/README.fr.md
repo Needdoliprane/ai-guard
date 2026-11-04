@@ -170,7 +170,8 @@ Choisir l'accès local nominatif dans le formulaire de connexion, saisir seuleme
 | Contexte expiré/révoqué | Retirer ses données et curseurs, relire l'identité puis choisir un contexte proposé. |
 | Ressource introuvable/refusée | Vérifier les droits explicites. Un identifiant inaccessible ne révèle pas son existence chez autrui. |
 |503 `migration_required` | Arrêter les contrôles, conserver une sauvegarde vérifiée et migrer explicitement ; aucun repli viewer. |
-|429, capacité ou taille de page | Suivre l'action de retry/réduction indiquée, sans élargir les permissions. |
+|429 `audit_read_budget_exhausted`, `contact_operator` | Arrêter les retries automatiques et faire examiner le budget durable d'audit par l'opérateur. |
+| Autre refus 429, capacité ou taille de page | Suivre l'action de retry/réduction indiquée, sans élargir les permissions. |
 | Audit ou stockage indisponible | Les lectures exigeant un audit sont refusées. Réparer capacité/stockage avant reprise. |
 
 Le client SSE reprend seulement après une trame complète validée. Un retry peut dupliquer des événements ; posséder un curseur ne prouve ni réception ni téléchargement. La révocation bloque les lectures futures, pas les octets déjà reçus. Identité locale, identité OIDC, identité de workload et authentification fournisseur IA restent indépendantes.
@@ -229,6 +230,13 @@ n'est fournie ici ; supprimer des événements ou redémarrer ne constitue pas u
 reprise. L'épuisement physique et l'indisponibilité du stockage obligatoire
 restent503. Un profil voisin indisponible peut donner une réponse d'identité
 partielle ; elle ne prouve pas que des droits ont disparu.
+
+Le dashboard conserve ce 429 et l'action `contact_operator` lorsque son
+précontrôle d'identité humaine rencontre ce refus, y compris lorsque la capacité
+configurée désactive les lectures humaines. Il fournit un message local fixe,
+sans en-tête `Retry-After`. Les pannes temporaires de transport et les erreurs de
+précontrôle non reconnues restent 503 `identity_unavailable` avec `retry` ; elles
+ne prouvent pas l'épuisement du budget durable.
 
 L'admission SSE humaine permet quatre flux vivants par principal canonique et
 24 flux humains par tenant, dans le total32 partagé existant. Huit places
