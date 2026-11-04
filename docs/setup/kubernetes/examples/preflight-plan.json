@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "authority_fingerprint": "<replace-with-exact-doctor-authority-fingerprint>",
+  "session_id": "<replace-with-new-nonzero-session-uuid>",
+  "operation_id": "<replace-with-new-nonzero-operation-uuid>",
+  "image": "<replace-with-real-worker-repository>@sha256:<replace-with-real-64-lowercase-hex-image-digest>",
+  "resources": {
+    "cpu_millis": 2000,
+    "memory_mib": 1024,
+    "workspace_mib": 128,
+    "temporary_mib": 64,
+    "deadline_seconds": 60
+  }
+}
