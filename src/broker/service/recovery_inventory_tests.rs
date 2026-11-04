@@ -179,20 +179,322 @@ async fn recovery_inventory_fresh_identity_guards_precede_journal_initialization
         );
     }
     assert!(
-        dispatch(
-            &service,
-            &gateway,
-            A_RUNNER,
-            BrokerCommandV1::RecoveryInventory {
-                after: None,
-                limit: 20
-            }
-        )
-        .await
-        .is_err(),
-        "a missing journal is an error, never a successful empty inventory"
+        matches!(
+            dispatch(
+                &service,
+                &gateway,
+                A_RUNNER,
+                BrokerCommandV1::RecoveryInventory {
+                    after: None,
+                    limit: 20
+                }
+            )
+            .await,
+            Err(BrokerErrorCodeV1::NeedsReconciliation)
+        ),
+        "a missing journal is reconciliation work, never a successful empty inventory"
     );
     assert_eq!(fs::read_dir(root).unwrap().count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_only_missing_journal_requires_reconciliation_without_initializing_history() {
+    let gateway = Gateway::inactive(true).await;
+    let mut fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+    let root = fixture.service.root.path().to_owned();
+    let (_role_temp, role) = recovery_role_fixture();
+    let child = recovery_child(&role, None);
+    let client = warmed_recovery_client(&role).await;
+    fixture.service.enforcer = None;
+    fixture.service.stop_enforcer = Some(client.clone());
+    fixture.service.fenced.store(true, Ordering::SeqCst);
+    let service = Arc::new(fixture.service);
+
+    // Even in recovery-only mode, a rejected identity must not inspect or
+    // initialize the fresh namespace. The following accepted requests then
+    // exercise each missing directory boundary using the real Gateway.
+    let unauthorized = dispatch(
+        &service,
+        &gateway,
+        "unknown-valid-shape-inventory-token",
+        BrokerCommandV1::RecoveryInventory {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let unauthorized_inventory = namespace_inventory(&root);
+    let absent_journals = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryInventory {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let journals = root.join("journals");
+    fs::create_dir(&journals).unwrap();
+    fs::set_permissions(&journals, fs::Permissions::from_mode(0o700)).unwrap();
+    let absent_profile = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryInventory {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let profile = journals.join("cancel_retry_test");
+    fs::create_dir(&profile).unwrap();
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+    let absent_reader = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryInventory {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let inventory_after = namespace_inventory(&root);
+    let writer_empty = service
+        .profile_jobs("cancel_retry_test")
+        .unwrap()
+        .writer
+        .get()
+        .is_none();
+    drop((service, client));
+    drop(child);
+
+    assert!(matches!(unauthorized, Err(BrokerErrorCodeV1::Unauthorized)));
+    assert!(
+        unauthorized_inventory.is_empty(),
+        "authentication refusal must precede filesystem effects"
+    );
+    for (stage, result) in [
+        ("journals directory", absent_journals),
+        ("profile directory", absent_profile),
+        ("recovery reader", absent_reader),
+    ] {
+        assert!(
+            matches!(result, Err(BrokerErrorCodeV1::NeedsReconciliation)),
+            "missing {stage} must request reconciliation, not classify valid input as invalid"
+        );
+    }
+    assert_eq!(
+        inventory_after,
+        vec![
+            PathBuf::from("journals"),
+            PathBuf::from("journals/cancel_retry_test")
+        ],
+        "recovery reads must not materialize journal history"
+    );
+    assert!(writer_empty, "failed recovery must not retain a writer");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_only_cancel_checks_ids_before_missing_history_but_refuses_valid_cancel_for_reconciliation()
+ {
+    let gateway = Gateway::inactive(true).await;
+    let mut fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+    let root = fixture.service.root.path().to_owned();
+    let (_role_temp, role) = recovery_role_fixture();
+    let child = recovery_child(&role, None);
+    let client = warmed_recovery_client(&role).await;
+    fixture.service.enforcer = None;
+    fixture.service.stop_enforcer = Some(client.clone());
+    fixture.service.fenced.store(true, Ordering::SeqCst);
+    let service = Arc::new(fixture.service);
+
+    let invalid_ids = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::Cancel {
+            operation_id: Uuid::nil(),
+            command_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let invalid_command = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::Cancel {
+            operation_id: Uuid::new_v4(),
+            command_id: Uuid::nil(),
+        },
+    )
+    .await;
+    let valid_ids = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::Cancel {
+            operation_id: Uuid::new_v4(),
+            command_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let missing_status = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryStatus {
+            operation_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let inventory = namespace_inventory(&root);
+    let writer_empty = service
+        .profile_jobs("cancel_retry_test")
+        .unwrap()
+        .writer
+        .get()
+        .is_none();
+    drop((service, client));
+    drop(child);
+
+    assert!(matches!(invalid_ids, Err(BrokerErrorCodeV1::InvalidInput)));
+    assert!(matches!(
+        invalid_command,
+        Err(BrokerErrorCodeV1::InvalidInput)
+    ));
+    assert!(matches!(
+        valid_ids,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    assert!(matches!(
+        missing_status,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    assert!(
+        inventory.is_empty(),
+        "Cancel must not create absent history"
+    );
+    assert!(writer_empty, "a refused Cancel must not retain a writer");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn normal_service_retries_after_missing_history_then_lists_and_recovers_empty_inventory() {
+    let gateway = Gateway::inactive(true).await;
+    let fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+    let root = fixture.service.root.path().to_owned();
+    let journals = root.join("journals");
+    fs::create_dir(&journals).unwrap();
+    fs::set_permissions(&journals, fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = journals.join("cancel_retry_test");
+    fs::create_dir(&profile).unwrap();
+    fs::set_permissions(&profile, fs::Permissions::from_mode(0o700)).unwrap();
+    let initial_inventory = namespace_inventory(&root);
+    let service = Arc::new(fixture.service);
+
+    let missing_status = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryStatus {
+            operation_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let missing_cancel = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::Cancel {
+            operation_id: Uuid::new_v4(),
+            command_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let no_history_inventory = namespace_inventory(&root);
+    let no_writer = service
+        .profile_jobs("cancel_retry_test")
+        .unwrap()
+        .writer
+        .get()
+        .is_none();
+
+    // An authorized business List is allowed to initialize Full history in a
+    // normal service. The same profile's lazy cell must recover after the
+    // earlier read-only and STOP attempts refused the absent journal.
+    let listed = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::List {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let inventory = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryInventory {
+            after: None,
+            limit: 20,
+        },
+    )
+    .await;
+    let unknown_status = dispatch(
+        &service,
+        &gateway,
+        A_RUNNER,
+        BrokerCommandV1::RecoveryStatus {
+            operation_id: Uuid::new_v4(),
+        },
+    )
+    .await;
+    let has_full_writer = service
+        .profile_jobs("cancel_retry_test")
+        .unwrap()
+        .writer
+        .get()
+        .is_some_and(|capabilities| capabilities.full().is_some());
+    drop(service);
+
+    assert!(matches!(
+        missing_status,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    assert!(matches!(
+        missing_cancel,
+        Err(BrokerErrorCodeV1::NeedsReconciliation)
+    ));
+    assert_eq!(no_history_inventory, initial_inventory);
+    assert!(
+        no_writer,
+        "failed read-only operations must not cache a writer"
+    );
+    assert!(matches!(
+        listed,
+        Ok(Response {
+            reply: BrokerReplyV1::Page { ref entries, next_after: None },
+            ..
+        }) if entries.is_empty()
+    ));
+    assert!(matches!(
+        inventory,
+        Ok(Response {
+            reply: BrokerReplyV1::RecoveryInventory { ref inventory },
+            ..
+        }) if inventory.entries.is_empty() && inventory.next_after.is_none()
+    ));
+    assert!(matches!(
+        unknown_status,
+        Err(BrokerErrorCodeV1::InvalidInput)
+    ));
+    assert!(
+        has_full_writer,
+        "authorized List must lazily open Full history"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
