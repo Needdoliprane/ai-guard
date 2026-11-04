@@ -369,6 +369,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                 validate_provider_version(version)?;
             }
             let source = source.canonicalize()?;
+            preflight_build_inputs(&source)?;
             let runtime = selected_runtime(
                 runtime,
                 runtime_program.as_deref(),
@@ -912,6 +913,63 @@ mod secret_projections {
         Ok(())
     }
 }
+fn preflight_build_inputs(source: &Path) -> Result<()> {
+    const DIRECTORIES: &[&str] = &[
+        "images",
+        "src",
+        "src/bin",
+        "front",
+        "front/src",
+        "front/public",
+        "policies",
+    ];
+    const FILES: &[&str] = &[
+        "images/control.Dockerfile",
+        "images/worker.Dockerfile",
+        ".dockerignore",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "LICENSE",
+        "src/main.rs",
+        "src/lib.rs",
+        "src/bin/ai-guard-provider.rs",
+        "front/package.json",
+        "front/package-lock.json",
+        "front/tsconfig.json",
+        "front/vite.config.ts",
+        "front/index.html",
+        "front/src/main.ts",
+        "front/src/style.css",
+        "front/public/favicon.svg",
+        "policies/default.json",
+    ];
+    // Structural precheck only: the engine later reads the live build context.
+    for (paths, directory) in [(DIRECTORIES, true), (FILES, false)] {
+        for relative in paths {
+            let metadata = fs::symlink_metadata(source.join(relative))
+                .map_err(|_| anyhow::anyhow!("required build input is unavailable: {relative}"))?;
+            if metadata.file_type().is_symlink() {
+                bail!("required build input must not be a symbolic link: {relative}");
+            }
+            let valid = if directory {
+                metadata.is_dir()
+            } else {
+                metadata.is_file()
+            };
+            if !valid {
+                let kind = if directory {
+                    "directory"
+                } else {
+                    "regular file"
+                };
+                bail!("required build input must be a {kind}: {relative}");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_provider_version(version: &str) -> Result<()> {
     let exact = regex::Regex::new(
         r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z.-]+)?$",
