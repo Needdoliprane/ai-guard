@@ -1,9 +1,9 @@
 # Plan d'industrialisation
 
-## Lot en cours — présence émise par le vrai service broker
+## Lot intégré — présence émise par le vrai service broker
 
-Basea76730c, donneur `codex/broker-publisher-20261104`. Le prochain raccord
-est le publisher de `broker serve`, avec clé Broker distincte, périmètre
+Basea76730c, donneur `codex/broker-publisher-20261104`. Ce raccord
+publie la présence de `broker serve`, avec clé Broker distincte, périmètre
 frais issu de la même preuve, ancre locale privée et pending/reçu durables.
 Le service possède et joint ses acteurs ; panne réseau/auth/budget de
 présence ne modifie ni admission ni STOP/quota. Des exclusions de secrets
@@ -30,17 +30,24 @@ sont distincts dans le donneur ; les checkouts D5/FD restent intacts.
 - [x] Tests pertinents FS/HTTP/Store et vrai cycle `serve`, contrôle composé,
   revue traitée, guides/exemple EN/FR et preuves :21fonctions uniques PASS,
   all-targets PASS, sans replay systématique des parents inchangés.
-- [ ] Commit/push, composition vérifiée et retrait sûr du donneur.
+- [x] Commit/push, composition vérifiée et retrait sûr du donneur :8ead8cc
+  intégré2949b54, guides/preuves8d9abc7, références distantes conformes et
+  donneur retiré normalement après inventaire/consommateurs ; preuves conservées.
 
 Le plafond local et les budgets d'audit sont cumulatifs : aucune présence
 indéfinie ou purge qualifiée n'est annoncée. Worker relay, fédération complète,
 reprise runtime et qualification production gardent leurs critères entiers.
+Prochaine priorité : mesurer le coût du flux et réduire les relectures
+redondantes seulement avec les mêmes contrôles avant POST et régressions.
+Le diagnostic Recovery sans journal reste à préciser. Kubernetes exige une
+proposition de canal/preset avant réalisation et un attachement sûr à
+l'instance autorisée ; un handle DTO ou GET suivi d'exec par nom ne le prouve pas.
 
-## Lot en cours au4novembre — portée authentifiée du broker
+## Lot intégré au4novembre — portée authentifiée du broker
 
 Base1da19fd, donneur dédié `codex/broker-presence-20261104`. Le backend
 possède déjà grant, heartbeat, lecture technique et projection humaine ;
-`broker serve` ne publie pas encore sa présence. Une clé Broker ne peut pas
+à ce gel, `broker serve` ne publiait pas encore sa présence. Une clé Broker ne peut pas
 utiliser le protocole runner et `GET /brokers/self` ne porte pas tenant,
 namespace de contrôle ou révision du binding. Le prochain consommateur doit
 obtenir ces faits de la même preuve authentifiée, sans les déduire d'un

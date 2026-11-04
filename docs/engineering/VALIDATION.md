@@ -96,9 +96,16 @@ Les quatre propriétaires QA sont fermés normalement après jobs terminés,
 seul sleep et inspection des contrôles effectifs ; logs/sources host
 préservés. Owner4 ferme15:12:16UTC, Pid0/OOMfalse, pic3712004096octets,
 tous compteurs OOM à0. Son hold137 de nettoyage est distinct des Cargo0.
-La fermeture du donneur reste à effectuer après intégration/push.
+Donneur commité/poussé8ead8cc, intégré2949b54 ; guides/preuves8d9abc7
+poussés, deux références distantes comparées exactement. Inventaire suivi,
+non suivi et ignoré propre ; probe cwd51336 visible, sorti0 puis scan
+extérieur lsof vide sans diagnostic. Retrait Git normal du donneur à15:19UTC,
+sans force/reset/clean, branches/gels/logs privés conservés. Main, D5 et FD
+préservés ; checkout d'intégration maintenu pour le chantier global.
 Note indépendante privée `FINAL_REVIEW.md`, mode0600, SHA
 `915ba8f697aea45342d373acd6677723e456e4d4707e1407ea17633247ec6684`.
+Ledger Root fermé après ces contrôles, SHA
+`8d3a734aba9e530555507a14496fae8164fe89be702eae8a54bffd5b890a98ea`.
 
 **BLOCKED** : Clippy Linux absent de l'image épinglée. **NOT_RUN** : release,
 coût soutenu de rétention/quatre scans par cycle, fautes physiques/électriques,

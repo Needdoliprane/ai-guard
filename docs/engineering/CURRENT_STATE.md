@@ -15,6 +15,9 @@ helper Full vide, possède son enfant StopsOnly et exige un vrai RPC avec
 la configuration présence absente. Les FAIL des fixtures/protocoles et
 leurs corrections restent consignés. Aucun job ou worker n'est lancé.
 [Résultats et limites](VALIDATION.md#4-novembre--présence-émise-par-le-service-broker).
+Code8ead8cc intégré2949b54, guides/preuves8d9abc7 poussés et références
+distantes vérifiées. Donneur propre sans consommateur retiré normalement ;
+branche, gels et preuves privés conservés, checkout d'intégration maintenu.
 
 Les RED ont aussi vérifié deux défauts de capacité/historique et la
 séparation publication/admission avant leurs corrections. Panne de flux
@@ -33,9 +36,9 @@ synchronisés ; [RED, OOM de compilation et reprise](VALIDATION.md#4-novembre--i
 conservés séparément. Code intégré en87e902d depuis le donneurfc22ca9,
 worktree donneur retiré normalement, branches/preuves préservées.
 
-Cette lecture ne publie pas encore la présence de `broker serve`, ne fournit
-ni santé runtime, inventaire d'hôtes ni autorité pour un POST futur. Reprise
-du publisher, transports, fédération et qualification restent ouverts.
+Cette lecture seule ne publie pas la présence de `broker serve` (raccord
+distinct ci-dessus) et ne fournit ni santé runtime, inventaire d'hôtes ni
+autorité pour un POST futur. Transports, fédération et qualification restent ouverts.
 Clippy Linux est BLOCKED ; aucun gate global clos, G09 reste FAIL.
 
 ## 4 novembre — cible Kubernetes locale préparée en lecture
