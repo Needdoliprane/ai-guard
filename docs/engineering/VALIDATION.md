@@ -1,5 +1,72 @@
 # Validation courante
 
+## 4 novembre — identité Broker liée au même périmètre serveur
+
+Base1da19fd, donneur `codex/broker-presence-20261104` commité/poussé en
+`fc22ca9`, intégré en `87e902d`. Le nouveau GET réservé Broker retourne neuf
+champs de portée dans une transaction checked unique, distincts de l'autorité
+interne. Le Redactor de la même preuve refuse toute enveloppe contenant un
+secret, en503 opaque ; aucune identité masquée ou partielle. Aucun rôle,
+service, stockage, migration ou publisher automatique ajouté.
+
+**PASS logiciel ciblé : six fonctions uniques, pas une matrice complète.**
+
+```sh
+cargo test --locked --test broker_identity_api -- --test-threads=1
+cargo test --locked --lib audit::broker_registry::identity_view_tests -- --test-threads=1
+cargo check --locked --all-targets
+```
+
+Luna exécute dans un OS isolé, env vide explicitement peuplé : toolchain
+LinuxARM64 Rust1.99.1, image cache2115d432, source/registry RO, UID1000,
+network none/routage vide, root RO, caps supprimées/nnp, CPU1, PID256,
+nofile1024/fsize512M, scratch3GiB/65536inodes/nosuid/nodev, hold1800s.
+HOME/TMP/CARGO/TARGET privés, offline/locked/incremental0/jobs1/debug0,
+RUSTC/RUSTDOC absolus ; aucun téléchargement ou code cible natif sur le Mac.
+La seule étape native Rust est rustfmt statique, PASS ; diff check PASS.
+
+| Gel et sélection | Résultat constaté |
+|---|---|
+| RED1, base sans route + premier test82cc6e3b | Compilation OK ; self200 prouve la fixture, identity404 au lieu200 ;1exécuté/FAIL101/0ignored. |
+| RED2, nouveau handler sans garde + test9aab9233 | Compilation OK ; Bearer égal au namespace authentifié, réponse identity réussie ; oracle de refus échoue,1exécuté/FAIL101/0ignored, aucune valeur de preuve affichée. |
+| GREEN, `--test broker_identity_api` | 3/3PASS/0ignored : A6/B7 avec mêmes UUID, autres classes de preuve refusées, collision namespace/secret refusée sans vue partielle. |
+| Première compilation `--lib` | SIGKILL avant lancement des unités : FAIL de compilation, unités et all-targets alors NOT_RUN. Root observe oom1/oom_kill1, pic5GiB égal au plafond, scratch2,4GiB ; mémoire disponible VM≈7,6GiB. Aucun défaut source ou latence produit déduit. |
+| Même source, propriétaire neuf6GiB | 3/3unités PASS/0ignored/349filtered, puis all-targets RC0 en52,33s. Aucun replay des3API ; pic3916775424octets, tous compteurs OOM à0. |
+
+Les unités vérifient preuve extraite avant rotation/révocation du binding,
+unseen puis stale réels sans rafraîchir heartbeat/head, grants remplacés ou
+révoqués, et plancher UTC durable futur avec refus ClockRegression. Le Worker
+est une projection de fixture via vraies API Store, jamais un conteneur.
+
+Journaux privés sous
+`/private/tmp/ai-guard-broker-identity-luna-20261104.p1cXpB` :
+RED1 `b0d8b2d14caaf7bef824de16435572eb7b58da9d54bcb9bed792d8a832422861`,
+RED2 `9594b8e5520de787d3fce5025f7a5f35175e0f7e29a651e0219945e75c796429`,
+API `b80b738be7c8f761c37c5783dbcacf9088c8d809ede8cf197e96df6d3207be74`,
+compile lib initiale `cc3d2f053cf1513d6689ec2f33c411af556e3e4caf21ace122ccf20703abde1e`,
+unités `c93c34c5071a8a10f7fd5a1843602647bb6a5eb1a8a5da0df6ea4b38a6bd40ba`,
+all-targets `87738f4a893fd4c0ed569a9897da0e2831273ec564e5f60a3c392de78cb94752`.
+Root vérifie ces hashes et les cinq fichiers exécutés, puis l'absence de
+différence de composition hors docs et profils Kubernetes publics.
+
+Revue indépendante sans blocage restant dans son périmètre, SHA
+`d9e2e18cdaad2234f7c4020afd6e4616b35c3794b8081c6c4bac733c101d2824`.
+La revue précède la fin des essais ; le ledger Root ferme séparément leurs
+résultats. Deux propriétaires QA fermés normalement après seul sleep et
+hashes conformes ; les statuts hold137 de nettoyage sont distincts des RC
+naturels des tests. Donneur propre, probe cwd6851 positif puis sortie0,
+scan final extérieur vide sans diagnostic et retrait Git normal ; branche
+et preuves conservées. Ledger privé
+`/private/tmp/ai-guard-broker-identity-inputs-20261104.B7OJgx/ROOT_VALIDATION.md`,
+SHA `a3cd040b3c3b7ee5da11d2801cbdee6379c886bb4c2387590c3dbd4decce04ae`.
+
+**BLOCKED** : Clippy Linux absent de l'image épinglée. **NOT_RUN** : release
+de ce lot, expiry réelle du binding/grant, corruption namespace, fautes
+physiques, publisher réel, transport worker, fédération et qualification
+runtime. Les collisions manuelles de réponses self/heartbeat historiques
+restent hors correctif. Un snapshot identity ne rend pas atomique le POST
+suivant. Aucun gate global clos, G09 FAIL, `billable=false`.
+
 ## 4 novembre — préparation RBAC Kubernetes Docker Desktop
 
 **PASS opérateur local, pas test du produit.** Luna confirme contexte Engine

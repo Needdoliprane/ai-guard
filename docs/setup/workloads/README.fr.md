@@ -238,6 +238,38 @@ Conserver chaque nouvel `operation_id` et sa requête exacte avant transmission.
 
 Une rotation exige un nouveau digest inutilisé ; l'ancienne clé brute cesse d'authentifier. Les digests historiques restent des preuves de propriété et ne peuvent être réintroduits après rotation, révocation ou expiration. Seul le renouvellement de la clé encore courante et active peut réutiliser son digest. La révocation exige la révision courante et l'avance. Ne pas réutiliser la clé d'un autre tenant, d'un humain ou du contrôle ; une propriété ambiguë échoue fermée. Préserver préparation privée, requête exacte et reçu après réponse perdue, sans émettre aveuglément une autre identité.
 
+## Lire le périmètre authentifié du broker
+
+Avant d'associer une preuve Broker à une installation attendue, utiliser
+`GET /api/v1/brokers/identity` avec ce même Bearer Broker dédié. La réponse
+fermée version1 contient `version`, `tenant_id`, `control_namespace_uuid`,
+`schema_version`, `broker_id`, `incarnation_id`, `credential_id`,
+`binding_revision` et `grant_revision`. Tenant et namespace proviennent du
+Store authentifié, au schéma6 ou7. Un autre appel réussi avec une clé runner,
+un libellé tenant local ou des UUID identiques ne prouvent pas le périmètre
+de cette clé Broker.
+
+Le gateway revalide binding, grant et horloge du contrôle dans une transaction
+contrôlée unique. Un broker encore autorisé peut lire ce périmètre avant son
+premier heartbeat ou après expiration de sa lease de présence. La lecture
+n'émet aucun heartbeat, ne prolonge aucune lease et n'ajoute aucun événement
+d'audit ; le plancher d'horloge durable existant s'applique toujours. Un
+namespace absent/incompatible, une preuve révoquée/expirée ou un contrôle
+incertain est refusé. Runner, viewer, humain et Worker n'accèdent pas à cette
+route réservée au Broker.
+
+Si un champ d'identité contient du matériel de credential retenu, toute
+l'enveloppe est refusée en `503 identity_unavailable`, sans identité masquée
+ou partielle. Examiner credential/configuration en privé plutôt qu'accepter
+un namespace substitué ou réessayer aveuglément.
+
+Comparer tous les champs attendus et conserver cette réponse dans le contrôle
+privé. C'est un snapshot courant, pas une preuve signée transportable, un
+diagnostic de santé runtime ou une autorisation pour une mutation future.
+Revalider à l'action suivante. `broker serve` ne publie pas encore de
+heartbeats automatiques ; lire identité ou métadonnées self n'enregistre pas
+un hôte vivant et ne livre pas la fédération.
+
 ## Autoriser un broker et interpréter son heartbeat
 
 Après préparation du binding broker, un runner accorde son périmètre d'autorité. Ce registre est distinct du Registry2 local de `broker serve --config`. Un objet autorité a la forme `{"authority_id":"<approved-authority-id>","runtime_kind":"docker"}`. Son `authority_id` est un libellé borné (1–256 octets, aucun caractère de contrôle), associé à `runtime_kind:docker|podman|kubernetes`. Ce n'est ni une connexion runtime ni un adaptateur Kubernetes installé. La propriété historique d'une autorité ne peut être transférée à un autre broker ou type de runtime par édition d'un grant.
@@ -248,6 +280,7 @@ Après préparation du binding broker, un runner accorde son périmètre d'autor
 | `POST /brokers/{id}/revoke` | Runner : `version`, `operation_id`, `broker_id` égal à `{id}`, `expected_revision` positif. |
 | `POST /brokers/heartbeat` | Broker : `version`, `operation_id`, `expected_heartbeat_revision`, `incarnation_id`, `sequence`. |
 | `GET /brokers/self` | Broker : aucun corps ni sélecteur de périmètre ; renvoie sa propre `BrokerViewV1`. |
+| `GET /brokers/identity` | Broker : aucun corps ni sélecteur de périmètre ; renvoie tenant/namespace de contrôle authentifiés et révisions courantes exactes du credential/grant broker. |
 | `GET /brokers?limit=50` | Viewer technique ou runner : limite 1–100, défaut 50 ; `cursor` facultatif est l'UUID broker exact renvoyé comme `next_cursor`. Renvoie `version`, `items`, `next_cursor`. |
 
 Un nouveau grant utilise un UUID d'incarnation jamais employé et un binding broker correspondant. Remplacer un grant exige aussi nouvelle incarnation et sujet/binding correspondant ; tourner un credential seul n'invente pas une incarnation. Comparer la révision durable du grant, pas une supposition en cache. Un heartbeat porte la révision heartbeat courante exacte, l'incarnation du grant et la séquence suivante (d'abord 1, puis précédente+1). Son rejeu exige toujours binding authentifié courant et grant non expiré/non révoqué ; un ancien reçu ne rétablit pas l'autorité. Les résultats des mutations runner et heartbeats contiennent métadonnées broker, révisions grant/heartbeat, opération/empreinte d'entrée et séquence/empreinte d'audit, avec `replayed` explicite.

@@ -1,5 +1,26 @@
 # Stratégie de qualification
 
+## Portée de la preuve Broker et préparation Kubernetes
+
+Pour une modification de `GET /api/v1/brokers/identity`, sélectionner
+`cargo test --locked --test broker_identity_api -- --test-threads=1` et
+`cargo test --locked --lib audit::broker_registry::identity_view_tests -- --test-threads=1`.
+Les trois parents API vérifient Store A6/B7 avec UUID identiques, classes
+de preuve interdites et refus d'une identité contenant le Bearer. Les trois
+unités Store vérifient preuve déjà extraite puis rotation/révocation,
+présence unseen/stale et grants remplacés, puis plancher d'horloge durable.
+Le Worker utilise une projection déclarée de fixture ; aucun moteur n'est
+appelé. Les expirations de binding/grant et fautes physiques restent des
+qualifications distinctes si non exécutées dans le lot.
+
+Les profils Kubernetes publics sont des configurations. Leur parsing et
+leur revue sont distincts de leur application. Les sept décisions opérateur
+`kubectl auth can-i` sous impersonation ne comptent ni comme tests Rust ni
+comme authentification ServiceAccount réelle, lancement Pod ou confinement
+CNI. Conserver endpoint, contexte, versions, UID des objets possédés et
+refus attendus. Pas de création de100workers, d'appel modèle ni de campagne
+E2E pour ces deux coutures ; [preuves](VALIDATION.md).
+
 ## CLI workload — sélectionner selon la couture modifiée
 
 `tests/workload_cli.rs` exerce la vraie CLI, des gateways Axum/Store SQLite

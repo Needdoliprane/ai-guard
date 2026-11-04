@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Complément Broker du4novembre : portée de la même preuve serveur, transaction
+unique et refus de réponse contenant un secret intégrés en87e902d ; six
+fonctions ciblées et all-targets PASS, revue traitée. Le profil Kubernetes
+local de lecture est provisionné avec sept décisions RBAC opérateur vérifiées,
+sans Pod/token ni sonde produit. Publisher réel, fédération, runtime, Clippy
+et qualifications restantes conservent leurs écarts ; aucun gate clos.
+
 Complément CLI workload du4novembre : préparation/clé privées et reprise
 exacte via les API existantes,17fonctions ciblées uniques PASS, all-targets
 et release PASS, revue source traitée, guides/exemples EN/FR.

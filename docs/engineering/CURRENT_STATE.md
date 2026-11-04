@@ -1,5 +1,20 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — portée courante authentifiée du broker
+
+Le nouveau `GET /api/v1/brokers/identity` lie la même preuve Broker au tenant,
+namespace et révisions courantes du serveur, via une seule transaction
+contrôlée. Une collision de métadonnée avec un secret refuse toute la réponse.
+Six fonctions ciblées et all-targets PASS, revue traitée, guides API/EN/FR
+synchronisés ; [RED, OOM de compilation et reprise](VALIDATION.md#4-novembre--identité-broker-liée-au-même-périmètre-serveur)
+conservés séparément. Code intégré en87e902d depuis le donneurfc22ca9,
+worktree donneur retiré normalement, branches/preuves préservées.
+
+Cette lecture ne publie pas encore la présence de `broker serve`, ne fournit
+ni santé runtime, inventaire d'hôtes ni autorité pour un POST futur. Reprise
+du publisher, transports, fédération et qualification restent ouverts.
+Clippy Linux est BLOCKED ; aucun gate global clos, G09 reste FAIL.
+
 ## 4 novembre — cible Kubernetes locale préparée en lecture
 
 Docker Desktop expose le cluster local1.36.1, un nœud Ready et environ12Go

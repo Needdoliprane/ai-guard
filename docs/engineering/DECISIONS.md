@@ -1,5 +1,29 @@
 # Décisions d'industrialisation
 
+## 4 novembre — projection de portée depuis la preuve Broker
+
+Raccord additif dans le gateway existant : `GET /api/v1/brokers/identity`
+utilise `VerifiedBroker`, sans service, rôle, stockage ou migration nouvelle.
+Une lecture runner réussie et les métadonnées `/brokers/self` ne suffisent
+pas à associer une autre clé Broker au même tenant/namespace. Le DTO fermé
+est distinct de l'autorité interne non désérialisable ; une transaction
+checked revalide binding, grant, horloge et périmètre avant de produire ses
+neuf champs. Une lease de présence stale n'est pas une révocation du grant.
+
+La même preuve fournit le Redactor de sortie. Si un champ contient une clé
+retenue, toute l'enveloppe est refusée en503 opaque, sans inventer d'ID
+masqué. La garde concerne cette nouvelle route ; les réponses historiques
+self/heartbeat et leurs collisions manuelles restent un écart distinct.
+Cette observation ne renouvelle aucune lease et ne fournit ni santé runtime
+ni autorité durable pour un futur POST. L'émission de présence par `serve`
+et sa reprise exigent leur propre lot ; le replay existant dépend aussi des
+révisions binding/grant et ne peut être reconstruit par ce seul GET.
+
+En parallèle, les profils Kubernetes locaux séparent lecture et Pod-create.
+Ils provisionnent une identité de test dans un Namespace dédié, pas un
+runtime. Le droit de création peut aussi consommer des objets du Namespace
+selon son admission ; aucun isolement tenant ou réseau n'en est déduit.
+
 ## 4 novembre — provisionnement des identités techniques par CLI
 
 Choix d'implémentation dans les frontières existantes, relu avant code :

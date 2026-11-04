@@ -233,6 +233,36 @@ Record each new `operation_id` and exact request before transmission. An exact r
 
 Rotation requires a new unused digest; the replaced raw key stops authenticating. Historical digests remain ownership evidence and cannot be reintroduced after rotation, revocation or expiry. Only renewal of the still-current active key may reuse its digest. Revocation requires the current revision and advances it. Do not reuse another tenant's, human's or control key; ambiguous ownership fails closed. Preserve private preparation, exact request and receipt after a lost response rather than issuing another identity blindly.
 
+## Read the authenticated broker scope
+
+Before associating a Broker proof with an expected control installation, use
+`GET /api/v1/brokers/identity` with that same dedicated Broker bearer. The
+closed version1 response contains `version`, `tenant_id`,
+`control_namespace_uuid`, `schema_version`, `broker_id`, `incarnation_id`,
+`credential_id`, `binding_revision` and `grant_revision`. The tenant and
+namespace come from the authenticated Store, with schema6 or7. A separate
+successful runner request, a local tenant label or matching resource UUIDs
+does not authenticate this Broker proof's scope.
+
+The gateway revalidates the binding, grant and control clock in one checked
+transaction. A still-authorized broker can read this scope before its first
+heartbeat or after the heartbeat lease becomes stale. The read does not emit
+a heartbeat, extend a lease or add an audit event; the existing durable clock
+floor still applies. Missing/incompatible namespace, revoked/expired proofs
+and uncertain control state fail closed. Runner, viewer, human and Worker
+credentials cannot use this Broker-only route.
+
+If any identity field contains retained credential material, the entire
+envelope is refused with `503 identity_unavailable`; no masked or partial
+identity is returned. Review the private credential/configuration rather
+than accepting a substituted namespace or retrying blindly.
+
+Compare every expected identity field and keep the response control-private.
+The response is a current snapshot, not a signed portable credential, runtime
+health check or authorization for a future mutation. Revalidate at the next
+action. `broker serve` does not yet publish heartbeats automatically; reading
+identity or self metadata does not register a live host or complete federation.
+
 ## Grant a broker and interpret its heartbeat
 
 After preparing the broker binding, a runner grants that broker's authority scope. This registry is distinct from the local `broker serve --config` Registry2. An authority object has the form `{"authority_id":"<approved-authority-id>","runtime_kind":"docker"}`. Its `authority_id` is a bounded label (1–256 bytes, no controls), paired with `runtime_kind:docker|podman|kubernetes`. It is not a runtime connection or an installed Kubernetes adapter. Historical authority ownership cannot be transferred to another broker or runtime kind by editing a grant.
@@ -243,6 +273,7 @@ After preparing the broker binding, a runner grants that broker's authority scop
 | `POST /brokers/{id}/revoke` | Runner: `version`, `operation_id`, `broker_id` matching `{id}`, positive `expected_revision`. |
 | `POST /brokers/heartbeat` | Broker: `version`, `operation_id`, `expected_heartbeat_revision`, `incarnation_id`, `sequence`. |
 | `GET /brokers/self` | Broker: no body or scope selector; returns its own `BrokerViewV1`. |
+| `GET /brokers/identity` | Broker: no body or scope selector; returns the authenticated tenant/control namespace and exact current broker credential/grant revisions. |
 | `GET /brokers?limit=50` | Technical viewer or runner: limit 1–100, default 50; optional `cursor` is the exact broker UUID returned as `next_cursor`. Returns `version`, `items`, `next_cursor`. |
 
 A new grant uses a previously unused incarnation UUID and a matching broker binding. Replacing a grant also requires a new incarnation and matching subject/binding; rotating a credential alone does not invent a new incarnation. Compare the durable grant revision, not a cached guess. A heartbeat carries the exact current heartbeat revision, the grant's incarnation and the next sequence (first 1, then previous+1). Heartbeat replay still requires a current authenticated binding and unexpired/unrevoked grant; a previous receipt does not restore authority. Runner mutations and heartbeat receipts contain broker metadata, grant/heartbeat revisions, operation/input hash and audit sequence/hash, with `replayed` explicitly reported.

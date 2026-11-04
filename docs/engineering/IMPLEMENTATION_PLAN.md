@@ -1,5 +1,53 @@
 # Plan d'industrialisation
 
+## Lot en cours au4novembre — portée authentifiée du broker
+
+Base1da19fd, donneur dédié `codex/broker-presence-20261104`. Le backend
+possède déjà grant, heartbeat, lecture technique et projection humaine ;
+`broker serve` ne publie pas encore sa présence. Une clé Broker ne peut pas
+utiliser le protocole runner et `GET /brokers/self` ne porte pas tenant,
+namespace de contrôle ou révision du binding. Le prochain consommateur doit
+obtenir ces faits de la même preuve authentifiée, sans les déduire d'un
+autre credential ou de labels locaux.
+
+- [x] Ajouter `GET /api/v1/brokers/identity`, via `VerifiedBroker` existant,
+  avec DTO fermé version1 : tenant et namespace serveur, version du schéma,
+  broker, incarnation, credential et révisions binding/grant. Une transaction
+  contrôlée revalide identité, horloge et grant avant de produire le snapshot.
+- [x] Reproduire l'absence de route avant code ; vérifier preuves Broker A/B
+  avec IDs identiques, refus des autres rôles, rotation/révocation et portée
+  inchangée. Les tests utilisent vrais Gateway/Store ; aucun heartbeat fictif
+  n'est ajouté à un service existant.
+- [x] Revue indépendante, Luna ciblé dans Docker isolé, contrôle composé des
+  cibles et guides API/EN/FR synchronisés ; commit/push puis fermeture normale
+  du donneur. Root possède intégration et docs, CORE les cinq fichiers
+  API/domaine/store/tests, Luna seulement l'exécution.
+
+Résultat :6fonctions uniques et all-targets PASS. Le RED de collision de
+secret précède sa garde ; l'OOM de compilation mesuré au premier propriétaire
+est conservé, puis trois unités passent sur source inchangée dans un
+propriétaire neuf, sans replay des trois API. Codefc22ca9 intégré87e902d,
+guides API/EN/FR synchronisés et donneur retiré normalement ;
+[preuves et limites](VALIDATION.md#4-novembre--identité-broker-liée-au-même-périmètre-serveur).
+
+Ce snapshot prouve la portée à sa lecture, pas une autorité durable, un
+service vivant ou le succès d'un POST ultérieur. Le publisher lié au vrai
+cycle de `serve`, sa pending operation durable, les changements de révision
+et son arrêt restent à implémenter. Le replay heartbeat dépend aussi des
+révisions de la preuve et du grant ; une rotation ne permet pas de deviner
+une nouvelle séquence. Les budgets d'audit cumulatifs interdisent une boucle
+de retry sans borne. Aucun endpoint ne ferme les gates de fédération.
+
+En parallèle, l'inventaire opérateur du cluster Docker Desktop confirme
+contexte local `docker-desktop`, serveur/nœud1.36.1, un nœud Ready,8CPU et
+12290272Ki de mémoire, sans pression signalée. C'est une lecture de
+métadonnées, pas l'exécution du produit. Doctor et dry-run réels restent
+NOT_RUN, avec préparation d'une identité locale restreinte et isolement du
+test à effectuer ; aucun besoin d'autorisation cloud n'en est déduit.
+Le profil lecture public est ensuite créé sans remplacement ; les sept
+décisions RBAC opérateur passent. Le profil Pod-create reste non appliqué,
+sans Pod ni token émis ; [preuves et limites](VALIDATION.md#4-novembre--préparation-rbac-kubernetes-docker-desktop).
+
 ## Lot en cours au4novembre — CLI des identités techniques
 
 Le lot logiciel ci-dessous est implémenté et vérifié :17fonctions uniques

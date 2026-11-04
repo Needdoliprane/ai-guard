@@ -54,6 +54,28 @@ The HTTP backend alone does not connect a `network:none` worker, deliver remote
 federation or qualify a unified cloud dashboard. Those paths require their own
 transport, authorization and runtime evidence.
 
+### Identité du broker / Broker identity
+
+`GET /api/v1/brokers/identity` utilise exclusivement le Bearer Broker courant,
+sans sélecteur de tenant. Son DTO fermé version1 contient `version`,
+`tenant_id`, `control_namespace_uuid`, `schema_version`, `broker_id`,
+`incarnation_id`, `credential_id`, `binding_revision`, `grant_revision`.
+Le Store sélectionné par l'authentification revalide ces faits dans une même
+transaction avec l'horloge et le grant. Les autres rôles n'accèdent pas à
+cette route ; une lease heartbeat périmée ne révoque pas à elle seule une
+identité dont binding et grant sont encore valides.
+
+This is a current server-authenticated scope snapshot, separate from the
+non-deserializable internal authority proof. It does not issue a credential,
+publish a heartbeat, renew a lease, prove runtime health or authorize a later
+POST. Compare the expected tenant, control namespace and revisions using the
+same Broker proof; a successful runner request under another key is not a
+substitute. Clock rollback, invalid Store state and revoked/expired authority
+fail closed. See the [operator guide](setup/workloads/README.md#read-the-authenticated-broker-scope)
+for lifecycle limits and the [French guide](setup/workloads/README.fr.md#lire-le-périmètre-authentifié-du-broker).
+An envelope containing retained credential material is refused as opaque
+`503 identity_unavailable`, without masked identifiers or a partial snapshot.
+
 ## Authentification OIDC Web et CLI / Web and CLI OIDC authentication
 
 Le contrat HTTP ci-dessous décrit **l'implémentation candidate**, configurable explicitement, au 2 novembre 2026. La qualification Keycloak réel et navigateur reste `NOT_RUN` ; aucune qualification production n'en découle. Les guides SSO [français](setup/sso/README.fr.md) et [anglais](setup/sso/README.md) décrivent configuration, profil signé accepté, memberships et exploitation. Les [routes Rust](../src/api/oidc.rs) et leurs [handlers](../src/api/oidc/gateway.rs) font autorité sur ces DTO.
