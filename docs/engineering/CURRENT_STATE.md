@@ -11,6 +11,9 @@ Sept fonctions ciblées et compilation toutes cibles PASS après RED réel ;
 Les guides locaux EN/FR expliquent le refus et l'action de reprise.
 Revue indépendante traitée ; code `7406e4f` composé en `fb918c9`, sans
 différence applicative supplémentaire et avec sources égales au gel testé.
+Guides/preuves `91de7c7` composés en `c51be48`, poussés et références
+distantes conformes. Donneur propre retiré normalement après relevé des
+consommateurs ; branches, gels et preuves privées conservés.
 
 Ce préflight ne valide ni contenu, ni totalité des imports, ni efficacité
 de `.dockerignore`, contexte figé ou atomicité des images. Aucun build

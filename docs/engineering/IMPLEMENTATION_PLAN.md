@@ -14,6 +14,9 @@ pas atomiques les deux builds. Les pins système, provenance/SBOM et G12
 restent ouverts. [Preuves](VALIDATION.md#4-novembre--prérequis-de-build-avant-tout-appel-moteur).
 Sept fonctions ciblées, compilation toutes cibles et revue PASS ; code
 `7406e4f` intégré en `fb918c9` sans autre changement applicatif.
+Guides/preuves `91de7c7` composés en `c51be48`, push vérifié. Propriétaire
+QA et donneur fermés normalement ; sources et preuves conservées, aucun
+arbre utilisateur/protégé modifié.
 
 ## Canal worker vers relais — décision de direction en attente
 

@@ -85,6 +85,13 @@ Six documents relus, 471 cibles relatives présentes ; pas de validation
 des ancres, sites externes ou navigateur. Scan étroit de huit fichiers
 contre trois secrets connus : zéro correspondance, sans garantie universelle.
 
+Code et guides poussés : donneur `91de7c7`, composition `c51be48`, références
+distantes exactes vérifiées ; différence complète nulle entre ces arbres.
+Donneur propre y compris ignorés/non suivis, relevé externe sans entrée ni
+diagnostic, retrait normal par Git sans force. Branches/gels/logs conservés,
+checkout d'intégration et arbres protégés préservés. Aucun hook cible exécuté
+nativement et aucune réussite CI/release déduite du push.
+
 **BLOCKED** : Clippy absent de l'image épinglée. **NOT_RUN** : suite complète,
 release, images réelles, providers/navigateur, système de fichiers physique,
 snapshot concurrent du contexte, atomicité des deux builds et reproductibilité
