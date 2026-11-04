@@ -159,6 +159,8 @@ impl ControlledIssuer {
             .into(),
             cli_callback_path: "/oidc/callback".into(),
             end_session_endpoint: None,
+            web_post_logout_redirect_uri: None,
+            cli_post_logout_redirect_uri: None,
             transport: if self.issuer.starts_with("https:") {
                 OidcTransportModeV1::HttpsOnly
             } else {

@@ -17,6 +17,11 @@ pub struct OidcConfigV1 {
     pub cli_callback_path: String,
     #[serde(default)]
     pub end_session_endpoint: Option<String>,
+    /// Exact registered completion return; inspected privately and never visited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_post_logout_redirect_uri: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_post_logout_redirect_uri: Option<String>,
     pub transport: OidcTransportModeV1,
     #[serde(default)]
     pub limits: OidcLimitsV1,
@@ -134,6 +139,21 @@ impl OidcConfigV1 {
         {
             return Err(invalid);
         }
+        for value in self
+            .web_post_logout_redirect_uri
+            .iter()
+            .chain(self.cli_post_logout_redirect_uri.iter())
+        {
+            let redirect = url(value)?;
+            if self.end_session_endpoint.is_none()
+                || redirect.scheme() != "https"
+                || redirect.as_str() != value.as_str()
+                || value.contains('*')
+                || value == &self.web_redirect_uri
+            {
+                return Err(invalid);
+            }
+        }
         let l = &self.limits;
         if !(25..=30_000).contains(&l.request_timeout_ms)
             || !(1024..=1_048_576).contains(&l.max_response_bytes)
@@ -161,6 +181,12 @@ impl OidcConfigV1 {
         match kind {
             OidcClientKind::Web => &self.web_client_id,
             OidcClientKind::Cli => &self.cli_client_id,
+        }
+    }
+    pub(super) fn post_logout_redirect_uri(&self, kind: OidcClientKind) -> Option<&str> {
+        match kind {
+            OidcClientKind::Web => self.web_post_logout_redirect_uri.as_deref(),
+            OidcClientKind::Cli => self.cli_post_logout_redirect_uri.as_deref(),
         }
     }
     pub(super) fn redirect(&self, kind: OidcClientKind, redirect: &str) -> Result<(), OidcError> {

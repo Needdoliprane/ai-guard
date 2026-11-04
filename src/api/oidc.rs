@@ -397,6 +397,20 @@ async fn cli_profile(State(state): State<GatewayState>) -> Json<Value> {
         "cli_callback_path":config.cli_callback_path,"end_session_endpoint":config.end_session_endpoint,
         "transport":config.transport,"limits":config.limits,
     }});
+    for (key, uri) in [
+        (
+            "web_post_logout_redirect_uri",
+            &config.web_post_logout_redirect_uri,
+        ),
+        (
+            "cli_post_logout_redirect_uri",
+            &config.cli_post_logout_redirect_uri,
+        ),
+    ] {
+        if let Some(uri) = uri {
+            value["provider"][key] = Value::String(uri.clone());
+        }
+    }
     if let Some(pem) = &oidc.ca_bundle_pem {
         value["ca_bundle_pem"] = Value::String(pem.clone());
     }

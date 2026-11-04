@@ -224,6 +224,20 @@ async fn public_profile_is_allowlisted_and_status_never_probes_issuer() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(profile["provider"]["issuer"], f.issuer.issuer);
     assert_eq!(
+        profile["provider"],
+        serde_json::to_value(&f.config.provider).unwrap()
+    );
+    assert!(
+        profile["provider"]
+            .get("web_post_logout_redirect_uri")
+            .is_none()
+    );
+    assert!(
+        profile["provider"]
+            .get("cli_post_logout_redirect_uri")
+            .is_none()
+    );
+    assert_eq!(
         profile
             .as_object()
             .unwrap()
@@ -246,6 +260,37 @@ async fn public_profile_is_allowlisted_and_status_never_probes_issuer() {
         value,
         json!({"version":1,"enabled":true,"issuer":f.issuer.issuer,"provider_label":"Controlled issuer"})
     );
+    assert!(f.issuer.requests().is_empty());
+}
+
+#[tokio::test]
+async fn public_profile_projects_only_configured_logout_returns_without_probing_the_issuer() {
+    let f = Fixture::new().await;
+    for (web, cli) in [(true, false), (false, true), (true, true)] {
+        let mut config = f.config.clone();
+        config.provider.end_session_endpoint = Some(format!("{}/logout", f.issuer.issuer));
+        config.provider.web_post_logout_redirect_uri =
+            web.then(|| "https://logout.invalid/web-complete".into());
+        config.provider.cli_post_logout_redirect_uri =
+            cli.then(|| "https://logout.invalid/cli-complete".into());
+        let router = Fixture::router(&f.store, &f.audit, &config);
+        let (status, profile) = json_response(
+            router,
+            Request::get("/auth/oidc/cli-profile")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            profile["provider"],
+            serde_json::to_value(&config.provider).unwrap()
+        );
+        let decoded: agentsandbox::oidc::OidcConfigV1 =
+            serde_json::from_value(profile["provider"].clone()).unwrap();
+        assert_eq!(decoded.web_post_logout_redirect_uri.is_some(), web);
+        assert_eq!(decoded.cli_post_logout_redirect_uri.is_some(), cli);
+    }
     assert!(f.issuer.requests().is_empty());
 }
 

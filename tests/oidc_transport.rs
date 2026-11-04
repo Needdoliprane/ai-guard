@@ -62,11 +62,19 @@ struct Behavior {
     jwks: Value,
     token: Value,
     discovery_status: u16,
+    jwks_status: Option<u16>,
+    token_status: Option<u16>,
     discovery_delay: Duration,
     token_delay: Duration,
     requests: Vec<(String, String)>,
     methods: Vec<String>,
     authorization_present: Vec<bool>,
+    logout_ack: bool,
+    logout_status: Option<u16>,
+    logout_body: Option<String>,
+    logout_locations: Option<Vec<String>>,
+    logout_content_type: Option<&'static str>,
+    logout_delay: Duration,
 }
 struct ProviderFixture {
     issuer: String,
@@ -137,6 +145,8 @@ impl ProviderFixture {
             .into(),
             cli_callback_path: "/oidc/callback".into(),
             end_session_endpoint: None,
+            web_post_logout_redirect_uri: None,
+            cli_post_logout_redirect_uri: None,
             transport: if self.issuer.starts_with("https:") {
                 OidcTransportModeV1::HttpsOnly
             } else {
@@ -165,6 +175,8 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
     let bytes = axum::body::to_bytes(request.into_body(), 32_768)
         .await
         .unwrap();
+    let mut locations = vec!["/realm/keys".to_owned()];
+    let mut content_type = "application/json";
     let (body, status, delay) = {
         let mut state = state.lock().unwrap();
         state
@@ -179,22 +191,68 @@ async fn endpoint(State(state): State<Arc<Mutex<Behavior>>>, request: Request<Bo
                 state.discovery_delay,
             )
         } else if path.ends_with("/keys") {
-            (state.jwks.to_string(), 200, Duration::ZERO)
+            (
+                state.jwks.to_string(),
+                state.jwks_status.unwrap_or(200),
+                Duration::ZERO,
+            )
         } else if path.ends_with("/token") {
-            (state.token.to_string(), 200, state.token_delay)
+            (
+                state.token.to_string(),
+                state.token_status.unwrap_or(200),
+                state.token_delay,
+            )
         } else if path.ends_with("/logout") {
-            ("{}".into(), 200, Duration::ZERO)
+            let fields: std::collections::BTreeMap<String, String> =
+                serde_urlencoded::from_bytes(&bytes).unwrap();
+            if state.logout_ack {
+                locations = vec![format!(
+                    "{}?state={}",
+                    fields.get("post_logout_redirect_uri").unwrap(),
+                    fields.get("state").unwrap()
+                )];
+            }
+            if let Some(templates) = &state.logout_locations {
+                locations = templates
+                    .iter()
+                    .map(|template| {
+                        template
+                            .replace(
+                                "{return}",
+                                fields
+                                    .get("post_logout_redirect_uri")
+                                    .map_or("", String::as_str),
+                            )
+                            .replace("{state}", fields.get("state").map_or("", String::as_str))
+                    })
+                    .collect();
+            }
+            content_type = state.logout_content_type.unwrap_or("application/json");
+            (
+                state.logout_body.clone().unwrap_or_else(|| {
+                    if state.logout_ack {
+                        String::new()
+                    } else {
+                        "{}".into()
+                    }
+                }),
+                state
+                    .logout_status
+                    .unwrap_or(if state.logout_ack { 302 } else { 200 }),
+                state.logout_delay,
+            )
         } else {
             ("{}".into(), 404, Duration::ZERO)
         }
     };
     tokio::time::sleep(delay).await;
-    Response::builder()
+    let mut response = Response::builder()
         .status(status)
-        .header("content-type", "application/json")
-        .header("location", "/realm/keys")
-        .body(Body::from(body))
-        .unwrap()
+        .header("content-type", content_type);
+    for location in locations {
+        response = response.header("location", location);
+    }
+    response.body(Body::from(body)).unwrap()
 }
 fn rsa_jwk(kid: &str) -> Value {
     json!({"kty":"RSA", "kid":kid, "alg":"RS256", "use":"sig", "key_ops":["verify"], "n":RSA_N, "e":"AQAB"})
@@ -235,6 +293,70 @@ async fn configuration_is_offline_and_http_is_never_the_default() {
     assert!(OidcProvider::new(config).is_err());
 }
 
+// Optional logout returns must not silently alter old configuration bindings or login redirects.
+#[test]
+fn logout_ack_configuration_preserves_legacy_bytes_and_requires_static_canonical_https_returns() {
+    // Literal bytes protect the existing configuration/audit binding when the new keys are absent.
+    const LEGACY: &str = concat!(
+        "{\"version\":1,\"issuer\":\"https://issuer.invalid/realm\",",
+        "\"web_client_id\":\"web-public\",\"cli_client_id\":\"cli-public\",\"api_audience\":\"guard-api\",",
+        "\"authorization_endpoint\":\"https://issuer.invalid/realm/authorize\",",
+        "\"token_endpoint\":\"https://issuer.invalid/realm/token\",\"jwks_uri\":\"https://issuer.invalid/realm/keys\",",
+        "\"web_redirect_uri\":\"https://app.invalid/auth/oidc/callback\",\"cli_callback_path\":\"/oidc/callback\",",
+        "\"end_session_endpoint\":\"https://issuer.invalid/realm/logout\",\"transport\":{\"kind\":\"https_only\"},",
+        "\"limits\":{\"request_timeout_ms\":5000,\"max_response_bytes\":131072,\"max_token_bytes\":16384,",
+        "\"max_jwks_keys\":32,\"max_inflight\":8,\"metadata_ttl_seconds\":300,\"jwks_ttl_seconds\":300,",
+        "\"unknown_kid_cooldown_seconds\":30,\"pkce_ttl_seconds\":300,\"clock_skew_seconds\":5,",
+        "\"max_token_lifetime_seconds\":3600}}"
+    );
+    let legacy: OidcConfigV1 = serde_json::from_str(LEGACY).unwrap();
+    assert_eq!(serde_json::to_string(&legacy).unwrap(), LEGACY);
+    assert!(OidcProvider::new(legacy.clone()).is_ok());
+    for key in [
+        "web_post_logout_redirect_uri",
+        "cli_post_logout_redirect_uri",
+    ] {
+        for invalid in [
+            "http://logout.invalid/complete",
+            "//logout.invalid/complete",
+            "urn:logout:complete",
+            "https://user@logout.invalid/complete",
+            "https://user:password@logout.invalid/complete",
+            "https://logout.invalid/complete?existing=x",
+            "https://logout.invalid/complete#fragment",
+            "https://logout.invalid/*",
+            "https://*.invalid/complete",
+            "https://logout.invalid",
+            "https://LOGOUT.invalid/complete",
+            "https://logout.invalid:443/complete",
+            "https://logout.invalid/other/../complete",
+            "https://app.invalid/auth/oidc/callback",
+            " https://logout.invalid/complete",
+            "https://logout.invalid/complete\n",
+            "",
+        ] {
+            let mut value: Value = serde_json::from_str(LEGACY).unwrap();
+            value[key] = json!(invalid);
+            let config: OidcConfigV1 = serde_json::from_value(value).unwrap();
+            assert!(OidcProvider::new(config).is_err(), "accepted invalid {key}");
+        }
+        let mut value: Value = serde_json::from_str(LEGACY).unwrap();
+        value[key] = json!("https://logout.invalid/oidc/callback");
+        let config: OidcConfigV1 = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            OidcProvider::new(config).is_ok(),
+            "a distinct HTTPS URI may share the CLI callback path"
+        );
+        value[key] = json!("https://logout.invalid/");
+        assert!(OidcProvider::new(serde_json::from_value(value.clone()).unwrap()).is_ok());
+        value["end_session_endpoint"] = Value::Null;
+        assert!(OidcProvider::new(serde_json::from_value(value).unwrap()).is_err());
+    }
+    let mut unknown: Value = serde_json::from_str(LEGACY).unwrap();
+    unknown["post_logout_redirect_uri"] = json!("https://logout.invalid/complete");
+    assert!(serde_json::from_value::<OidcConfigV1>(unknown).is_err());
+}
+
 // Discovery may confirm operator choices, but cannot grant itself a destination or follow redirects.
 #[tokio::test]
 async fn discovery_rejects_unapproved_destinations_and_redirects_without_following_them() {
@@ -255,6 +377,52 @@ async fn discovery_rejects_unapproved_destinations_and_redirects_without_followi
     assert_eq!(fixture.hits("openid-configuration"), 2);
     assert_eq!(fixture.hits("/keys"), 0);
     assert!(trap.state.lock().unwrap().requests.is_empty());
+}
+
+// A slow/oversized provider cannot consume an unbounded request or trigger an automatic retry.
+#[tokio::test]
+async fn logout_ack_does_not_accept_redirects_for_jwks_or_an_aliased_token_endpoint() {
+    let fixture = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(config.token_endpoint.clone());
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/complete".into());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(config.token_endpoint);
+        state.jwks_status = Some(302);
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    assert!(matches!(
+        provider.discover().await,
+        Err(OidcError::ProviderRejected)
+    ));
+    assert_eq!(fixture.hits("/keys"), 1);
+    fixture.state.lock().unwrap().jwks_status = None;
+    provider.discover().await.unwrap();
+    let pending = provider
+        .begin_login(
+            OidcClientKind::Web,
+            "http://127.0.0.1:18100/auth/oidc/callback",
+        )
+        .await
+        .unwrap();
+    let query = login_query(&pending);
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.token = token_response(
+            &fixture.issuer,
+            &id_claims(&fixture.issuer, &query["nonce"]),
+        );
+        state.token_status = Some(302);
+    }
+    assert!(matches!(
+        provider
+            .complete_login(pending, "code", &query["state"])
+            .await,
+        Err(OidcError::ProviderRejected)
+    ));
+    assert_eq!(fixture.hits("/token"), 1);
+    assert_eq!(fixture.hits("/keys"), 2, "neither redirect may be followed");
 }
 
 // A slow/oversized provider cannot consume an unbounded request or trigger an automatic retry.
@@ -719,18 +887,34 @@ async fn initial_login(
     provider: &OidcProvider,
     fixture: &ProviderFixture,
 ) -> agentsandbox::oidc::VerifiedLogin {
-    let pending = provider
-        .begin_login(
-            OidcClientKind::Web,
-            "http://127.0.0.1:18100/auth/oidc/callback",
-        )
-        .await
-        .unwrap();
+    initial_login_for_kind(
+        provider,
+        fixture,
+        OidcClientKind::Web,
+        "http://127.0.0.1:18100/auth/oidc/callback",
+    )
+    .await
+}
+async fn initial_login_for_kind(
+    provider: &OidcProvider,
+    fixture: &ProviderFixture,
+    kind: OidcClientKind,
+    redirect: &str,
+) -> agentsandbox::oidc::VerifiedLogin {
+    let pending = provider.begin_login(kind, redirect).await.unwrap();
     let query = login_query(&pending);
-    fixture.state.lock().unwrap().token = token_response(
-        &fixture.issuer,
-        &id_claims(&fixture.issuer, &query["nonce"]),
-    );
+    let client = match kind {
+        OidcClientKind::Web => "web-public",
+        OidcClientKind::Cli => "cli-public",
+    };
+    let mut id = id_claims(&fixture.issuer, &query["nonce"]);
+    id["aud"] = json!(client);
+    id["azp"] = json!(client);
+    let mut access = access_claims(&fixture.issuer);
+    access["azp"] = json!(client);
+    let mut token = token_response(&fixture.issuer, &id);
+    token["access_token"] = json!(sign(&access));
+    fixture.state.lock().unwrap().token = token;
     provider
         .complete_login(pending, "initial-code", &query["state"])
         .await
@@ -868,6 +1052,431 @@ async fn idp_logout_consumes_private_context_and_posts_to_the_exact_approved_end
     assert_eq!(fields["id_token_hint"], id);
     assert_eq!(state.methods.last().map(String::as_str), Some("POST"));
     assert!(state.requests.iter().all(|(path, _)| !path.contains(&id)));
+}
+
+// The opt-in profile must send its static return and fresh correlation, then accept a direct ack.
+// Deserialization uses the old public type so this also compiles before the feature exists.
+#[tokio::test]
+async fn configured_logout_ack_accepts_only_the_direct_correlated_return() {
+    let fixture = ProviderFixture::new().await;
+    let mut value = serde_json::to_value(fixture.config()).unwrap();
+    value["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+    value["web_post_logout_redirect_uri"] = json!("https://logout.invalid/web-complete");
+    value["cli_post_logout_redirect_uri"] = json!("https://logout.invalid/cli-complete");
+    let config: OidcConfigV1 = serde_json::from_value(value)
+        .expect("the explicit per-client logout acknowledgement profile must be accepted");
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+        state.logout_ack = true;
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    let mut previous_state = None;
+    for _ in 0..2 {
+        let login = initial_login(&provider, &fixture).await;
+        let (_, _, context) = login.into_session_parts();
+        provider.logout_idp(context.unwrap()).await.unwrap();
+        let state = fixture.state.lock().unwrap();
+        let (path, form) = state.requests.last().unwrap();
+        assert_eq!(path, "/realm/logout");
+        let fields: std::collections::BTreeMap<String, String> =
+            serde_urlencoded::from_str(form).unwrap();
+        assert_eq!(fields.len(), 4);
+        assert_eq!(fields["client_id"], "web-public");
+        assert_eq!(
+            fields["post_logout_redirect_uri"],
+            "https://logout.invalid/web-complete"
+        );
+        assert_eq!(
+            fields["id_token_hint"],
+            state.token["id_token"].as_str().unwrap()
+        );
+        let correlation = &fields["state"];
+        assert_eq!(correlation.len(), 43);
+        assert!(
+            correlation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+        );
+        if let Some(previous) = previous_state {
+            assert_ne!(correlation, &previous);
+        }
+        previous_state = Some(correlation.clone());
+    }
+    assert_eq!(fixture.hits("/logout"), 2);
+}
+
+#[tokio::test]
+async fn logout_ack_uses_the_bound_cli_client_and_static_uri_across_login_ports() {
+    let fixture = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(format!("{}/logout", fixture.issuer));
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/web-complete".into());
+    config.cli_post_logout_redirect_uri = Some("https://logout.invalid/cli-complete".into());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+        state.logout_ack = true;
+        state.logout_status = Some(303);
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    for port in [34001, 34002] {
+        let login = initial_login_for_kind(
+            &provider,
+            &fixture,
+            OidcClientKind::Cli,
+            &format!("http://127.0.0.1:{port}/oidc/callback"),
+        )
+        .await;
+        let (_, _, context) = login.into_session_parts();
+        provider.logout_idp(context.unwrap()).await.unwrap();
+        let state = fixture.state.lock().unwrap();
+        let (_, form) = state.requests.last().unwrap();
+        let fields: std::collections::BTreeMap<String, String> =
+            serde_urlencoded::from_str(form).unwrap();
+        assert_eq!(fields["client_id"], "cli-public");
+        assert_eq!(
+            fields["post_logout_redirect_uri"],
+            "https://logout.invalid/cli-complete"
+        );
+        assert!(!fields.contains_key("redirect_uri"));
+        assert_eq!(
+            fields["id_token_hint"],
+            state.token["id_token"].as_str().unwrap()
+        );
+        assert!(!state.authorization_present.last().unwrap());
+    }
+    assert_eq!(fixture.hits("/logout"), 2);
+}
+
+// Every case stays unconfirmed, and no Location is fetched even when it names another server.
+#[tokio::test]
+async fn logout_ack_rejects_uncorrelated_ambiguous_and_interactive_responses_without_following() {
+    let fixture = ProviderFixture::new().await;
+    let trap = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(format!("{}/logout", fixture.issuer));
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/web-complete".into());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+        state.logout_ack = true;
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    let mut cases = vec![
+        (302, vec![], "", "application/json"),
+        (302, vec!["{return}".into()], "", "application/json"),
+        (302, vec!["{return}?state=".into()], "", "application/json"),
+        (
+            302,
+            vec!["{return}?state=wrong".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}&state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}&other=x".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}&".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?%73tate={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}#fragment".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["/web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://LOGOUT.invalid/web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://logout.invalid:443/web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://logout.invalid/other/../web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://user@logout.invalid/web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://logout.invalid/other?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["https://other.invalid/web-complete?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec![
+                "{return}?state={state}".into(),
+                "{return}?state={state}".into(),
+            ],
+            "",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}".into()],
+            "{}",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}".into()],
+            " ",
+            "application/json",
+        ),
+        (
+            302,
+            vec!["{return}?state={state}".into()],
+            "<html>Confirm logout</html>",
+            "text/html",
+        ),
+        (
+            200,
+            vec!["{return}?state={state}".into()],
+            "<html>Logout complete</html>",
+            "text/html",
+        ),
+        (
+            200,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            200,
+            vec!["{return}?state={state}".into()],
+            "{}",
+            "application/json",
+        ),
+        (
+            204,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            301,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            307,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            308,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            400,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+        (
+            503,
+            vec!["{return}?state={state}".into()],
+            "",
+            "application/json",
+        ),
+    ];
+    cases.push((302, vec!["x".repeat(5000)], "", "application/json"));
+    cases.push((
+        302,
+        vec![format!("{}/keys", trap.issuer)],
+        "",
+        "application/json",
+    ));
+    for (index, (status, locations, body, mime)) in cases.into_iter().enumerate() {
+        let login = initial_login(&provider, &fixture).await;
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.logout_status = Some(status);
+            state.logout_locations = Some(locations);
+            state.logout_body = Some(body.into());
+            state.logout_content_type = Some(mime);
+        }
+        let (_, _, context) = login.into_session_parts();
+        assert!(
+            provider.logout_idp(context.unwrap()).await.is_err(),
+            "accepted case {index}"
+        );
+        assert_eq!(
+            fixture.hits("/logout"),
+            index + 1,
+            "must not retry case {index}"
+        );
+    }
+    assert!(trap.state.lock().unwrap().requests.is_empty());
+}
+
+#[tokio::test]
+async fn logout_ack_timeout_and_response_size_are_bounded_without_retry() {
+    let fixture = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(format!("{}/logout", fixture.issuer));
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/complete".into());
+    config.limits.request_timeout_ms = 1000;
+    config.limits.max_response_bytes = 4096;
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+        state.logout_ack = true;
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    let login = initial_login(&provider, &fixture).await;
+    fixture.state.lock().unwrap().logout_delay = Duration::from_millis(1500);
+    let (_, _, context) = login.into_session_parts();
+    assert!(matches!(
+        provider.logout_idp(context.unwrap()).await,
+        Err(OidcError::TransportUnavailable)
+    ));
+    assert_eq!(fixture.hits("/logout"), 1);
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.logout_delay = Duration::ZERO;
+        state.logout_body = Some("x".repeat(8192));
+    }
+    let login = initial_login(&provider, &fixture).await;
+    let (_, _, context) = login.into_session_parts();
+    assert!(matches!(
+        provider.logout_idp(context.unwrap()).await,
+        Err(OidcError::TransportUnavailable)
+    ));
+    assert_eq!(fixture.hits("/logout"), 2);
+}
+
+#[tokio::test]
+async fn logout_ack_rejects_the_previous_operations_completion_state() {
+    let fixture = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(format!("{}/logout", fixture.issuer));
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/complete".into());
+    {
+        let mut state = fixture.state.lock().unwrap();
+        state.metadata["end_session_endpoint"] = json!(format!("{}/logout", fixture.issuer));
+        state.logout_ack = true;
+    }
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    let login = initial_login(&provider, &fixture).await;
+    let (_, _, context) = login.into_session_parts();
+    provider.logout_idp(context.unwrap()).await.unwrap();
+    {
+        let mut state = fixture.state.lock().unwrap();
+        let fields: std::collections::BTreeMap<String, String> =
+            serde_urlencoded::from_str(&state.requests.last().unwrap().1).unwrap();
+        state.logout_locations = Some(vec![format!(
+            "https://logout.invalid/complete?state={}",
+            fields["state"]
+        )]);
+    }
+    let login = initial_login(&provider, &fixture).await;
+    let (_, _, context) = login.into_session_parts();
+    assert!(matches!(
+        provider.logout_idp(context.unwrap()).await,
+        Err(OidcError::ProviderRejected)
+    ));
+    assert_eq!(fixture.hits("/logout"), 2);
+}
+
+#[tokio::test]
+async fn logout_legacy_profile_remains_per_client_and_accepts_only_its_original_responses() {
+    let fixture = ProviderFixture::new().await;
+    let mut config = fixture.config();
+    config.end_session_endpoint = Some(format!("{}/logout", fixture.issuer));
+    // The Web client opts in; the independently bound CLI client remains on the old profile.
+    config.web_post_logout_redirect_uri = Some("https://logout.invalid/web-complete".into());
+    fixture.state.lock().unwrap().metadata["end_session_endpoint"] =
+        json!(format!("{}/logout", fixture.issuer));
+    let provider = OidcProvider::new(config).unwrap();
+    provider.discover().await.unwrap();
+    for (status, body, mime, accepted) in [
+        (204, "", "text/plain", true),
+        (200, "", "text/plain", true),
+        (200, "{}", "application/json", true),
+        (200, "[]", "application/json", false),
+        (200, "{\"logout\":true}", "application/json", false),
+        (200, "<html>Complete</html>", "text/html", false),
+        (302, "", "text/html", false),
+        (303, "", "text/html", false),
+    ] {
+        {
+            let mut state = fixture.state.lock().unwrap();
+            state.logout_status = Some(status);
+            state.logout_body = Some(body.into());
+            state.logout_content_type = Some(mime);
+        }
+        let login = initial_login_for_kind(
+            &provider,
+            &fixture,
+            OidcClientKind::Cli,
+            "http://127.0.0.1:34100/oidc/callback",
+        )
+        .await;
+        let (_, _, context) = login.into_session_parts();
+        assert_eq!(
+            provider.logout_idp(context.unwrap()).await.is_ok(),
+            accepted
+        );
+        let state = fixture.state.lock().unwrap();
+        let fields: Vec<(String, String)> =
+            serde_urlencoded::from_str(&state.requests.last().unwrap().1).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0], ("client_id".into(), "cli-public".into()));
+        assert_eq!(fields[1].0, "id_token_hint");
+    }
 }
 
 // Explicit roots replace WebPKI, reject mixed/private material and preserve name verification.
