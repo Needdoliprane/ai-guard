@@ -101,10 +101,59 @@ enregistrent la forme sans port. Le retrait seul du port est justifié,
 sans wildcard ni changement du callback natif. Cela ne prouve pas encore
 que l'essai D a reçu400. Diagnostic privé SHA
 `42d8e5f467eab075c224b4e0b0112527cc05e6787674f5a33e7907314100a525` ;
-rejeu ciblé après correction et diagnostic fermé, `NOT_RUN`.
-Le candidat local `ad22d33bef92ba176383bf2a6981d3001d59d860` porte uniquement
-le realm corrigé et ses deux guides ; il n'est ni intégré ni qualifié ici.
+À ce stade D, le rejeu après correction et diagnostic fermé était `NOT_RUN` ;
+son résultat E est consigné ci-dessous.
+Le candidat `ad22d33bef92ba176383bf2a6981d3001d59d860` porte uniquement
+le realm corrigé et ses deux guides ; il est conservé sur sa branche poussée,
+sans intégration ni qualification complète ici.
 Tous les gates globaux et les autres plateformes/parcours restent ouverts.
+
+### Gel E — profil corrigé, refus du parseur de cookies
+
+Source candidatead22d33, realm SHA
+`f0044023af80e22c0df4fe32351fd0401e0accc5b5e554cca0a2a1af72ac3ab9`.
+Revue indépendante des trois fichiers de configuration/guides SHA35be455a… ;
+prérevue indépendante du delta Web exact7a00a628… favorable. Le reviewer a
+atteint sa limite d'usage avant son reçu final des six hashes ; Root clôt les
+vérifications restantes dans `REVIEW-E-ROOT.md`, SHA
+`fb08b6872248396bbfb7c59ec3c8a1abafd7cc53a4d89fe209df7819027a9115`,
+sans attribuer à ce reviewer un reçu qu'il n'a pas produit. Source principale
+du driver : deux constantes seulement ; oracle HTTP200+text/html inchangé,
+codes HTTP/MIME séparés. Code/helper auxiliaires toujours hors Git.
+
+`PASS` : build offline/locked puis exemple seul, **5/5 tests**, aucun ignoré,
+RC0 ; log SHA
+`d6442e87a12f971efa36d5160314e819c29a328cfc26cee500d40a61b02f94af`.
+Une erreur d'extraction antérieure est conservée et exclue : nouveau parent
+exclusif g4YA6t,42sources+3overlays exacts. Une première tentative owner
+omettait ExtraHosts ; Root arrête la compilation commencée, RC137,
+tests`NOT_RUN` pour ce setup, sans transfert d'artefact. Le remplacement est
+créé et inspecté par Root avec alias127 effectif et tous les contrôles D.
+
+Le seul rejeu réel corrigé utilise ce remplacement et un nouveau peer borné.
+Reçu public SHA
+`dece90cee179065bba670d39e7ccd6304913dece81a30a1579b966801f097b58` ;
+gate06:21:24UTC,1449s restant à l'owner. Discovery du realm exact répond200.
+**`FAIL cookie_unsupported_attribute`** après le guard HTTP200+text/html,
+avant admission. Le parseur étant appelé après GET et POST, le rapport ne
+permet pas de localiser ce refus à l'un de ces deux appels. Aucun
+attribut/header brut n'est retenu.
+Setup0 naturel, gateway0 gracieux, CLI SIGTERM après refus du harnais ;
+connexion, lecture et logout complets restent non qualifiés. Hypothèse bornée
+à reproduire hors ligne :
+[Keycloak26.8.1 déclare Version1](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/cookie/DefaultCookieProvider.java#L57),
+absent du parseur. Le nom de l'attribut effectif n'a pas été capturé.
+
+Driver naturel1, limiteur0, consumer stderr0/compteur0,2328octets ; tous
+acteurs exacts fermés et leur absence recontrôlée avant admission214codes.
+Rapport dérivé `ADMITTED-REPORT-E.json` dans le dossier privé5j99ro, SHA
+`a5ef0659d51ba405658215d449006c2ba0b524f8514f0691ff72f7b4742da36d` ;
+canal SHA `b9efb6092297d6b122b74c827979c66c06fb5f625c8c10f3e82bea02166a78b6` ;
+fermeture SHA `9adb793918f41339f325a6febe0ed32c3d6fe21fc24af9f0dcf301fcd4795b72`.
+Source42,lock,fixtures,binaires et reçu restent inchangés après run. Les
+erreurs d'affichage `/usr/bin/cat` absent et d'estimation restante725s
+(corrigée1325s à06:23:28, sans changer l'échéance) sont séparées du code1
+du driver. Aucun volume/image/service existant supprimé, aucun appel IA.
 
 ## 4 novembre — composition conservée et prérequis SSO CLI
 

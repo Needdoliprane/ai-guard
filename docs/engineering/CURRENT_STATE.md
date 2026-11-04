@@ -32,18 +32,24 @@ les outils Linux manquants ont une préparation de cache épinglé soumise au
 mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
 workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
 
-Un premier essai SSO CLI avec un vrai Keycloak local a été exécuté sur le
-gel privé D, indépendamment des outils frontend absents. Compilation et
-quatre tests du harnais PASS ; le prédicat réseau corrigé accepte les
+Deux essais SSO CLI avec un vrai Keycloak local ont été exécutés sur les
+gels privés D puis E, indépendamment des outils frontend absents. Le gel E
+compile et passe ses cinq tests ciblés ; le prédicat réseau corrigé accepte les
 interfaces tunnel DOWN sans adresse et refuse interfaces actives/adresses
 non-loopback. Le scénario réel passe préflight, installation neuve et
-démarrage du gateway, puis échoue sur `authorization_html_status`, avant
-admission. Son rapport fermé est validé après terminaison des acteurs ;
+démarrage du gateway. D échoue sur `authorization_html_status`, avant
+admission. E utilise le profil loopback corrigé et franchit200+text/html,
+puis échoue sur `cookie_unsupported_attribute` dans le harnais, avant
+admission. Ce code partagé ne distingue pas les cookies GET/POST.
+Les rapports fermés sont validés après terminaison des acteurs ;
 sources et binaires restent inchangés. La connexion et le logout ne sont
 donc pas qualifiés. L'analyse indépendante établit une incompatibilité du
-`:80` enregistré dans le profil Keycloak ; retrait ciblé et guides EN/FR en
-correction. Le statut HTTP précis de l'essai reste inconnu, sans nouvelle
-campagne automatique. Les gels B/C et leurs résultats sont préservés.
+`:80` enregistré dans le profil Keycloak ; retrait ciblé et guides EN/FR
+relus, conservés sur la branche candidate `codex/sso-cli-loopback-redirect-20261104`
+à `ad22d33`, sans intégration/qualification complète. Le statut HTTP précis
+de D reste inconnu. Le cookie Version1 déclaré par la source Keycloak est
+en cours de reproduction hors ligne ; aucune acceptation générale d'attributs
+inconnus. Les gels antérieurs et leurs résultats sont préservés.
 [Preuves et limites](VALIDATION.md#4-novembre--prétests-du-driver-sso-cli-privé).
 Le DNS hôte Keycloak est revalidé : le blocage historique est levé, sans
 preuve de CLI natif macOS. WSI-Q02 reste ouvert : l'analyse confirme des
