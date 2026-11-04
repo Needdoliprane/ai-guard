@@ -155,6 +155,62 @@ erreurs d'affichage `/usr/bin/cat` absent et d'estimation restante725s
 (corrigée1325s à06:23:28, sans changer l'échéance) sont séparées du code1
 du driver. Aucun volume/image/service existant supprimé, aucun appel IA.
 
+### Gel F — authentification et lecture réelles, logout encore refusé
+
+La régression privée Version1 est exécutée avant correction : test exact,
+RC101,1assertionFAIL `cookie_unsupported_attribute`,5filtrés ; log SHA
+`f88627b9b89412f82c91c72f1d0a0075d1b472dc50911f1e4b581f63f1ae4110`.
+La correction Root ajoute seulement `version == "1"`, sans forwarder cette
+métadonnée. Revue du delta par un agent qui n'a pas écrit ces deux lignes,
+SHA `8c1280576b18a57569cdaa401a68ee5d624b10ba129f3b17315408685a23a848`.
+Tous refus domain/path/secure/duplicate/Version2/attribut inconnu et bornes
+restent actifs. Le build GREEN et les **6 tests de l'exemple passent RC0**,
+aucun ignoré/filtré. Nettoyage du seul paquet entre snapshots publics
+RED/GREEN avant toute session ; les dépendances restent en scratch privé.
+
+Un seul essai réel F est lancé après barrière et nouveaux contrôles Root.
+Même sourcead22/realmf004/42hashes et images épinglées, owner fixe1800/peer600,
+limites E inchangées ; reçu public SHA
+`109a9b4adef632f0c44b86624eba3dec31b6cdefaab0fe522432144e18142841`,
+gate06:50:11UTC avec1032s avant l'échéance owner. Discovery du realm exact200.
+Rapport normalisé admis après fermeture,215codes, SHA
+`4563376f83daa7ea9fc01fe58719d588419ec0089342b877a32cbb27d6693326`,
+`ADMITTED-REPORT-F.json` dans le dossier privé5j99ro.
+
+`PASS` observés : préflight, installation neuve, gateway prêt, formulaire
+Keycloak et vrai callback Code/PKCE, admission native, identité personnelle,
+contexte explicitement offert et lecture autorisée avec forme de reçu valide.
+**`FAIL logout_contract`** ensuite : le guard composé ne distingue pas ses
+six conditions. Aucun résultat particulier de logout n'est inféré. Le CLI
+est SIGTERM après refus ; sortie naturelle0 du CLI, logout complet et
+vérification finale/corrélation des audits restent `NOT_RUN`/non qualifiés.
+L'intégrité après cleanup passe ;16hashes admis correspondent aux valeurs
+indépendamment attendues. Ce reçu ne ferme aucun gate global.
+
+Canal : driver naturel1, head0, consumer stderr0/compteur0,2574octets. Tous
+acteurs exacts fermés et absence recontrôlée ; SHA canal
+`67561d7403d8c97662aef1cf41ab6e4f44b24b989199adaf5f71a9e6fc2a1cec`,
+fermeture `5c334e5d8f0e8a2c88b2b1c61314f0f8833c447dc629bad7ea70d9e515cbd6b5`.
+Aucun secret, SQLite, realm ou binaire exporté ; aucun modèle IA appelé.
+
+Diagnostic source du logout, SHA
+`36b8ac9c24b887dd1de43d58b2dbdc6b02c0072186509f3d463de7a744fdcd50` :
+le transport refuse réellement HTML/redirections ambigus. Le chemin
+RP-Initiated de Keycloak sans `post_logout_redirect_uri` fourni peut produire une page INFO ;
+cela n'établit pas la réponse reçue par F. Le prochain delta G sépare les
+six gardes en codes fermés, sans relâcher les critères ni modifier le produit.
+Draft G `g-staging/main.rs` SHA
+`d5d3e82fe631bafc1138ad4dba9021c7cb14aceb871c3c61ddbc6a4b46b41aa0`,
+relire/puis tester hors ligne avant tout nouveau scénario. G reste `NOT_RUN`.
+
+Les trois fichiers URI+guides sont intégrés/poussés par44cb51e : hashes
+realmf004, guideENc08a, guideFR11b3 identiques àad22 testé. Seuls les deux
+documents engineering diffèrent. Le donneur propre est fermé normalement
+après contrôle positif lsof PID/FD/fichier RC0, fin naturelle du holder et
+scan vide sans erreur ; branche/remotead22 et preuves conservés. Reçu privé
+`/private/tmp/ai-guard-sso-cli-worktree-closure-20261104.md`. Aucun checkout
+principal/protégé ni donnée persistante existante supprimé.
+
 ## 4 novembre — composition conservée et prérequis SSO CLI
 
 La branche de validation `codex/human-brokers-validation-20261104` part de

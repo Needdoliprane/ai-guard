@@ -32,24 +32,26 @@ les outils Linux manquants ont une préparation de cache épinglé soumise au
 mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
 workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
 
-Deux essais SSO CLI avec un vrai Keycloak local ont été exécutés sur les
-gels privés D puis E, indépendamment des outils frontend absents. Le gel E
-compile et passe ses cinq tests ciblés ; le prédicat réseau corrigé accepte les
-interfaces tunnel DOWN sans adresse et refuse interfaces actives/adresses
-non-loopback. Le scénario réel passe préflight, installation neuve et
-démarrage du gateway. D échoue sur `authorization_html_status`, avant
-admission. E utilise le profil loopback corrigé et franchit200+text/html,
-puis échoue sur `cookie_unsupported_attribute` dans le harnais, avant
-admission. Ce code partagé ne distingue pas les cookies GET/POST.
-Les rapports fermés sont validés après terminaison des acteurs ;
-sources et binaires restent inchangés. La connexion et le logout ne sont
-donc pas qualifiés. L'analyse indépendante établit une incompatibilité du
-`:80` enregistré dans le profil Keycloak ; retrait ciblé et guides EN/FR
-relus, conservés sur la branche candidate `codex/sso-cli-loopback-redirect-20261104`
-à `ad22d33`, sans intégration/qualification complète. Le statut HTTP précis
-de D reste inconnu. Le cookie Version1 déclaré par la source Keycloak est
-en cours de reproduction hors ligne ; aucune acceptation générale d'attributs
-inconnus. Les gels antérieurs et leurs résultats sont préservés.
+Trois essais SSO CLI réels D/E/F ont été exécutés indépendamment des outils
+frontend absents, sur Linux ARM64/Docker et un Keycloak local neuf isolé.
+F passe compilation et six tests ciblés après un RED Version1 confirmé ;
+le correctif du seul harnais n'accepte que cette métadonnée connue, sans
+ouvrir les autres attributs, domaines, chemins ou limites. Le scénario F
+valide le vrai Code/PKCE et callback, l'admission, l'identité personnelle,
+la sélection d'un contexte offert et la lecture autorisée avec reçu.
+Il échoue ensuite sur le guard composé `logout_contract` ; les champs de
+déconnexion fautifs restent inconnus, et la vérification finale des audits
+n'est pas atteinte. La fermeture du parcours complet n'est pas qualifiée.
+
+Le profil loopback canonique et ses deux guides EN/FR, relus indépendamment,
+sont intégrés par `44cb51e` dans la branche de validation poussée. Les trois
+hashes correspondent à la source testée `ad22d33` ; seules les preuves
+engineering diffèrent. Son worktree donneur est retiré normalement après
+contrôle des consommateurs, sans effacer branches ni preuves. Les gels D/E
+et leurs échecs antérieurs restent conservés. La prochaine étape est un
+diagnostic fermé par champ du logout, à critères inchangés, avant toute
+correction produit. Aucun navigateur/macOS natif/SSO entreprise ni worker
+réel n'est qualifié par ce scénario.
 [Preuves et limites](VALIDATION.md#4-novembre--prétests-du-driver-sso-cli-privé).
 Le DNS hôte Keycloak est revalidé : le blocage historique est levé, sans
 preuve de CLI natif macOS. WSI-Q02 reste ouvert : l'analyse confirme des
