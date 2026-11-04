@@ -147,6 +147,10 @@ impl SetupManifestV1 {
                 );
                 let capabilities: BTreeSet<_> = identity.capabilities.iter().copied().collect();
                 ensure!(
+                    !capabilities.contains(&crate::identity::HumanCapabilityV1::ReadBrokerRegistry),
+                    "prepare without read_broker_registry, explicitly migrate6→7, then apply a trusted control membership mutation"
+                );
+                ensure!(
                     capabilities.len() == identity.capabilities.len(),
                     "duplicate setup capability"
                 );

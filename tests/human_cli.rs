@@ -1071,6 +1071,165 @@ fn schema_five_maintenance_replays_schema_four_preparation_without_rotation() {
     assert_eq!(store(&data, "tenant-a").head().unwrap(), head);
 }
 
+fn migrate_human_cli_to(data: &Path, version: u32) {
+    let audit = store(data, "tenant-a");
+    let current = audit.supervision_state().unwrap();
+    assert!(!current.active);
+    for target in current.schema_version + 1..=version {
+        let backup = data.with_extension(format!("before-v{target}.sqlite"));
+        match target {
+            5 => audit.migrate_human_access_v5(&backup).unwrap(),
+            6 => audit.migrate_workload_v6(&backup).unwrap(),
+            7 => audit.migrate_human_brokers_v7(&backup).unwrap(),
+            _ => panic!("unexpected human CLI migration target"),
+        };
+    }
+    assert_eq!(audit.supervision_state().unwrap().schema_version, version);
+    assert!(!audit.supervision_state().unwrap().active);
+    assert!(audit.integrity().unwrap().valid);
+}
+
+#[test]
+fn broker_registry_cli_option_requires_schema7_before_preparation_and_is_never_default() {
+    let files = support::private_tempdir();
+    let data = files.path().join("audit.sqlite");
+    initialized(&data, "tenant-a", true);
+    migrate_human_cli_to(&data, 6);
+    let refused_directory = files.path().join("schema6-refused");
+    let before = store(&data, "tenant-a").integrity().unwrap();
+    let refused = provision_command(&data, "tenant-a", &refused_directory, "Broker reader")
+        .args([
+            "--capabilities",
+            "read-broker-registry",
+            "--max-events",
+            "5000",
+        ])
+        .output()
+        .unwrap();
+    failure(&refused);
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("requires explicit migration6→7"));
+    assert!(
+        !refused_directory.exists(),
+        "refused schema6 preparation must not publish credentials or recovery files"
+    );
+    assert_eq!(
+        store(&data, "tenant-a").integrity().unwrap().head_hash,
+        before.head_hash
+    );
+    assert_eq!(
+        store(&data, "tenant-a")
+            .supervision_state()
+            .unwrap()
+            .schema_version,
+        6
+    );
+
+    migrate_human_cli_to(&data, 7);
+    let explicit = files.path().join("explicit-broker-reader");
+    let granted = provision_command(&data, "tenant-a", &explicit, "Broker reader")
+        .args([
+            "--capabilities",
+            "read-broker-registry",
+            "--max-events",
+            "5000",
+        ])
+        .output()
+        .unwrap();
+    success(&granted);
+    let bearer = secret(&explicit);
+    no_secret(&granted, &bearer);
+    let prepared = preparation(&explicit);
+    let explicit_membership = membership(&prepared);
+    assert_eq!(
+        explicit_membership.capabilities,
+        std::collections::BTreeSet::from([HumanCapabilityV1::ReadBrokerRegistry])
+    );
+    let audit = store(&data, "tenant-a");
+    assert_eq!(
+        audit
+            .identity_memberships(&explicit_membership.principal)
+            .unwrap(),
+        [explicit_membership]
+    );
+    assert!(!audit.supervision_state().unwrap().active);
+    drop(audit);
+
+    let defaults = files.path().join("default-reader");
+    let default_output = provision_command(&data, "tenant-a", &defaults, "Default reader")
+        .args(["--max-events", "5000"])
+        .output()
+        .unwrap();
+    success(&default_output);
+    assert_eq!(
+        membership(&preparation(&defaults)).capabilities,
+        std::collections::BTreeSet::from([
+            HumanCapabilityV1::ReadMetadata,
+            HumanCapabilityV1::ReadContent,
+            HumanCapabilityV1::Export
+        ])
+    );
+    no_secret(&default_output, &secret(&defaults));
+}
+
+#[test]
+fn schema_seven_replays_exact_historical_preparations_without_rotation_or_new_grants() {
+    for historical in [4, 5, 6] {
+        let files = support::private_tempdir();
+        let data = files.path().join("audit.sqlite");
+        initialized(&data, "tenant-a", true);
+        migrate_human_cli_to(&data, historical);
+        let output = files.path().join("retained-reader");
+        let provisioned = provision_command(&data, "tenant-a", &output, "Historical reader")
+            .args(["--max-events", "5000"])
+            .output()
+            .unwrap();
+        success(&provisioned);
+        let bearer = secret(&output);
+        no_secret(&provisioned, &bearer);
+        let prepared = preparation(&output);
+        let original_membership = membership(&prepared);
+        assert!(
+            !original_membership
+                .capabilities
+                .contains(&HumanCapabilityV1::ReadBrokerRegistry)
+        );
+        let recovery = std::fs::read(output.join("recovery.json")).unwrap();
+        let completion = std::fs::read(output.join("completion.json")).unwrap();
+        std::fs::rename(
+            output.join("completion.json"),
+            output.join("retained-completion.json"),
+        )
+        .unwrap();
+        migrate_human_cli_to(&data, 7);
+        let before = store(&data, "tenant-a").integrity().unwrap();
+        let resumed = resume_command(&data, "tenant-a", &output)
+            .args(["--max-events", "5000"])
+            .output()
+            .unwrap();
+        success(&resumed);
+        no_secret(&resumed, &bearer);
+        assert_eq!(secret(&output), bearer);
+        assert_eq!(
+            std::fs::read(output.join("recovery.json")).unwrap(),
+            recovery
+        );
+        assert_eq!(
+            std::fs::read(output.join("completion.json")).unwrap(),
+            completion
+        );
+        let audit = store(&data, "tenant-a");
+        assert_eq!(audit.integrity().unwrap().head_hash, before.head_hash);
+        assert_eq!(
+            audit
+                .identity_memberships(&original_membership.principal)
+                .unwrap(),
+            [original_membership]
+        );
+        assert_eq!(audit.supervision_state().unwrap().schema_version, 7);
+        assert!(!audit.supervision_state().unwrap().active);
+    }
+}
+
 #[tokio::test]
 async fn schema_four_human_get_requires_explicit_migration_without_read_audit() {
     let files = support::private_tempdir();

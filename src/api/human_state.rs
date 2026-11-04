@@ -17,7 +17,8 @@ pub(super) const MAX_CONTEXTS: usize = 4096;
 pub(super) const MAX_OWNER_CONTEXTS: usize = 64;
 const PADDED_BYTES: usize = 512;
 const NONCE_BYTES: usize = 12;
-pub(super) const CURSOR_HEX_BYTES: usize = (1 + NONCE_BYTES + PADDED_BYTES + 16) * 2;
+pub(super) const CURSOR_HEX_BYTES: usize = crate::identity::HUMAN_CURSOR_HEX_BYTES;
+const _: () = assert!(CURSOR_HEX_BYTES == (1 + NONCE_BYTES + PADDED_BYTES + 16) * 2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StateFailure {
@@ -111,17 +112,15 @@ impl RegisteredContext {
                 .upper_event
                 .is_some_and(|upper| upper < state.after_event)
             || (!state.after_resource.is_empty() && !hex_64(&state.after_resource))
-            || state.pages > 1000
-            || state.bytes > 16 * 1024 * 1024
-            || state.deadline_millis != self.deadline_millis()?
-            || state.started_millis > state.deadline_millis
         {
             return Err(StateFailure::InvalidCursor);
         }
-        if self.elapsed_millis()? >= state.deadline_millis {
-            return Err(StateFailure::Expired);
-        }
-        Ok(())
+        self.check_budget(
+            state.pages,
+            state.bytes,
+            state.started_millis,
+            state.deadline_millis,
+        )
     }
     pub fn advance(
         &self,
@@ -129,14 +128,7 @@ impl RegisteredContext {
         bytes: usize,
     ) -> Result<CursorState, StateFailure> {
         self.check_state(&state)?;
-        state.pages = state.pages.checked_add(1).ok_or(StateFailure::Capacity)?;
-        state.bytes = state
-            .bytes
-            .checked_add(u64::try_from(bytes).map_err(|_| StateFailure::Capacity)?)
-            .ok_or(StateFailure::Capacity)?;
-        if state.pages > 1000 || state.bytes > 16 * 1024 * 1024 {
-            return Err(StateFailure::Capacity);
-        }
+        add_budget(&mut state.pages, &mut state.bytes, bytes)?;
         Ok(state)
     }
     pub fn seal<Q: Serialize>(
@@ -147,6 +139,101 @@ impl RegisteredContext {
         self.check_state(state)?;
         self.cipher.seal(&self.aad(query)?, state)
     }
+    fn check_budget(
+        &self,
+        pages: u32,
+        bytes: u64,
+        started: u64,
+        deadline: u64,
+    ) -> Result<(), StateFailure> {
+        if pages > 1000
+            || bytes > 16 * 1024 * 1024
+            || deadline != self.deadline_millis()?
+            || started > deadline
+        {
+            return Err(StateFailure::InvalidCursor);
+        }
+        if self.elapsed_millis()? >= deadline {
+            return Err(StateFailure::Expired);
+        }
+        Ok(())
+    }
+    fn broker_aad<Q: Serialize>(&self, query: &Q) -> Result<Vec<u8>, StateFailure> {
+        self.aad(&("human_broker_registry_live_keyset_v1", query))
+    }
+    pub fn start_brokers<Q: Serialize>(
+        &self,
+        query: &Q,
+        token: Option<&str>,
+    ) -> Result<BrokerCursorStateV1, StateFailure> {
+        self.ensure_valid()?;
+        let state = match token {
+            Some(token) => self.cipher.open_value(&self.broker_aad(query)?, token)?,
+            None => BrokerCursorStateV1 {
+                version: 1,
+                after_broker_id: None,
+                pages: 0,
+                bytes: 0,
+                started_millis: self.elapsed_millis()?,
+                deadline_millis: self.deadline_millis()?,
+            },
+        };
+        self.check_broker_state(&state)?;
+        Ok(state)
+    }
+    fn check_broker_state(&self, state: &BrokerCursorStateV1) -> Result<(), StateFailure> {
+        if state.version != 1
+            || state.after_broker_id.as_ref().is_some_and(|value| {
+                !uuid::Uuid::parse_str(value)
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == *value)
+            })
+        {
+            return Err(StateFailure::InvalidCursor);
+        }
+        self.check_budget(
+            state.pages,
+            state.bytes,
+            state.started_millis,
+            state.deadline_millis,
+        )
+    }
+    pub fn advance_brokers(
+        &self,
+        mut state: BrokerCursorStateV1,
+        bytes: usize,
+    ) -> Result<BrokerCursorStateV1, StateFailure> {
+        self.check_broker_state(&state)?;
+        add_budget(&mut state.pages, &mut state.bytes, bytes)?;
+        Ok(state)
+    }
+    pub fn seal_brokers<Q: Serialize>(
+        &self,
+        query: &Q,
+        state: &BrokerCursorStateV1,
+    ) -> Result<String, StateFailure> {
+        self.check_broker_state(state)?;
+        self.cipher.seal(&self.broker_aad(query)?, state)
+    }
+}
+fn add_budget(pages: &mut u32, total: &mut u64, bytes: usize) -> Result<(), StateFailure> {
+    *pages = pages.checked_add(1).ok_or(StateFailure::Capacity)?;
+    *total = total
+        .checked_add(u64::try_from(bytes).map_err(|_| StateFailure::Capacity)?)
+        .ok_or(StateFailure::Capacity)?;
+    if *pages > 1000 || *total > 16 * 1024 * 1024 {
+        return Err(StateFailure::Capacity);
+    }
+    Ok(())
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BrokerCursorStateV1 {
+    version: u32,
+    pub after_broker_id: Option<String>,
+    pages: u32,
+    bytes: u64,
+    started_millis: u64,
+    deadline_millis: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -188,7 +275,7 @@ impl CursorCipher {
         nonce[4..].copy_from_slice(&value.to_be_bytes());
         Ok(nonce)
     }
-    fn seal(&self, aad: &[u8], state: &CursorState) -> Result<String, StateFailure> {
+    fn seal<T: Serialize>(&self, aad: &[u8], state: &T) -> Result<String, StateFailure> {
         let nonce = self.reserve()?;
         let json = serde_json::to_vec(state).map_err(|_| StateFailure::Unavailable)?;
         if json.len() > PADDED_BYTES - 2 {
@@ -215,6 +302,13 @@ impl CursorCipher {
         Ok(hex::encode(wire))
     }
     fn open(&self, aad: &[u8], token: &str) -> Result<CursorState, StateFailure> {
+        self.open_value(aad, token)
+    }
+    fn open_value<T: serde::de::DeserializeOwned>(
+        &self,
+        aad: &[u8],
+        token: &str,
+    ) -> Result<T, StateFailure> {
         // Authentic existing tokens may be opened repeatedly. Only sealing
         // reserves nonces; no encryption accepts a caller-supplied nonce.
         if token.len() != CURSOR_HEX_BYTES || !token.bytes().all(lower_hex) {
@@ -689,5 +783,80 @@ mod tests {
             current.key_fingerprint != old.key_fingerprint,
             "reacquired context key must be fresh"
         );
+    }
+
+    #[test]
+    fn broker_and_legacy_cursors_share_nonce_and_reject_domains_positions_and_budget_overflow() {
+        let registry = ContextRegistry::new();
+        let mut entry = registry
+            .obtain(binding(), CONTEXT_TTL, "expiry".into())
+            .unwrap();
+        let resource = entry.start(&"same-query", None).unwrap();
+        let broker = entry.start_brokers(&"same-query", None).unwrap();
+        let legacy_token = entry.seal(&"same-query", &resource).unwrap();
+        let broker_token = entry.seal_brokers(&"same-query", &broker).unwrap();
+        let second_legacy = entry.seal(&"same-query", &resource).unwrap();
+        for (index, token) in [&legacy_token, &broker_token, &second_legacy]
+            .into_iter()
+            .enumerate()
+        {
+            let wire = hex::decode(token).unwrap();
+            assert_eq!(wire.len() * 2, CURSOR_HEX_BYTES);
+            assert_eq!(&wire[5..13], &u64::try_from(index).unwrap().to_be_bytes());
+        }
+        assert!(matches!(
+            entry.start(&"same-query", Some(&broker_token)),
+            Err(StateFailure::InvalidCursor)
+        ));
+        assert!(matches!(
+            entry.start_brokers(&"same-query", Some(&legacy_token)),
+            Err(StateFailure::InvalidCursor)
+        ));
+        assert!(matches!(
+            entry.start_brokers(&"other-limit", Some(&broker_token)),
+            Err(StateFailure::InvalidCursor)
+        ));
+        let mut position = broker.clone();
+        position.after_broker_id = Some("a".repeat(64));
+        assert!(matches!(
+            entry.seal_brokers(&"same-query", &position),
+            Err(StateFailure::InvalidCursor)
+        ));
+        let mut exhausted = broker.clone();
+        exhausted.pages = 1000;
+        assert!(matches!(
+            entry.advance_brokers(exhausted, 1),
+            Err(StateFailure::Capacity)
+        ));
+        let mut exhausted = broker.clone();
+        exhausted.bytes = 16 * 1024 * 1024;
+        assert!(matches!(
+            entry.advance_brokers(exhausted, 1),
+            Err(StateFailure::Capacity)
+        ));
+        let foreign = registry
+            .obtain(
+                ContextBinding {
+                    digest: [8; 32],
+                    ..binding()
+                },
+                CONTEXT_TTL,
+                "expiry".into(),
+            )
+            .unwrap();
+        assert!(matches!(
+            foreign.start_brokers(&"same-query", Some(&broker_token)),
+            Err(StateFailure::InvalidCursor)
+        ));
+        drop(foreign);
+        // Expiry is established without sleeping or weakening the product clock.
+        let id = entry.id.clone();
+        registry.entries.lock().unwrap().remove(&id);
+        let unique = Arc::get_mut(&mut entry).unwrap();
+        unique.created = unique.created.checked_sub(CONTEXT_TTL).unwrap();
+        assert!(matches!(
+            entry.start_brokers(&"same-query", Some(&broker_token)),
+            Err(StateFailure::Expired)
+        ));
     }
 }

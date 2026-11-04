@@ -2298,6 +2298,154 @@ async fn reopened_control_stays_inactive_and_a_tampered_body_latches_unhealthy_b
 }
 
 #[tokio::test]
+async fn schema7_preserves_directed_relay_and_workload_identity_boundaries() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 10_000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 10_000));
+    for (store, tenant) in [(&a, "tenant-a"), (&b, "tenant-b")] {
+        store
+            .migrate_human_brokers_v7(&directory.path().join(format!("{tenant}-before-v7.sqlite")))
+            .unwrap();
+        let state = store.supervision_state().unwrap();
+        assert_eq!(state.schema_version, 7);
+        assert!(state.active);
+    }
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let b1 = running_worker(&b);
+    let a1_token = "7".repeat(48);
+    let a2_token = "8".repeat(48);
+    let b1_token = "9".repeat(48);
+    bind(&a, &a1, &a1_token);
+    bind(&a, &a2, &a2_token);
+    bind(&b, &b1, &b1_token);
+    let app = router(a.clone(), b.clone());
+    let before = (a.head().unwrap(), b.head().unwrap());
+    assert_eq!(
+        call(&app, "GET", "/api/v1/human/brokers", &a1_token, Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        (a.head().unwrap(), b.head().unwrap()),
+        before,
+        "a bound worker proof cannot create a human broker read receipt"
+    );
+
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let before_cross = (a.head().unwrap(), b.head().unwrap());
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(directed(&a1, &b1, 300))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!((a.head().unwrap(), b.head().unwrap()), before_cross);
+    let payload = send(&grant, "schema7-directed-business-body");
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &b1_token,
+            json!(payload)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, first) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &a1_token,
+        json!(payload),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(first["replayed"], false);
+    let after_first = a.head().unwrap();
+    let (status, replay) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &a1_token,
+        json!(payload),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(replay["audit_seq"], first["audit_seq"]);
+    assert_eq!(
+        a.head().unwrap(),
+        after_first,
+        "an exact send replay must not append again"
+    );
+    let (status, inbox) = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &a2_token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"][0]["body"], payload.body);
+    let (status, foreign) = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &b1_token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(foreign["items"], json!([]));
+    assert!(!foreign.to_string().contains(&payload.body));
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        1
+    );
+    for store in [&a, &b] {
+        let audit = store
+            .events(&EventQuery {
+                order: Some("asc".into()),
+                limit: Some(1000),
+                ..Default::default()
+            })
+            .unwrap();
+        let encoded = serde_json::to_string(&audit).unwrap();
+        for private in [&payload.body, &a1_token, &a2_token, &b1_token] {
+            assert!(!encoded.contains(private));
+        }
+        assert!(store.integrity().unwrap().valid);
+    }
+}
+
+#[tokio::test]
 async fn directed_worker_messages_are_tenant_scoped_idempotent_and_do_not_duplicate_bodies_in_audit()
  {
     let directory = support::private_tempdir();

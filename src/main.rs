@@ -75,8 +75,8 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workload bindings, broker registry and relay).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=6))]
+        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workloads), 7 (human broker registry reads).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=7))]
         target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -735,6 +735,7 @@ async fn main() -> Result<()> {
                 4 => store.migrate_identity_v4(&backup)?,
                 5 => store.migrate_human_access_v5(&backup)?,
                 6 => store.migrate_workload_v6(&backup)?,
+                7 => store.migrate_human_brokers_v7(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);

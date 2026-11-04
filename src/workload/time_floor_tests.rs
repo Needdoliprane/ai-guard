@@ -51,6 +51,189 @@ fn guard(store: &Store, at: DateTime<Utc>, before: Option<i64>) -> anyhow::Resul
 }
 
 #[test]
+fn schema7_preserves_durable_time_floor_workload_guards_and_tamper_detection() {
+    for remove_last in [false, true] {
+        let files = files();
+        let path = files.path().join("audit.sqlite");
+        let audit = store(&path);
+        let lower = future();
+        let higher6 = lower + chrono::Duration::hours(2);
+        let higher7 = lower + chrono::Duration::hours(4);
+        let token = "schema7-clock-workload-test-material-0123456789abcdef";
+        let (_, _, issue) = broker_with_expiry(&audit, lower + chrono::Duration::days(2), token);
+        let high6 = append_at(&audit, higher6);
+        let low6 = append_at(&audit, lower);
+        let before = audit.integrity().unwrap();
+        let namespace = audit.supervision_state().unwrap().control_namespace_uuid;
+        audit
+            .migrate_human_brokers_v7(&path.with_extension("v6.bak"))
+            .unwrap();
+        assert_eq!(audit.supervision_state().unwrap().schema_version, 7);
+        assert_eq!(
+            audit.supervision_state().unwrap().control_namespace_uuid,
+            namespace
+        );
+        assert_eq!(
+            audit.integrity().unwrap().event_count,
+            before.event_count + 1
+        );
+        let high7 = append_at(&audit, higher7);
+        let low7 = append_at(&audit, lower);
+        assert!(high7.seq > low6.seq && low7.seq > high7.seq);
+        let head = audit.head().unwrap();
+        assert_eq!(
+            guard(&audit, lower, None)
+                .unwrap_err()
+                .downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::ClockRegression)
+        );
+        assert!(guard(&audit, higher7, None).is_ok());
+        assert_eq!(
+            audit
+                .authenticate_workload_token(token)
+                .map(|_| ())
+                .unwrap_err()
+                .downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::ClockRegression)
+        );
+        assert_eq!(audit.head().unwrap(), head);
+        {
+            let db = audit.db.lock().unwrap();
+            let (floor_count, maximum): (i64, String) = db.query_row("SELECT (SELECT COUNT(*) FROM audit_time_floors),max_received_at FROM audit_time_floors WHERE event_seq=?1", [head], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(floor_count, head);
+            assert_eq!(maximum, format_time(higher7));
+            for historical in [&high6, &low6] {
+                let received: String = db
+                    .query_row(
+                        "SELECT received_at FROM events WHERE seq=?1",
+                        [historical.seq],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(received, historical.received_at);
+            }
+        }
+        assert!(audit.integrity().unwrap().valid);
+        drop(audit);
+        let reopened =
+            Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000)
+                .unwrap();
+        assert_eq!(reopened.supervision_state().unwrap().schema_version, 7);
+        assert!(!reopened.supervision_state().unwrap().active);
+        assert_eq!(
+            guard(&reopened, lower, None)
+                .unwrap_err()
+                .downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::ClockRegression)
+        );
+        assert!(guard(&reopened, higher7, None).is_ok());
+        assert_eq!(
+            reopened
+                .authenticate_workload_token(token)
+                .map(|_| ())
+                .unwrap_err()
+                .downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::ClockRegression)
+        );
+        assert!(reopened.integrity().unwrap().valid);
+        drop(reopened);
+
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let raw_head: (i64, String) = db
+            .query_row(
+                "SELECT seq,hash FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(raw_head, (head, low7.hash.clone()));
+        if remove_last {
+            assert_eq!(
+                db.execute("DELETE FROM audit_time_floors WHERE event_seq=?1", [head])
+                    .unwrap(),
+                1
+            );
+        } else {
+            assert_eq!(
+                db.execute(
+                    "UPDATE audit_time_floors SET max_received_at=?1 WHERE event_seq=?2",
+                    rusqlite::params![format_time(lower), head]
+                )
+                .unwrap(),
+                1
+            );
+        }
+        let tampered_floor: Option<String> = db
+            .query_row(
+                "SELECT max_received_at FROM audit_time_floors WHERE event_seq=?1",
+                [head],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let expected_floor = (!remove_last).then(|| format_time(lower));
+        assert_eq!(
+            tampered_floor, expected_floor,
+            "fixture must alter only the intended final floor row"
+        );
+        let prior_floor: String = db
+            .query_row(
+                "SELECT max_received_at FROM audit_time_floors WHERE event_seq=?1",
+                [head - 1],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prior_floor, format_time(higher7));
+        drop(db);
+        // Replay failures retain a diagnostic handle, never execution authority.
+        let rejected =
+            Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000)
+                .unwrap();
+        assert!(!rejected.healthy());
+        let integrity = rejected.integrity().unwrap();
+        assert!(!integrity.valid);
+        assert_eq!(
+            integrity.error,
+            Some(format!("integrity violation at sequence {head}"))
+        );
+        assert_eq!(integrity.event_count, u64::try_from(head - 1).unwrap());
+        assert_eq!(integrity.head_hash, high7.hash);
+        assert!(rejected.authenticate_workload_token(token).is_err());
+        assert!(rejected.issue_workload_binding(&issue).is_err());
+        // This same clock point passed before corruption, so its refusal now
+        // cannot be explained solely by the deliberately earlier UTC fixture.
+        assert!(guard(&rejected, higher7, None).is_err());
+        assert!(rejected.brokers_page(None, 1).is_err());
+        assert!(
+            rejected
+                .append(Event::new("test.refused.after_floor_corruption"))
+                .is_err()
+        );
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let after_head: (i64, String) = db
+            .query_row(
+                "SELECT seq,hash FROM events ORDER BY seq DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(after_head, raw_head);
+        let after_floor: Option<String> = db
+            .query_row(
+                "SELECT max_received_at FROM audit_time_floors WHERE event_seq=?1",
+                [head],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            after_floor, expected_floor,
+            "diagnostic access must not repair the tampered row"
+        );
+    }
+}
+
+#[test]
 fn durable_time_floor_survives_a_lower_generic_receipt_and_reopen() {
     let files = files();
     let path = files.path().join("audit.sqlite");

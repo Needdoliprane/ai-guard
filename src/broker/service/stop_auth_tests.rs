@@ -2,6 +2,7 @@
 //! The delivery probe qualifies routing only; no runtime or IPC stop is claimed.
 use super::*;
 use crate::api::{GatewayState, TenantGateway, gateway_router};
+use crate::runner::AuditClient;
 use std::sync::atomic::AtomicUsize;
 
 const A_RUNNER: &str = "runner-a-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -29,7 +30,7 @@ impl Gateway {
     }
 
     async fn with_schema(schema: u32, inactive: bool) -> Self {
-        assert!(matches!(schema, 3 | 6));
+        assert!(matches!(schema, 3 | 6 | 7));
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -44,7 +45,7 @@ impl Gateway {
             )
             .unwrap(),
         );
-        if schema == 6 {
+        if schema >= 6 {
             store
                 .migrate_identity_v4(&root.path().join("a-before-v4.sqlite"))
                 .unwrap();
@@ -53,6 +54,11 @@ impl Gateway {
                 .unwrap();
             store
                 .migrate_workload_v6(&root.path().join("a-before-v6.sqlite"))
+                .unwrap();
+        }
+        if schema == 7 {
+            store
+                .migrate_human_brokers_v7(&root.path().join("a-before-v7.sqlite"))
                 .unwrap();
         }
         let store = if inactive {
@@ -223,6 +229,78 @@ async fn workload_schema6_keeps_fresh_broker_auth_and_inactive_admission_guards(
                 Err(BrokerErrorCodeV1::IncompatibleControl)
             ));
         }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn human_broker_schema7_keeps_stop_identity_and_inactive_admission_guards() {
+    for inactive in [false, true] {
+        let gateway = Gateway::with_schema(7, inactive).await;
+        let fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+        let registry = &fixture.service.registry;
+        let identity = AuditClient::new(&gateway.url, A_RUNNER)
+            .unwrap()
+            .supervision_identity()
+            .await
+            .unwrap();
+        assert_eq!(identity.schema_version, 7);
+        assert_eq!(identity.tenant_id, TENANT);
+        assert_eq!(identity.role, "runner");
+        assert_eq!(identity.active, !inactive);
+        assert_eq!(
+            identity.control_namespace_uuid.as_deref(),
+            Some(gateway.namespace.to_string().as_str())
+        );
+        assert!(
+            VerifiedProfile::authenticate(registry, "cancel_retry_test", A_RUNNER, false)
+                .await
+                .is_ok(),
+            "schema7 retains authenticated STOP metadata in both lease states"
+        );
+        if inactive {
+            assert!(matches!(
+                VerifiedProfile::authenticate(registry, "cancel_retry_test", A_RUNNER, true).await,
+                Err(BrokerErrorCodeV1::IncompatibleControl)
+            ));
+        } else {
+            assert!(
+                VerifiedProfile::authenticate(registry, "cancel_retry_test", A_RUNNER, true)
+                    .await
+                    .is_ok()
+            );
+        }
+        refused_stop_identity(
+            &gateway,
+            gateway.namespace,
+            A_VIEWER,
+            BrokerErrorCodeV1::Forbidden,
+        )
+        .await;
+        refused_stop_identity(
+            &gateway,
+            Uuid::new_v4(),
+            A_RUNNER,
+            BrokerErrorCodeV1::Forbidden,
+        )
+        .await;
+
+        // A compatible schema cannot make a different tenant profile match.
+        let mut config: Value = serde_json::from_slice(registry.source.bytes()).unwrap();
+        config["profiles"][0]["tenant_id"] = json!("tenant-not-this-gateway");
+        let path = fixture
+            ._temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("wrong-tenant-registry.json");
+        fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let wrong_tenant = Registry::load(&path).unwrap();
+        assert!(matches!(
+            VerifiedProfile::authenticate(&wrong_tenant, "cancel_retry_test", A_RUNNER, false)
+                .await,
+            Err(BrokerErrorCodeV1::Forbidden)
+        ));
     }
 }
 
