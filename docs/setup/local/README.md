@@ -40,6 +40,10 @@ The normal requirement is a rootless engine. If you deliberately use Docker Desk
 
 The default worker image supports ordinary commands. For Codex or Claude Code, build the client versions described in the [provider guide](../providers/README.md) before starting an AI session.
 
+`build --source` selects the ai-guard source distribution, not the project an agent will edit. Before contacting the engine, the CLI checks the required Dockerfiles, `.dockerignore`, manifests/locks, Rust/frontend entry files and policy, including their parent directories. A missing, linked or incorrectly typed required entry is reported by its relative path. Restore that entry in the selected source distribution and retry; this refusal does not require deleting images, caches or data. An explicitly selected source root is still canonicalized normally.
+
+This is a structural prerequisite check. It does not validate every import, lockfile content or `.dockerignore` rule, freeze concurrent source changes, or make the two image builds atomic. The first image can still build successfully before a later build failure. Keep the source stable while building and retain the actual engine results; completing the check is not a reproducible-build or production qualification.
+
 ## Create the stack configuration
 
 The [local example](../../../.env.exemple.local) controls Compose interpolation. Create a **new** private copy; the subshell below refuses to overwrite an existing file.

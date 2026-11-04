@@ -1,5 +1,23 @@
 # Stratégie de qualification
 
+## Prérequis du paquet source avant build
+
+Pour ce chemin, sélectionner dans `tests/runtime_program.rs` les trois
+fonctions `build_refuses_missing_worker_dockerfile_before_any_engine_call`,
+`build_refuses_malformed_public_source_inputs_before_any_engine_call` et
+`build_accepts_complete_source_and_forwards_provider_versions`, ainsi que
+les quatre canaris Build existants : changement d'identité avant effet,
+identité entre les deux images, endpoint retenu et chemins absolus.
+
+Les fixtures copient uniquement 19 fichiers publics réels, sans parcourir
+node_modules, dist, caches ou credentials. Elles satisfont le contrôle
+structurel, sans constituer un projet compilable complet. Le vrai CLI lance
+un moteur témoin Rust dans le sandbox ; les marqueurs prouvent l'absence
+d'appel ou les arguments/effets attendus, pas une construction d'image réelle.
+Le RED précède le code. Après un delta, exécuter ces sélections et vérifier
+la compilation concernée ; ne pas rejouer modèles, navigateur ou recette
+moteur pour ce seul préflight. [Résultats et limites](VALIDATION.md#4-novembre--prérequis-de-build-avant-tout-appel-moteur).
+
 ## Diagnostic de récupération sans historique
 
 Pour un delta sur l'ouverture d'historique du broker, sélectionner les six
