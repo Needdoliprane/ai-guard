@@ -306,7 +306,7 @@ On the manual route, the operator must create an active OIDC account and members
 
 Replace every sample UUID with a fresh canonical lowercase non-nil UUID for its new operation or membership; keep each identity stable for exact retries. Replace `REPLACE_WITH_VERIFIED_SUBJECT`, issuer, tenant, organization and resource ID consistently. For the DEMO, use its exact HTTP issuer in all three templates. No subject IDs are preassigned by these files. Creating an account without a membership grants no access; a membership alone grants no ownership of historical resources.
 
-Save each reviewed mutation privately under the existing control authority. For an existing validated schema4/5/6 database with inactive supervision, run the following command, then repeat it with `oidc-membership.json` and `oidc-resource-grant.json` after each preceding command succeeds:
+Save each reviewed mutation privately under the existing control authority. For an existing validated schema4–7 database with inactive supervision, run the following command, then repeat it with `oidc-membership.json` and `oidc-resource-grant.json` after each preceding command succeeds:
 
 ```sh
 AIGUARD_BIN="/absolute/path/to/agentsandbox"
@@ -316,7 +316,7 @@ AIGUARD_PRIVATE="/absolute/private/ai-guard"
 "$AIGUARD_BIN" human apply \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --mutation-file "$AIGUARD_PRIVATE/oidc-account.json" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 The input accepts only `version`, `operation_id` and typed `change`; an `actor` field is refused. The effective filesystem operator supplies authority. Each mutation and its audit commit together; the three separate commands are not one transaction. On an ambiguous result, preserve the file and retry the exact operation and bytes. A changed meaning needs a new operation UUID. `expected_revision:0`/`revision:1` means initial creation; changing an existing record requires its exact previous revision and the next revision. Do not edit SQLite projections directly.
@@ -327,9 +327,37 @@ The input accepts only `version`, `operation_id` and typed `change`; an `actor` 
 
 Effective rights are the intersection of this ceiling and the active control-side membership, then the selected context and resource permissions. The examples allow `read_metadata`, `read_content` and `export` in personal contexts. The administrator rule adds `read_tenant_metadata`; the intended administrator's membership must also explicitly contain it. Other users' memberships must not acquire it merely because they share an organization. Administrative capabilities cannot appear in `default_capabilities`.
 
-The accepted capability names are `read_metadata`, `read_content`, `export`, `read_tenant_metadata`, `manage_memberships` and `manage_grants`. A configurable capability does not imply that a complete Web mutation or administration workflow exists. Personal and administration contexts are distinct and must be offered by Rust. Realm administration, account names and roles from another client confer no implicit application permission or cross-tenant access.
+The accepted capability names are `read_metadata`, `read_content`, `export`, `read_tenant_metadata`, `manage_memberships`, `manage_grants` and `read_broker_registry`. A configurable capability does not imply that a complete Web mutation or administration workflow exists. Broker registry access is a separate explicit opt-in described below. Personal and administration contexts are distinct and must be offered by Rust. Realm administration, account names and roles from another client confer no implicit application permission or cross-tenant access.
 
 Change `mapping.revision` whenever the approved mapping changes and restart the gateway with reviewed configuration. For membership/account/grant withdrawal, perform a new audited offline mutation with incremented revision and `active:false` as appropriate. Stop all consumers first, then restart and require users to authenticate again. Changing an IdP role alone is not immediate revocation of an already issued token; role changes become visible through new verified claims, while control-side permissions are revalidated by human reads.
+
+### Opt in to broker registry reads
+
+The distributed setup/example manifests do **not** grant `read_broker_registry`. `setup prepare` produces schema5 and rejects an identity requesting this capability before publishing any installation artifacts. Leave the fresh DEMO and existing ordinary memberships unchanged unless the operator deliberately approves this tenant infrastructure access. The public `admin-ai-guard` role and realm administrator do not acquire it automatically.
+
+For each intended tenant, stop every database consumer and automatic restart, keep the existing prepared installation/volume, then perform [5→6→7 with a verified new backup at each step](../workloads/README.md#enable-named-broker-registry-reads). An existing6 needs only6→7. The prepared path is `/data/installation/tenants/<tenant>/audit.sqlite`; use the actual container UID/GID and inspected volume, not an unrelated host store. Migration adds no account, membership grant or execution activation; a cold reopen remains inactive maintenance. Do not use fresh-store bootstrap, metadata edits or replacement storage as reactivation.
+
+Broker reads require **both** an active control-side membership explicitly containing `read_broker_registry` and an explicit rule in `gateway.mapping.rules` whose verified access-token claim ceiling includes it. The [typed membership procedure](../identity/README.md#authorize-named-broker-registry-readers) shows `human apply` with `version`, `operation_id` and `change.action:"membership"`, exact prior/next revisions, immutable principal/organization and no caller `actor`. For OIDC retain the exact `human_oidc` issuer/subject. Use the same `--max-events` and explicit `--audit-capacity-file` policy as the installation. Only trusted authenticated/offline control can add or reactivate this capability; organization admins cannot promote themselves or others through `manage_memberships`.
+
+In a reviewed private copy of the existing OIDC JSON, a **single rule template inside `gateway.mapping.rules`** is:
+
+```json
+{
+  "claim_path": ["resource_access", "ai-guard-api", "roles"],
+  "equals": "guard-broker-reader",
+  "capabilities": ["read_broker_registry"]
+}
+```
+
+Replace the claim path/client and role with the actual operator-controlled verified claim. This fragment is not a complete OIDC file or an IdP role creation command. Preserve provider URLs, audit identity/policy and unrelated rules. If the same `claim_path`/`equals` already exists, deliberately update its capability list instead of adding a duplicate. Increment `gateway.mapping.revision`, retaining its string format, for example `company-policy-2-brokers`. Never put an administration capability in `default_capabilities`. A raw claim or matching role without the explicit local membership still grants no access; membership without a matching ceiling also grants no broker read. No role mapping chooses another tenant or turns a browser into runner.
+
+Restart matching gateway/dashboard components with the existing configuration and data, without an initialization flag. Reauthenticate and choose a currently offered administration context carrying the capability. **Brokers** opens **Brokers enregistrés du tenant.**; a context with only this right lands there without resource/event/export/SSE reads. `read_tenant_metadata` retains its old organization-filtered resource semantics. Neither ordinary `human` nor foreground SSO CLI has a brokers command; use this dashboard view or the [typed human GET contract](../../api.md#registre-brokers-humain--human-broker-registry).
+
+To withdraw access, have the operator apply a new audited membership revision removing the capability or deactivating the membership, or revise the approved claim ceiling and require a new login. An organization administrator can retain/remove an existing right or keep it dormant, but cannot add it or reactivate its inactive membership. A recognized context/permission refusal clears prior data, detail and cursors; late replies cannot restore them. Revocation cannot retract bytes already received, and the visible30second polling trigger is no end-to-end withdrawal deadline.
+
+The page requires mandatory durable human audit, including empty results, and shares identity/resource F1 tenant/principal budgets. The dashboard preserves `429 audit_read_budget_exhausted`/`contact_operator` from its identity preflight as well as the page read. It stops automatic reads and keeps any permitted previous page dated/stale. Preserve the tenant database, policy and receipts, inspect occupancy/reserves and repair the cause; do not reset audit or rotate credentials for capacity. After intervention, **Relire après intervention de l’opérateur** performs an explicit retry. Temporary capacity or transport errors remain separate. A503 `migration_required` needs the offline upgrade, not a viewer fallback. See [named access](../identity/README.md#authorize-named-broker-registry-readers) for page states and receipt/freshness limits.
+
+Actual broker registration and heartbeat operations must already have populated the real registry. Empty is valid; do not insert fixture observations. This view does not qualify a real browser/OIDC deployment, federation, complete runtime inventory or production release. Refer to the matching engineering validation for what was actually run.
 
 ## Start or reopen the existing services
 

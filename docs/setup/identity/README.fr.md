@@ -18,10 +18,10 @@ AIGUARD_PRIVATE="/chemin/prive/ai-guard"
 "$AIGUARD_BIN" migrate-control \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --backup "$AIGUARD_PRIVATE/avant-acces-humain-v5.sqlite" \
-  --target-version 5 --confirm-control-stopped
+  --target-version 5 --max-events 100000 --confirm-control-stopped
 ```
 
-Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision, resume-provision et apply acceptent les schémas4,5 ou6 validés avec supervision inactive ; les lectures HTTP humaines prennent en charge5/6 et renvoient `migration_required` avant d'émettre leur audit de lecture sur une ancienne base. Le [guide workload](../workloads/README.fr.md) décrit la migration explicite5→6 séparée.
+Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision, resume-provision et apply acceptent les schémas4–7 validés avec supervision inactive ; les lectures HTTP humaines ordinaires prennent en charge5–7 et renvoient `migration_required` avant leur audit sur une base plus ancienne. La lecture du registre brokers et sa nouvelle capacité exigent7. Le [guide workload](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers) décrit5→6→7, y compris pour une base préparée en5 par `setup prepare`.
 
 Pour une base appartenant à un conteneur, exécuter la maintenance avec l'UID/GID du contrôle sur son volume existant, après arrêt de tous les autres consommateurs. Le CLI hôte ne peut pas supposer qu'il possède un volume Docker Desktop. Le conteneur ponctuel n'a besoin que de ce volume et de son image de confiance, sans socket, credential runner, secret fournisseur ou réseau. Conserver l'identité du projet Compose et de son volume ; ne pas initialiser une autre base pour contourner une migration refusée.
 
@@ -40,7 +40,7 @@ docker run --name ai-guard-offline-human-v5 --pull never \
   --mount "type=volume,source=$AIGUARD_AUDIT_VOLUME,target=/data,volume-nocopy" \
   "$AIGUARD_CONTROL_IMAGE_ID" migrate-control --data /data/audit.sqlite \
   --tenant-id "$AIGUARD_TENANT" --backup /data/before-human-access-v5.sqlite \
-  --target-version 5 --confirm-control-stopped
+  --target-version 5 --max-events 100000 --confirm-control-stopped
 docker run --name ai-guard-offline-human-alice --pull never \
   --user 1000:1000 --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true --cpus 1 --memory 384m --memory-swap 384m --pids-limit 128 \
@@ -48,7 +48,7 @@ docker run --name ai-guard-offline-human-alice --pull never \
   --mount "type=volume,source=$AIGUARD_AUDIT_VOLUME,target=/data,volume-nocopy" \
   "$AIGUARD_CONTROL_IMAGE_ID" human provision --data /data/audit.sqlite \
   --tenant-id "$AIGUARD_TENANT" --name Alice --organization engineering \
-  --output-dir /data/human-alice --confirm-control-stopped
+  --output-dir /data/human-alice --max-events 100000 --confirm-control-stopped
 )
 ```
 
@@ -63,7 +63,7 @@ Le parent de sortie doit déjà être privé (`0700`). Choisir un nouveau réper
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --name "Alice" --organization "engineering" \
   --output-dir "$AIGUARD_PRIVATE/human-alice" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 La commande prépare les fichiers privés `credential`, `recovery.json` et `completion.json`. Elle génère un credential aléatoire sans l'afficher. Compte, binding du credential et membership initial sont validés dans une transaction avec leur audit. La sortie présente des identifiants et chemins, jamais le credential. Les capacités initiales sont lecture des métadonnées, lecture du contenu et export ; les grants de ressources restent nécessaires. `--capabilities read-metadata` permet de limiter ce choix.
@@ -74,7 +74,7 @@ Après une interruption ou un résultat ambigu, préserver exactement la prépar
 "$AIGUARD_BIN" human resume-provision \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --output-dir "$AIGUARD_PRIVATE/human-alice" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 La reprise vérifie namespace, empreinte du credential, chemins, fichiers et identités d'opérations conservés. Elle ne remplace pas une préparation manquante et ne renouvelle pas le credential. Protéger les reçus comme des données de contrôle. Transmettre uniquement son credential à l'utilisateur par votre canal privé, sans distribuer toute la préparation opérateur. Son fichier doit rester `0600` sous un parent privé, hors du projet exécuté.
@@ -116,10 +116,77 @@ Pour le premier binding d'une session, enregistrer ce **modèle** dans un nouvea
 "$AIGUARD_BIN" human apply \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --mutation-file "$AIGUARD_PRIVATE/grant-session-alice.json" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 Désactiver compte, credential, membership ou grant par une nouvelle mutation auditée, en conservant son identité et en augmentant sa révision. Pour ce grant resté en révision1, la révocation utilise un nouvel UUID d'opération, `expected_revision:1`, grant `revision:2` et `active:false`, avec mêmes tenant, organisation, ressource et propriétaire. Un conflit de révision est un refus : examiner le record opérateur conservé plutôt que deviner. Ne pas modifier directement les projections ou réutiliser le credential d'une autre personne. Après changement de droits, reprendre un contexte actuellement proposé. Créer un compte ne lance aucun worker et ne délègue pas le rôle runner.
+
+## Autoriser la lecture nominative du registre brokers
+
+`read_broker_registry` est une capacité d'administration distincte sur les métadonnées d'infrastructure de tout le tenant authentifié. Elle n'expose ni contenus de ressources, ni grants brokers bruts, ni credentials, ni inventaire workers, ni export. `read_tenant_metadata` conserve son filtre d'organisation. Les anciens memberships, un nom d'administrateur ou un rôle IdP n'acquièrent jamais automatiquement ce nouveau droit.
+
+Effectuer d'abord la [migration explicite vers7](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers), tous consommateurs arrêtés. Sur schéma7 validé avec supervision inactive, l'opérateur de confiance du système de fichiers peut créer un **nouveau** lecteur local avec cette seule capacité :
+
+```sh
+"$AIGUARD_BIN" human provision \
+  --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
+  --name "Lecteur infrastructure" --organization "engineering" \
+  --capabilities read-broker-registry \
+  --output-dir "$AIGUARD_PRIVATE/human-infrastructure-reader" \
+  --max-events 100000 --confirm-control-stopped
+```
+
+Remplacer `100000` par la limite réelle de l'installation si différente. Avec une politique explicite d'audit humain, transmettre aussi le même `--audit-capacity-file` qu'aux autres commandes d'identité hors ligne. Les capacités de création par défaut restent `read-metadata,read-content,export` ; la nouvelle option n'est jamais implicite. La demander avant7 échoue avant création du répertoire de préparation. `resume-provision` peut rejouer une ancienne préparation exacte après migration sans ajouter de grant ni renouveler son credential.
+
+Pour un compte local ou OIDC **existant**, utiliser `human apply` avec son véritable membership. Le JSON fermé suivant est un **modèle pour un membership actuellement en révision1 possédant seulement `read_metadata`**. Remplacer tous les paramètres, conserver principal, tenant, organisation et ID exacts, ainsi que toutes les capacités existantes encore voulues. Pour une autre révision, employer son véritable `expected_revision` et sa révision suivante :
+
+```json
+{
+  "version": 1,
+  "operation_id": "<nouvel-uuid-operation>",
+  "change": {
+    "action": "membership",
+    "expected_revision": 1,
+    "membership": {
+      "version": 1,
+      "membership_id": "<uuid-membership-existant>",
+      "principal": {
+        "kind": "human_local",
+        "installation_id": "<uuid-installation-existant>",
+        "account_id": "<uuid-compte-existant>"
+      },
+      "tenant_id": "<tenant-configure>",
+      "organization_scope": "engineering",
+      "revision": 2,
+      "active": true,
+      "capabilities": ["read_metadata", "read_broker_registry"]
+    }
+  }
+}
+```
+
+Pour OIDC, la même position `principal` vaut `{"kind":"human_oidc","issuer":"<issuer-exact-approuve>","subject":"<subject-verifie>"}`. Conserver les octets du principal existant : changer principal ou organisation d'un membership est refusé. Un premier membership utilise `expected_revision:0` et `revision:1`, après création de son compte. Enregistrer la mutation relue dans un nouveau fichier privé0600, sans champ `actor` :
+
+```sh
+"$AIGUARD_BIN" human apply \
+  --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
+  --mutation-file "$AIGUARD_PRIVATE/broker-reader-membership.json" \
+  --max-events 100000 --confirm-control-stopped
+```
+
+Seuls le contrôle de confiance authentifié ou cette autorité hors ligne vérifiée peuvent introduire ou réactiver ce droit tenant-wide. Un administrateur d'organisation possédant `manage_memberships` peut le conserver sur un membership déjà actif, le garder dormant sur un membership inactif, le retirer ou désactiver le membership dans ses droits existants. Il ne peut ni l'ajouter, ni le restaurer après retrait, ni réactiver un membership inactif qui le porte, pour lui-même ou autrui. Ne pas créer un second membership pour changer son principal/organisation immuable ou contourner cette frontière. OIDC exige aussi le plafond explicite sur claims vérifiés décrit dans le [guide SSO](../sso/README.fr.md#activer-explicitement-la-lecture-du-registre-brokers).
+
+Après réouverture des services de contrôle voulus, se connecter normalement et choisir un contexte **administration** actuellement proposé contenant `read_broker_registry`. Le dashboard propose **Brokers** et **Brokers enregistrés du tenant.** ; un contexte possédant cette seule capacité ouvre directement cette vue. Il ne lit automatiquement ni ressources, ni événements, ni export, ni leur flux SSE. Il n'existe ni `human brokers` ni commande brokers dans le CLI SSO au premier plan ; utiliser le dashboard ou le [contrat HTTP humain](../../api.md#registre-brokers-humain--human-broker-registry). Ne jamais saisir une clé runner dans le navigateur.
+
+Le tableau et **Détails du broker** montrent heure d'évaluation serveur, incarnation courante, révisions d'autorisation/heartbeat, autorités déclarées, dernière réception, expirations et reçu durable. **Bail courant** signifie que le bail enregistré est courant ; cela ne prouve pas un worker en fonctionnement. **Heartbeat d’une ancienne incarnation** conserve la dernière déclaration reçue sans l'attribuer à la nouvelle incarnation. Une page vide réussie signifie aucune ligne enregistrée à cette position et heure d'évaluation, jamais une activité runtime nulle. Les lignes proviennent des vraies opérations d'enregistrement/heartbeat du contrôle décrites dans le [guide workload](../workloads/README.fr.md#autoriser-un-broker-et-interpréter-son-heartbeat), sans événement synthétique ni édition manuelle de SQLite.
+
+La pagination est live, avec au plus100 lignes et256Kio par réponse ; le dashboard en demande25. Les lignes peuvent changer entre pages, sans total ni snapshot. Conserver le curseur opaque exact, le contexte, la version d'autorisation et la limite. Le serveur borne une traversée à1000pages/16Mio dans la durée absolue du contexte, au plus300secondes. Ce n'est pas un crédit d'audit renouvelable.
+
+**Actualiser** relit la vue sélectionnée. L'actualisation automatique est déclenchée au plus toutes les30secondes lorsque Brokers est visible ; latence réseau, files d'attente, navigateur suspendu ou contrôle déconnecté peuvent prolonger l'attente. Ce n'est ni un délai de réponse ni une borne de retrait des droits. Un403 retire lignes, détails et curseurs et propose **Relire mes accès**. Changer de contexte, quitter Brokers ou se déconnecter annule ses lectures et retire sa page ; les réponses tardives ne peuvent repeupler l'ancienne vue.
+
+Chaque page, même vide, exige un reçu durable dans les budgets humains existants du tenant/principal. Autorisation, projection bornée et reçu sont engagés dans une transaction Store ; la route réauthentifie avant publication. Le reçu constate la lecture, sans prouver livraison, exécution ou checkpoint signé externe. Une panne d'audit ne rend aucune page. Un503 `migration_required` exige la migration hors ligne ; un429 `audit_read_budget_exhausted` avec `contact_operator` exige une intervention, pas des retries périodiques. Le dashboard conserve la dernière page datée/périmée et arrête les lectures automatiques, même après changement de visibilité ou resélection. Préserver base, politique et reçus, examiner occupation/réserves puis réparer la cause. Après intervention, **Relire après intervention de l’opérateur** permet une tentative explicite ; seul un succès courant permet de reprendre l'actualisation. Les pannes temporaires de capacité/transport restent distinctes. Ne jamais supprimer l'audit, renouveler les credentials ou réinitialiser le stockage pour récupérer de la capacité.
+
+Cette vue ne qualifie ni transport multi-brokers, ni fédération, ni agrégation workers/sessions, ni complétude runtime, ni capacité100, ni release production. Elle ne change aucun contrat de quota ou facturation : l'allocation reste non facturable et l'usage non observé reste inconnu. Consulter les preuves d'ingénierie pour la portée réelle de validation des sources correspondantes.
 
 ## Consulter avec le CLI
 
@@ -204,7 +271,7 @@ physique de payload est 256 Mio ; `--max-events` règle celui des événements.
 Les capacités automatiques trop petites pour représenter les budgets protégés
 désactivent explicitement les nouvelles lectures humaines, sans relever le
 plafond physique ni invalider le stockage existant. Les lectures exigent aussi
-un schéma5 ou6 validé.
+un schéma5–7 validé ; les lectures brokers exigent7 et partagent les mêmes budgets humains cumulatifs.
 
 [audit-capacity.json](examples/audit-capacity.json) donne les défauts résolus pour
 `--max-events 100000`. Copier ce fichier dans le répertoire de contrôle privé

@@ -306,7 +306,7 @@ Dans le parcours manuel, l’opérateur doit créer un compte OIDC actif et un m
 
 Remplacez chaque UUID d’exemple par un UUID canonique neuf en minuscules et non nul pour son opération ou membership ; conservez chaque identité pour les retries exacts. Remplacez `REPLACE_WITH_VERIFIED_SUBJECT`, issuer, tenant, organisation et ID ressource de façon cohérente. Pour la DEMO, reprenez son issuer HTTP exact dans les trois modèles. Ces fichiers ne préattribuent aucun ID sujet. Un compte sans membership n’accorde aucun accès ; un membership seul n’attribue pas les ressources historiques.
 
-Enregistrez chaque mutation relue dans un fichier privé sous l’autorité de contrôle existante. Pour une base schéma4/5/6 existante validée à supervision inactive, lancez la commande suivante, puis répétez-la avec `oidc-membership.json` et `oidc-resource-grant.json` après la réussite de chaque commande précédente :
+Enregistrez chaque mutation relue dans un fichier privé sous l’autorité de contrôle existante. Pour une base schéma4–7 existante validée à supervision inactive, lancez la commande suivante, puis répétez-la avec `oidc-membership.json` et `oidc-resource-grant.json` après la réussite de chaque commande précédente :
 
 ```sh
 AIGUARD_BIN="/absolute/path/to/agentsandbox"
@@ -316,7 +316,7 @@ AIGUARD_PRIVATE="/absolute/private/ai-guard"
 "$AIGUARD_BIN" human apply \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --mutation-file "$AIGUARD_PRIVATE/oidc-account.json" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 L’entrée accepte seulement `version`, `operation_id` et `change` typé ; un champ `actor` est refusé. L’autorité vient de l’opérateur effectif du filesystem. Chaque mutation et son audit sont atomiques ; les trois commandes distinctes ne forment pas une seule transaction. Après un résultat ambigu, préservez le fichier et rejouez exactement opération et octets. Un sens différent exige un nouvel UUID d’opération. `expected_revision:0`/`revision:1` désigne une création ; modifier un enregistrement existant exige sa révision précédente exacte et la suivante. N’éditez pas directement les projections SQLite.
@@ -327,9 +327,37 @@ L’entrée accepte seulement `version`, `operation_id` et `change` typé ; un c
 
 Les droits effectifs sont l’intersection de ce plafond et du membership actif côté contrôle, puis du contexte choisi et des permissions de ressource. Les exemples permettent `read_metadata`, `read_content` et `export` en contexte personnel. La règle administrateur ajoute `read_tenant_metadata` ; le membership de l’administrateur voulu doit aussi le contenir explicitement. Les autres memberships ne doivent pas l’acquérir par la seule organisation commune. Les capacités administratives sont interdites dans `default_capabilities`.
 
-Les capacités acceptées sont `read_metadata`, `read_content`, `export`, `read_tenant_metadata`, `manage_memberships` et `manage_grants`. Une capacité configurable ne prouve pas l’existence d’un parcours Web complet de mutation ou d’administration. Les contextes personnel et administration sont distincts et doivent être proposés par Rust. Administration du realm, noms de comptes et rôles d’un autre client ne donnent aucun droit applicatif ou accès inter-tenant implicite.
+Les capacités acceptées sont `read_metadata`, `read_content`, `export`, `read_tenant_metadata`, `manage_memberships`, `manage_grants` et `read_broker_registry`. Une capacité configurable ne prouve pas l’existence d’un parcours Web complet de mutation ou d’administration. Les contextes personnel et administration sont distincts et doivent être proposés par Rust. Administration du realm, noms de comptes et rôles d’un autre client ne donnent aucun droit applicatif ou accès inter-tenant implicite.
 
 Changez `mapping.revision` à chaque évolution du mapping approuvé et redémarrez le gateway avec la configuration relue. Pour retirer membership/compte/grant, appliquez une nouvelle mutation hors ligne auditée avec révision incrémentée et `active:false` selon le cas. Arrêtez tous les consommateurs, puis redémarrez et imposez une nouvelle authentification. Un changement de rôle IdP seul ne révoque pas immédiatement un token émis ; les rôles changent avec de nouveaux claims vérifiés, tandis que les lectures humaines revalident les permissions du contrôle.
+
+### Activer explicitement la lecture du registre brokers
+
+Les manifestes setup/exemples distribués n'accordent **pas** `read_broker_registry`. `setup prepare` produit le schéma5 et refuse une identité demandant cette capacité avant publication des artefacts d'installation. Laisser la DEMO neuve et les memberships ordinaires existants inchangés tant que l'opérateur n'approuve pas délibérément cet accès à l'infrastructure du tenant. Le rôle public `admin-ai-guard` et l'administrateur du realm ne l'acquièrent pas automatiquement.
+
+Pour chaque tenant voulu, arrêter tous consommateurs de sa base et redémarrages automatiques, conserver installation/volume préparés existants, puis appliquer [5→6→7 avec une nouvelle sauvegarde vérifiée par étape](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers). Une base6 n'exige que6→7. Le chemin préparé est `/data/installation/tenants/<tenant>/audit.sqlite` ; utiliser UID/GID du conteneur et volume inspecté réels, sans base hôte différente. La migration n'ajoute ni compte, ni grant de membership, ni activation d'exécution ; la réouverture à froid reste en maintenance inactive. Ne pas employer bootstrap neuf, édition de métadonnées ou stockage de remplacement pour réactiver.
+
+La lecture exige **à la fois** un membership actif côté contrôle contenant explicitement `read_broker_registry` et une règle explicite de `gateway.mapping.rules` dont le plafond sur claims vérifiés l'inclut. La [procédure de membership typé](../identity/README.fr.md#autoriser-la-lecture-nominative-du-registre-brokers) montre `human apply` avec `version`, `operation_id`, `change.action:"membership"`, révisions précédente/suivante exactes, principal/organisation immuables et aucun `actor` caller. Pour OIDC, conserver issuer/subject `human_oidc` exacts. Employer les mêmes `--max-events` et politique explicite `--audit-capacity-file` que l'installation. Seul le contrôle authentifié/hors ligne de confiance peut ajouter/réactiver cette capacité ; `manage_memberships` ne permet pas de promouvoir soi-même ou autrui.
+
+Dans une copie privée relue du JSON OIDC existant, voici un **modèle d'une seule règle dans `gateway.mapping.rules`** :
+
+```json
+{
+  "claim_path": ["resource_access", "ai-guard-api", "roles"],
+  "equals": "guard-broker-reader",
+  "capabilities": ["read_broker_registry"]
+}
+```
+
+Remplacer chemin/client et rôle par le véritable claim vérifié administré par l'opérateur. Ce fragment n'est ni un fichier OIDC complet ni une commande de création de rôle IdP. Préserver URLs fournisseur, identité/politique d'audit et autres règles. Si le même couple `claim_path`/`equals` existe, modifier sa liste de capacités délibérément au lieu d'ajouter un doublon. Incrémenter `gateway.mapping.revision` en conservant son format chaîne, par exemple `company-policy-2-brokers`. Ne jamais mettre une capacité administration dans `default_capabilities`. Un claim brut/rôle correspondant sans membership local explicite n'accorde aucun accès ; un membership sans plafond correspondant n'autorise pas davantage la lecture. Aucun mapping ne choisit un autre tenant ou ne transforme le navigateur en runner.
+
+Redémarrer gateway/dashboard correspondants avec configuration/données existantes, sans option d'initialisation. Se reconnecter et choisir un contexte administration actuellement proposé portant la capacité. **Brokers** ouvre **Brokers enregistrés du tenant.** ; un contexte possédant ce seul droit y arrive sans lecture ressources/événements/export/SSE. `read_tenant_metadata` conserve son ancienne portée ressources filtrée par organisation. Ni `human` ordinaire ni CLI SSO au premier plan n'ont de commande brokers ; utiliser cette vue ou le [contrat GET humain typé](../../api.md#registre-brokers-humain--human-broker-registry).
+
+Pour retirer l'accès, l'opérateur applique une nouvelle révision auditée du membership retirant la capacité ou le désactivant, ou révise le plafond approuvé et impose une nouvelle connexion. Un administrateur d'organisation peut conserver/retirer un droit existant ou le garder dormant, jamais l'ajouter ou réactiver son membership inactif. Un refus reconnu de contexte/permission retire données, détails et curseurs ; les réponses tardives ne les restaurent pas. La révocation ne rappelle pas les octets déjà reçus et le déclenchement visible toutes les30secondes ne borne pas le délai global de retrait.
+
+La page exige l'audit humain durable obligatoire, même vide, et partage les budgets F1 tenant/principal des lectures identité/ressources. Le dashboard préserve `429 audit_read_budget_exhausted`/`contact_operator` du préflight identité comme de la page. Il arrête les lectures automatiques et conserve toute dernière page encore permise datée/périmée. Préserver base tenant, politique et reçus, examiner occupation/réserves et réparer la cause ; ne pas réinitialiser l'audit ou renouveler les credentials pour retrouver de la capacité. Après intervention, **Relire après intervention de l’opérateur** déclenche un retry explicite. Capacité temporaire et erreurs transport restent distinctes. Un503 `migration_required` demande la migration hors ligne, sans repli viewer. Voir [l'accès nominatif](../identity/README.fr.md#autoriser-la-lecture-nominative-du-registre-brokers) pour états, reçus et limites de fraîcheur.
+
+De vraies opérations d'enregistrement/heartbeat doivent déjà avoir alimenté le registre réel. Un registre vide est valide ; ne pas insérer d'observations de fixture. Cette vue ne qualifie ni déploiement réel navigateur/OIDC, ni fédération, ni inventaire runtime complet, ni release production. Les preuves d'ingénierie correspondantes indiquent ce qui a réellement été exécuté.
 
 ## Démarrer ou rouvrir les services existants
 

@@ -10,9 +10,9 @@ This manual describes the complete product contract. The implementation and qual
 |---|---|
 | [Local workstation](local/README.md) | Rust CLI, Docker/Podman, control services, first worker, permissions, workspace/export, data and recovery. |
 | [Trusted local broker](broker/README.md) | Private Registry2, Docker start profile, service/IPC, replay identities, approval, cancellation, recovery and export. |
-| [Workload identities and relay](workloads/README.md) | Explicit schema6 migration, scoped credentials, central broker registry, directed messages, audit budgets and maintenance. Runtime transport remains separate. |
+| [Workload identities and relay](workloads/README.md) | Explicit migrations5→6→7, scoped credentials, broker registry and its separately authorized human view, directed messages, audit budgets and maintenance. Runtime transport remains separate. |
 | [AI providers](providers/README.md) | Codex and Claude Code with subscription or API, explicit selection, private credentials and optional Jev. |
-| [Named local access](identity/README.md) | Private human account provisioning, explicit resource permissions, authenticated reads, export and recovery without an IdP. |
+| [Named local access](identity/README.md) | Private human account provisioning, explicit resource and broker-registry permissions, authenticated reads, export and recovery without an IdP. |
 | [ai-guard SSO](sso/README.md) | Fresh local DEMO: own images, inspected identity network, UID1000 volume preparation and normal reopen. Also covers existing/enterprise providers, Web sign-in, foreground CLI and recovery. Complete gateway/Web/CLI interoperability remains unqualified. |
 | [Keycloak provider](keycloak/README.md) | Separate local identity-provider project, public Web/CLI clients, PKCE, claims and enterprise IdP preparation. |
 | [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |

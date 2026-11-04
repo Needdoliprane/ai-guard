@@ -29,7 +29,7 @@ Le fonctionnement rootless est l'exigence normale. `allow_rootful_runtime: true`
 
 ## Exiger un contrôle compatible et actif
 
-Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version` 3, 4, 5 ou 6 et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
+Chaque requête authentifie de nouveau son credential **présenté** avec `GET /api/v1/control/protocol`. Le broker exige `role: "runner"`, le tenant et le namespace configurés, `schema_version` 3, 4, 5, 6 ou 7 et le protocole `broker_supervision_v1`. Submit, approve, resume et export exigent aussi `active: true`. Status, list, recovery-status et cancel peuvent s'authentifier auprès d'un contrôle compatible inactif ; leurs autres dépendances et vérifications de sûreté restent applicables. Un même UID Unix donne accès au transport, pas une authentification tenant.
 
 Lire les vrais tenant, namespace, rôle et état de supervision avant de rédiger le registre. Remplacer le binaire, l'origine et le chemin de credential privé par les valeurs de l'installation :
 
@@ -45,22 +45,32 @@ Ne pas deviner le namespace, recopier un UUID de test, choisir un autre tenant d
 
 Les fichiers Compose locaux standards démarrent le contrôle schéma2. `/healthz` établit seulement la disponibilité du service. Ni une stack saine ni `init` n'établissent le protocole de supervision ou une autorité d'exécution fraîche. Le [bootstrap exclusif existant pour des bases de contrôle supervisé neuves](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) utilise l'option gateway `--initialize-supervised-stores BACKUP_ROOT`, avec destinations de bases absentes, sauvegardes privées vérifiées et fichiers de credentials existants. Il doit être intégré au déploiement conteneurisé du contrôle par l'opérateur ; ce guide broker ne fournit pas de profil Compose schéma3.
 
-Une limite essentielle concerne la reprise : une réouverture ordinaire d'une base schéma3,4,5 ou6 conserve son namespace en maintenance inactive. Réutiliser l'option de bootstrap sur cette base refuse le démarrage. Une procédure de réactivation sûre n'est pas actuellement livrée. Préserver bases, sauvegardes et preuves runtime ; ne pas supprimer une base, modifier les métadonnées d'activation ou créer des identités de remplacement pour contourner cet état. `broker resume` réconcilie un job et ne peut pas réactiver le contrôle. La CLI actuelle n'a pas de commande `broker init`, `broker doctor` ou d'installation de service OS.
+Une limite essentielle concerne la reprise : une réouverture ordinaire d'une base schéma3–7 conserve son namespace en maintenance inactive. Réutiliser l'option de bootstrap sur cette base refuse le démarrage. Une procédure de réactivation sûre n'est pas actuellement livrée. Préserver bases, sauvegardes et preuves runtime ; ne pas supprimer une base, modifier les métadonnées d'activation ou créer des identités de remplacement pour contourner cet état. `broker resume` réconcilie un job et ne peut pas réactiver le contrôle. La CLI actuelle n'a pas de commande `broker init`, `broker doctor` ou d'installation de service OS.
 
 ### Mettre à jour le stockage explicitement
 
-Arrêter le gateway et tous les brokers/consommateurs de la base du tenant, y compris les redémarrages automatiques. `migrate-control --target-version` accepte la version suivante exacte2,3,4,5 ou6 ; son défaut reste2. Utiliser une sauvegarde neuve distincte pour chaque étape. Le schéma5 ajoute l'audit nominatif obligatoire des lectures, décrit dans le guide [accès local nominatif](../identity/README.fr.md). Le schéma6 ajoute bindings workload, registre des brokers, relais dirigé et plancher UTC durable ; suivre le [guide workload](../workloads/README.fr.md) pour la migration explicite5→6, les budgets d'audit protégés et les contrats HTTP par rôle. Cela ne raccorde pas les workers à un transport runtime et n'active pas la supervision. Pour une source existante schéma3 :
+Arrêter le gateway et tous les brokers/consommateurs de la base du tenant, y compris les redémarrages automatiques. `migrate-control --target-version` accepte la version suivante exacte2,3,4,5,6 ou7 ; son défaut reste2. Utiliser une sauvegarde neuve distincte pour chaque étape. Le schéma5 ajoute l'audit nominatif obligatoire des lectures, décrit dans le guide [accès local nominatif](../identity/README.fr.md). Le schéma6 ajoute bindings workload, registre des brokers, relais dirigé et plancher UTC durable ; suivre le [guide workload](../workloads/README.fr.md) pour la migration explicite5→6, les budgets d'audit protégés et les contrats HTTP par rôle. Cela ne raccorde pas les workers à un transport runtime et n'active pas la supervision. Pour une source existante schéma3 :
 
 ```sh
 "/absolute/path/to/agentsandbox" migrate-control \
   --data "/absolute/private/ai-guard/audit.sqlite" \
   --tenant-id "<configured-tenant-id>" \
   --backup "/absolute/private/ai-guard/audit-before-identities-v4.sqlite" \
-  --target-version 4 \
+  --target-version 4 --max-events 100000 \
   --confirm-control-stopped
 ```
 
 Mettre à jour ensemble les lecteurs gateway et broker avant d'ouvrir le schéma4. La sauvegarde vérifiée, les anciens événements, le namespace, la liaison tenant et les claims consommés sont préservés ; un ancien binaire refuse le nouveau schéma. Migration/réouverture n'activent pas une supervision inactive. Le schéma4 prépare le stockage d'identité humaine et de permissions ; il ne crée pas de compte, n'attribue pas les anciens événements à une personne, ne transforme pas une clé technique en credential humain et n'effectue pas de connexion OIDC. Conserver backups et rapports après un échec et enquêter avant de choisir une nouvelle destination. Voir la [maintenance hors ligne](../../operations.md#répertoire-sqlite-privé) pour la sauvegarde vérifiée et les limites de restauration.
+
+### Lire les brokers enregistrés après migration7
+
+Le schéma7 ajoute la lecture humaine du registre brokers existant du tenant par `GET /api/v1/human/brokers`. Suivre la [procédure exacte5→6→7 avec sauvegardes](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers), y compris pour une base setup SSO en5. La migration utilise la même base tenant et ajoute son marqueur de capacité d'audit sans activer la supervision. Les lecteurs acceptant7 conservent la compatibilité5/6 ; mettre gateway, clients broker/STOP et dashboard à jour ensemble avant d'ouvrir7. Cela ne délivre aucun nouveau claim et ne contourne ni réouverture inactive ni écarts de fencing/reprise.
+
+La vue **Brokers** exige la capacité administration explicitement accordée `read_broker_registry` ; le [guide nominatif](../identity/README.fr.md#autoriser-la-lecture-nominative-du-registre-brokers) couvre création, mutation du membership, retrait et reprise. Elle montre l'infrastructure du tenant indépendamment de l'accès aux ressources `read_tenant_metadata`, filtré par organisation. SSO exige membership et plafond configuré sur claims. Ne jamais envoyer de credential runner au navigateur.
+
+Les lignes proviennent de vraies [opérations authentifiées binding/grant/heartbeat](../workloads/README.fr.md#autoriser-un-broker-et-interpréter-son-heartbeat). `broker serve --config` ne publie pas automatiquement ce registre et ne produit pas ses observations. Un bail courant n'est ni une inspection runtime ni une preuve que ce broker permanent ou un worker fonctionne ; une entrée périmée/révoquée n'arrête pas un runtime et ne libère pas de quota. Préserver incarnation et heure de réception d'un ancien heartbeat pour le diagnostic.
+
+Ce registre humain diffère de Registry2 privé ci-dessous et de la liste de jobs IPC `broker list`. Il n'expose ni grant brut ni ID/digest de credential, ne fournit ni export, fédération workers ou accès moteur au frontend. Un refus cumulatif d'audit exige de préserver base/politique et réparer la capacité avant une tentative explicite, sans supprimer l'audit ou réinitialiser le contrôle. Cette vue ne qualifie pas la production et ne réactive pas la supervision.
 
 ## Écrire le registre opérateur privé
 

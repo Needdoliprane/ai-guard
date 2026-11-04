@@ -18,10 +18,10 @@ AIGUARD_PRIVATE="/absolute/private/ai-guard"
 "$AIGUARD_BIN" migrate-control \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --backup "$AIGUARD_PRIVATE/before-human-access-v5.sqlite" \
-  --target-version 5 --confirm-control-stopped
+  --target-version 5 --max-events 100000 --confirm-control-stopped
 ```
 
-Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision, resume-provision and apply can maintain validated schemas4,5 or6 with inactive supervision; HTTP human reads support5/6 and report `migration_required` before emitting their read audit on an older store. The [workload guide](../workloads/README.md) covers the separate explicit5→6 migration.
+Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision, resume-provision and apply can maintain validated schemas4–7 with inactive supervision; ordinary HTTP human reads support5–7 and report `migration_required` before emitting their read audit on an older store. Broker registry reads and the new membership capability require7. The [workload guide](../workloads/README.md#enable-named-broker-registry-reads) covers explicit5→6→7 maintenance, including a store created by `setup prepare` at5.
 
 For a container-owned database, run offline maintenance as the existing control UID/GID against its existing data volume, with every other consumer stopped. A host CLI cannot assume ownership of a Docker Desktop volume. The one-shot container needs only that data volume and its trusted image; it needs neither a socket, runner credential, provider secret nor network. Preserve the original Compose project/volume identity. Do not initialize a replacement database to bypass a failed upgrade.
 
@@ -40,7 +40,7 @@ docker run --name ai-guard-offline-human-v5 --pull never \
   --mount "type=volume,source=$AIGUARD_AUDIT_VOLUME,target=/data,volume-nocopy" \
   "$AIGUARD_CONTROL_IMAGE_ID" migrate-control --data /data/audit.sqlite \
   --tenant-id "$AIGUARD_TENANT" --backup /data/before-human-access-v5.sqlite \
-  --target-version 5 --confirm-control-stopped
+  --target-version 5 --max-events 100000 --confirm-control-stopped
 docker run --name ai-guard-offline-human-alice --pull never \
   --user 1000:1000 --network none --read-only --cap-drop ALL \
   --security-opt no-new-privileges:true --cpus 1 --memory 384m --memory-swap 384m --pids-limit 128 \
@@ -48,7 +48,7 @@ docker run --name ai-guard-offline-human-alice --pull never \
   --mount "type=volume,source=$AIGUARD_AUDIT_VOLUME,target=/data,volume-nocopy" \
   "$AIGUARD_CONTROL_IMAGE_ID" human provision --data /data/audit.sqlite \
   --tenant-id "$AIGUARD_TENANT" --name Alice --organization engineering \
-  --output-dir /data/human-alice --confirm-control-stopped
+  --output-dir /data/human-alice --max-events 100000 --confirm-control-stopped
 )
 ```
 
@@ -63,7 +63,7 @@ The output parent must already be private (`0700`). Choose a new output director
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --name "Alice" --organization "engineering" \
   --output-dir "$AIGUARD_PRIVATE/human-alice" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 The command prepares `credential`, `recovery.json` and `completion.json` privately. It generates a random human credential without printing it. Account, credential binding and initial membership commit atomically with their audit. Standard output reports identifiers and file paths, not the credential. Default account capabilities are read metadata, read content and export; resource grants remain separately required. Restrict capabilities with `--capabilities read-metadata` when appropriate.
@@ -74,7 +74,7 @@ After an interrupted or ambiguous result, preserve the exact output and database
 "$AIGUARD_BIN" human resume-provision \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --output-dir "$AIGUARD_PRIVATE/human-alice" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 Resume verifies the retained namespace, credential digest, paths, files and operation identities. It does not rotate a credential or recreate missing preparation. Protect recovery/completion files as control records. Deliver only the user's credential through your private channel; do not distribute the full operator preparation. Keep the user's credential file `0600` under a private parent and outside the project being executed.
@@ -116,10 +116,77 @@ For a first session binding, save this **template** in a new private0600 JSON fi
 "$AIGUARD_BIN" human apply \
   --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
   --mutation-file "$AIGUARD_PRIVATE/alice-session-grant.json" \
-  --confirm-control-stopped
+  --max-events 100000 --confirm-control-stopped
 ```
 
 Deactivate a credential, membership, account or grant through a new audited mutation, retaining its identity and increasing its revision. For this unchanged grant at revision1, a revocation uses a new operation UUID, `expected_revision:1`, grant `revision:2` and `active:false`, preserving its tenant, organization, resource and owner. A conflicting revision is a refusal: inspect the retained operator record rather than guessing. Do not delete the database, edit projections directly or reuse another account's credential. After rights change, old contexts expire or are refused; reacquire an offered context. Provisioning itself does not launch a worker or delegate runner authority.
+
+## Authorize named broker registry readers
+
+`read_broker_registry` is a separate administration capability for infrastructure metadata across the authenticated tenant. It does not expose resource content, raw broker grants, credentials, worker inventory or export. Existing `read_tenant_metadata` keeps its organization filter. Neither old memberships nor an administrator's name or IdP role acquires the new capability automatically.
+
+First perform the [explicit migration to7](../workloads/README.md#enable-named-broker-registry-reads) with all consumers stopped. On validated schema7 with inactive supervision, a trusted filesystem operator can create a **new** local reader with only this capability:
+
+```sh
+"$AIGUARD_BIN" human provision \
+  --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
+  --name "Infrastructure reader" --organization "engineering" \
+  --capabilities read-broker-registry \
+  --output-dir "$AIGUARD_PRIVATE/human-infrastructure-reader" \
+  --max-events 100000 --confirm-control-stopped
+```
+
+Use the installation's actual event limit instead of `100000` if different. When it uses an explicit human audit policy, also pass the same `--audit-capacity-file` as the other offline identity commands. The default provisioning capabilities remain `read-metadata,read-content,export`; the new option is never a default. Requesting it below7 fails before creating the preparation directory. `resume-provision` can replay an old exact preparation after migration without adding a grant or rotating its credential.
+
+For an **existing** local or OIDC account, use `human apply` and its actual membership record. The following is a closed JSON **template for a membership currently at revision1 with only `read_metadata`**. Replace every placeholder, keep the exact principal, tenant, organization and membership ID, and preserve every existing capability that is still intended. A real record at another revision requires its actual `expected_revision` and next `revision`:
+
+```json
+{
+  "version": 1,
+  "operation_id": "<new-operation-uuid>",
+  "change": {
+    "action": "membership",
+    "expected_revision": 1,
+    "membership": {
+      "version": 1,
+      "membership_id": "<existing-membership-uuid>",
+      "principal": {
+        "kind": "human_local",
+        "installation_id": "<existing-installation-uuid>",
+        "account_id": "<existing-account-uuid>"
+      },
+      "tenant_id": "<configured-tenant-id>",
+      "organization_scope": "engineering",
+      "revision": 2,
+      "active": true,
+      "capabilities": ["read_metadata", "read_broker_registry"]
+    }
+  }
+}
+```
+
+For OIDC the same `principal` position is `{"kind":"human_oidc","issuer":"<exact-approved-issuer>","subject":"<verified-subject>"}`. Use the existing principal bytes; changing principal or organization on a membership is refused. An initial membership uses `expected_revision:0` and `revision:1`, after its account exists. Save the reviewed mutation as a new private0600 file, without an `actor` field:
+
+```sh
+"$AIGUARD_BIN" human apply \
+  --data "$AIGUARD_DATA" --tenant-id "$AIGUARD_TENANT" \
+  --mutation-file "$AIGUARD_PRIVATE/broker-reader-membership.json" \
+  --max-events 100000 --confirm-control-stopped
+```
+
+Only authenticated trusted control or this checked offline authority can introduce or reactivate the tenant-wide capability. An organization administrator with `manage_memberships` may retain it on an already active membership, keep it dormant while inactive, remove it or deactivate the membership within that administrator's existing rights. The administrator cannot add it, restore it after removal, or reactivate an inactive membership carrying it, for themselves or another user. Do not create a second membership to change its immutable principal/organization or evade this boundary. OIDC additionally requires the explicit verified-claim ceiling described in the [SSO guide](../sso/README.md#opt-in-to-broker-registry-reads).
+
+After the intended control services reopen, authenticate normally and choose a currently offered **administration** context containing `read_broker_registry`. The dashboard exposes **Brokers** and **Brokers enregistrés du tenant.**; a context with only this capability opens that view directly. It does not automatically read resources, events, exports or their SSE stream. There is no `human brokers` CLI or broker command in the foreground SSO CLI; use the dashboard or the [human HTTP contract](../../api.md#registre-brokers-humain--human-broker-registry). Never enter a runner key in the browser.
+
+The table and **Détails du broker** show the server evaluation time, current incarnation, grant/heartbeat revisions, declared authorities, last heartbeat reception, expiry and durable read receipt. **Bail courant** means the recorded lease is current; it is not proof of a running worker. **Heartbeat d’une ancienne incarnation** preserves the last received assertion without attributing it to a new incarnation. A successful empty page means no registered row at that position and evaluation time, never zero runtime activity. Rows come from the real trusted registration/heartbeat operations in the [workload guide](../workloads/README.md#grant-a-broker-and-interpret-its-heartbeat), not synthetic events or manually edited SQLite.
+
+Pagination is live, at most100 rows and256KiB per response; the dashboard requests25. Changes can occur between pages, and no total or snapshot is supplied. Keep the exact opaque cursor with the same context, authorization version and limit. The server traversal budget is1000 pages/16MiB within the context's absolute lifetime of at most300seconds. This is a traversal bound, not a replenishable audit allowance.
+
+**Actualiser** rereads the selected view. Automatic refresh is triggered at most every30seconds while Brokers is visible; network latency, queueing, a suspended browser and a disconnected control can extend the time before any result. This is no response or permission-withdrawal deadline. A403 removes rows, details and cursors and offers **Relire mes accès**. Changing context, leaving Brokers or disconnecting aborts its reads and clears its page; late responses cannot refill the old view.
+
+Each page, including an empty one, requires a durable receipt sharing the existing human tenant/principal audit budgets. Authorization, bounded projection and receipt commit in one Store transaction; the route reauthenticates before publication. A receipt records the read, not proof of delivery, execution or an externally signed checkpoint. An audit failure returns no page. A503 `migration_required` requires offline migration; a429 `audit_read_budget_exhausted` with `contact_operator` requires intervention, not timer retries. The dashboard retains any previous page as dated/stale and stops automatic reads even through visibility changes or reselection. Preserve database, policy and receipts, inspect occupancy/reserves and repair the cause. After intervention use **Relire après intervention de l’opérateur** for one explicit attempt; a current success permits refresh again. Temporary capacity/transport failures remain distinct. Never delete audit, rotate credentials or reset storage to recover capacity.
+
+This registry view does not qualify multi-broker transport, federation, worker/session aggregation, runtime completeness, capacity100 or a production release. It changes no quota or billing contract: allocation remains nonbillable, and unobserved usage remains unknown. See the engineering records for the actual validation scope of the matching sources.
 
 ## Read from the CLI
 
@@ -201,7 +268,8 @@ prepared UTF-8 payload stored in the audit, rather than response bytes or SQLite
 file size. The physical payload limit is 256 MiB; `--max-events` sets the event
 limit. Very small automatic capacities that cannot represent protected human
 budgets disable new human reads explicitly, without raising the physical limit
-or invalidating existing storage. Human reads still require validated schema5 or6.
+or invalidating existing storage. Ordinary human reads require validated schema5–7;
+broker registry reads require7 and consume the same cumulative human budgets.
 
 [audit-capacity.json](examples/audit-capacity.json) gives the resolved defaults
 for `--max-events 100000`. Copy it into your existing private control directory

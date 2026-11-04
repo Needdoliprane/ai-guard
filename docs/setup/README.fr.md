@@ -10,9 +10,9 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 |---|---|
 | [Poste local](local/README.fr.md) | CLI Rust, Docker/Podman, services de contrôle, premier worker, permissions, copie/export, données et reprise. |
 | [Broker local de confiance](broker/README.fr.md) | Registre privé2, profil de lancement Docker, service/IPC, identités de replay, approbation, annulation, reprise et export. |
-| [Identités workload et relais](workloads/README.fr.md) | Migration6 explicite, credentials restreints, registre central des brokers, messages dirigés, budgets d'audit et maintenance. Transport runtime distinct. |
+| [Identités workload et relais](workloads/README.fr.md) | Migrations5→6→7 explicites, credentials restreints, registre des brokers et sa vue humaine autorisée séparément, messages dirigés, budgets d'audit et maintenance. Transport runtime distinct. |
 | [Fournisseurs IA](providers/README.fr.md) | Codex et Claude Code par abonnement ou API, sélection explicite, credentials privés et Jev optionnel. |
-| [Accès local nominatif](identity/README.fr.md) | Provisioning privé des comptes humains, permissions explicites, consultation authentifiée, export et reprise sans IdP. |
+| [Accès local nominatif](identity/README.fr.md) | Provisioning privé des comptes humains, permissions explicites sur ressources et registre brokers, consultation authentifiée, export et reprise sans IdP. |
 | [SSO ai-guard](sso/README.fr.md) | DEMO locale neuve : images propres, réseau d’identité inspecté, préparation du volume UID1000 et réouverture normale. Couvre aussi fournisseurs existants/entreprise, connexion Web, CLI au premier plan et reprise. Interopérabilité complète gateway/Web/CLI non qualifiée. |
 | [Fournisseur Keycloak](keycloak/README.fr.md) | Projet fournisseur local séparé, clients publics Web/CLI, PKCE, claims et préparation de l'IdP d'entreprise. |
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |

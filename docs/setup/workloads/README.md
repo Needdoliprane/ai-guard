@@ -4,7 +4,7 @@
 
 This guide describes the Rust gateway's technical HTTP contracts for workload credentials, broker declarations and directed worker messages. They use one existing SQLite database per tenant. These endpoints do not start workers or connect remote brokers. Workers retain `network: "none"`; the private Unix/runtime transport that would connect them to this relay is not wired or qualified. Do not attach a worker to the control network to make these examples reachable.
 
-Use the [engineering ledger](../../engineering/CURRENT_STATE.md), [validation](../../engineering/VALIDATION.md) and [gates](../../engineering/PRODUCTION_READINESS.md) for qualification. HTTP backend behavior alone does not establish the A1/A2/B1 three-worker recipe, federation, multiple hosts, a human administration UI or measured capacity for 100 workers.
+Use the [engineering ledger](../../engineering/CURRENT_STATE.md), [validation](../../engineering/VALIDATION.md) and [gates](../../engineering/PRODUCTION_READINESS.md) for qualification. HTTP backend behavior alone does not establish the A1/A2/B1 three-worker recipe, federation, multiple hosts, complete human administration or measured capacity for 100 workers.
 
 ## Prepare storage without activating execution
 
@@ -17,10 +17,11 @@ Use the reviewed control binary, the existing tenant database and its private co
 | 4 | Human identity storage; compatible broker protocol reader. |
 | 5 | Mandatory human-read audit; compatible broker protocol reader. |
 | 6 | Workload bindings, broker registry, relay and durable UTC floor; compatible broker protocol reader. These workload contracts require this explicit migration. |
+| 7 | Separate named human broker-registry projection and audit capability marker; explicit6→7, with no automatic grant or activation. |
 
-Broker compatibility also requires the configured namespace, tenant, runner role and `broker_supervision_v1`. Fresh Submit, approve, resume and export require active supervision. **Migrating or reopening a store does not activate it.** Ordinary reopen of schemas 3–6 remains inactive maintenance; safe reactivation is not delivered. Do not edit metadata, delete storage or reuse exclusive fresh-store initialization to bypass that condition. See [active control and recovery](../broker/README.md#require-an-active-compatible-control).
+Broker compatibility also requires the configured namespace, tenant, runner role and `broker_supervision_v1`. Fresh Submit, approve, resume and export require active supervision. **Migrating or reopening a store does not activate it.** Ordinary reopen of schemas 3–7 remains inactive maintenance; safe reactivation is not delivered. Do not edit metadata, delete storage or reuse exclusive fresh-store initialization to bypass that condition. See [active control and recovery](../broker/README.md#require-an-active-compatible-control).
 
-Offline human maintenance (`human provision`, `human resume-provision` and `human apply`) accepts an existing validated schema 4, 5 or 6 database with inactive supervision. After the explicit 5→6 migration, use the same private control filesystem, tenant binding and `--confirm-control-stopped` attestation. The commands do not create or migrate the database or reactivate supervision. Preserve private credentials and recovery files; resume only the exact retained preparation, without rotating its credential or overwriting its files. Follow [account provisioning and recovery](../identity/README.md#provision-an-account-and-retain-its-recovery) and keep the same audit capacity policy across consumers.
+Offline human maintenance (`human provision`, `human resume-provision` and `human apply`) accepts an existing validated schema 4–7 database with inactive supervision. After the explicit 5→6 migration, use the same private control filesystem, tenant binding and `--confirm-control-stopped` attestation. The commands do not create or migrate the database or reactivate supervision. Preserve private credentials and recovery files; resume only the exact retained preparation, without rotating its credential or overwriting its files. Follow [account provisioning and recovery](../identity/README.md#provision-an-account-and-retain-its-recovery) and keep the same audit capacity policy across consumers.
 
 For an existing schema 5 store, replace every installation reference below. The backup destination must be new; its private parent must already exist. Migration verifies a backup and upgrades exactly one step. Its default target is still 2, so spell out 6:
 
@@ -33,6 +34,30 @@ For an existing schema 5 store, replace every installation reference below. The 
 ```
 
 For older sources, apply each next migration with a separate new backup: 3→4→5→6, following [offline storage maintenance](../../operations.md#répertoire-sqlite-privé). Update all readers together; older binaries refuse newer schemas. Preserve tenant binding, namespace, events, consumed claims, credentials and verified backups. Never replace migration with a SQLite `user_version` edit. For container-owned storage, use the existing control UID/GID and its inspected existing data volume with other consumers stopped; the [identity guide](../identity/README.md#prepare-storage-and-authority) explains that maintenance boundary. Do not guess a volume name or initialize a replacement store.
+
+## Enable named broker registry reads
+
+Schema7 adds the separately authorized human projection of this existing registry. It uses the **same tenant SQLite database**, broker records and human audit capacity; it adds no worker transport or automatic broker registration. Keep gateway, broker/STOP readers, native clients and the built dashboard matched to the version accepting7. Those readers retain the historical5/6 contracts; older binaries that do not recognize7 cannot reopen it. The new capability is not granted by migration, defaults or historical preparation replay.
+
+Storage from `setup prepare` is at5: first run the explicit5→6 command above, check its successful report and retain its verified schema5 backup. Then, with every consumer still stopped, migrate the **same** database6→7. Replace paths/tenant and use the installation's actual `--max-events`; do not rerun5→6 on a7 store:
+
+```sh
+"/absolute/path/to/agentsandbox" migrate-control \
+  --data "/absolute/private/ai-guard/audit.sqlite" \
+  --tenant-id "<configured-tenant-id>" \
+  --backup "/absolute/private/ai-guard/before-human-brokers-v7.sqlite" \
+  --target-version 7 --max-events 100000 --confirm-control-stopped
+```
+
+For container-owned data, follow the [identity guide's offline boundary](../identity/README.md#prepare-storage-and-authority): existing control UID/GID, inspected existing volume, no network/socket, matching image, all other consumers stopped. `/data/installation/tenants/<tenant>/audit.sqlite` applies to a prepared SSO volume rather than legacy `/data/audit.sqlite`; inspect and preserve the installation in use. Keep each backup in a new private path on that storage. Do not substitute a volume or infer its name from this example.
+
+Migration creates and verifies a new backup of6 against its exact audit head, then atomically appends the hash-linked `control.identity.brokers_access.genesis` marker and changes the schema to7. It adds no tables/indexes, clears no budgets, rewrites no grants, issues no credentials and activates no execution. A failed final transaction leaves the source version/head unchanged; a created backup may remain and must be preserved. Check the exit and successful report's `from_version:6`, `to_version:7`, `backup_path`, `genesis_seq`, `genesis_hash` before continuing. No automatic restore/downgrade is supplied. Do not edit `user_version`, markers, receipts or projections to bypass a refusal.
+
+Ordinary cold reopen remains inactive maintenance at7. New admissions, arms and claims remain refused; this procedure provides no supervision reactivation or workaround for unresolved fencing/recovery. Retain runtime/enforcement anchors and consumed claims. Reopening for reads is not authority to launch a replacement worker.
+
+Next explicitly [grant `read_broker_registry`](../identity/README.md#authorize-named-broker-registry-readers) through trusted control/offline maintenance. OIDC also needs its [verified-claim ceiling](../sso/README.md#opt-in-to-broker-registry-reads). `setup prepare` still prepares5 and refuses this capability before publishing an installation; do not add it to the setup manifest. Keep `--max-events` and the intended audit policy consistent across gateway and offline identity consumers. `migrate-control` has no `--audit-capacity-file` flag; that option belongs to gateway/offline identity commands. Migration consumes mandatory identity audit capacity and cannot bypass a full ledger.
+
+The human route is `GET /api/v1/human/brokers`, with an admitted local/OIDC proof and an administration context. It differs from technical `GET /api/v1/brokers`: no raw grants or credential IDs/digests go to the browser. The [API contract](../../api.md#registre-brokers-humain--human-broker-registry) defines the closed query/response. Rows appear only after real authorized control registration; use the issue/grant/heartbeat contracts below for the actual broker concerned. Do not post fixture observations or synthetic audit events to populate a dashboard. This read view supplies no runtime inventory, federation or production qualification.
 
 ## Set a bounded workload audit policy
 
@@ -155,9 +180,9 @@ Record exact operation IDs and requests for retries. Idempotence is not a permis
 |429 `audit_workload_budget_exhausted` / `audit_write_budget_exhausted` | Cumulative capacity refusal with `retry_action:"contact_operator"`; preserve state and inspect occupancy/reserves. |
 |429 `relay_rate_limited`, `relay_capacity_exhausted`, `issuance_busy`, I/O admission refusal | Respect the applicable rate/concurrency bound; retained bodies require deliberate expired-body prune. Retry only the same intended operation after resolving the cause. |
 |503 `control_clock_uncertain` | UTC precedes durable authorization evidence; `retry_action:"contact_operator"`. Preserve state and repair/reconcile the trusted clock. Never treat the result as an empty inbox or no brokers. |
-|503 identity/storage/schema unavailable | Check schema 6, unambiguous credential ownership, integrity and required storage. An unavailable tenant source is not proof of absence; no identity substitution or viewer fallback. |
+|503 identity/storage/schema unavailable | Check schema 6/7, unambiguous credential ownership, integrity and required storage. An unavailable tenant source is not proof of absence; no identity substitution or viewer fallback. |
 
-Schema6's UTC floor is derived from durable audit reception evidence. Authorization/expiry comparisons use millisecond UTC precision; this does not claim detection of cross-request rollback within one millisecond, trusted SSH/SSO time, or a general clock guarantee. Actual reception timestamps remain actual observations; the floor does not fabricate a later `received_at`. A clock refusal does not authorize editing timestamps or durable floor tables.
+The schema6/7 UTC floor is derived from durable audit reception evidence. Authorization/expiry comparisons use millisecond UTC precision; this does not claim detection of cross-request rollback within one millisecond, trusted SSH/SSO time, or a general clock guarantee. Actual reception timestamps remain actual observations; the floor does not fabricate a later `received_at`. A clock refusal does not authorize editing timestamps or durable floor tables.
 
 Before maintenance, revoke intended relay/broker authorities and workload bindings through their separate authorized operations, retain requests/receipts, and stop jobs through the [broker's supported procedure](../broker/README.md#stop-restart-and-maintain-the-installation). Revocation is not a runtime stop observation or a quota release. Preserve existing enforcement even when control becomes unavailable. Restart only the same intended installation after checking ownership, storage and clock; budgets, revocations and historical key ownership survive restart. Keep private backups, bindings, broker journal, tenant data and runtime evidence together. No command here supplies federation, automatic service installation, safe supervision reactivation or destructive cleanup.
 

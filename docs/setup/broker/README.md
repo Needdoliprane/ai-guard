@@ -29,7 +29,7 @@ Rootless operation is the normal requirement. `allow_rootful_runtime: true` is a
 
 ## Require an active compatible control
 
-Every request authenticates its **presented** credential afresh against `GET /api/v1/control/protocol`. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version` 3, 4, 5 or 6 and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
+Every request authenticates its **presented** credential afresh against `GET /api/v1/control/protocol`. The broker requires `role: "runner"`, the configured tenant and namespace, `schema_version` 3, 4, 5, 6 or 7 and the `broker_supervision_v1` protocol. Submit, approve, resume and export also require `active: true`. Status, list, recovery-status and cancel can authenticate against an inactive compatible control; their other dependencies and safety checks still apply. Being the same Unix UID is transport access, not tenant authentication.
 
 Read the real tenant, namespace, role and supervision state before writing the registry. Replace the binary, origin and private credential path with your installation values:
 
@@ -45,22 +45,32 @@ Do not guess the namespace, copy a test UUID, choose another tenant in the regis
 
 The standard local Compose files start schema2 control. `/healthz` only establishes service availability. Neither a healthy stack nor `init` establishes the supervision protocol or fresh execution authority. The existing [exclusive bootstrap for new supervised control stores](../../operations.md#initialiser-un-contrôle-de-supervision-neuf) uses the gateway option `--initialize-supervised-stores BACKUP_ROOT`, with absent database destinations, private verified backups and the existing credential files. It must be integrated into the operator's containerized control deployment; this broker guide does not supply a schema3 Compose profile.
 
-There is an essential recovery limit: an ordinary reopen of a schema3, schema4, schema5 or schema6 store preserves its namespace in inactive maintenance. Reusing the bootstrap option on that database refuses startup. A safe reactivation procedure is not currently delivered. Preserve databases, backups and runtime evidence; do not delete a database, edit activation metadata or create replacement identities to bypass this condition. `broker resume` reconciles a job and cannot reactivate the control. There is no `broker init`, `broker doctor` or OS-service installation command in the current CLI.
+There is an essential recovery limit: an ordinary reopen of a schema3–7 store preserves its namespace in inactive maintenance. Reusing the bootstrap option on that database refuses startup. A safe reactivation procedure is not currently delivered. Preserve databases, backups and runtime evidence; do not delete a database, edit activation metadata or create replacement identities to bypass this condition. `broker resume` reconciles a job and cannot reactivate the control. There is no `broker init`, `broker doctor` or OS-service installation command in the current CLI.
 
 ### Upgrade storage explicitly
 
-Stop the gateway and every broker/consumer of the tenant database, including automatic restarts. `migrate-control --target-version` accepts the exact next version2,3,4,5 or6; its default remains2. Use a distinct new backup for every step. Schema5 adds mandatory nominative read audit, as described in [named local access](../identity/README.md). Schema6 adds workload bindings, broker registry, directed relay and a durable UTC floor; follow the [workload guide](../workloads/README.md) for explicit5→6 migration, protected audit budgets and HTTP role contracts. This does not connect workers to a runtime transport or activate supervision. For an existing schema3 source:
+Stop the gateway and every broker/consumer of the tenant database, including automatic restarts. `migrate-control --target-version` accepts the exact next version2,3,4,5,6 or7; its default remains2. Use a distinct new backup for every step. Schema5 adds mandatory nominative read audit, as described in [named local access](../identity/README.md). Schema6 adds workload bindings, broker registry, directed relay and a durable UTC floor; follow the [workload guide](../workloads/README.md) for explicit5→6 migration, protected audit budgets and HTTP role contracts. This does not connect workers to a runtime transport or activate supervision. For an existing schema3 source:
 
 ```sh
 "/absolute/path/to/agentsandbox" migrate-control \
   --data "/absolute/private/ai-guard/audit.sqlite" \
   --tenant-id "<configured-tenant-id>" \
   --backup "/absolute/private/ai-guard/audit-before-identities-v4.sqlite" \
-  --target-version 4 \
+  --target-version 4 --max-events 100000 \
   --confirm-control-stopped
 ```
 
 Update gateway and broker readers together before opening schema4. The verified backup and old events, namespace, tenant binding and consumed claims are preserved; an old binary refuses the new schema. Migration/reopening does not activate inactive supervision. Schema4 prepares human identity and permission storage; it does not create an account, attribute old events to a person, turn a technical key into a human credential or perform an OIDC login. Retain backups and reports after failure and investigate before selecting a new destination. See [offline maintenance](../../operations.md#répertoire-sqlite-privé) for the checked backup and restoration limits.
+
+### Read registered brokers after migration7
+
+Schema7 adds human read access to the tenant's existing broker registry through `GET /api/v1/human/brokers`. Follow the [exact5→6→7 backup procedure](../workloads/README.md#enable-named-broker-registry-reads), including for SSO setup storage at5. Migration uses the same tenant database and adds its audit capability marker without activating supervision. Readers accepting7 retain5/6 compatibility; update gateway, broker/STOP clients and dashboard together before opening7. This issues no new claim and supplies no workaround for inactive cold reopen or unresolved fencing/recovery.
+
+The **Brokers** dashboard view requires explicitly granted administration capability `read_broker_registry`; [named-access instructions](../identity/README.md#authorize-named-broker-registry-readers) cover provisioning, membership updates, withdrawal and recovery. It shows tenant infrastructure independently of organization-filtered `read_tenant_metadata` resource access. SSO requires membership and a configured claim ceiling. Never send runner credentials to the browser.
+
+Records come from real authenticated [binding/grant/heartbeat operations](../workloads/README.md#grant-a-broker-and-interpret-its-heartbeat). `broker serve --config` does not automatically publish this registry or produce its observations. A current lease is not runtime inspection or proof that this permanent broker or a worker runs; a stale/revoked entry neither stops a runtime nor releases quota. Preserve any older heartbeat incarnation and reception time during diagnosis.
+
+This human registry differs from private Registry2 below and the local IPC `broker list` job list. It exposes no raw grants or credential IDs/digests, supplies no export, worker federation or engine access to the frontend. Cumulative audit refusal requires preserving database/policy and repairing capacity before an explicit retry, without deleting audit or reinitializing control. The view adds no production qualification or supervision reactivation path.
 
 ## Write the private operator registry
 
