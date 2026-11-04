@@ -216,23 +216,68 @@ et d'epoch sont bornés à `i64::MAX` et utilisent une addition vérifiée.
 | `KubernetesCreateResultV1` | `operation_id`, `create_id`, `intent_hash`, `claim_operation_id`, `expected_revision`, `expected_create_epoch`, `outcome`. Rapporte le même CREATE possible. |
 | `KubernetesCreateCancelV1` | `operation_id`, `create_id`, `intent_hash`, `expected_revision`, `expected_create_epoch`. Invalide les claims futurs ; aucune suppression de Pod. |
 | `KubernetesCreateReceiptV1` | `operation_id`, `input_hash`, `control_namespace_uuid`, `audit_seq`, `audit_hash`, `emission_window`. Reçu descriptif, sans pouvoir d'émission ; fenêtre `None` sauf pour un claim. |
+| `KubernetesCreateObservationV1` | `api_version`, `kind`, `metadata`, `status`. Projection fermée décrite ci-dessous de la réponse CREATE, rapportée par le broker ; aucun Pod JSON arbitraire. |
 
 `emission_window`, quand présente, contient exactement `issued_at` et
 `not_after`, dates UTC RFC3339 canoniques du contrôle. À la transaction du
 claim : `not_after = min(grant.not_after, issued_at + 8 secondes)`, avec une
-durée strictement positive. Cette fenêtre borne la première émission, sans
-modifier le timeout HTTPS ni la durée de vie ou le quota du Pod.
+durée strictement positive. C'est un budget de préparation et d'initiation de
+la requête par le code Rust, pas une garantie de date du premier octet réseau
+ou d'acceptation par le cluster. Il ne modifie ni le timeout HTTPS, ni la durée
+de vie ou le quota du Pod.
 
-`outcome` est une union fermée : `created_held` contient `pod_uid`,
-`resource_version`, `admitted_spec`, `admitted_configuration_sha256`,
+`outcome` est une union fermée : `created_held` contient `observation`,
+`admitted_spec`, `admitted_configuration_sha256`,
 `observed_at` ; `ownership_unknown` contient uniquement `reason` parmi
 `transport_unknown`, `api_rejected`, `response_invalid`, `profile_changed`,
 `authority_changed`, `cancelled_after_claim`, `recovered_after_claim`,
 avec `http_status: Option<u16>` présent seulement pour `api_rejected`.
 Une réponse HTTP d'erreur ne prouve pas ici l'absence d'effet.
 Le résultat local non ACKé est aussi une inconnue : aucun champ secret ou corps
-d'erreur serveur n'est conservé. Une mutation dangereuse constatée est signalée
-comme incident `profile_changed`, sans état de succès.
+d'erreur serveur n'est conservé. Une mutation dangereuse rapportée produit un
+diagnostic local `profile_changed`, sans état de succès ; sa persistance centrale
+dépend de l'acceptation effective de la mutation de résultat, jamais présumée.
+Une spec non validée ou susceptible de contenir un secret est réduite à ce
+motif opaque avant toute persistance, y compris dans le journal privé.
+
+`observation.api_version = v1` et `observation.kind = Pod` sont exigés.
+`observation.metadata` contient exactement `name`, `namespace`, `uid`,
+`resource_version`, `labels`, `annotation_count`, `owner_reference_count`,
+`finalizer_count`, `deletion_requested`, `unexpected_fields_present`.
+Nom/namespace/labels sont comparés au rendu exact ; UID et resourceVersion
+suivent les validateurs existants. Seules les quatre clés de labels du profil
+et leurs valeurs attendues sont retenues, sans valeur inattendue libre.
+Les trois compteurs sont des `u32`, exigés à zéro ; les deux booléens sont
+exigés à false. Les seuls autres champs de métadonnées tolérés et non persistés
+sont les défauts serveur `creationTimestamp` et `managedFields` ; les annotations,
+références de propriétaire et finalizers ne sont jamais copiés. Type invalide,
+label différent ou ajout hors liste rend la réponse impropre à `created_held`.
+
+`observation.status` vaut `None` si le champ status est absent de la réponse ;
+sinon il contient exactement `phase`, `container_status_count`,
+`init_container_status_count`, `ephemeral_container_status_count`,
+`start_time_present`, `placement_fields_present`, `unexpected_fields_present`,
+`pod_scheduled`. `phase` est `None` ou l'une des cinq phases déjà reconnues par
+le lecteur de Pod ; seul `None` ou `Pending` est admis. Les trois compteurs
+`Option<u32>` valent `None` pour un tableau absent et `Some(0)` pour un tableau
+vide ; toute valeur positive est refusée. Les trois booléens décrivent seulement
+la présence des champs dans la réponse et doivent être false.
+`placement_fields_present` couvre `hostIP`, `hostIPs`, `podIP`, `podIPs` et
+`nominatedNodeName` non vides, sans persister leur valeur. `pod_scheduled` est
+`None` ou le couple fermé `status = False`, `reason = SchedulingGated` extrait
+d'une unique condition `PodScheduled` ; toute autre condition est refusée.
+Le seul autre défaut de status toléré et non persisté est `qosClass` parmi
+`Guaranteed`, `Burstable`, `BestEffort`. Champs/types inconnus et doublons sont
+refusés. Aucun message, IP, corps d'événement ou contenu de status libre n'est
+conservé ; projection metadata/status complète ≤ 4 KiB.
+
+Le contrôle central valide à nouveau cette projection et la spec fermée ;
+les mêmes contrôles sont rejouables depuis l'entrée auditée. Une extraction
+partielle, invalide ou non bornée ne devient pas une observation vide.
+Le broker pourrait toutefois déclarer des champs faux : le DTO et sa validation
+ne constituent pas une observation indépendante du cluster ni une preuve
+d'absence d'exécution. Le résultat audité conserve `provenance = declared` et
+`coverage = partial` ; les preuves d'admission/audit cluster restent requises.
 
 `intent_hash` emploie le domaine `ai-guard:kubernetes-create-intent:v1\0` sur
 le JSON canonique de l'intention ; `request_sha256` emploie
@@ -297,8 +342,9 @@ Chaque transition nouvelle augmente `revision` de 1. L'annulation après claim
 augmente aussi `create_epoch`, conserve le quota et conduit à
 `ownership_unknown` ; après `created_held`, elle conserve cet état/UID et
 invalide seulement l'epoch, sans prétendre arrêter quoi que ce soit.
-Une réponse tardive pour un epoch périmé reste une donnée d'incident du même
-CREATE ; elle ne promeut pas un état et n'autorise jamais une autre émission.
+Une réponse tardive pour un epoch périmé n'est conservée que dans l'emplacement
+durable borné du journal privé décrit ci-dessous ; aucun incident central n'est
+présumé enregistré. Elle ne promeut pas un état et n'autorise aucune émission.
 Une seconde mutation `result` différente est un conflit : pas de remplacement
 de l'UID/spec ou d'effacement de l'inconnue dans ce lot.
 Une nouvelle annulation sur `cancelled_before_emission` est refusée ; seul
@@ -317,12 +363,13 @@ Transactions prévues, dans le même Store tenant et sans appel réseau sous loc
    refaire les contrôles d'identité, de scope, de temps et d'autorisation,
    vérifier `reserved`, les deux CAS et l'intention. Commiter
    `emission_possible` avec audit avant de répondre. Seule la première réponse
-   fraîche exacte, dans sa fenêtre d'émission, peut porter une disposition
+   fraîche exacte, dans son budget d'initiation, peut porter une disposition
    `emit_once` ; tout replay porte `observe_only`, même si l'ancien événement
    expose le claim accepté.
 3. `record_kubernetes_create_result` : vérifier le lien au claim, les CAS et
-   l'identité ; contrôler UID/spec/profil/absence de placement et de statut
-   d'exécution avant `created_held`. Persister résultat et audit atomiquement.
+   l'identité ; revalider la projection metadata/status et la spec exacte
+   avant `created_held`, sans transformer le rapport broker en preuve runtime
+   indépendante. Persister résultat et audit atomiquement.
    Perte du reçu ou échec de persistance : conserver la réponse privée si
    disponible et l'inconnue, sans exposer de handle possédé autorisant un effet.
    Le rejeu **du résultat exact** peut obtenir son ACK ; il ne refait pas le POST.
@@ -367,7 +414,7 @@ Migration et réouverture ne recréent aucune autorité live ni permission.
 
 Le nouveau journal privé versionné du CREATE conserve exactement intention,
 cible, bytes du Pod, reçus centraux, révision/epoch et réponse éventuelle ;
-aucun credential. Réutiliser les capabilities privées et barrières de
+aucun credential ni réponse brute. Réutiliser les capabilities privées et barrières de
 [`control_fs`](../../src/control_fs.rs), sans charger ce format dans les anciens
 plans/checkpoints Docker. Une intention `prepared` est durable avant le claim.
 Après son ACK, persister localement `emission_possible` **avant** `send`.
@@ -387,9 +434,13 @@ propriétés de suspension restent à tester et qualifier.
 
 Le guard final synchrone revalide aussi capabilities privées, annulation locale
 et cible après acquisition du permis transport et construction de la requête ;
-aucun `await` ne sépare ce guard du `send`. Le point central d'autorisation est
-le claim : cette couture ne prétend pas rendre une révocation distante atomique
-avec le POST.
+aucun `await` ne sépare ce guard de l'initiation de `send`. DNS, connexion, TLS,
+ordonnancement du futur et traitement serveur peuvent survenir ensuite : ce
+guard ne borne ni le premier octet réseau, ni la réception/admission effective
+avant `not_after`. Le point central d'autorisation est le claim ; aucune
+révocation distante atomique avec le POST n'est promise. Une échéance effective
+côté cluster exige des preuves d'admission, d'horloges et d'exclusivité des
+acteurs avant activation ; le seul appel Rust `send` ne les fournit pas.
 
 Tout disque relu avec claim ou `emission_possible` donne seulement
 `observe_only` / `ownership_unknown` : **aucun second POST, même si zéro octet
@@ -398,6 +449,27 @@ retenir la réponse privée, obtenir l'ACK central, puis commiter le checkpoint
 local `created_held` avant de publier le handle pour inspection seulement.
 Un crash à chaque frontière peut donc conserver une inconnue ; un même nom,
 label ou spec ne permet jamais d'adopter un UID découvert ultérieurement.
+
+Course explicite : claim `revision = 2, create_epoch = 1`, annulation acceptée
+`revision = 3, create_epoch = 2`, puis résultat portant les anciens CAS.
+Le résultat est rejeté sans nouvel événement central, promotion ni libération
+du quota. Le journal privé conserve **un seul candidat de résultat exact**
+(DTO borné à 64 KiB avec projection sûre, jamais le Pod brut) et un seul code
+de refus fermé `stale_revision`, `stale_epoch` ou `unavailable`. Il ne réécrit
+pas le candidat avec de nouveaux CAS et n'accumule pas un historique de réponses.
+La conservation emploie les vraies barrières durables ; si elle échoue, aucune
+conservation réussie n'est déclarée et la reprise reste inconnue.
+
+Reprise d'un résultat perdu : si le candidat exact et son `operation_id` sont
+durables, seul son replay est permis sous identité encore autorisée. Un ACK
+historique déjà commité peut être relu sans réappliquer la transition ; il ne
+réactive aucun état ou droit. Si aucun résultat central n'existe et que les
+CAS ont été dépassés, conserver le refus/candidat privé et le quota, sans
+nouvelle mutation adaptée, nouvel endpoint ou ledger d'incident. Si le candidat
+a été perdu avant persistance, il reste inconnu : pas de reconstruction à partir
+d'un Pod de même nom. Le diagnostic doit exposer cette limite et demander la
+réconciliation opérateur exacte prévue avant activation, sans adopter ni
+nettoyer automatiquement.
 
 **Aucune factory de permission de production dans ce lot.** Les prérequis
 NamespaceUID stable, droits exclusifs, chaîne d'admission et audit cluster
@@ -436,9 +508,15 @@ compté lorsque pertinent ; ils restent **NOT_RUN** à ce stade :
    checkpoint d'émission, POST, réponse, ACK central, checkpoint local. Au
    redémarrage, aucun second POST dès qu'un claim a pu réussir. ACK perdu du
    résultat se réconcilie par son replay exact, sans émettre ni adopter.
+   Course claim rev2/epoch1 → cancel rev3/epoch2 → résultat rev2/epoch1 :
+   refus CAS, aucun événement central ajouté, candidat privé durable borné,
+   quota conservé ; candidat perdu ou journal en panne restent inconnus.
 4. UID remplacé au même nom, NamespaceUID divergent, gate retirée, `nodeName`,
    conteneur/volume/credential injecté, statut d'exécution, spec trop grande
-   ou JSON invalide : jamais `created_held`, incident opaque et quota conservé.
+   ou JSON invalide : jamais `created_held`, diagnostic opaque et quota conservé.
+   Le Store rejette séparément labels/flags/counts/status incohérents et rejoue
+   les contrôles des résultats acceptés depuis l'audit ; un refus sans commit
+   ne crée aucun événement central. Aucun message/status libre n'est persisté.
 5. Concurrence réservations Docker/Kubernetes à la dernière unité du quota :
    une seule réservation acceptée. Réouverture/reconstruction gardent la somme
    et les inconnues ; mutation SQL, audit manquant et replay divergent échouent.
@@ -451,3 +529,13 @@ Critère du lot logiciel : ces propriétés sont implémentées, vérifiées sur
 gel et relues, avec diagnostics et guides cohérents. Ce résultat laissera
 séparément **BLOCKED** l'activation et **NOT_RUN** tous les effets cluster,
 sans fermer de gate production ni qualifier une session Kubernetes.
+
+### Revue documentaire de `7e0ea0` et résolution
+
+Trois écarts ont été établis avant code : le résultat ne contenait pas les
+métadonnées/status nécessaires au contrôle annoncé ; le budget 8 s pouvait
+être lu comme une échéance réseau/cluster ; le résultat tardif après annulation
+était appelé incident sans voie centrale admissible. Cet addendum est corrigé
+par une projection fermée et revalidable, une borne d'initiation explicitement
+limitée, et la seule conservation privée durable du candidat refusé. Aucun
+nouveau ledger, endpoint, test exécuté ou comportement Rust n'en résulte.
