@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Grants broker depuis le CLI,4novembre : préparation/rejeu durable, contrôle
+de périmètre, CAS, révocation et normalisation des reçus ; 11 fonctions
+ciblées uniques, format et compilation toutes cibles PASS, revue traitée.
+[Preuves et limites](VALIDATION.md#4-novembre--grants-broker-durables-depuis-le-cli).
+Cela complète un parcours opérateur du registre, sans qualifier la fédération
+multi-hôtes, le transport worker, Kubernetes ou les pannes réelles.
+G09 reste FAIL,0/12 gates clos ; Clippy Linux BLOCKED.
+
 Diagnostic broker du 4 novembre : journal requis absent distingué d'une
 entrée invalide, sans création en récupération ; sept fonctions ciblées et
 compilation toutes cibles PASS après RED, revue indépendante et guides EN/FR.

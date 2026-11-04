@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "action": "broker_revoke",
+  "broker_id": "<approved-broker-uuid>",
+  "expected_revision": 1
+}

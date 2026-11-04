@@ -1,5 +1,23 @@
 # Décisions d'industrialisation
 
+## 4 novembre — provisionner les grants broker par le CLI existant
+
+Les actions fermées `broker_grant` et `broker_revoke` rejoignent les manifestes
+de `workload prepare/apply/resume/status`. Les commandes, routes v1, rôle runner
+et stockage tenant restent les mêmes ; aucune nouvelle identité, permission
+serveur, migration ou découverte automatique n'est ajoutée. La préparation
+fige uniquement un UUID d'opération et les choix explicites de l'opérateur,
+sans émettre de clé ni changer d'incarnation. Les anciens documents privés
+V1 de bindings et reçus conservent leur forme sérialisée.
+
+Les engagements d'entrée réutilisent le `Change` privé exact du Store grâce à
+deux fonctions pures, sans recopier son format de hash dans le CLI. Le reçu
+historique et son résultat sont validés avant persistance ; ils ne constituent
+ni une identité portable ni une preuve de disponibilité courante. Une
+révocation du grant ne prouve pas l'arrêt d'un worker et ne libère pas sa
+quota. [Guide EN](../setup/workloads/README.md#prepare-a-broker-grant-or-revocation-from-the-cli)
+et [FR](../setup/workloads/README.fr.md#préparer-un-grant-ou-une-révocation-de-broker-par-cli).
+
 ## 4 novembre — snapshot préparatoire sans scan redondant
 
 Après comptage réel et RED du getter, `cached_head()` remplace la lecture

@@ -264,6 +264,71 @@ action. `broker serve` publishes only with an explicit [presence configuration](
 and preapproved binding/grant; reading identity or self metadata alone does
 not publish presence, prove runtime health or complete federation.
 
+## Prepare a broker grant or revocation from the CLI
+
+Use the same private control file and `workload prepare/apply/resume/status`
+commands as for a credential. The two operations are distinct: issuing a
+Broker credential does not grant its authority scope, and granting a broker
+does not create or rotate its credential. Keep each preparation in its own
+new private directory, outside projects and exports.
+
+These additional V1 actions require the current binary. Existing binding
+preparations keep their encoding; an older binary rejects the new broker
+actions. Keep the compatible binary and private state available for resume.
+
+| Request template | Values to configure |
+|---|---|
+| [Broker grant](examples/cli-broker-grant.json) | Broker, matching recorded credential and approved unused incarnation; explicit `expected_revision:null` for the first grant, or the exact positive current grant revision for a replacement; authority list, lease and future expiry. |
+| [Broker revocation](examples/cli-broker-revoke.json) | Broker and exact positive current **grant** revision, not its binding or heartbeat revision. |
+
+Replace all placeholders. The grant's authorities are 1–16 unique approved
+authority IDs paired with `docker`, `podman` or `kubernetes`; a runtime label
+does not install an adapter or establish a connection. The lease is 1–300
+seconds. A replacement grant needs a new unused incarnation and matching
+credential binding; the CLI never chooses or generates those identities.
+Rotating an existing credential preserves its subject and incarnation; it
+does not supply the binding for a different incarnation.
+For the [presence publisher](../broker/PRESENCE.md), use exactly one authority
+matching its operator profile. The general registry supports several.
+
+After configuring the grant template as a private `broker-grant.json`:
+
+```sh
+"$AIGUARD_BIN" workload prepare \
+  --input "$AIGUARD_PRIVATE/broker-grant.json" \
+  --control-file "$AIGUARD_PRIVATE/control.json" \
+  --output-dir "$AIGUARD_PRIVATE/broker-grant-operation"
+
+"$AIGUARD_BIN" workload apply \
+  --operation-dir "$AIGUARD_PRIVATE/broker-grant-operation" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+
+"$AIGUARD_BIN" workload status \
+  --operation-dir "$AIGUARD_PRIVATE/broker-grant-operation"
+```
+
+`AIGUARD_BIN` and `AIGUARD_PRIVATE` are the explicit operator paths defined
+[above](#prepare-and-record-a-credential-operation-from-the-cli). Preparation
+performs no HTTP, generates only the operation UUID, and retains the exact
+request without creating a `credential` file. Apply authenticates the current
+runner and checks the expected tenant/namespace before using the fixed grant
+or revocation route. It records a validated historical receipt, not current
+broker readiness or runtime health.
+
+On a lost response, preserve the directory and run `workload resume` with the
+same `--operation-dir` and current `--control-file`. It resubmits the same UUID
+and request, rather than choosing a new CAS or incarnation. Recovering a
+historical receipt does not renew an expired grant. A CAS conflict requires
+examining the current trusted registry and preserving the old preparation;
+do not edit its request or receipt to force a retry.
+
+For revocation, prepare the revocation template in another new directory and
+use the same commands. Revoking a broker grant removes its registry/presence
+authority; it does not prove that its workers stopped, release their quota,
+or revoke a separate workload binding. Follow the broker stop and runtime
+reconciliation procedures for execution. No automatic regrant or renewal is
+performed.
+
 ## Grant a broker and interpret its heartbeat
 
 After preparing the broker binding, a runner grants that broker's authority scope. This registry is distinct from the local `broker serve --config` Registry2. An authority object has the form `{"authority_id":"<approved-authority-id>","runtime_kind":"docker"}`. Its `authority_id` is a bounded label (1–256 bytes, no controls), paired with `runtime_kind:docker|podman|kubernetes`. It is not a runtime connection or an installed Kubernetes adapter. Historical authority ownership cannot be transferred to another broker or runtime kind by editing a grant.

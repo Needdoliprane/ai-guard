@@ -1,5 +1,23 @@
 # Plan d'industrialisation
 
+## Registre multi-hôtes — provisionnement opérateur des grants broker
+
+Base `b77edbf`, donneur `codex/broker-grants-cli-20261104`. Core : cinq
+fichiers Rust applicatifs ; Luna : tests CLI ; Root : contrats, guides EN/FR,
+preuves, intégration et cycle de vie ; revue source/tests indépendante.
+Les deux actions fermées réutilisent les API runner existantes, les contrôles
+privés et le workflow durable. Aucun nouveau service, transport, rôle ou
+schéma. Les deux défauts de validation de reçu sont reproduits puis corrigés.
+Onze fonctions uniques et compilation toutes cibles PASS ;
+[preuves et limites](VALIDATION.md#4-novembre--grants-broker-durables-depuis-le-cli).
+
+Les obligations suivantes restent ouvertes : reprise broker et retrait sûr
+des gardiens, transport runtime du relais sous la décision déjà soumise,
+fédération complète et admission Kubernetes, puis qualifications réelles.
+Le harnais distinct d'observation d'un worker annulé est conservé inachevé,
+sans correction applicative ni reproduction métier revendiquée. Poursuivre
+les travaux indépendants sans transformer cet échec de setup en blocage global.
+
 ## Build — prérequis structurels avant appel moteur
 
 Base `dbc5afa`, donneur `codex/build-input-preflight-20261104`. Core possède

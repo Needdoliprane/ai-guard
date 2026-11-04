@@ -1,5 +1,26 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — autorisations broker depuis le CLI
+
+`workload prepare/apply/resume/status` prend en charge les actions fermées
+`broker_grant` et `broker_revoke`, sans clé générée, migration ni nouvelle
+permission serveur. Requêtes/reçus retenus, contrôle du périmètre avant POST,
+CAS, révocation, rejeu après perte d'accusé/expiration et regrant avec ancien
+heartbeat : 11 fonctions uniques PASS, compilation toutes cibles et format
+ciblé PASS ; revue indépendante traitée.
+[Commandes, RED, résultats et limites](VALIDATION.md#4-novembre--grants-broker-durables-depuis-le-cli).
+Guides et exemples EN/FR synchronisés. Les guides fournisseurs expliquent
+aussi le choix API explicite après quota abonnement ; aucun appel modèle.
+Code `fe3b558` composé en `0962231`, avec fichiers égaux au gel vérifié.
+La documentation fournisseurs `0c4cbf1` est composée en `e6e0b25` et poussée.
+
+Ce lot complète le provisionnement opérateur du registre, sans fournir le
+transport worker, la fédération de jobs, Kubernetes ou une qualification
+runtime. L'investigation distincte de reprise d'un worker annulé échoue
+encore dans le setup de son harnais, avant l'oracle ; code applicatif inchangé
+et preuves conservées, travail indépendant poursuivi. G09 reste FAIL,
+0/12 gates clos ; ancien artefact V1 et panne disque non qualifiés ici.
+
 ## 4 novembre — build refusé avant moteur si le paquet est incomplet
 
 `build --source` vérifie désormais 7 répertoires et 19 fichiers requis avant
