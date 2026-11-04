@@ -85,6 +85,16 @@ Ces livrables sont en développement, pas disponibles par la seule commission.
 Le contrôle de manifeste setup est dans `src/setup.rs` : refuser la nouvelle
 capacité avant publication sous5, sans modifier l'installation5 existante.
 
+La parallélisation s'applique aussi à la validation et aux guides : l'auteur
+traite un échec isolé pendant que Luna exécute les tranches indépendantes
+sur un snapshot immuable, et un troisième agent prépare les guides EN/FR
+dans les seuls fichiers documentaires attribués. Les revues restent
+indépendantes des auteurs. Ne pas multiplier les compilations lourdes ni
+les matrices E2E pour occuper les slots ; chaque test doit fermer un critère
+du lot. Avant intégration, contrôler la composition backend/frontend,
+traiter les constats, pousser un lot cohérent puis fermer normalement ses
+worktrees après vérification des consommateurs et conservation des preuves.
+
 Les preuves broker/worker sont opaques et revalidées en transaction avant
 replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker
 ni crédit d'audit. Génération v1 fixée à1 par tentative UUID tant qu'aucune
@@ -100,11 +110,12 @@ sélectionne une classe privilégiée. Les erreurs de DB/audit ne deviennent
 pas un inbox vide ; ACK et heartbeat ne prouvent pas une exécution runtime.
 
 Chaque gel reçoit tests Luna ciblés et revue indépendante avant commit/push.
-Le premier gel Kube a huit parents PASS ; deux échecs préparatoires du harnais
-(shim rustup puis scratch noexec) n'ont exécuté aucun test et sont conservés
-séparément. Les compléments mTLS/cancellation restent ouverts. Les nouveaux
-modules relais/registre n'ont pas encore passé compilation ou tests : ne pas
-les annoncer comme un service livré. La qualification réelle A1/A2/B1,
+Historique du premier gel Kube : huit parents PASS ; deux échecs préparatoires
+du harnais (shim rustup puis scratch noexec) n'ont exécuté aucun test et sont
+conservés séparément. Les compléments mTLS/cancellation portent ensuite le
+total à11 ; le CLI a ses quatre tests propres. Les modules relais/registre
+ont depuis été intégrés avec86fonctions ciblées et all-targets PASS, dans
+leur seul périmètre logiciel. La qualification réelle A1/A2/B1,
 Podman/Kubernetes, reprise broker et charge100 garde ses propres gates.
 
 ## Lot F — plan de correction après reproduction

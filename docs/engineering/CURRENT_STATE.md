@@ -1,5 +1,28 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## Vue humaine des brokers — développement parallèle non intégré
+
+Backend Rust et frontend TypeScript travaillent depuis `5b6dfc1` dans deux
+worktrees distincts. La capacité explicite `read_broker_registry`, la
+migration7 et la vue humaine ne sont pas encore disponibles dans le candidat
+intégré. Luna exécute les tests ciblés dans le sandbox ; la documentation
+opérateur EN/FR avance séparément, puis les revues indépendantes conditionnent
+l'intégration. Un seul Cargo lourd tourne à la fois sur le Mac sous pression.
+
+Sur le gel backend stage4 : **12 fonctions API PASS**, puis **3 migrations
+PASS et 1 FAIL**. L'échec attendait un refus d'ouverture ; le code existant
+peut renvoyer un handle diagnostique sans autorité lorsque son rejeu est
+invalide. L'oracle est en correction pour vérifier l'intégrité et les refus
+effectifs, sans annoncer un défaut d'autorisation ni modifier la production
+sur cette seule assertion. Les autres tranches ont leur résultat propre.
+
+Sur le gel frontend stage5 : **35 tests Node et TypeScript PASS**. La revue
+a fait corriger un verrou de budget levé avant validation complète de la
+réponse. Build Vite, navigateur et parcours composé réels restent `NOT_RUN` :
+les outils Linux manquants ont une préparation de cache épinglé soumise au
+mainteneur. Ces résultats ne qualifient ni la fédération multi-hôtes, ni des
+workers réels. [Preuves et limites](VALIDATION.md#4-novembre--vue-humaine-des-brokers-gels-en-cours).
+
 ## Correctifs initiaux de l'audit en cours
 
 Les lots export A, disponibilité multi-tenant B et admission ingress C sont

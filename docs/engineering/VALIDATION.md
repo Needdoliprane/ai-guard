@@ -1,5 +1,42 @@
 # Validation courante
 
+## 4 novembre — vue humaine des brokers, gels en cours
+
+**Non intégré.** Deux worktrees issus de `5b6dfc1`, contrats relus dans
+[DECISIONS](DECISIONS.md#4-novembre--contrat-de-lecture-humaine-du-registre-brokers).
+Les résultats ci-dessous portent sur leurs gels, pas sur le candidat poussé.
+Sources publiques RO, dépendances verrouillées RO, scratch privé et limites
+OS conservées ; ni Cargo/Node natifs, ni appel fournisseur ou IdP réel.
+
+Backend stage4, manifeste34overlays SHA
+`3fafeabd6e2db53b0ef2ae18697b7596aa2b9dfce19017994c733f2aeb4318cc` :
+`cargo test --offline --locked --manifest-path
+/inputs/human-brokers-core-stage4/Cargo.toml --test human_brokers
+--test human_brokers_migration -- --test-threads=1` donne RC101.
+**12/12 fonctions `human_brokers` PASS** ; dans les migrations, **3 PASS et
+1 FAIL**. Log
+`/private/tmp/ai-guard-human-brokers-core-stage4-luna-20261104/proofs/integration-1.log`.
+L'assertion en échec assimile `Store::open` renvoyant un handle à une
+autorité acceptée. La source conserve pourtant un handle diagnostique
+`unhealthy` après échec du rejeu ; la correction d'oracle doit exiger
+l'erreur d'intégrité précise et le refus des opérations. Aucun succès ou
+contournement du garde de migration n'est déduit de ce seul résultat.
+La revue a également demandé un client OIDC valide pour isoler le test
+d'absence d'admission. Les tranches suivantes restent à consigner après
+exécution ; aucune matrice complète ni test runtime n'est lancé par ce lot.
+
+Frontend : la revue a isolé le verrou F1 réarmé avant vérification complète
+de la sémantique d'une réponse. Stage4 RED :35fonctions,28PASS/7FAIL ; après
+correction,35/35PASS. Deux erreurs de typage ont ensuite été corrigées sans
+coercition permissive. Stage5 :35/35Node PASS et `tsc --noEmit` RC0, reçu
+direct conservé dans
+`/private/tmp/ai-guard-human-brokers-front-stage5-luna-20261104/proofs/tsc-exit-receipt.txt`.
+Revue source indépendante : aucun défaut bloquant restant dans ce delta ;
+cela ne remplace pas l'exécution de la vue DOM. **NOT_RUN :** Vite, navigateur,
+captures, parcours composé réel et Clippy Linux. Préparation des seuls outils
+publics manquants soumise au mainteneur ; aucune récupération supplémentaire
+avant cet accord. Gates globaux inchangés, G09 FAIL,0/12 clos.
+
 ## 4 novembre — refus F1 conservé par le proxy du dashboard
 
 Base `b8fc2a7`, quatre overlays, source `bedf3de` intégrée par `167ff85`.
