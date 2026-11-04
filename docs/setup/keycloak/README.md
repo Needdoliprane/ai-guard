@@ -98,10 +98,12 @@ The bootstrap applies to a fresh DEMO database. These values are never installat
 | Client | Contract |
 |---|---|
 | `ai-guard-demo-web` | Public; Authorization Code; PKCE S256 required; registered return `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback`; exact Web origin and logout return `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered loopback reference `http://127.0.0.1:80/oidc/callback`; no CORS origin. The native flow uses an ephemeral loopback port, the same IP and fixed path. Provider support for the loopback port exception is required. |
+| `ai-guard-demo-cli` | Separate public client; Code and required S256; registered loopback reference `http://127.0.0.1/oidc/callback`; no CORS origin. The native flow uses an ephemeral loopback port, the same IP and fixed path. Provider support for the loopback port exception is required. |
 | `ai-guard-demo-api` | Bearer-only resource server and access-token audience; no login flow or service account. |
 
 Neither public client distributes a `client_secret`. Implicit, password grants, device flow, CIBA, service accounts and token exchange are disabled. Do not replace a failed browser flow with a password grant or manual token copy.
+
+Register the CLI reference in the canonical form above, without explicit `:80`. Keycloak 26.8.1 normalizes the default HTTP port away during its native-loopback comparison; a registered literal containing `:80` can prevent that match. The CLI still binds an ephemeral local port and includes it in the actual authorization request. Keep the literal IP, exact `/oidc/callback` path and required S256, without a wildcard. This configuration alone does not prove a successful CLI sign-in. Startup import skips existing realms; use the data-preservation procedure below when changing an existing registration.
 
 Both public clients have exactly `basic` and `profile` as default client scopes, with no optional scopes. `basic` supplies Keycloak's access-token subject mapper; the signed token must contain a non-empty `sub`. Its absence is a provider configuration error, not a reason to weaken validation. `basic` need not appear in the token's textual `scope` field: it is a default client scope whose mapper is applied by the provider.
 
@@ -178,5 +180,5 @@ Keep diagnostics free of bearer tokens, authorization codes, verifiers, cookies 
 ## References
 
 - [Keycloak containers](https://www.keycloak.org/server/containers), [realm import](https://www.keycloak.org/server/importExport), [hostname configuration](https://www.keycloak.org/server/hostname).
-- [Keycloak 26.8.1 basic client scope source](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCLoginProtocolFactory.java#L563-L579) and [loopback redirect handling](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java).
+- [Keycloak 26.8.1 basic client scope source](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCLoginProtocolFactory.java#L563-L579), [loopback redirect handling](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/utils/RedirectUtils.java) and [canonical URI builder](https://github.com/keycloak/keycloak/blob/26.8.1/common/src/main/java/org/keycloak/common/util/KeycloakUriBuilder.java).
 - [OIDC Core](https://openid.net/specs/openid-connect-core-1_0.html), [PKCE RFC 7636](https://www.rfc-editor.org/rfc/rfc7636.html), [native clients RFC 8252](https://www.rfc-editor.org/rfc/rfc8252.html), [OAuth security RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html).
