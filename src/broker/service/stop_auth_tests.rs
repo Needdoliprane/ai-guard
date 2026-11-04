@@ -25,6 +25,11 @@ impl Drop for Gateway {
 }
 impl Gateway {
     async fn active() -> Self {
+        Self::with_schema(3, false).await
+    }
+
+    async fn with_schema(schema: u32, inactive: bool) -> Self {
+        assert!(matches!(schema, 3 | 6));
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -39,8 +44,34 @@ impl Gateway {
             )
             .unwrap(),
         );
+        if schema == 6 {
+            store
+                .migrate_identity_v4(&root.path().join("a-before-v4.sqlite"))
+                .unwrap();
+            store
+                .migrate_human_access_v5(&root.path().join("a-before-v5.sqlite"))
+                .unwrap();
+            store
+                .migrate_workload_v6(&root.path().join("a-before-v6.sqlite"))
+                .unwrap();
+        }
+        let store = if inactive {
+            drop(store);
+            Arc::new(
+                Store::open_existing_for_tenant(
+                    &root.path().join("a.sqlite"),
+                    TENANT,
+                    Redactor::new(vec![]),
+                    1000,
+                )
+                .unwrap(),
+            )
+        } else {
+            store
+        };
         let state = store.supervision_state().unwrap();
-        assert!(state.active);
+        assert_eq!(state.schema_version, schema);
+        assert_eq!(state.active, !inactive);
         let namespace = Uuid::parse_str(state.control_namespace_uuid.as_deref().unwrap()).unwrap();
         let state = GatewayState::for_tenants(
             vec![TenantGateway {
@@ -166,6 +197,31 @@ impl Gateway {
             requests,
             identities,
             task,
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn workload_schema6_keeps_fresh_broker_auth_and_inactive_admission_guards() {
+    for inactive in [false, true] {
+        let gateway = Gateway::with_schema(6, inactive).await;
+        let fixture = fresh_namespace_fixture(&gateway, gateway.namespace);
+        let registry = &fixture.service.registry;
+        assert!(
+            VerifiedProfile::authenticate(registry, "cancel_retry_test", A_RUNNER, !inactive)
+                .await
+                .is_ok(),
+            "schema6 must preserve authenticated metadata and compatible admission"
+        );
+        assert!(matches!(
+            VerifiedProfile::authenticate(registry, "cancel_retry_test", A_VIEWER, false).await,
+            Err(BrokerErrorCodeV1::Forbidden)
+        ));
+        if inactive {
+            assert!(matches!(
+                VerifiedProfile::authenticate(registry, "cancel_retry_test", A_RUNNER, true).await,
+                Err(BrokerErrorCodeV1::IncompatibleControl)
+            ));
         }
     }
 }

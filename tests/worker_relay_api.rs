@@ -1,0 +1,2470 @@
+//! Relay storage regression fixtures use real typed supervision and SQLite, without a runtime.
+mod support;
+
+use agentsandbox::{
+    api::{GatewayState, TenantGateway, gateway_router},
+    audit::{AuditCapacityV1, EventQuery, Store, WorkloadAuditPolicyV1},
+    broker_registry::{
+        BrokerAuthorityV1, BrokerGrantMutationV1, BrokerHeartbeatV1, BrokerRevocationV1,
+        BrokerRuntimeKindV1,
+    },
+    control::*,
+    identity::{
+        HumanAccountV1, HumanCapabilityV1, IdentityChangeV1, IdentityMutationV1,
+        LegacyControlRoleV1, LocalCredentialV1, MembershipV1, PrincipalRefV1,
+    },
+    model::{CommandSpec, DecisionRequest},
+    policy::{self, Policy},
+    redaction::Redactor,
+    relay::*,
+    workload::{WorkloadBindingIssueV1, WorkloadBindingRevocationV1, WorkloadSubjectV1},
+};
+use axum::{
+    Router,
+    body::Body,
+    http::{Request, StatusCode},
+};
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{path::Path, sync::Arc};
+use tower::ServiceExt;
+use uuid::Uuid;
+
+const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+// The production issuer deliberately rejects concurrent HTTP emissions across
+// GatewayState instances in one process. Isolate the two fixture campaigns.
+static HTTP_ISSUE_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn decision_admission(store: &Store) -> AdmissionV1 {
+    let session_id = Uuid::new_v4().to_string();
+    let request = DecisionRequest {
+        request_id: Uuid::new_v4().to_string(),
+        profile: "strict".into(),
+        command: CommandSpec {
+            argv: vec!["/usr/bin/id".into()],
+            cwd: "/workspace".into(),
+        },
+        project_id: None,
+        sandbox_id: None,
+        agent_id: None,
+        session_id: Some(session_id.clone()),
+        correlation_id: None,
+        trace_id: None,
+        human_approved: false,
+        approval_hash: None,
+        execution_mode: None,
+        provider_resolution: None,
+    };
+    let policy = Policy::default();
+    let stored = store
+        .decision(
+            &request,
+            Some((policy::evaluate(&policy, &request), json!(null))),
+        )
+        .unwrap()
+        .unwrap();
+    AdmissionV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        receipt: DecisionReceiptV1 {
+            version: 1,
+            request_id: request.request_id.clone(),
+            request_hash: policy::request_hash(&request),
+            phase: DecisionPhaseV1::Initial,
+            audit_seq: stored.seq,
+            audit_hash: stored.hash,
+        },
+        launch: LaunchSpecV1 {
+            version: 1,
+            session_id,
+            command: request.command.clone(),
+            profile: request.profile.clone(),
+            runtime_kind: RuntimeKindV1::Docker,
+            authority_id: Uuid::new_v4().to_string(),
+            image_ref: "worker:fixture".into(),
+            image_id: format!("sha256:{HASH_A}"),
+            network: NetworkV1::None,
+            cpu_millis: 2000,
+            memory_bytes: 1_073_741_824,
+            pids_limit: 256,
+            timeout_seconds: 600,
+            security_preset: SecurityPresetV1::FixedSandboxV2,
+            restart_policy: RestartPolicyV1::No,
+            workspace_manifest_digest: HASH_B.into(),
+            workspace_import_policy_version: 1,
+            provider: "generic".into(),
+            capture_output: false,
+            credential_binding_id: None,
+            credential_names: vec![],
+            provider_resolution: None,
+        },
+        decision_request: request,
+    }
+}
+
+fn supervised_request(admission: AdmissionV1) -> SupervisedAdmissionV1 {
+    let compact = Uuid::new_v4().simple().to_string();
+    SupervisedAdmissionV1 {
+        version: 1,
+        protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+        intent_hash: format!("{compact}{compact}"),
+        admission,
+    }
+}
+
+fn admit_supervised(store: &Store, request: &SupervisedAdmissionV1) -> AdmissionResultV1 {
+    let policy = Policy::default();
+    store
+        .admit_supervised(
+            request,
+            &policy,
+            policy::evaluate(&policy, &request.admission.decision_request),
+            json!(null),
+            &QuotaPolicyV1::default(),
+        )
+        .unwrap()
+}
+
+fn mutation(worker: &WorkerV1, transition: WorkerTransitionV1) -> WorkerMutationV1 {
+    WorkerMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        transition,
+    }
+}
+
+fn inspection(worker: &WorkerV1) -> RuntimeInspectionV1 {
+    RuntimeInspectionV1 {
+        authority_id: worker.launch.authority_id.clone(),
+        runtime_kind: worker.launch.runtime_kind,
+        container_id: "d".repeat(64),
+        stable_name: worker.attempt.stable_name.clone(),
+        volume_name: worker.attempt.volume_name.clone(),
+        image_id: worker.launch.image_id.clone(),
+        spec_hash: worker.spec_hash.clone(),
+        cpu_millis: worker.launch.cpu_millis,
+        memory_bytes: worker.launch.memory_bytes,
+        pids_limit: worker.launch.pids_limit,
+        network: worker.launch.network,
+        security_preset: worker.launch.security_preset,
+        restart_policy: worker.launch.restart_policy,
+    }
+}
+
+fn host_clock(ns: u128) -> HostClockSampleV1 {
+    HostClockSampleV1 {
+        version: 1,
+        method: HostClockMethodV1::DarwinMachContinuousV1,
+        boot_id: "11111111-1111-4111-8111-111111111111".into(),
+        continuous_ns_decimal: ns.to_string(),
+        observed_utc: Some("2026-10-30T12:00:00Z".into()),
+    }
+}
+
+fn worker_arm(worker: &WorkerV1, intent_hash: &str) -> ArmV1 {
+    let inspection = worker.attempt.created_inspection.clone().unwrap();
+    let start = 100_000_000_000_u128;
+    let timeout = worker.launch.timeout_seconds;
+    ArmV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        intent_hash: intent_hash.into(),
+        subject: ArmSubjectV1::Worker,
+        inspection,
+        authority_binding_hash: HASH_A.into(),
+        configuration_fingerprint_version: 2,
+        configuration_fingerprint: HASH_B.into(),
+        clock: host_clock(start),
+        timeout_seconds: timeout,
+        deadline_ns_decimal: (start + u128::from(timeout) * 1_000_000_000).to_string(),
+    }
+}
+
+fn helper_arm(
+    worker: &WorkerV1,
+    intent_hash: &str,
+    helper_id: Uuid,
+    purpose: HelperPurposeV1,
+    permission: HelperPermissionV1,
+) -> ArmV1 {
+    worker
+        .launch
+        .validate()
+        .expect("parent launch must be valid");
+    assert_eq!(worker.spec_hash, worker.launch.spec_hash().unwrap());
+    let policy = helper_execution_policy_v1(worker, purpose, helper_id).unwrap();
+    let start = 100_000_000_000_u128;
+    let timeout = 120_u32;
+    ArmV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        expected_revision: worker.revision,
+        intent_hash: intent_hash.into(),
+        subject: ArmSubjectV1::Helper {
+            helper_id: helper_id.to_string(),
+            purpose,
+            policy_version: 1,
+            permission: Box::new(permission),
+        },
+        inspection: RuntimeInspectionV1 {
+            authority_id: policy.authority_id.clone(),
+            runtime_kind: policy.runtime_kind,
+            container_id: format!("{:064x}", helper_id.as_u128()),
+            stable_name: policy.stable_name.clone(),
+            volume_name: policy.volume_name.clone(),
+            image_id: policy.image_id.clone(),
+            spec_hash: policy.spec_hash().unwrap(),
+            cpu_millis: policy.cpu_millis,
+            memory_bytes: policy.memory_bytes,
+            pids_limit: policy.pids_limit,
+            network: policy.network,
+            security_preset: policy.security_preset,
+            restart_policy: policy.restart_policy,
+        },
+        authority_binding_hash: HASH_A.into(),
+        configuration_fingerprint_version: 2,
+        configuration_fingerprint: HASH_C.into(),
+        clock: host_clock(start),
+        timeout_seconds: timeout,
+        deadline_ns_decimal: (start + u128::from(timeout) * 1_000_000_000).to_string(),
+    }
+}
+
+fn helper_claim(_arm: &ArmV1, receipt: &ArmReceiptV1, helper_id: Uuid) -> HelperStartClaimV1 {
+    HelperStartClaimV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        helper_id: helper_id.to_string(),
+        emitter_id: Uuid::new_v4().to_string(),
+        arm_receipt: receipt.clone(),
+        clock_check: host_clock(100_000_000_001),
+    }
+}
+
+fn helper_observation(
+    arm: &ArmV1,
+    receipt: &ArmReceiptV1,
+    helper_id: Uuid,
+    running: Option<bool>,
+    exit_code: i64,
+    verification: Option<agentsandbox::control::ImportVerificationReportV1>,
+) -> HelperObservationV1 {
+    HelperObservationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        helper_id: helper_id.to_string(),
+        arm_receipt: receipt.clone(),
+        observation: RuntimeObservationV1 {
+            inspection: arm.inspection.clone(),
+            observed_at: "2026-10-30T12:00:02Z".into(),
+            status: if running == Some(true) {
+                RuntimeStatusV1::Running
+            } else {
+                RuntimeStatusV1::Exited
+            },
+            running,
+            started_at: Some("2026-10-30T12:00:00Z".into()),
+            finished_at: Some("2026-10-30T12:00:01Z".into()),
+            exit_code: Some(exit_code),
+            oom_killed: Some(false),
+            restart_count: Some(0),
+        },
+        verification,
+    }
+}
+
+fn parent_observation(
+    worker: &WorkerV1,
+    status: RuntimeStatusV1,
+    running: bool,
+    finished_at: Option<&str>,
+    exit_code: Option<i64>,
+) -> RuntimeObservationV1 {
+    RuntimeObservationV1 {
+        inspection: worker.attempt.created_inspection.clone().unwrap(),
+        observed_at: "2026-10-30T12:00:02Z".into(),
+        status,
+        running: Some(running),
+        started_at: Some("2026-10-30T12:00:00Z".into()),
+        finished_at: finished_at.map(str::to_owned),
+        exit_code,
+        oom_killed: Some(false),
+        restart_count: Some(0),
+    }
+}
+
+fn running_worker(store: &Store) -> WorkerV1 {
+    let request = supervised_request(decision_admission(store));
+    let admitted = admit_supervised(store, &request);
+    let mut worker = admitted.worker.unwrap();
+    worker = store
+        .mutate_worker(&mutation(&worker, WorkerTransitionV1::Prepare))
+        .unwrap()
+        .worker;
+
+    // The real typed import and independent verification gates remain active in this fixture.
+    let import_id = Uuid::new_v4();
+    let import_arm = helper_arm(
+        &worker,
+        &request.intent_hash,
+        import_id,
+        HelperPurposeV1::Import,
+        HelperPermissionV1::Admission {
+            receipt: admitted.receipt,
+        },
+    );
+    let imported = store.arm_execution(&import_arm).unwrap();
+    store
+        .claim_helper_start(&helper_claim(&import_arm, &imported.receipt, import_id))
+        .unwrap();
+    let import_terminal = store
+        .observe_helper(&helper_observation(
+            &import_arm,
+            &imported.receipt,
+            import_id,
+            Some(false),
+            0,
+            None,
+        ))
+        .unwrap();
+
+    let verify_id = Uuid::new_v4();
+    let verify_arm = helper_arm(
+        &worker,
+        &request.intent_hash,
+        verify_id,
+        HelperPurposeV1::ImportVerification,
+        HelperPermissionV1::ImportVerification {
+            import_helper_id: import_id.to_string(),
+            import_arm: imported.receipt,
+            import_terminal,
+            manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+        },
+    );
+    let verified = store.arm_execution(&verify_arm).unwrap();
+    store
+        .claim_helper_start(&helper_claim(&verify_arm, &verified.receipt, verify_id))
+        .unwrap();
+    store
+        .observe_helper(&helper_observation(
+            &verify_arm,
+            &verified.receipt,
+            verify_id,
+            Some(false),
+            0,
+            Some(ImportVerificationReportV1 {
+                import_helper_id: import_id.to_string(),
+                expected_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+                observed_manifest_digest: worker.launch.workspace_manifest_digest.clone(),
+            }),
+        ))
+        .unwrap();
+
+    worker = store
+        .mutate_worker(&mutation(&worker, WorkerTransitionV1::CreateIssued))
+        .unwrap()
+        .worker;
+    let mut observed = inspection(&worker);
+    observed.container_id = format!("{:064x}", Uuid::new_v4().as_u128());
+    worker = store
+        .mutate_worker(&mutation(
+            &worker,
+            WorkerTransitionV1::Created {
+                inspection: observed,
+            },
+        ))
+        .unwrap()
+        .worker;
+    let arm = worker_arm(&worker, &request.intent_hash);
+    let armed = store.arm_execution(&arm).unwrap();
+    worker = store
+        .claim_armed_start(&ArmedStartClaimV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            worker_id: worker.worker_id.clone(),
+            attempt_id: worker.attempt.attempt_id.clone(),
+            expected_revision: worker.revision,
+            emitter_id: Uuid::new_v4().to_string(),
+            arm_receipt: armed.receipt,
+            clock_check: host_clock(100_000_000_001),
+        })
+        .unwrap()
+        .worker;
+    let observation = parent_observation(&worker, RuntimeStatusV1::Running, true, None, None);
+    let worker = store
+        .mutate_worker(&mutation(
+            &worker,
+            WorkerTransitionV1::Observe { observation },
+        ))
+        .unwrap()
+        .worker;
+    assert_eq!(worker.state, WorkerStateV1::Running);
+    worker
+}
+
+fn fresh(directory: &Path, tenant: &str, max_events: u64) -> Store {
+    let path = directory.join(format!("{tenant}.sqlite"));
+    let store = Store::create_supervised_for_tenant(
+        &path,
+        tenant,
+        Redactor::new(vec!["fixture-private-provider-secret".into()]),
+        max_events,
+        &directory.join(format!("{tenant}-before-v3.sqlite")),
+    )
+    .unwrap();
+    store
+        .migrate_identity_v4(&directory.join(format!("{tenant}-before-v4.sqlite")))
+        .unwrap();
+    store
+        .migrate_human_access_v5(&directory.join(format!("{tenant}-before-v5.sqlite")))
+        .unwrap();
+    store
+        .migrate_workload_v6(&directory.join(format!("{tenant}-before-v6.sqlite")))
+        .unwrap();
+    store
+}
+
+fn endpoint(worker: &WorkerV1) -> RelayEndpointV1 {
+    RelayEndpointV1 {
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        generation: 1,
+    }
+}
+fn bind(store: &Store, worker: &WorkerV1, token: &str) -> (String, u64) {
+    let credential_id = Uuid::new_v4().to_string();
+    let receipt = store
+        .issue_workload_binding(&WorkloadBindingIssueV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential_id.clone(),
+            expected_revision: 0,
+            subject: WorkloadSubjectV1::Worker {
+                worker_id: worker.worker_id.clone(),
+                attempt_id: worker.attempt.attempt_id.clone(),
+                generation: 1,
+            },
+            sha256_digest: hex::encode(Sha256::digest(token.as_bytes())),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+        })
+        .unwrap();
+    (credential_id, receipt.revision)
+}
+fn bind_local_human_metadata(store: &Store, token: &str) -> PrincipalRefV1 {
+    let principal = PrincipalRefV1::HumanLocal {
+        installation_id: Uuid::new_v4().to_string(),
+        account_id: Uuid::new_v4().to_string(),
+    };
+    let account = HumanAccountV1 {
+        version: 1,
+        principal: principal.clone(),
+        display_name: "Local identity collision fixture".into(),
+        revision: 1,
+        active: true,
+    };
+    let credential = LocalCredentialV1 {
+        version: 1,
+        credential_id: Uuid::new_v4().to_string(),
+        principal: principal.clone(),
+        sha256_digest: hex::encode(Sha256::digest(token.as_bytes())),
+        revision: 1,
+        active: true,
+        expires_at: None,
+    };
+    for change in [
+        IdentityChangeV1::Account {
+            expected_revision: 0,
+            account,
+        },
+        IdentityChangeV1::Credential {
+            expected_revision: 0,
+            binding: credential,
+        },
+    ] {
+        store
+            .mutate_identity(&IdentityMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                actor: PrincipalRefV1::LegacyControl {
+                    credential_id: "operator-fixture".into(),
+                    role: LegacyControlRoleV1::Runner,
+                },
+                change,
+            })
+            .unwrap();
+    }
+    principal
+}
+fn directed(source: &WorkerV1, destination: &WorkerV1, seconds: i64) -> RelayGrantV1 {
+    RelayGrantV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: Uuid::new_v4().to_string(),
+        source: endpoint(source),
+        destination: endpoint(destination),
+        channel: "tasks".into(),
+        expires_at: (chrono::Utc::now() + chrono::Duration::seconds(seconds)).to_rfc3339(),
+    }
+}
+fn send(grant: &RelayGrantV1, body: &str) -> RelaySendV1 {
+    RelaySendV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: grant.grant_id.clone(),
+        ttl_seconds: 60,
+        body: body.into(),
+    }
+}
+fn router(a: Arc<Store>, b: Arc<Store>) -> Router {
+    gateway_router(
+        GatewayState::for_tenants(
+            vec![
+                TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store: a,
+                    runner_token: "a".repeat(48),
+                    viewer_token: "v".repeat(48),
+                },
+                TenantGateway {
+                    tenant_id: "tenant-b".into(),
+                    store: b,
+                    runner_token: "b".repeat(48),
+                    viewer_token: "w".repeat(48),
+                },
+            ],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    )
+}
+async fn call(
+    app: &Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Value,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .header("x-tenant-id", "tenant-b")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn human_identity_refuses_live_and_historical_workload_collision_in_either_tenant() {
+    // This deliberately authorized Store provisioning represents operator
+    // misconfiguration, not a CLI default or a reproduced worker exploit.
+    for human_in_b in [false, true] {
+        let directory = support::private_tempdir();
+        let a = Arc::new(fresh(directory.path(), "tenant-a", 2000));
+        let b = Arc::new(fresh(directory.path(), "tenant-b", 2000));
+        let worker = running_worker(&a);
+        let token = format!("aigh1_{}", "1".repeat(64));
+        let (credential, revision) = bind(&a, &worker, &token);
+        let app = router(a.clone(), b.clone());
+        assert_eq!(
+            call(&app, "GET", "/api/v1/human/identity", &token, Value::Null)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        bind_local_human_metadata(if human_in_b { &b } else { &a }, &token);
+        let result = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+        assert_eq!(
+            result.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "readable workload ownership did not block human authentication"
+        );
+        assert_eq!(result.1["error"]["code"], "identity_unavailable");
+        assert_eq!(result.1["error"]["retry_action"], "contact_operator");
+        assert!(result.1.get("principal").is_none() && result.1.get("contexts").is_none());
+        assert_eq!(
+            call(
+                &app,
+                "GET",
+                "/api/v1/relay/messages?limit=32",
+                &token,
+                Value::Null
+            )
+            .await
+            .0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let rotated = format!("aigh1_{}", "2".repeat(64));
+        let receipt = a
+            .issue_workload_binding(&WorkloadBindingIssueV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: credential.clone(),
+                expected_revision: revision,
+                subject: WorkloadSubjectV1::Worker {
+                    worker_id: worker.worker_id,
+                    attempt_id: worker.attempt.attempt_id,
+                    generation: 1,
+                },
+                sha256_digest: hex::encode(Sha256::digest(rotated.as_bytes())),
+                expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+            })
+            .unwrap();
+        assert_eq!(
+            call(&app, "GET", "/api/v1/human/identity", &token, Value::Null)
+                .await
+                .0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "rotation forgot historical ownership"
+        );
+        a.revoke_workload_binding(&WorkloadBindingRevocationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: credential,
+            expected_revision: receipt.revision,
+        })
+        .unwrap();
+        let historical = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+        assert_eq!(
+            historical.0,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "revocation forgot historical ownership"
+        );
+        assert_eq!(historical.1["error"]["code"], "identity_unavailable");
+        assert!(historical.1.get("principal").is_none() && historical.1.get("contexts").is_none());
+    }
+}
+
+#[tokio::test]
+async fn extracted_human_stream_revalidates_workload_collision_before_first_content_poll() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 2000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 2000));
+    let worker = running_worker(&a);
+    let token = format!("aigh1_{}", "3".repeat(64));
+    let principal = bind_local_human_metadata(&a, &token);
+    a.mutate_identity(&IdentityMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        actor: PrincipalRefV1::LegacyControl {
+            credential_id: "operator-fixture".into(),
+            role: LegacyControlRoleV1::Runner,
+        },
+        change: IdentityChangeV1::Membership {
+            expected_revision: 0,
+            membership: MembershipV1 {
+                version: 1,
+                membership_id: Uuid::new_v4().to_string(),
+                principal,
+                tenant_id: "tenant-a".into(),
+                organization_scope: "organization-stream".into(),
+                revision: 1,
+                active: true,
+                capabilities: std::collections::BTreeSet::from([
+                    HumanCapabilityV1::ReadMetadata,
+                    HumanCapabilityV1::ReadTenantMetadata,
+                ]),
+            },
+        },
+    })
+    .unwrap();
+    a.append(agentsandbox::model::Event::new(
+        "fixture.human_stream_visible",
+    ))
+    .unwrap();
+    let app = router(a.clone(), b);
+    let identity = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+    assert_eq!(identity.0, StatusCode::OK);
+    let context = identity.1["contexts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|context| context["mode"] == "administration")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let request = Request::builder()
+        .uri("/api/v1/human/stream?limit=1&view=metadata")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-aiguard-context", context)
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    bind(&a, &worker, &token);
+    let mut frames = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), frames.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8(first.to_vec()).unwrap();
+    assert!(
+        frame.contains("event: error")
+            && frame.contains("identity_unavailable")
+            && frame.contains("contact_operator")
+    );
+    assert!(!frame.contains("human_audit") && !frame.contains(&token));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), frames.next())
+            .await
+            .unwrap()
+            .is_none(),
+        "collision stream did not terminate after its error frame"
+    );
+}
+
+#[tokio::test]
+async fn healthy_human_source_keeps_partial_context_status_when_a_neighbor_is_unavailable() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let token = format!("aigh1_{}", "4".repeat(64));
+    bind_local_human_metadata(&a, &token);
+    let app = router(a.clone(), b);
+    let initial = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+    assert_eq!(initial.0, StatusCode::OK);
+    assert_eq!(initial.1["contexts_complete"], true);
+    let corrupted = rusqlite::Connection::open(directory.path().join("tenant-b.sqlite")).unwrap();
+    corrupted
+        .execute("UPDATE quota SET bytes=bytes+1 WHERE id=1", [])
+        .unwrap();
+    drop(corrupted);
+    let partial = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+    assert_eq!(partial.0, StatusCode::OK);
+    assert_eq!(
+        partial.1["contexts_complete"], false,
+        "unavailable neighbor was presented as a complete empty profile"
+    );
+    let corrupted = rusqlite::Connection::open(directory.path().join("tenant-a.sqlite")).unwrap();
+    corrupted
+        .execute("UPDATE quota SET bytes=bytes+1 WHERE id=1", [])
+        .unwrap();
+    drop(corrupted);
+    let unavailable = call(&app, "GET", "/api/v1/human/identity", &token, Value::Null).await;
+    assert_eq!(unavailable.0, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(unavailable.1.get("principal").is_none() && unavailable.1.get("contexts").is_none());
+}
+
+#[tokio::test]
+async fn workload_http_issuance_refuses_aliases_and_valid_auth_survives_an_unavailable_neighbor() {
+    let _issue_campaign = HTTP_ISSUE_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 2000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 2000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let b1 = running_worker(&b);
+    let token = "5".repeat(48);
+    let peer = "2".repeat(48);
+    let neighbor = "3".repeat(48);
+    let human_token = "8".repeat(48);
+    bind_local_human_metadata(&b, &human_token);
+    bind(&a, &a2, &peer);
+    bind(&b, &b1, &neighbor);
+    let app = router(a.clone(), b.clone());
+    let input = WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: Uuid::new_v4().to_string(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Worker {
+            worker_id: a1.worker_id.clone(),
+            attempt_id: a1.attempt.attempt_id.clone(),
+            generation: 1,
+        },
+        sha256_digest: hex::encode(Sha256::digest(token.as_bytes())),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+    };
+    let issued = call(
+        &app,
+        "POST",
+        "/api/v1/workload-bindings",
+        &"a".repeat(48),
+        json!(input),
+    )
+    .await;
+    assert_eq!(issued.0, StatusCode::CREATED);
+    assert!(!issued.1.to_string().contains(&token));
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/workload-bindings",
+            &"a".repeat(48),
+            json!(input)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for forbidden_token in [&"a".repeat(48), &"v".repeat(48), &neighbor, &human_token] {
+        let collision = WorkloadBindingIssueV1 {
+            operation_id: Uuid::new_v4().to_string(),
+            credential_id: Uuid::new_v4().to_string(),
+            sha256_digest: hex::encode(Sha256::digest(forbidden_token.as_bytes())),
+            ..input.clone()
+        };
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/workload-bindings",
+                &"a".repeat(48),
+                json!(collision)
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+    }
+    let grant = directed(&a1, &a2, 300);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token,
+            json!(send(&grant, &token))
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST,
+        "current bearer was accepted as message content"
+    );
+    for (headers, expected) in [
+        (
+            vec![
+                ("authorization", format!("Bearer {token}")),
+                ("authorization", format!("Bearer {token}")),
+            ],
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            vec![("authorization", format!("Bearer {}", "x".repeat(513)))],
+            StatusCode::UNAUTHORIZED,
+        ),
+        (
+            vec![
+                ("authorization", format!("Bearer {token}")),
+                ("origin", "https://untrusted.example".into()),
+            ],
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = polled.clone();
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"untrusted unread input"))
+        }));
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/relay/messages")
+            .header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+        assert!(
+            !polled.load(std::sync::atomic::Ordering::SeqCst),
+            "invalid proof/origin polled body"
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &"z".repeat(48),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let before = rows(
+        &directory.path().join("tenant-a.sqlite"),
+        "SELECT COUNT(*) FROM workload_bindings",
+    );
+    let corrupted = rusqlite::Connection::open(directory.path().join("tenant-b.sqlite")).unwrap();
+    corrupted
+        .execute("UPDATE quota SET bytes=bytes+1 WHERE id=1", [])
+        .unwrap();
+    drop(corrupted);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token,
+            json!(send(&grant, "authorized source despite unrelated failure"))
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &neighbor,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unavailable source became an absent credential"
+    );
+    let new = WorkloadBindingIssueV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: Uuid::new_v4().to_string(),
+        sha256_digest: hex::encode(Sha256::digest("6".repeat(48).as_bytes())),
+        ..input
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/workload-bindings",
+            &"a".repeat(48),
+            json!(new)
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "emission assumed uniqueness in an unreadable neighbor"
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM workload_bindings"
+        ),
+        before
+    );
+    let revoke = WorkloadBindingRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: input.credential_id.clone(),
+        expected_revision: issued.1["revision"].as_u64().unwrap(),
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workload-bindings/{}/revoke", Uuid::new_v4()),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/workload-bindings/{}/revoke", revoke.credential_id),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn broker_http_heartbeat_and_self_are_bound_to_the_authenticated_broker() {
+    let _issue_campaign = HTTP_ISSUE_TEST_SERIAL.lock().await;
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let app = router(a.clone(), b);
+    let token = "7".repeat(48);
+    let grant = BrokerGrantMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: Uuid::new_v4().to_string(),
+        expected_revision: None,
+        credential_id: Uuid::new_v4().to_string(),
+        incarnation_id: Uuid::new_v4().to_string(),
+        authorities: vec![BrokerAuthorityV1 {
+            authority_id: "fixture-broker-authority-a".into(),
+            runtime_kind: BrokerRuntimeKindV1::Docker,
+        }],
+        lease_seconds: 30,
+        not_after: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/brokers/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let binding = WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: grant.credential_id.clone(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: grant.broker_id.clone(),
+            incarnation_id: grant.incarnation_id.clone(),
+        },
+        sha256_digest: hex::encode(Sha256::digest(token.as_bytes())),
+        expires_at: grant.not_after.clone(),
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/workload-bindings",
+            &"a".repeat(48),
+            json!(binding)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let heartbeat = BrokerHeartbeatV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        expected_heartbeat_revision: 0,
+        incarnation_id: grant.incarnation_id.clone(),
+        sequence: 1,
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/brokers/heartbeat",
+            &token,
+            json!(heartbeat)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let own = call(
+        &app,
+        "GET",
+        "/api/v1/brokers/self?broker_id=untrusted-selector",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(own.0, StatusCode::OK);
+    assert_eq!(own.1["broker"]["broker_id"], grant.broker_id);
+    assert_eq!(own.1["runtime_inventory_complete"], false);
+    let a_list = call(
+        &app,
+        "GET",
+        "/api/v1/brokers?limit=100",
+        &"v".repeat(48),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(a_list.0, StatusCode::OK);
+    assert_eq!(a_list.1["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/brokers?limit=100",
+            &"w".repeat(48),
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/brokers?limit=0",
+            &"v".repeat(48),
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/v1/brokers", &token, Value::Null)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let mut spoofed = json!(heartbeat);
+    spoofed["broker_id"] = json!(Uuid::new_v4().to_string());
+    assert_eq!(
+        call(&app, "POST", "/api/v1/brokers/heartbeat", &token, spoofed)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let revoke = BrokerRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: grant.broker_id.clone(),
+        expected_revision: 1,
+    };
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/brokers/{}/revoke", Uuid::new_v4()),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/brokers/{}/revoke", grant.broker_id),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        call(&app, "GET", "/api/v1/brokers/self", &token, Value::Null)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn readable_cross_tenant_workload_collision_is_refused_without_revealing_owners() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let b1 = running_worker(&b);
+    let token = "1".repeat(48);
+    // A deliberately conflicting trusted provision, bypassing HTTP issue preflight,
+    // represents legacy/operator state. HTTP must refuse its ambiguous authority.
+    bind(&a, &a1, &token);
+    bind(&b, &b1, &token);
+    let app = router(a, b);
+    let result = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &token,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(result.0, StatusCode::SERVICE_UNAVAILABLE);
+    let encoded = result.1.to_string();
+    for forbidden in ["tenant-a", "tenant-b", &a1.worker_id, &b1.worker_id, &token] {
+        assert!(!encoded.contains(forbidden));
+    }
+}
+
+#[tokio::test]
+async fn worker_proof_is_revalidated_after_a_slow_body_and_revocation_prevents_commit() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token = "1".repeat(48);
+    let peer = "2".repeat(48);
+    let (credential, revision) = bind(&a, &a1, &token);
+    bind(&a, &a2, &peer);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 300);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0,
+        StatusCode::CREATED
+    );
+    let payload = serde_json::to_vec(&send(
+        &grant,
+        "held request must be denied after revocation",
+    ))
+    .unwrap();
+    let (polled, body_polled) = tokio::sync::oneshot::channel();
+    let (release, body_release) = tokio::sync::oneshot::channel();
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        let _ = polled.send(());
+        body_release.await.unwrap();
+        Ok::<_, std::io::Error>(axum::body::Bytes::from(payload))
+    }));
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/relay/messages")
+        .header("authorization", format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap();
+    let response = tokio::spawn(app.oneshot(request));
+    body_polled.await.unwrap();
+    a.revoke_workload_binding(&WorkloadBindingRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential,
+        expected_revision: revision,
+    })
+    .unwrap();
+    release.send(()).unwrap();
+    assert_eq!(
+        response.await.unwrap().unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        0
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+fn rows(path: &Path, query: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(query, [], |r| r.get(0))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn inbox_pagination_obeys_encoded_envelope_and_authorized_cursor() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 5000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 5000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    // Newlines are one UTF-8 byte but require two encoded JSON bytes.
+    let body = "\n".repeat(MAX_MESSAGE_BYTES);
+    for _ in 0..20 {
+        assert!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/messages",
+                &token1,
+                json!(send(&grant, &body))
+            )
+            .await
+            .0
+            .is_success()
+        );
+    }
+    let mut after = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pages = 0;
+    loop {
+        let path = after.map_or_else(
+            || "/api/v1/relay/messages?limit=32".into(),
+            |cursor| format!("/api/v1/relay/messages?limit=32&after={cursor}"),
+        );
+        let (status, inbox) = call(&app, "GET", &path, &token2, Value::Null).await;
+        assert!(status.is_success());
+        assert_eq!(inbox["version"], 1);
+        assert!(serde_json::to_vec(&inbox).unwrap().len() <= MAX_INBOX_BYTES);
+        let items = inbox["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items.len() <= 32);
+        for item in items {
+            assert!(seen.insert(item["metadata"]["message_id"].as_str().unwrap().to_owned()));
+            assert_eq!(item["body"], body);
+        }
+        pages += 1;
+        assert!(pages <= 20, "pagination made no progress");
+        if inbox["next_after"].is_null() {
+            break;
+        }
+        after = Some(inbox["next_after"].as_i64().unwrap());
+        assert_eq!(after, items.last().unwrap()["sequence"].as_i64());
+    }
+    assert!(pages >= 2, "encoded envelope bound was not exercised");
+    assert_eq!(seen.len(), 20);
+    let empty = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &token1,
+        Value::Null,
+    )
+    .await;
+    assert!(empty.0.is_success());
+    assert_eq!(empty.1["items"], json!([]));
+    assert!(empty.1["next_after"].is_null());
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn one_worker_cannot_spend_its_peers_or_controls_audit_budget_and_rotation_does_not_reset_usage()
+ {
+    let directory = support::private_tempdir();
+    let a = Arc::new(
+        fresh(directory.path(), "tenant-a", 1000)
+            .with_workload_audit_policy(WorkloadAuditPolicyV1 {
+                version: 1,
+                tenant: AuditCapacityV1 {
+                    events: 12,
+                    bytes: 96 * 1024,
+                },
+                principal: AuditCapacityV1 {
+                    events: 3,
+                    bytes: 24 * 1024,
+                },
+            })
+            .unwrap(),
+    );
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    let (credential, revision) = bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let forward = directed(&a1, &a2, 300);
+    let backward = directed(&a2, &a1, 300);
+    for grant in [&forward, &backward] {
+        assert!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/grants",
+                &"a".repeat(48),
+                json!(grant)
+            )
+            .await
+            .0
+            .is_success()
+        );
+    }
+    for index in 0..3 {
+        assert!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/messages",
+                &token1,
+                json!(send(&forward, &format!("bounded principal {index}")))
+            )
+            .await
+            .0
+            .is_success()
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(send(&forward, "over principal audit budget"))
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        3
+    );
+    let peer = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &token2,
+        Value::Null,
+    )
+    .await;
+    assert!(peer.0.is_success());
+    assert_eq!(peer.1["items"].as_array().unwrap().len(), 3);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token2,
+            json!(send(&backward, "peer still has its independent share"))
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let rotated = "4".repeat(48);
+    a.issue_workload_binding(&WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential,
+        expected_revision: revision,
+        subject: WorkloadSubjectV1::Worker {
+            worker_id: a1.worker_id,
+            attempt_id: a1.attempt.attempt_id,
+            generation: 1,
+        },
+        sha256_digest: hex::encode(Sha256::digest(rotated.as_bytes())),
+        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+    })
+    .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &rotated,
+            json!(send(&forward, "rotation cannot recharge a stable worker"))
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let revoke = RelayRevokeV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: forward.grant_id.clone(),
+    };
+    assert!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/relay/grants/{}/revoke", forward.grant_id),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn recipient_ack_and_revocation_stop_delivery_and_do_not_restore_a_stale_capability() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    let (credential, revision) = bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let payload = send(&grant, "acknowledge the business message");
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let ack = RelayAckV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        message_id: payload.operation_id.clone(),
+    };
+    let path = format!("/api/v1/relay/messages/{}/ack", payload.operation_id);
+    assert_eq!(
+        call(&app, "POST", &path, &token1, json!(ack)).await.0,
+        StatusCode::FORBIDDEN,
+        "sender acknowledged recipient delivery"
+    );
+    assert!(
+        call(&app, "POST", &path, &token2, json!(ack))
+            .await
+            .0
+            .is_success()
+    );
+    let replay = call(&app, "POST", &path, &token2, json!(ack)).await;
+    assert!(replay.0.is_success());
+    assert_eq!(replay.1["replayed"], true);
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token2,
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages WHERE body IS NOT NULL"
+        ),
+        1,
+        "ACK silently destroyed retained business content"
+    );
+    let queued = send(&grant, "pending before explicit grant revocation");
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(queued)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let revoke = RelayRevokeV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: grant.grant_id.clone(),
+    };
+    let path = format!("/api/v1/relay/grants/{}/revoke", grant.grant_id);
+    assert_eq!(
+        call(&app, "POST", &path, &token1, json!(revoke)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        call(&app, "POST", &path, &"a".repeat(48), json!(revoke))
+            .await
+            .0
+            .is_success()
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token2,
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(send(&grant, "not authorized after revoke"))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let operations = rows(
+        &directory.path().join("tenant-a.sqlite"),
+        "SELECT COUNT(*) FROM relay_operations",
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "exact send receipt bypassed grant revocation"
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/relay/messages/{}/ack", ack.message_id),
+            &token2,
+            json!(ack)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "exact ACK receipt bypassed grant revocation"
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_operations"
+        ),
+        operations
+    );
+    a.revoke_workload_binding(&WorkloadBindingRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential,
+        expected_revision: revision,
+    })
+    .unwrap();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+        "revoked worker reused an idempotent send as authorization"
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn ttl_size_secret_detection_rate_limit_and_body_prune_are_enforced_by_the_real_store() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 2000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 2000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    for body in [
+        "x".repeat(MAX_MESSAGE_BYTES + 1),
+        "fixture-private-provider-secret".into(),
+        r#"{"api_key":"unknown-but-explicit-secret-field"}"#.into(),
+    ] {
+        assert_eq!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/messages",
+                &token1,
+                json!(send(&grant, &body))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut invalid_ttl = send(&grant, "invalid TTL");
+    invalid_ttl.ttl_seconds = MAX_MESSAGE_TTL_SECONDS + 1;
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(invalid_ttl)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut expiring = send(&grant, "short lived message");
+    expiring.ttl_seconds = 1;
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(expiring)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let mut second_expiring = send(&grant, "second short lived message");
+    second_expiring.ttl_seconds = 1;
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(second_expiring)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let acknowledged = RelayAckV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        message_id: expiring.operation_id.clone(),
+    };
+    let ack_path = format!("/api/v1/relay/messages/{}/ack", acknowledged.message_id);
+    assert!(
+        call(&app, "POST", &ack_path, &token2, json!(acknowledged))
+            .await
+            .0
+            .is_success()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1150)).await;
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token2,
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    let prune = RelayPruneV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        message_id: expiring.operation_id.clone(),
+    };
+    let path = format!("/api/v1/relay/messages/{}/prune", prune.message_id);
+    assert_eq!(
+        call(&app, "POST", &path, &token1, json!(prune)).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        call(&app, "POST", &path, &"a".repeat(48), json!(prune))
+            .await
+            .0
+            .is_success()
+    );
+    assert_eq!(
+        call(&app, "POST", &path, &"a".repeat(48), json!(prune))
+            .await
+            .1["replayed"],
+        true
+    );
+    let divergent = RelayPruneV1 {
+        message_id: second_expiring.operation_id.clone(),
+        ..prune
+    };
+    let ack_replay = call(&app, "POST", &ack_path, &token2, json!(acknowledged)).await;
+    assert!(ack_replay.0.is_success());
+    assert_eq!(
+        ack_replay.1["replayed"], true,
+        "message expiration/pruning incorrectly revoked an otherwise active grant"
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/relay/messages/{}/prune", divergent.message_id),
+            &"a".repeat(48),
+            json!(divergent)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages WHERE body IS NULL"
+        ),
+        1
+    );
+    for index in 2..MAX_MESSAGES_PER_MINUTE {
+        assert!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/messages",
+                &token1,
+                json!(send(&grant, &format!("bounded business message {index}")))
+            )
+            .await
+            .0
+            .is_success()
+        );
+    }
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(send(&grant, "over durable grant rate"))
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let replay = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &token1,
+        json!(expiring),
+    )
+    .await;
+    assert!(replay.0.is_success());
+    assert_eq!(
+        replay.1["replayed"], true,
+        "an exact retry spent a second rate slot"
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn exact_send_and_ack_receipts_require_an_unexpired_grant() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 2);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let payload = send(&grant, "already accepted before grant deadline");
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let ack = RelayAckV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        message_id: payload.operation_id.clone(),
+    };
+    let ack_path = format!("/api/v1/relay/messages/{}/ack", ack.message_id);
+    assert!(
+        call(&app, "POST", &ack_path, &token2, json!(ack))
+            .await
+            .0
+            .is_success()
+    );
+    let operations = rows(
+        &directory.path().join("tenant-a.sqlite"),
+        "SELECT COUNT(*) FROM relay_operations",
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(&app, "POST", &ack_path, &token2, json!(ack)).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_operations"
+        ),
+        operations
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn exact_receipts_require_the_opposite_endpoint_to_still_be_in_scope() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    let (credential, revision) = bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let forward = directed(&a1, &a2, 300);
+    let reverse = directed(&a2, &a1, 300);
+    for grant in [&forward, &reverse] {
+        assert!(
+            call(
+                &app,
+                "POST",
+                "/api/v1/relay/grants",
+                &"a".repeat(48),
+                json!(grant)
+            )
+            .await
+            .0
+            .is_success()
+        );
+    }
+    let first = send(&forward, "before destination revocation");
+    let second = send(&reverse, "before source revocation");
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(first)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token2,
+            json!(second)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let ack = RelayAckV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        message_id: second.operation_id,
+    };
+    let ack_path = format!("/api/v1/relay/messages/{}/ack", ack.message_id);
+    assert!(
+        call(&app, "POST", &ack_path, &token1, json!(ack))
+            .await
+            .0
+            .is_success()
+    );
+    a.revoke_workload_binding(&WorkloadBindingRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential,
+        expected_revision: revision,
+    })
+    .unwrap();
+    let operations = rows(
+        &directory.path().join("tenant-a.sqlite"),
+        "SELECT COUNT(*) FROM relay_operations",
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(first)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN,
+        "send replay ignored revoked destination binding"
+    );
+    assert_eq!(
+        call(&app, "POST", &ack_path, &token1, json!(ack)).await.0,
+        StatusCode::FORBIDDEN,
+        "ACK replay ignored revoked source binding"
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_operations"
+        ),
+        operations
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn audit_exhaustion_blocks_message_but_preserves_the_private_grant_revocation_path() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 256));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 256));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b);
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let mut exhausted = false;
+    for _ in 0..512 {
+        if a.append(agentsandbox::model::Event::new("ordinary.capacity.fixture"))
+            .is_err()
+        {
+            exhausted = true;
+            break;
+        }
+    }
+    assert!(
+        exhausted,
+        "fixture did not exercise mandatory audit exhaustion"
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(send(&grant, "must not persist without audit"))
+        )
+        .await
+        .0,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        0
+    );
+    let revoke = RelayRevokeV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        grant_id: grant.grant_id.clone(),
+    };
+    assert!(
+        call(
+            &app,
+            "POST",
+            &format!("/api/v1/relay/grants/{}/revoke", grant.grant_id),
+            &"a".repeat(48),
+            json!(revoke)
+        )
+        .await
+        .0
+        .is_success(),
+        "ordinary worker traffic consumed revocation capacity"
+    );
+    assert!(a.integrity().unwrap().valid);
+}
+
+#[tokio::test]
+async fn reopened_control_stays_inactive_and_a_tampered_body_latches_unhealthy_before_any_delivery()
+{
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 1000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 1000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let token1 = "1".repeat(48);
+    let token2 = "2".repeat(48);
+    bind(&a, &a1, &token1);
+    bind(&a, &a2, &token2);
+    let app = router(a.clone(), b.clone());
+    let grant = directed(&a1, &a2, 300);
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(grant)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    let payload = send(&grant, "durable original business body");
+    assert!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &token1,
+            json!(payload)
+        )
+        .await
+        .0
+        .is_success()
+    );
+    drop(app);
+    drop(a);
+    drop(b);
+    let path = directory.path().join("tenant-a.sqlite");
+    let a = Arc::new(
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 1000).unwrap(),
+    );
+    let b = Arc::new(
+        Store::open_existing_for_tenant(
+            &directory.path().join("tenant-b.sqlite"),
+            "tenant-b",
+            Redactor::new(vec![]),
+            1000,
+        )
+        .unwrap(),
+    );
+    assert!(!a.supervision_state().unwrap().active);
+    assert!(a.healthy());
+    assert!(a.integrity().unwrap().valid);
+    let app = router(a.clone(), b);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &token1,
+        json!(payload),
+    )
+    .await;
+    assert!(
+        !status.is_success(),
+        "reopen silently restored execution/relay authority"
+    );
+    assert_eq!(rows(&path, "SELECT COUNT(*) FROM relay_messages"), 1);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE relay_messages SET body='modified outside mandatory audit' WHERE message_id=?1",
+        [payload.operation_id],
+    )
+    .unwrap();
+    drop(db);
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token2,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(
+        !a.healthy(),
+        "body hash mismatch did not latch the independent audit failure"
+    );
+}
+
+#[tokio::test]
+async fn directed_worker_messages_are_tenant_scoped_idempotent_and_do_not_duplicate_bodies_in_audit()
+ {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 10_000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 10_000));
+    let a1 = running_worker(&a);
+    let a2 = running_worker(&a);
+    let b1 = running_worker(&b);
+    let a1_token = "1".repeat(48);
+    let a2_token = "2".repeat(48);
+    let b1_token = "3".repeat(48);
+    bind(&a, &a1, &a1_token);
+    bind(&a, &a2, &a2_token);
+    bind(&b, &b1, &b1_token);
+    let app = router(a.clone(), b.clone());
+    let grant = directed(&a1, &a2, 300);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/grants",
+        &"a".repeat(48),
+        json!(grant),
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "directed tenant-a grant refused: {status}"
+    );
+    let cross = directed(&a1, &b1, 300);
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"a".repeat(48),
+            json!(cross)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/grants",
+            &"v".repeat(48),
+            json!(directed(&a1, &a2, 300))
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    for path in [
+        "/api/v1/workers",
+        "/api/v1/quota",
+        "/api/v1/events",
+        "/api/v1/overview",
+    ] {
+        assert_eq!(
+            call(&app, "GET", path, &a1_token, Value::Null).await.0,
+            StatusCode::UNAUTHORIZED,
+            "worker accessed {path}"
+        );
+    }
+    let payload = send(&grant, "relay-business-canary-without-secret");
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &b1_token,
+            json!(payload)
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, first) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &a1_token,
+        json!(payload),
+    )
+    .await;
+    assert!(status.is_success(), "worker send refused: {status}");
+    assert_eq!(first["replayed"], false);
+    let (status, replay) = call(
+        &app,
+        "POST",
+        "/api/v1/relay/messages",
+        &a1_token,
+        json!(payload),
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(replay["replayed"], true);
+    assert_eq!(first["audit_seq"], replay["audit_seq"]);
+    let mut changed = payload.clone();
+    changed.body = "different business content".into();
+    assert_eq!(
+        call(
+            &app,
+            "POST",
+            "/api/v1/relay/messages",
+            &a1_token,
+            json!(changed)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        rows(
+            &directory.path().join("tenant-a.sqlite"),
+            "SELECT COUNT(*) FROM relay_messages"
+        ),
+        1
+    );
+    let (status, inbox) = call(
+        &app,
+        "GET",
+        "/api/v1/relay/messages?limit=32",
+        &a2_token,
+        Value::Null,
+    )
+    .await;
+    assert!(status.is_success());
+    assert_eq!(inbox["items"].as_array().unwrap().len(), 1);
+    assert_eq!(inbox["items"][0]["body"], payload.body);
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &a1_token,
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &b1_token,
+            Value::Null
+        )
+        .await
+        .1["items"],
+        json!([])
+    );
+    let audit = a
+        .events(&EventQuery {
+            order: Some("asc".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        !serde_json::to_string(&audit)
+            .unwrap()
+            .contains(&payload.body),
+        "audit duplicated the business body"
+    );
+    assert!(a.integrity().unwrap().valid);
+    assert!(b.integrity().unwrap().valid);
+}

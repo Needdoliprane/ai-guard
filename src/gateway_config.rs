@@ -24,6 +24,7 @@ struct TenantFiles {
     #[serde(default)]
     worker_quota: agentsandbox::control::QuotaPolicyV1,
     audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
+    workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
 }
 
 pub struct ConfiguredTenant {
@@ -35,6 +36,7 @@ pub struct ConfiguredTenant {
     pub viewer_token: String,
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
     pub audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
+    pub workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
 }
 
 #[derive(Deserialize)]
@@ -191,10 +193,50 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             viewer_token,
             worker_quota: tenant.worker_quota,
             audit_capacity_policy: tenant.audit_capacity_policy,
+            workload_audit_policy: tenant.workload_audit_policy,
         });
     }
     Ok(result)
 }
+
+/// Pure validation of every configured tenant before opening/creating a Store
+/// or preparing any backup directory. Defaults come from the Store contract.
+pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Result<()> {
+    anyhow::ensure!(
+        (1..=1_000_000).contains(&max_events),
+        "max-events doit être compris entre 1 et 1000000"
+    );
+    let defaults = agentsandbox::audit::AuditCapacityPolicyV1::resolved(max_events);
+    let mut credentials = BTreeSet::new();
+    for tenant in tenants {
+        tenant
+            .worker_quota
+            .validate()
+            .context("Quota workers invalide")?;
+        agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
+        for credential in [&tenant.runner_token, &tenant.viewer_token] {
+            use sha2::Digest;
+            anyhow::ensure!(
+                credentials.insert(sha2::Sha256::digest(credential.as_bytes())),
+                "Credentials ambigus : chaque identité doit avoir un secret distinct"
+            );
+        }
+        if let Some(policy) = &tenant.audit_capacity_policy {
+            policy.validate(max_events)?;
+        }
+        if let Some(policy) = &tenant.workload_audit_policy {
+            policy.validate(
+                max_events,
+                tenant.audit_capacity_policy.as_ref().unwrap_or(&defaults),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "workload/gateway_config_tests.rs"]
+mod workload_tests;
 
 #[cfg(test)]
 mod tests {

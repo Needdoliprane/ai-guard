@@ -240,7 +240,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        [2, 3, 4, 5].contains(&version),
+        [2, 3, 4, 5, 6].contains(&version),
         "unsupported control schema"
     );
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
@@ -289,9 +289,16 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .query_map([genesis_seq], row_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
+        if stored.event.kind.starts_with("control.workload.")
+            || stored.event.kind.starts_with("control.broker_registry.")
+            || stored.event.kind.starts_with("control.relay.")
+        {
+            anyhow::ensure!(version == 6, "workload control event requires schema6");
+            continue;
+        }
         if stored.event.kind.starts_with("control.identity.") {
             anyhow::ensure!(
-                [4, 5].contains(&version),
+                [4, 5, 6].contains(&version),
                 "identity event requires schema4 or5"
             );
             continue;
@@ -529,12 +536,50 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             "control projection differs from audit: {table}"
         );
     }
+    // These readers use indexed historical worker projections, so validate
+    // every worker/mutation column above before accepting dependent evidence.
+    super::workload::validate(db)?;
+    super::broker_registry::validate(db)?;
+    super::relay::validate(db)?;
     Ok(())
+}
+
+pub(in crate::audit) fn worker_at(
+    db: &Connection,
+    worker_id: &str,
+    before_seq: i64,
+) -> anyhow::Result<Option<WorkerV1>> {
+    uuid(worker_id)?;
+    invalid(before_seq > 0)?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    invalid(version == 6)?;
+    // The partial compound index excludes helper/Arm/export records, which
+    // cannot alter WorkerV1. This seeks one snapshot without scanning them.
+    let query = format!(
+        "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload FROM worker_mutations m JOIN events e ON e.seq=m.event_seq WHERE m.worker_id=?1 AND m.event_seq<?2 AND {WORKER_SNAPSHOT_PREDICATE} ORDER BY m.event_seq DESC LIMIT 1"
+    );
+    let stored = db
+        .query_row(&query, params![worker_id, before_seq], row_event)
+        .optional()?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let worker = if stored.event.kind == "control.worker.transition" {
+        serde_json::from_value::<ControlRecord>(stored.event.data)?.worker
+    } else {
+        supervision::worker_snapshot(&stored)?
+    };
+    let worker = worker.context("indexed worker mutation has no snapshot")?;
+    anyhow::ensure!(
+        worker.worker_id == worker_id,
+        "historical worker snapshot identity differs"
+    );
+    Ok(Some(worker))
 }
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4, 5].contains(&version) {
+    if [2, 3, 4, 5, 6].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -1070,6 +1115,11 @@ impl Store {
     pub fn migrate_control_v3(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
         self.migrate_control_version(backup_path, 2, 3)
     }
+    /// Offline maintenance only; the verified schema5 backup is retained.
+    /// Migration preserves an existing live origin but never activates one.
+    pub fn migrate_workload_v6(&self, backup_path: &Path) -> anyhow::Result<MigrationReportV1> {
+        self.migrate_control_version(backup_path, 5, 6)
+    }
     pub(super) fn migrate_control_version(
         &self,
         backup_path: &Path,
@@ -1154,6 +1204,14 @@ impl Store {
             3 => self.initialize_supervision(&tx)?,
             4 => self.initialize_identity(&tx)?,
             5 => self.initialize_human_access(&tx)?,
+            6 => {
+                super::workload::initialize(self, &tx)?;
+                super::broker_registry::initialize(self, &tx)?;
+                super::relay::initialize(&tx)?;
+                for (_, _, sql) in WORKLOAD_INDEX_SCHEMA {
+                    tx.execute_batch(sql)?;
+                }
+            }
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1172,6 +1230,7 @@ impl Store {
                 5 => {
                     "SELECT seq,hash FROM events WHERE kind='control.identity.human_access.genesis'"
                 }
+                6 => "SELECT genesis_seq,genesis_hash FROM workload_meta WHERE singleton=1",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1231,7 +1290,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if [3, 4, 5].contains(&version) {
+        if [3, 4, 5, 6].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,

@@ -83,7 +83,11 @@ impl CredentialIndex {
     /// One bounded digest and one lookup; this is not a constant-time lookup.
     pub(super) fn lookup(&self, token: &str) -> Option<CredentialBinding> {
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        self.entries.get(&digest).copied()
+        self.lookup_digest(&digest)
+    }
+
+    pub(super) fn lookup_digest(&self, digest: &[u8; 32]) -> Option<CredentialBinding> {
+        self.entries.get(digest).copied()
     }
 }
 

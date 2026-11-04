@@ -73,8 +73,8 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=5))]
+        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workload bindings, broker registry and relay).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=6))]
         target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -105,6 +105,9 @@ struct GatewayArgs {
     /// Private, versioned audit budgets for the local tenant; never resets usage.
     #[arg(long, conflicts_with = "tenants_file")]
     audit_capacity_file: Option<PathBuf>,
+    /// Private workload audit budgets; preserve control/identity reserves and cumulative usage.
+    #[arg(long, conflicts_with = "tenants_file")]
+    workload_audit_file: Option<PathBuf>,
     /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
     #[arg(long)]
     oidc_config: Option<PathBuf>,
@@ -480,6 +483,11 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .map(Store::load_capacity_policy)
                         .transpose()?,
+                    workload_audit_policy: args
+                        .workload_audit_file
+                        .as_deref()
+                        .map(Store::load_workload_audit_policy)
+                        .transpose()?,
                 }]
             };
             let mut secrets: Vec<String> = tenants
@@ -551,17 +559,9 @@ async fn main() -> Result<()> {
                 &std::fs::read(&args.policy).context("Politique locale manquante")?,
             )
             .context("Politique locale invalide")?;
-            anyhow::ensure!(
-                args.max_events > 0 && args.max_events <= 1_000_000,
-                "max-events doit être compris entre 1 et 1000000"
-            );
             // Validate the complete registry before preparing backups or any
             // fresh origin: a later tenant must not strand an earlier one.
-            for tenant in &tenants {
-                if let Some(policy) = &tenant.audit_capacity_policy {
-                    policy.validate(args.max_events)?;
-                }
-            }
+            gateway_config::validate_policies(&tenants, args.max_events)?;
             let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
                 let mut credential_files: Vec<&Path> = tenants
                     .iter()
@@ -590,10 +590,6 @@ async fn main() -> Result<()> {
             let mut event_count = 0_u64;
             let mut capacity_diagnostics = Vec::with_capacity(tenants.len());
             for tenant in tenants {
-                tenant
-                    .worker_quota
-                    .validate()
-                    .context("Quota workers invalide")?;
                 quotas.push((tenant.tenant_id.clone(), tenant.worker_quota));
                 let store = if let Some(root) = &backup_root {
                     root.revalidate()?;
@@ -626,7 +622,21 @@ async fn main() -> Result<()> {
                 } else {
                     store
                 };
-                capacity_diagnostics.push(format!(
+                let workload_source = if tenant.workload_audit_policy.is_some() {
+                    if args.tenants_file.is_some() {
+                        "tenant_registry"
+                    } else {
+                        "private_policy_file"
+                    }
+                } else {
+                    "derived_defaults"
+                };
+                let store = if let Some(policy) = tenant.workload_audit_policy {
+                    store.with_workload_audit_policy(policy)?
+                } else {
+                    store
+                };
+                capacity_diagnostics.push(redactor.text(&format!(
                     "Audit capacity tenant={} source={} human_read_policy={} policy={} fingerprint={}",
                     store.tenant_id(),
                     capacity_source,
@@ -637,7 +647,13 @@ async fn main() -> Result<()> {
                     },
                     serde_json::to_string(store.capacity_policy())?,
                     store.capacity_policy_fingerprint()?,
-                ));
+                )));
+                capacity_diagnostics.push(redactor.text(&format!(
+                    "Workload audit capacity tenant={} source={} admission_budget={} policy={} fingerprint={}",
+                    store.tenant_id(),workload_source,
+                    if store.workload_audit_policy().enabled() { "enabled" } else { "workload_audit_disabled_insufficient_capacity" },
+                    serde_json::to_string(store.workload_audit_policy())?,store.workload_audit_policy_fingerprint()?,
+                )));
                 let store = Arc::new(store);
                 let check = store.integrity()?;
                 anyhow::ensure!(
@@ -715,6 +731,7 @@ async fn main() -> Result<()> {
                 3 => store.migrate_control_v3(&backup)?,
                 4 => store.migrate_identity_v4(&backup)?,
                 5 => store.migrate_human_access_v5(&backup)?,
+                6 => store.migrate_workload_v6(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -891,6 +908,10 @@ async fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "workload/main_config_tests.rs"]
+mod workload_config_tests;
 
 #[cfg(test)]
 mod tests {
