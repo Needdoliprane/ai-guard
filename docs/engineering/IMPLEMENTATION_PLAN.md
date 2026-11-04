@@ -20,14 +20,17 @@
    Rapprocher tout nouveau constat du rapport final
    avec le code courant, y compris les lots déjà intégrés. Le retry du runner
    reste une proposition séparée sans décision du mainteneur.
-4. Trois chantiers produit indépendants sont lancés en parallèle sur `2c40097` :
-   adaptateur Kubernetes, relais worker et registre broker/bindings workload.
-   Périmètres ci-dessous, sans modifier les worktrees D5 protégés ni réduire les exigences cloud,
-   runtime, identité, exploitation et capacité100. Les résultats du 2 novembre
+4. Les trois chantiers parallèles sur `2c40097` ont livré un premier sous-lot
+   Kubernetes readonly (`1b61f4d`) et le backend workload/registre/relais
+   (`c762a24`), après86tests ciblés et contrôles composés sans avertissement.
+   Les périmètres ci-dessous ne qualifient ni transport worker, ni fédération,
+   ni lancement Kubernetes. Les worktrees D5 protégés restent intacts, et les
+   exigences cloud/runtime/identité/exploitation/capacité100 restent entières.
+   Les résultats du 2 novembre
    restent historiques ; les blocages DNS indiqués ci-dessous ont depuis été
    levés dans leur portée documentée.
 
-## Cycle actif — trois périmètres de développement
+## Cycle logiciel intégré — trois périmètres de développement
 
 | Worktree | Propriétaire | Périmètre |
 |---|---|---|
@@ -36,10 +39,18 @@
 | `broker-registry-20261103` | Agent cœur | Nouveaux `broker_registry*`, `workload*`, audit/replay, migration6 et capacité workload ; helper historique worker et adaptation contrôlée des schémas. |
 | Intégration | Root | Contrats transverses, API/auth, `lib.rs`, `main.rs`, configuration, composition et clôture. |
 
-La migration publique prévue est `migrate_workload_v6`, explicite5→6 avec
+La migration publique est `migrate_workload_v6`, explicite5→6 avec
 backup/rollback et validation de tous les objets. Elle ne réactive aucune
 autorité de supervision perdue. Une seule migration commune initialise
 registre, bindings et relais ; pas de schémas6 concurrents par agent.
+
+Prochaine priorité : raccorder un vrai worker network:none au relais et
+exécuter la recetteA1/A2/B1. La proposition privée du4novembre compare UDS et
+exec non-TTY ; sa revue exige de fermer ordre Running/release, ambiguïté de
+release, incarnation/epochs et rotation avant décision structurelle/code.
+Le backend seul ne clôture pas ce chantier. Reprise D5, fédération/UI humaine,
+admission Kubernetes, rétention/WSI-Q02 et qualification réelle restent au
+plan ; aucune obligation n'est reportée sous une étiquette MVP/V2.
 
 Les preuves broker/worker sont opaques et revalidées en transaction avant
 replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker

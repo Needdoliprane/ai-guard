@@ -1,5 +1,21 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Raccord produit après correctifs — 4 novembre 2026
+
+Le backend workload/registre/relais est intégré par `c762a24`, après86tests
+ciblés, revues indépendantes et contrôle composé de toutes les cibles sans
+avertissement. Les constats supplémentaires de ces revues sont détaillés dans
+[VALIDATION](VALIDATION.md#4-novembre--backend-workload-registre-et-relais-intégré),
+avec leurs RED et limites : indexation, recul UTC, collision de classes,
+association de schéma et contrat publié. Ils ne sont pas transformés en
+nouvel audit global ni en vulnérabilités distantes formellement confirmées.
+
+Les pièces externes restent inchangées en lecture seule : findings SHA
+`8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`,
+metadata `in_progress`. Tout rapport final reste à rapprocher de ce code plus
+récent, pas de correction spéculative. FD/Daybreak, WSI-Q02 et qualification
+runtime restent ouverts ; G09 FAIL,0/12 gates globaux clos.
+
 ## Correctifs initiaux de l'audit en cours — 3 novembre 2026
 
 L'audit courant reste ouvert. Ses sources sont `main@c4c4d2a` et

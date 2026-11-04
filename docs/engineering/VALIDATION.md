@@ -1,5 +1,151 @@
 # Validation courante
 
+## 4 novembre — backend workload, registre et relais intégré
+
+Source `567a673`, intégrée par `c762a24` ; base `2c400976`. Le Store reste
+SQLite par tenant. Le schéma6 ajoute bindings digest-only, registre des brokers,
+grants/messages/ACK du relais, budgets workload séparés et maximum temporel
+dérivé. Migration CLI explicite sauvegardée5→6 ; aucun auto-activate. Le
+frontend, les images/services en cours et les données utilisateurs ne sont
+pas remplacés par cette intégration.
+
+**PASS logiciel : 86 fonctions uniques ciblées.** Les85premières couvrent
+les14commandes du tableau ; le test de contrat publié ajouté ensuite compte
+une seule fonction pour ses cas2→6 et réouverture6. Aucun test ignoré n'est
+compté. Le canari de révocation composé est une reprise d'une de ces fonctions,
+pas une87e réussite.
+
+| Commande après `cargo test --offline --locked` | Fonctions PASS |
+|---|---:|
+| `--test broker_registry_migration` | 3 |
+| `--lib workload::` | 19 |
+| `--lib broker_registry::` | 7 |
+| `--lib audit::relay::` | 5 |
+| `--lib api::human::workload_collision_tests::` | 2 |
+| `--lib audit::capacity::workload_tests::` | 2 |
+| `--lib audit::capacity_tests::` | 15 |
+| `--lib workload_schema6_keeps_fresh_broker_auth_and_inactive_admission_guards` | 1 |
+| `--bin agentsandbox workload_config_tests::` | 1 |
+| `--bin agentsandbox gateway_config::workload_tests::` | 2 |
+| `--test worker_relay_contract` | 3 |
+| `--test broker_registry_storage` | 5 |
+| `--test broker_registry_cli_config` | 4 |
+| `--test worker_relay_api` | 16 |
+| `--test control_protocol_schema` | 1 |
+
+Toutes utilisent `-- --test-threads=1`, filtres exacts lorsque prescrits.
+Le code testé relie de vrais Router, identités, SQLite et protocoles Rust ;
+les observations de workers sont des fixtures de supervision, pas un moteur.
+La fixture OIDC signe/admet réellement sa preuve localement, sans IdP externe.
+Les tests contrôlent migration/backup/rollback, intégrité, CAS/idempotence,
+révocation/expiration, isolation A/B, collisions historiques de classes,
+revalidation après corps lent ou avant contenu SSE, limites et réserves.
+
+Les mesures SQL utilisent les requêtes exactes de production. Avec1024 puis
+2048tombstones et un nombre de corps retenus constant : inbox vide malgré256
+puis512corps d'autres destinations, `(rows,VM,fullscan)=(0,20,0)` ; quota
+`(count,bytes,VM,fullscan)=(2,2,23,1)` ; débit `(count,VM)=(2,23)` dans les
+deux cas. Pas de seuil de latence sur le Mac sous pression, ni mesure de
+capacité100. L'historique demeure conservé.
+
+### Reproductions et corrections de revue
+
+- WSI-Q01 : sous source bind-RO, les anciennes requêtes parcourent l'historique.
+  Quota : VM3100/fullscan1025 à N1024 puis VM6172/fullscan2049 à N2048 ;
+  inbox lit256lignes SQL d'autres destinations au lieu de zéro. Cela ne prouve
+  aucun contenu livré à un worker. L'oracle quota échoue avant le contrôle de
+  débit : ne pas attribuer ces valeurs au rate. GREEN constate séparément les
+  trois requêtes indexées.
+- WSI-V01 : deux RED déterministes de plancher UTC, sans modification de
+  l'horloge OS, puis huit cas time-floor GREEN inclus dans `workload::`.
+  Le maximum de préfixe survit à une réception générique plus basse/reopen ;
+  preuve brute intra-requête et précision milliseconde entre requêtes sont
+  distinguées. Aucune date reçue réécrite, aucune garantie générale d'horloge.
+- WRR-01 : ancien prédicat admet un intervalle dont les millisecondes
+  persistées s'effondrent ; RED par assertion après recompilation effective,
+  puis cas de refus et intervalle suivant valide/reopen GREEN.
+- B1 : deux unités et une API RED admettent une identité humaine alors que le
+  digest appartient déjà à un workload. Revalidation locale/OIDC et admission
+  sont corrigées, anciennes empreintes comprises. Le RED SSE n'obtient aucune
+  frame d'erreur dans sa garde5s après HTTP200/binding durable : ce timeout
+  seul n'est pas une preuve de vulnérabilité. GREEN prouve erreur sans contenu
+  puis terminaison ; aucune libération de lease avant drop n'est revendiquée.
+  Le canari de source indisponible est ajouté au GREEN, pas inventé dans le RED.
+- WSI-D01 : migration du premier GREEN échoue après DDL sur
+  `unexpected audit schema object`. Association des trois index retenus/rate/
+  inbox à leur table corrigée, sans assouplir les SQL/noms permis. Les trois
+  tests de migration passent ensuite. WSI-T01 corrige seulement la séquence
+  de fixture devenue2 après insertion de l'événement1 du grant.
+- Client broker : RED refuse un runner valide sur contrôle6 ; les deux gardes
+  ajoutent6 en conservant rôle, namespace, protocole et condition active.
+  Test réel HTTP sur actif/inactif et viewer GREEN.
+- Contrat publié : le JSONSchema omettait4/5/6 et gardait activeconst3. Deux
+  déclarations corrigées (enum1..6 et activeenum3..6). Le test initial savait
+  lire seulement const ; son lecteur borné const/enum est corrigé, puis le
+  même ancien JSON repasse RED avant le GREEN. Il compare les versions et
+  cette contrainte des DTO réellement servis, sans prétendre valider tout
+  JSONSchema ni ajouter une bibliothèque.
+
+Les revues indépendantes de stockage, du delta temporel/SQL, d'API/CLI,
+du raccord humain/broker, du schéma publié et des guides EN/FR ont leurs
+constats bloquants traités dans leur périmètre. WSI-Q02 demeure ouvert : les
+reconstructions complètes historiques après commits de sœurs et mutations
+de supervision ne deviennent pas bornées par les seuls index relais.
+
+### Provenance et contrôles finaux
+
+Preuves privées conservées :
+`/private/tmp/ai-guard-workload-composition-luna-20261103.osokbm/proofs/`.
+Le gel85 comporte43overlays sur `2c400976`, manifeste SHA
+`df479dfa836ab34418069c21eeff2e03cb932ad4af4549dc5a0ac7c1962ccfae`.
+Après retrait de la seule variable pure `now` inutilisée, le gel43v2 a pour
+SHA `16147906dffdcd61dee8c29a27feffba526f4200e19fee36a4333e595a1d8987`.
+Le canari révocation puis `cargo check --offline --locked --all-targets`
+passent sur `44b9f0b` +43v2, y compris les7fichiers Kubernetes inchangés.
+Le test/JSON du contrat ajoutent ensuite deux fichiers : nouvelle commande
+all-targets PASS sans avertissement,52SHA/mtimes et Cargo.lock inchangés.
+Formatage natif statique et scan des trois secrets connus PASS sur45fichiers.
+
+Logs finaux : `final-green-*.log` et rapports `final-green-RESULT.md`,
+`final-composed-check-RESULT.md`, `control-protocol-schema-green-RESULT.md`.
+Manifeste des logs GREEN85/composition
+`root-final-green-log-sha256.txt`, SHA
+`a40133ffdaca90cccb397724492399ea4fe9608ac7c256ab9bf2122ad3f7bf93` ;
+dernier `control-protocol-schema-green-all-targets.log`, SHA
+`06e858cd2f5812e02356879a59a1d71e48df3509817f08f48a8e80f2eb38cf5b`.
+Source finale : `/private/tmp/ai-guard-workload-final-source-20261104.sha256`.
+La copie intégrée est vérifiée45/45 et les7SHA Kubernetes restent identiques.
+Après intégration, les13documents relus ont639liens relatifs contrôlés,
+aucune cible manquante : les12liens différés vers les6nouveaux modules sont
+résolus. JSON d'exemple, diff et scan des trois secrets connus PASS sur les
+14fichiers documentaires/configuration ; le scanner privé est vérifié par
+contrôle positif sur le fichier de clés existant, sans afficher ses valeurs.
+
+Conteneur final image immuable
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`,
+Rust/Cargo1.99.1 directs, réseau/IPC coupés, racine/inputs/registry montés RO,
+UID1000, capabilities supprimées/no-new-privileges, CPU1, RAM/swap5Gio,
+PID256/nofile1024/fsize512Mio, tmpfs privé exécutable3Gio/65536inodes,
+environnement allowlist et garde5400s. Aucun code du dépôt exécuté sur hôte.
+
+Incidents de harnais préservés : copies scratch chmod-ro insuffisantes,
+CARGO_HOME erroné, filtre zéro fonction et invocation accidentelle du shim
+au post-check. Un faux PASS WRR-01 réutilisait le binaire du gel précédent :
+écarté, remplacé par preuve de compilation du bon chemin puis RED. Depuis,
+clean du seul package au changement de snapshot, jamais entre commandes du
+même gel. Aucun téléchargement ou écriture root n'a réussi via le shim ;
+tous les tests finaux utilisent les binaires absolus et source sous bind-RO.
+Les anciens conteneurs ne contenant plus que sleep sont retirés précisément,
+sans volume ni données/preuves supprimées ; reçus privés
+`ai-guard-workload-retired-sandboxes-20261104.wJ18t8/`.
+
+**NOT_RUN :** Clippy Linux (composant absent ; aucun téléchargement autorisé
+par ce lot), release/image, navigateur, fournisseur, véritables workers et
+recetteA1/A2/B1, crash du broker, charge100 et restauration physique.
+Le rapport externe reste `in_progress`, findings SHA
+`8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`
+inchangé : aucune conclusion finale inventée. G09 FAIL,0/12 gates clos.
+
 ## 3 et 4 novembre — composition workload, registre et relais en validation
 
 Base `2c400976`, travail composé dans `broker-registry-20261103`, aucun

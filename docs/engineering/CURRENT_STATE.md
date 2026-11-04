@@ -62,7 +62,11 @@ G09 reste FAIL et **0/12 gates globaux sont fermés**.
 
 ## Chantiers parallèles après les correctifs F
 
-Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
+Les trois chantiers partis de `2c40097` ont leurs propriétaires distincts.
+Le backend composé est intégré par `c762a24` (source `567a673`) : **86 tests
+uniques ciblés PASS**, canari de révocation composé PASS et compilation de
+toutes les cibles sans avertissement. Ces résultats et les limites sont
+décrits dans [VALIDATION](VALIDATION.md#4-novembre--backend-workload-registre-et-relais-intégré).
 
 - `kubernetes-adapter-20261103` : connexion HTTPS explicite, diagnostic et
   observation liée aux UID. **11 tests parents PASS** : 8 HTTP/TLS/config,
@@ -76,34 +80,30 @@ Trois worktrees partent du candidat `2c40097`, avec propriétaires distincts :
   local read-only Docker Desktop montre kindnet ; la présence d'une API
   NetworkPolicy ne prouve pas son application.
 - `worker-relay-20261103` : contrats, transactions SQLite, grants dirigés,
-  ACK/révocation, quotas et modules HTTP composés avec le registre ; tests
-  fonctionnels en cours. Le bord de canonisation temporelle et le replay
-  après révocation ont leurs correctifs source, pas encore qualifiés par
-  exécution. La revue d'intégration demande requêtes indexées bornées et
-  plancher UTC durable : corrections parallèles, lot non accepté à ce stade.
+  ACK/révocation, quotas et modules HTTP composés avec le registre. Tests
+  fonctionnels, bord de canonisation temporelle, replay après révocation,
+  requêtes indexées, plancher UTC et revalidation des preuves humaines passent
+  sur le gel testé ; les constats bloquants des revues ont été corrigés.
   Transport Unix/runtime et recette de trois workers réels restent ouverts.
 - `broker-registry-20261103` : registre, incarnations, ownership des autorités
-  et bindings workload digest-only en développement. Cet agent possède aussi
-  la migration6, le replay, les budgets workload et le raccord CLI/configuration.
-  La compilation du deuxième gel passe après quatre conversions SQLite
-  corrigées. Le gel2c cumule **47 fonctions uniques PASS** et deux attentes
-  HTTP403 erronées sur des routes runner qui refusent401 ; leurs assertions
-  sont corrigées, validation finale encore en cours. Les défauts de fixtures
-  privées et d'injection FK sont conservés dans les preuves. Ces résultats
-  historiques utilisaient des copies source en scratch avec modes readonly,
-  sans montage OS readonly de la copie. Les validations finales reprennent
-  directement sur snapshots sous bind-RO, sans reprendre cette garantie
-  par simple chmod. Aucune fédération distante qualifiée.
+  et bindings workload digest-only, migration6, replay, budgets workload et
+  raccord CLI/configuration sont vérifiés dans le périmètre logiciel indiqué.
+  Les gels historiques, défauts de fixtures et deux attentes HTTP corrigées
+  restent consignés. La validation finale travaille directement sur source
+  sous montage OS readonly, avec nouvelle compilation au changement de gel.
+  Aucune fédération distante qualifiée.
 
 Revues du raccord : refus manquant de collision humain/workload, association
 des nouveaux index relay au schéma exact et compatibilité du client broker6
-ont été identifiés. Les corrections humaines et de compatibilité sont codées
-et relues, tests ciblés en cours ; le défaut d'association d'index est conservé
-pour reproduction avant correction. Les campagnes RED SQL/UTC sont rejouées
-sous montage source RO. Coût historique des reconstructions complètes après
+ont été identifiés, reproduits, corrigés et relus. Le schéma JSON publié accepte
+désormais les versions réellement servies2 à6, dont3 à6 actives ; un test dédié
+compare les réponses Router et les contraintes publiées. Les campagnes RED
+SQL/UTC, puis GREEN, ont leurs preuves sous montage source RO. Coût historique des reconstructions complètes après
 commits de connexions sœurs et mutations de supervision : **WSI-Q02 ouvert**,
-aucune garantie de coût global borné ou de capacité100. Le lot backend reste
-non accepté tant que ses vérifications composées ne sont pas terminées.
+aucune garantie de coût global borné ou de capacité100. Les guides opérateur
+EN/FR documentent la distinction entre ce backend et le transport worker.
+Le candidat reste non qualifié production : reprise D5, vrais workers,
+transport, fédération, Kubernetes et les autres gates conservent leurs écarts.
 
 Root possède les contrats et la composition. Le propriétaire du relais écrit
 les nouveaux modules HTTP ; celui du registre raccorde CLI/configuration.

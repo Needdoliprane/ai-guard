@@ -1,5 +1,32 @@
 # Décisions d'industrialisation
 
+## 4 novembre — identité workload et relais dans le Store existant
+
+Le schéma6 conserve une base SQLite par tenant, un audit et les réserves F1.
+Migration explicite5→6 avec sauvegarde neuve, sans autoactivation ni remise à
+zéro des budgets. Les rôles worker/broker restent distincts des clés
+runner/viewer et des identités humaines ; l'ownership historique des digests
+empêche une collision de classe après rotation/révocation.
+
+Les corps du relais sont des données métier ; l'audit conserve métadonnées,
+taille et hash. La purge ne retire que le corps expiré, sans supprimer les
+tombstones d'idempotence. Send/read/ACK/heartbeat consomment une classe
+workload bornée par tenant et principal canonique, jamais la réserve de
+contrôle de confiance. Les index limitent les lectures de corps retenus et
+la fenêtre de débit ; cela ne corrige pas le coût historique WSI-Q02.
+
+Un maximum temporel dérivé est conservé par préfixe d'audit. L'autorisation
+utilise une preuve interne, pas le timestamp JSON d'un client ; l'append et
+le commit revérifient leur heure réelle. La précision entre requêtes est
+milliseconde, sans réécriture de received_at ni garantie d'horloge générale.
+Un refus logique de temps ne devient ni boîte vide ni corruption fictive.
+
+Ce lot n'ajoute aucun service, moteur ou stockage. Le transport physique
+depuis un worker network:none, la fédération et l'UI humaine unifiée restent
+des obligations ouvertes. Un nouveau canal/preset de lancement demande une
+proposition motivée et une décision avant réalisation ; aucun repli réseau
+ou changement de sens de FixedSandboxV2 n'est autorisé par ce backend.
+
 ## 3 novembre — autorité Kubernetes explicite avant admission
 
 Le premier sous-lot Kubernetes utilise les dépendances HTTP/TLS existantes

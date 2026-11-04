@@ -34,6 +34,26 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 | `GET /api/quota` | Viewer ou runner | Politique et réservations CPU/RAM/workers tenues |
 | `GET /api/usage` | Viewer ou runner | Page `{items,next_cursor}` d'allocations terminales, `billable=false` |
 
+## Identités workload, registre et relais / Workload identities, registry and relay
+
+Le schéma6 ajoute les bindings de credentials workload, le registre des brokers
+et les échanges dirigés entre workers. Ces nouvelles routes existent uniquement
+sous `/api/v1`, sans alias `/api`. Le [guide français](setup/workloads/README.fr.md)
+et le [guide anglais](setup/workloads/README.md) donnent les routes, DTO, limites,
+reçus, erreurs et procédures de migration/configuration. Le tenant vient de la
+preuve authentifiée ; un credential humain, worker ou broker ne devient pas
+une clé runner. Les collisions lisibles entre classes sont refusées, y compris
+pour les anciennes empreintes workload conservées.
+
+Schema6 introduces workload credential bindings, broker registration and directed
+worker messaging. These routes are available only under `/api/v1`; see the
+[English contract and operator guide](setup/workloads/README.md). The gateway
+persists authorized operations and mandatory audit, and does not execute container
+commands. Broker heartbeat assertions are separate from runtime observations.
+The HTTP backend alone does not connect a `network:none` worker, deliver remote
+federation or qualify a unified cloud dashboard. Those paths require their own
+transport, authorization and runtime evidence.
+
 ## Authentification OIDC Web et CLI / Web and CLI OIDC authentication
 
 Le contrat HTTP ci-dessous décrit **l'implémentation candidate**, configurable explicitement, au 2 novembre 2026. La qualification Keycloak réel et navigateur reste `NOT_RUN` ; aucune qualification production n'en découle. Les guides SSO [français](setup/sso/README.fr.md) et [anglais](setup/sso/README.md) décrivent configuration, profil signé accepté, memberships et exploitation. Les [routes Rust](../src/api/oidc.rs) et leurs [handlers](../src/api/oidc/gateway.rs) font autorité sur ces DTO.
@@ -311,7 +331,7 @@ Le claim de démarrage renvoie `disposition:emit_once` seulement lors de sa cons
 
 Ces API sont des contrats du contrôle de confiance ; une déclaration par le runner ne prouve pas à elle seule un confinement. Le broker inspecte le vrai moteur avant start et lors des observations. La qualification du parcours, les limites de reprise et les obligations encore ouvertes sont dans [CURRENT_STATE.md](engineering/CURRENT_STATE.md). Les anciennes bases v1 restent lisibles mais les routes du registre renvoient `503` avec `migration_required` jusqu'à une migration explicite sauvegardée ; voir [les opérations](operations.md).
 
-Le Store Rust du schéma3 de supervision est vérifié séparément et les routes ci-dessous exposent ses transactions réelles. Le schéma par défaut reste2 ; aucune nouvelle migration CLI, route d'activation ou installation de broker n'est ajoutée. Une base v3 rouverte/restaurée est en maintenance : les effets frais sont refusés avec `503 supervision_inactive`. La capacité d'origine neuve est non sérialisée ; le numéro de schéma seul n'autorise aucun start. Réactivation après restart et migration des anciens Created restent des exigences ouvertes, sans repli legacy. [Contrats, preuves et limites du Store](engineering/evidence/2026-10-30/supervision-store/README.md).
+Les schémas3 à6 conservent le protocole `broker_supervision_v1` ; les routes ci-dessous exposent les transactions du Store Rust. Le schéma par défaut reste2. Les [migrations CLI explicites](setup/broker/README.fr.md#mettre-à-jour-le-stockage-explicitement) progressent d'une version avec sauvegarde neuve ; elles ne sont pas une route d'activation ou une installation de service OS. Une base3 à6 rouverte/restaurée est en maintenance : les effets frais sont refusés avec `503 supervision_inactive`. La capacité d'origine neuve est non sérialisée ; le numéro de schéma seul n'autorise aucun start. Réactivation après restart et migration des anciens Created restent des exigences ouvertes, sans repli legacy. [Preuves historiques du schéma3 et limites du Store](engineering/evidence/2026-10-30/supervision-store/README.md).
 
 ### Supervision centrale — protocole v1
 
@@ -333,7 +353,7 @@ Les types et leur validation sont définis dans [src/control/supervision.rs](../
 
 `ControlProtocolV1` ajoute `tenant_id` et `role` de l'identité authentifiée aux seuls faits du Store : `version`, `schema_version`, `control_namespace_uuid`, `protocols`, `active`. Son [schéma JSON](../schemas/supervision-protocol.schema.json) décrit cette réponse de lecture ; les autres contrats restent les types Rust stricts. Une base2 renvoie `active:false` et `protocols:[]`. Le schéma3 peut annoncer `broker_supervision_v1` tout en restant inactif. `active:true` n'atteste ni ordonnanceur, ni horloge native, ni confinement runtime : c'est la capacité transactionnelle de cette origine vivante.
 
-`SupervisedAdmissionV1` contient `version:1`, `protocol:"broker_supervision_v1"`, un `intent_hash` SHA-256 et l'objet `admission:AdmissionV1` complet. Son autorité est un UUID ; les nouveaux presets exigent NoLogs. Le serveur valide forme, taille et absence de masquage nécessaire avant l'évaluation externe. Il recherche d'abord l'opération durable ; un replay n'appelle pas Jev. Une demande fraîche vérifie d'abord schéma3 et activation ; leur refus connu ne déclenche pas d'appel Jev. Les quotas dynamiques et la décision fraîche sont revérifiés dans la transaction du Store : cette prélecture ne remplace ni la réservation atomique ni son refus durable. Les champs et hashes historiques de l'admission, de la résolution fournisseur et de la spécification restent inchangés.
+`SupervisedAdmissionV1` contient `version:1`, `protocol:"broker_supervision_v1"`, un `intent_hash` SHA-256 et l'objet `admission:AdmissionV1` complet. Son autorité est un UUID ; les nouveaux presets exigent NoLogs. Le serveur valide forme, taille et absence de masquage nécessaire avant l'évaluation externe. Il recherche d'abord l'opération durable ; un replay n'appelle pas Jev. Une demande fraîche vérifie d'abord la compatibilité du schéma3 à6 et l'activation ; leur refus connu ne déclenche pas d'appel Jev. Les quotas dynamiques et la décision fraîche sont revérifiés dans la transaction du Store : cette prélecture ne remplace ni la réservation atomique ni son refus durable. Les champs et hashes historiques de l'admission, de la résolution fournisseur et de la spécification restent inchangés.
 
 Un `ArmV1` lie worker/tentative/intention, inspection déclarée, empreintes d'autorité/configuration, horloge d'hôte et échéance absolue. Un replay conserve exactement ces octets, l'échéance et le reçu. Les nanosecondes sont des chaînes décimales canoniques vérifiées sans débordement ; le serveur ne prouve pas qu'un caller a réellement lu cette horloge. Pour un helper, `inspection.spec_hash` doit être le hash de la politique helper dérivée côté Rust, pas celui du worker. Le Store exige une importation puis une vérification exacte avant création/claim du worker ; un helper de vérification encore pending, inconnu ou divergent bloque la continuation.
 

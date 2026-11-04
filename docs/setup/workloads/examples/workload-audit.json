@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "tenant": {
+    "events": 25000,
+    "bytes": 67108864
+  },
+  "principal": {
+    "events": 6250,
+    "bytes": 16777216
+  }
+}
