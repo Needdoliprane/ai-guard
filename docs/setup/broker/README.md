@@ -230,6 +230,16 @@ A cancellation ACK is neither a terminal runtime observation nor proof of quota 
 
 `recovery-status` reads confirmed journal metadata even when full business loading is unavailable. Its `source` is `confirmed_journal` and `runtime_evidence` is `not_queried`: it does **not inspect the engine**. `journal_mode: "stop_only"`, `incomplete`, `reconciliation_required`, pending Arms and original deadlines describe retained evidence, not new observations or execution permission. Missing fields or targets do not establish their absence in the runtime.
 
+If the operation UUID was lost, discover accepted jobs within the authenticated profile:
+
+```sh
+"$AIGUARD_BIN" broker recovery-inventory --root "$AIGUARD_BROKER_ROOT" --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" --limit 20
+```
+
+Cold discovery requires an existing broker explicitly started with `broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only`. A normal service with an unopened profile returns `needs_reconciliation` without opening that journal or changing its admission state. An already retained Full/STOP queue can be read in place. Do not start a second owner or replace its root to bypass a lease. Recovery mode keeps admission closed; this command never starts or resumes a worker.
+
+The response contains confirmed accepted-job UUIDs and journal heads, not runtime activity, business payloads or a total worker count. Use a returned `operation_id` with `recovery-status` above. Pagination accepts `--limit` from 1 to 100 and an optional `--after` UUID; continue only with the returned `next_after`. A partial scan supplies issues and no continuation guarantee; missing data is not evidence of an idle runtime. Loss of a shared journal anchor fails the read. A scan can still read the journal's configured bounds; a small page does not guarantee low latency. At most one inventory is queued or running per retained writer, including after a caller timeout. This does not preempt an ongoing scan or reserve queue space for cancellation.
+
 For explicit reconciliation of the same accepted job, once the required control and runtime are available:
 
 ```sh

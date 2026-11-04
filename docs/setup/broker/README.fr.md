@@ -230,6 +230,16 @@ Un ACK d'annulation n'est ni une observation terminale runtime ni une preuve de 
 
 `recovery-status` lit les métadonnées confirmées du journal même si le chargement métier complet est indisponible. Sa `source` est `confirmed_journal` et sa `runtime_evidence` est `not_queried` : il **n'inspecte pas le moteur**. `journal_mode: "stop_only"`, `incomplete`, `reconciliation_required`, les Arms pending et les échéances originales décrivent les preuves retenues, pas de nouvelles observations ou une permission d'exécution. Des champs ou cibles absents n'établissent pas leur absence du runtime.
 
+Si l'UUID de l'opération a été perdu, découvrir les jobs acceptés dans le profil authentifié :
+
+```sh
+"$AIGUARD_BIN" broker recovery-inventory --root "$AIGUARD_BROKER_ROOT" --profile "$AIGUARD_BROKER_PROFILE" --token-file "$AIGUARD_RUNNER_FILE" --limit 20
+```
+
+La découverte à froid exige un broker existant explicitement démarré avec `broker serve --config "$AIGUARD_BROKER_CONFIG" --recovery-only`. Un service normal dont le profil n'est pas encore ouvert répond `needs_reconciliation` sans ouvrir ce journal ni changer son admission. Une queue Full/STOP déjà retenue se lit sur place. Ne pas lancer de second propriétaire ni remplacer sa racine pour contourner un verrou. Le mode récupération conserve l'admission fermée ; cette commande ne démarre ni ne reprend de worker.
+
+La réponse contient les UUID et têtes confirmés des jobs acceptés, sans activité runtime, contenu métier ou total de workers. Utiliser un `operation_id` retourné avec `recovery-status` ci-dessus. La pagination accepte `--limit` de 1 à 100 et un UUID `--after` facultatif ; poursuivre seulement avec le `next_after` retourné. Un scan partiel fournit des problèmes explicites et aucune garantie de continuation ; des données absentes ne prouvent pas l'inactivité du runtime. La perte d'une ancre commune du journal refuse la lecture. Le scan peut encore lire jusqu'aux bornes configurées du journal ; une petite page ne garantit pas une faible latence. Un seul inventaire est en file ou en cours par writer retenu, même après timeout du demandeur. Cela ne préempte pas un scan en cours et ne réserve pas de place aux annulations.
+
 Pour une réconciliation explicite du même job accepté, quand contrôle et runtime requis sont disponibles :
 
 ```sh

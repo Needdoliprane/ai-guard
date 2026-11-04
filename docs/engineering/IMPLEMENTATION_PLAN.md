@@ -1,5 +1,27 @@
 # Plan d'industrialisation
 
+## Priorités au 4 novembre — validations et raccords parallèles
+
+1. L'inventaire STOP est intégré dans la branche de validation par3acd5cc :
+   découverte des UUID, auth fraîche, lecture partielle explicite et limite
+   d'un scan en file ;24tests uniques ciblés et all-targets PASS. Le mode
+   récupération froid est explicite. Cela ne ferme ni D5 ni G09.
+2. Raccorder et vérifier le préflight Kubernetes Rust déjà écrit sur un
+   worktree distinct : identité serveur, audit avant POST dry-run et résultat
+   avant succès.24tests ciblés et all-targets PASS, revue sans blocage
+   statique ; guides/intégration en cours, aucun cluster sondé.
+   Compléter ensuite le vrai lancement/reprise de pods, sans confondre cette
+   inspection avec le runtime obligatoire.
+3. Le vrai SSO CLI a franchi login/PKCE, identité/contexte et lecture autorisée.
+   Le logout reste en échec composé ; le diagnostic privé G gelé sépare
+   seulement ses gardes, à critères inchangés, avant correction produit.
+4. Poursuivre relais runtime, fédération multi-hôtes et qualifications réelles.
+   Les worktrees D5 protégés restent intacts. Tests Luna ciblés et compilations
+   sérielles sur le Mac sous pression ; aucune matrice E2E systématique.
+
+Les [preuves](VALIDATION.md) et l'[état](CURRENT_STATE.md) bornent ces
+résultats ; les exigences production et les douze gates restent entières.
+
 ## Priorités au 3 novembre — audit en cours
 
 1. A/B/C intégrés et poussés jusqu'à `2eeaa0d`, avec RED/GREEN ciblés, revues et

@@ -1,5 +1,25 @@
 # Décisions d'industrialisation
 
+## 4 novembre — inventaire de récupération sans admission implicite
+
+Retenir la queue STOP, son reader et ses planchers pour découvrir les UUID
+acceptés ; ne pas charger les blobs métier pour cette consultation. Une
+erreur commune d'ancre/lease refuse toute projection. Une erreur locale
+conserve seulement les autres faits prouvés, avec couverture partielle et
+sans inventer de total ou de continuation.
+
+Sur profil froid, un service normal refuse avant la factory : une lecture
+ne doit ni amorcer Full ni mettre tout le service en maintenance. Le mode
+récupération explicitement lancé peut ouvrir Stops par la factory existante ;
+une cellule Full/Stops retenue est réutilisée sans promotion. Le bootstrap
+historique de RecoveryStatus reste inchangé. Aucun nouveau service, canal
+FS, lease ou changement de frontière n'est introduit.
+
+Un permis d'inventaire est porté par la commande jusqu'à sa fin, y compris
+si son demandeur expire. Il empêche l'empilement de scans devant Cancel,
+sans promettre préemption, place réservée ou latence. D5, reprise runtime
+et retrait sûr des gardiens restent distincts. [Preuves](VALIDATION.md#4-novembre--inventaire-stop-du-broker).
+
 ## 4 novembre — revalidation SQLite, mesurer avant optimisation
 
 L'analyse source WSI-Q02 confirme des traversées complètes après un commit

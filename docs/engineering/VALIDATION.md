@@ -1,5 +1,76 @@
 # Validation courante
 
+## 4 novembre — inventaire STOP du broker
+
+Source de base44cb51e, donneur1df111e, intégration3acd5cc. Quinze fichiers
+produit/tests, aucun nouveau service ni dépendance. Les deux guides broker
+EN/FR documentent l'usage sans modifier le contrat d'admission. Le profil
+normal froid refuse avant factory/fence ; le mode récupération explicite
+réutilise la factory STOP. Les données retournées sont des métadonnées
+confirmées du journal, jamais des observations runtime ou un total de workers.
+
+Exécution Luna LinuxARM64, Rust1.99.1, image2115d432 en cache, aucune
+installation ni réseau externe. Source et registre publics RO, env-i explicite,
+UID1000, caps0/nnp,rootRO,CPU1,RAM5Gio/swap0,PID256,nofile1024,
+fsize512Mio,scratch3Gio/65536inodes,PID1sleep1800 fixe. Root a inspecté
+les contrôles effectifs et comparé les quinze hashes du dernier snapshot.
+Les compilations restent sérielles ; aucune mesure de latence du produit.
+
+- `FAIL` attendu RED : test CLI neuf seul transplanté sur44cb51e,
+  `cargo test --offline --locked --bin agentsandbox
+  broker_cli::tests::broker_recovery_inventory_is_available_without_a_known_operation_uuid
+  -- --exact --test-threads=1` : compilation réussie,1FAIL/19filtrés,RC101.
+- `PASS` gel1 : sept `broker::journal::recovery::inventory::tests::`,
+  un `broker::writer::inventory_tests::`, deux
+  `broker::service::recovery_inventory::tests::`, tous avec
+  `cargo test --offline --locked --lib <filtre> -- --test-threads=1`.
+  Les trois services donnent1PASS/2FAIL : helper test forçant/tmp readonly ;
+  construction de fixture mêlant Store local et namespace gateway distinct.
+- `PASS` gel2 : trois tests services corrigés et les deux filtres CLI
+  inventory/mode explicite. Le canari matriciel d'identité provoque ensuite
+  un stack overflow/SIGABRT ; suite arrêtée. Aucun enfant gardien restant.
+- `PASS` gel3 : neuf `broker::service::server::cancel_retry_tests::stop_auth_tests::`
+  (dont les trois services précédents), trois `broker::writer::tests::`,
+  puis `cargo check --offline --locked --manifest-path
+  /inputs/green3/Cargo.toml --all-targets`,RC0 sans warning. Le helper test
+  entier est alloué sur heap ; pile globale, assertions et vrai contrôle
+  `connection` non boxé restent inchangés. Les14autres empreintes sont
+  identiques au gel2. Aucun produit modifié pour corriger ces fixtures.
+
+Union sans doublons : **24 fonctions uniques PASS, dont14nouvelles**.
+Les filtrés et les trois services répétés ne sont pas ajoutés. Les échecs
+initiaux ne sont pas reclassés. Logs/RC privés :
+`/private/tmp/ai-guard-recovery-luna-20261104.qWkCXQ/`.
+SHA logRED35f5e0ea4895be786d13e4f817d865be00bed574b630c17b1770bf27a3868b66 ;
+gel3stop-auth258cddf79a29f3e7a31f68bae8911c55ac6404db6fb03c3ca1cd9ccc3a145525 ;
+gel3writer16002828bb4bd2344357d10fda0f3eb9dfe2e37865ea7a43a733e5ad060fe07b ;
+all-targets1fc54cbc3071e26effb585223d4dbd9b5e50c9b6360c8133ebddf79a03ee3686.
+Manifeste final15 SHAaf58ebcc37bc0592147bab79694e27bbff40a362e6a3676a6befb89bb5205da6,
+dans `/private/tmp/ai-guard-recovery-inputs-20261104.ynic4v/`.
+Revue indépendante produit puis deltas fixtures :
+`/private/tmp/ai-guard-recovery-inventory-review-20261104.md`,
+SHAe49a598b4774a36a2144f848d491b304a1d12e4e42bd03785a8faad48e128d57,
+aucun blocage statique établi. Rustfmt ciblé15fichiers et diffcheck PASS.
+
+`BLOCKED` : Clippy Linux, outil absent de l'image connue ; pas de téléchargement.
+`NOT_RUN` : release, macOS natif, moteur/worker/crash, frontend/navigateur,
+Podman/Kubernetes, charge100 et compatibilité avec un vrai ancien binaire.
+Le scan reste borné par JournalLimits, pas par la taille de page ; un seul
+inventaire en file/en cours, aucune préemption ni place Cancel réservée.
+Pas de runtime sondé, Restore, start, retrait, terminal ou quota libéré.
+G09 et les autres gates globaux restent ouverts.
+
+Le même owner ne reçoit ensuite que le snapshot public Kubernetes distinct,
+sans session utilisateur ni secret réel. À la fin des deux lots, Root observe
+uniquement sleep, recoupe les15+9hashes sources puis arrête le hold borné ;
+Runningfalse/Pid0/exit137, fin08:33:41UTC, suppression normale du seul
+conteneur, inventaire exact vide. Ce137 ne concerne aucun test/check.
+Le donneur broker propre et poussé est retiré normalement après contrôle
+positif lsof PID/FD puis fin naturelle du probe et scan vide sans erreur ;
+branche, preuves et snapshots conservés. Reçu privé de fermeture :
+`/private/tmp/ai-guard-recovery-inputs-20261104.ynic4v/ROOT_CLOSURE.md`,
+SHA8c9a4553c28e551d4871be31edc8ba4d10f20be9b0706ed22a1c1c58c7fe33fd.
+
 ## 4 novembre — prétests du driver SSO CLI privé
 
 Source produit figée : `9ee05ccb9806b2d0667c0d6ae6571a21d1416fbf` ;
@@ -202,6 +273,15 @@ six gardes en codes fermés, sans relâcher les critères ni modifier le produit
 Draft G `g-staging/main.rs` SHA
 `d5d3e82fe631bafc1138ad4dba9021c7cb14aceb871c3c61ddbc6a4b46b41aa0`,
 relire/puis tester hors ligne avant tout nouveau scénario. G reste `NOT_RUN`.
+
+Le gel G privé est désormais figé : main d5d3e82f, web ea5a1b08 et audit
+0bdf24db, schéma224codes et sept tests anticipés. SHA du gel complet
+`8aa7bfd07d29ec35d6a3a7c7f0409b5c32adcd4400fa54ca8ef65db919282454`.
+Le gel F six fichiers est archivé inchangé sous
+`driver-src/archives/gel-f-53150200/`. Nouvelle copie publique sous
+`/private/tmp/ai-guard-sso-cli-inputs-g-20261104.ofLTlw/inputs/` ;
+les42hashes et trois fixtures y correspondent aux références. Compilation,
+sept tests et scénario G restent `NOT_RUN` ; aucun acteur G créé.
 
 Les trois fichiers URI+guides sont intégrés/poussés par44cb51e : hashes
 realmf004, guideENc08a, guideFR11b3 identiques àad22 testé. Seuls les deux

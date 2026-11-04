@@ -1,5 +1,30 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — découverte des jobs en récupération
+
+Le lot `RecoveryInventory` est intégré dans la branche de validation par
+`3acd5cc` (donneur `1df111e`). La CLI découvre les UUID/head confirmés sans
+ouvrir les blobs métier et réutilise le reader, la queue et les planchers STOP.
+L'identité runner/tenant/namespace/profil est revalidée avant accès au journal.
+Un profil froid d'un service normal refuse sans ouvrir ni mettre le service
+en maintenance ; la découverte froide exige le mode récupération explicite.
+Les guides EN/FR couvrent commande, pagination, états partiels et limites.
+
+**24 fonctions Rust uniques ciblées PASS** sur les gels reliés, dont14nouvelles ;
+`cargo check --all-targets` PASS sur le gel final. Les deux erreurs de
+fixtures puis le stack overflow de matrice restent conservés ; leurs
+corrections sont limitées aux tests. Revue indépendante traitée sans
+blocage statique. L'inventaire ne sonde pas le runtime, ne prouve aucun arrêt,
+ne renouvelle aucun délai et ne libère aucun quota. Il ne clôture ni D5 ni G09.
+[Commandes, gels et limites](VALIDATION.md#4-novembre--inventaire-stop-du-broker).
+
+Le préflight Kubernetes avec CLI et audit réel est développé dans un autre
+worktree :24tests logiciels ciblés et all-targets passent, revue indépendante
+sans blocage statique ; documentation/intégration en cours, aucun appel cluster.
+Le diagnostic privé SSO G est gelé à critères inchangés et reste `NOT_RUN`.
+Les prochaines étapes sont ces validations puis le lancement/reprise réels,
+le relais runtime et la fédération multi-hôtes ; aucun gate global clos.
+
 ## Vue humaine des brokers — développement parallèle non intégré
 
 Backend Rust et frontend TypeScript ont été développés depuis `5b6dfc1`
