@@ -271,6 +271,76 @@ Revalider à l'action suivante. `broker serve` publie seulement avec une
 approuvés ; lire identité ou métadonnées self seul ne publie pas de présence,
 ne prouve pas la santé runtime et ne livre pas la fédération.
 
+## Préparer un grant ou une révocation de broker par CLI
+
+Utiliser le même fichier de contrôle privé et les commandes
+`workload prepare/apply/resume/status` que pour un credential. Les deux
+opérations sont distinctes : émettre un credential Broker n'autorise pas son
+périmètre d'autorité ; accorder un grant ne crée ni ne tourne son credential.
+Conserver chaque préparation dans un nouveau répertoire privé distinct,
+hors des projets et exports.
+
+Ces actions V1 supplémentaires exigent le binaire courant. Les préparations
+de binding existantes gardent leur encodage ; un ancien binaire refuse les
+nouvelles actions broker. Conserver le binaire compatible et l'état privé
+nécessaires à la reprise.
+
+| Modèle de requête | Valeurs à configurer |
+|---|---|
+| [Grant broker](examples/cli-broker-grant.json) | Broker, credential enregistré correspondant et incarnation approuvée jamais utilisée ; `expected_revision:null` explicite pour le premier grant, ou révision courante positive exacte pour son remplacement ; autorités, bail et expiration future. |
+| [Révocation broker](examples/cli-broker-revoke.json) | Broker et révision courante positive exacte du **grant**, pas celle du binding ou du heartbeat. |
+
+Remplacer tous les placeholders. Le grant contient 1 à 16 IDs d'autorité
+approuvés uniques, associés à `docker`, `podman` ou `kubernetes` ; un libellé
+runtime n'installe pas d'adaptateur et n'établit aucune connexion. Le bail
+vaut 1 à 300 secondes. Un remplacement exige une nouvelle incarnation jamais
+utilisée et un binding correspondant ; le CLI ne choisit ni ne génère ces
+identités. Pour le [publisher de présence](../broker/PRESENCE.fr.md), utiliser
+exactement une autorité correspondant au profil opérateur. Le registre
+général en accepte plusieurs.
+
+Tourner un credential existant conserve son sujet et son incarnation ; cela
+ne fournit pas le binding d'une incarnation différente.
+
+Après configuration du modèle dans un fichier privé `broker-grant.json` :
+
+```sh
+"$AIGUARD_BIN" workload prepare \
+  --input "$AIGUARD_PRIVATE/broker-grant.json" \
+  --control-file "$AIGUARD_PRIVATE/control.json" \
+  --output-dir "$AIGUARD_PRIVATE/broker-grant-operation"
+
+"$AIGUARD_BIN" workload apply \
+  --operation-dir "$AIGUARD_PRIVATE/broker-grant-operation" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+
+"$AIGUARD_BIN" workload status \
+  --operation-dir "$AIGUARD_PRIVATE/broker-grant-operation"
+```
+
+`AIGUARD_BIN` et `AIGUARD_PRIVATE` sont les chemins opérateur explicites
+définis [plus haut](#préparer-et-enregistrer-une-opération-de-credential-par-cli).
+La préparation ne fait aucun HTTP, génère seulement l'UUID d'opération et
+conserve la requête exacte sans créer de fichier `credential`. Apply
+authentifie le runner courant et vérifie tenant/namespace attendus avant
+d'utiliser la route fixe de grant ou révocation. Il enregistre un reçu
+historique validé, pas la disponibilité courante du broker ni sa santé runtime.
+
+Si une réponse est perdue, préserver le répertoire et lancer `workload resume`
+avec le même `--operation-dir` et le `--control-file` courant. La reprise
+renvoie le même UUID et la même requête ; elle ne choisit ni nouveau CAS ni
+nouvelle incarnation. Récupérer un reçu historique ne renouvelle pas un grant
+expiré. Un conflit CAS exige d'examiner le registre courant de confiance et
+de préserver l'ancienne préparation ; ne pas modifier requête ou reçu pour
+forcer un rejeu.
+
+Pour révoquer, préparer le modèle de révocation dans un autre nouveau
+répertoire puis utiliser les mêmes commandes. Révoquer un grant retire
+l'autorité registre/présence du broker ; cela ne prouve ni l'arrêt de ses
+workers, ni la libération de leur quota, ni la révocation d'un binding
+workload distinct. Suivre les procédures d'arrêt et de réconciliation runtime
+pour l'exécution. Aucun regrant ni renouvellement automatique n'est effectué.
+
 ## Autoriser un broker et interpréter son heartbeat
 
 Après préparation du binding broker, un runner accorde son périmètre d'autorité. Ce registre est distinct du Registry2 local de `broker serve --config`. Un objet autorité a la forme `{"authority_id":"<approved-authority-id>","runtime_kind":"docker"}`. Son `authority_id` est un libellé borné (1–256 octets, aucun caractère de contrôle), associé à `runtime_kind:docker|podman|kubernetes`. Ce n'est ni une connexion runtime ni un adaptateur Kubernetes installé. La propriété historique d'une autorité ne peut être transférée à un autre broker ou type de runtime par édition d'un grant.

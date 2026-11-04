@@ -133,6 +133,22 @@ entreprise, transport réseau, handoff ou fédération. La compilation release
 est effectuée une fois sur la composition applicative finale ; Clippy Linux
 reste indisponible dans l'image de contrôle épinglée.
 
+## Séparer un échec du harnais du comportement produit
+
+Un échec pendant la préparation, avant l'oracle métier, ne reproduit pas le
+défaut recherché. Conserver la phase effectivement atteinte, le gel source,
+la commande et le résultat ; un dépassement de pile ou un timeout de setup
+n'est ni un RED métier ni une preuve de confinement. Vérifier la trace
+complète avant d'attribuer l'échec à un composant.
+
+Borner chaque investigation du harnais avec une hypothèse et un diagnostic
+discriminant. Si les essais n'atteignent toujours pas le comportement visé,
+préserver le travail incomplet et poursuivre un lot indépendant utile au
+produit, avec des propriétaires distincts. Ne pas monopoliser l'objectif
+global, augmenter les piles ou délais à l'aveugle, ni remplacer une preuve
+runtime par une fixture présentée comme terminée. Reprendre le diagnostic
+avec les observations conservées plutôt que relancer la même matrice.
+
 ## Latence et pression de la machine de développement
 
 La machine locale de référence du mainteneur est un MacBook Air M3 avec

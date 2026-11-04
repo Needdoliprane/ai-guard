@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "action": "broker_grant",
+  "broker_id": "<approved-broker-uuid>",
+  "expected_revision": null,
+  "credential_id": "<recorded-broker-credential-uuid>",
+  "incarnation_id": "<approved-unused-incarnation-uuid>",
+  "authorities": [
+    {
+      "authority_id": "<approved-authority-id>",
+      "runtime_kind": "docker"
+    }
+  ],
+  "lease_seconds": 60,
+  "not_after": "<future-rfc3339-time>"
+}

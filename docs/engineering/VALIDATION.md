@@ -1,5 +1,131 @@
 # Validation courante
 
+## 4 novembre — grants broker durables depuis le CLI
+
+Base `b77edbf`, donneur `codex/broker-grants-cli-20261104`. Les nouvelles
+actions fermées `broker_grant` et `broker_revoke` utilisent les commandes
+existantes `workload prepare/apply/resume/status` et les routes runner v1.
+Prepare fige la requête et son UUID avant HTTP, sans générer de credential.
+CAS, identité/incarnation, autorités, bail et expiration sont explicites.
+Le contrôle authentifié détermine toujours le tenant. Deux helpers purs
+réutilisent le `Change` privé exact du Store pour vérifier l'engagement
+d'entrée ; ils n'ouvrent pas de base et n'accordent aucune permission.
+Code `fe3b558` composé en `0962231` ; les six fichiers Rust/tests intégrés
+sont égaux au gel final. Documentation fournisseurs `0c4cbf1` composée en
+`e6e0b25`, sans changement applicatif.
+
+**PASS logiciel ciblé : 11 fonctions uniques, 8 nouvelles et 3 canaris.**
+Les deux corruptions de reçu dans un parent ne sont pas deux fonctions
+supplémentaires ; les rejeux et gels successifs ne sont pas additionnés.
+Vraie CLI, Axum et SQLite, avec altérations de transport après le vrai commit.
+Aucun moteur, modèle ou service externe n'est utilisé.
+
+| Gel et sélection | Résultat constaté |
+|---|---|
+| `broker-grants-review-green`, filtre `broker_grant` | 2 PASS : préparation sans HTTP/clé et refus des deux reçus impossibles, puis reprise exacte. 0 FAIL, 0 ignorée, 16 filtrées. |
+| `broker-grants-green`, `broker_operation_preparation_requires_closed_explicit_cas_fields` | PASS : CAS absent/zéro et champ inconnu refusés avant HTTP. |
+| même gel, `broker_grant_wrong_authenticated_scope_stops_before_post` | PASS : périmètre erroné refusé avant POST. |
+| même gel, `broker_grant_and_revoke_cas_divergence_do_not_mutate_the_registry` | PASS : conflits sans mutation et voisin préservé. |
+| `broker-grants-green2`, `broker_grant_lost_ack_resumes_the_same_receipt_after_expiry` | PASS : réponse perdue après commit, expiration réellement observée, accès broker403, même reçu récupéré et un seul événement. 90,34 s pour le parent. |
+| même gel, `broker_revoke_stops_broker_authentication_and_preserves_historical_receipts` | PASS : révocation effective, rejeu sans seconde mutation et statut historique. |
+| même gel, `broker_regrant_preserves_heartbeat_history_and_normalizes_expiry_precision` | PASS : vrai heartbeat, nouvelle incarnation/binding, ancienne histoire conservée et expiration normalisée en millisecondes. |
+| même gel, `apply_records_one_broker_binding_and_resume_returns_its_historical_receipt` | PASS : binding, audit unique et reçu relu. |
+| même gel, `a_lost_committed_response_resumes_the_same_key_operation_and_audit_receipt` | PASS : ancien parcours de clé, perte d'accusé et rejeu exact. |
+| même gel, `explicit_rotation_and_revocation_change_real_broker_authentication_only` | PASS : anciens contrôles de rotation/révocation de binding. |
+
+Chaque sélection exacte des deux derniers gels lance une fonction, avec
+23 filtrées et aucune ignorée. Les deux premiers parents et leurs helpers
+utiles sont inchangés dans les gels suivants ; les trois attentes401→403
+corrigées ensuite concernent uniquement expiry/revoke. Comparaison source
+effectuée avant de conserver les résultats sans les rejouer.
+
+Commandes dans l'environnement isolé, avec le nom exact de la table pour
+les sélections unitaires :
+
+```sh
+cargo test --locked --offline --manifest-path /inputs/broker-grants-review-green/Cargo.toml --test workload_cli broker_grant -- --nocapture --test-threads=1
+cargo test --locked --offline --manifest-path /inputs/broker-grants-green2/Cargo.toml --test workload_cli broker_grant_lost_ack_resumes_the_same_receipt_after_expiry -- --exact --nocapture --test-threads=1
+cargo check --locked --offline --manifest-path /inputs/broker-grants-green2/Cargo.toml --all-targets
+```
+
+Compilation toutes cibles **PASS**, RC0, 1 min06s. Format ciblé avec
+Rust1.99.1 et `git diff --check` **PASS**. Les six fichiers Rust/tests du
+donneur sont comparés octet pour octet au gel final. `storage.rs` :
+`4853702869c1e2e1d101821951f8f4584764c7c0067e2c25a4574505096883e5` ;
+`tests/workload_cli.rs` :
+`7e3ac3a609c5707cb32a2872af07295db1dd6eb90baee8134bfc1f56ab6e4815`.
+
+**RED et échecs conservés séparément :**
+
+- Base inchangée, `broker-grants-red` : compilation PASS48,39s puis CLI
+  exit1 sur l'action absente, Cargo101. Un seul test lancé ; les assertions
+  de persistance suivantes ne sont pas déclarées atteintes.
+- Première préparation du test de reçu : erreur de type E0308 dans le
+  harnais, aucun test exécuté. Le témoin de préparation est ensuite cadré
+  après le seed du binding et avant la mutation visée.
+- APP1, `broker-grants-review-red2` : les deux réponses impossibles sont
+  acceptées après de vraies mutations Store ; le parent échoue au seul
+  récapitulatif, Cargo101. Après ce RED, ajout des gardes historiques
+  `not_after > granted_at` et absence de heartbeat au premier grant.
+  Les regrants et reçus récupérés après expiration restent admissibles.
+- Premier essai d'expiration : état Expired atteint puis erreur d'oracle,
+  401 attendu au lieu du403 contractuel, avant le replay. Source et revue
+  confirment : binding valide + grant expiré/révoqué →403 ; incarnation
+  dépareillée ou binding invalide →401. Trois attentes corrigées, aucun
+  changement applicatif ; le passage `green2` vérifie ensuite le replay.
+
+Journaux parents privés sous
+`/private/tmp/ai-guard-cancelled-worker-logs-20261104.LzPE7P`, hors sandbox :
+RED initial `bbe926da1f9d261b07c16b95cc6e1252e9eddd42b3c7820a8f047308dea2d4a7` ;
+RED reçus `1ed97839fb8849fd9103d17f2d5ef6fc97c186c410e9854d6951bfcfcbb1b171` ;
+GREEN deux parents `fdead9e97542b7a17b35823dd7d98d8c4975e3127f80e1a3c7aff8108d24bd07` ;
+GREEN expiry `bbc3d8901e84a29333b578125f297ac6d9afe9c3eb6514b6135f9f3891363155` ;
+check `0a918256e58893c09826e90f68a0665b0cee1599de65f85eab13068e729d6c72`.
+
+Linux ARM64/Rust1.99.1, image en cache
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`.
+Conteneur UID1000, rootfs/source/registry RO, réseau none, IPC privé,
+capabilities supprimées et no-new-privileges ; CPU1, RAM6GiB et total
+RAM+swap6GiB,
+PID256, fichier512MiB, nofile1024, scratch tmpfs3GiB/65536inodes et
+garde de3600s. Env vide puis allowlist explicite :
+
+```text
+PATH=/usr/local/rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin:/usr/bin:/bin
+HOME=/scratch/home
+TMPDIR=/scratch/tmp
+CARGO_HOME=/scratch/cargo
+CARGO_TARGET_DIR=/scratch/target
+RUSTC=/usr/local/rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin/rustc
+RUSTDOC=/usr/local/rustup/toolchains/1.99.1-aarch64-unknown-linux-gnu/bin/rustdoc
+CARGO_NET_OFFLINE=true
+CARGO_INCREMENTAL=0
+CARGO_BUILD_JOBS=1
+CARGO_PROFILE_DEV_DEBUG=0
+```
+
+Aucun socket moteur, home hôte, secret opérateur/fournisseur ou sortie privée
+monté dans la cible. Pas de téléchargement. L'attente d'expiration est
+bornée, avec marge de préparation90s ; ce n'est pas une mesure de latence.
+
+QA dédiée `aa0466ac…` close après constat du seul processus sleep et fin
+des tests/check : OOM0, pic cgroup3987517440octets (build/tests/cache),
+arrêt de nettoyage explicite, état final exited137/OOMfalse/Pid0 puis retrait
+normal. Ce code137 est celui du hold de QA arrêté, pas un test ni un worker.
+Volumes, services utilisateur, cache verrouillé et preuves sont préservés ;
+aucune preuve de retrait D5 n'est déduite de ce nettoyage.
+
+**Limites :** le témoin de préparation suit un chemin fixe, pas chaque
+opération successive du gateway. Les canaris de binding utilisent le
+nouveau binaire ; la compatibilité de forme V1 est étayée aussi par la revue
+du serde untagged, sans reprise d'un artefact émis par l'ancien binaire.
+La durabilité transactionnelle est exercée sur tmpfs, pas sur panne de disque.
+Clippy Linux **BLOCKED** dans l'image épinglée ; release, suite complète,
+frontend/navigateur, moteurs réels, modèles et charge100 **NOT_RUN** ici.
+Revue indépendante source/tests et corrections traitées ; les guides EN/FR
+décrivent aussi le choix API explicite après quota d'abonnement, sans appel
+fournisseur. G09 reste FAIL et 0/12 gates globaux sont clos.
+
 ## 4 novembre — prérequis de build avant tout appel moteur
 
 Base `dbc5afa`, donneur `codex/build-input-preflight-20261104`. Le CLI
