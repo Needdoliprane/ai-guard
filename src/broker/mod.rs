@@ -12,5 +12,6 @@ pub mod journal;
 pub mod lifecycle;
 pub mod local_ipc;
 pub mod outbox;
+pub(crate) mod presence;
 pub mod service;
 pub mod writer;

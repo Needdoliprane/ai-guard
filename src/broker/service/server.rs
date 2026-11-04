@@ -20,6 +20,7 @@ use crate::{
         },
         lifecycle::{LocalCommandReceiptV1, LocalCommandRequestV1},
         local_ipc::{PrivateListener, read_frame, write_frame},
+        presence::{PreparedPresence, PresenceError, PresenceScope},
         writer::{
             CancelInputV1, CompletionFailure, ProfileWriterCapabilities, StopWriterClient,
             WriterClient,
@@ -48,7 +49,7 @@ use std::{
 };
 use tokio::{
     net::UnixStream,
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
     task::JoinSet,
 };
 use uuid::Uuid;
@@ -57,6 +58,10 @@ const FRAME_BYTES: u32 = 512 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITER_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[cfg(test)]
+#[path = "presence_material_tests.rs"]
+mod presence_material_tests;
 
 #[cfg(test)]
 #[path = "cancel_retry_tests.rs"]
@@ -149,6 +154,49 @@ impl Material {
         for parent in &self.parents {
             parent.revalidate()?;
         }
+        Ok(())
+    }
+    fn protect_presence(&mut self, prepared: &PreparedPresence) -> Result<()> {
+        for file in prepared.protected_files() {
+            file.revalidate()
+                .map_err(|_| anyhow!("broker presence protection is unavailable"))?;
+            let parent = Directory::open_existing(
+                file.path()
+                    .parent()
+                    .ok_or_else(|| anyhow!("broker presence protection is invalid"))?,
+            )
+            .map_err(|_| anyhow!("broker presence protection is unavailable"))?;
+            let name = file
+                .path()
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| anyhow!("broker presence protection is invalid"))?;
+            self.exclusions.add_known_file(&parent, name).map_err(|_| {
+                anyhow!("broker presence exceeds the configured protection capacity")
+            })?;
+            if !self.files.iter().any(|known| known.path() == file.path()) {
+                self.files.push(file);
+            }
+            if !self
+                .parents
+                .iter()
+                .any(|known| known.path() == parent.path())
+            {
+                self.parents.push(parent);
+            }
+        }
+        for root in prepared.protected_roots() {
+            root.revalidate()
+                .map_err(|_| anyhow!("broker presence protection is unavailable"))?;
+            if !self.parents.iter().any(|known| known.path() == root.path()) {
+                self.parents.push(root);
+            }
+        }
+        self.literals.extend(prepared.secret_literals());
+        self.literals.sort();
+        self.literals.dedup();
+        ControlSecrets::new(self.literals.clone())
+            .map_err(|_| anyhow!("broker presence exceeds the configured secret capacity"))?;
         Ok(())
     }
     fn reconciler(&self, profile: &ControlProfileV1) -> Result<String> {
@@ -256,6 +304,87 @@ impl Response {
     }
 }
 
+/// Prepare all presence protections together before any actor or new helper.
+/// Only normal mode with explicit opt-in calls this; STOP-only never opens it.
+async fn prepare_presence(
+    registry: Arc<Registry>,
+) -> Result<(Material, Vec<(String, PreparedPresence)>)> {
+    tokio::task::spawn_blocking(move || {
+        let mut material = Material::load(&registry)?;
+        let mut prepared = Vec::new();
+        let mut references = BTreeSet::new();
+        for profile in &registry.data.profiles {
+            let Some(path) = registry.presence_path(&profile.id) else {
+                continue;
+            };
+            ensure!(
+                references.insert(path.to_owned()),
+                "broker presence requires a distinct configuration per profile"
+            );
+            let scope = PresenceScope {
+                installation_id: registry.data.installation_id,
+                profile_id: profile.id.clone(),
+                gateway: profile.gateway.clone(),
+                expected_tenant_id: profile.tenant_id.clone(),
+                control_namespace_uuid: profile.control_namespace_uuid,
+                runtime_kind: match profile.runtime {
+                    crate::runtime::RuntimeKind::Docker => {
+                        crate::broker_registry::BrokerRuntimeKindV1::Docker
+                    }
+                    crate::runtime::RuntimeKind::Podman => {
+                        crate::broker_registry::BrokerRuntimeKindV1::Podman
+                    }
+                },
+            };
+            let presence = PreparedPresence::load(path, scope, material.literals.clone())?;
+            prepared.push((profile.id.clone(), presence));
+        }
+        // Preflight cumulative protection/secret caps before initializing any
+        // state. A later profile's key must also protect earlier metadata.
+        for (_, presence) in &prepared {
+            material.protect_presence(presence)?;
+        }
+        let mut ready = Vec::new();
+        for (profile, mut presence) in prepared {
+            match presence.finalize(&material.literals) {
+                Ok(()) => {
+                    presence.revalidate()?;
+                    ready.push((profile, presence));
+                }
+                Err(error) if error.fences_admission() => return Err(error.into()),
+                Err(error) => {
+                    // Stream evidence/capacity is independent of business
+                    // authority. Keep its static protections even when this
+                    // publisher cannot resume. Never repair or reset the data.
+                    log_presence_stopped(&profile, error, &material.literals);
+                }
+            }
+        }
+        for file in &material.files {
+            file.revalidate()
+                .map_err(|_| anyhow!("broker presence protection changed"))?;
+        }
+        for directory in &material.parents {
+            directory
+                .revalidate()
+                .map_err(|_| anyhow!("broker presence protection changed"))?;
+        }
+        Ok((material, ready))
+    })
+    .await
+    .map_err(|_| anyhow!("broker presence preparation is unavailable"))?
+}
+
+fn log_presence_stopped(profile: &str, error: PresenceError, secrets: &[String]) {
+    let label = Redactor::new(secrets.to_vec()).text(profile);
+    eprintln!(
+        "{}",
+        json!({"component":"broker_presence","event":"publication_stopped",
+            "profile":label,"reason":error.to_string(),
+            "retry_action":"contact_operator","runtime_state":"unknown"})
+    );
+}
+
 /// Run the real leased broker. No service is installed and no business process
 /// is ever executed on the host. SIGINT/SIGTERM closes admissions; the distinct
 /// helper retains every armed stop and its original deadline.
@@ -285,6 +414,20 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
         RoleLease::acquire_existing(&broker_root)?
     } else {
         RoleLease::acquire(&broker_root)?
+    };
+    let (early_material, prepared_presence) = if !recovery_only
+        && registry
+            .data
+            .profiles
+            .iter()
+            .any(|profile| registry.presence_path(&profile.id).is_some())
+    {
+        let (material, presence) = prepare_presence(Arc::clone(&registry)).await?;
+        (Some(material), presence)
+    } else {
+        // Preserve the existing legacy/recovery initialization order. In
+        // recovery this branch does not inspect any presence file or state.
+        (None, Vec::new())
     };
     let enforcer_root = root
         .persistent_child("enforcer", !recovery_only)?
@@ -316,9 +459,12 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
             None,
         )
     };
-    let material_registry = Arc::clone(&registry);
-    let material =
-        Arc::new(tokio::task::spawn_blocking(move || Material::load(&material_registry)).await??);
+    let material = if let Some(material) = early_material {
+        Arc::new(material)
+    } else {
+        let material_registry = Arc::clone(&registry);
+        Arc::new(tokio::task::spawn_blocking(move || Material::load(&material_registry)).await??)
+    };
     let profiles = registry
         .data
         .profiles
@@ -357,6 +503,24 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let connections = Arc::new(Semaphore::new(64));
     let mut requests = JoinSet::new();
+    let (presence_shutdown, _) = watch::channel(false);
+    let mut presence_tasks = JoinSet::new();
+    let presence_attempts = Arc::new(Semaphore::new(4));
+    let presence_io = Arc::new(Semaphore::new(2));
+    for (profile, presence) in prepared_presence {
+        let shutdown = presence_shutdown.subscribe();
+        let attempts = Arc::clone(&presence_attempts);
+        let io = Arc::clone(&presence_io);
+        let owner = Arc::clone(&service);
+        presence_tasks.spawn(async move {
+            if let Err(error) = presence.run(shutdown, attempts, io).await {
+                if error.fences_admission() {
+                    owner.fenced.store(true, Ordering::SeqCst);
+                }
+                log_presence_stopped(&profile, error, &owner.material.literals);
+            }
+        });
+    }
     // An autonomous reconciler uses only the configured private runner key,
     // never as a substitute for an unauthenticated user's request.
     let reconciler_service = Arc::clone(&service);
@@ -368,6 +532,13 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
             Some(_) = requests.join_next(), if !requests.is_empty() => {},
+            Some(result) = presence_tasks.join_next(), if !presence_tasks.is_empty() => {
+                if result.is_err() {
+                    eprintln!("{}", json!({"component":"broker_presence",
+                        "event":"task_failed","retry_action":"contact_operator",
+                        "runtime_state":"unknown"}));
+                }
+            },
             accepted = listener.accept_checked() => {
                 match accepted {
                     Ok(mut stream) => match Arc::clone(&connections).try_acquire_owned() {
@@ -387,10 +558,21 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
         }
     }
     service.stopping.store(true, Ordering::SeqCst);
+    let _ = presence_shutdown.send(true);
     for profile in service.profiles.values() {
         profile.invalidate_all();
     }
     reconciler.abort();
+    // HTTP exists only in these owned futures. A cancelled blocking filesystem
+    // closure may finish later while retaining its lock; it cannot send a POST.
+    let presence_drain = async { while presence_tasks.join_next().await.is_some() {} };
+    if tokio::time::timeout(Duration::from_secs(15), presence_drain)
+        .await
+        .is_err()
+    {
+        presence_tasks.abort_all();
+        while presence_tasks.join_next().await.is_some() {}
+    }
     // In-flight framing/writer ACKs receive a short bounded drain. A lost reply
     // never rolls back an already durable accepted job or enforcer registration.
     let drain = async { while requests.join_next().await.is_some() {} };

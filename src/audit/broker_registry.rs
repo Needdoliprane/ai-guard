@@ -614,6 +614,42 @@ fn replay(db: &Connection, change: &Change) -> anyhow::Result<Option<BrokerMutat
 }
 
 impl Store {
+    /// Compute the existing heartbeat commitment from checked DTO evidence.
+    /// This does not authenticate the DTO, open a Store, or construct a current
+    /// BrokerIdentityV1 proof. The original private Change serialization is
+    /// deliberately shared with persistence, including its historical order.
+    pub(crate) fn broker_heartbeat_input_hash(
+        view: &BrokerIdentityViewV1,
+        heartbeat: &BrokerHeartbeatV1,
+    ) -> anyhow::Result<String> {
+        require(view.version == 1 && matches!(view.schema_version, 6 | 7))?;
+        crate::tenancy::validate_tenant_id(&view.tenant_id)?;
+        for id in [
+            &view.control_namespace_uuid,
+            &view.broker_id,
+            &view.credential_id,
+            &view.incarnation_id,
+        ] {
+            registry_uuid(id)?;
+        }
+        require(view.binding_revision > 0 && view.grant_revision > 0)?;
+        revision(view.binding_revision)?;
+        revision(view.grant_revision)?;
+        heartbeat.validate()?;
+        require(heartbeat.incarnation_id == view.incarnation_id)?;
+        Change::Heartbeat {
+            identity: IdentityEvidence {
+                tenant_id: view.tenant_id.clone(),
+                broker_id: view.broker_id.clone(),
+                credential_id: view.credential_id.clone(),
+                binding_revision: view.binding_revision,
+                grant_revision: view.grant_revision,
+            },
+            heartbeat: heartbeat.clone(),
+        }
+        .input_hash()
+    }
+
     /// Trusted operator entry point. HTTP callers must already hold control
     /// mutation permission; this DTO never authenticates its broker subject.
     pub fn mutate_broker_grant(
