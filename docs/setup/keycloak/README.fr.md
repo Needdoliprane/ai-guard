@@ -97,13 +97,21 @@ Le bootstrap s'applique à une base DEMO neuve. Ces valeurs ne sont jamais les v
 
 | Client | Contrat |
 |---|---|
-| `ai-guard-demo-web` | Public ; Authorization Code ; PKCE S256 obligatoire ; retour enregistré `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback` ; origine Web exacte et retour logout `${AI_GUARD_DEMO_WEB_ORIGIN}/`. |
-| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence loopback enregistrée `http://127.0.0.1/oidc/callback` ; aucune origine CORS. Le flux natif emploie un port loopback éphémère, la même IP et le chemin fixe. Le fournisseur doit accepter l'exception de port loopback. |
+| `ai-guard-demo-web` | Public ; Authorization Code ; PKCE S256 obligatoire ; retour de connexion enregistré `${AI_GUARD_DEMO_WEB_ORIGIN}/auth/oidc/callback` ; origine Web exacte. Les retours logout explicites conservent `${AI_GUARD_DEMO_WEB_ORIGIN}/` et ajoutent `https://127.0.0.1/oidc/logout-complete/web`. |
+| `ai-guard-demo-cli` | Client public distinct ; Code et S256 obligatoire ; référence de connexion enregistrée `http://127.0.0.1/oidc/callback` ; aucune origine CORS. La connexion native emploie un port loopback éphémère, la même IP et le chemin fixe, avec prise en charge de l'exception de port par le fournisseur. Son retour logout explicite est `https://127.0.0.1/oidc/logout-complete/cli`, sans héritage de port. |
 | `ai-guard-demo-api` | Serveur de ressources bearer-only et audience des access tokens ; aucun flux de connexion ou compte de service. |
 
 Aucun `client_secret` n'est distribué par les clients publics. Implicit, grants mot de passe, device flow, CIBA, comptes de service et token exchange sont désactivés. Ne remplacez pas un échec du flux navigateur par un grant mot de passe ou une copie manuelle de jeton.
 
 Enregistrez la référence CLI sous la forme canonique ci-dessus, sans `:80` explicite. Keycloak 26.8.1 retire le port HTTP par défaut lors de sa comparaison loopback native ; un littéral enregistré avec `:80` peut empêcher cet appariement. Le CLI écoute toujours sur un port local éphémère et l'inclut dans la demande d'autorisation réelle. Conservez l'IP littérale, le chemin exact `/oidc/callback` et S256 obligatoire, sans joker. Cette configuration seule ne prouve pas une connexion CLI réussie. L'import au démarrage saute les realms existants ; suivez la procédure de conservation des données ci-dessous pour modifier un enregistrement existant.
+
+### Enregistrer les retours d'accusé de déconnexion
+
+Le [modèle de realm](../../../deploy/keycloak-demo/ai-guard-demo-realm.json) utilise l'attribut client `post.logout.redirect.uris`. Keycloak 26.8.1 conserve plusieurs valeurs dans une chaîne séparée par `##` : la valeur Web est `${AI_GUARD_DEMO_WEB_ORIGIN}/##https://127.0.0.1/oidc/logout-complete/web`. Le CLI a la seule valeur explicite `https://127.0.0.1/oidc/logout-complete/cli`. N'utilisez pas `+`, l'héritage des redirects de connexion, des jokers ou le port de connexion éphémère du CLI. L'ancien enregistrement logout Web est conservé. Voir l'[encodage multivaleur épinglé](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/AbstractClientConfigWrapper.java#L60-L71), le [séparateur](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/models/Constants.java#L140-L147) et le [traitement des enregistrements logout](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCAdvancedConfigWrapper.java#L439-L469).
+
+Les deux clients publics fixent explicitement `logout.confirmation.enabled` à la chaîne `false`, valeur par défaut de cette version épinglée ([clé de l'attribut](https://github.com/keycloak/keycloak/blob/26.8.1/server-spi-private/src/main/java/org/keycloak/protocol/oidc/OIDCConfigAttributes.java#L65), [défaut](https://github.com/keycloak/keycloak/blob/26.8.1/services/src/main/java/org/keycloak/protocol/oidc/OIDCAdvancedConfigWrapper.java#L369-L374)). La politique fournisseur doit permettre une fin directe avec l'ID-token hint fourni ; ce réglage seul ne prouve pas la réponse. Une confirmation HTML interactive reste non confirmée par ai-guard. Préservez la politique approuvée de l'installation sans l'assouplir globalement.
+
+Le [manifeste local](../sso/examples/local-demo.json) et l'[exemple gateway](../sso/examples/gateway.keycloak-demo.json) correspondants sélectionnent ces deux URI HTTPS comme seuls accusés de protocole. ai-guard compare un `302`/`303` direct, un `Location` exact unique contenant uniquement son state de requête neuf et un corps vide ; il ne suit jamais l'URI, n'ouvre pas de navigateur pour elle et n'installe pas de callback logout. Aucun listener TLS, certificat, entrée DNS ou service OS n'est nécessaire ni créé sur ces chemins. C'est le profil de réponse pris en charge par ai-guard, pas une règle de corps OIDC universelle. Issuer et endpoint end-session restent ceux de la DEMO HTTP isolée ; des URI d'accusé HTTPS ne qualifient pas ce déploiement en HTTPS d'entreprise. Voir le [contrat complet de réponse et compatibilité](../sso/README.fr.md#configurer-les-accusés-de-déconnexion-fournisseur). La qualification réelle Web/CLI natif de ce nouveau profil est **NOT_RUN** dans ce lot modèles/documentation.
 
 Les deux clients publics ont exactement `basic` et `profile` comme client scopes par défaut, sans scope facultatif. `basic` fournit le mapper du sujet des access tokens Keycloak ; le jeton signé doit contenir un `sub` non vide. Son absence est une erreur de configuration du fournisseur, pas un motif d'assouplissement du validateur. `basic` peut être absent du champ textuel `scope` du jeton : il s'agit d'un client scope par défaut dont le mapper est appliqué par le fournisseur.
 
@@ -117,8 +125,9 @@ Consignez les éléments suivants dans une configuration OIDC d'installation JSO
 |---|---|
 | Issuer | Issuer exact ci-dessus ; même écriture pour navigateur, CLI et contrôle. |
 | IDs clients | IDs Web/CLI distincts ci-dessus ; Code+S256 obligatoire. |
-| Retours Web | Origine, callback et retour post-logout configurés exactement ; aucun joker. |
-| Retour CLI | IP loopback littérale, port d'écoute éphémère, chemin fixe `/oidc/callback` ; fermeture après succès, erreur ou délai. |
+| Retour de connexion Web | Origine et callback configurés exactement ; aucun joker. |
+| Retour de connexion CLI | IP loopback littérale, port d'écoute éphémère, chemin fixe `/oidc/callback` ; fermeture après succès, erreur ou délai. |
+| Retours d'accusé logout | `gateway.provider.web_post_logout_redirect_uri` et `cli_post_logout_redirect_uri` facultatifs, exigeant chacun `end_session_endpoint` ; enregistrements HTTPS statiques canoniques exacts ci-dessus, sans query, fragment, userinfo ou joker. Distincts des callbacks de connexion. |
 | Validation API | RS256, issuer et audience exacts, `exp`, `iss`, `sub`, `aud` obligatoires, `nbf` contrôlé s'il est présent ; tolérance d'horloge bornée. Profil DEMO : header JWT `typ=JWT`, payload `typ=Bearer`, `azp` limité aux deux clients publics. |
 | Scopes demandés | `openid` et informations de profil minimales ; client scopes par défaut `basic`+`profile` côté fournisseur. |
 | Mapping administrateur | Chemin de claim de l'access token vérifié `resource_access.ai-guard-demo-api.roles`, valeur `admin-ai-guard` ; application aux seuls périmètres applicatifs explicitement attribués. |
@@ -137,6 +146,8 @@ Configurez les appartenances explicites et le périmètre d'administration de la
 Soumettez une tâche courte non destructive au broker de confiance. Examinez demande, autorisation, exécution et résultat dans l'audit ; distinguez l'initiateur des acteurs broker et agent. Examinez les changements et exportez uniquement dans une destination neuve. Avec `user-2`, vérifiez le refus des ressources privées et des contextes non autorisés, puis utilisez `admin-ai-guard` pour consulter son seul périmètre d'administration attribué. Le compte master ne doit pas obtenir d'accès applicatif implicite.
 
 À la déconnexion, effacez l'identité locale et les transactions privées, annulez les requêtes en attente et fermez les abonnements. Confirmez séparément le logout du fournisseur ; la déconnexion locale doit rester possible pendant sa panne. Un retrait de rôle ou d'appartenance doit aussi retirer les données et abonnements auparavant visibles dans la borne de révocation configurée. Un échec SSO ne change jamais d'identité ni de fournisseur d'inférence facturé.
+
+Lisez séparément `local_session` (fermeture de l'admission ai-guard), `audit` (audit du contrôle) et `provider_logout` (réponse fournisseur prise en charge). Dans la sortie du CLI natif, `control_provider_logout:not_attempted` signifie que le gateway n'a pas tenté le logout fournisseur : le CLI natif conserve le hint en privé et décrit son propre appel dans `provider_logout`. Un accusé `accepted` n'affirme ni révocation JWT globale ni fermeture de toutes les autres sessions. Le [guide SSO](../sso/README.fr.md#se-connecter-dans-le-navigateur) explique les résultats échoués ou inconnus.
 
 ## Raccorder un fournisseur d'entreprise et HTTPS
 
@@ -163,6 +174,13 @@ L'import au démarrage saute un realm existant. Modifier le JSON du realm, chang
 
 Avant une mise à jour du fournisseur, conservez une sauvegarde cohérente et les références exactes des images/configurations précédentes selon sa procédure de sauvegarde. Un export JSON de realm seul n'est pas une sauvegarde complète de la base. Restaurez d'abord dans une destination isolée neuve, puis vérifiez issuer, utilisateurs, mappings et politique d'autorisation de l'application. Conservez les anciennes données et identités jusqu'à confirmation de la reprise.
 
+### Mettre à jour les enregistrements logout existants
+
+1. Gardez realm, utilisateurs, sujets, credentials, mappings et volumes actuels. Inventoriez les réglages des deux clients et réalisez les sauvegardes cohérentes fournisseur/contrôle décrites ci-dessus et dans le [guide de reprise SSO](../sso/README.fr.md#diagnostiquer-et-reprendre).
+2. Par l'interface d'administration Keycloak approuvée par l'opérateur, ajoutez l'URI d'accusé Web exacte dans **Valid post logout redirect URIs** de ce client, en préservant son retour Web exact existant. Ajoutez l'URI d'accusé CLI explicite à la liste post-logout du client natif. Pour la DEMO, utilisez les valeurs HTTPS littérales ci-dessus ; remplacez `${AI_GUARD_DEMO_WEB_ORIGIN}/` par l'origine réelle de l'installation suivie de `/` lors de l'édition d'un client stocké. `##` est le séparateur de l'attribut sérialisé, pas une partie des URI saisies séparément dans la console. Préservez les autres entrées exactes approuvées ; n'utilisez ni `+`, héritage de la liste de connexion ou jokers. Ne modifiez ni enregistrement natif canonique de connexion, ni drapeaux de client public, Code/S256, grants désactivés ou mappers de tokens.
+3. Vérifiez la politique de fin directe approuvée des clients (`logout.confirmation.enabled:false` dans la DEMO distribuée). Ne changez pas de politique de session globale sans rapport. Préparez une configuration OIDC privée relue avec `web_post_logout_redirect_uri` et `cli_post_logout_redirect_uri` correspondants et l'endpoint end-session exact existant.
+4. Activez uniquement avec des binaires gateway et CLI natif mis à jour correspondants, selon la [procédure de mise à jour existante](../sso/README.fr.md#mettre-à-jour-la-configuration-logout-sans-remplacer-les-données), l'arrêt/redémarrage approuvé et une nouvelle authentification. Les anciens binaires refusent ces nouveaux champs ; les omettre conserve le fonctionnement antérieur. Ne rejouez pas la préparation neuve, ne réinitialisez pas le realm, ne supprimez pas de volume et ne remplacez pas d'audit pour appliquer ce changement. Vérifiez séparément fermeture, audit et réponse fournisseur ; modifier ces réglages ne fournit aucun résultat réel de logout.
+
 ## Diagnostiquer une connexion refusée
 
 | Symptôme | Vérification et reprise |
@@ -174,6 +192,7 @@ Avant une mise à jour du fournisseur, conservez une sauvegarde cohérente et le
 | Callback refusé | Origine/chemin exacts, client choisi, expiration de transaction, state et nonce. Commencer une nouvelle connexion ; ne pas rejouer un code. |
 | TLS refusé | SAN, chaîne, validité et bundle d'AC explicite du client. Réparer confiance ou certificats ; garder la validation TLS active. |
 | Fournisseur indisponible ou session expirée | Afficher l'erreur de connexion, préserver la provenance d'audit et demander une authentification si nécessaire. Une vue déconnectée n'est pas une absence d'activité. |
+| Logout non confirmé | Vérifier URI post-logout exacte par client et politique de fin directe. Une page de confirmation ou un redirect différent/à corps non vide n'est pas un accusé accepté. Conserver le résultat local/audit distinct ; ne jamais suivre ni journaliser Location, state ou hint reçus. |
 
 Les diagnostics ne conservent ni bearer, code d'autorisation, vérificateur, cookie ou query de callback. Ne persistez pas de réponse brute du fournisseur ou de dump complet d'environnement/inspection. Les harnais de tests auxiliaires locaux ne sont pas des commandes distribuées du produit.
 
