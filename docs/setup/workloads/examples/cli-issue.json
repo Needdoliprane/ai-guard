@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "action": "issue",
+  "expected_revision": 0,
+  "subject": {
+    "kind": "broker",
+    "broker_id": "<approved-broker-uuid>",
+    "incarnation_id": "<approved-incarnation-uuid>"
+  },
+  "expires_at": "<future-rfc3339-time>"
+}

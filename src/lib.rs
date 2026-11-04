@@ -26,4 +26,5 @@ pub mod setup;
 pub mod tenancy;
 pub mod tls;
 pub mod workload;
+pub mod workload_cli;
 pub mod workspace;

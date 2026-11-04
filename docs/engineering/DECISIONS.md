@@ -6,7 +6,7 @@ Choix d'implémentation dans les frontières existantes, relu avant code :
 client Rust dédié aux deux routes HTTP workload présentes, plutôt qu'écriture
 SQLite hors ligne ou client POST arbitraire. Aucun nouveau service, rôle,
 endpoint, stockage ou autorité de provisioning. Le tenant reste dérivé du
-runner authentifié. Le parent attend le RED ciblé avant code applicatif.
+runner authentifié. Un RED ciblé précède le code applicatif.
 
 `workload prepare` fixe localement origine, namespace et tenant attendus
 comme gardes d'égalité, génère une fois les identités/credentials nécessaires,

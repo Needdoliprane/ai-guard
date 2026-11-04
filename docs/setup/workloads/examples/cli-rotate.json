@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "action": "rotate",
+  "credential_id": "<credential-uuid-to-rotate>",
+  "expected_revision": 1,
+  "subject": {
+    "kind": "broker",
+    "broker_id": "<same-approved-broker-uuid>",
+    "incarnation_id": "<same-approved-incarnation-uuid>"
+  },
+  "expires_at": "<new-future-rfc3339-time>"
+}

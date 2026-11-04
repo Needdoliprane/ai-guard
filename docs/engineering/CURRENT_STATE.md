@@ -1,5 +1,25 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — opérations CLI des identités techniques
+
+Le client Rust workload fournit préparation privée sans HTTP, émission/
+rotation/révocation avec le runner courant, reprise exacte et consultation
+locale. Le scope attendu est fixé avant toute mutation ; le tenant reste
+authentifié côté serveur. La clé et l'intent sont resynchronisés en reprise,
+les secrets contrôlés avant échappement JSON et les reçus publiés sans
+remplacement. Un reçu historique ne prouve jamais l'activité actuelle.
+
+**17 fonctions uniques ciblées PASS**, build release et all-targets PASS,
+revue indépendante traitée ; les RED et cinq échecs de fixture intermédiaires
+sont conservés. Le Worker est vérifié sur projection logicielle autorisée
+et API réelle, sans container. Guides EN/FR et exemples sont fournis.
+Le complément vérifie expiry réelle, reprise historique, conflit CAS et
+capacité d'audit indisponible, sans replay des tests inchangés.
+[Gels, commandes et limites](VALIDATION.md#4-novembre--cli-durable-des-identités-techniques).
+Clippy Linux reste BLOCKED ; publication interrompue par faute réelle,
+handoff, transport worker, fédération et reprise runtime restent ouverts.
+Aucun nouveau service, rôle, endpoint ou stockage ajouté ; aucun gate clos.
+
 ## 4 novembre — parcours natif SSO vérifié dans son périmètre Linux
 
 La recette H contre un vrai Keycloak local neuf passe sur5f508cf :

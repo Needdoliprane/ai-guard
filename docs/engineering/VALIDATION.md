@@ -1,5 +1,143 @@
 # Validation courante
 
+## 4 novembre — CLI durable des identités techniques
+
+Base73707d1, plan3986283, worktree dédié `workload-cli-20261104`.
+Quatre modules Rust ajoutent `workload prepare/apply/resume/status` aux
+routes workload existantes, sans dépendance, rôle, API ou migration nouvelle.
+Le tenant reste choisi par la preuve runner côté serveur ; les attentes du
+fichier privé sont des gardes d'égalité. Le secret et la requête exacte sont
+durables avant HTTP ; reçu historique et état courant inconnu sont distincts.
+Guides EN/FR et quatre modèles de configuration accompagnent le parcours.
+
+**`PASS` logiciel :17 fonctions uniques**, soit16parents CLI et1unité de
+barrière filesystem, sur les gels explicites ci-dessous. Ce n'est pas une
+prétendue exécution monolithique de la suite finale. Vraie CLI, gateway Axum,
+SQLite, FS et TLS possédés ; aucun moteur, IdP, fournisseur ou worker réel.
+
+Luna travaille dans deux owners neufs isolés, image LinuxARM64/Rust1.99.1
+2115d432 en cache, sources et registre Cargo publics RO, env-i avec scratch
+HOME/TMP/cache et chemins Rust explicites, offline/locked/incremental0/job1.
+Root inspecte UID1000/rootRO/caps0/nnp/réseau none et loopback seul, CPU1,
+RAM5Gio/swap0, PID256, nofile1024, fsize512Mio,
+scratch3Gio/65536inodes, durée1800s fixée ; aucun socket, port publié,
+device, secret utilisateur, projet original, log Docker ou restart.
+Le premier wrapper Luna échoue sur PATH hôte avant Docker : `NOT_RUN`,
+sans compilation ni défaut produit. Les chemins absolus corrigent ce seul
+raccord ; aucun téléchargement ni exception supplémentaire.
+
+- `FAIL` RED initial : seul test
+  `prepare_persists_a_private_broker_key_and_exact_request_without_http`
+  transplanté sur73707d1, compilation réussie puis CLI exit2/commande
+  absente, Cargo101,1fonction/0ignoré. Test20f05148 ; log
+  `/private/tmp/ai-guard-workload-cli-red-luna-20261104.XQjmZF/red.log`,
+  SHA394b3433eb8777734aba8c4aafcbba53bb2b9037a60518c14db667bc7343d183.
+- `FAIL` RED de revue avant correction : trois filtres exacts séparés,
+  chacun1fonction exécutée/Cargo101 : secret JSON échappé accepté au lieu
+  du refus, status inconnu au lieu de prepared, et mesure des vrais
+  `File::sync_all` en reprise0au lieu de2. Garde littérale déplacée avant
+  sérialisation, clés/valeurs décodées contrôlées ; reprise réarme fsync
+  clé/intent/répertoire/ancêtres avant HTTP ; status distingue sans scope.
+  Manifest red2ca0dae8b08c47b6a83922bf66595e7dbfa0767c7df736c3abeba9da5a38d7afa.
+  Logs dans `/private/tmp/ai-guard-workload-cli-red2-luna-20261104.mBoegY/` :
+  prepare_escaped58639147a158ca9638eef8d61f8fce4bf8a97b1b19e74136ceb6b546e2066f65,
+  status_prepareda7dbe68d682be5cb0720b7b040d0286c802ae4f4200d3401199a9b063c31f024,
+  resync6d7597d9a0c3823f5ef8f7874e02b5a1b83167b7ff0ba91f726d4e6cdb331dfc.
+- Green1 :5CLI PASS/5FAIL, tous les échecs à l'assertion de fixture
+  supposant à tort une supervision inactive après migration ; aucun parcours
+  positif API/client atteint par ces cinq fonctions. L'unité resync passe1/1.
+  Correction limitée à cette fixture, application inchangée. Logs privés
+  `/private/tmp/ai-guard-workload-cli-green1-luna-20261104.mDxWcT/` :
+  CLI5fd48661babdd19674119869050f77d1bfb74d64e4ce1ff59de00d8657371d63,
+  unité3240d41f81074db1e5b2cb4e424c1188dfbe6f20f73ab1635a567cd1f66b993b.
+  All-targets à ce gel : `NOT_RUN`, conformément au gate.
+- Green2 : reprise des cinq fonctions échouées et trois nouveaux parents
+  adverses seulement :8PASS/5filtrés/0ignoré. Flock indépendant, clé modifiée,
+  liens, namespace/rôle/schéma incorrects et0POST ; six réponses altérées
+  après vrai commit, pas de reçu final ou retry, puis replay exact sans
+  seconde mutation. Rotation/révocation changent réellement l'authentification
+  broker ; la reprise après fermeture/réouverture des deux Store et du gateway
+  garde origine/namespace/clé/opération et audit. `cargo check --all-targets`
+  passeRC0. Logs dans
+  `/private/tmp/ai-guard-workload-cli-green2-luna-20261104.orzT40/` :
+  CLIa2a9396c6617955e326963264fd67fcbdf65b527a09e091c2b913f993bdbddeb,
+  checka6e1c9eb7bb6b76e461e28bd0fe7649bd3897572faa2d710b9072a002b2772cd.
+- Gel final : nouveau parent Worker1PASS, sur projection logicielle autorisée,
+  propre inbox200 puis tentative B sous runner A refusée sans mutation A/B ;
+  aucune déclaration de worker réel. TLS renforcé1PASS : CA inconnue refusée,
+  CA explicite acceptée, puis contrôle positif strict au même endpoint
+  127.0.0.2 avec nom SAN valide avant refus du client par IP sans ce SAN.
+  Ce seul parent TLS est rejoué pour son nouvel oracle, pas recompté.
+  Cinq assertions de secrets deviennent opaques sans changer leur comparaison.
+  Les autres PASS et l'unité ne sont pas rejoués. All-targets final et
+  `cargo build --release --locked --offline --bin agentsandbox` passentRC0,
+  release5min39, sans promesse de latence.
+  Logs dans `/private/tmp/ai-guard-workload-cli-final-luna-20261104.w8ZeVp/` :
+  workerf261ffc1769e13ddc9fa4c7ce48b1c1e03327337576461640c590495c3857315,
+  TLS601acf10ad293c29d5145813eddb24c23974d295c948bceeb0d3b8a8cd920e46,
+  check6bb87e7c53f0fdef8d53f65dcc80a324d045358efdc90bd592ae79fcc32baf35,
+  release33de46872874635e59440a6b45a2041a5e7f892a3843507a7558073cea11c246.
+
+Un complément séparé ferme deux critères logiciels restants, application
+toujours inchangée :
+
+- `cas_conflict_and_real_audit_capacity_refusal_do_not_retry_or_publish_receipts`
+  passe1/1,15filtrés/0ignoré. CAS9 contre révision1 refusé, puis réouverture
+  réelle de A avec max_events égal au nombre d'événements courant, B10000
+  inchangé. GET protocole200 précède un POST réellement refusé par la capacité
+  de l'audit, sans retry/reçu/mutation et avec intégrité conservée. Ce n'est
+  ni un middleware de panne métier, ni une panne disque.
+- `replay_after_real_binding_expiry_retains_the_same_historical_receipt`
+  passe1/1,15filtrés/0ignoré. La clé est authentifiée avant puis refusée
+  après son expiry UTC réelle ; même requête/secret/expiry/reçu et aucun
+  nouvel événement à la reprise. Attente fonctionnelle90s, durée90,19s ;
+  aucune hypothèse de latence sur le Mac sous pression.
+
+Les deux commandes utilisent `--test workload_cli <nom> -- --exact
+--test-threads=1`, avec `--locked --offline --manifest-path
+/inputs/complement/Cargo.toml`. Aucun des15PASS, all-targets ou release
+antérieurs n'est rejoué ; la cible d'intégration modifiée compile pour ces
+deux fonctions, et tous les autres fichiers Rust sont byte-identiques.
+Logs privés `/private/tmp/ai-guard-workload-cli-complement-luna-20261104.zgGxCt/` :
+cas_capacity07cabfd40e2b9f05d90b3c3b69be8a3aec23b972dc843192edd759d792963808,
+expiry_replay15738e0d308cf6ddafa68b7e76e97a81667c68184b520798b353e48a028f45e7.
+Nouveau test f47ebb738a1170df8d1739b922eaa7a262efa237c1ea0d56952e196d0d5847bc,
+manifest7 72e3a7c37db9e4b434c5349d2496d26f83587d1466e942d18316a1fe89e4c42b.
+Root inspecte un troisième owner95e725bc aux mêmes limites, fixé1800s
+à12:01:03UTC ; post7/7hashes, sleep seul, arrêt borné5s, Runningfalse/Pid0,
+hold137 à12:07:01UTC, suppression normale et inventaire exact vide.
+Reçu distinct `COMPLEMENT_VALIDATION.md` dans le même parent privé,
+SHAb6cbb6fff9d62976a0a8ce01a4baeb0c1cf7128e5bb1870e230e5bc7f0aa22ca.
+Le précédent reçu15fonctions reste intact et ne prétend pas couvrir ce gel.
+
+Source applicative inchangée après Green1 : module52e652e6,
+manifest409f3101, storage9351e4ab, httpc9a28318 ; les hashes complets,
+lib/main et test final63b4276d figurent dans le manifest7
+d90ec0cdcbb29df0550059cafd963bc7e4004a3237aa0cb9dde4989117365083.
+Rustfmt explicite ciblé, diffcheck et revue indépendante source/deltas/tests/
+guides passent dans leurs périmètres. Avis privé
+`/private/tmp/ai-guard-workload-cli-independent-review-20261104.final.md`,
+SHA55b2b48419783029b5037556792a274d17d53af3f0b4e47ae4278e4b70ff2dd7.
+Scan des trois littéraux sensibles connus : aucune correspondance, sans
+preuve universelle d'absence de secrets. Aucun test auxiliaire Keycloak,
+Qwen ou script PKI n'est ajouté au dépôt ; fixtures TLS Rust de produit.
+
+Root compare7/7hashes de chaque gel avant fermeture. Seul sleep reste ;
+owners ee41c91d puis f0a69318 arrêtés avec borne5s, Runningfalse/Pid0,
+hold137 à11:21:49 et11:42:01UTC, suppressions normales et inventaires exacts
+vides. Ces137 de cleanup ne sont pas des sorties de tests. Aucun volume,
+image, credential, preuve ou donnée utilisateur préexistant supprimé.
+Reçu privé `/private/tmp/ai-guard-workload-cli-inputs-20261104.tpOiAu/ROOT_VALIDATION.md`,
+SHA38e9759dc535ca42ff1c7d7d0f3e0f5beccb400977053cd0891ab371c70ad9d2.
+
+`BLOCKED` : Clippy Linux absent de l'image épinglée. `NOT_RUN` : DiskFULL,
+fsyncError, SIGKILL/panne électrique pendant publication, reprise arbitraire
+de corruption, broker/workers/réseau réels, handoff/fédération, macOS natif,
+PKI entreprise et charge100. Le compteur sync observe des appels réels, pas
+un média matériel persistant. Le profil runner32–512 correspond au gateway
+CLI actuel ; la borne4096 de l'API/bibliothèque reste distincte et inchangée.
+G09 FAIL,0/12 gates globaux clos ; `billable=false`.
+
 ## 4 novembre — SSO CLI réel, renouvellement et déconnexion
 
 **PASS**, un seul scénario H sur le vrai Keycloak26.8.1 local neuf,

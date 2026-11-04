@@ -2,6 +2,15 @@
 
 ## Lot en cours au4novembre — CLI des identités techniques
 
+Le lot logiciel ci-dessous est implémenté et vérifié :17fonctions uniques
+ciblées, all-targets et release PASS, revue indépendante traitée, guides
+et modèles EN/FR. Les RED et échecs de fixtures restent dans
+[les preuves](VALIDATION.md#4-novembre--cli-durable-des-identités-techniques).
+Clippy Linux est BLOCKED ; les limites de faute physique, transport et
+fédération restent ouvertes. Les étapes suivantes conservent les critères
+du cycle ; les cas réalisés et ceux encore ouverts sont distingués à
+l'étape4 et dans les preuves, sans qualification implicite.
+
 Base73707d1 dans un worktree dédié. Contrat existant issue/revoke et reçu
 workload conservés ; [décision et limites](DECISIONS.md#4-novembre--provisionnement-des-identités-techniques-par-cli).
 Propriétaires : CORE nouveaux `src/workload_cli.rs`, `src/workload_cli/*`,
@@ -22,7 +31,13 @@ Pas de compilation native, téléchargement ou campagne fournisseur/runtime.
    replay après mutations/expiry, CAS/contenu divergent, isolement A/B,
    audit indisponible, reçu invalide/bornes, liens/substitutions/verrou,
    publication interrompue et confiance/nom TLS, sans mock métier permanent.
-5. Rustfmt ciblé, tests sélectionnés avec comptes réels et all-targets ;
+   Réalisés :17fonctions listées dans VALIDATION, dont réouverture propre,
+   mutations historiques, réponses altérées, identité Worker projetée,
+   refus A/B, scope, fichiers et TLS, puis expiration réelle avant replay,
+   CAS divergent et capacité d'audit réellement indisponible. Encore NOT_RUN :
+   faute fsync/medium et interruption brutale de publication. Les autres
+   suites API existantes ne sont pas transformées en ces preuves CLI.
+5. Rustfmt ciblé, tests sélectionnés avec comptage effectif et all-targets ;
    Clippy seulement si disponible sans installer. Revue indépendante puis
    traitement des constats et contrôle composé, sans rejouer la matrice.
 6. Guides EN/FR et exemples de manifeste/control, rotation/reprise/révocation,
@@ -32,6 +47,14 @@ Pas de compilation native, téléchargement ou campagne fournisseur/runtime.
 Ces critères ne livrent pas l'activation automatique d'un consommateur ni
 le transport réseau des workers. Ils demeurent des chantiers obligatoires
 distincts ; la cible produit complète et les gates restent inchangés.
+
+Prochaine priorité : raccorder les preuves workload aux brokers/consommateurs
+réels et au registre, puis qualifier leur visibilité et révocation sans
+distribuer de credential de contrôle aux workers. Le transport worker et
+sa frontière attendent leur décision structurelle existante ; ne pas la
+contourner avec un endpoint générique, socket ou accès réseau général.
+Reprise D5/arrêt/retrait sûrs, fédération multi-hôtes et Kubernetes complet
+restent en parallèle selon les propriétaires et dépendances disponibles.
 
 ## Priorités au 4 novembre — validations et raccords parallèles
 
