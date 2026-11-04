@@ -778,6 +778,54 @@ impl Store {
         self.commit_authorized(tx, &clock)?;
         Ok(view)
     }
+
+    /// Resolve only this current broker proof's scope in one checked snapshot.
+    /// This does not refresh a heartbeat or authorize a later write.
+    pub fn broker_authenticated_identity(
+        &self,
+        identity: &BrokerIdentityV1,
+    ) -> anyhow::Result<BrokerIdentityViewV1> {
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        require_schema(&tx)?;
+        let clock = super::workload::capture_control_time(&tx)?;
+        let now = clock.at();
+        permission(identity.tenant_id() == self.tenant_id)?;
+        super::workload::revalidate_broker_identity(&tx, identity, now)?;
+        let broker = load_broker(&tx, identity.broker_id())?
+            .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
+        broker.require_current_grant(identity, &format_time(now))?;
+        let (tenant_id, binding_version): (String, i64) = tx.query_row(
+            "SELECT tenant_id,schema_version FROM tenant_binding WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        permission(tenant_id == identity.tenant_id() && binding_version == 1)?;
+        let namespace: String = tx.query_row(
+            "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?;
+        registry_uuid(&namespace)?;
+        let schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let view = BrokerIdentityViewV1 {
+            version: 1,
+            tenant_id,
+            control_namespace_uuid: namespace,
+            schema_version: schema,
+            broker_id: broker.broker_id,
+            incarnation_id: broker.incarnation_id,
+            credential_id: identity.credential_id().to_owned(),
+            binding_revision: identity.binding_revision(),
+            grant_revision: identity.grant_revision(),
+        };
+        self.commit_authorized(tx, &clock)?;
+        Ok(view)
+    }
+
     /// Immutable ownership is historical provenance, never execution permission.
     /// An authority removed from the current grant retains its original owner.
     pub fn broker_for_authority(&self, authority_id: &str) -> anyhow::Result<Option<BrokerViewV1>> {
@@ -845,3 +893,241 @@ impl Store {
 #[cfg(test)]
 #[path = "../broker_registry/replay_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod identity_view_tests {
+    use super::*;
+    use crate::workload::{
+        AuthenticatedWorkload, WorkloadBindingIssueV1, WorkloadBindingRevocationV1,
+        WorkloadFailureV1, WorkloadSubjectV1,
+    };
+    use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+    use uuid::Uuid;
+
+    const BROKER: &str = "22222222-2222-4222-8222-222222222222";
+    const CREDENTIAL: &str = "44444444-4444-4444-8444-444444444444";
+    const INCARNATION: &str = "33333333-3333-4333-8333-333333333333";
+    const ORIGINAL: &str = "public-identity-view-original-fixture-key-0000000000";
+    const REPLACEMENT: &str = "public-identity-view-replacement-fixture-key-0000000";
+
+    fn issue(store: &Store, credential: &str, incarnation: &str, revision: u64, token: &str) {
+        store
+            .issue_workload_binding(&WorkloadBindingIssueV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: credential.into(),
+                expected_revision: revision,
+                subject: WorkloadSubjectV1::Broker {
+                    broker_id: BROKER.into(),
+                    incarnation_id: incarnation.into(),
+                },
+                sha256_digest: hex::encode(Sha256::digest(token.as_bytes())),
+                expires_at: "2100-01-01T00:00:00.000Z".into(),
+            })
+            .unwrap();
+    }
+
+    fn grant(store: &Store, credential: &str, incarnation: &str, revision: Option<u64>) {
+        store
+            .mutate_broker_grant(&BrokerGrantMutationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                broker_id: BROKER.into(),
+                expected_revision: revision,
+                credential_id: credential.into(),
+                incarnation_id: incarnation.into(),
+                authorities: vec![BrokerAuthorityV1 {
+                    authority_id: "identity-view-declared-authority".into(),
+                    runtime_kind: BrokerRuntimeKindV1::Docker,
+                }],
+                lease_seconds: 1,
+                not_after: "2100-01-01T00:00:00.000Z".into(),
+            })
+            .unwrap();
+    }
+
+    fn fixture() -> (tempfile::TempDir, Store) {
+        let directory = tempfile::Builder::new()
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let path = directory
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("tenant.sqlite");
+        let store =
+            Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10_000).unwrap();
+        store
+            .migrate_control_v3(&path.with_extension("before3"))
+            .unwrap();
+        store
+            .migrate_identity_v4(&path.with_extension("before4"))
+            .unwrap();
+        store
+            .migrate_human_access_v5(&path.with_extension("before5"))
+            .unwrap();
+        store
+            .migrate_workload_v6(&path.with_extension("before6"))
+            .unwrap();
+        issue(&store, CREDENTIAL, INCARNATION, 0, ORIGINAL);
+        grant(&store, CREDENTIAL, INCARNATION, None);
+        (directory, store)
+    }
+
+    fn extract(store: &Store, token: &str) -> BrokerIdentityV1 {
+        match store.authenticate_workload_token(token).unwrap().unwrap() {
+            AuthenticatedWorkload::Broker(identity) => identity,
+            _ => panic!("fixture must authenticate a real broker proof"),
+        }
+    }
+
+    #[test]
+    fn identity_view_revalidates_extracted_proof_after_binding_rotation_and_revocation() {
+        let (_directory, store) = fixture();
+        let original = extract(&store, ORIGINAL);
+        assert_eq!(
+            store
+                .broker_authenticated_identity(&original)
+                .unwrap()
+                .binding_revision,
+            1
+        );
+        issue(&store, CREDENTIAL, INCARNATION, 1, REPLACEMENT);
+        assert!(
+            store.broker_authenticated_identity(&original).is_err(),
+            "a previously extracted binding revision is no longer authority"
+        );
+        let current = extract(&store, REPLACEMENT);
+        assert_eq!(
+            store
+                .broker_authenticated_identity(&current)
+                .unwrap()
+                .binding_revision,
+            2
+        );
+        store
+            .revoke_workload_binding(&WorkloadBindingRevocationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                credential_id: CREDENTIAL.into(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let head = store.head().unwrap();
+        assert!(
+            store.broker_authenticated_identity(&current).is_err(),
+            "revocation must invalidate an already extracted proof"
+        );
+        assert_eq!(store.head().unwrap(), head);
+    }
+
+    #[tokio::test]
+    async fn identity_view_ignores_heartbeat_staleness_but_revalidates_replaced_or_revoked_grants()
+    {
+        let (_directory, store) = fixture();
+        let original = extract(&store, ORIGINAL);
+        assert_eq!(
+            store.broker(BROKER).unwrap().unwrap().state,
+            BrokerStateV1::Unseen
+        );
+        assert!(store.broker_authenticated_identity(&original).is_ok());
+        let heartbeat = store
+            .broker_heartbeat(
+                &original,
+                &BrokerHeartbeatV1 {
+                    version: 1,
+                    operation_id: Uuid::new_v4().to_string(),
+                    expected_heartbeat_revision: 0,
+                    incarnation_id: INCARNATION.into(),
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        let expiry =
+            parse_time(&heartbeat.broker.last_heartbeat.unwrap().lease_expires_at).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Utc::now() < expiry {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture heartbeat lease must expire as a functional condition");
+        assert_eq!(
+            store.broker(BROKER).unwrap().unwrap().state,
+            BrokerStateV1::Stale
+        );
+        let before = store.head().unwrap();
+        assert!(
+            store.broker_authenticated_identity(&original).is_ok(),
+            "a stale heartbeat is not a revoked broker grant"
+        );
+        assert_eq!(
+            store.head().unwrap(),
+            before,
+            "identity must not refresh heartbeat liveness"
+        );
+        let credential = Uuid::new_v4().to_string();
+        let incarnation = Uuid::new_v4().to_string();
+        issue(&store, &credential, &incarnation, 0, REPLACEMENT);
+        grant(&store, &credential, &incarnation, Some(1));
+        assert!(
+            store.broker_authenticated_identity(&original).is_err(),
+            "an extracted proof cannot follow a replaced grant or incarnation"
+        );
+        let current = extract(&store, REPLACEMENT);
+        let view = store.broker_authenticated_identity(&current).unwrap();
+        assert_eq!(view.grant_revision, 2);
+        assert_eq!(view.incarnation_id, incarnation);
+        store
+            .revoke_broker(&BrokerRevocationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                broker_id: BROKER.into(),
+                expected_revision: 2,
+            })
+            .unwrap();
+        let head = store.head().unwrap();
+        assert!(
+            store.broker_authenticated_identity(&current).is_err(),
+            "grant revocation also invalidates an already extracted proof"
+        );
+        assert_eq!(store.head().unwrap(), head);
+    }
+
+    #[test]
+    fn identity_view_refuses_an_extracted_proof_after_a_future_durable_time_floor() {
+        let (_directory, store) = fixture();
+        let identity = extract(&store, ORIGINAL);
+        assert!(store.broker_authenticated_identity(&identity).is_ok());
+        let at = parse_time(&format_time(Utc::now() + chrono::Duration::days(1))).unwrap();
+        let mut db = store.db.lock().unwrap();
+        let tx = store.begin_checked(&mut db).unwrap();
+        let mut event = Event::new("test.broker.identity.clock.received");
+        event.timestamp = format_time(at);
+        let (event, payload) = store.prepare_event(event).unwrap();
+        store
+            .append_with_capacity_class_at(
+                &tx,
+                event,
+                payload,
+                super::super::capacity::Class::OrdinaryWrite,
+                at,
+            )
+            .unwrap();
+        store.commit_checked(tx).unwrap();
+        drop(db);
+        let head = store.head().unwrap();
+        let failure = store.broker_authenticated_identity(&identity).unwrap_err();
+        assert_eq!(
+            failure.downcast_ref::<WorkloadFailureV1>(),
+            Some(&WorkloadFailureV1::ClockRegression)
+        );
+        assert_eq!(
+            store.head().unwrap(),
+            head,
+            "a clock refusal must not publish new evidence"
+        );
+        assert!(store.integrity().unwrap().valid);
+    }
+}

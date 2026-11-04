@@ -278,6 +278,24 @@ pub struct BrokerViewV1 {
     /// Liveness is not a complete runtime inventory or a terminal observation.
     pub runtime_inventory_complete: bool,
 }
+
+/// Instantaneous authenticated scope, distinct from the non-serializable proof.
+/// Deserializing this view grants no permission for a later operation and says
+/// nothing about process health, runtime inventory or execution admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrokerIdentityViewV1 {
+    pub version: u32,
+    pub tenant_id: String,
+    pub control_namespace_uuid: String,
+    pub schema_version: u32,
+    pub broker_id: String,
+    pub incarnation_id: String,
+    pub credential_id: String,
+    pub binding_revision: u64,
+    pub grant_revision: u64,
+}
+
 impl BrokerV1 {
     pub(crate) fn latest_received_at(&self) -> anyhow::Result<DateTime<Utc>> {
         let mut latest = parse_time(&self.granted_at)?;
