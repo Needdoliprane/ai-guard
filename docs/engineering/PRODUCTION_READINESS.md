@@ -1,9 +1,17 @@
 # Gates de qualification production
 
+Coût publisher du4novembre : compteur d'ancêtres corrigé après RED, sept
+parents ciblés uniques PASS sur les gels reliés et all-targets final PASS.
+Le getter non autorisant évite un scan ; les contrôles avant effet restent
+complets. À N32,262→198 sync fichiers et831→634 sync répertoires observés
+sur tmpfs, sans qualification de latence physique, rétention soutenue ou
+capacité100. [Preuves](VALIDATION.md#4-novembre--compteurs-de-durabilité-et-snapshot-du-publisher).
+G09 FAIL,0/12 gates clos ; aucun résultat runtime nouveau.
+
 Publisher du4novembre :21 fonctions uniques ciblées PASS sur les gels
 reliés (19bibliothèque,2vraies CLI), puis compilation composée PASS.
 Les défauts de reprise/capacité/historique trouvés
-en revue ont leurs RED et corrections. L'historique reste relu/synchronisé
+en revue ont leurs RED et corrections. Au gel initial, l'historique était relu/synchronisé
 quatre fois par cycle ; durée soutenue, rétention et effet runtime ne sont
 pas qualifiés. [Preuves](VALIDATION.md#4-novembre--présence-émise-par-le-service-broker).
 G09 FAIL,0/12 gates globaux clos.

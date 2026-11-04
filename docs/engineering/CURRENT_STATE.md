@@ -1,5 +1,28 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — coût mesuré et relecture redondante retirée
+
+Les synchronisations des ancêtres, absentes du compteur de test, sont
+désormais comptées au scope appelant. Le RED mesure1 au lieu6, puis les
+deux consommateurs concurrents passent. Une mesure manuelle réelle Store/
+HTTP/Stream passe à N0/8/32 ; un second RED constate16fsync pour une simple
+lecture du snapshot. Le getter devient `cached_head`, sans autorité de POST,
+en conservant root/lock/anchor ; append, préPOST, ACK et reopen conservent
+leurs vérifications complètes. Un historique altéré peut provoquer les GET
+identity/self avant refus, mais aucun nouveau POST.
+
+Après modification, le cycle à32 opérations historiques passe de262 à198
+sync fichiers et de831 à634 sync répertoires. Ce sont des comptes sur
+tmpfs LinuxARM64, pas un gain de latence disque ou un SLO Mac. Sept parents
+uniques ciblés passent sur les gels reliés, dont le parent manuel exécuté
+explicitement avant/après ; all-targets final PASS. Aucun worker/modèle
+n'est lancé. [Détail et limites](VALIDATION.md#4-novembre--compteurs-de-durabilité-et-snapshot-du-publisher).
+
+La complexité reste croissante avec l'historique : trois scans complets
+par cycle neuf sans retry et un clone d'identités O(N). Grande rétention, pannes
+physiques, capacité100 et qualification runtime restent ouvertes. G09 FAIL,
+aucun gate global clos ; Clippy Linux BLOCKED. Revue/insertion Git en cours.
+
 ## 4 novembre — publisher possédé par le service broker
 
 Le raccord Rust de `broker serve` utilise une clé Broker distincte et les

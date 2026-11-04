@@ -1,5 +1,31 @@
 # Plan d'industrialisation
 
+## Lot en cours — compteurs fiables et snapshot de présence
+
+Base00876e3, donneur `codex/presence-cost-20261104`. Root intègre et possède
+docs/sandbox/lifecycle ; Core possède instrumentation et getter/acteur,
+Luna tests/exécution, reviewer source indépendant. Aucun arbre D5/FD modifié.
+
+- [x] Reproduire le compteur manquant :1vs6, puis attribution des ancêtres
+  au scope appelant et deux consommateurs concurrents PASS.
+- [x] Baseline réelle N0/8/32 avant changement du getter, préparation hors
+  fenêtre et contrôles durables après reopen ; aucun worker/modèle.
+- [x] RED getter16fsyncvs0, puis cache non autorisant, contrôles complets
+  avant effet préservés et sept parents ciblés uniques PASS sur les gels.
+- [x] Mesure après changement : àN32,262→198sync fichiers et831→634sync
+  répertoires, all-targets final PASS. Tmpfs/debug, aucun SLO physique.
+- [ ] Revue finale, guides/preuves, commit/push/composition et fermeture
+  normale du donneur, en conservant sources/journaux privés.
+
+Le coût reste dépendant de N et la rétention n'est pas qualifiée. Full3
+protégé contient un draft et un correctif outbox WIP non validé ; coordination
+de sa reprise demandée au mainteneur, sans déduire activité d'un fichier.
+Le contrôle froid reste volontairement inactif tant que continuité d'origine,
+claims, exclusion de l'ancienne autorité et effets ambigus ne sont pas prouvés.
+Kubernetes conserve admission fermée : canal/preset et attachement à la bonne
+instance exigent conception/revue/décision avant réalisation. Aucun de ces
+écarts n'est fermé par le coût publisher ; G09 reste FAIL.
+
 ## Lot intégré — présence émise par le vrai service broker
 
 Basea76730c, donneur `codex/broker-publisher-20261104`. Ce raccord
@@ -37,8 +63,8 @@ sont distincts dans le donneur ; les checkouts D5/FD restent intacts.
 Le plafond local et les budgets d'audit sont cumulatifs : aucune présence
 indéfinie ou purge qualifiée n'est annoncée. Worker relay, fédération complète,
 reprise runtime et qualification production gardent leurs critères entiers.
-Prochaine priorité : mesurer le coût du flux et réduire les relectures
-redondantes seulement avec les mêmes contrôles avant POST et régressions.
+Le lot suivant ci-dessus mesure le coût du flux et retire une relecture
+redondante en conservant les contrôles avant POST et leurs régressions.
 Le diagnostic Recovery sans journal reste à préciser. Kubernetes exige une
 proposition de canal/preset avant réalisation et un attachement sûr à
 l'instance autorisée ; un handle DTO ou GET suivi d'exec par nom ne le prouve pas.

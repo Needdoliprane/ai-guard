@@ -1,5 +1,24 @@
 # Décisions d'industrialisation
 
+## 4 novembre — snapshot préparatoire sans scan redondant
+
+Après comptage réel et RED du getter, `cached_head()` remplace la lecture
+qui resynchronisait tout l'historique avant le premier GET. Il conserve
+root/lock/anchor, mutex empoisonné et clone du Head ; ce snapshot n'est ni
+une autorité ni une preuve de l'histoire actuelle. Les GET identity/self
+restent frais ; append/préPOST/ACK/reopen gardent scans, secrets, capacité,
+réserve du reçu, identités et resynchronisations. Un historique altéré peut
+donc être découvert après un GET, mais jamais après un POST rendu possible
+par ce seul cache. Aucun format, rôle, endpoint ou limite modifié.
+
+Le scope de mesure test concerne les syncs demandés par un répertoire,
+y compris ses ancêtres extérieurs au scope physique. Les wrappers ajoutés
+exécutent les mêmes syscalls, une fois, et l'expansion non-test reste le
+corps original. Un seul collecteur, explicitement sérialisé entre tests.
+Les trois scans restants et le clone O(N) ne qualifient pas une grande
+rétention ; les durées sur tmpfs ne qualifient pas le disque de l'opérateur.
+[Avant/après et refus conservés](VALIDATION.md#4-novembre--compteurs-de-durabilité-et-snapshot-du-publisher).
+
 ## 4 novembre — publication possédée par le service broker
 
 Raccord dans le processus Rust et les trois API Broker existants, sans
@@ -26,7 +45,7 @@ est borné à trois reprises, avec backoff100/250/500ms ; un429 n'est pas
 rejoué périodiquement. Les limites d'audit sont cumulées par broker, même
 après rotation ou changement d'incarnation.
 
-L'historique est relu/synchronisé quatre fois par cycle réussi ; coût et
+Au gel initial du publisher, l'historique est relu/synchronisé quatre fois par cycle réussi ; coût et
 rétention soutenue restent à mesurer, sans promesse de présence indéfinie
 ni procédure de purge qualifiée. Les guides [EN](../setup/broker/PRESENCE.md)
 et [FR](../setup/broker/PRESENCE.fr.md) distinguent ces limites de la reprise

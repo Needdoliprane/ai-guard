@@ -1,5 +1,37 @@
 # Stratégie de qualification
 
+## Coût de la présence — compteur et échantillons manuels
+
+Le compteur test attribue chaque sync d'ancêtre de `durable_bootstrap` au
+répertoire appelant ; un scope physique d'ancêtre ignorerait la plupart des
+appels. `EXCLUSIVE` sérialise les producteurs du collecteur global :
+`blocking_lock` seulement dans les unités synchrones, `.lock().await` dans
+les helpers async, guard avant Measurement et conservé jusqu'à finish/drop.
+Pour vérifier ses deux consommateurs synchrones, exécuter les deux filtres
+exacts avec `--test-threads=2`, comme dans [VALIDATION](VALIDATION.md#4-novembre--compteurs-de-durabilité-et-snapshot-du-publisher).
+
+Le canari actif `validated_head_snapshot_does_not_resynchronize_history`
+exige zéro sync/rescan de records dans la lecture du snapshot, sans exiger
+zéro IO des ancres. La donnée cachée n'autorise aucun effet. Après un delta
+sur ce chemin, sélectionner les canaris historique live, capacité pending
+et ACK perdu/restart ; éviter le replay de tous les parents inchangés.
+
+Le parent manuel
+`broker::presence::http_tests::cost_tests::publisher_cycles_one_real_heartbeat_at_history_depths_0_8_32`
+est ignoré par défaut et doit être exécuté explicitement avec `--ignored
+--nocapture --exact`. Il prépare N0/8/32 reçus authentiques hors fenêtre,
+mesure un seul POST réel puis draine IO/joint l'acteur avant finish ; un
+reopen/Store replay après fenêtre prouve le reçu et l'absence de doublon.
+Un drainage inconnu provoque une sortie enfant86 avant Drop, avec mesure
+incomplète/nonzero et conservation des fichiers jusqu'au contrôle Root de
+la fin réelle ; aucun échantillon suivant. Ce chemin n'est pas injecté par
+le lot et n'est pas présenté comme une qualification de panne physique.
+
+Le temps inclut fixture HTTP, middleware O(N) et polling5ms, pas la cadence
+ou le seeding. Les syncs sont réels mais la cible est tmpfs, non disque
+physique. RSS/FD sont des observations du processus entier. Ni percentile,
+gain statistique de durée, CPU consommé, prix ou capacité100 déduit.
+
 ## Présence du service broker — validation ciblée
 
 `broker::presence::` couvre le vrai gateway/Store et les fichiers privés :

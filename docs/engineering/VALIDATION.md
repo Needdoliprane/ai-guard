@@ -1,5 +1,116 @@
 # Validation courante
 
+## 4 novembre — compteurs de durabilité et snapshot du publisher
+
+Base00876e3, donneur `codex/presence-cost-20261104`. Le compteur de test
+omet les sync des ancêtres dans `durable_bootstrap` ; une régression démontre
+1appel au lieu6, avec contrôle positif et sibling hors scope. Le correctif
+instrumente chaque syscall existant au scope du répertoire appelant, sans
+en retirer ni modifier l'ordre/erreur ; l'expansion non-test reste son corps
+original. Un verrou test Tokio unique sérialise les producteurs du collecteur
+global, synchrone ou async, sans modifier son refus AlreadyActive.
+
+La baseline réelle démontre quatre scans complets par cycle neuf sans retry.
+Un RED séparé mesure16sync fichiers pour un getter qui doit simplement lire
+le snapshot validé. Le nouveau `cached_head` conserve root/lock/anchor et
+mutex empoisonné ; seul le scan du getter est retiré. La donnée cachée ne
+remplace pas identity/self frais ni les contrôles complets append/préPOST/
+ACK/reopen. Un historique altéré peut être découvert après un GET, mais
+n'autorise aucun nouveau POST. Aucun format/endpoint/rôle/cap/timer changé.
+Code donneurc9f5d49 intégré en6af1081, sans autre changement de source.
+
+**PASS : sept fonctions uniques ciblées sur les gels reliés**, pas sept
+nouveaux tests. Le parent manuel avant/après est compté une fois et n'est
+PASS que parce qu'exécuté explicitement avec `--ignored`. Les deux unités
+du compteur ne sont pas rejouées après le changement privé du getter.
+
+Sélections reproductibles sur le checkout composé (dans le sandbox décrit) :
+
+```sh
+cargo test --locked --lib -- --exact control_fs::persistent::bootstrap_cost_tests::durable_bootstrap_attributes_every_ancestor_sync_to_the_selected_root workload_cli::storage::tests::resume_resynchronizes_complete_files_before_returning --test-threads=2
+cargo test --locked --lib broker::presence::http_tests::cost_tests::validated_head_snapshot_does_not_resynchronize_history -- --exact --test-threads=1
+cargo test --locked --lib broker::presence::http_tests::cost_tests::publisher_cycles_one_real_heartbeat_at_history_depths_0_8_32 -- --ignored --exact --nocapture --test-threads=1
+cargo check --locked --all-targets
+```
+
+| Sélection | Résultat constaté |
+|---|---|
+| RED compteur exact | Compilation1m27s PASS ;1FAIL/0PASS/371filtered, Cargo101, appels1vs6. |
+| GREEN compteur + reprise workload | Deux filtres exacts,2threads :2/2PASS/370filtered, Cargo0 ; compilation35,77s, tests0,01s. |
+| Parent manuel baseline N0/8/32 |1PASS/372filtered, Cargo0,3,22s après compilation37,27s ; trois échantillons complets, historique Store/Stream réel préparé hors fenêtre et un vrai POST/ACK par point. |
+| RED getter exact | Compilation1m28s PASS ;1FAIL/373filtered, Cargo101, FileSyncAll16vs0. Les autres assertions ne sont pas déclarées atteintes. |
+| Premier appel GREEN incorrect | Mauvais ID Docker, No such container/RC1, aucun test. ID réel confirmé vivant, source/owner conservés, première commande effective séparée ; aucune relance pour timeout. |
+| Getter +3canaris |4/4PASS/370filtered, Cargo0,11,88s après compilation36,81s : snapshot sans sync, historique live altéré, réserve pending réduite et ACK perdu/restart. |
+| Parent manuel optimisé N0/8/32 |1PASS/373filtered, Cargo0,2,85s ; mêmes oracles durables et trois échantillons complets. |
+| Compilation finale toutes cibles | `cargo check --locked --all-targets` RC0,52,52s, aucun full-suite/release déduit. |
+
+Les tests font de vrais appels File::sync_all et mutations du Store avec
+preuve Broker ; aucun reçu simulé, worker, moteur ou modèle. Mesure sous
+LinuxARM64 Rust1.99.1, image cache2115d432, source/registry/root RO,
+UID1000/networknone/loopbackfixture/cap0/nnp, CPU1/RAM6GiB/swap0/PID256,
+scratch tmpfs3GiB/65536inodes/nosuid/nodev, fsize512MiB/nofile1024,
+hold1800s. Env-i explicite HOME/TMP/CARGO/TARGET/RUSTC/RUSTDOC,
+offline/locked/jobs1/incremental0/devdebug0. Aucun téléchargement ou cible
+nativement exécutée sur le Mac ; rustfmt statique et Git seulement.
+
+Les comptes d'un cycle sans retry sont indépendamment dérivés et observés :
+avant FileSyncAll=`8N+6`, DirectorySyncAll=`(4N+11)D+4N+8`,
+ReadToEnd=`8N+4` ; après respectivement`6N+6`, `(3N+10)D+3N+8`, `6N+4`.
+D vaut5dans la fixture. Aucun échec/abandon/outstanding dans les six
+échantillons ; un replay Store après reopen confirme opération/hash/reçu
+et head inchangé, usage et quota workers vides réellement lus.
+
+| N reçus initiaux | Sync fichiers avant→après | Sync répertoires avant→après | ReadToEnd avant→après | Temps fixture observé avant→après (ms) |
+|---|---:|---:|---:|---:|
+|0|6→6|63→58|4→4|44,32→43,21|
+|8|70→54|255→202|68→52|101,35→94,11|
+|32|262→198|831→634|260→196|283,31→214,16|
+
+**Ces durées isolées ne démontrent aucun gain statistique ou SLO.** Tmpfs
+n'est pas le disque physique de l'opérateur ; le temps inclut configuration
+HTTP, middleware de fixture O(N), polling5ms et attente de fin IO, exclut
+préparation/cadence et ne mesure pas exclusivement le publisher. FD/RSS sont
+du processus entier (FD18après chaque acteur ; RSS final≈39–40Mio), pas une
+consommation attribuable/facturable. Aucun percentile ou capacité100 déduit.
+
+Le parent manuel signale/joint son acteur et attend le même permit IO avant
+finish ; un reopen complet après fenêtre prouve le résultat. Le chemin de
+drainage inconnu est source-reviewé, pas injecté : sortie enfant86 avant
+Drop/échantillon suivant, mesure incomplète/nonzero et contrôle Root de la
+fin effective requis avant nettoyage. Il ne qualifie pas fsyncError/powerloss.
+
+Sources/logs privés :
+`/private/tmp/ai-guard-presence-cost-inputs-20261104.5DBiEM` et
+`/private/tmp/ai-guard-presence-cost-luna-20261104.9yKU0O`.
+RED compteur `dcab0cabce6ca5973ba47adcdd64a79226084b022a40f4cf5b0797308a6b57cc`,
+GREEN compteur `474dece5468d99e2b264dcd72f34478973e800c61ceb0c244a1496af651ead2e`,
+baseline `034ac3b4c5e1ab81d72a3ebd2bc198584bbd3ffe83e156c5941989aaf7d636eb`,
+RED getter `e72ce82ce592f1d6279f3c4e82f0ef744962e5b348a9bd2b088998d18d30ddb4`,
+orchestration `fb88f2db98f5e6dbf2ac44559f18c5976831849003bbbb5463a47998f6d7d0ea`,
+canaris `83e05debba89532eff37d3bd1e806c8f0f2c4656f5341f41083d07848846265a`,
+mesure optimisée `39a50c02ebed1b41cadce27cdd3cf8215921423d7a46cfd803aa027d12e27336`,
+all-targets `d5bcda889b767d3e8384631f83ed827d1f255fb24bf9de9d635d5a05610476db`.
+Manifeste final8sources
+`4e8d366f1284363f4656317fa58d98cdbbee0c7665b07f245ba08efbc1094b65`,
+Root vérifie8/8hashes du donneur égaux au gel exécuté. Une erreur de copie
+initiale du snapshot (fichier nouveau manquant, aucun test lancé) est corrigée
+avant admission, ancien manifeste incomplet conservé comme erreur de harnais.
+
+Deux owners QA fermés normalement après tous jobs terminés et seul sleep,
+OOM0/Pid0 finaux. Owner1 ferme16:08:26UTC, pic4074926080octets ; owner2
+ferme16:20:52UTC, pic3983466496octets. Les hold137 de nettoyage sont distincts
+des RC naturels des tests. Aucun volume/donnée/credential utilisateur supprimé.
+Revues indépendantes source conservées dans le plan privé ; revue finale et
+cycle Git/worktree restent à consigner avant clôture du lot. Avis final
+source/documentation favorable, trois précisions éditoriales appliquées ;
+note0600 `FINAL_REVIEW.md` SHA
+`14af8edcee94cb6ba9042a83c90dfea70f216ce2a392dc297da11cf7fac44a39`.
+
+**BLOCKED** : Clippy Linux absent de l'image. **NOT_RUN** : release/fullsuite,
+grande rétention/longue durée/disque physique, fautes IO réelles, matrice
+macOS/TTY, runtime workers, relais/fédération/Kubernetes et capacité100.
+G09 FAIL, aucun gate global clos, `billable=false`.
+
 ## 4 novembre — présence émise par le service broker
 
 Basea76730c, donneur `codex/broker-publisher-20261104`. Opt-in
