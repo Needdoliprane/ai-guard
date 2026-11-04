@@ -339,11 +339,11 @@ impl VerifiedWorker {
 impl VerifiedBroker {
     pub(super) async fn blocking<T: Send + 'static>(
         self,
-        operation: impl FnOnce(TenantState, BrokerIdentityV1) -> ApiResult<T> + Send + 'static,
+        operation: impl FnOnce(TenantState, BrokerIdentityV1, Redactor) -> ApiResult<T> + Send + 'static,
     ) -> ApiResult<T> {
         self.0
-            .blocking(move |tenant, identity, _| match identity {
-                AuthenticatedWorkload::Broker(identity) => operation(tenant, identity),
+            .blocking(move |tenant, identity, redactor| match identity {
+                AuthenticatedWorkload::Broker(identity) => operation(tenant, identity, redactor),
                 _ => Err(forbidden()),
             })
             .await

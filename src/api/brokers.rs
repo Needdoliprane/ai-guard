@@ -10,6 +10,7 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/brokers/{id}/revoke", post(revoke))
         .route("/brokers/heartbeat", post(heartbeat))
         .route("/brokers/self", get(own))
+        .route("/brokers/identity", get(identity))
         .layer(middleware::from_fn(workload::request_guard))
 }
 async fn grant(
@@ -57,7 +58,7 @@ async fn heartbeat(
 ) -> ApiResult<Json<BrokerMutationResultV1>> {
     let input = parse_json(body)?;
     broker
-        .blocking(move |tenant, identity| {
+        .blocking(move |tenant, identity, _redactor| {
             // Heartbeats use the untrusted Read gate and workload audit budget,
             // never the runner's mutation-frequency allowance.
             Ok(Json(
@@ -71,12 +72,38 @@ async fn heartbeat(
 }
 async fn own(broker: VerifiedBroker) -> ApiResult<Json<BrokerViewV1>> {
     broker
-        .blocking(move |tenant, identity| {
+        .blocking(move |tenant, identity, _redactor| {
             Ok(Json(tenant.store.broker_for_identity(&identity).map_err(
                 |error| workload::store_failure(&tenant.store, error),
             )?))
         })
         .await
+}
+
+async fn identity(broker: VerifiedBroker) -> ApiResult<Json<BrokerIdentityViewV1>> {
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            let view = tenant
+                .store
+                .broker_authenticated_identity(&identity)
+                .map_err(|error| workload::store_failure(&tenant.store, error))?;
+            let value = serde_json::to_value(&view).map_err(|_| identity_unavailable())?;
+            if redactor.value_unclipped(&value) != value {
+                // A scope field can itself equal the current proof. Never
+                // substitute masked IDs or return a partial identity envelope.
+                return Err(identity_unavailable());
+            }
+            Ok(Json(view))
+        })
+        .await
+}
+
+fn identity_unavailable() -> (StatusCode, Json<Value>) {
+    workload::response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "identity_unavailable",
+        "Authenticated broker identity is unavailable.",
+    )
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
