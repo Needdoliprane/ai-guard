@@ -1,6 +1,6 @@
 # Plan d'industrialisation
 
-## Lot en cours — compteurs fiables et snapshot de présence
+## Lot intégré — compteurs fiables et snapshot de présence
 
 Base00876e3, donneur `codex/presence-cost-20261104`. Root intègre et possède
 docs/sandbox/lifecycle ; Core possède instrumentation et getter/acteur,
@@ -14,8 +14,10 @@ Luna tests/exécution, reviewer source indépendant. Aucun arbre D5/FD modifié.
   avant effet préservés et sept parents ciblés uniques PASS sur les gels.
 - [x] Mesure après changement : àN32,262→198sync fichiers et831→634sync
   répertoires, all-targets final PASS. Tmpfs/debug, aucun SLO physique.
-- [ ] Revue finale, guides/preuves, commit/push/composition et fermeture
-  normale du donneur, en conservant sources/journaux privés.
+- [x] Revue finale, guides/preuves, commit/push/composition et fermeture
+  normale du donneur, en conservant sources/journaux privés :c9f5d49 intégré
+  en6af1081, guides/preuves0416db4, références distantes conformes et retrait
+  normal après inventaire et probe de consommateurs.
 
 Le coût reste dépendant de N et la rétention n'est pas qualifiée. Full3
 protégé contient un draft et un correctif outbox WIP non validé ; coordination

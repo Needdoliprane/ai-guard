@@ -100,11 +100,17 @@ Deux owners QA fermés normalement après tous jobs terminés et seul sleep,
 OOM0/Pid0 finaux. Owner1 ferme16:08:26UTC, pic4074926080octets ; owner2
 ferme16:20:52UTC, pic3983466496octets. Les hold137 de nettoyage sont distincts
 des RC naturels des tests. Aucun volume/donnée/credential utilisateur supprimé.
-Revues indépendantes source conservées dans le plan privé ; revue finale et
-cycle Git/worktree restent à consigner avant clôture du lot. Avis final
+Revues indépendantes source conservées dans le plan privé. Avis final
 source/documentation favorable, trois précisions éditoriales appliquées ;
 note0600 `FINAL_REVIEW.md` SHA
 `14af8edcee94cb6ba9042a83c90dfea70f216ce2a392dc297da11cf7fac44a39`.
+Donneurc9f5d49 intégré6af1081, guides/preuves0416db4, deux branches poussées
+et références distantes comparées exactement. Inventaire suivi/non suivi/
+ignoré propre ; probe cwd76364 visible puis sorti0, scan extérieur final
+vide sans diagnostic. Retrait Git normal du donneur à16:40UTC, sans force/
+reset/clean. Branches, gels et preuves conservés hors du checkout ; main,
+D5/FD et données utilisateur préservés. Ledger Root fermé, SHA
+`8ea577652e9ce7a22e707a198a578802bc3d68c517741c2bd77df316cc92518a`.
 
 **BLOCKED** : Clippy Linux absent de l'image. **NOT_RUN** : release/fullsuite,
 grande rétention/longue durée/disque physique, fautes IO réelles, matrice

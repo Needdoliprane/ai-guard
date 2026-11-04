@@ -21,7 +21,10 @@ n'est lancé. [Détail et limites](VALIDATION.md#4-novembre--compteurs-de-durabi
 La complexité reste croissante avec l'historique : trois scans complets
 par cycle neuf sans retry et un clone d'identités O(N). Grande rétention, pannes
 physiques, capacité100 et qualification runtime restent ouvertes. G09 FAIL,
-aucun gate global clos ; Clippy Linux BLOCKED. Revue/insertion Git en cours.
+aucun gate global clos ; Clippy Linux BLOCKED. Codec9f5d49 intégré6af1081,
+guides/preuves0416db4 poussés et références distantes vérifiées ; donneur
+retiré normalement après inventaire et contrôle des consommateurs. Branches,
+gels et notes privés préservés ; checkout d'intégration maintenu.
 
 ## 4 novembre — publisher possédé par le service broker
 
