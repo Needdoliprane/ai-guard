@@ -10,6 +10,9 @@ refus des UUID nuls et inconnues, sans initialiser l'historique de récupératio
 [Preuves et limites](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
 Sept parents ciblés, compilation toutes cibles et revue PASS ; code
 `3f8b33d` composé en `0281bb1` sans delta applicatif supplémentaire.
+Guides/preuves `6f7d398` composés en `36d9c39`, push et références distantes
+vérifiés ; propriétaire QA et donneur fermés normalement, branches et
+preuves conservées. Aucun chantier D5 externe modifié.
 
 La prochaine priorité de reprise dépend du gel coordonné du travail D5
 externe ; ses fichiers protégés restent préservés. Continuer les travaux

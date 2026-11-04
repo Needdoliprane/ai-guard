@@ -10,6 +10,9 @@ avant ouverture. Les guides opérateur EN/FR indiquent les preuves à préserver
 [Vérification et limites](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
 Sept fonctions ciblées et compilation toutes cibles PASS, revue traitée ;
 code `3f8b33d` intégré en `0281bb1`, sources égales au gel vérifié.
+Guides/preuves `6f7d398` composés en `36d9c39`, poussés avec références
+distantes conformes. Donneur propre retiré normalement après contrôle des
+consommateurs ; branches, gels et preuves privés conservés.
 
 La reprise D5, le transport des workers, la fédération multi-hôtes,
 Kubernetes et les qualifications réelles restent ouverts. G09 demeure FAIL ;

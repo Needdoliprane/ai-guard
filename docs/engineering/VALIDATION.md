@@ -79,6 +79,15 @@ sans validation de leurs ancres, sites externes ou rendu navigateur ; scan
 des dix fichiers contre trois secrets connus : zéro correspondance, sans
 prétendre à une détection universelle.
 
+Code et documentation poussés : donneur `6f7d398`, composition `36d9c39`,
+références distantes exactes vérifiées. Arbres propres, y compris fichiers
+ignorés/non suivis, différence complète nulle après composition. Un probe
+cwd détenu apparaît dans lsof, termine naturellement, puis le relevé externe
+du donneur ne retourne ni entrée ni diagnostic. Retrait normal par Git sans
+force ; branches et preuves conservées, checkout d'intégration maintenu.
+Les HEAD des arbres principaux et protégés sont inchangés. Aucun hook de
+code cible exécuté nativement ni résultat CI/release déduit du push.
+
 **BLOCKED** : Clippy absent de l'image épinglée. **NOT_RUN** : suite complète,
 release, fournisseur, navigateur, moteur Docker/Podman/Kubernetes, panne
 physique et reprise D5. FD/Daybreak et WSI-Q02 restent ouverts ; G09 FAIL,
