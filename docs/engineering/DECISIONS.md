@@ -1,5 +1,63 @@
 # Décisions d'industrialisation
 
+## 4 novembre — proposition de transport des workers sans réseau, décision attendue
+
+**Proposition uniquement : aucun accord, code ou test runtime de ce canal.**
+Le backend du relais est intégré, mais un worker `network:none` ne peut pas
+joindre son API. Le mainteneur doit décider de l'exception au contrat actuel
+« aucun nouveau socket ou secret au worker ». Le socket proposé reste interne
+au tmpfs du worker ; aucun secret de contrôle n'y est remis.
+
+Direction proposée : employer `exec -i` sans TTY dans le CID exact, via
+l'invocation moteur approuvée existante. Un adaptateur Rust non fiable dans
+l'image expose son socket local et parle HTTP/1.1 sur les pipes ; un pont Rust
+du broker reconstruit uniquement send/inbox/ACK vers le relais. La preuve
+workload de la tentative reste en mémoire du broker, jamais dans le worker,
+son environnement, argv, logs ou messages. Aucun nouveau daemon de confiance,
+réseau, montage hôte, socket moteur ou accès runner/SSO n'est proposé.
+
+Les alternatives ont été examinées : un UDS hôte ne traverse pas de façon
+établie les noyaux macOS/VM ; un UDS en volume VM nécessiterait un compagnon
+de confiance et des montages supplémentaires. L'exec évite ces deux ajouts,
+mais ses propriétés duplex, EOF et terminaison restent à vérifier sur chaque
+moteur réel. L'échec de ces probes demande une nouvelle décision, sans repli
+réseau implicite.
+
+L'accord de direction porterait sur les livrables obligatoires suivants :
+
+- Nouveau preset/version d'empreinte et checkpoint, sans modifier le sens
+  des profils historiques. Wrapper Rust en attente, image et environnement
+  fermés, aucun contenu du workspace exécuté avant la libération.
+- Ordre durable : start du bootstrap inspecté → canal prêt → Running central
+  acquitté et reçu conservé → marqueur irréversible de libération → unique
+  réponse autorisant le programme. Une réponse perdue ou partielle est
+  ambiguë : aucune réémission ni nouveau start, arrêt/réconciliation du même
+  CID et quota conservée tant qu'une observation terminale admissible manque.
+- Une époque de transport propriétaire, CAS et identité CID/StartedAt/
+  RestartCount ; stop et échéance originale gardent priorité. Rotation sous
+  le même credential_id et tentative, sans renouveler budgets ou idempotence.
+  L'exclusivité centrale du binding reste un contrat à définir et vérifier
+  atomiquement avant activation, avec migration explicite si nécessaire.
+  Le schéma6 actuel ne prouve pas cette exclusivité.
+- Un seul parseur HTTP standard, DTO fermés, chemins fixes, requêtes amont
+  reconstruites. Normalisation de Content-Length de même valeur numérique
+  admise ; valeurs divergentes, Transfer-Encoding et CL+TE refusés. Aucun
+  forwarding de Host/Authorization/URL ni proxy générique. Limites de corps,
+  en-têtes, concurrence, débit et temps vérifiées avant disponibilité.
+- EOF ou sortie du client moteur ne prouvent pas la fin de l'exec distant.
+  Aucune reconnexion/adoption sans preuve de terminaison ; aucune répétition
+  de libération. Ni fencing distribué ni reprise D5 ne sont déduits de ce lot.
+- RED/GREEN ciblés et revue indépendante des transitions, framing et preuves,
+  puis probes Docker/Podman distincts et recette réelle A1/A2/B1 : échange
+  autorisé, refus inter-tenant, révocation, panne/reprise, audit et quotas.
+
+La proposition détaillée et ses revues privées du4novembre restent des
+preuves de conception, pas des garanties runtime. Cette direction n'autorise
+aucune installation OS, action cloud/PKI, modification de D5 ou relèvement de
+deadline. Jusqu'à décision et satisfaction des prérequis, le lancement avec
+ce nouveau canal reste indisponible. Le diagnostic CLI Kubernetes en lecture
+seule avance indépendamment, sans admission de pod.
+
 ## 4 novembre — identité workload et relais dans le Store existant
 
 Le schéma6 conserve une base SQLite par tenant, un audit et les réserves F1.
