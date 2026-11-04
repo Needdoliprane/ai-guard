@@ -284,6 +284,57 @@ deadline. Jusqu'à décision et satisfaction des prérequis, le lancement avec
 ce nouveau canal reste indisponible. Le diagnostic CLI Kubernetes en lecture
 seule avance indépendamment, sans admission de pod.
 
+### Précisions de conception après lecture du code courant
+
+Revue du 4 novembre sur `f7129cf` : plusieurs `credential_id` peuvent désigner
+le même sujet worker. Le schéma actuel ne fournit pas d'époque exclusive de
+transport. Avant activation, définir un propriétaire canonique par
+`worker_id + attempt_id + generation`, lié à son credential, son époque et
+sa révision, dans la même base tenant. Acquisition, CAS, révocation et audit
+doivent être transactionnels, avec migration explicite si nécessaire.
+Une nouvelle époque ne devient pas une nouvelle génération centrale : le
+contrat actuel accepte seulement `generation: 1`. Toute autorisation
+ultérieure doit vérifier ce propriétaire courant ; créer un registre sans
+invalider les anciennes preuves ne suffit pas. Rotation sous le même
+`credential_id` pour préserver identité, budgets et idempotence. Aucun
+transfert ou réattachement tant que la quiescence de l'ancien exec est
+inconnue, même si un bail ou un client local a expiré.
+
+Le bootstrap d'une image quelconque ne prouve pas l'absence d'exécution
+métier antérieure. Le nouveau preset doit fixer le processus effectif,
+l'ENTRYPOINT, l'artefact wrapper vérifié et ses permissions ainsi que les
+droits du workspace. Un `Ready` émis par un adaptateur non fiable n'est pas
+une preuve indépendante de cette retenue. Les profils historiques ne
+changent pas de sens ; aucun wrapper ou changement d'empreinte n'est livré
+par cette proposition.
+
+Les mutations relayées exigent une préparation privée bornée distincte de
+l'outbox d'événements : identité d'opération et requête exacte retenues avant
+POST, réponse/reçu validés, reprise exacte sous autorité fraîche. Les corps
+éventuellement nécessaires au rejeu restent des données métier privées ;
+l'audit conserve leurs métadonnées et hashes. Aucun ACK applicatif implicite
+après simple livraison, polling illimité ou nouvel UUID pour contourner un
+refus. Le contrôle doit être réellement actif et le worker Running avec
+quota et inspection cohérents ; aucun faux état ou contournement de la
+réactivation froide n'alimente cette verticale.
+
+Un probe d'outils OS sur Docker Desktop 29.9.2 ARM64 a depuis confirmé une
+copie stdin exacte de 27 octets, incluant NUL, et une sortie de 23 octets
+avant EOF via `exec -i`, sans TTY distant. Le conteneur jetable n'a reçu ni
+réseau, volume, socket ou credential. Il n'a exécuté aucun worker produit.
+Ces résultats ne prouvent ni framing HTTP, exclusivité, handoff, libération
+unique ou terminaison distante après interruption ; Podman reste NOT_RUN.
+[Commandes, preuves et limites](VALIDATION.md#4-novembre--primitives-docker-du-futur-canal-de-relais).
+
+**Décision demandée** : autoriser cette direction de canal `exec -i`, le
+socket interne tmpfs et le nouveau preset/checkpoint, avec pont Rust dans
+le broker et preuve Workload conservée au contrôle. L'accord concerne
+conception détaillée, code et tests locaux ; aucune installation OS ni action
+cloud/PKI. L'activation reste fermée jusqu'à revue et preuves des contrats
+ci-dessus, puis qualification Docker/Podman et recette A1/A2/B1. À la date
+de cette mise à jour, cet accord n'a pas été reçu et aucun code du canal
+n'est implémenté.
+
 ## 4 novembre — identité workload et relais dans le Store existant
 
 Le schéma6 conserve une base SQLite par tenant, un audit et les réserves F1.

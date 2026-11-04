@@ -1,5 +1,21 @@
 # Plan d'industrialisation
 
+## Canal worker vers relais — décision de direction en attente
+
+Sur `f7129cf`, analyse parallèle Core/tests Luna/revue indépendante : les
+trois routes worker existent, sans handoff depuis le runtime. La proposition
+`exec -i`/socket tmpfs/nouveau preset est précisée dans
+[DECISIONS](DECISIONS.md#4-novembre--proposition-de-transport-des-workers-sans-réseau-décision-attendue).
+Deux primitives Docker réelles sont observées, conteneur possédé fermé ;
+elles ne constituent pas une verticale de workers.
+
+Après accord : contrat transactionnel d'ownership par tentative, version
+du preset/checkpoint et wrapper vérifié, pont Rust spécialisé et préparation
+durable des mutations, tests ciblés/revue puis vraie recette A1/A2/B1.
+L'activation reste refusée tant que les prérequis ne sont pas prouvés.
+Aucun contournement du contrôle inactif ni modification de D5 externe.
+Les corrections documentaires de tenancy/recette avancent indépendamment.
+
 ## Lot intégré — diagnostic de récupération sans journal
 
 Base `26ab9e7`, worktree dédié `codex/recovery-journal-diagnostic-20261104`.
