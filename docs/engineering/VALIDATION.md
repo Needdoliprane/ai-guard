@@ -47,6 +47,11 @@ ni preuve supprimée ; reçu `proofs/previous-container-closure.txt`.
 du polling, IdP réel, runtime/cloud et autres plateformes. Ce correctif rend
 le refus exploitable par le client ; ses tests ne qualifient pas l'UI entière.
 Aucun nouveau schéma, endpoint brokers ou gate production par ce lot.
+Le worktree donneur est fermé après contrôle clean/ignorés, correspondance
+des quatre sources intégrées, références poussées et consommateurs lsof
+accessibles. Reçu privé
+`/private/tmp/ai-guard-human-proxy-worktree-close-20261104.35RjdP/` ; branches,
+preuves et données conservées, aucun retrait forcé.
 
 ## 4 novembre — maintenance humaine après migration workload6
 

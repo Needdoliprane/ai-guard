@@ -117,6 +117,12 @@ SQL/UTC, puis GREEN, ont leurs preuves sous montage source RO. Coût historique 
 commits de connexions sœurs et mutations de supervision : **WSI-Q02 ouvert**,
 aucune garantie de coût global borné ou de capacité100. Les guides opérateur
 EN/FR documentent la distinction entre ce backend et le transport worker.
+Depuis `5b6dfc1`, deux implémentations distinctes commencent la lecture humaine
+du registre : backend Rust/schema7 et modèle/client/vue TypeScript, avec Luna
+pour leurs tests ciblés séparés. Le contrat relu impose un droit explicite
+non délégué aux admins d'organisation et le parcours broker seul, sans
+élargir les permissions existantes. Code de cette nouvelle vue, recette UI
+et schéma7 restent à livrer/valider ; aucune disponibilité n'est présumée.
 Les worktrees donneurs du registre et du relais sont fermés après contrôle
 des sources intégrées, références poussées et consommateurs accessibles.
 Le brouillon antérieur du relais reste conservé sous une référence Git dédiée ;

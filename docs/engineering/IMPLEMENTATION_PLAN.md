@@ -72,6 +72,19 @@ TypeScript (modèle/client/vue humaine/états), Root aux contrats/intégration,
 Luna aux tests ciblés et second regard indépendant. Aucun raccord de workers
 ou accès physique aux moteurs n'est implicitement livré par cette vue.
 
+Commission depuis `5b6dfc1`, worktrees indépendants :
+
+| Périmètre actif | Propriétaire | Livraison attendue |
+|---|---|---|
+| `human-brokers-core-20261104` | Agent Rust | Capacité non délégable, audit/migration7, API/pagination bornée, compatibilité historique et tests de contrats. |
+| `human-brokers-front-20261104` | Agent TypeScript | Modèle/client/vue humaine, landing broker seul, états et purge/latch, tests ciblés. |
+| Validation | Luna | RED/GREEN séparés, un Cargo lourd à la fois, montages source RO et limites OS ; aucune matrice fournisseur systématique. |
+| Intégration | Root | Contrats, documentation EN/FR, revue indépendante, composition, push et retrait propre des worktrees. |
+
+Ces livrables sont en développement, pas disponibles par la seule commission.
+Le contrôle de manifeste setup est dans `src/setup.rs` : refuser la nouvelle
+capacité avant publication sous5, sans modifier l'installation5 existante.
+
 Les preuves broker/worker sont opaques et revalidées en transaction avant
 replay. Le tenant vient du credential ; la rotation ne crée ni nouveau worker
 ni crédit d'audit. Génération v1 fixée à1 par tentative UUID tant qu'aucune
