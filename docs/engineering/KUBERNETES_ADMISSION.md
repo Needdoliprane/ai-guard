@@ -1,8 +1,9 @@
 # Admission Kubernetes — proposition de création retenue avant exécution
 
-**4 novembre 2026 · décision attendue · aucune implémentation ni qualification.**
-Lecture de la base `361bf69`. Ce document propose une direction au mainteneur ;
-il n'autorise aucun appel cluster, nouveau preset ou lancement de worker.
+**4 novembre 2026 · direction approuvée pour conception/code/tests locaux ; aucune qualification.**
+Lecture initiale de la base `361bf69`. Le mainteneur a autorisé la direction
+et le code local décrits ci-dessous. Cet accord n'autorise aucun appel cluster,
+start/release ou lancement de worker ; l'admission réelle reste fermée.
 Les [frontières d'architecture](ARCHITECTURE_CONTRACT.md), la
 [supervision](BROKER_SUPERVISION.md), les [gates](PRODUCTION_READINESS.md) et
 la [stratégie de test](TEST_STRATEGY.md) restent applicables.

@@ -1,5 +1,16 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — direction Kubernetes locale approuvée, aucune admission ajoutée
+
+Une [proposition de création retenue](KUBERNETES_ADMISSION.md), relue
+séparément, décrit permission avant CREATE, UID/spec reçus, ACK perdu,
+NamespaceUID et limites de la schedulingGate. Son premier lot envisagé
+n'autorise aucune libération ; le véritable adaptateur reste obligatoire.
+Le mainteneur autorise conception, code Rust et tests locaux de cette direction,
+sans start/release ni action cluster. Aucun cluster, droit ou runtime modifié,
+aucun test runtime effectué par ce document ; 0/12 gates clos. Les travaux
+indépendants de reprise Rust continuent.
+
 ## 4 novembre — autorisations broker depuis le CLI
 
 `workload prepare/apply/resume/status` prend en charge les actions fermées

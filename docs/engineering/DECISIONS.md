@@ -1,5 +1,19 @@
 # Décisions d'industrialisation
 
+## 4 novembre — création Kubernetes retenue, direction locale approuvée
+
+La [proposition relue](KUBERNETES_ADMISSION.md) sépare une création de Pod
+avec gate imposée de toute libération pour exécution. Elle vise à retenir
+UID/spec avant un futur start, sans présenter cette préparation comme un
+adaptateur livré. L'accord demandé porte sur conception, code et tests
+locaux ; aucun effet cluster ni release n'est autorisé par le document.
+
+Le mainteneur autorise explicitement cette direction et le code local.
+Permission centrale exacte et garantie NamespaceUID/admission restent à
+définir et prouver avant effet réel. Nom/labels et GET après CREATE ne
+remplacent pas l'ownership ou une barrière avant effet. Aucun start/release
+ni action cluster n'est autorisé ; contrats Docker/Podman et gates inchangés.
+
 ## 4 novembre — provisionner les grants broker par le CLI existant
 
 Les actions fermées `broker_grant` et `broker_revoke` rejoignent les manifestes
