@@ -91,9 +91,118 @@ The gateway derives tenant and role from the presented Bearer proof. There is no
 
 Human local credentials and OIDC sessions remain separate, as do AI-provider credentials. Neither an IdP administrator nor an ai-guard application role creates a runner or workload credential. These APIs do not establish a named human initiator or authenticate a complete agent/delegation chain. Follow [named access](../identity/README.md) or [SSO](../sso/README.md) for human access.
 
-## Issue, rotate and revoke a binding
+## Prepare and record a credential operation from the CLI
 
-There is no workload provisioning CLI in this guide. An authorized trusted caller prepares a high-entropy private Bearer credential, computes its SHA-256 digest locally and submits **only the digest** in the issue DTO. The gateway does not generate or return the raw credential. Authentication later presents that credential privately over the approved control transport; do not put it in argv, public JSON, logs or screenshots. Keep its source as a private file reference in the trusted caller. No runner, SSO token, engine socket or complete environment belongs in a worker handoff.
+Use the Rust operator CLI from the trusted control environment. Build the
+current `agentsandbox` binary, prepare storage schema6 or7 as above and keep
+the current runner credential in a private file. The command does not obtain
+runner authority from a human account or an IdP role.
+The runner file uses the current gateway CLI profile:32–512 bytes without
+whitespace, optionally followed by one LF. The operation never replaces or
+regenerates that existing runner credential.
+
+Copy the [control template](examples/cli-control.json) and one request
+template into an operator-owned private directory. The examples are inputs
+to configure, not installed identities: replace every `<...>` and example
+origin/path. Use the actual authenticated tenant and control namespace from
+the approved installation profile. These are equality guards; the server
+still chooses the tenant from the runner credential.
+
+| Request template | Values to prepare |
+|---|---|
+| [Issue](examples/cli-issue.json) | Approved broker/incarnation, future expiry, revision0. The CLI generates the credential ID and secret once. |
+| [Rotate](examples/cli-rotate.json) | Same credential ID and subject, explicit current revision and new future expiry. A new secret is generated. |
+| [Revoke](examples/cli-revoke.json) | Credential ID and explicit current revision. No new secret is generated. |
+
+For a worker subject, use its approved `worker_id`, `attempt_id` and
+`generation:1` under `kind:worker`, matching the existing authorized runtime
+attempt. A supplied ID does not establish that attempt or start a worker.
+Do not put a tenant, raw key, digest, actor or operation ID in the request
+template; unknown fields are refused.
+
+Keep both input and control files private, with existing trusted parents
+and mode0600. Keep the operation directory outside projects and directories
+imported into workers. Use HTTPS with normal chain/name verification, or a numeric
+loopback HTTP origin for local control. For a private CA, set
+`ca_bundle_file` to the absolute private-file path of the approved public
+certificate bundle, at most64KiB/eight certificates. These explicit roots
+replace built-in roots. Never include a CA private key or disable TLS.
+
+The following paths are operator-selected examples. The parent must already
+be private; the operation directory must be new:
+
+```sh
+AIGUARD_BIN=/absolute/path/to/agentsandbox
+AIGUARD_PRIVATE=/absolute/private/operator
+"$AIGUARD_BIN" workload prepare \
+  --input "$AIGUARD_PRIVATE/issue.json" \
+  --control-file "$AIGUARD_PRIVATE/control.json" \
+  --output-dir "$AIGUARD_PRIVATE/broker-key-issue"
+
+"$AIGUARD_BIN" workload status \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue"
+
+"$AIGUARD_BIN" workload apply \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+```
+
+`prepare` performs no HTTP. It retains the exact request and, for issue or
+rotation, a random credential in the operation's private `credential` file
+before any remote mutation. It never prints that secret. Container users
+can use `--input -` with stdin instead of a host bind; input remains bounded
+to16KiB/five seconds, and control/destination files retain their private
+filesystem requirements.
+
+`apply` validates the current explicitly supplied runner, expected origin,
+tenant and namespace, then makes one mutation request. There is no automatic
+retry. Success reports a recorded historical operation and its durable
+receipt, with `current_state:not_observed`; it does not assert that the key
+is still active. A binding alone neither grants a broker nor authorizes a
+relay channel, distributes a key or starts/stops a worker. Keep these
+operations separate under the grants described below. Never mount the
+whole operation directory or a runner/SSO credential in a worker.
+
+### Resume, rotate and revoke without discarding state
+
+After a lost response, preserve the whole private operation directory.
+Resume that operation explicitly instead of preparing a replacement:
+
+```sh
+"$AIGUARD_BIN" workload resume \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+```
+
+Resume retains IDs, bytes, secret, expiry and CAS. A now-expired request can
+still recover an earlier receipt. The current control file may reference a
+replacement authorized runner or approved CA bundle, but origin, tenant and
+namespace must match the preparation. A preflight followed by a POST is not
+an atomic server scope comparison during concurrent trusted-control
+reconfiguration; preserve the installation's routing/credential assignment
+while performing the operation.
+
+For rotation or revocation, review the corresponding template, set the
+actual expected revision, and run prepare/apply with a **different new**
+operation directory. A local receipt is historical and cannot discover the
+current revision. A409 conflict must be investigated; do not guess a higher
+CAS or edit a retained request. Distribute a rotated key only through the
+approved consumer configuration and preserve the old operation for audit.
+Revocation records credential refusal, not termination of a running process.
+
+Partial preparation is retained and cannot be adopted or repaired by editing
+JSON. An apply/resume attempt with an unknown result fails until a validated
+receipt is durable locally. `status` can successfully display that retained
+local state while leaving the remote outcome explicitly unresolved.
+No secret, existing operation, database or partial receipt
+is deleted automatically. Retained staging is bounded; an exhausted or
+corrupt operation needs operator diagnosis, without deleting evidence to
+obtain a successful status. On quota/clock/storage rejection, preserve state
+and use the diagnostics below before deliberately resuming.
+
+## Issue, rotate and revoke through the HTTP API
+
+The CLI above handles durable preparation for operators. An authorized integration caller may also prepare a high-entropy private Bearer credential, compute its SHA-256 digest locally and submit **only the digest** in the issue DTO. The gateway does not generate or return the raw credential. Authentication later presents that credential privately over the approved control transport; do not put it in argv, public JSON, logs or screenshots. Keep its source as a private file reference in the trusted caller. No runner, SSO token, engine socket or complete environment belongs in a worker handoff.
 
 All routes below are under `/api/v1`. JSON objects are closed: unknown fields are refused. The gateway's request-body limit is 256 KiB, including JSON escaping/envelope; a body's own limit does not override it. Use `version:1`, canonical lowercase non-nil UUIDs, valid future RFC3339 expiries and SHA-256 hex digests. Workload Bearers must be 32–512 bytes without whitespace. The following is a **request template**, not an installed identity. Replace every `<...>` reference with fresh IDs, the real prepared digest and an intended expiry; do not send placeholders:
 

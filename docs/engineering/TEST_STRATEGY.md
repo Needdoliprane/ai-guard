@@ -1,5 +1,28 @@
 # Stratégie de qualification
 
+## CLI workload — sélectionner selon la couture modifiée
+
+`tests/workload_cli.rs` exerce la vraie CLI, des gateways Axum/Store SQLite
+et une AC TLS privée possédée. Le lot du4novembre a16parents CLI et1unité
+filesystem uniques passés sur les gels reliés ; le test TLS rejoué avec son
+contrôle positif n'est pas recompté. Les commandes, sélections, RED,
+échecs de fixture et hashes figurent dans [VALIDATION](VALIDATION.md#4-novembre--cli-durable-des-identités-techniques).
+
+Sélectionner `--test workload_cli` pour une modification de ce parcours.
+L'unité exacte `workload_cli::storage::tests::resume_resynchronizes_complete_files_before_returning`
+vérifie les appels `File::sync_all` réels après réouverture de fichiers
+réécrits sans flush ; ne pas en déduire panne électrique ou fsyncError.
+Les altérations de réponses sont des middlewares de fixture après le vrai
+handler/commit ; aucune logique métier simulée ne remplace le Store.
+Le parent Worker utilise des projections déclarées de contrôle, sans moteur.
+
+Un changement de tests/oracle ne justifie pas le replay des autres parents
+inchangés. Réserver les scénarios réels Docker/Podman/A1A2B1 à leurs gates
+distincts ; ni ce client ni ses17tests ne qualifient ces runtimes, PKI
+entreprise, transport réseau, handoff ou fédération. La compilation release
+est effectuée une fois sur la composition applicative finale ; Clippy Linux
+reste indisponible dans l'image de contrôle épinglée.
+
 ## Latence et pression de la machine de développement
 
 La machine locale de référence du mainteneur est un MacBook Air M3 avec

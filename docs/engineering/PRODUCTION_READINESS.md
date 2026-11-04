@@ -1,5 +1,15 @@
 # Gates de qualification production
 
+Complément CLI workload du4novembre : préparation/clé privées et reprise
+exacte via les API existantes,17fonctions ciblées uniques PASS, all-targets
+et release PASS, revue source traitée, guides/exemples EN/FR.
+L'état courant reste inconnu après un reçu historique ; aucune activation
+ou transmission de clé n'est implicite. Les Store/TLS et sujets Worker
+sont vérifiés dans des fixtures logicielles, sans worker réel. Clippy Linux
+est BLOCKED, fautes physiques/publication et transport/handoff/fédération
+restent ouverts. [Preuves](VALIDATION.md#4-novembre--cli-durable-des-identités-techniques).
+G09 FAIL,0/12 gates globaux clos ; aucune qualification de release.
+
 Mise à jour de la branche de validation au4novembre : l'inventaire STOP du
 broker et le préflight Kubernetes audité sont intégrés, avec48fonctions
 uniques ciblées PASS sur leurs gels et compilation composée96bf8ed PASS.

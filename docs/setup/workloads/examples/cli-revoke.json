@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "action": "revoke",
+  "credential_id": "<credential-uuid-to-revoke>",
+  "expected_revision": 2
+}

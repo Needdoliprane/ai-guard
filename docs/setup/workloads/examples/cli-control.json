@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "gateway": "https://control.example.invalid/",
+  "expected_tenant_id": "<authenticated-tenant>",
+  "control_namespace_uuid": "<approved-control-namespace-uuid>",
+  "runner_token_file": "/absolute/private/control/runner",
+  "ca_bundle_file": null
+}

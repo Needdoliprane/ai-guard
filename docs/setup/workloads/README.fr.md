@@ -91,9 +91,123 @@ Le gateway déduit tenant et rôle de la preuve Bearer présentée. Aucun header
 
 Credentials humains locaux et sessions OIDC restent distincts, comme les credentials fournisseurs IA. Ni un administrateur IdP ni un rôle applicatif ai-guard ne créent de credential runner ou workload. Ces API n'établissent ni initiateur humain nominatif ni chaîne complète authentifiée agent/délégation. Suivre [l'accès nominatif](../identity/README.fr.md) ou [le SSO](../sso/README.fr.md) pour les accès humains.
 
-## Émettre, tourner et révoquer un binding
+## Préparer et enregistrer une opération de credential par CLI
 
-Ce guide ne fournit pas de CLI de provisionnement workload. Un appelant autorisé de confiance prépare un credential Bearer privé à forte entropie, calcule localement son SHA-256 puis soumet **uniquement le digest** dans le DTO d'émission. Le gateway ne génère ni ne renvoie le credential brut. L'authentification ultérieure le présente de façon privée sur le transport de contrôle approuvé ; ne pas le mettre en argv, JSON public, logs ou captures. Conserver sa source comme référence de fichier privé dans l'appelant de confiance. Aucun runner, jeton SSO, socket moteur ou environnement complet ne doit rejoindre un handoff worker.
+Utilisez la CLI opérateur Rust depuis le périmètre de contrôle de confiance.
+Construisez le binaire `agentsandbox` courant, préparez le schéma6 ou7
+comme ci-dessus et conservez le credential runner courant dans un fichier
+privé. La commande n'obtient pas de droit runner depuis un compte humain ou
+un rôle IdP.
+Le fichier runner suit le profil CLI gateway courant :32–512octets sans
+blanc, avec au plus un LF final. L'opération ne remplace ni ne régénère ce
+credential runner existant.
+
+Copiez le [modèle de contrôle](examples/cli-control.json) et un modèle de
+requête dans un répertoire privé de l'opérateur. Ces exemples sont des
+entrées à configurer, pas des identités installées : remplacez tous les
+`<...>` et origine/chemins d'exemple. Utilisez le tenant authentifié et le
+namespace de contrôle réels du profil d'installation approuvé. Ce sont des
+gardes d'égalité ; le serveur choisit toujours le tenant depuis le runner.
+
+| Modèle de requête | Valeurs à préparer |
+|---|---|
+| [Émission](examples/cli-issue.json) | Broker/incarnation approuvés, expiry future, révision0. La CLI génère une seule fois l'ID du credential et le secret. |
+| [Rotation](examples/cli-rotate.json) | Même ID de credential et sujet, révision courante explicite et nouvelle expiry future. Un nouveau secret est généré. |
+| [Révocation](examples/cli-revoke.json) | ID du credential et révision courante explicite. Aucun nouveau secret n'est généré. |
+
+Pour un sujet worker, utilisez ses `worker_id`, `attempt_id` et
+`generation:1` approuvés sous `kind:worker`, conformément à la tentative
+runtime déjà autorisée. Un ID fourni n'établit pas cette tentative et ne
+démarre aucun worker. Ne mettez ni tenant, clé brute, digest, actor ou ID
+d'opération dans le modèle de requête ; les champs inconnus sont refusés.
+
+Gardez fichiers d'entrée et de contrôle privés, avec parents de confiance
+existants et mode0600. Conservez le répertoire d'opération hors des projets
+et répertoires importés dans les workers. Utilisez HTTPS avec vérification normale chaîne/nom,
+ou une origine HTTP sur IP loopback numérique pour le contrôle local. Pour
+une AC privée, donnez à `ca_bundle_file` le chemin absolu du fichier privé
+contenant le bundle de certificats publics approuvés, au plus64Kio/huit
+certificats. Ces racines explicites remplacent les racines intégrées. Ne
+fournissez aucune clé privée d'AC et ne désactivez pas TLS.
+
+Les chemins suivants sont des exemples choisis par l'opérateur. Le parent
+doit déjà être privé ; le répertoire d'opération doit être neuf :
+
+```sh
+AIGUARD_BIN=/absolute/path/to/agentsandbox
+AIGUARD_PRIVATE=/absolute/private/operator
+"$AIGUARD_BIN" workload prepare \
+  --input "$AIGUARD_PRIVATE/issue.json" \
+  --control-file "$AIGUARD_PRIVATE/control.json" \
+  --output-dir "$AIGUARD_PRIVATE/broker-key-issue"
+
+"$AIGUARD_BIN" workload status \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue"
+
+"$AIGUARD_BIN" workload apply \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+```
+
+`prepare` ne fait aucun HTTP. Il conserve requête exacte et, pour émission
+ou rotation, credential aléatoire dans le fichier privé `credential` de
+l'opération avant toute mutation distante. Il n'affiche jamais ce secret.
+En conteneur, `--input -` et stdin évitent un bind hôte ; l'entrée reste
+bornée16Kio/cinq secondes et fichiers de contrôle/destination conservent
+leurs exigences de filesystem privé.
+
+`apply` valide le runner courant explicitement fourni, l'origine, le tenant
+et le namespace attendus, puis fait une requête de mutation. Aucun retry
+automatique. Le succès annonce une opération historique enregistrée et son
+reçu durable, avec `current_state:not_observed` ; il ne prétend pas que la
+clé est toujours active. Un binding seul n'accorde ni grant broker, ni canal
+de relais, distribution de clé ou démarrage/arrêt worker. Gardez ces
+opérations distinctes selon les grants décrits ci-dessous. Ne montez jamais
+le répertoire d'opération entier ni un credential runner/SSO dans un worker.
+
+### Reprendre, tourner et révoquer sans perdre l'état
+
+Après perte de réponse, préservez le répertoire privé d'opération complet.
+Reprenez explicitement cette opération plutôt que préparer un remplacement :
+
+```sh
+"$AIGUARD_BIN" workload resume \
+  --operation-dir "$AIGUARD_PRIVATE/broker-key-issue" \
+  --control-file "$AIGUARD_PRIVATE/control.json"
+```
+
+La reprise garde IDs, bytes, secret, expiry et CAS. Une requête désormais
+expirée peut encore récupérer son reçu antérieur. Le fichier de contrôle
+courant peut référencer un runner autorisé remplaçant ou un bundle d'AC
+approuvé, mais origine, tenant et namespace doivent correspondre à la
+préparation. Un préflight puis POST n'est pas une comparaison atomique du
+scope serveur pendant une reconfiguration concurrente du contrôle de
+confiance ; conservez routage et attribution du credential de l'installation
+pendant l'opération.
+
+Pour rotation ou révocation, relisez le modèle correspondant, fixez la vraie
+révision attendue et faites prepare/apply dans un **autre répertoire neuf**.
+Un reçu local est historique et ne découvre pas la révision courante. Un
+conflit409 doit être examiné ; ne devinez pas un CAS supérieur et n'éditez
+pas une requête retenue. Distribuez une clé tournée seulement par la
+configuration du consommateur autorisée et préservez l'ancienne opération
+pour audit. Révoquer enregistre un refus du credential, pas l'arrêt d'un
+processus en cours.
+
+Une préparation partielle reste conservée et ne s'adopte/répare pas par
+édition JSON. Une tentative apply/resume au résultat inconnu échoue jusqu'à
+un reçu validé durable localement. `status` peut afficher avec succès cet
+état local retenu en laissant explicitement l'issue distante non résolue.
+Aucun secret, opération existante, base ou
+reçu partiel n'est supprimé automatiquement. Le staging retenu est borné ;
+une opération épuisée ou corrompue demande un diagnostic opérateur, sans
+supprimer de preuve pour obtenir un statut réussi. Sur refus quota/horloge/
+stockage, préservez l'état et utilisez les diagnostics ci-dessous avant une
+reprise délibérée.
+
+## Émettre, tourner et révoquer par l'API HTTP
+
+La CLI ci-dessus gère la préparation durable pour l'opérateur. Un appelant d'intégration autorisé de confiance peut aussi préparer un credential Bearer privé à forte entropie, calculer localement son SHA-256 puis soumettre **uniquement le digest** dans le DTO d'émission. Le gateway ne génère ni ne renvoie le credential brut. L'authentification ultérieure le présente de façon privée sur le transport de contrôle approuvé ; ne pas le mettre en argv, JSON public, logs ou captures. Conserver sa source comme référence de fichier privé dans l'appelant de confiance. Aucun runner, jeton SSO, socket moteur ou environnement complet ne doit rejoindre un handoff worker.
 
 Toutes les routes ci-dessous sont sous `/api/v1`. Les objets JSON sont fermés : les champs inconnus sont refusés. La limite de corps de requête du gateway est de 256 Kio, échappement/enveloppe JSON compris ; la limite propre à un corps ne la remplace pas. Utiliser `version:1`, UUID canoniques minuscules non nuls, expirations RFC3339 futures valides et digests SHA-256 hexadécimaux. Les Bearer workload font 32–512 octets sans espace blanc. Voici un **modèle de requête**, pas une identité installée. Remplacer chaque référence `<...>` par des IDs neufs, le vrai digest préparé et une expiration voulue ; ne pas envoyer les placeholders :
 
