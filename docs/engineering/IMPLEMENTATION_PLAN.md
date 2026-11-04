@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## Build — prérequis structurels avant appel moteur
+
+Base `dbc5afa`, donneur `codex/build-input-preflight-20261104`. Core possède
+`operations.rs`, Luna les tests `runtime_program`, Root le contrat, les guides
+EN/FR, les preuves et le cycle Git/QA ; revue source indépendante.
+
+Après RED réel du CLI acceptant un paquet sans Dockerfile worker, le contrôle
+vérifie 7 répertoires et 19 fichiers avant `selected_runtime`. Les quatre
+canaris Build conservent leurs parcours, avec fixtures structurelles complètes.
+Le contrôle ne fige pas le contexte, ne prouve pas la compilation et ne rend
+pas atomiques les deux builds. Les pins système, provenance/SBOM et G12
+restent ouverts. [Preuves](VALIDATION.md#4-novembre--prérequis-de-build-avant-tout-appel-moteur).
+Sept fonctions ciblées, compilation toutes cibles et revue PASS ; code
+`7406e4f` intégré en `fb918c9` sans autre changement applicatif.
+
 ## Canal worker vers relais — décision de direction en attente
 
 Sur `f7129cf`, analyse parallèle Core/tests Luna/revue indépendante : les

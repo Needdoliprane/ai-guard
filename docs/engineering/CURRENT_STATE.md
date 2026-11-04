@@ -1,5 +1,22 @@
 # État constaté — suivi des 3 et 4 novembre 2026
 
+## 4 novembre — build refusé avant moteur si le paquet est incomplet
+
+`build --source` vérifie désormais 7 répertoires et 19 fichiers requis avant
+de sélectionner ou contacter le moteur. Absences, liens détectés et types
+incorrects produisent un diagnostic relatif borné. Les quatre canaris
+d'identité/endpoint/arguments restent exercés avec des fixtures adaptées.
+Sept fonctions ciblées et compilation toutes cibles PASS après RED réel ;
+[preuves et limites](VALIDATION.md#4-novembre--prérequis-de-build-avant-tout-appel-moteur).
+Les guides locaux EN/FR expliquent le refus et l'action de reprise.
+Revue indépendante traitée ; code `7406e4f` composé en `fb918c9`, sans
+différence applicative supplémentaire et avec sources égales au gel testé.
+
+Ce préflight ne valide ni contenu, ni totalité des imports, ni efficacité
+de `.dockerignore`, contexte figé ou atomicité des images. Aucun build
+d'image réel n'est exécuté par cette validation. G12, reprise, relais,
+fédération et Kubernetes restent ouverts ; G09 FAIL, aucun gate clos.
+
 ## 4 novembre — canal de relais étudié, primitives Docker observées
 
 Le relais HTTP/SQLite et ses identités existent, sans raccord depuis les

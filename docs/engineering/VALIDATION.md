@@ -1,5 +1,99 @@
 # Validation courante
 
+## 4 novembre — prérequis de build avant tout appel moteur
+
+Base `dbc5afa`, donneur `codex/build-input-preflight-20261104`. Le CLI
+acceptait une source sans Dockerfile worker et atteignait le moteur avant
+de connaître ses prérequis. Le nouveau helper de `operations.rs` vérifie
+7 répertoires parents, puis 19 fichiers requis, après canonicalisation de la
+racine et avant `selected_runtime`. Il refuse les absences, liens détectés
+et mauvais types sans lire leur contenu. Les diagnostics n'emploient que
+les noms relatifs constants. Sélection de la racine, validation des versions,
+arguments et contrôles de l'autorité moteur sont conservés.
+Code `7406e4f` composé en `fb918c9`, sans différence applicative et avec les
+deux sources égales au gel exécuté.
+
+**RED réel** : `build_refuses_missing_worker_dockerfile_before_any_engine_call`
+compile en 1 min 30 s, puis échoue sur « incomplete source was accepted » :
+le vrai CLI avait terminé avec succès malgré l'entrée retirée. Cargo 101,
+1 FAIL, 0 ignorée, 9 filtrées, 3,42 s ; les assertions suivantes d'absence
+de marqueurs ne sont pas déclarées atteintes. Deux erreurs de préparation
+du harnais ont été corrigées en prélecture, avant tout Cargo : helpers hors
+du littéral Rust du moteur témoin et copie bornée aux seuls inputs publics.
+Elles ne sont pas des défauts produit reproduits.
+
+**GREEN : sept fonctions uniques ciblées**, trois nouvelles et quatre
+canaris modifiés. Chacune est exécutée séparément avec filtre exact,
+1 PASS/0 FAIL/0 ignorée/11 filtrées et Cargo 0 ; les nombres de filtrées
+ne sont pas additionnés comme des tests uniques. Le parent malformed
+contient sept cas, pas sept fonctions supplémentaires : lock/ignore absents,
+lock remplacé par un répertoire, images remplacé par un fichier, entrée
+provider absente, liens de feuille et de parent. Les refus exigent un
+diagnostic du chemin concerné et zéro marqueur/appel moteur. Le positif
+conserve exactement deux builds et les arguments de versions fournisseur.
+
+Sélection reproductible, en remplaçant `AIGUARD_TEST` par chaque nom du tableau :
+
+```sh
+AIGUARD_TEST=build_refuses_missing_worker_dockerfile_before_any_engine_call
+cargo test --locked --offline --test runtime_program "$AIGUARD_TEST" -- --exact --test-threads=1
+cargo check --locked --offline --all-targets
+```
+
+| Fonction ciblée | Résultat |
+|---|---|
+| `build_refuses_missing_worker_dockerfile_before_any_engine_call` | PASS |
+| `build_refuses_malformed_public_source_inputs_before_any_engine_call` | PASS |
+| `build_accepts_complete_source_and_forwards_provider_versions` | PASS |
+| `second_image_build_revalidates_the_same_engine_id` | PASS, un premier effet avant refus du second. |
+| `operators_keep_the_original_docker_endpoint_when_context_changes_after_preflight` | PASS |
+| `operators_refuse_an_engine_id_change_before_build_or_compose_effects` | PASS |
+| `build_and_compose_use_the_same_program_and_absolute_source_paths` | PASS |
+
+Compilation GREEN initiale 39,43 s ; check toutes cibles 53,08 s, RC 0.
+Formatage statique des deux fichiers modifiés et diff PASS. Les fixtures
+copient seulement 19 vrais fichiers publics ; elles satisfont le minimum
+structurel et ne constituent pas une distribution compilable complète.
+Le moteur témoin est un enfant Rust, jamais une construction Docker/Podman
+réelle ; ses versions fournisseur sont des valeurs de test, sans installation
+ou appel modèle. Aucun résultat runtime n'est déduit de ces appels.
+
+Exécution Luna dans le sandbox Linux ARM64 Rust 1.99.1, image cache
+`2115d432`, source/registry/root RO, network none, UID 1000/cap 0/NNP,
+CPU 1/RAM 6 GiB sans swap supplémentaire/PID 256, fsize 512 MiB/nofile 1024,
+scratch tmpfs 3 GiB/65 536 inodes et hold 1 800 s. Env-i explicite avec
+HOME/TMP/CARGO/TARGET/RUSTC/RUSTDOC, offline/locked/jobs1/incremental0/devdebug0.
+Le premier propriétaire QA sans montages a été rejeté à l'inspection avant
+exécution cible, fermé puis remplacé ; aucun test n'est attribué au propriétaire rejeté.
+Après fin naturelle des validations, seul sleep restait. Pic cgroup
+3 570 954 240 octets, événements OOM nuls ; arrêt normal puis retrait du
+propriétaire QA à 17:53:05 UTC, running=false/PID=0/OOM=false. Son sleep137
+de nettoyage n'est pas un échec Cargo. Aucun téléchargement ou test cible
+natif sur le Mac.
+
+Gels RO reliés, sans mutation après exécution : RED tests SHA
+`753c360ea1f8406b9d0126e6f16f5c83683bd6f665d4012406f38cd614446a20` ;
+GREEN `operations.rs` SHA `142a251d8269c0e4c68ac7769a97944baa03dfa2691bc5ee966ecf1d1386e524`
+et tests SHA `4e6b0f45a521e6be1bc42bd5fd3990d0006c251efdce2900c25bbb3eee434ea3`,
+égalité vérifiée contre le donneur. Logs privés : RED SHA
+`f8cfd9195dd9958efebb431757a378a8e7994fe843aba83d58a2e1fcfb17cd86`,
+GREEN SHA `71d0baf816b65ab72440540acbbdc318abaf2dc68f4af22e8282b7fc6ec964d1`,
+all-targets SHA `549d88cd61d26e1e087d05cb8de538b55e2ae10fcdbe48c68c445a82379b5754`.
+Ledger Root scellé SHA `e49f0fe491507c7aa3e14dd8739bf302286b49f0a9b52dc323b6c81c7f3e3d82`,
+revue finale favorable SHA `dd740b8ba9767a116f5b03521a79747901c9e09f1650eb774e79642fb5c0b021`.
+Six documents relus, 471 cibles relatives présentes ; pas de validation
+des ancres, sites externes ou navigateur. Scan étroit de huit fichiers
+contre trois secrets connus : zéro correspondance, sans garantie universelle.
+
+**BLOCKED** : Clippy absent de l'image épinglée. **NOT_RUN** : suite complète,
+release, images réelles, providers/navigateur, système de fichiers physique,
+snapshot concurrent du contexte, atomicité des deux builds et reproductibilité
+binaire. La présence de `.dockerignore` ne valide pas ses règles ; les imports
+et le contenu ne sont pas parcourus, les liens physiques restent acceptés.
+Le moteur lit ensuite le contexte vivant, sans garantie TOCTOU. Ce lot
+améliore le refus précoce ; il ne clôture ni G12 ni une exigence de sécurité
+du contexte. G09 FAIL, aucun gate global clos.
+
 ## 4 novembre — primitives Docker du futur canal de relais
 
 Source de conception `f7129cf`, aucun changement de code applicatif.

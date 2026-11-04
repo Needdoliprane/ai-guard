@@ -40,6 +40,10 @@ Le fonctionnement normal exige un moteur rootless. Pour utiliser délibérément
 
 L'image worker par défaut permet les commandes ordinaires. Pour Codex ou Claude Code, construire les versions des clients décrites dans le [guide fournisseurs](../providers/README.fr.md) avant une session IA.
 
+`build --source` désigne la distribution source d'ai-guard, pas le projet qu'un agent modifiera. Avant de contacter le moteur, le CLI vérifie les Dockerfiles, `.dockerignore`, manifestes/locks, entrées Rust/frontend et politique requis, ainsi que leurs répertoires parents. Une entrée absente, liée ou du mauvais type est signalée par son chemin relatif. Rétablir cette entrée dans la distribution sélectionnée puis réessayer ; ce refus ne nécessite aucune suppression d'image, de cache ou de données. La racine source explicitement choisie reste canonicalisée normalement.
+
+Ce contrôle porte sur les prérequis structurels. Il ne valide pas tous les imports, le contenu des locks ou les règles `.dockerignore`, ne fige pas des sources modifiées simultanément et ne rend pas atomiques les deux builds. La première image peut encore réussir avant un échec ultérieur. Garder les sources stables pendant la construction et conserver les résultats réels du moteur ; réussir le contrôle ne qualifie ni un build reproductible ni la production.
+
 ## Créer la configuration de la pile
 
 L'[exemple local](../../../.env.exemple.local) règle l'interpolation Compose. Créer une **nouvelle** copie privée ; le sous-shell ci-dessous refuse d'écraser un fichier existant.
