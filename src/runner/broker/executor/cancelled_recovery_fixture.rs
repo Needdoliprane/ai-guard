@@ -2,10 +2,11 @@
 //! with explicitly synthetic engine observations. No Docker/Podman is invoked.
 use super::super::*;
 use crate::{
+    broker::journal::{JournalLimitsV1, recovery::StopRecoveryReaderV1},
     control::*,
     runtime::{ContainerHandle, ManagedRuntime, OwnedContainerSnapshot, RuntimeAuthority},
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, sync::atomic::Ordering};
 
 const STARTED: &str = "2026-10-30T12:00:00Z";
 const FINISHED: &str = "2026-10-30T12:00:02Z";
@@ -49,7 +50,14 @@ pub(super) struct ResultPublicationSnapshot {
 impl RecoveryFixture {
     pub(super) async fn new(case: Case) -> Self {
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || Self::seed(case, &handle))
+        tokio::task::spawn_blocking(move || Self::seed(case, &handle, false))
+            .await
+            .unwrap()
+    }
+
+    async fn new_for_cold_audit_test() -> Self {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || Self::seed(Case::TerminalAfterCancel, &handle, true))
             .await
             .unwrap()
     }
@@ -57,12 +65,17 @@ impl RecoveryFixture {
     // The calling test keeps its original runtime/IO driver alive while it
     // awaits this single blocking owner. Each phase has a separate polling
     // frame; no runtime, larger stack or detached seed is introduced here.
-    fn seed(case: Case, handle: &tokio::runtime::Handle) -> Self {
+    fn seed(case: Case, handle: &tokio::runtime::Handle, service_layout: bool) -> Self {
         eprintln!("cancelled_recovery_fixture phase=seed_begin");
         // Domain proof with writer_timeout=60s; production writer_timeout=10s is NOT qualified.
         eprintln!("cancelled_recovery_fixture budget writer_timeout_seconds=60 domain_only=true");
-        let base =
-            Arc::new(handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(60))));
+        let base = Arc::new(if service_layout {
+            handle.block_on(Fixture::new_cold_recovery_with_writer_timeout(
+                Duration::from_secs(60),
+            ))
+        } else {
+            handle.block_on(Fixture::new_with_writer_timeout(Duration::from_secs(60)))
+        });
         eprintln!("cancelled_recovery_fixture phase=base_ready");
         let peer = handle.block_on(NativePeer::empty(&base));
         eprintln!("cancelled_recovery_fixture phase=peer_ready");
@@ -78,7 +91,7 @@ impl RecoveryFixture {
         .unwrap();
         eprintln!("cancelled_recovery_fixture phase=authority_ready");
         let executor = BatchExecutor::new(
-            base.writer.clone(),
+            base.writer().clone(),
             peer.client.clone(),
             Arc::new(NativeHostClock::new().unwrap()),
         );
@@ -340,7 +353,7 @@ impl RecoveryFixture {
         eprintln!("cancelled_recovery_fixture phase=running_ready");
         let cancel = Uuid::new_v4();
         handle
-            .block_on(base.writer.append_command(
+            .block_on(base.writer().append_command(
                 operation,
                 cancel,
                 LocalCommandRequestV1::CancelRequested,
@@ -367,6 +380,15 @@ impl RecoveryFixture {
     pub(super) fn run_sync(
         &self,
         driver: &tokio::runtime::Runtime,
+    ) -> std::result::Result<(), BatchFailure> {
+        self.run_with_handle(driver.handle())
+    }
+
+    /// Drive the same fresh async phases through an existing runtime handle.
+    /// Its owner remains alive so fixture gateway tasks keep their I/O driver.
+    pub(super) fn run_with_handle(
+        &self,
+        driver: &tokio::runtime::Handle,
     ) -> std::result::Result<(), BatchFailure> {
         // A new authenticated context and Execution; no old execution survives.
         let context = driver
@@ -399,7 +421,7 @@ impl RecoveryFixture {
             .collect()
     }
     pub(super) fn arm_claim_snapshot(&self) -> Value {
-        let job = self.base.journal.load(self.operation).unwrap().unwrap();
+        let job = self.base.journal().load(self.operation).unwrap().unwrap();
         let operations = job
             .broker_checkpoint_v2()
             .unwrap()
@@ -422,7 +444,7 @@ impl RecoveryFixture {
     }
     pub(super) fn cancel_present(&self) -> bool {
         self.base
-            .journal
+            .journal()
             .load(self.operation)
             .unwrap()
             .unwrap()
@@ -446,7 +468,7 @@ impl RecoveryFixture {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
     pub(super) fn result_publication_snapshot(&self) -> ResultPublicationSnapshot {
-        let job = self.base.journal.load(self.operation).unwrap().unwrap();
+        let job = self.base.journal().load(self.operation).unwrap().unwrap();
         let private = serde_json::to_value(job.checkpoint()).unwrap();
         let output_acknowledged = private["managed"]["output_acknowledged"].as_bool().unwrap();
         let result_outbox = job
@@ -508,7 +530,7 @@ impl RecoveryFixture {
         let mut managed_output_acknowledged = None;
         let mut outbox_v4 = "unknown";
         let mut event_counts = [None; 6];
-        match self.base.journal.load(self.operation) {
+        match self.base.journal().load(self.operation) {
             Ok(Some(job)) => {
                 journal_load = "present";
                 if let Ok(private) = serde_json::to_value(job.checkpoint()) {
@@ -602,6 +624,299 @@ impl RecoveryFixture {
         )
         .unwrap();
     }
+}
+
+/// Opaque descriptor for the real committed-terminal/pending-V4 fixture. It
+/// retains only the synthetic gateway/store and private temp directory; the
+/// broker executor, full Journal, Writer actor and empty enforcer child have
+/// already been closed before this value is returned.
+pub(crate) struct ColdRecoverySeed {
+    base: Arc<Fixture>,
+    root: std::path::PathBuf,
+    journal_root: std::path::PathBuf,
+    database: std::path::PathBuf,
+    config: std::path::PathBuf,
+    scope: JournalScopeV1,
+    operation: Uuid,
+    cancel: Uuid,
+    worker_id: String,
+    attempt_id: String,
+    container_id: String,
+    event_id: Uuid,
+    event_input_hash: String,
+    coverage_event_id: Uuid,
+    coverage_event_input_hash: String,
+    coverage_audit_seq: Option<i64>,
+    terminal: bool,
+    quota_held: bool,
+    allocation_count: usize,
+    result_pending: bool,
+    result_acknowledged: bool,
+    runtime_call_snapshot: Vec<String>,
+    decision_request_count: usize,
+    arm_claim_snapshot: Value,
+}
+
+impl ColdRecoverySeed {
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+    pub(crate) fn journal_root(&self) -> &Path {
+        &self.journal_root
+    }
+    pub(crate) fn database(&self) -> &Path {
+        &self.database
+    }
+    pub(crate) fn config(&self) -> &Path {
+        &self.config
+    }
+    pub(crate) fn scope(&self) -> &JournalScopeV1 {
+        &self.scope
+    }
+    pub(crate) fn operation_id(&self) -> Uuid {
+        self.operation
+    }
+    pub(crate) fn cancel_id(&self) -> Uuid {
+        self.cancel
+    }
+    pub(crate) fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+    pub(crate) fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+    pub(crate) fn container_id(&self) -> &str {
+        &self.container_id
+    }
+    pub(crate) fn event_id(&self) -> Uuid {
+        self.event_id
+    }
+    pub(crate) fn event_input_hash(&self) -> &str {
+        &self.event_input_hash
+    }
+    pub(crate) fn coverage_event_id(&self) -> Uuid {
+        self.coverage_event_id
+    }
+    pub(crate) fn coverage_event_input_hash(&self) -> &str {
+        &self.coverage_event_input_hash
+    }
+    pub(crate) fn coverage_audit_seq(&self) -> Option<i64> {
+        self.coverage_audit_seq
+    }
+    pub(crate) fn is_terminal(&self) -> bool {
+        self.terminal
+    }
+    pub(crate) fn quota_held(&self) -> bool {
+        self.quota_held
+    }
+    pub(crate) fn allocation_count(&self) -> usize {
+        self.allocation_count
+    }
+    pub(crate) fn result_pending(&self) -> bool {
+        self.result_pending
+    }
+    pub(crate) fn result_acknowledged(&self) -> bool {
+        self.result_acknowledged
+    }
+    pub(crate) fn runtime_calls(&self) -> Vec<String> {
+        fs::read_to_string(self.root.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+    pub(crate) fn runtime_call_snapshot(&self) -> &[String] {
+        &self.runtime_call_snapshot
+    }
+    pub(crate) fn decision_request_count_snapshot(&self) -> usize {
+        self.decision_request_count
+    }
+    pub(crate) fn current_decision_request_count(&self) -> usize {
+        self.base.requests.load(Ordering::SeqCst)
+    }
+    pub(crate) fn arm_claim_snapshot(&self) -> &Value {
+        &self.arm_claim_snapshot
+    }
+    pub(crate) fn retained_gateway_is_live(&self) -> bool {
+        !self.base.gateway.is_finished()
+    }
+}
+
+/// Build the same real V4 lost-ACK state as the existing recovery scenario,
+/// then release all broker-side journal owners and verify that a fresh
+/// StopRecoveryReader can acquire the exact configured profile lease.
+pub(crate) async fn terminal_pending_seed_for_cold_audit_test() -> ColdRecoverySeed {
+    let driver = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let fixture = driver.block_on(RecoveryFixture::new_for_cold_audit_test());
+        let before = fixture.worker();
+        assert_eq!(before.state, WorkerStateV1::Running);
+        assert!(before.quota_held);
+        let cancel_id = fixture.cancel_id();
+        let worker_id = before.worker_id.clone();
+        let attempt_id = before.attempt.attempt_id.clone();
+        let container_id = before
+            .attempt
+            .container_id
+            .clone()
+            .expect("seeded Running worker has a retained CID");
+
+        fixture.arm_transition_response_cut();
+        let first = fixture.run_with_handle(&driver);
+        assert!(first.is_err(), "the committed terminal response is cut");
+        assert!(!fixture.transition_response_cut_pending());
+        let worker = fixture.worker();
+        assert_eq!(worker.state, WorkerStateV1::Terminal);
+        assert!(!worker.quota_held);
+        assert_eq!(worker.worker_id, worker_id);
+        assert_eq!(worker.attempt.attempt_id, attempt_id);
+        assert_eq!(
+            worker.attempt.container_id.as_deref(),
+            Some(container_id.as_str())
+        );
+        assert!(fixture.cancel_present());
+        assert_eq!(fixture.cancel_id(), cancel_id);
+        let usage = fixture.usage();
+        assert_eq!(usage.len(), 1);
+        assert!(!usage[0].billable);
+
+        let publication = fixture.result_publication_snapshot();
+        assert!(!publication.output_acknowledged);
+        assert_eq!(publication.result_outbox.len(), 1);
+        let (event_id, audit_seq) = publication.result_outbox[0];
+        assert_eq!(audit_seq, None);
+        assert!(publication.stored_result_events.is_empty());
+        let job = fixture
+            .base
+            .journal()
+            .load(fixture.operation)
+            .unwrap()
+            .unwrap();
+        let v4_events = job.broker_checkpoint_v4().unwrap().events();
+        let result_events = v4_events
+            .iter()
+            .filter(|event| event.event().kind == "broker.batch.result")
+            .collect::<Vec<_>>();
+        assert_eq!(result_events.len(), 1, "one result event is pending");
+        let pending_result = result_events[0];
+        assert_eq!(pending_result.event_id(), event_id);
+        assert_eq!(pending_result.audit_seq(), None);
+        let event_input_hash = pending_result.input_hash().to_owned();
+        let coverage_events = v4_events
+            .iter()
+            .filter(|event| event.event().kind == "observer.coverage")
+            .collect::<Vec<_>>();
+        assert_eq!(coverage_events.len(), 1, "coverage is a separate event");
+        let acknowledged_coverage = coverage_events[0];
+        let coverage_audit_seq = acknowledged_coverage.audit_seq();
+        let coverage_event_id = acknowledged_coverage.event_id();
+        let coverage_event_input_hash = acknowledged_coverage.input_hash().to_owned();
+        assert_eq!(
+            coverage_audit_seq,
+            None,
+            "coverage is genuinely pending and must not be acknowledged by fixture setup"
+        );
+        let pending_v4_ids = v4_events
+            .iter()
+            .filter(|entry| entry.audit_seq().is_none())
+            .map(|entry| (entry.event().kind.as_str(), entry.event_id()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pending_v4_ids,
+            vec![
+                ("observer.coverage", coverage_event_id),
+                ("broker.batch.result", event_id),
+            ],
+            "the complete V4 pending set must be the observed coverage/result pair; do not alter either event to force the fixture"
+        );
+        let runtime_call_snapshot = fixture.runtime_calls();
+        let decision_request_count = fixture.base.requests.load(Ordering::SeqCst);
+        let arm_claim_snapshot = fixture.arm_claim_snapshot();
+
+        let base = fixture.base.clone();
+        let root = base.root.path().to_owned();
+        let journal_root = root.join("journals").join(base.scope.profile_id());
+        let database = root.join("audit.sqlite");
+        let config = base.config.path().to_owned();
+        let scope = base.scope.clone();
+        let usage_count = usage.len();
+        let operation = fixture.operation;
+        let result_pending = !publication.output_acknowledged
+            && publication.result_outbox.len() == 1
+            && publication.result_outbox[0].1.is_none();
+        drop(base);
+
+        // First close the empty native enforcer owner, then all executor-held
+        // writer clones, and finally the fixture's Journal and last Writer
+        // client. The actual gateway/SQLite control plane stays live at the
+        // exact original origin and identity.
+        let RecoveryFixture {
+            _peer,
+            executor,
+            base: mut retained_base,
+            ..
+        } = fixture;
+        driver.block_on(_peer.close());
+        drop(executor);
+        Arc::get_mut(&mut retained_base)
+            .expect("cold seed must have one fixture owner")
+            .close_journal_owners_for_cold_test();
+
+        let profile = Directory::open_existing(&journal_root).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match StopRecoveryReaderV1::open_existing(
+                &profile,
+                scope.clone(),
+                &FsExclusions::new(),
+                JournalLimitsV1::default(),
+                ControlSecrets::new(Vec::new()).unwrap(),
+            ) {
+                Ok(Some(reader)) => {
+                    drop(reader);
+                    break;
+                }
+                Ok(None) => panic!("cold journal profile disappeared"),
+                Err(crate::broker::journal::JournalError::Busy) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "writer lease did not release within the bounded cold-close wait"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(error) => panic!("cold StopRecoveryReader reopen failed: {error}"),
+            }
+        }
+
+        ColdRecoverySeed {
+            base: retained_base,
+            root,
+            journal_root,
+            database,
+            config,
+            scope,
+            operation,
+            cancel: cancel_id,
+            worker_id,
+            attempt_id,
+            container_id,
+            event_id,
+            event_input_hash,
+            coverage_event_id,
+            coverage_event_input_hash,
+            coverage_audit_seq,
+            terminal: worker.state == WorkerStateV1::Terminal,
+            quota_held: worker.quota_held,
+            allocation_count: usage_count,
+            result_pending,
+            result_acknowledged: publication.output_acknowledged,
+            runtime_call_snapshot,
+            decision_request_count,
+            arm_claim_snapshot,
+        }
+    })
+    .await
+    .expect("cold recovery seed task must join")
 }
 
 fn inspection(

@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 5 novembre — cohérence des faits terminaux retenus
+
+Un contrôle pur recoupe le Worker central terminal avec l'intention, le scope,
+l'admission, l'autorité et le handle retenus, les ACK Arm/WorkerClaim et la paire
+coverage/result V4. Les champs immuables sont liés avant toute projection qui
+recopie des données du Worker. Le Claim historique doit être exactement la
+transition Store depuis son parent ; les noms sont liés au namespace exact.
+Les quatre records de résultat existants sont partagés avec leur producteur,
+sans changer leur format.
+
+Le parent ciblé passe après RED initial et trois variantes supplémentaires
+reproduites en revue ; compilation toutes cibles RC0. La fixture utilise un vrai
+journal, HTTP et SQLite, avec moteur synthétique déclaré. Les snapshots suivis
+restent inchangés pendant les contrôles purs. Revue indépendante traitée ;
+[preuves et limites](VALIDATION.md#5-novembre--cohérence-pure-des-faits-terminaux-retenus).
+Ces données n'authentifient pas le client et ne donnent aucun droit d'ACK ou
+de lancement. Boucle froide, chemin sans blob, fencing et runtimes restent
+à qualifier ; 181 avertissements bibliothèque et 8 lib-test restent ouverts.
+
 ## 5 novembre — capacité logique pour l'audit V4 retenu
 
 La préparation interne du reader restreint conserve une seule réservation

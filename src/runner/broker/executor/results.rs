@@ -1,6 +1,9 @@
 //! Private batch results operations.
 use super::journal::same;
 use super::*;
+use crate::broker::terminal_facts::{
+    BatchResultFactsV1, CaptureFactsV1, CoverageFactsV1, TransportFactsV1,
+};
 
 impl Execution<'_> {
     pub(super) async fn save_worker_result(
@@ -490,43 +493,6 @@ impl Execution<'_> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CaptureFactsV1 {
-    total_bytes: u64,
-    truncated: bool,
-    text_clipped: Option<bool>,
-    text: Option<String>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TransportFactsV1 {
-    exit_code: Option<i32>,
-    duration_ms_decimal: String,
-    stdout: CaptureFactsV1,
-    stderr: CaptureFactsV1,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BatchResultFactsV1 {
-    version: u32,
-    worker_id: String,
-    attempt_id: String,
-    observation: ContainerObservation,
-    transport: Option<TransportFactsV1>,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CoverageFactsV1 {
-    version: u32,
-    normalized_events: Option<usize>,
-    maximum_events: usize,
-    event_limit_reached: Option<bool>,
-    stdout_truncated: Option<bool>,
-    unterminated_final_line_omitted: Option<bool>,
-    nested_authorization: bool,
-    raw_output_capture: bool,
-}
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ChangeKindV1 {

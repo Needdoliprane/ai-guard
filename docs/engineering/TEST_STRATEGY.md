@@ -53,6 +53,14 @@ HTTP/StoredEvent seuls ne constituent pas cette preuve.
 
 ## Chantiers et validations en parallèle
 
+Le parent `broker::cold_terminal::tests::retained_terminal_checker_matches_real_facts_and_rejects_divergent_clones`
+construit une seule fixture terminale journal/HTTP/SQLite, puis recoupe les
+variantes en mémoire et l'absence de mutation des snapshots suivis. Les
+contre-exemples couplés sont tous évalués avant l'assertion agrégée : un premier
+échec ne doit pas masquer les autres résultats. Le moteur y est synthétique ;
+ne pas créditer ce parent à la qualification runtime ou à la boucle ServiceCold.
+[Gels et résultats](VALIDATION.md#5-novembre--cohérence-pure-des-faits-terminaux-retenus).
+
 Pour la préparation de capacité d'audit retenu, sélectionner
 `broker::journal::recovery::cold_audit::tests::` : sept parents emploient les
 vrais reader/journal/encodeur et des copies de taille non persistées. Leur

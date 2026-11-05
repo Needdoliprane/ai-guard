@@ -547,3 +547,6 @@ pub(super) fn without_response(operation: &Operation) -> Operation {
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "journal_tests.rs"]
 mod tests;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use tests::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};

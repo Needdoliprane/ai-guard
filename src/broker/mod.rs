@@ -4,6 +4,7 @@
 
 pub mod checkpoint;
 pub mod clock;
+pub(crate) mod cold_terminal;
 pub(crate) mod discovery;
 #[doc(hidden)]
 pub mod enforcer;
@@ -15,4 +16,5 @@ pub mod local_ipc;
 pub mod outbox;
 pub(crate) mod presence;
 pub mod service;
+pub(crate) mod terminal_facts;
 pub mod writer;

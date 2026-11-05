@@ -4,6 +4,8 @@ use fixture::{Case, RecoveryFixture};
 #[path = "cancelled_recovery_fixture.rs"]
 mod fixture;
 
+pub(crate) use fixture::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
+
 #[test]
 fn cancelled_running_worker_reconciles_an_exact_terminal_without_a_new_start() {
     assert_exact_terminal_reconciliation(Case::TerminalAfterCancel);

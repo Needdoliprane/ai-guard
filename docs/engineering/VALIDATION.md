@@ -1,5 +1,73 @@
 # Validation courante
 
+## 5 novembre — cohérence pure des faits terminaux retenus
+
+Base finale `3451a8d`, douze fichiers Rust du contrôle/des records partagés et
+de la fixture runner. Les deux fichiers du scénario ServiceCold encore rouge
+restent exclus de ce lot ; ni ce test ni un chemin de service livré ne sont
+annoncés PASS. Les travaux parallèles writer/merge ne sont pas dans ce gel.
+
+Luna prépare et exécute le parent réel
+`broker::cold_terminal::tests::retained_terminal_checker_matches_real_facts_and_rejects_divergent_clones`.
+La fixture constitue le terminal avec HTTP/SQLite, le vrai journal V4 et un
+programme Rust synthétique à la place du moteur. Elle libère les propriétaires
+broker et rouvre le reader restreint ; le Full Journal sert seulement à extraire
+et vérifier les données de ce test. Le gateway et SQLite restent vivants.
+
+| Gel | Résultat constaté |
+|---|---|
+| `terminal-once-red`, stub Conflict | RC101 après compilation ; baseline Ok attendu refusé, 161,48 s. Vrai RED, variantes suivantes NOT_REACHED. Un premier E0382 de harnais est NOT_RUN. |
+| `terminal-green`, contrôle `1cd729…`, tests `96d9…` | 1 PASS, 0 ignoré, 473 filtrés ; 166,44 s. Les premières divergences et snapshots passent. |
+| `terminal-review-red`, tests `1a6e…` | Arrêt contrôlé pour corriger un diagnostic qui masquait des valeurs ; RC137 à helpers_ready. Nouveaux cas NOT_RUN, aucun défaut produit déduit. |
+| `terminal-review-values-red`, tests `821768…` | RC101 après compilation ; Running historique, révision couplée et namespace couplé renvoient tous Ok à tort. Le témoin d'émetteur divergent renvoie Conflict. Les quatre valeurs sont constatées dans une assertion agrégée. |
+| `terminal-final`, contrôle `11139a…`, mêmes tests `821768…` | 1 PASS, 0 FAIL, 0 ignoré, 479 filtrés ; compilation 1 min 09 puis 178,44 s. Les trois contre-exemples sont maintenant refusés et les snapshots finaux passent. |
+
+Le correctif de revue réutilise la transition déterministe Store StartClaim
+et exige le nom exact `aig-{namespace.simple}-{worker.simple}`. Le reader
+historique complet vérifiait déjà ces relations : aucun contournement du futur
+service n'est établi par les trois divergences du helper pur. Les erreurs du
+contrôle sont opaques. Aucune IO ni permission n'est ajoutée à ce contrôle.
+
+Commande du gel final :
+
+```sh
+CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo test --offline --locked --manifest-path /inputs/terminal-final/Cargo.toml \
+  --lib broker::cold_terminal::tests::retained_terminal_checker_matches_real_facts_and_rejects_divergent_clones \
+  -- --exact --nocapture --test-threads=1
+```
+
+Même image Linux ARM64/Rust 1.99.1 et contrôles Config/noyau que le lot
+métadonnées : CPU 2, mémoire 6 Gio/swap 0, PID 256, scratch 3 Gio/65536 inodes,
+fichier 512 Mio, nofile 1024/core 0, UID 1000/caps 0/NNP 1/seccomp 2,
+network none, namespaces privés et sources/toolchain/registre RO. Env explicite
+depuis env-i, Cargo offline/locked, target neuf pour chaque gel distinct.
+Compilation du writer indépendante et simultanée dans un autre propriétaire.
+
+Le `cargo check --offline --locked --all-targets` final passe sur le même gel,
+RC0 en 35,66 s. Les 181 avertissements bibliothèque et 8 lib-test (un doublon)
+restent ouverts, dont l'import et les champs utilisés seulement par ServiceCold
+encore exclu ; aucune suppression d'avertissement n'est introduite.
+
+SHA256 des journaux : RED initial
+`20eedf98f76e5c42da4b419aab161277dad4fb7359c9b0fcd580cdc2510424f6`,
+premier positif `6cebcf1e1313532b13449c31c40e7fb651385183cf756a105c46d6a03554a3ee`,
+arrêt du harnais `7dbacccb5d2e22b10c841c9c2029aab57ec3e48c999b3cc6ecd18d643451c1b2`,
+RED des trois variantes `3058f2165ce7017ebd78fe0dc5ad3024b8b44b180cfb9ba72d2d0db57c0ea636`,
+GREEN final `308295ef5772046660d27041f41f260bc26d11e691ab48e705734bd68c056397`,
+compilation finale `2d68e2980fcf05d99ced2cb80ed596fb65acfc4d910bd8fc3f3c998f60ba66ba`.
+Revue indépendante initiale et correctifs traités, sans défaut bloquant restant
+dans ce périmètre. **NOT_RUN :** authentification/owner, ACK et ServiceCold,
+NoBlob réel, crash/fencing, Docker/Podman/Kubernetes et capacité 100.
+**BLOCKED :** Clippy absent de l'image admise. G09 FAIL, 0/12 gates clos.
+
+Le format final corrige uniquement le retour à la ligne d'une affectation dans
+le test : `821768…` testé devient `eb084a…`, sans changement de cas, d'assertion
+ou de code applicatif. Format ciblé des douze fichiers, diff-check, 437 liens
+relatifs et recherche des trois secrets littéraux connus dans 16 fichiers PASS.
+Le propriétaire QA final est fermé à 22:41:34 UTC, PID0/exit143/OOMfalse, puis
+retiré précisément ; aucun binaire, base ou cache cible n'est promu.
+
 ## 5 novembre — capacité logique de l'audit V4 retenu
 
 Base `156bdddcb44b78da4266975ad29186acf76d473c`, worktree dédié

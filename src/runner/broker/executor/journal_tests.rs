@@ -20,6 +20,9 @@ use crate::{
     redaction::Redactor,
     runtime::{Runtime, RuntimeKind},
 };
+pub(crate) use cancelled_recovery_tests::{
+    ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test,
+};
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
@@ -49,8 +52,8 @@ pub(super) fn before_commit() -> Result<()> {
 
 struct Fixture {
     store: Arc<Store>,
-    journal: Journal,
-    writer: WriterClient,
+    journal: Option<Journal>,
+    writer: Option<WriterClient>,
     scope: JournalScopeV1,
     client: AuditClient,
     config: Directory,
@@ -73,6 +76,17 @@ impl Fixture {
     }
 
     async fn new_with_writer_timeout(writer_timeout: Duration) -> Self {
+        Self::new_with_layout(writer_timeout, false).await
+    }
+
+    /// Use the broker service's real `root/journals/<profile>` layout for a
+    /// cold-recovery test. All other executor fixtures retain their original
+    /// directory layout.
+    pub(super) async fn new_cold_recovery_with_writer_timeout(writer_timeout: Duration) -> Self {
+        Self::new_with_layout(writer_timeout, true).await
+    }
+
+    async fn new_with_layout(writer_timeout: Duration, service_layout: bool) -> Self {
         #[cfg(target_os = "linux")]
         let temporary_root = std::env::temp_dir();
         #[cfg(target_os = "macos")]
@@ -162,7 +176,7 @@ impl Fixture {
         let gateway = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        for name in ["journal", "config"] {
+        for name in ["journal", "config", "journals"] {
             fs::create_dir(base.join(name)).unwrap();
             fs::set_permissions(base.join(name), fs::Permissions::from_mode(0o700)).unwrap();
         }
@@ -170,8 +184,20 @@ impl Fixture {
         let scope =
             JournalScopeV1::new(Uuid::new_v4(), TENANT, &origin, namespace, "committed-test")
                 .unwrap();
+        let journal_path = if service_layout {
+            base.join("journals").join(scope.profile_id())
+        } else {
+            base.join("journal")
+        };
+        if service_layout {
+            fs::create_dir(&journal_path).unwrap();
+            fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o700)).unwrap();
+            let reconciler_token = base.join("config/reconciler.token");
+            fs::write(&reconciler_token, RUNNER).unwrap();
+            fs::set_permissions(&reconciler_token, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         let journal = Journal::open(
-            &Directory::open_existing(&base.join("journal")).unwrap(),
+            &Directory::open_existing(&journal_path).unwrap(),
             scope.clone(),
             &FsExclusions::new(),
             Default::default(),
@@ -181,8 +207,8 @@ impl Fixture {
         let writer = WriterClient::start(journal.clone(), 8, writer_timeout).unwrap();
         Self {
             store,
-            journal,
-            writer,
+            journal: Some(journal),
+            writer: Some(writer),
             scope,
             client: AuditClient::new(&origin, RUNNER).unwrap(),
             config,
@@ -191,6 +217,21 @@ impl Fixture {
             gateway,
             root,
         }
+    }
+
+    fn journal(&self) -> &Journal {
+        self.journal.as_ref().expect("fixture journal is open")
+    }
+
+    fn writer(&self) -> &WriterClient {
+        self.writer.as_ref().expect("fixture writer is open")
+    }
+
+    /// Drop every full journal owner while retaining the real gateway and
+    /// private fixture directory for a cold StopOnly reopen.
+    fn close_journal_owners_for_cold_test(&mut self) {
+        drop(self.writer.take());
+        drop(self.journal.take());
     }
 
     fn accept(&self, operation: Uuid, manual: bool) -> AcceptedJobV1 {
@@ -238,7 +279,7 @@ impl Fixture {
             ExecutionIntentV1::from_plan_bytes(&serde_json::to_vec(&plan).unwrap()).unwrap();
         let initial = CheckpointPayloadV1::initial(&intent).unwrap();
         let ReserveResult::New(ticket) = self
-            .journal
+            .journal()
             .reserve(operation, br#"{"committed_fixture":true}"#)
             .unwrap()
         else {
@@ -249,7 +290,7 @@ impl Fixture {
             .map_or(BindingInputs::None, |source| BindingInputs::Manual {
                 source,
             });
-        self.journal
+        self.journal()
             .accept(ticket, &intent, binding, &initial)
             .unwrap()
     }
@@ -347,7 +388,7 @@ async fn committed_draft_conflict_preserves_cancel_and_acknowledged_outbox() {
     let failure_id = Uuid::new_v4();
     let injected = Cell::new(false);
     let attempts = Cell::new(0);
-    let committed = commit_patch(&fixture.writer, operation, &fixture.scope, |draft| {
+    let committed = commit_patch(fixture.writer(), operation, &fixture.scope, |draft| {
         attempts.set(attempts.get() + 1);
         if !injected.replace(true) {
             let cancel = LocalCommandV1::new(
@@ -370,11 +411,11 @@ async fn committed_draft_conflict_preserves_cancel_and_acknowledged_outbox() {
             let born = BrokerCheckpointV4::new(lifecycle.clone(), vec![pending.clone()])?;
             let birth =
                 fixture
-                    .journal
+                    .journal()
                     .advance_outbox(operation, accepted.head().clone(), &born)?;
             let acked = BrokerCheckpointV4::new(lifecycle, vec![pending.acknowledged(73)?])?;
             fixture
-                .journal
+                .journal()
                 .advance_outbox(operation, birth.head().clone(), &acked)?;
         }
         draft.commands.push(LocalCommandV1::new(
@@ -395,7 +436,7 @@ async fn committed_draft_conflict_preserves_cancel_and_acknowledged_outbox() {
         2,
         "the obsolete CAS must reload before committing"
     );
-    let current = fixture.writer.load(operation).await.unwrap().unwrap();
+    let current = fixture.writer().load(operation).await.unwrap().unwrap();
     assert_eq!(committed.head.hash(), current.head().hash());
     assert_eq!(committed.head.revision(), current.head().revision());
     assert!(
@@ -448,7 +489,7 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
     .await
     .unwrap();
     let executor = BatchExecutor::new(
-        fixture.writer.clone(),
+        fixture.writer().clone(),
         peer.client.clone(),
         Arc::new(NativeHostClock::new().unwrap()),
     );
@@ -514,7 +555,7 @@ async fn committed_rpc_replay_is_not_fresh_and_binding_loss_blocks_http() {
         1,
         "strict precommit binding failure must precede HTTP"
     );
-    assert!(fixture.writer.load(second).await.is_err());
+    assert!(fixture.writer().load(second).await.is_err());
     let pointer: Value = serde_json::from_slice(&fs::read(pointer_path).unwrap()).unwrap();
     assert_eq!(
         pointer["head"]["revision"],
@@ -541,7 +582,7 @@ async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority(
     .await
     .unwrap();
     let executor = BatchExecutor::new(
-        fixture.writer.clone(),
+        fixture.writer().clone(),
         peer.client.clone(),
         Arc::new(NativeHostClock::new().unwrap()),
     );
@@ -554,7 +595,7 @@ async fn unknown_failure_is_durable_public_and_opaque_without_runtime_authority(
     execution
         .failure(LocalFailurePhaseV1::Worker, &anyhow!("{private}"))
         .await;
-    let current = fixture.writer.load(operation).await.unwrap().unwrap();
+    let current = fixture.writer().load(operation).await.unwrap().unwrap();
     let public: Value = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(10))

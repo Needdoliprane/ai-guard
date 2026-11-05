@@ -597,6 +597,17 @@ pub(crate) struct BrokerRunnerContext<'a> {
     pub managed: bool,
     pub legacy_pending: bool,
     pub legacy_import: bool,
+    pub tenant_id: Option<&'a str>,
+    pub gateway_origin: Option<&'a str>,
+}
+
+/// Pure projection of already retained data; this performs no runtime call and
+/// supplies no independent observation or permission.
+pub(crate) fn broker_observation_data(
+    worker: &crate::control::WorkerV1,
+    observation: &crate::runtime::ContainerObservation,
+) -> Result<crate::control::RuntimeObservationV1> {
+    managed::observation_dto(worker, observation)
 }
 impl std::fmt::Debug for CheckpointPayloadV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -634,6 +645,8 @@ impl CheckpointPayloadV1 {
             legacy_pending: managed
                 .is_some_and(|value| value.pending.is_some() || !value.uncertain.is_empty()),
             legacy_import: managed.is_some_and(|value| value.import.is_some()),
+            tenant_id: managed.map(|value| value.tenant_id.as_str()),
+            gateway_origin: managed.map(|value| value.gateway_origin.as_str()),
         }
     }
     pub fn initial(

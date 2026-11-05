@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Contrôle des faits terminaux du 5 novembre : parent ciblé PASS après RED et
+trois contre-exemples de revue corrigés, compilation toutes cibles RC0 et revue
+traitée. Contrôle pur descriptif, sans identité ni droit d'ACK ; ServiceCold et
+fencing ouverts. [Preuves](VALIDATION.md#5-novembre--cohérence-pure-des-faits-terminaux-retenus).
+181 avertissements bibliothèque/8 lib-test et Clippy absent restent ouverts ;
+G09 FAIL, 0/12 gates globaux clos, aucune qualification runtime nouvelle.
+
 Préparation de capacité d'audit du 5 novembre : 7 parents ciblés PASS et compilation
 toutes cibles RC0, revue indépendante sans blocage dans ce périmètre. Réserve
 logique seulement ; writer/identité/terminal/ACK et boucle froide à composer.

@@ -32,6 +32,8 @@ use crate::{
     workspace::{self, Limits},
 };
 use anyhow::{Context, Result, anyhow, ensure};
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+pub(crate) use journal::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
 use journal::{operation_key, same};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
