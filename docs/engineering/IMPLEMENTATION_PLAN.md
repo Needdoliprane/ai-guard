@@ -1,5 +1,34 @@
 # Plan d'industrialisation
 
+## Lots intégrés le 5 novembre et priorité suivante
+
+La référence de validation est `bfa992c`, poussée et vérifiée après intégration
+par avance rapide. Elle inclut la vue des autorités du dashboard (`6c2b7f7`),
+le client HTTP/journal Kubernetes (`e22e8b9`) et le port HTTP exact pour l'audit
+retenu (`bfa992c`). Les preuves détaillées sont dans [VALIDATION](VALIDATION.md) :
+15 fonctions Node/API et TypeScript pour la vue, 17 fonctions Rust pour le
+raccord Kubernetes, trois parents HTTP et un canari existant pour le port.
+Les avertissements, Clippy absent, activation Kubernetes fermée et qualifications
+runtime restent des écarts ; aucune gate globale n'est clôturée.
+
+La priorité suivante est la reprise de publication des événements V4 déjà
+durables d'un worker déjà terminal au contrôle, après fermeture réelle des
+propriétaires du broker. Le mode restreint et le fencing restent conservés.
+Le harnais de régression a reproduit l'absence de publication de la paire V4
+après réouverture réelle des propriétaires broker, contrôle restant vivant.
+Le port HTTP vérifie désormais l'événement retourné sans accorder de droit au
+journal. Les réservations de queue et de journal, le recoupement du terminal
+central et la composition au service restent à livrer sur le même acteur,
+sans élargir Stops ou Full. La queue RAII est vérifiée par huit parents et
+revue indépendamment ; son raccord au port froid et le budget durable restent
+à implémenter. Une façade TDD non implémentée n'est jamais intégrable.
+
+Le WIP outbox/D5 signalé plus bas n'est ni repris ni réécrit par cette préparation.
+Le raccord writer devra coordonner ses fichiers et invariants avant intégration.
+Le transport runtime du relais attend la décision sur la proposition existante ;
+les autres travaux continuent. Reprise froide/fencing complets, fédération réelle,
+Kubernetes exploitable et qualifications Docker/Podman/cloud restent obligatoires.
+
 ## P1 — réconciliation warm après annulation
 
 Base `361bf69`, donneur `codex/cancelled-recovery-driver-20261104` :

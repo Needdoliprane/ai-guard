@@ -26,6 +26,8 @@ use std::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+mod queue;
+
 type Reply<T> = oneshot::Sender<JournalResult<T>>;
 
 /// Owned by the queued scan, so a caller timeout cannot admit another scan.
@@ -205,7 +207,7 @@ enum Command {
 }
 
 struct ClientState {
-    sender: mpsc::SyncSender<Command>,
+    sender: queue::QueueSender<Command>,
     scope: JournalScopeV1,
     timeout: Duration,
     inventory_pending: Arc<AtomicBool>,
@@ -243,7 +245,8 @@ impl ClientState {
     fn start(backend: Backend, capacity: u32, timeout: Duration) -> JournalResult<Arc<Self>> {
         validate_queue(capacity, timeout)?;
         let scope = backend.scope().clone();
-        let (sender, receiver) = mpsc::sync_channel(capacity as usize);
+        let (sender, receiver) =
+            queue::bounded(capacity as usize).map_err(|_| JournalError::InvalidInput)?;
         // Closing the queue is graceful. No client Drop joins a blocked fsync;
         // the actor owns its exact existing lease until queued work drains.
         let _thread = std::thread::Builder::new()
@@ -713,11 +716,11 @@ impl WriterClient {
 }
 
 #[cfg(test)]
-fn serve(journal: Journal, receiver: mpsc::Receiver<Command>) {
+fn serve(journal: Journal, receiver: queue::QueueReceiver<Command>) {
     serve_backend(Backend::Full(journal), receiver);
 }
 
-fn serve_backend(backend: Backend, receiver: mpsc::Receiver<Command>) {
+fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
     while let Ok(command) = receiver.recv() {
         match command {
             Command::Reserve {
@@ -1082,8 +1085,8 @@ mod tests {
         journal: &Journal,
         capacity: usize,
         timeout: Duration,
-    ) -> (WriterClient, std::sync::mpsc::Receiver<Command>) {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(capacity);
+    ) -> (WriterClient, queue::QueueReceiver<Command>) {
+        let (sender, receiver) = queue::bounded(capacity).unwrap();
         (
             WriterClient(std::sync::Arc::new(ClientState {
                 sender,
@@ -1357,16 +1360,29 @@ mod tests {
         let worker_journal = journal.clone();
         let worker = std::thread::spawn(move || serve(worker_journal, receiver));
         let (reply, result) = oneshot::channel();
-        assert!(
-            recovered_writer
-                .0
-                .sender
-                .send(Command::Status {
-                    operation_id,
-                    reply
-                })
-                .is_ok()
-        );
+        let mut barrier = Command::Status {
+            operation_id,
+            reply,
+        };
+        // Infrastructure watchdog only, not a product latency requirement.
+        // The ClientState timeout and the product's 10 s default are unchanged.
+        let barrier_deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            match recovered_writer.0.sender.try_send(barrier) {
+                Ok(()) => break,
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    assert!(
+                        std::time::Instant::now() < barrier_deadline,
+                        "the owned fixture writer must drain before its infrastructure watchdog"
+                    );
+                    barrier = returned;
+                    tokio::task::yield_now().await;
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    panic!("the owned fixture writer disconnected before its status barrier")
+                }
+            }
+        }
         assert!(result.await.unwrap().unwrap().is_some());
         let projection = recovered_writer
             .stops()

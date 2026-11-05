@@ -1,5 +1,23 @@
 # Stratégie de qualification
 
+## Admissions et réservation privée du writer
+
+Sélection ciblée : `cargo test --locked --lib broker::writer:: -- --test-threads=1`.
+Les quatre nouveaux parents vérifient capacités0/257refusées et1/256admises,
+C ordinaires pleins avec une complétion réservée supplémentaire, FIFO,
+capacité rendue au dequeue même si T reste détenu, absence de contrainte Clone,
+réserve unique entre clones, drop et valeurs rendues à la fermeture.
+Les quatre canaris existants protègent Reject plein/Unknown, Cancel Unknown
+et le permis d'inventaire conservé après timeout. Ils utilisent une queue
+mise en pause et de vrais fichiers de journal, sans moteur ou fournisseur.
+
+Le seul nouveau watchdog de120secondes concerne l'admission d'une barrière
+de ce harnais, auparavant envoyée par un send bloquant. Il ne modifie pas
+le timeout produit du writer et ne prouve aucune latence de durabilité.
+Après un delta du chemin commun, vérifier cette sélection et la compilation
+toutes cibles. Une réservation de queue ne valide pas le coût filesystem,
+l'ownership HTTP ou la reprise froide complète.
+
 ## Port HTTP exact de l'audit retenu
 
 Sélection ciblée : `cargo test --locked --lib runner::cold_audit_http::tests::`.

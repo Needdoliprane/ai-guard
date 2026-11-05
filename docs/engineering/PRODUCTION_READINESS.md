@@ -1,5 +1,11 @@
 # Gates de qualification production
 
+Admissions du writer du5novembre :8parents ciblés PASS, compilation toutes
+cibles RC0, revue indépendante traitée ;139avertissements bibliothèque/3lib-test
+restent ouverts. La réserve de queue n'est pas une réserve durable ni une
+reprise froide. [Preuves](VALIDATION.md#5-novembre--admissions-raii-et-réservation-de-queue-du-writer).
+G09 FAIL, aucun gate global clos ; aucun runtime supplémentaire qualifié.
+
 Port HTTP d'audit retenu du5novembre :3nouveaux parents et1canari existant
 PASS après RED, compilation toutes cibles RC0, revue indépendante traitée.
 Les133avertissements bibliothèque/3lib-test et Clippy absent restent ouverts.

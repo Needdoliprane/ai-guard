@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 5 novembre — admissions bornées du writer
+
+Tous les producteurs du writer partagent maintenant un comptage RAII de C
+admissions ordinaires. Une réservation privée non clonable peut occuper une
+place supplémentaire sans élargir cette capacité ordinaire ni contourner FIFO.
+Le retrait de l'enveloppe rend la capacité avant le traitement de sa valeur ;
+abandon, fermeture et erreurs rendent les admissions et les entrées appropriées.
+Les façades Full/Stops, la lease, les catégories NotQueued/Unknown et le délai
+produit de10secondes restent conservés.
+
+Huit parents ciblés passent, quatre nouveaux et quatre canaris du writer ;
+compilation toutes cibles RC0 et revue indépendante sans défaut bloquant dans
+ce périmètre.139avertissements bibliothèque et3lib-test restent visibles.
+[Gels et limites](VALIDATION.md#5-novembre--admissions-raii-et-réservation-de-queue-du-writer).
+La réservation est uniquement une capacité de queue : aucun budget durable,
+limite de reprises actives ou ACK froid n'est encore accordé. La composition
+froide, le fencing et la qualification runtime restent ouverts.
+
 ## 5 novembre — reçu HTTP exact pour l'audit retenu
 
 Le port Rust interne lit un worker descriptif et publie uniquement les deux

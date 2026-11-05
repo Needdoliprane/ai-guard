@@ -1,5 +1,58 @@
 # Validation courante
 
+## 5 novembre — admissions RAII et réservation de queue du writer
+
+Base `bfa992c`, worktree `codex/broker-cold-audit-20261105`.
+Core possède writer et queue, Luna les nouveaux tests et leurs exécutions,
+Root contrats/preuves/intégration, reviewer indépendant sans écriture du code.
+Les huit fichiers du harnais froid distinct restent hors de ces gels : ce
+lot n'intègre pas un test de reprise encore rouge ni son implémentation future.
+
+Propriétaire QA Linux ARM64/Rust1.99.1 sur image épinglée2115d432 comme plus
+haut, admis par configuration et noyau : UID1000/caps0/NNP1/seccomp2/networknone,
+root/sources/registre RO,2CPU/6Gio/swap0/PID256, scratch3Gio/65536inodes,
+fsize536870912/nofile1024, HOME/tmp/cache/cible privés et environnement reconstruit.
+Cargo offline/locked/deux jobs. La qualification HTTP complémentaire compile
+simultanément dans un autre propriétaire5Gio/2CPU, sans cible ou base partagée.
+
+Commandes après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` :
+
+| Gel et sélection | Résultat constaté |
+|---|---|
+| `queue-red`, `--lib broker::writer::queue::tests:: -- --test-threads=1` | Compilation PASS,2PASS/2FAIL/0ignoré/466filtrés. Les deux positifs de réservation échouent au stubFull ; leurs branches suivantes ne sont pas atteintes. |
+| `queue-green`, `--lib broker::writer:: -- --test-threads=1` | PASS8/8,0ignoré,462filtrés. Quatre parents nouveaux et quatre canaris existants. |
+| Même gel, `cargo check --offline --locked --all-targets` | RC0,140avertissements bibliothèque/4lib-test, dont fetch_update déprécié. |
+| `queue-current-api`, même sélection après le seul renommage demandé par rustc vers try_update | PASS8/8,0ignoré,462filtrés ;3avertissements lib-test. |
+| Même gel, `cargo check --offline --locked --all-targets` | RC0,139avertissements bibliothèque/3lib-test ; aucune réussite sans avertissement revendiquée. |
+
+Huit fonctions uniques, sans compter une seconde fois le rejeu. Source finale :
+writer `c3346187f376a5cd96927b0012f090f844916ab9b1e543666cf5ce5546d5e518`,
+queue `f40a022cb4c142ea36aefb6a06cd30ef0c45719db57caee05028791fa1d5eab5`,
+tests `98dca34a5f17961d2b2e4731f766ed18cf074e32a41ac3e724fe06834d272f43`.
+Journaux SHA256 : RED `1cd6b859138f1e9099a686e1ee33b1ec3a7fa48682ddaf7fc73d6c4e5c36c5e6`,
+premier GREEN `a977c1dd62d56feb1caaff44cda576077a5e0efaf18e2050311c982b4018f359`,
+premier check `0860252631680eafccef330fb6ddf116dcb016e6a7e12bc2b364a4d5146ea5bf`,
+GREEN final `76421f85a21da924c5bac98ef41613979201e64d5d977c51d93865ee767ccc50`,
+check final `6b307246ff4badded318ee18de6226351e69a94d7bf2cd33e50d5f5f07b8a73b`.
+
+Le watchdog de120s est uniquement celui d'une barrière du harnais ; le délai
+produit reste10s. L'admission ordinaire peut refuser de manière conservatrice
+pendant la courte acquisition/libération du compteur, sans await ni I/O.
+Full/Stops, lease, catégories NotQueued/Unknown et restitution des inputs sont
+préservés. La seule écriture brute dans le canal est encapsulée dans enqueue.
+La revue indépendante ne signale aucun défaut bloquant sur ces sources.
+
+Cette réserve n'accorde aucun budget de journal, aucune preuve HTTP et aucune
+limite de reprises actives à elle seule. La publication V4 froide reste rouge
+dans le harnais distinct ; aucune réactivation, action runtime ou clôture G09.
+Clippy BLOCKED, composant absent ; release, moteurs et matrice E2E NOT_RUN.
+Format ciblé, diff-check et comparaison des trois sources au gel final PASS ;
+515liens relatifs vérifiés sans cible absente et8fichiers sans les3secrets
+connus. Le propriétaire QA est fermé normalement à21:21:46UTC, PID0/exit143,
+OOMfalse, puis supprimé précisément. Aucun cache, binaire, base ou clé promu.
+Le checkpoint privé `cold-writer-queue-checkpoint-20261105` conserve les preuves
+et le pont de sources du RED froid distinct, qui reste WIP hors du commit.
+
 ## 5 novembre — port HTTP exact de l'audit retenu
 
 Base `e22e8b9`, worktree dédié `codex/cold-audit-http-20261105`.
