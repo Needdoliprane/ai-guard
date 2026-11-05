@@ -3,7 +3,7 @@
 //! remain synchronous: a future service caller must own bounded control-worker
 //! admission; this module does not isolate blocking I/O from Tokio workers.
 use super::{
-    journal::AdmissionJournal,
+    journal::{AdmissionJournal, CandidateRefusal},
     permission::{HeldCreateClaimOutcome, PendingHeldCreateClaim},
 };
 use crate::{
@@ -169,15 +169,37 @@ impl<'a> HeldCreateCoordinator<'a> {
             .clone();
         // The Store revalidates current identity, grant and authorization even
         // for historical replay. This neither claims nor reactivates control.
-        let confirmed = self
-            .store
-            .record_kubernetes_create_result(self.identity, self.authorization, &candidate)
-            .map_err(control_error)?;
+        let confirmed = match self.store.record_kubernetes_create_result(
+            self.identity,
+            self.authorization,
+            &candidate,
+        ) {
+            Ok(confirmed) => confirmed,
+            Err(error) => {
+                let refusal = match error.downcast_ref::<KubernetesCreateFailureV1>() {
+                    Some(KubernetesCreateFailureV1::StaleEpoch) => CandidateRefusal::StaleEpoch,
+                    Some(KubernetesCreateFailureV1::StaleRevision) => {
+                        CandidateRefusal::StaleRevision
+                    }
+                    Some(KubernetesCreateFailureV1::Unavailable) | None => {
+                        CandidateRefusal::Unavailable
+                    }
+                    Some(_) => CandidateRefusal::ControlRejected,
+                };
+                return retain_result_refusal(journal, &candidate, refusal, control_error(error));
+            }
+        };
         #[cfg(test)]
         if self.lose_result_ack.swap(false, Ordering::AcqRel) {
             // Inject only loss of the confirmation after a real durable commit.
             // The exact candidate stays retained; no SQL or receipt is forged.
-            return Err(CoordinatorError::ControlUnavailable);
+            drop(confirmed);
+            return retain_result_refusal(
+                journal,
+                &candidate,
+                CandidateRefusal::Unavailable,
+                CoordinatorError::ControlUnavailable,
+            );
         }
         let receipt = confirmed.receipt().clone();
         let handle = journal
@@ -217,6 +239,21 @@ impl<'a> HeldCreateCoordinator<'a> {
             .revalidate_retained()
             .map_err(|_| CoordinatorError::JournalUnavailable)
     }
+}
+
+fn retain_result_refusal(
+    journal: &mut AdmissionJournal,
+    candidate: &KubernetesCreateResultV1,
+    observed: CandidateRefusal,
+    error: CoordinatorError,
+) -> Result<HeldCreateCompletion, CoordinatorError> {
+    // Retain the first historical diagnosis, even if this attempt reports a
+    // different refusal. The journal still rejects changed candidate bytes/CAS.
+    let first = journal.candidate_refusal().unwrap_or(observed);
+    journal
+        .retain_candidate(candidate, Some(first))
+        .map_err(|_| CoordinatorError::JournalUnavailable)?;
+    Err(error)
 }
 
 fn pending_error(error: KubernetesError) -> CoordinatorError {

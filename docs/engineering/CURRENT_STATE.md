@@ -1,5 +1,30 @@
 # État constaté — suivi du développement
 
+## 5 novembre — refus de résultat durable et provenance vérifiée
+
+Le Store distingue désormais, pour un résultat lié à son intention et à son
+claim exacts, un epoch ou une révision réellement dépassés d'un conflit
+générique. Le coordinateur retient le premier refus dans `refusal.json`,
+avec le candidat/opération/CAS inchangés. Un refus différent ou un ACK reçu
+plus tard ne réécrit pas ce diagnostic historique. Une erreur de vérification
+d'un ancien audit devient indisponible, sans être attribuée au CAS courant ;
+le Store reste invalidé et ne modifie rien.
+
+**PASS logiciel ciblé :17fonctions uniques**,9Store,7coordinateur et1journal,
+aucun ignoré ; compilation toutes cibles RC0 et revue indépendante traitée.
+[RED, gels, commandes et limites](VALIDATION.md). Les données d'audit altérées
+sont des fixtures privées ; les tests établissent réouverture et barrières
+logicielles, pas résistance à une coupure physique ou effets Kubernetes réels.
+
+Travail de branche non intégré à la référence. L'ancien lecteur refuse le
+nouveau code fermé `control_rejected` ; les consommateurs Rust doivent gérer
+les nouvelles erreurs typées. Raccord broker HTTP/Store, politique centrale
+réelle, I/O sur worker borné, activation et parcours de session Kubernetes
+restent ouverts.85warnings de bibliothèque et1de test : garde sans avertissement
+non satisfaite ; Clippy absent et release non rejouée sur cette tranche.
+Prochaine priorité : contrat et raccord opérationnel du broker, sans ouvrir
+le cluster. G09 FAIL et0/12 gates globaux clos ; objectif produit inchangé.
+
 ## 5 novembre — rétention et reprise communes des résultats Kubernetes
 
 Le coordinateur Rust local conserve maintenant le candidat exact pour une
@@ -14,15 +39,14 @@ et TLS locaux réels ; compilation toutes cibles RC0 et revue indépendante
 traitée. [Gels, RED, commandes et limites](VALIDATION.md). Les réponses de Pod
 restent des fixtures déclarées ; aucun effet cluster n'est qualifié.
 
-**Travail de branche, non intégré à la référence.** Le refus central n'a pas
-encore de code durable dans `refusal.json` : cette exigence reste obligatoire
-et ouverte. Raccord broker HTTP/Store, I/O synchrones sur worker borné,
+**Au gel de ce premier coordinateur (`66e9dc1`).** Le refus central n'avait pas
+encore de code durable dans `refusal.json` ; ce manque logiciel est traité
+par la tranche décrite ci-dessus. Raccord broker HTTP/Store, I/O synchrones sur worker borné,
 constructeurs d'autorité/activation et parcours de session Kubernetes restent
 à implémenter ou qualifier. Le contrôle émet84warnings de bibliothèque et1de
 test ; la garde sans avertissement n'est pas satisfaite. Clippy manque dans
 l'image de validation, release n'a pas été rejouée pour cette tranche.
-Prochaine priorité locale : refus durable véridique et reprise de son candidat,
-puis raccord opérationnel conforme aux frontières existantes. G09 FAIL,
+La priorité suivante est le raccord opérationnel conforme aux frontières existantes. G09 FAIL,
 0/12 gates globaux clos ; le mandat produit complet est inchangé.
 
 ## 5 novembre — permission et transport CREATE vérifiés sur TLS local

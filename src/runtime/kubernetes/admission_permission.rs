@@ -320,8 +320,8 @@ fn control_error(error: anyhow::Error) -> KubernetesError {
     use KubernetesCreateFailureV1::*;
     match error.downcast_ref::<KubernetesCreateFailureV1>() {
         Some(
-            InvalidRequest | Conflict | PermissionDenied | SupervisionInactive | MigrationRequired
-            | NotFound | QuotaExceeded,
+            InvalidRequest | Conflict | StaleEpoch | StaleRevision | PermissionDenied
+            | SupervisionInactive | MigrationRequired | NotFound | QuotaExceeded,
         ) => KubernetesError::HeldCreateAuthorizationDenied,
         Some(Unavailable) | None => KubernetesError::HeldCreateControlUnavailable,
     }

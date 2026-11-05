@@ -186,11 +186,27 @@ pub(super) fn transition(
         ),
         Change::Reserve { .. } => return Err(KubernetesCreateFailureV1::Conflict.into()),
     };
-    conflict(
-        old.revision == expected_revision
-            && old.create_epoch == expected_epoch
-            && &old.intent_hash == intent_hash,
-    )?;
+    conflict(&old.intent_hash == intent_hash)?;
+    if let Change::Result { result } = change {
+        // A stale result must first identify this exact retained intention and
+        // its actual claim. A cancelled state can still carry that claim;
+        // result-state guards deliberately remain after this CAS classification.
+        conflict(
+            old.claim
+                .as_ref()
+                .is_some_and(|claim| claim.operation_id == result.claim_operation_id),
+        )?;
+        if expected_epoch < old.create_epoch {
+            return Err(KubernetesCreateFailureV1::StaleEpoch.into());
+        }
+        conflict(expected_epoch == old.create_epoch)?;
+        if expected_revision < old.revision {
+            return Err(KubernetesCreateFailureV1::StaleRevision.into());
+        }
+        conflict(expected_revision == old.revision)?;
+    } else {
+        conflict(old.revision == expected_revision && old.create_epoch == expected_epoch)?;
+    }
     let mut next = old.clone();
     next.revision = advance(old.revision)?;
     match change {

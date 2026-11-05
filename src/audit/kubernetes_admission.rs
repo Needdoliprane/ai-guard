@@ -77,6 +77,11 @@ pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<
 }
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
+    replay::validate(db).map_err(|_| KubernetesCreateFailureV1::Unavailable.into())
+}
+
+#[cfg(test)]
+pub(super) fn validate_unwrapped_for_test(db: &Connection) -> anyhow::Result<()> {
     replay::validate(db)
 }
 

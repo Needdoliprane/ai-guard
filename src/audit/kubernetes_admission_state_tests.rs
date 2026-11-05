@@ -8,6 +8,7 @@ use crate::{
     runtime::kubernetes::{KubernetesAuthorityV1, KubernetesPreflightResourcesV1},
     workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
+use rusqlite::Connection;
 use std::{fs, os::unix::fs::PermissionsExt};
 use uuid::Uuid;
 
@@ -353,6 +354,354 @@ fn held_create_result_ack_replays_exactly_and_late_epoch_cannot_promote() {
             .is_err()
     );
     assert!(f.store.integrity().unwrap().valid);
+}
+
+#[test]
+fn held_create_result_classifies_only_projection_behind_cas_and_preserves_exact_replay() {
+    let f = Fixture::new();
+    let quota = QuotaPolicyV1::default();
+    let authorization = f
+        .store
+        .authorize_held_create_for_test(&f.identity, &f.intent, &quota, EXPIRY)
+        .unwrap();
+    f.store
+        .reserve_kubernetes_create(&f.identity, &authorization, &f.intent)
+        .unwrap();
+    let request = claim(&f.intent);
+    let (claim_response, fresh) = f
+        .store
+        .claim_kubernetes_create(&f.identity, &authorization, &request)
+        .unwrap();
+    assert_eq!(claim_response.snapshot.revision, 2);
+    assert_eq!(claim_response.snapshot.create_epoch, 1);
+    assert!(fresh.is_some());
+    let original = KubernetesCreateResultV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        create_id: f.intent.create_id.clone(),
+        intent_hash: f.intent.intent_hash().unwrap(),
+        claim_operation_id: request.operation_id.clone(),
+        expected_revision: 2,
+        expected_create_epoch: 1,
+        outcome: KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::TransportUnknown,
+            http_status: None,
+        },
+    };
+    let original_ack = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &original)
+        .unwrap();
+    assert_eq!(original_ack.snapshot().revision, 3);
+    assert_eq!(original_ack.snapshot().create_epoch, 1);
+    assert_eq!(
+        original_ack.snapshot().state,
+        KubernetesCreateStateV1::OwnershipUnknown
+    );
+    assert!(original_ack.snapshot().quota_held);
+    let head_after_original = f.store.head().unwrap();
+
+    let mut stale_revision = original.clone();
+    stale_revision.operation_id = Uuid::new_v4().to_string();
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &stale_revision)
+        .err()
+        .expect("a distinct operation with an old revision must be rejected");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::StaleRevision),
+        "equal epoch with an older revision is a typed stale-revision result"
+    );
+    assert_eq!(f.store.head().unwrap(), head_after_original);
+
+    let mut wrong_hash = stale_revision.clone();
+    wrong_hash.operation_id = Uuid::new_v4().to_string();
+    wrong_hash.intent_hash = "f".repeat(64);
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &wrong_hash)
+        .err()
+        .expect("a result with a mismatching intent hash must be rejected");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::Conflict),
+        "a bad intent hash is checked before the stale-CAS classifier"
+    );
+
+    let mut wrong_claim = stale_revision.clone();
+    wrong_claim.operation_id = Uuid::new_v4().to_string();
+    wrong_claim.claim_operation_id = Uuid::new_v4().to_string();
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &wrong_claim)
+        .err()
+        .expect("a result with another claim operation must be rejected");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::Conflict),
+        "a nonmatching claim operation is not reclassified as stale CAS"
+    );
+
+    let mut future_revision = original.clone();
+    future_revision.operation_id = Uuid::new_v4().to_string();
+    future_revision.expected_revision = 4;
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &future_revision)
+        .err()
+        .expect("a result with a future revision must be rejected");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::Conflict),
+        "a future revision remains a generic conflict"
+    );
+
+    let mut future_epoch = original.clone();
+    future_epoch.operation_id = Uuid::new_v4().to_string();
+    future_epoch.expected_revision = 3;
+    future_epoch.expected_create_epoch = 2;
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &future_epoch)
+        .err()
+        .expect("a result with a future epoch must be rejected");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::Conflict),
+        "a future epoch remains a generic conflict"
+    );
+    assert_eq!(f.store.head().unwrap(), head_after_original);
+
+    let (_, cancelled, replayed) = f
+        .store
+        .cancel_kubernetes_create(&f.identity, &authorization, &cancel(&f.intent, 3, 1))
+        .unwrap();
+    assert!(!replayed);
+    assert_eq!(cancelled.revision, 4);
+    assert_eq!(cancelled.create_epoch, 2);
+    assert!(cancelled.quota_held);
+    let head_after_cancel = f.store.head().unwrap();
+    let historical = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &original)
+        .expect("the exact original operation remains replayable after cancellation");
+    assert_eq!(historical.receipt(), original_ack.receipt());
+    assert_eq!(historical.snapshot(), original_ack.snapshot());
+    assert_eq!(f.store.head().unwrap(), head_after_cancel);
+    let result_events = f
+        .store
+        .events(&EventQuery {
+            kind: Some("control.kubernetes.create.result".into()),
+            ..EventQuery::default()
+        })
+        .unwrap();
+    assert_eq!(result_events.len(), 1);
+    assert_eq!(result_events[0].event.id, original.operation_id);
+    assert_eq!(f.store.worker_quota(&quota).unwrap().held_workers, 1);
+    assert!(f.store.integrity().unwrap().valid);
+}
+
+#[test]
+fn stale_result_in_a_valid_audit_prefix_latches_the_store_before_current_mutation() {
+    let f = Fixture::new();
+    let quota = QuotaPolicyV1::default();
+    let authorization = f
+        .store
+        .authorize_held_create_for_test(&f.identity, &f.intent, &quota, EXPIRY)
+        .unwrap();
+    f.store
+        .reserve_kubernetes_create(&f.identity, &authorization, &f.intent)
+        .unwrap();
+    let claim = claim(&f.intent);
+    f.store
+        .claim_kubernetes_create(&f.identity, &authorization, &claim)
+        .unwrap();
+    let first_result = KubernetesCreateResultV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        create_id: f.intent.create_id.clone(),
+        intent_hash: f.intent.intent_hash().unwrap(),
+        claim_operation_id: claim.operation_id.clone(),
+        expected_revision: 2,
+        expected_create_epoch: 1,
+        outcome: KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::TransportUnknown,
+            http_status: None,
+        },
+    };
+    let committed = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &first_result)
+        .unwrap();
+    assert_eq!(committed.snapshot().revision, 3);
+    assert_eq!(committed.snapshot().create_epoch, 1);
+    assert!(committed.snapshot().quota_held);
+
+    let result_events = f
+        .store
+        .events(&EventQuery {
+            kind: Some("control.kubernetes.create.result".into()),
+            ..EventQuery::default()
+        })
+        .unwrap();
+    assert_eq!(result_events.len(), 1);
+    let mut injected_event = result_events[0].event.clone();
+    let mut record = injected_event.data.clone();
+    let mut stale_result: KubernetesCreateResultV1 =
+        serde_json::from_value(record["change"]["result"].clone()).unwrap();
+    stale_result.operation_id = Uuid::new_v4().to_string();
+    stale_result.expected_revision = 2;
+    stale_result.expected_create_epoch = 1;
+    assert_eq!(stale_result.create_id, f.intent.create_id);
+    assert_eq!(stale_result.claim_operation_id, claim.operation_id);
+    assert_eq!(stale_result.intent_hash, f.intent.intent_hash().unwrap());
+    record["input_hash"] = json!(stale_result.input_hash().unwrap());
+    record["previous_revision"] = json!(3);
+    record["change"]["result"] = serde_json::to_value(&stale_result).unwrap();
+    injected_event.id = stale_result.operation_id.clone();
+    assert_eq!(injected_event.kind, "control.kubernetes.create.result");
+    assert_eq!(injected_event.source, "gateway");
+    assert_eq!(injected_event.provenance, "declared");
+    assert_eq!(injected_event.coverage, "partial");
+
+    let database_path = f._directory.path().join("tenant.sqlite");
+    let mut db = Connection::open(&database_path).unwrap();
+    db.busy_timeout(std::time::Duration::from_secs(1)).unwrap();
+    let (previous_seq, previous_hash): (i64, String) = db
+        .query_row(
+            "SELECT seq,hash FROM events ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(previous_seq, result_events[0].seq);
+    let previous_floor: String = db
+        .query_row(
+            "SELECT max_received_at FROM audit_time_floors WHERE event_seq=?1",
+            [previous_seq],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let received_at = crate::broker_registry::format_time(
+        chrono::Utc::now().max(crate::broker_registry::parse_time(&previous_floor).unwrap()),
+    );
+    record["received_at"] = json!(received_at);
+    injected_event.timestamp = received_at.clone();
+    injected_event.data = record;
+    let before_projection: (i64, i64, i64, String, String, i64) = db
+        .query_row(
+            "SELECT revision,create_epoch,quota_held,snapshot_json,snapshot_hash,last_event_seq FROM kubernetes_creates WHERE create_id=?1",
+            [&f.intent.create_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(before_projection.0, 3);
+    assert_eq!(before_projection.1, 1);
+    assert_eq!(before_projection.2, 1);
+
+    assert_eq!(injected_event.data["received_at"], received_at);
+    let payload = serde_json::to_string(&injected_event).unwrap();
+    let next_seq = previous_seq + 1;
+    let hash = super::digest(next_seq, &received_at, &previous_hash, &payload);
+    let tx = db.transaction().unwrap();
+    tx.execute(
+        "INSERT INTO events(seq,id,received_at,prev_hash,hash,payload,kind,agent_id,sandbox_id,project_id,decision) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        rusqlite::params![
+            next_seq,
+            injected_event.id,
+            received_at,
+            previous_hash,
+            hash,
+            payload,
+            injected_event.kind,
+            injected_event.agent_id,
+            injected_event.sandbox_id,
+            injected_event.project_id,
+            Option::<String>::None,
+        ],
+    )
+    .unwrap();
+    tx.execute(
+        "UPDATE quota SET bytes=bytes+(SELECT length(payload) FROM events WHERE seq=?1) WHERE id=1",
+        [next_seq],
+    )
+    .unwrap();
+    super::workload::advance_time_floor(&tx, next_seq, &received_at).unwrap();
+    tx.commit().unwrap();
+
+    let (persisted_prev, persisted_hash, persisted_payload): (String, String, String) = db
+        .query_row(
+            "SELECT prev_hash,hash,payload FROM events WHERE seq=?1",
+            [next_seq],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(persisted_prev, previous_hash);
+    assert_eq!(
+        persisted_hash,
+        super::digest(next_seq, &received_at, &persisted_prev, &persisted_payload)
+    );
+    assert_eq!(persisted_hash, hash);
+
+    let stale_history = super::kubernetes_admission::validate_unwrapped_for_test(&db)
+        .expect_err("valid event hashing must still expose the stale result transition");
+    assert_eq!(
+        stale_history.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::StaleRevision),
+        "the fixture reaches the intended model stale-result cause, not an event/hash failure"
+    );
+    let event_count_before_current: i64 = db
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    let quota_bytes_before_current: i64 = db
+        .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get(0))
+        .unwrap();
+    drop(db);
+
+    let mut current_result = first_result;
+    current_result.operation_id = Uuid::new_v4().to_string();
+    current_result.expected_revision = 3;
+    let error = f
+        .store
+        .record_kubernetes_create_result(&f.identity, &authorization, &current_result)
+        .err()
+        .expect("a current mutation must stop when its prior audit projection is stale");
+    assert_eq!(
+        error.downcast_ref::<KubernetesCreateFailureV1>(),
+        Some(&KubernetesCreateFailureV1::Unavailable),
+        "an unrelated stale historical record must not be attributed to the current request"
+    );
+    assert!(
+        !f.store.healthy(),
+        "the invalid history latches this Store instance"
+    );
+
+    let verification = Connection::open(&database_path).unwrap();
+    let head_after: (i64, String) = verification
+        .query_row(
+            "SELECT seq,hash FROM events ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(head_after, (next_seq, hash));
+    let event_count_after: i64 = verification
+        .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(event_count_after, event_count_before_current);
+    let after_projection: (i64, i64, i64, String, String, i64) = verification
+        .query_row(
+            "SELECT revision,create_epoch,quota_held,snapshot_json,snapshot_hash,last_event_seq FROM kubernetes_creates WHERE create_id=?1",
+            [&f.intent.create_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+        )
+        .unwrap();
+    assert_eq!(after_projection, before_projection);
+    let quota_bytes_after: i64 = verification
+        .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(quota_bytes_after, quota_bytes_before_current);
 }
 
 #[test]

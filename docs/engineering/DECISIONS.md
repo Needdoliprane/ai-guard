@@ -1,5 +1,30 @@
 # Décisions d'industrialisation
 
+## 5 novembre — motifs de refus établis et premier diagnostic durable
+
+Direction technique du lot local, vérifiée sur17fonctions ciblées : les erreurs de CAS
+d'un résultat doivent provenir du comparateur transactionnel après le hash
+d'intention et le lien au claim exacts. L'epoch attendu inférieur établit
+`StaleEpoch`, supérieur reste `Conflict` ; à epoch égal, la révision inférieure
+établit `StaleRevision`, supérieure reste `Conflict`. Les autres conflits
+restent génériques. Le replay d'une opération
+déjà committée conserve son reçu historique avant cette comparaison.
+
+Une erreur rencontrée en validant un historique n'est pas le refus de la
+mutation courante. La frontière de validation Kubernetes doit la rendre
+opaque/indisponible sans conserver une cause typed stale dans la chaîne
+anyhow ; le Store reste invalidé. Le modèle de mutation courant conserve
+ses erreurs précises après validation de la transaction. La reproduction
+et la correction de cette séparation sont vérifiées dans le même lot local.
+
+Le journal garde un seul premier motif historique et le candidat exact ;
+la nouvelle variante `control_rejected` complète les motifs existants sans
+inventer la cause d'un conflit. Un ACK ultérieur ne réécrit pas le diagnostic.
+Le lecteur antérieur refuse ce nouveau code fermé ; aucune compatibilité
+descendante ni migration automatique n'est annoncée. La forme des anciens
+codes, fichiers, candidats et ACK reste conservée. Ni stockage, service,
+permission de production ou opération cluster supplémentaire n'est ajouté.
+
 ## 5 novembre — une seule reprise du résultat de CREATE retenu
 
 Le coordinateur Rust interne compose les capacités Store, identité broker,
@@ -27,8 +52,8 @@ Les opérations Store et journal restent synchrones dans cette composition.
 L'isolation de leurs I/O sur un propriétaire de contrôle borné doit être
 résolue au raccord d'exploitation ; ce lot ne prouve pas qu'elles épargnent
 les threads Tokio partagés.
-Le code durable de refus reste également à raccorder : la conservation du
-candidat et le retour d'erreur ne satisfont pas à eux seuls cette exigence.
+Le code durable de refus manquait à ce premier gel ; il est désormais raccordé
+par la tranche décrite ci-dessus. Le raccord d'exploitation reste distinct.
 
 ## 5 novembre — décision exacte et journal du CREATE retenu
 

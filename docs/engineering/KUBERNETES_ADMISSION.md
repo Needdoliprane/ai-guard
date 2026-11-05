@@ -508,18 +508,48 @@ Course explicite : claim `revision = 2, create_epoch = 1`, annulation acceptée
 Le résultat est rejeté sans nouvel événement central, promotion ni libération
 du quota. Le journal privé conserve **un seul candidat de résultat exact**
 (DTO borné à 64 KiB avec projection sûre, jamais le Pod brut) et un seul code
-de refus fermé `stale_revision`, `stale_epoch` ou `unavailable`. Il ne réécrit
+de refus fermé `stale_revision`, `stale_epoch`, `control_rejected` ou `unavailable`. Il ne réécrit
 pas le candidat avec de nouveaux CAS et n'accumule pas un historique de réponses.
 La conservation emploie les vraies barrières durables ; si elle échoue, aucune
 conservation réussie n'est déclarée et la reprise reste inconnue.
 
-**Écart d'implémentation encore ouvert au 5 novembre.** Le coordinateur local
-retient le candidat exact et remonte actuellement une erreur fermée à son
-appelant ; il n'enregistre pas encore le code dans `refusal.json`. Le Store
-retourne un `Conflict` générique, qui ne permet pas de distinguer honnêtement
-révision et epoch périmés. La persistance d'un refus exact reste obligatoire
-et non couverte par ce raccord ; ni ce manque ni la classification à compléter
-ne sont transformés en preuve réussie. Aucun CAS de rattrapage n'est permis.
+**Résultat logiciel du 5 novembre.** Le coordinateur local retient le candidat
+exact et son premier code de refus fermé avant de retourner l'erreur. Les
+[17tests ciblés](VALIDATION.md) vérifient les reprises et la séparation des
+causes historiques/courantes. Aucun CAS de rattrapage n'est permis ; le
+raccord d'exploitation et les qualifications physiques restent ouverts.
+
+Les motifs sont établis par la transaction, sans les déduire d'un snapshot
+client : pour un **Result** lié au hash d'intention et au claim exacts, le
+Store compare d'abord l'epoch, puis la révision.
+L'epoch attendu inférieur établit `StaleEpoch`, supérieur reste `Conflict` ;
+à epoch égal, la révision inférieure établit `StaleRevision`, supérieure
+reste `Conflict`. Les
+autres conflits restent génériques. Le lookup du replay exact précède cette
+transition et doit restituer son reçu historique sans réappliquer le CAS.
+Cette distinction est vérifiée au niveau Store/coordinateur local, sans API
+ou lancement Kubernetes de production livré.
+
+Les mêmes transitions servent au replay de vérification ; une erreur issue
+d'un historique invalide ne doit pas traverser cette frontière comme un
+refus stale du candidat courant. La validation doit échouer de manière
+opaque/indisponible et invalider le Store, sans conserver une cause anyhow
+qui permettrait cette fausse attribution. Les erreurs précises de la
+mutation courante restent distinctes, après transaction validée.
+
+Le premier code de refus est un fait historique, attaché au hash du candidat,
+pas un état courant. Un nouvel échec d'une autre classe ou un ACK ultérieur
+ne l'écrase ni ne l'efface. `control_rejected` représente un autre refus typé
+du contrôle ; `unavailable` représente une confirmation indéterminée, y
+compris la perte injectée d'un ACK après vrai commit. Un échec de rétention
+ou de sync doit rester une erreur de journal sans rétention prétendue.
+
+Le format privé reste fermé : le nouveau lecteur accepte les trois anciens
+codes, avec leurs bytes inchangés, et le quatrième. Un ancien lecteur refuse
+`control_rejected` sans réparation ni suppression ; cette extension avant
+activation n'est pas une compatibilité descendante transparente. Les
+consommateurs Rust du type d'erreur fermé doivent aussi traiter les deux
+nouvelles variantes ; aucun contrat HTTP de lancement n'est annoncé.
 
 Reprise d'un résultat perdu : si le candidat exact et son `operation_id` sont
 durables, seul son replay est permis sous identité encore autorisée. Un ACK

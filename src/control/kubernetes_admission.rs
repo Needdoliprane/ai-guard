@@ -12,6 +12,8 @@ pub const KUBERNETES_HELD_PROFILE_V1: &str = "kubernetes_held_pod_v1";
 pub enum KubernetesCreateFailureV1 {
     InvalidRequest,
     Conflict,
+    StaleEpoch,
+    StaleRevision,
     PermissionDenied,
     SupervisionInactive,
     MigrationRequired,
@@ -24,6 +26,8 @@ impl std::fmt::Display for KubernetesCreateFailureV1 {
         f.write_str(match self {
             Self::InvalidRequest => "invalid held Kubernetes create request",
             Self::Conflict => "held Kubernetes create conflicts with durable content or state",
+            Self::StaleEpoch => "held Kubernetes create result precedes the current create epoch",
+            Self::StaleRevision => "held Kubernetes create result precedes the current revision",
             Self::PermissionDenied => "held Kubernetes create authorization is unavailable or outside its authenticated scope",
             Self::SupervisionInactive => "held Kubernetes create requires active supervision",
             Self::MigrationRequired => "explicit held Kubernetes create schema migration is required",

@@ -67,6 +67,7 @@ impl AdmissionJournalProtection {
 pub(crate) enum CandidateRefusal {
     StaleRevision,
     StaleEpoch,
+    ControlRejected,
     Unavailable,
 }
 
@@ -451,6 +452,9 @@ impl AdmissionJournal {
 
     pub(crate) fn candidate(&self) -> Option<&KubernetesCreateResultV1> {
         self.candidate.as_ref()
+    }
+    pub(crate) fn candidate_refusal(&self) -> Option<CandidateRefusal> {
+        self.refusal.as_ref().map(|record| record.refusal)
     }
 
     pub(crate) fn tenant_id(&self) -> &str {

@@ -1,5 +1,155 @@
 # Validation courante
 
+## 5 novembre — refus durable de résultat, validation en cours
+
+Base de travail `66e9dc1`, même worktree dédié ; checkout principal préservé.
+La correction vise les motifs CAS réellement établis par le Store et le
+premier diagnostic privé durable. Les définitions fermées sont préparées ;
+comparateur et rétention restent inchangés tant que le test rouge n'est pas
+atteint. Les nouveaux tests utilisent Store/journal réels, sans moteur ni
+cluster. Luna les possède, un reviewer indépendant examine leur provenance
+et leurs assertions pendant la préparation.
+
+Le premier gel `refusal-red` est **NOT_RUN** : la pré-revue statique détecte
+un appel `Digest::digest` sans type concret et des `unwrap_err()` qui
+exigeraient Debug de la preuve opaque de confirmation. Le harnais est corrigé
+sans ajouter de Debug, Clone ou sérialisation à cette preuve. Ce gel n'a pas
+été compilé et aucun RED fonctionnel ne lui est attribué.
+
+Le sandbox neuf est admis sur config et noyau : image Linux ARM64 inchangée,
+Docker29.9.2, Rust1.99.1, UID1000/caps0/NNP1/seccomp2/networknone/rootRO,
+source et registre publics RO,1CPU/6Gio/swap0/PID256, scratch3Gio/65536inodes,
+nofile1024 et **RLIMIT_FSIZE536870912bytes**. Aucun compte, clé réelle, socket
+moteur, fournisseur, NAS ou cluster n'est monté/joint. Compilation hors réseau,
+env-i et une seule commande Cargo à la fois ; pas de matrice E2E systématique.
+
+Avant tout build, un premier conteneur inerte est refusé à l'admission parce
+que la valeur Docker fsize1048576 représente1Mio en bytes, pas512Mio. Son
+processus est seulement init+sleep ; arrêt normal et retrait de son ID exact,
+PID0/exit143/OOMfalse. Le remplaçant est vérifié avec la valeur explicite en
+bytes via `/proc/self/limits`. Aucun test ni artefact de ce premier conteneur
+n'est promu comme preuve.
+
+Après correction du harnais, le gel `refusal-red-ready` compile et exécute
+cinq fonctions sélectionnées séparément, une seule commande Cargo à la fois :
+
+| Filtre exact, sous `--lib` | Résultat observé |
+|---|---|
+| `audit::kubernetes_admission_state_tests::held_create_result_classifies_only_projection_behind_cas_and_preserves_exact_replay` | RED RC101, `Conflict` au lieu de `StaleRevision` ;1sélectionné,0ignoré. |
+| `runtime::kubernetes::admission::coordinator_tests::stale_epoch_candidate_refusal_survives_reopen_without_result_event_or_ack` | RED RC101, aucun code au lieu de `StaleEpoch` ;1sélectionné,0ignoré. |
+| `runtime::kubernetes::admission::coordinator_tests::mismatched_store_authorization_persists_control_refusal_before_exact_ack` | RED RC101, aucun code au lieu de `ControlRejected` ;1sélectionné,0ignoré. |
+| `runtime::kubernetes::admission::coordinator_tests::lost_result_ack_resumes_the_committed_candidate_without_post_or_store_mutation` | RED RC101, aucun code au lieu de `Unavailable` ;1sélectionné,0ignoré. |
+| `runtime::kubernetes::admission::journal::tests::held_journal_refusal_codes_roundtrip_closed_and_preserve_first` | PASS RC0,4codes fermés et premier code conservé ;1sélectionné,0ignoré. |
+
+Les commandes utilisent `cargo test --offline --locked --manifest-path
+/inputs/refusal-red-ready/Cargo.toml --lib <filtre> -- --exact --test-threads=1`.
+Les branches après la première assertion en échec ne sont pas qualifiées par
+ce RED. Les deux motifs stale existent à ce gel comme types uniquement ;
+le comparateur et la rétention ne changent qu'après ces reproductions.
+Journaux parent SHA-256 :
+
+```text
+e1e52a792ab7923a83e847ac6b4cdf3a36ceebd173792e8d663896ebeea33034 refusal-red-store.log
+9a05046181e08984c311b6f71e9f73c1819f18a789f2b8128ccdd090b57e844c refusal-red-epoch.log
+c0eacc1b5397b2af6bbe9e777ba3c4a2e8e9375bfc781cd8fffb7d8e844afffc refusal-red-rejected.log
+ead711e2d59c645509909004c79761100f2419ba1ec1be2426d412e680db5dbe refusal-red-lostack.log
+660752047a6b566f14d53ba4bdd2fb8b8341e40a79e48ee360bba2b94dd18f7c refusal-red-journal.log
+```
+
+Le gel suivant `refusal-green` passe **16fonctions uniques ciblées** : module
+Store-state8/8 (0,84s), coordinateur7/7 (2,25s), round-trip journal1/1
+(0,15s), RC0 et aucun ignoré. Le contrôle toutes cibles du même gel termine
+RC0 en52,96s,85warnings de bibliothèque et1de test. Les anciens cinq tests
+du coordinateur sont inclus dans ces sept, sans double comptage. SHA des logs :
+
+```text
+107ecbcd80e15594c2b6a0e372234efc062f0b3b093fe78f2c70c8a671b108d8 refusal-green-store.log
+f7d994a24a106a1fdecca114b9de8fb9b1ee04bbdb9ab31db7c3af709f156f41 refusal-green-coordinator.log
+50344d8bbcc9fd28defd1fcbd24ef81dde30cf411151188c8c812a87b89085e8 refusal-green-journal.log
+6328df41715f044ad855a97aa38faceb33bb7fa079fa9e4a048d2a165a1f4165 refusal-all-targets.log
+```
+
+La revue trouve ensuite un risque de provenance non couvert : le même
+comparateur est utilisé par le replay d'intégrité. Un type stale provenant
+d'un ancien événement invalide peut traverser `begin_checked` et être classé
+comme le refus opérationnel du candidat courant. Une reproduction Store
+ciblée est préparée avant correction ; ces16PASS ne qualifient pas ce cas.
+La validation d'historique doit refuser sans promouvoir ce motif comme une
+comparaison opérationnelle courante. Aucune exécution ou libération de quota
+indue n'est établie par ce constat de diagnostic.
+
+La première reproduction de provenance compile mais échoue sur sa
+précondition : replay brut sans type stale, oracle final non atteint. Elle
+est **NOT_RUN pour le P2** (RC101 du test). Un diagnostic borné de la même
+fixture confirme ensuite un recul du plancher UTC : la date de l'événement
+recopié précède le `received_at` réellement durable du précédent résultat.
+La fixture est corrigée avec une date canonique au moins égale au plancher,
+dans Record, Event et ligne SQL ; décision/origine et ancien audit restent
+inchangés. Aucun validateur, budget, délai ou oracle final n'est relâché.
+
+```text
+c3355587faac812f430997a9db5fec5cf8c0a24d99650330e582049eba435836 refusal-provenance-red.log
+2e5f6d1971969b20e69c645af770a922df2f83ef928923390f93823716528eca refusal-provenance-diagnostic.log
+```
+
+Un helper strictement `cfg(test)` lit le replay brut sans modifier le Store
+pour établir la causalité stale avant/après correction. La mutation réelle
+utilise toujours la frontière de production et doit échouer en indisponible,
+Store invalidé et sans nouvel effet. Il ne produit ni permission ni reçu.
+
+Le gel `refusal-provenance-red-ready` atteint enfin le P2 : la précondition
+brute `StaleRevision` passe, puis le vrai Store retourne ce même type au lieu
+de `Unavailable`. **RED RC101,1FAIL/0ignoré**,37,86s de compilation et0,11s
+de test ; SHA
+`1efc090ac1bb06fdf18bddb66de00063caa26474a78323f6767729e8feffca3e`.
+Le correctif intervient ensuite à la frontière `kubernetes_admission::validate` :
+erreur neuve indisponible, sans conserver de cause anyhow. Le modèle de la
+mutation courante reste hors enveloppe et conserve ses motifs précis.
+
+**Gel final `refusal-final` :17fonctions uniques PASS, aucun ignoré, RC0** :
+module Store-state9/9 (0,88s), coordinateur7/7 (2,59s), journal1/1 (0,15s).
+Compilation du premier test37,80s ; `cargo check --all-targets` RC0 en30,19s,
+85warnings de bibliothèque et1de test. Les16PASS antérieurs ne sont pas
+additionnés à ces17 ; ils identifient le gel où le nouveau cas manquait.
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/refusal-final/Cargo.toml --lib audit::kubernetes_admission_state_tests:: -- --test-threads=1
+cargo test --offline --locked --manifest-path /inputs/refusal-final/Cargo.toml --lib runtime::kubernetes::admission::coordinator_tests:: -- --test-threads=1
+cargo test --offline --locked --manifest-path /inputs/refusal-final/Cargo.toml --lib runtime::kubernetes::admission::journal::tests::held_journal_refusal_codes_roundtrip_closed_and_preserve_first -- --exact --test-threads=1
+cargo check --offline --locked --all-targets --manifest-path /inputs/refusal-final/Cargo.toml
+```
+
+```text
+ffb291817c96f433bc9a06c6cc0cd943f0b0fdbd6647de7637e99121ad3afa46 refusal-final-store.log
+0e2aca62acf6ce0c2fd380c7b5e209a655b48b6904c6162308197cea92131b5a refusal-final-coordinator.log
+9b6287ebd154664153b462c7e21dd6781b848df90f582f070d9e8bdb0201c6d8 refusal-final-journal.log
+90007b39f524de2b2959b5179762117d8fadda8d65dbb1fc512f2e69af6a0cd5 refusal-final-all-targets.log
+753ae2b3c036d499335b639dbe971e4adab37d0ae7e054d678b5c55e1e586ec0 kubernetes_admission.rs
+ff48256f250c3d8476b6aa33f7ee2db376a270aae419844cb071552c7804e4ea kubernetes_admission/model.rs
+09cbc470ae9f9e4828e5fa7da7b5b0455d54c664fe636c96e240e42611cd0ed7 admission_coordinator.rs
+```
+
+La revue indépendante relit les sources finales, le wrapper sans cause et
+la fixture corrigée ; aucun autre défaut bloquant établi dans ce périmètre.
+Critères logiciels vérifiés : quatre codes fermés, premier diagnostic
+historique, ACK reçu plus tard sans réécriture, candidat/opération/CAS
+immutables, mauvaise capacité refusée, comparaison courante distincte du
+replay invalide, Store invalidé sans mutation ni relâchement de quota.
+
+Limites : fixtures SQLite/fichiers et TLS loopback réels, stockage QA tmpfs ;
+aucune preuve de sync sur média persistant, coupure physique ou crash de VM.
+Aucun Pod, moteur métier, fournisseur ou cluster joint. Raccord HTTP/politique
+centrale, admission des I/O synchrones, activation et session Kubernetes
+restent ouverts. Clippy reste indisponible et la garde sans avertissement
+n'est pas satisfaite ; release/front/navigateur non rejoués pour ce lot.
+Aucun gate global fermé et aucune qualification produit déduite.
+
+Après tous les retours terminaux, Root constate init+sleep seulement, puis
+arrête normalement et retire l'ID exact du sandbox admis le5novembre
+à13:39:08UTC : PID0,exit143,OOMfalse. Source et logs parent restent conservés ;
+aucune clé/DB/binaire du scratch promu, aucun volume/image/service utilisateur
+supprimé. Le worktree demeure actif pour le raccord d'exploitation suivant.
+
 ## 5 novembre — coordinateur de résultat held-CREATE, en cours
 
 La rétention commune de tous les résultats et leur reprise exacte sont en

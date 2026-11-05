@@ -3,7 +3,7 @@
 //! these tests do not contact a cluster or start a Pod.
 use super::{
     coordinator::{CoordinatorError, HeldCreateCoordinator},
-    journal::{AdmissionJournal, AdmissionJournalProtection, RecoveryPhase},
+    journal::{AdmissionJournal, AdmissionJournalProtection, CandidateRefusal, RecoveryPhase},
     permission::{HeldCreateActivation, PendingHeldCreateClaim},
     prepare,
     transport_tests::{
@@ -17,6 +17,7 @@ use crate::{
     control_fs::Directory,
     runtime::kubernetes::KubernetesRuntime,
 };
+use sha2::{Digest, Sha256};
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, sync::atomic::AtomicBool};
 use uuid::Uuid;
 
@@ -127,6 +128,13 @@ fn pending_for(peer: &Peer, intent: &KubernetesCreateIntentV1) -> PendingHeldCre
         TestClock::repeated(sample(&boot_id, HostClockMethodV1::LinuxBoottimeV1, 1_000));
     PendingHeldCreateClaim::begin_for_test(activation, clock, intent)
         .expect("prepare the same retained request without changing the Store")
+}
+
+fn other_create_intent(intent: &KubernetesCreateIntentV1) -> KubernetesCreateIntentV1 {
+    let mut other = intent.clone();
+    other.create_id = Uuid::new_v4().to_string();
+    other.session_id = Uuid::new_v4().to_string();
+    other
 }
 
 fn result_events(store: &Store) -> Vec<crate::model::StoredEvent> {
@@ -240,6 +248,16 @@ async fn coordinator_commits_unknown_result_without_publishing_a_handle() {
 async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_mutation() {
     let mut f = prepared_call(ResponseMode::Status(503)).await;
     let db_path = f.directory.path().join("tenant.sqlite");
+    let other_intent = other_create_intent(&f.intent);
+    let other_authorization = f
+        .store
+        .authorize_held_create_for_test(
+            &f.identity,
+            &other_intent,
+            &QuotaPolicyV1::default(),
+            EXPIRY,
+        )
+        .expect("obtain a real capability bound to another create and session");
     let before_execute_head = f.store.head().unwrap();
     let coordinator = HeldCreateCoordinator::new(&f.store, &f.identity, &f.authorization);
     coordinator.lose_result_ack_once_for_test();
@@ -256,6 +274,11 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
         execution,
         Err(CoordinatorError::ControlUnavailable)
     ));
+    assert_eq!(
+        f.journal.candidate_refusal(),
+        Some(CandidateRefusal::Unavailable),
+        "a committed result with a lost confirmation records an indeterminate refusal"
+    );
 
     let candidate = f
         .journal
@@ -264,6 +287,9 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
         .clone();
     let (candidate_bytes_before_reopen, disk_candidate) = persisted_candidate(&f.journal_path);
     assert_eq!(disk_candidate, candidate);
+    let refusal_bytes_before_reopen = fs::read(f.journal_path.join("refusal.json")).unwrap();
+    let refusal: serde_json::Value = serde_json::from_slice(&refusal_bytes_before_reopen).unwrap();
+    assert_eq!(refusal["refusal"], "unavailable");
     assert!(
         !f.journal_path.join("ack.json").exists(),
         "the injected lost confirmation must leave the local ACK absent"
@@ -308,6 +334,14 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
     assert_eq!(recovered.phase(), RecoveryPhase::CandidateRetained);
     let mut journal = recovered.into_journal();
     assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::Unavailable)
+    );
+    assert_eq!(
+        fs::read(journal_path.join("refusal.json")).unwrap(),
+        refusal_bytes_before_reopen
+    );
     let (candidate_bytes_after_reopen, disk_candidate) = persisted_candidate(&journal_path);
     assert_eq!(candidate_bytes_after_reopen, candidate_bytes_before_reopen);
     assert_eq!(disk_candidate, candidate);
@@ -317,6 +351,36 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
         .worker_quota(&QuotaPolicyV1::default())
         .unwrap()
         .held_workers;
+    let wrong_coordinator =
+        HeldCreateCoordinator::new(&reopened, &f.identity, &other_authorization);
+    assert!(matches!(
+        wrong_coordinator.resume_result(&mut journal),
+        Err(CoordinatorError::ControlRejected)
+    ));
+    assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::Unavailable)
+    );
+    assert_eq!(
+        fs::read(journal_path.join("refusal.json")).unwrap(),
+        refusal_bytes_before_reopen
+    );
+    assert_eq!(
+        fs::read(journal_path.join("candidate.json")).unwrap(),
+        candidate_bytes_before_reopen
+    );
+    assert!(!journal_path.join("ack.json").exists());
+    assert_eq!(reopened.head().unwrap(), before_resume_head);
+    assert_eq!(result_events(&reopened).len(), before_resume_events.len());
+    assert_eq!(
+        reopened
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        before_resume_quota
+    );
+    drop(wrong_coordinator);
     let coordinator = HeldCreateCoordinator::new(&reopened, &f.identity, &f.authorization);
     let completion = coordinator
         .resume_result(&mut journal)
@@ -337,6 +401,15 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
     assert_eq!(persisted_ack(&journal_path), completion.receipt);
     let ack_bytes_after_resume = fs::read(journal_path.join("ack.json")).unwrap();
     assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::Unavailable),
+        "acknowledgement does not erase the first durable refusal"
+    );
+    assert_eq!(
+        fs::read(journal_path.join("refusal.json")).unwrap(),
+        refusal_bytes_before_reopen
+    );
     assert_eq!(
         f.peer.post_count(),
         1,
@@ -381,6 +454,10 @@ async fn lost_result_ack_resumes_the_committed_candidate_without_post_or_store_m
     assert_eq!(
         fs::read(journal_path.join("ack.json")).unwrap(),
         ack_bytes_after_resume
+    );
+    assert_eq!(
+        fs::read(journal_path.join("refusal.json")).unwrap(),
+        refusal_bytes_before_reopen
     );
 
     let mut changed_intent = f.intent.clone();
@@ -573,4 +650,245 @@ async fn expired_claim_window_is_unknown_without_mislabeling_authority_or_postin
             .held_workers,
         1
     );
+}
+
+#[test]
+fn stale_epoch_candidate_refusal_survives_reopen_without_result_event_or_ack() {
+    let StoreFixture {
+        _directory: directory,
+        store,
+        identity,
+        intent,
+    } = StoreFixture::new();
+    let quota = QuotaPolicyV1::default();
+    let authorization = store
+        .authorize_held_create_for_test(&identity, &intent, &quota, EXPIRY)
+        .unwrap();
+    let (reservation, reserved, replayed) = store
+        .reserve_kubernetes_create(&identity, &authorization, &intent)
+        .unwrap();
+    assert!(!replayed);
+    let claim = claim(&intent);
+    let journal_path = directory
+        .path()
+        .join(format!("private-stale-epoch-{}", intent.create_id));
+    fs::create_dir(&journal_path).unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut journal = AdmissionJournal::prepare(
+        Directory::open_existing(&journal_path).unwrap(),
+        AdmissionJournalProtection::new(Vec::new(), Vec::new()),
+        store.tenant_id(),
+        &intent,
+        prepare(&intent).unwrap(),
+        &reservation,
+        &reserved,
+        &claim,
+    )
+    .unwrap();
+    let (claim_response, fresh) = store
+        .claim_kubernetes_create(&identity, &authorization, &claim)
+        .unwrap();
+    assert_eq!(claim_response.snapshot.revision, 2);
+    let checkpoint = journal
+        .commit_emission_possible(&fresh.expect("real claim commit yields one proof"))
+        .unwrap();
+    journal.revalidate_emission(&checkpoint).unwrap();
+    let candidate = KubernetesCreateResultV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        create_id: intent.create_id.clone(),
+        intent_hash: intent.intent_hash().unwrap(),
+        claim_operation_id: claim.operation_id.clone(),
+        expected_revision: claim_response.snapshot.revision,
+        expected_create_epoch: claim_response.snapshot.create_epoch,
+        outcome: KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::TransportUnknown,
+            http_status: None,
+        },
+    };
+    journal.retain_candidate(&candidate, None).unwrap();
+    let cancellation = KubernetesCreateCancelV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        create_id: intent.create_id.clone(),
+        intent_hash: intent.intent_hash().unwrap(),
+        expected_revision: claim_response.snapshot.revision,
+        expected_create_epoch: claim_response.snapshot.create_epoch,
+    };
+    let (_, current, replayed) = store
+        .cancel_kubernetes_create(&identity, &authorization, &cancellation)
+        .unwrap();
+    assert!(!replayed);
+    assert_eq!(current.revision, 3);
+    assert_eq!(current.create_epoch, 2);
+    assert_eq!(current.state, KubernetesCreateStateV1::OwnershipUnknown);
+    assert!(current.quota_held);
+
+    let candidate_path = journal_path.join("candidate.json");
+    let candidate_bytes = fs::read(&candidate_path).unwrap();
+    let refusal_path = journal_path.join("refusal.json");
+    let before_resume_head = store.head().unwrap();
+    let coordinator = HeldCreateCoordinator::new(&store, &identity, &authorization);
+    assert!(matches!(
+        coordinator.resume_result(&mut journal),
+        Err(CoordinatorError::ControlRejected)
+    ));
+    assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::StaleEpoch)
+    );
+    assert_eq!(fs::read(&candidate_path).unwrap(), candidate_bytes);
+    assert!(!journal_path.join("ack.json").exists());
+    let refusal_bytes = fs::read(&refusal_path).expect("typed CAS refusal is durable");
+    let refusal: serde_json::Value = serde_json::from_slice(&refusal_bytes).unwrap();
+    assert_eq!(refusal["refusal"], "stale_epoch");
+    assert_eq!(
+        refusal["candidate_sha256"],
+        hex::encode(Sha256::digest(&candidate_bytes))
+    );
+    assert_eq!(store.head().unwrap(), before_resume_head);
+    assert!(result_events(&store).is_empty());
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+
+    let database_path = directory.path().join("tenant.sqlite");
+    drop(journal);
+    drop(coordinator);
+    drop(store);
+    let reopened = Store::open_existing_for_tenant(
+        &database_path,
+        "tenant-a",
+        crate::redaction::Redactor::new(Vec::new()),
+        10_000,
+    )
+    .unwrap();
+    assert!(!reopened.supervision_state().unwrap().active);
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&journal_path).unwrap(),
+        AdmissionJournalProtection::new(Vec::new(), Vec::new()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::CandidateRetained);
+    let journal = recovered.into_journal();
+    assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::StaleEpoch)
+    );
+    assert_eq!(fs::read(&candidate_path).unwrap(), candidate_bytes);
+    assert_eq!(fs::read(&refusal_path).unwrap(), refusal_bytes);
+    assert!(!journal_path.join("ack.json").exists());
+    assert_eq!(reopened.head().unwrap(), before_resume_head);
+    assert!(result_events(&reopened).is_empty());
+    assert_eq!(reopened.worker_quota(&quota).unwrap().held_workers, 1);
+    assert!(reopened.integrity().unwrap().valid);
+}
+
+#[test]
+fn mismatched_store_authorization_persists_control_refusal_before_exact_ack() {
+    let StoreFixture {
+        _directory: directory,
+        store,
+        identity,
+        intent,
+    } = StoreFixture::new();
+    let quota = QuotaPolicyV1::default();
+    let authorization = store
+        .authorize_held_create_for_test(&identity, &intent, &quota, EXPIRY)
+        .unwrap();
+    let other_intent = other_create_intent(&intent);
+    let other_authorization = store
+        .authorize_held_create_for_test(&identity, &other_intent, &quota, EXPIRY)
+        .expect("the mismatched authority is still a real Store-issued capability");
+    let (reservation, reserved, replayed) = store
+        .reserve_kubernetes_create(&identity, &authorization, &intent)
+        .unwrap();
+    assert!(!replayed);
+    let claim = claim(&intent);
+    let journal_path = directory
+        .path()
+        .join(format!("private-control-refusal-{}", intent.create_id));
+    fs::create_dir(&journal_path).unwrap();
+    fs::set_permissions(&journal_path, fs::Permissions::from_mode(0o700)).unwrap();
+    let prepared = prepare(&intent).unwrap();
+    let mut journal = AdmissionJournal::prepare(
+        Directory::open_existing(&journal_path).unwrap(),
+        AdmissionJournalProtection::new(Vec::new(), Vec::new()),
+        store.tenant_id(),
+        &intent,
+        prepared,
+        &reservation,
+        &reserved,
+        &claim,
+    )
+    .unwrap();
+    let (claim_response, fresh) = store
+        .claim_kubernetes_create(&identity, &authorization, &claim)
+        .unwrap();
+    let checkpoint = journal
+        .commit_emission_possible(&fresh.expect("claim is committed in the real Store"))
+        .unwrap();
+    journal.revalidate_emission(&checkpoint).unwrap();
+    let candidate = KubernetesCreateResultV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        create_id: intent.create_id.clone(),
+        intent_hash: intent.intent_hash().unwrap(),
+        claim_operation_id: claim.operation_id.clone(),
+        expected_revision: claim_response.snapshot.revision,
+        expected_create_epoch: claim_response.snapshot.create_epoch,
+        outcome: KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::TransportUnknown,
+            http_status: None,
+        },
+    };
+    journal.retain_candidate(&candidate, None).unwrap();
+
+    let head_before_refusal = store.head().unwrap();
+    let wrong_coordinator = HeldCreateCoordinator::new(&store, &identity, &other_authorization);
+    assert!(matches!(
+        wrong_coordinator.resume_result(&mut journal),
+        Err(CoordinatorError::ControlRejected)
+    ));
+    assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::ControlRejected)
+    );
+    let candidate_bytes = fs::read(journal_path.join("candidate.json")).unwrap();
+    let refusal_bytes = fs::read(journal_path.join("refusal.json")).unwrap();
+    let refusal: serde_json::Value = serde_json::from_slice(&refusal_bytes).unwrap();
+    assert_eq!(refusal["refusal"], "control_rejected");
+    assert!(!journal_path.join("ack.json").exists());
+    assert!(result_events(&store).is_empty());
+    assert_eq!(store.head().unwrap(), head_before_refusal);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    drop(wrong_coordinator);
+
+    let coordinator = HeldCreateCoordinator::new(&store, &identity, &authorization);
+    let completion = coordinator
+        .resume_result(&mut journal)
+        .expect("the exact candidate succeeds after using its matching Store capability");
+    assert!(completion.handle.is_none());
+    assert_eq!(completion.receipt.operation_id, candidate.operation_id);
+    assert_eq!(completion.outcome, candidate.outcome);
+    assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::ControlRejected),
+        "a later successful ACK cannot erase the first refusal"
+    );
+    assert_eq!(
+        fs::read(journal_path.join("candidate.json")).unwrap(),
+        candidate_bytes
+    );
+    assert_eq!(
+        fs::read(journal_path.join("refusal.json")).unwrap(),
+        refusal_bytes
+    );
+    assert_eq!(persisted_ack(&journal_path), completion.receipt);
+    assert_eq!(result_events(&store).len(), 1);
+    assert_eq!(store.worker_quota(&quota).unwrap().held_workers, 1);
+    assert!(store.integrity().unwrap().valid);
 }

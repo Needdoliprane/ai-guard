@@ -306,6 +306,10 @@ fn held_journal_retains_one_exact_candidate_and_first_refusal_across_reopen() {
     journal
         .retain_candidate(&candidate, Some(CandidateRefusal::StaleEpoch))
         .unwrap();
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::StaleEpoch)
+    );
     let candidate_bytes = fs::read(fixture.root.path().join("candidate.json")).unwrap();
     let refusal_bytes = fs::read(fixture.root.path().join("refusal.json")).unwrap();
     journal
@@ -334,8 +338,72 @@ fn held_journal_retains_one_exact_candidate_and_first_refusal_across_reopen() {
     assert_eq!(recovered.phase(), RecoveryPhase::CandidateRetained);
     let mut journal = recovered.into_journal();
     assert_eq!(journal.candidate(), Some(&candidate));
+    assert_eq!(
+        journal.candidate_refusal(),
+        Some(CandidateRefusal::StaleEpoch)
+    );
     journal.retain_candidate(&candidate, None).unwrap();
     assert_eq!(names(fixture.root.path()).len(), 6);
+}
+
+#[test]
+fn held_journal_refusal_codes_roundtrip_closed_and_preserve_first() {
+    let variants = [
+        (CandidateRefusal::StaleRevision, "stale_revision"),
+        (CandidateRefusal::StaleEpoch, "stale_epoch"),
+        (CandidateRefusal::ControlRejected, "control_rejected"),
+        (CandidateRefusal::Unavailable, "unavailable"),
+    ];
+    for (refusal, expected) in variants {
+        let fixture = Fixture::new();
+        let mut journal = fixture.historical_emission();
+        let candidate = fixture.candidate();
+        journal.retain_candidate(&candidate, Some(refusal)).unwrap();
+        assert_eq!(journal.candidate_refusal(), Some(refusal));
+        let bytes = fs::read(fixture.root.path().join("refusal.json")).unwrap();
+        let record: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(record["refusal"], expected);
+        assert_eq!(
+            record["candidate_sha256"],
+            hex::encode(Sha256::digest(
+                fs::read(fixture.root.path().join("candidate.json")).unwrap()
+            ))
+        );
+
+        drop(journal);
+        let recovered = fixture.recover().unwrap().unwrap();
+        let mut journal = recovered.into_journal();
+        assert_eq!(journal.candidate_refusal(), Some(refusal));
+        assert_eq!(
+            fs::read(fixture.root.path().join("refusal.json")).unwrap(),
+            bytes
+        );
+        let replacement =
+            journal.retain_candidate(&candidate, Some(CandidateRefusal::ControlRejected));
+        if refusal == CandidateRefusal::ControlRejected {
+            replacement.unwrap();
+        } else {
+            assert!(matches!(replacement, Err(JournalError::Conflict)));
+        }
+        assert_eq!(journal.candidate_refusal(), Some(refusal));
+        assert_eq!(
+            fs::read(fixture.root.path().join("refusal.json")).unwrap(),
+            bytes
+        );
+    }
+
+    let fixture = Fixture::new();
+    let mut journal = fixture.historical_emission();
+    let candidate = fixture.candidate();
+    journal
+        .retain_candidate(&candidate, Some(CandidateRefusal::Unavailable))
+        .unwrap();
+    let refusal_path = fixture.root.path().join("refusal.json");
+    let mut unknown: Value = serde_json::from_slice(&fs::read(&refusal_path).unwrap()).unwrap();
+    unknown["refusal"] = Value::String("future_code".into());
+    private_write(&refusal_path, &serde_json::to_vec(&unknown).unwrap());
+    drop(journal);
+    assert!(matches!(fixture.recover(), Err(JournalError::Corrupt)));
 }
 
 #[test]
