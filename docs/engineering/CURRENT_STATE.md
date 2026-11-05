@@ -1,5 +1,25 @@
 # État constaté — suivi du développement
 
+## 5 novembre — réconciliation après annulation, périmètre logiciel vérifié
+
+Le broker peut réconcilier le terminal du worker annulé déjà possédé, sans
+nouveau start, helper ou retrait de gardien. Autorité/CID, Arm/claim historiques,
+configuration et StartedAt doivent correspondre ; les inconnues conservent
+le quota. La transaction Terminal enregistre l'allocation unique non facturable.
+Après perte de réponse, le résultat retenu reprend sa publication idempotente.
+Quatre nouveaux parents puis deux canaris PASS ; compilation toutes cibles
+sans avertissement et format ciblé PASS. Revue indépendante et corrections
+des guides EN/FR traitées ; code `f738662` composé en `7cdb969`, sources Rust
+égales au gel vérifié. [Preuves et limites](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation).
+
+Les nouveaux parents utilisent des observations runtime synthétiques et un
+Writer de fixture à 60 s ; le produit garde 10 s, non qualifiés pour ce parcours.
+Stopping reste relu, sans scénario distinct ; reprise froide, D5/fencing et
+moteurs réels restent ouverts. L'optimisation envisagée du Writer est rejetée
+après revue pour préserver les contrôles tardifs, sans lancer son test
+exploratoire ni le pousser. QA fermée sans OOM ; preuves conservées.
+G09 reste FAIL, 0/12 gates globaux clos.
+
 ## 5 novembre — documentation alignée sur les accès humains existants
 
 Les prérequis d'exploitation pointent désormais vers les guides d'identité
@@ -14,9 +34,9 @@ liens corrigés et vérifiés ; aucune nouvelle qualification SSO ou frontend.
 Le contrat Kubernetes retenu est précisé et ses trois écarts de revue traités,
 sans code CREATE ni action cluster. Les donneurs documentaires sont intégrés,
 poussés, leurs références distantes vérifiées, puis retirés normalement après
-fin des consommateurs ; branches et preuves conservées. La reprise d'un
-worker annulé demeure un chantier séparé en validation : le défaut d'état est
-reproduit, le correctif n'est pas encore intégré. G09 reste FAIL, 0/12 gates clos.
+fin des consommateurs ; branches et preuves conservées. À ce gel documentaire,
+la reprise d'un worker annulé était encore en validation ; le résultat logiciel
+plus récent figure ci-dessus. G09 reste FAIL, 0/12 gates clos.
 
 ## 4 novembre — direction Kubernetes locale approuvée, aucune admission ajoutée
 

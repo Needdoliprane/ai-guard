@@ -252,6 +252,12 @@ AIGUARD_RESUME="<new-resume-command-uuid>"
 
 Resume conserve intention acceptée, credentials, autorité runtime, échéances originales et claims consommés. Il ne donne ni autre start ni renouvellement de durée. Une capacité source fraîche n'est admise que par les contrôles produit de source figée pour l'étape pré-managed concernée ; ne pas modifier source, binding ou checkpoint pour les faire passer. Une dépendance indisponible, un runtime ambigu ou une réconciliation refusée reste une erreur explicite.
 
+Après une annulation durable, la réconciliation d'un worker précédemment Running ou Stopping utilise uniquement son autorité runtime retenue et son identifiant de conteneur immuable. Une observation terminale complète doit correspondre à l'ownership conservé, à la configuration, aux limites de ressources et au démarrage observé centralement. Seule la transaction centrale durable enregistrant Terminal libère le quota d'allocation. Le relevé reste non facturable ; répéter la réconciliation n'ajoute pas d'allocation. Une observation indisponible, encore active ou divergente conserve le quota et signale une erreur de réconciliation.
+
+Cette observation n'émet aucun nouveau start, helper, cleanup ou retrait du gardien, et ne renouvelle aucune échéance. Consulter `status` après l'accusé de commande : accepter Resume n'est pas un résultat terminal. Resume exige toujours le contrôle compatible actif et les prérequis Full indiqués plus haut ; `--recovery-only` ne l'active pas et ne réactive pas un contrôle inactif.
+
+Le code couvre Running et Stopping ; les essais ciblés portent actuellement sur Running uniquement, avec des observations runtime synthétiques et un budget Writer de fixture de 60 secondes. La fiabilité sous le budget produit normal de réponse du Writer de 10 secondes reste non qualifiée. Une erreur ou une perte d'accusé peut suivre une transition terminale durable : examiner `status` avant de conclure à l'échec ou de réessayer. Ces résultats ne fournissent pas de reprise froide d'un contrôle inactif. Voir le [périmètre de validation](../../engineering/TEST_STRATEGY.md#réconciliation-après-cancel--sélection-logicielle-warm).
+
 ## Exporter vers une destination neuve
 
 Après examen des décisions, résultats observés et changements, demander un export audité du job accepté. Le répertoire parent doit déjà exister sous une racine d'export permise ; la destination doit être **neuve**, hors du projet source et du stockage privé du contrôle. L'original n'est jamais réécrit automatiquement.

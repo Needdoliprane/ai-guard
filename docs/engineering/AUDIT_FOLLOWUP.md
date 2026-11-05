@@ -1,5 +1,23 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Reprise après annulation — 5 novembre 2026
+
+Défaut d'état reproduit sur le code courant, puis défaut distinct de publication
+après perte de réponse identifié en revue et reproduit avant correction.
+Le broker réconcilie l'observation terminale de l'autorité retenue et reprend
+le résultat durable sans nouvelle émission runtime. Code `f738662` composé en
+`7cdb969`, quatre nouveaux parents et deux canaris PASS, toutes cibles et
+format ciblé PASS ; revue indépendante et guides EN/FR traités.
+[Reproductions, gels, commandes et limites](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation).
+
+Cette preuve fonctionnelle à 60 s ne qualifie pas le Writer produit à 10 s,
+la reprise froide, D5 ou un vrai moteur. Elle ne confirme pas le candidat outbox
+du rapport externe. Sa proposition parallèle de réduction des lectures est
+rejetée après revue, sans modifier les contrôles tardifs. Les SHA des pièces
+externes revérifiés le 5 novembre restent ceux consignés ci-dessous ; audit
+externe encore distinct, aucun résultat ou fichier original modifié.
+G09 reste FAIL, aucun gate global clos.
+
 ## Diagnostic opérateur après intégration — 4 novembre 2026
 
 Le refus trompeur d'un journal requis absent est reproduit puis corrigé dans

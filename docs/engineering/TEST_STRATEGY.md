@@ -31,6 +31,43 @@ est détenu et fermé sans lancer de worker. Ce périmètre logiciel ne qualifie
 ni panne de disque ni reprise runtime. Les commandes et gels sont dans
 [VALIDATION](VALIDATION.md#4-novembre--journal-requis-absent-et-diagnostic-de-récupération).
 
+## Réconciliation après Cancel — sélection logicielle warm
+
+Le chemin de reprise vise un job durablement annulé avec worker `Running`
+ou `Stopping`, sans nouvelle autorisation de démarrage. Les quatre parents
+de `runner::broker::executor::journal::tests::cancelled_recovery_tests`
+amorcent un worker `Running` : terminal exact avec Owned initial Running,
+terminal exact avec Owned initial Created, refus d'observations divergentes,
+et perte de réponse HTTP après commit terminal puis replay du résultat.
+Vérifier quota tenu sur inconnue/divergence, libération seulement par la
+transaction terminale admissible, allocation unique non facturable, même CID/Arm/claim,
+UUID et reçu d'audit du résultat conservés, puis acquittement local idempotent.
+Ces parents ne constituent pas une preuve distincte de l'état `Stopping`.
+
+Store SQLite, HTTP, Journal et Writer sont réels ; les observations moteur
+proviennent d'un programme Rust synthétique. Le seed séquentiel utilise un
+seul runtime de test et un `spawn_blocking` joint, sans augmentation de pile.
+Aucune qualification Docker/Podman, reprise froide, fencing ou D5 n'en découle.
+La sélection finale dans la QA confinée passe : quatre parents, zéro échec,
+zéro ignoré, RC0. Les temps et gels exacts, ainsi que le nettoyage des seuls
+diagnostics temporaires, sont consignés dans
+[VALIDATION](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation) :
+
+```sh
+cargo test --locked --lib runner::broker::executor::journal::tests::cancelled_recovery_tests:: -- --nocapture --test-threads=1
+```
+
+Ce groupe demande explicitement un timeout Writer de fixture de 60 s pour
+isoler le comportement métier. Les autres fixtures et le produit conservent
+10 s. Le diagnostic à 10 s confirme un timeout de réception ; le snapshot
+ultérieur retrouve les ACK durables, sans dater le commit par rapport au timeout.
+Un appel `acknowledge_events` a ensuite été mesuré à
+10 303 ms de temps mural sur QA à 1 CPU/debug, avec hôte M3 chargé. Ce temps inclusif
+ne mesure ni CPU consommé, ni fsync isolé, ni p95 ou performance produit.
+Un résultat à 60 s ne qualifie pas le budget produit de 10 s. Sa fiabilité/performance
+et la vraie reprise/fencing restent des écarts P1 ouverts ; voir les
+[gates](PRODUCTION_READINESS.md) et le [contrat de supervision](BROKER_SUPERVISION.md).
+
 ## Coût de la présence — compteur et échantillons manuels
 
 Le compteur test attribue chaque sync d'ancêtre de `durable_bootstrap` au

@@ -1,5 +1,28 @@
 # Plan d'industrialisation
 
+## P1 — réconciliation warm après annulation
+
+Base `361bf69`, donneur `codex/cancelled-recovery-driver-20261104` :
+réconcilier uniquement une observation terminale admissible du worker déjà
+possédé après Cancel durable, puis reprendre la publication du résultat retenu
+après perte d'ACK. Aucun nouveau start/Arm/claim, nettoyage moteur ou retrait
+de gardien. Les quatre parents ciblés utilisent Store/HTTP/Journal réels et
+un runtime synthétique ; [sélection et commande](TEST_STRATEGY.md#réconciliation-après-cancel--sélection-logicielle-warm).
+Les quatre parents passent sur le gel propre, puis deux canaris et la compilation
+toutes cibles passent après retrait des seuls diagnostics temporaires. Aucune
+qualification moteur, reprise froide, fencing ou D5 n'en découle ; le
+[bilan](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation)
+distingue les gels et les limites.
+
+Le budget Writer de 60 s est explicite et limité à cette fixture métier.
+Le produit et les autres fixtures conservent 10 s. Le refus à 10 s est identifié
+comme timeout de réception ; le snapshot ultérieur retrouve les ACK durables,
+sans dater le commit par rapport au timeout. Mesure inclusive de 10 303 ms sur
+QA à 1 CPU/debug avec hôte M3 chargé, sans mesure CPU/fsync isolé/p95 ni preuve
+de performance produit. P1 reste ouvert pour la fiabilité du budget produit de 10 s,
+la vraie reprise et le fencing. Un succès métier à 60 s ne ferme aucun de ces
+écarts ni G09 ; aucun mandat local/cloud ou de capacité n'est réduit.
+
 ## Registre multi-hôtes — provisionnement opérateur des grants broker
 
 Base `b77edbf`, donneur `codex/broker-grants-cli-20261104`. Core : cinq
@@ -14,9 +37,10 @@ Onze fonctions uniques et compilation toutes cibles PASS ;
 Les obligations suivantes restent ouvertes : reprise broker et retrait sûr
 des gardiens, transport runtime du relais sous la décision déjà soumise,
 fédération complète et admission Kubernetes, puis qualifications réelles.
-Le harnais distinct d'observation d'un worker annulé est conservé inachevé,
-sans correction applicative ni reproduction métier revendiquée. Poursuivre
-les travaux indépendants sans transformer cet échec de setup en blocage global.
+Au gel de ce lot grants, le harnais distinct d'observation d'un worker annulé
+était conservé inachevé, sans correction applicative ni reproduction métier
+revendiquée. Le suivi P1 ci-dessus décrit sa reprise ; cet ancien échec de
+setup ne bloque pas les travaux indépendants.
 
 ## Build — prérequis structurels avant appel moteur
 

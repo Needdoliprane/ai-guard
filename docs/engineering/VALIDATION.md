@@ -1,5 +1,111 @@
 # Validation courante
 
+## 5 novembre — réconciliation logicielle après annulation
+
+**Changements intégrés.** Base `361bf69`, donneur
+`codex/cancelled-recovery-driver-20261104`, code `f738662` composé en `7cdb969`.
+Les arbres Rust/tests, Cargo et toolchain des deux commits sont égaux ; les
+cinq fichiers concernés correspondent au gel nettoyé vérifié. Le chemin Cancel conserve son
+autorité runtime et vérifie CID, ownership, Arm/claim historiques, configuration
+et StartedAt central avant d'accepter une observation terminale. Une observation
+inconnue, encore active ou divergente ne libère pas le quota. La transaction
+centrale Terminal produit une allocation unique, non facturable. La reprise
+termine aussi la publication du résultat déjà retenu si l'accusé HTTP a été
+perdu après commit ; aucun nouveau start, helper, cleanup, retrait de gardien
+ou renouvellement d'échéance. Le chemin actif est extrait sans changer ses
+gardes ni leur ordre ; les futures lourdes sont placées sur le tas, sans
+augmenter les piles de threads.
+
+**Reproductions et diagnostics conservés.** Le premier parcours déborde la
+pile debug avant l'oracle. Après séparation des futures, le RED métier atteint
+Running au lieu du Terminal attendu (RC101). La revue indépendante identifie
+ensuite un rejeu Terminal qui conserve `output_acknowledged=false` : la coupure
+de réponse après le vrai commit HTTP reproduit ce défaut, puis un correctif
+ciblé passe le même parent sur le gel intermédiaire instrumenté. Cette preuve
+intermédiaire ne remplace pas la sélection finale propre.
+
+| Observation | Résultat et limite |
+|---|---|
+| RED après séparation des futures | 1 FAIL, 0 PASS, 97,03 s ; état Running inchangé. Les assertions suivantes ne sont pas comptées comme exécutées. |
+| Trois parents avec Writer de 10 s | 0 PASS, 3 FAIL, 888,29 s. Timeout de réception confirmé ; les snapshots ultérieurs retrouvent les ACK durables, sans dater le commit par rapport au timeout. Aucune perte des données n'est établie. |
+| Mesure comparative à 60 s | ACK inclusif mesuré à 10 303 ms ; le parent échoue ensuite sur un littéral de date non canonique, corrigé uniquement dans l'attendu. Ce n'est pas un PASS complet. |
+| Perte d'ACK, RED ciblé | 1 FAIL, 203,03 s, coupure consommée après commit ; le rejeu laisse le marqueur local faux. |
+| Perte d'ACK, GREEN intermédiaire | 1 PASS, 0 FAIL, 0 ignorée, RC0, 245,78 s ; UUID, séquence d'audit, allocation et appels runtime stables après deux reprises. |
+| Quatre parents, source propre | 4 PASS, 0 FAIL, 0 ignorée, 378 filtrées, RC0 ; compilation 86 s puis tests 1 431,06 s. Les huit refus et la reprise valide partagent un seul parent, sans gonfler le compteur. |
+
+Le gel propre contient `executor.rs` SHA `bf8a06ac31c17a7ba4d1c40a231f35025adcbce762c6204ae20f6c172e238a80`
+et `cancelled.rs` SHA `a1561d6c5633b0eec28edc847b0fcdf00659dfac10dddb0169934b86ac86ae7c`.
+`writer.rs` et `results.rs` sont identiques à la base ; aucune instrumentation
+temporaire ni correction générale d'outbox n'y subsiste. Les revues de source
+traitent aussi l'étiquette de phase Worker pour l'échec de publication.
+La revue des guides précise la libération par transaction plutôt que réception
+de l'ACK, puis corrige la chronologie non établie des snapshots après timeout.
+Ces remarques sont confirmées traitées. Contrôle des 574 liens relatifs dans
+les huit documents et des deux nouvelles ancres : PASS ; scan limité aux trois
+littéraux secrets connus : aucune occurrence, sans garantie universelle.
+
+Après ce terminal, un test diagnostique ignoré non sélectionné et l'attribut
+`allow(dead_code)` devenu inutile sont retirés. Aucun code applicatif ni oracle
+des quatre parents n'est modifié ; le gel précédent reste conservé. Le nouveau
+gel porte `journal_tests.rs` SHA `78ce87221968c7e8fab9eceb5fd0db82c65366cfbec19da0b940b554a28dbfeb`
+et `cancelled_recovery_fixture.rs` SHA `21006aa087af7f326bbb21640c32ad8deba01fc080c480006759568c690c4f01`.
+Deux canaris historiques passent sur ce gel : conflit de draft conservant Cancel
+et outbox acquittée ; rejeu RPC non frais et perte de binding refusée avant HTTP.
+2 PASS, 0 FAIL, 0 ignorée, RC0, compilation 37,58 s et tests 10,23 s ; leur Writer
+reste à 10 s, sans transférer cette preuve aux scénarios Recovery à 60 s.
+`cargo check --all-targets` termine RC0 en 54 s, sans avertissement. Format Rust
+ciblé et `git diff --check` passent. Revue indépendante finale sans blocage source
+dans ce périmètre, nettoyage et corrections des guides EN/FR confirmés.
+Commande ciblée des quatre parents :
+
+```text
+cargo test --locked --offline --manifest-path /inputs/cancelled-final/Cargo.toml --lib runner::broker::executor::journal::tests::cancelled_recovery_tests -- --nocapture --test-threads=1
+cargo test --locked --offline --manifest-path /inputs/cancelled-final-clean/Cargo.toml --lib runner::broker::executor::journal::tests::committed_ -- --nocapture --test-threads=1
+cargo check --locked --offline --manifest-path /inputs/cancelled-final-clean/Cargo.toml --all-targets
+```
+
+QA Linux ARM64, Rust 1.99.1, environnement vide reconstruit par allowlist,
+sans réseau, source/cache publics montés en lecture seule, UID 1000, racine
+en lecture seule, capabilities retirées et no-new-privileges, 1 CPU/6 Gio/PID 256.
+Scratch privé limité en bytes/inodes, aucun home, socket ou credential hôte.
+Log final SHA `c26629344e254803de351dac4d2f5218be8c4b93edc8a5bfb4af03546afe2766` ;
+canaris SHA `16f6465837996e08d4af16f40af6ef6abb0a8c0cdbb3957fd0477f291081f7b5`,
+toutes cibles SHA `99ed266825843b180de7d5706f3737d6b1b22fd162e2def75592a3af6041dfc0`.
+Logs et revues privés préservés séparément des artefacts d'exécution. Six fonctions
+uniques passent au total ; les rejeux et diagnostics intermédiaires ne sont pas
+additionnés. Aucun test ignoré, modèle ou campagne E2E générale lancé ici.
+Après fin naturelle des commandes, l'inventaire du conteneur QA ne contient plus
+que init/sleep. Arrêt normal : PID 0, exit 143, OOM false, puis suppression de ce
+seul conteneur possédé. Aucun volume, image partagée ou processus externe supprimé.
+Une archive privée distincte conserve les sources, deux variantes de fixture,
+17 logs capturés par le parent et cinq revues : manifeste de 30 fichiers vérifié.
+Aucun exécutable ni fichier du scratch cible n'y est promu.
+
+**Périmètre.** Store SQLite, HTTP, Journal et Writer réels ; observations moteur
+synthétiques, enforcer natif vide. Tous les nouveaux parents amorcent Running ;
+Stopping reste seulement relu dans le code. Le constructeur commun et le serveur
+gardent 10 s ; seule RecoveryFixture demande explicitement 60 s. Un succès
+fonctionnel à 60 s ne qualifie pas le budget produit de 10 s, qui reste un écart
+P1 ouvert. Les temps sont muraux, sur QA Linux ARM64 à 1 CPU/debug et hôte M3
+sous charge ; ce ne sont ni des mesures CPU, ni fsync isolé, ni p95.
+
+**NOT_RUN :** Docker/Podman produit, Kubernetes, reprise froide, fencing/D5,
+panne physique, charge et capacité 100. **BLOCKED :** Clippy de la toolchain
+Linux absent, sans téléchargement supplémentaire autorisé. Aucun gate global
+clos ; G09 reste FAIL. Les pièces de l'audit externe demeurent en lecture seule ;
+ce lot n'est ni un audit global ni une confirmation de son candidat outbox.
+
+**Diagnostic parallèle, sans correctif.** La lecture source compte quatre
+lectures complètes et sept inventaires globaux pour un ACK modifiant l'outbox.
+La proposition de supprimer la dernière lecture est rejetée pour ce lot :
+replay historique et contrôles tardifs après `BeforeAck` ne sont pas équivalents
+à un job déjà confirmé suivi d'un simple `check_writer`. Aucun gain de durée
+n'est démontré. Le test de coût préparatoire reste exploratoire NOT_RUN et
+n'est pas ajouté au dépôt. Sources et deux revues sont préservées dans l'archive
+privée `writer-ack-design-20261105`, manifeste de six fichiers vérifié ; le
+worktree possédé est redevenu propre puis retiré normalement après fin du
+consommateur et relevé lsof vide. Ni délai produit ni contrôle de sûreté modifié.
+
 ## 5 novembre — cohérence des guides et contrats Kubernetes
 
 **Changements.** L'exploitation, l'introduction et le périmètre de `docs/ui.md`,

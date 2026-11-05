@@ -252,6 +252,12 @@ AIGUARD_RESUME="<new-resume-command-uuid>"
 
 Resume preserves the accepted intent, credentials, runtime authority, original deadlines and consumed claims. It cannot grant another start or renew a duration. A fresh source capability is allowed only by the product's frozen-source checks for the relevant pre-managed stage; do not edit a source, binding or checkpoint to force them to pass. An unavailable dependency, ambiguous runtime state or refused reconciliation remains an explicit error.
 
+After a durable cancellation, reconciliation of a previously Running or Stopping worker uses only its retained runtime authority and immutable container ID. A complete terminal observation must match the retained ownership, configuration, resource limits and centrally observed start time. Only the gateway's durable transaction recording Terminal releases the allocation quota. The allocation record remains nonbillable, and repeating reconciliation does not add another allocation. An unavailable, still-running or divergent observation leaves the quota held and reports a reconciliation error.
+
+This observation performs no new start, helper, cleanup or enforcer retirement, and does not renew a deadline. Use `status` after the command acknowledgement: accepting Resume is not a terminal result. Resume still requires the normal active compatible control and Full service prerequisites above; `--recovery-only` does not enable it or reactivate an inactive control.
+
+The code covers Running and Stopping; targeted tests currently exercise Running only, using synthetic runtime observations and a 60-second fixture writer budget. Reliability under the product's normal 10-second writer reply budget remains unqualified. An error or lost acknowledgement may follow a durable terminal transition: inspect `status` before concluding failure or retrying. These results do not provide cold recovery of an inactive control. See the [validation scope](../../engineering/TEST_STRATEGY.md#réconciliation-après-cancel--sélection-logicielle-warm).
+
 ## Export into a new destination
 
 After reviewing decisions, observed results and changes, request an audited export from the accepted job. The parent directory must already exist under an allowed export root; the destination must be **new**, outside the source project and private control storage. The original is never rewritten automatically.

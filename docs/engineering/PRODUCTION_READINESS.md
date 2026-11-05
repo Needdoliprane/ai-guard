@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Réconciliation après annulation, 5 novembre : quatre parents fonctionnels
+et deux canaris PASS, compilation toutes cibles et format ciblé PASS, revue
+indépendante traitée. Le terminal retenu et sa publication convergent sans
+nouveau start ; [preuves et limites](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation).
+La fixture métier choisit 60 s ; la fiabilité du Writer produit à 10 s reste
+ouverte. Ni reprise froide, D5/fencing, runtime réel ou capacité qualifiés.
+G09 reste FAIL, 0/12 gates clos ; Clippy Linux BLOCKED.
+
 Grants broker depuis le CLI,4novembre : préparation/rejeu durable, contrôle
 de périmètre, CAS, révocation et normalisation des reçus ; 11 fonctions
 ciblées uniques, format et compilation toutes cibles PASS, revue traitée.
