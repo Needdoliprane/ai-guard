@@ -1,5 +1,8 @@
 //! Real Journal/Writer and gateway contracts. The native enforcer remains empty;
-//! no engine program, registration, start or stop is exercised by these tests.
+//! no engine program, registration, start or stop is exercised by the tests in
+//! this file. The child recovery module declares its synthetic engine fixture.
+#[path = "cancelled_recovery_tests.rs"]
+mod cancelled_recovery_tests;
 use super::*;
 use crate::{
     api::{GatewayState, gateway_router},
@@ -24,7 +27,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::AtomicUsize,
+    sync::atomic::{AtomicBool, AtomicUsize},
 };
 
 const TENANT: &str = "tenant-committed-draft-test";
@@ -32,8 +35,6 @@ const RUNNER: &str = "runner-committed-draft-aaaaaaaaaaaaaaaaaaaaaaaa";
 const VIEWER: &str = "viewer-committed-draft-bbbbbbbbbbbbbbbbbbbbbbbb";
 #[cfg(target_os = "macos")]
 const PRIVATE_TMP: &str = "/private/tmp";
-#[cfg(target_os = "linux")]
-const PRIVATE_TMP: &str = "/tmp";
 
 thread_local! {
     static MOVE_BINDING_ONCE: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
@@ -47,12 +48,14 @@ pub(super) fn before_commit() -> Result<()> {
 }
 
 struct Fixture {
+    store: Arc<Store>,
     journal: Journal,
     writer: WriterClient,
     scope: JournalScopeV1,
     client: AuditClient,
     config: Directory,
     requests: Arc<AtomicUsize>,
+    drop_next_worker_transition_response: Arc<AtomicBool>,
     gateway: tokio::task::JoinHandle<()>,
     root: tempfile::TempDir,
 }
@@ -66,10 +69,18 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::new_with_writer_timeout(Duration::from_secs(10)).await
+    }
+
+    async fn new_with_writer_timeout(writer_timeout: Duration) -> Self {
+        #[cfg(target_os = "linux")]
+        let temporary_root = std::env::temp_dir();
+        #[cfg(target_os = "macos")]
+        let temporary_root = PathBuf::from(PRIVATE_TMP);
         let root = tempfile::Builder::new()
             .prefix("cd-")
             .permissions(fs::Permissions::from_mode(0o700))
-            .tempdir_in(PRIVATE_TMP)
+            .tempdir_in(temporary_root)
             .unwrap();
         let base = root.path().canonicalize().unwrap();
         let store = Arc::new(
@@ -95,8 +106,10 @@ impl Fixture {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&requests);
+        let drop_next_worker_transition_response = Arc::new(AtomicBool::new(false));
+        let observed_fault = Arc::clone(&drop_next_worker_transition_response);
         let app = gateway_router(GatewayState::new(
-            store,
+            Arc::clone(&store),
             RUNNER.into(),
             VIEWER.into(),
             Policy::default(),
@@ -106,11 +119,43 @@ impl Fixture {
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let observed = Arc::clone(&observed);
+                let observed_fault = Arc::clone(&observed_fault);
                 async move {
-                    if request.uri().path() == "/api/decide" {
+                    let decision = request.uri().path() == "/api/decide";
+                    let worker_transition = request.method() == axum::http::Method::POST
+                        && request.uri().path().starts_with("/api/v1/workers/")
+                        && request.uri().path().ends_with("/transitions");
+                    if decision {
                         observed.fetch_add(1, Ordering::SeqCst);
+                        eprintln!("cancelled_recovery_fixture phase=decision_http_enter");
                     }
-                    next.run(request).await
+                    let response = next.run(request).await;
+                    if decision {
+                        eprintln!("cancelled_recovery_fixture phase=decision_http_complete");
+                    }
+                    if worker_transition
+                        && response.status().is_success()
+                        && observed_fault.swap(false, Ordering::SeqCst)
+                    {
+                        eprintln!(
+                            "cancelled_recovery_fixture phase=worker_transition_response_cut"
+                        );
+                        // The real handler has returned a successful response
+                        // after committing. Fail its body stream so the client
+                        // cannot receive the durable transition acknowledgement.
+                        let (mut parts, _) = response.into_parts();
+                        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+                        let body = axum::body::Body::from_stream(futures_util::stream::once(
+                            std::future::ready(Err::<axum::body::Bytes, std::io::Error>(
+                                std::io::Error::new(
+                                    std::io::ErrorKind::ConnectionReset,
+                                    "test fixture drops the committed transition acknowledgement",
+                                ),
+                            )),
+                        ));
+                        return axum::response::Response::from_parts(parts, body);
+                    }
+                    response
                 }
             },
         ));
@@ -133,14 +178,16 @@ impl Fixture {
             ControlSecrets::new(vec![]).unwrap(),
         )
         .unwrap();
-        let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(10)).unwrap();
+        let writer = WriterClient::start(journal.clone(), 8, writer_timeout).unwrap();
         Self {
+            store,
             journal,
             writer,
             scope,
             client: AuditClient::new(&origin, RUNNER).unwrap(),
             config,
             requests,
+            drop_next_worker_transition_response,
             gateway,
             root,
         }
@@ -212,6 +259,7 @@ struct NativePeer {
     client: EnforcerClient,
     child: NativeChild,
 }
+
 struct NativeChild(Child);
 impl Drop for NativeChild {
     fn drop(&mut self) {

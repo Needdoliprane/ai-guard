@@ -1,5 +1,6 @@
 //! Batch execution from a durable intention. Journal I/O is delegated to the
 //! bounded writer; the enforcer owns stop independently of that writer.
+mod cancelled;
 mod diagnostics;
 mod helpers;
 mod journal;
@@ -216,7 +217,7 @@ impl BatchExecutor {
         let execution = Execution::open(self, operation, context)
             .await
             .map_err(|_| BatchFailure)?;
-        match execution.run().await {
+        match Box::pin(execution.run()).await {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 execution.failure(execution.phase(), &error).await;
@@ -308,11 +309,13 @@ pub(crate) async fn deliver_cancellation(
 }
 
 impl<'a> Execution<'a> {
+    // Bound inline composition of heavy phase futures: a debug poll reserves
+    // its frame before the cancellation branch can return early.
     async fn run(&self) -> Result<BatchOutcome> {
         self.stage(LocalFailurePhaseV1::Decision);
         self.replay_events().await?;
         self.reconcile_pending().await?;
-        let (job, mut draft) = self.load().await?;
+        let (job, draft) = self.load().await?;
         if draft.cancelled() {
             let worker = draft
                 .run
@@ -320,14 +323,30 @@ impl<'a> Execution<'a> {
                 .managed
                 .as_ref()
                 .and_then(|m| m.worker.clone());
-            if worker
-                .as_ref()
-                .is_some_and(|w| w.state == WorkerStateV1::Reserved)
-            {
-                self.mutate(WorkerTransitionV1::CancelReserved).await?;
+            match worker.as_ref().map(|worker| worker.state) {
+                Some(WorkerStateV1::Reserved) => {
+                    self.mutate(WorkerTransitionV1::CancelReserved).await?;
+                }
+                Some(WorkerStateV1::Running | WorkerStateV1::Stopping) => {
+                    Box::pin(self.reconcile_cancelled_worker()).await?;
+                }
+                Some(WorkerStateV1::Terminal) => {
+                    if draft.run.plan.managed.as_ref().is_some_and(|managed| {
+                        managed.output_event.is_some() && !managed.output_acknowledged
+                    }) {
+                        self.stage(LocalFailurePhaseV1::Worker);
+                        Box::pin(self.post_worker_result()).await?;
+                    }
+                }
+                None | Some(WorkerStateV1::Cancelled) => {}
+                Some(_) => return Err(anyhow!("cancelled worker requires reconciliation")),
             }
             return Ok(BatchOutcome::Cancelled);
         }
+        Box::pin(self.run_active(job, draft)).await
+    }
+
+    async fn run_active(&self, job: AcceptedJobV1, mut draft: Draft) -> Result<BatchOutcome> {
         self.generation_current()?;
         if draft.run.plan.managed.is_none() {
             self.executor.enforcer.require_admission_ready().await?;
@@ -437,7 +456,7 @@ impl<'a> Execution<'a> {
             })
             .await??;
             let credentials = credentials_from_job(&current_job, self.context.config())?;
-            let managed = managed::broker_prepare(managed::BrokerPreparation {
+            let managed = Box::pin(managed::broker_prepare(managed::BrokerPreparation {
                 plan: &current.run.plan,
                 scope: self.context.scope(),
                 binding: current_job.binding_manifest(),
@@ -446,7 +465,7 @@ impl<'a> Execution<'a> {
                 workspace,
                 credentials: credentials.as_ref().map(|c| &c.credential),
                 launch_profile: self.launch_profile.as_ref(),
-            })
+            }))
             .await
             .map_err(|_| anyhow!("immutable workspace preparation requires reconciliation"))?;
             let request = SupervisedAdmissionV1 {
@@ -524,7 +543,7 @@ impl<'a> Execution<'a> {
         }
         if worker.state == WorkerStateV1::Preparing && worker.attempt.create_operation_id.is_none()
         {
-            self.import(&runtime).await?;
+            Box::pin(self.import(&runtime)).await?;
             worker = self.mutate(WorkerTransitionV1::CreateIssued).await?;
         }
         if (worker.state == WorkerStateV1::Preparing
@@ -538,7 +557,7 @@ impl<'a> Execution<'a> {
                     | WorkerStateV1::Stopping
             )
         {
-            self.execute_worker(&runtime).await?;
+            Box::pin(self.execute_worker(&runtime)).await?;
         }
         let (_, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -547,7 +566,7 @@ impl<'a> Execution<'a> {
             "runtime terminal is not centrally acknowledged"
         );
         self.post_worker_result().await?;
-        self.final_scan(&runtime).await?;
+        Box::pin(self.final_scan(&runtime)).await?;
         Ok(BatchOutcome::Terminal)
     }
 
