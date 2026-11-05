@@ -1,6 +1,6 @@
 # Interface de supervision
 
-Ce document est la référence pour l'identité visuelle et les vues du dashboard. Le [périmètre livré](#périmètre-livré) reste une consultation `viewer` ; les [vues utilisateur et administration](#vues-utilisateur-et-administration-unifiée--cible-à-livrer) sont une cible obligatoire à implémenter et qualifier. Le [contrat d'identité et de configuration](sso.md) fixe les permissions et profils attendus. Les preuves visuelles datées ne qualifient pas les fonctions futures.
+Ce document est la référence pour l'identité visuelle et les vues du dashboard. Le [périmètre livré](#périmètre-livré) comprend la consultation technique `viewer` et les lectures nominatives locales/OIDC décrites ci-dessous, dont le registre brokers sur permission explicite. Les [vues utilisateur et administration unifiée à 360°](#vues-utilisateur-et-administration-unifiée--cible-à-livrer) restent une cible obligatoire à compléter et qualifier. Le [contrat d'identité et de configuration](sso.md) fixe les permissions et profils attendus. Les preuves visuelles datées ne qualifient pas les fonctions futures.
 
 ## Direction de conception
 
@@ -33,7 +33,7 @@ La revue d'un changement visuel compare les vues principales à cette référenc
 
 Les détails agent/sandbox chargent réellement le registre workers et permettent d'en parcourir les pages ; un détail worker présente les agents et sandboxes correspondants. Les relations reposent sur les identifiants exacts de session ou de runtime reçus, avec provenance explicite ou inconnue. Elles ne prouvent ni délégation ni exécution et n'attribuent aucune identité de broker. Chaque source indique lecture, fraîcheur, périmètre et erreur éventuelle ; l'absence de correspondance dans une page ne signifie pas absence du tenant. La reprise d'une source retire son erreur résolue sans masquer une erreur indépendante. Le focus reste dans le dialogue lors des changements de liens et des reprises.
 
-Cette navigation utilise les API de lecture existantes du tenant `viewer`, sans nouvel endpoint ni accès moteur. Les vues humaines/administratives, l'identité des brokers et la fédération restent les exigences distinctes ci-dessous. [Validation ciblée et limites](engineering/VALIDATION.md#1er-novembre--navigation-liée-du-dashboard-et-reprises).
+Cette navigation utilise les API de lecture existantes du tenant `viewer`, sans nouvel endpoint ni accès moteur. Les lectures nominatives, dont celle du registre brokers, ont leur périmètre distinct décrit ci-dessous ; elles ne livrent pas la fédération ni la vue unifiée à 360°. [Validation ciblée et limites](engineering/VALIDATION.md#1er-novembre--navigation-liée-du-dashboard-et-reprises).
 
 ## Lecture nominative du registre brokers
 
@@ -90,6 +90,8 @@ Les opérations de gestion passent par des contrats API Rust explicites, validé
 ## Périmètre livré
 
 Le dossier `front/` contient une interface TypeScript et Vite sans framework ni dépendance JavaScript d’exécution. Les neuf vues sont en français : vue d’ensemble, agents, actions, sécurité, fichiers, sandboxes, workers, quotas et allocations. La production utilise les fichiers statiques de `front/dist/`, servis par le service Rust dashboard. Aucun hébergement public ni service cloud n’est nécessaire.
+
+Ces neuf vues appartiennent au parcours technique `viewer`. Les parcours nominatifs [locaux](setup/identity/README.fr.md) et [OIDC Web/CLI](setup/sso/README.fr.md) disposent aussi de lectures de ressources et d'événements, d'exports et de contextes proposés par le contrôle. Le dashboard nominatif présente ces lectures selon les droits effectifs et, sur permission distincte, la [lecture du registre brokers](#lecture-nominative-du-registre-brokers). Ces fonctions ne constituent pas l'administration unifiée complète ; leurs qualifications et limites restent celles des guides et des preuves datées.
 
 La vue d’ensemble présente les comptes fournis par `/api/overview`, les décisions, le journal récent, la santé des services, les ressources disponibles et l’intégrité du journal. Une valeur absente ou `null` est affichée « Inconnu » ; zéro reste affiché comme zéro. Aucun pourcentage de progression, consommation CPU, coût, débit, agent ou conteneur de démonstration n’est généré dans l’application.
 
