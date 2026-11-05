@@ -21,15 +21,27 @@ l'ownership HTTP ou la reprise froide complète.
 ## Port HTTP exact de l'audit retenu
 
 Sélection ciblée : `cargo test --locked --lib runner::cold_audit_http::tests::`.
-Les trois parents couvrent le vrai gateway et deux Stores SQLite pour A/B,
+Les cinq parents couvrent le vrai gateway et deux Stores SQLite pour A/B,
 la lecture Worker, l'ingestion exacte et son replay sans second append ; un
 peer HTTP possédé couvre les reçus incomplets, divergents, inconnus, dupliqués,
 surdimensionnés, les statuts et redirections, et le refus local sans envoi.
 L'oracle des corps compare le vecteur avant/après ; le compteur des requêtes
-inclut aussi les GET. Le test d'échéance expire synthétiquement le même objet
-entre appels et vérifie zéro nouvel envoi. Il ne mesure pas 45 secondes réelles
-et ne discrimine pas une expiration pendant une lecture ni la borne d'un flux
-sans longueur déclarée. Les gardes de code ne valent pas qualification de ces cas.
+inclut aussi les GET. Un parent expire synthétiquement le même objet entre
+appels et vérifie zéro nouvel envoi. Deux parents supplémentaires vérifient
+un Worker désérialisable dépassant512Kio en chunked sans Content-Length et
+une échéance synthétique de3secondes pendant un corps incomplet après un
+premier fragment de64octets émis par le peer. Le budget original est conservé ; les tâches
+du peer et du client sont fermées et jointes. Aucun délai45s réel, SLO ou
+comportement réseau après fermeture du peer n'est qualifié.
+
+Les copies de contrôle privées retirent séparément la garde de taille ou
+le timeout de lecture : chaque parent doit alors échouer après le trajet
+HTTP utile. Ne jamais committer ces copies. Utiliser une cible neuve pour
+comparer des snapshots de contenu différent, ou prouver l'invalidation et
+la recompilation du paquet. Une simple invocation Cargo sans compilation
+ne rattache pas un ancien binaire à une nouvelle source ; conserver les
+hashes et déclarer non concluant un essai dont la fraîcheur n'est pas établie.
+[Contrôles et limite du cache](VALIDATION.md#5-novembre--bornes-http-en-flux-et-fraîcheur-des-preuves).
 
 Un changement du constructeur HTTP partagé justifie le canari existant
 `unavailable_or_unacknowledged_audit_never_yields_allow` de

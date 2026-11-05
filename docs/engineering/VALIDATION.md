@@ -1,5 +1,62 @@
 # Validation courante
 
+## 5 novembre — bornes HTTP en flux et fraîcheur des preuves
+
+Base `bfa992c`, worktree `codex/cold-http-boundary-tests-20261105`, puis
+composition sans conflit de la queue `d6c66b6`. Le seul delta Rust est le
+fichier de tests `b84a80d79022f3cf5140e86969dd904e97696f2a80eb7e447e7b0ca1d8c1ed28` ;
+le code applicatif du port reste `b014985…`. Luna écrit/exécute ces tests,
+Root possède QA, copies de contrôle et intégration ; revue indépendante
+source sans défaut bloquant dans ce périmètre.
+
+QA LinuxARM64/Rust1.99.1 sur image2115d432 épinglée, mêmes contrôles Config
+et noyau que le lot précédent : UID1000/caps0/NNP1/seccomp2/networknone,
+root/sources/registre RO,2CPU/5Gio/swap0/PID256, scratch3Gio/65536inodes,
+fsize536870912/nofile1024, env reconstruit et cibles privées. Compilation
+simultanée de la queue dans un propriétaire distinct ; aucun partage de base
+ou target mutable entre les agents. Cargo offline/locked/deux jobs.
+
+| Gel et sélection après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml --lib` | Résultat constaté |
+|---|---|
+| `boundary-owned-budget`, `runner::cold_audit_http::tests:: -- --test-threads=1` | PASS5/5,0ignoré,463filtrés,3avertissements lib-test. Deux nouveaux parents, trois existants ; pas cinq fonctionnalités nouvelles. |
+| `boundary-no-stream-cap`, parent exact `cold_http_rejects_valid_chunked_worker_larger_than_body_limit` | Échec attendu du contrôle privé : Worker accepté, `.err()` vautNone au lieu d'InvalidResponse. Compilation réelle,1FAIL/0ignoré/467filtrés après HTTP. |
+| `boundary-no-body-deadline`, parent exact `cold_http_deadline_expiring_during_incomplete_worker_body_returns_expired`, target réutilisé | NON CONCLUANT : PASS inattendu en3,04s, sans recompilation du crate, malgré source différente. Ce résultat n'est pas crédité au contrôle demandé. |
+| Même gel sans timeout de lecture, target neuf `/scratch/target-body-deadline-fresh` | Compilation réelle1m12 ; barrière d'émission du peer atteinte puis FAIL attendu au watchdog10s, au lieu d'Expired.1FAIL/0ignoré/467filtrés, oom0. |
+
+Les copies de contrôle modifient chacune une seule garde, dans les inputs
+privés RO, jamais dans le dépôt. Le Worker surdimensionné reste désérialisable
+avec le même UUID et versions ; ses600Kio utilisent le champ existant
+unknown_reason. Le peer TCP émet réellement Transfer-Encoding:chunked sans
+Content-Length. Le parent lent conserve le même budget, l'écourte à3s pour
+le test ; le peer envoie un premier fragment de64octets puis attend sans fin.
+Le compteur porte sur cet envoi, pas une réception client indépendante. Le watchdog annule
+et joint le client si la garde manque. Les garde-fous ne sont pas remplacés
+par un résultat simulé. Aucun résultat réseau après fermeture du peer ni
+respect du délai45s réel n'est déduit.
+
+Journaux SHA256 : PASS `b4028cb0816edd6b964de4a17c44a29d7b443ccc607251f318aa0697ec02d04f`,
+contrôle taille `558fdf17f65d5849f8a1f93656802218b470bc806f65b080968b8d5d941b437e`,
+cache écarté `cb0704d4bf4c613d430b72d88bc4bb56ac5a89742174f35eb7ffd7a0f269c514`,
+contrôle lecture frais `a179a2dab6516eea4137589354926afb6c2bdb0c02e3829883d1b7d2c5a715d5`.
+Le gel initial `boundary`, tests19332…, est NOT_RUN ; le gel corrigé
+`boundary-owned-budget`, testsb84a…, est le premier réellement exécuté.
+La composition `boundary-composed` ajoute seulement ces tests à `d6c66b6`.
+`cargo check --offline --locked --all-targets` passe sur une cible neuve,
+RC0,139avertissements bibliothèque/3lib-test ; SHA256
+`42a02b1aacd234cfeaaf681cc037dec0d789211e604eeccc7c4ea198f18f1d29`.
+Ce delta de tests ne justifie pas une nouvelle campagne E2E ou fournisseur.
+
+Ces preuves logicielles ne fournissent ni identité/terminal froid, ACK journal,
+réactivation, fencing ou qualification de moteur/cluster. Les échéances produit
+restent inchangées ; aucun gate global clos, G09 FAIL, Clippy BLOCKED.
+Format ciblé, diff-check, manifests inchangés et source comparée au gel composé
+PASS ;393liens relatifs sans cible absente,4fichiers sans les3secrets connus.
+La revue indépendante traite la provenance d'émission du peer et ne relève
+aucun blocage dans ces tests/docs. Le propriétaire QA est fermé normalement
+à21:27:55UTC, PID0/exit143/OOMfalse, puis supprimé précisément. Aucun cache,
+binaire, base ou clé promu ; sources, copies de contrôle et journaux restent
+dans le checkpoint privé `cold-http-boundary-checkpoint-20261105`.
+
 ## 5 novembre — admissions RAII et réservation de queue du writer
 
 Base `bfa992c`, worktree `codex/broker-cold-audit-20261105`.

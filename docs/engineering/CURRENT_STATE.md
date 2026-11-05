@@ -1,5 +1,16 @@
 # État constaté — suivi du développement
 
+## 5 novembre — bornes HTTP pendant une lecture en flux
+
+Les deux limites des premiers tests du port HTTP sont maintenant discriminées :
+un Worker valide de plus de512Kio transmis sans Content-Length est refusé,
+et le même budget expire pendant un corps partiel. Les cinq parents du module
+passent. Deux copies privées avec une garde retirée échouent comme attendu ;
+un essai ayant réutilisé le cache est écarté avant compilation en cible neuve.
+[Preuves et périmètre](VALIDATION.md#5-novembre--bornes-http-en-flux-et-fraîcheur-des-preuves).
+Le code applicatif ne change pas dans ce complément de tests. Ces résultats
+ne mesurent pas le délai45s réel ni ne raccordent le journal ou la boucle froide.
+
 ## 5 novembre — admissions bornées du writer
 
 Tous les producteurs du writer partagent maintenant un comptage RAII de C

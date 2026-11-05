@@ -30,7 +30,13 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{net::TcpListener, task::JoinHandle, time::Instant};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::Notify,
+    task::JoinHandle,
+    time::Instant,
+};
 use uuid::Uuid;
 
 struct GatewayFixture {
@@ -674,4 +680,283 @@ async fn cold_http_reuses_one_deadline_and_makes_no_request_after_expiry() {
     assert_eq!(state.requests.load(Ordering::SeqCst), 1);
     task.abort();
     let _ = task.await;
+}
+
+struct ChunkedWorkerObservation {
+    requests: AtomicUsize,
+    body_bytes_sent: AtomicUsize,
+    fragments_sent: AtomicUsize,
+    worker_get: std::sync::atomic::AtomicBool,
+    response_headers: Mutex<Vec<u8>>,
+    first_fragment_sent: Notify,
+}
+
+impl ChunkedWorkerObservation {
+    fn new() -> Self {
+        Self {
+            requests: AtomicUsize::new(0),
+            body_bytes_sent: AtomicUsize::new(0),
+            fragments_sent: AtomicUsize::new(0),
+            worker_get: std::sync::atomic::AtomicBool::new(false),
+            response_headers: Mutex::new(Vec::new()),
+            first_fragment_sent: Notify::new(),
+        }
+    }
+}
+
+struct ChunkedWorkerPeer {
+    origin: String,
+    task: Option<JoinHandle<()>>,
+    observation: Arc<ChunkedWorkerObservation>,
+}
+
+impl Drop for ChunkedWorkerPeer {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+impl ChunkedWorkerPeer {
+    async fn close(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+async fn chunked_worker_peer(body: Vec<u8>, stall_after_first_fragment: bool) -> ChunkedWorkerPeer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let observation = Arc::new(ChunkedWorkerObservation::new());
+    let peer_observation = Arc::clone(&observation);
+    let task = tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        peer_observation.requests.fetch_add(1, Ordering::SeqCst);
+
+        let mut request_headers = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request_headers
+            .windows(4)
+            .any(|window| window == b"\r\n\r\n")
+        {
+            let Ok(read) = socket.read(&mut buffer).await else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            request_headers.extend_from_slice(&buffer[..read]);
+            if request_headers.len() > 16 * 1024 {
+                return;
+            }
+        }
+        let first_line_end = request_headers
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .unwrap_or(request_headers.len());
+        peer_observation.worker_get.store(
+            request_headers[..first_line_end].starts_with(b"GET /api/v1/workers/"),
+            Ordering::SeqCst,
+        );
+
+        let headers = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        *peer_observation.response_headers.lock().unwrap() = headers.to_vec();
+        if socket.write_all(headers).await.is_err() {
+            return;
+        }
+
+        let chunk_size = if stall_after_first_fragment {
+            64
+        } else {
+            16 * 1024
+        };
+        let first_end = body.len().min(chunk_size);
+        if write_http_chunk(&mut socket, &body[..first_end], &peer_observation)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if stall_after_first_fragment {
+            futures_util::future::pending::<()>().await;
+        }
+
+        for chunk in body[first_end..].chunks(chunk_size) {
+            if write_http_chunk(&mut socket, chunk, &peer_observation)
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        let _ = socket.write_all(b"0\r\n\r\n").await;
+    });
+    ChunkedWorkerPeer {
+        origin,
+        task: Some(task),
+        observation,
+    }
+}
+
+async fn write_http_chunk(
+    socket: &mut TcpStream,
+    chunk: &[u8],
+    observation: &ChunkedWorkerObservation,
+) -> std::io::Result<()> {
+    socket
+        .write_all(format!("{:X}\r\n", chunk.len()).as_bytes())
+        .await?;
+    socket.write_all(chunk).await?;
+    socket.write_all(b"\r\n").await?;
+    socket.flush().await?;
+    observation
+        .body_bytes_sent
+        .fetch_add(chunk.len(), Ordering::SeqCst);
+    observation.fragments_sent.fetch_add(1, Ordering::SeqCst);
+    observation.first_fragment_sent.notify_one();
+    Ok(())
+}
+
+fn valid_chunked_response_headers(headers: &[u8]) -> bool {
+    let headers = String::from_utf8_lossy(headers).to_ascii_lowercase();
+    headers.contains("transfer-encoding: chunked") && !headers.contains("content-length:")
+}
+
+#[tokio::test]
+async fn cold_http_rejects_valid_chunked_worker_larger_than_body_limit() {
+    let directory = tempfile::Builder::new()
+        .prefix("cold-audit-streamed-worker-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = Store::open_for_tenant(
+        &directory.path().join("streamed-worker.sqlite"),
+        "tenant-streamed-worker",
+        Redactor::new(vec![]),
+        1000,
+    )
+    .unwrap();
+    let mut worker = seed_worker(&store);
+    worker.unknown_reason = Some("u".repeat(600 * 1024));
+    assert!(Uuid::parse_str(&worker.worker_id).is_ok());
+    assert_eq!(worker.launch.version, 1);
+    assert_eq!(worker.receipt.version, 1);
+    let body = serde_json::to_vec(&worker).unwrap();
+    assert!(body.len() > MAX_RESPONSE_BYTES);
+    assert_eq!(
+        serde_json::from_slice::<crate::control::WorkerV1>(&body)
+            .unwrap()
+            .worker_id,
+        worker.worker_id,
+        "the oversized JSON body is an otherwise valid WorkerV1 with matching identity"
+    );
+
+    let worker_id = worker.worker_id.clone();
+    let mut peer = chunked_worker_peer(body, false).await;
+    let client = AuditClient::new(&peer.origin, "synthetic-stream-runner-token-cccccccc").unwrap();
+    let budget = ColdAuditBudget::start();
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.cold_worker(&worker_id, &budget),
+    )
+    .await;
+    peer.close().await;
+
+    assert_eq!(
+        result.expect("10-second test watchdog").err(),
+        Some(ColdAuditHttpError::InvalidResponse),
+        "a valid chunked WorkerV1 over the 512-KiB cap is rejected"
+    );
+    assert_eq!(peer.observation.requests.load(Ordering::SeqCst), 1);
+    assert!(peer.observation.worker_get.load(Ordering::SeqCst));
+    assert!(
+        valid_chunked_response_headers(&peer.observation.response_headers.lock().unwrap()),
+        "the actual loopback response is chunked and has no Content-Length"
+    );
+    assert!(
+        peer.observation.body_bytes_sent.load(Ordering::SeqCst) > MAX_RESPONSE_BYTES,
+        "the peer streamed more than the response limit"
+    );
+    assert!(peer.observation.fragments_sent.load(Ordering::SeqCst) > 1);
+}
+
+#[tokio::test]
+async fn cold_http_deadline_expiring_during_incomplete_worker_body_returns_expired() {
+    let directory = tempfile::Builder::new()
+        .prefix("cold-audit-stalled-worker-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let store = Store::open_for_tenant(
+        &directory.path().join("stalled-worker.sqlite"),
+        "tenant-stalled-worker",
+        Redactor::new(vec![]),
+        1000,
+    )
+    .unwrap();
+    let worker = seed_worker(&store);
+    let body = serde_json::to_vec(&worker).unwrap();
+    let worker_id = worker.worker_id.clone();
+    let mut peer = chunked_worker_peer(body, true).await;
+    let client = AuditClient::new(&peer.origin, "synthetic-stall-runner-token-dddddddd").unwrap();
+    let mut budget = ColdAuditBudget::start();
+    budget.deadline = Instant::now() + Duration::from_secs(3);
+    let shared_deadline = budget.deadline();
+    let request_client = client.clone();
+    let request_worker_id = worker_id.clone();
+    let mut request = tokio::spawn(async move {
+        let result = request_client
+            .cold_worker(&request_worker_id, &budget)
+            .await;
+        (budget, result)
+    });
+
+    let first_fragment = tokio::time::timeout(
+        Duration::from_secs(10),
+        peer.observation.first_fragment_sent.notified(),
+    )
+    .await;
+    let request_outcome = match tokio::time::timeout(Duration::from_secs(10), &mut request).await {
+        Ok(joined) => Some(joined),
+        Err(_) => {
+            request.abort();
+            let _ = request.await;
+            None
+        }
+    };
+    peer.close().await;
+
+    assert!(
+        first_fragment.is_ok(),
+        "the peer sent the first response fragment"
+    );
+    let (budget, result) = request_outcome
+        .expect("10-second task watchdog")
+        .expect("HTTP request task did not panic");
+    assert_eq!(
+        result.err(),
+        Some(ColdAuditHttpError::Expired),
+        "the synthetic shared deadline expires while the body stream is stalled"
+    );
+    assert_eq!(budget.deadline(), shared_deadline);
+    assert_eq!(peer.observation.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(peer.observation.fragments_sent.load(Ordering::SeqCst), 1);
+    assert_eq!(peer.observation.body_bytes_sent.load(Ordering::SeqCst), 64);
+    assert!(
+        valid_chunked_response_headers(&peer.observation.response_headers.lock().unwrap()),
+        "the stalled loopback response is chunked and has no Content-Length"
+    );
+
+    // The existing expiration parent checks that a locally expired budget
+    // does not send; this assertion reuses the same object after body timeout.
+    assert_eq!(
+        client.cold_worker(&worker_id, &budget).await.err(),
+        Some(ColdAuditHttpError::Expired),
+        "the same budget remains expired after the body-read timeout"
+    );
 }
