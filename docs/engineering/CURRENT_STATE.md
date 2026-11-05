@@ -11,6 +11,10 @@ Quatre nouveaux parents puis deux canaris PASS ; compilation toutes cibles
 sans avertissement et format ciblé PASS. Revue indépendante et corrections
 des guides EN/FR traitées ; code `f738662` composé en `7cdb969`, sources Rust
 égales au gel vérifié. [Preuves et limites](VALIDATION.md#5-novembre--réconciliation-logicielle-après-annulation).
+Code et guides/preuves `2533c91` sont poussés, références distantes exactes
+vérifiées. Après conservation des deux brouillons documentaires dans une archive
+privée distincte, le donneur propre est retiré normalement, consommateurs finis
+et relevé lsof vide ; branche distante, sources et preuves conservées.
 
 Les nouveaux parents utilisent des observations runtime synthétiques et un
 Writer de fixture à 60 s ; le produit garde 10 s, non qualifiés pour ce parcours.

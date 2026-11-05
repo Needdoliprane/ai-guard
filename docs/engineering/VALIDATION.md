@@ -80,6 +80,12 @@ seul conteneur possédé. Aucun volume, image partagée ou processus externe sup
 Une archive privée distincte conserve les sources, deux variantes de fixture,
 17 logs capturés par le parent et cinq revues : manifeste de 30 fichiers vérifié.
 Aucun exécutable ni fichier du scratch cible n'y est promu.
+Source `f738662` et intégration guides/preuves `2533c91` poussées, SHA complets
+des deux références distantes conformes. Deux brouillons documentaires du
+donneur sont préservés avant restauration de ces seules copies, déjà intégrées
+et corrigées ; manifeste supplémentaire de cinq fichiers vérifié. Donneur
+propre retiré normalement après fin des consommateurs et relevé lsof vide,
+branche source distante conservée. Aucun travail principal ou D5 modifié.
 
 **Périmètre.** Store SQLite, HTTP, Journal et Writer réels ; observations moteur
 synthétiques, enforcer natif vide. Tous les nouveaux parents amorcent Running ;
