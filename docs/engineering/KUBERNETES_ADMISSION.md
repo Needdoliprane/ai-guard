@@ -12,10 +12,14 @@ la [stratégie de test](TEST_STRATEGY.md) restent applicables.
 
 ### Contrat central suivant — configuration, décision et raccord HTTP
 
-Direction technique locale du5novembre, à implémenter et vérifier dans les
-frontières existantes. La validation pure de politique et le prédicat d'image
-partagé ont leurs essais ciblés ; le producteur central, format9 et raccord
-HTTP ne sont pas livrés par ce résultat. Aucun appel cluster n'en découle.
+Direction technique locale du5novembre, dans les frontières existantes.
+La politique et son chargement, le prédicat d'image partagé, la migration9
+et sa validation historique sont vérifiés par les lots locaux correspondants.
+Sous9, les mutations et lookups/replays opérationnels V1 restent refusés par
+`MigrationRequired` jusqu'au producteur EvidenceV2. Les décisions, retours de
+reçus historiques et échanges HTTP décrits ci-dessous sont le raccord cible ;
+ce producteur central et ce raccord ne sont pas livrés par ces résultats.
+Aucun appel cluster n'en découle.
 
 La configuration de chaque tenant porte une option `held_create_policy`.
 Absence/null interdit l'admission ; une politique présente vide est une erreur
@@ -61,6 +65,17 @@ unique lié au tenant, namespace et préfixe, sans table supplémentaire ni
 activation. Ancien writer8 refusé avant mutation ; schéma9 sans marqueur,
 marqueur sur8, V2 avant marqueur et nouveaux V1 après marqueur sont refusés.
 Le marqueur est une opération de maintenance, pas un principal broker.
+Son kind est `control.kubernetes.create.policy.genesis` et son objet fermé
+contient exactement `version=1`, `protocol=kubernetes_held_create_policy_v1`,
+`tenant_id`, `control_namespace_uuid`, `create_genesis_seq`,
+`create_genesis_hash`, `previous_seq` et `previous_hash`. La première paire
+référence le genesis CREATE du format8 ; la seconde référence le head exact
+immédiatement avant le marqueur9. Ces origines restent distinctes, même si
+elles sont égales dans une base sans autre événement après son genesis8.
+Les séquences sont positives, hashes hexadécimaux minuscules complets et
+namespace UUID canonique. Le rapport de migration désigne ce marqueur9.
+Le timestamp observé du marqueur est canonique et ne dépasse pas son
+`received_at` durable ; ce contrôle ne réécrit pas l'historique du format8.
 Les quotas Kube partagés, planchers temporels, gardes de schéma et protocole
 doivent évoluer ensemble. Les anciens tuples/hashes/records V1 restent
 inchangés ; un replay V1 exact rend son reçu historique sans append ni Fresh.

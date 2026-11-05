@@ -1,5 +1,27 @@
 # État constaté — suivi du développement
 
+## 5 novembre — format d'audit Kubernetes 9 et sauvegardes compatibles
+
+La migration explicite8→9 conserve une sauvegarde8 vérifiée et les projections,
+quotas, CAS et namespace. Un marqueur ordinaire fermé engage le vrai genesis8
+et le head précédent ; marqueur absent, dupliqué, mal lié ou daté après sa
+réception sont refusés. La lease live existante est conservée dans le même
+processus ; réouvrir la base reste inactif. Aucun objet SQL supplémentaire.
+
+**PASS logiciel ciblé :7fonctions uniques exécutées**, incluant vraie CLI
+courante8→9, protocole/anciens lecteurs6/7/8 et ancien binaire refusant9 avant
+mutation, avec témoin positif sur une copie7→8. Le canari ignoré par défaut
+est exécuté explicitement ; [gels, RED et limites](VALIDATION.md) sont distincts.
+Compilation toutes cibles PASS RC0 ;86warnings bibliothèque et1lib-test,
+garde sans avertissement non satisfaite. Revue indépendante source traitée.
+
+La validation/reconstruction V1 historique est disponible, mais mutations et
+lookups/replays opérationnels Kubernetes9 restent fermés. Le producteur
+EvidenceV2, la décision actuelle admission/réconciliation et l'ACK broker HTTP
+sont les prochaines étapes obligatoires. Ni format9 ni configuration de
+politique ne donnent de permission CREATE. Guides Kubernetes FR/EN mis à jour,
+travail de branche non intégré à la référence ; G09 FAIL,0/12 gates globaux clos.
+
 ## 5 novembre — politique Kubernetes centrale chargée par tenant
 
 Le gateway charge et canonise désormais `held_create_policy` depuis sa

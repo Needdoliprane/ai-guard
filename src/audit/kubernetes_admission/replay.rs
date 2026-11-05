@@ -247,7 +247,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(events.is_empty())?;
         return Ok(());
     }
-    require_schema(db)?;
+    conflict([8, 9].contains(&version))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],
@@ -258,11 +258,12 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         [],
         |row| row.get(0),
     )?;
-    let mut genesis_seen = false;
+    let mut create_genesis: Option<(i64, String)> = None;
+    let mut policy_seen = false;
     let mut creates = BTreeMap::<String, (KubernetesCreateSnapshotV1, i64)>::new();
     for stored in events {
         if stored.event.kind == GENESIS_KIND {
-            conflict(!genesis_seen && creates.is_empty())?;
+            conflict(create_genesis.is_none() && creates.is_empty())?;
             let genesis: Genesis = serde_json::from_value(stored.event.data.clone())?;
             conflict(
                 genesis.version == 1
@@ -273,10 +274,21 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                     && stored.event.source == "gateway"
                     && stored.event.provenance == "observed",
             )?;
-            genesis_seen = true;
+            create_genesis = Some((stored.seq, stored.hash.clone()));
             continue;
         }
-        conflict(genesis_seen)?;
+        if stored.event.kind == migration::POLICY_GENESIS_KIND {
+            conflict(version == 9 && !policy_seen)?;
+            let (genesis_seq, genesis_hash) = create_genesis
+                .as_ref()
+                .ok_or(KubernetesCreateFailureV1::Conflict)?;
+            migration::validate_marker(&stored, &tenant, &namespace, *genesis_seq, genesis_hash)?;
+            policy_seen = true;
+            continue;
+        }
+        // V1 remains readable only before the format boundary. V2 writers and
+        // readers are a separate change; no new V1 append is valid on schema9.
+        conflict(create_genesis.is_some() && !policy_seen)?;
         let record = record(&stored)?;
         validate_historical_identity(db, &stored, &record, &tenant)?;
         let previous = creates
@@ -319,7 +331,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(expected == record.snapshot)?;
         creates.insert(record.intent.create_id.clone(), (expected, stored.seq));
     }
-    conflict(genesis_seen)?;
+    conflict(create_genesis.is_some() && policy_seen == (version == 9))?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement
         .query_map([], read_row)?

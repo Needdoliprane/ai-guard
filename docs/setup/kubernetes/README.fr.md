@@ -237,7 +237,7 @@ agentsandbox broker control-info \
 ```
 
 Utiliser son `control_namespace_uuid` exact, une identité runner et un schéma
-compatible 3–8 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
+compatible 3–9 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
 ou une origine HTTP loopback explicitement choisie ; ce fichier n'ajoute pas
 d'options AC privée ou mTLS à la connexion gateway. `runner_token_file` est
 un chemin absolu vers un fichier privé contenant au plus 4 Kio, pas la valeur du jeton. Le runner du
@@ -373,6 +373,50 @@ normaliser leurs chaînes ; leur ordre ne change pas l'empreinte de politique.
 `worker_quota` reste la configuration distincte du quota durable du tenant.
 Ces contrôles valident seulement la configuration ; ils ne qualifient ni
 propriété du Namespace, admission cluster, RBAC ou confinement CNI.
+
+## Maintenir l'audit : du schéma 8 au schéma 9
+
+Le schéma 9 ajoute un marqueur durable de format de politique held-create à
+une base tenant existante et validée au schéma 8. Il n'ajoute aucune table,
+n'active aucune admission et ne crée aucun Pod. SQLite et la politique tenant
+restent au gateway ; les credentials Kubernetes restent au broker de confiance.
+
+Arrêter le gateway et tous les brokers utilisant cette base avant maintenance.
+`--confirm-control-stopped` est votre attestation ; il n'arrête pas ces processus
+et ne garantit pas leur exclusion. Adapter tous les chemins d'exemple et
+l'identifiant tenant à l'installation existante. Utiliser sa limite d'événements
+d'audit configurée (`10000` ci-dessous est un exemple), et un **fichier de sauvegarde neuf,
+inexistant** dans le stockage privé du contrôle :
+
+```sh
+agentsandbox migrate-control \
+  --data /private/control/tenant.sqlite \
+  --tenant-id tenant-a \
+  --backup /private/control/before-policy9.sqlite \
+  --target-version 9 \
+  --confirm-control-stopped \
+  --max-events 10000
+```
+
+La commande crée, vérifie et synchronise la sauvegarde au schéma 8, puis
+revérifie le head d'audit source avant de commiter le marqueur et la version 9.
+Conserver la sauvegarde et le rapport JSON de migration, dont séquence et
+empreinte du marqueur. Le namespace de contrôle, les projections, les quotas
+réservés et les valeurs CAS de révision/epoch existants sont préservés.
+Rouvrir la base ne réactive pas la supervision. Une sauvegarde existante est
+refusée, et une tentative échouée peut laisser un fichier de sauvegarde : le
+conserver et examiner l'échec avant de choisir une autre destination neuve.
+Ne jamais écraser une sauvegarde ni forcer un downgrade par modification de
+`PRAGMA user_version` ou réécriture de l'audit.
+
+La validation de l'audit V1 historique et la reconstruction des projections
+restent disponibles. Au schéma 9, les mutations Kubernetes **ainsi que le lookup
+opérationnel de claim/replay exact d'opération restent fermés par la garde
+`MigrationRequired`**, jusqu'à l'implémentation du producteur de décision V2.
+Cela inclut la confirmation d'un résultat retenu ; la migration ne livre ni
+réconciliation opérationnelle ni permission CREATE. Conserver les journaux en
+attente et les quotas des inconnues. Ni le schéma 9 ni la politique configurée
+n'activent le lancement de workers Kubernetes.
 
 ## Configurer l'intégration Rust
 

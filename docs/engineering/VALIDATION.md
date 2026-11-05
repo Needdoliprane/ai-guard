@@ -1,5 +1,89 @@
 # Validation courante
 
+## 5 novembre — migration d'audit Kubernetes 8→9 et compatibilité réelle des CLI
+
+Base `341dd5f`, worktree dédié inchangé. La migration conserve les objets du
+format8 et ajoute un marqueur ordinaire fermé lié au tenant, namespace, vrai
+genesis8 et head précédent. Les deux branches quota/exclusivité de session,
+planchers temporels, classificateurs et guards DB sont adaptés ensemble. Les
+versions des plans/reçus et le parcours d'installation2→5 sont inchangés.
+
+Un nouveau sandbox est admis sur configuration et noyau : même image LinuxARM64,
+Docker29.9.2/Rust1.99.1, UID1000/caps0/NNP1/seccomp2/networknone/rootRO,
+1CPU/6Gio/swap0/PID256, fsize536870912bytes/nofile1024, scratch3Gio/65536inodes.
+Source et registre public RO ; HOME/tmp/cache privés au scratch, aucune clé,
+socket, checkout original, API payante ou infrastructure externe. Une commande
+Cargo à la fois, `env -i`, un job et dépendances verrouillées hors réseau.
+Les durées ne qualifient pas la latence sur le Mac sous pression.
+
+La pré-revue a corrigé deux oracles avant exécution : la réservation nécessite
+une lease déjà active, conservée par migration puis inactive après réouverture ;
+le floor attendu est max(floor précédent,réception), sans supposer UTC monotone.
+Aucun faux RED n'est attribué à ces versions de fixture non exécutées.
+
+| Gel et commande après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` | Résultat observé |
+|---|---|
+| `schema9-red`, `--lib audit::kubernetes_policy_tests:: -- --test-threads=1` | RED RC101 :3FAIL au stub `MigrationRequired`, compilation réussie. Les négatifs après migration restent alors non atteints. |
+| `schema9-red`, `--lib kubernetes_cli::identity_scope_tests:: -- --test-threads=1` | RED RC101 :1PASS négatif/1FAIL positif ;8 accepté puis9 refusé par la vraie garde. |
+| `schema9-red`, `--test control_protocol_schema -- --test-threads=1` | RED RC101 :1FAIL au vrai appel migrate9, sans crédit pour les branches ultérieures. |
+| `schema9-timestamp-red`, `--lib audit::kubernetes_policy_tests::schema9_requires_one_well_linked_policy_marker_and_rejects_it_on_schema8 -- --exact --test-threads=1` | RED RC101 : corruptions précédentes franchies puis échec exact « future observed policy marker timestamp healthy on reopen » ; doublon et marqueur sur8, placés après, non atteints à ce gel. Le GREEN les couvre ensuite. |
+| `schema9-green`, `--lib audit::kubernetes_policy_tests:: -- --test-threads=1` | PASS :3/3 ;1canari ignoré ici, exécuté séparément ci-dessous. |
+| `schema9-green`, `--lib kubernetes_cli::identity_scope_tests:: -- --test-threads=1` | PASS :2/2 ;9 accepté,10 et portées invalides refusés. |
+| `schema9-green`, `--test control_protocol_schema -- --test-threads=1` | PASS :1parent ; protocole actif/inactif, anciens lecteurs6/7/8 et vraie CLI courante migrent une copie8→9. |
+| `schema9-green`, `--lib audit::kubernetes_policy_tests::schema8_writer_rejects_schema9_before_mutating_it -- --exact --ignored --test-threads=1` | PASS :1/1 réellement exécuté avec le binaire antérieur épinglé ; aucun ignoré dans cette sélection. |
+
+**7fonctions uniques exécutées**, sans additionner les différents gels. Le
+correctif temporel est limité au marqueur9, après sa reproduction ; aucune
+modification rétroactive du genesis8 ou des décisions V1. Les fixtures de
+corruption conservent chaîne, quota bytes et floor pour isoler la sémantique.
+Sauvegarde8/préfixe/projections/CAS/quota, capacité ordinaire épuisée et refus
+sans mutation sont vérifiés. Une ancienne capacité V1 ne peut pas muter ou
+rejouer une opération sous9 ; le refus conserve head/projections/quota.
+
+L'ancien binaire est réellement compilé depuis Gitarchive `341dd5f` :
+`cargo build --offline --locked --manifest-path /inputs/base-341dd5f/Cargo.toml --bin agentsandbox`, RC0.
+SHA256 `ea3b53dbfe1affed35a8375fbff7f3643c9eacd5e34e54be9579b99815171eec`,
+conservé seulement dans le scratch du même QA. Le témoin CLI positif migre une
+copie du backup7→8 ; l'essai sur une vraie base9 fermée refuse la version avant
+création du backup, conserve ses bytes et laisse le lecteur actuel sain.
+La CLI courante est aussi exécutée, avec env vide/HOME/tmp de fixture, rapport
+typé et backup neuf, sur une copie8 ; les sauvegardes d'origine restent intactes.
+
+`cargo check --offline --locked --manifest-path /inputs/schema9-green/Cargo.toml --all-targets`
+est **PASS RC0**,55,21secondes ;86warnings bibliothèque et1lib-test, garde sans
+avertissement non satisfaite. La revue indépendante source est traitée. Les
+23fichiers du gel final sont comparés à la source finale ; le binaire antérieur
+garde son SHA avant/après le canari. Journaux privés conservés, SHA relus par Root :
+
+| Journal | SHA256 |
+|---|---|
+| `schema9-old-writer-build.log` | `db770905cd492ec8d86e63bb39160a64217eb1c5c1ca815ce3da9b4f4d695f78` |
+| `schema9-migration-red.log` | `dfa2ea8b0edc8ab92027ee8c615bbe22c42d6ee6159145e63f10eb0b648e48f4` |
+| `schema9-cli-red.log` | `ebe174a3c774e1c129908351364a356acb7f12ec0ce5ea5cca4d8d265785a1d9` |
+| `schema9-protocol-red.log` | `c48de29f10434c6785e8020d173acb1f344603a18230ead131a415e06229c552` |
+| `schema9-timestamp-red.log` | `c4fe5414f092acbf2a12ddf75c3331b4413d310f6365de742750ceaaf292ee57` |
+| `schema9-migration-green.log` | `87b3c36d39ae1cdf93cb37651f3bb7cc2cb54985e4f1fc72dda64722c3755b1f` |
+| `schema9-cli-green.log` | `b78d5edacca593fb16694faee3b1976c7b583d8d4324b7c95f51d64224309d4b` |
+| `schema9-protocol-green.log` | `7ea149e47c69a93643a1fb6410f6b7ad4868aecfed1a004cffc914f99ff4806e` |
+| `schema9-old-writer-green.log` | `c528556742ff1edae542cf42ceb2c568bb960159d77c621f59db1577544d408b` |
+| `schema9-final-all-targets.log` | `3c01683e65fa877ef98b88f96c42dda49e437272d0abaa7cf8bd94684f2a63a5` |
+
+Après résultats terminaux et inventaire limité à init+sleep, arrêt normal du
+seul QA à15:47:55UTC, PID0/exit143/OOMfalse puis retrait exact. Aucun volume,
+image, service ou preuve utilisateur supprimé. Aucun binaire, DB ou cache du
+scratch n'est promu sur l'hôte. Contrôles statiques PASS : format des22fichiers
+Rust, `git diff --check`, Cargo.toml/Cargo.lock inchangés, comparaison des23
+sources avec le gel final.456liens relatifs sur6documents, aucune cible absente.
+Contrôle des3clés réelles déjà connues sur29fichiers du delta : aucun littéral ;
+ce contrôle limité ne constitue pas un audit universel de secrets. Aucun test
+vert n'est relancé pour produire ce bilan.
+La validation/reconstruction historique8/9 est disponible ; les mutations et
+lookups/replays opérationnels Kubernetes9 restent fermés tant que le producteur
+EvidenceV2 n'est pas raccordé. Ce travail ne livre ni réconciliation9, ACK live,
+activation, workspace ou session Kubernetes. Clippy **BLOCKED** (composant absent),
+release et runtimes/cluster **NOT_RUN** sur cette tranche. G09 FAIL,0/12 gates
+globaux clos ; branche non intégrée à la référence et aucune qualification produit.
+
 ## 5 novembre — politique centrale Kubernetes, configuration et identité tenant
 
 Base `522e6a9`, worktree `kubernetes-held-create-20261105` dédié. Ce lot ajoute

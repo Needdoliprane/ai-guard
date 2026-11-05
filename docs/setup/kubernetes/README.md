@@ -227,7 +227,7 @@ agentsandbox broker control-info \
 ```
 
 Use its exact `control_namespace_uuid`, a runner identity and compatible
-schema 3–8 with `broker_supervision_v1`. The gateway must be an HTTPS origin
+schema 3–9 with `broker_supervision_v1`. The gateway must be an HTTPS origin
 or an explicitly selected HTTP loopback origin; this file does not add private
 CA or mTLS options to the gateway connection. `runner_token_file` is an
 absolute path to a private file containing at most 4 KiB, not a token value. The control runner
@@ -355,6 +355,47 @@ normalizing their strings; entry order does not affect the policy hash.
 `worker_quota` remains the tenant's separate durable quota configuration.
 These checks validate configuration only; they do not qualify Namespace
 ownership, cluster admission, RBAC or CNI enforcement.
+
+## Maintain the audit database: schema 8 to 9
+
+Schema 9 adds a durable held-create policy format marker to an existing,
+validated schema-8 tenant database. It adds no table, enables no admission
+and creates no Pod. The SQLite database and tenant policy remain with the
+gateway; Kubernetes credentials remain with the trusted broker.
+
+Stop the gateway and every broker using this database before maintenance.
+`--confirm-control-stopped` is your attestation; it does not stop or fence
+those processes. Adapt all example paths and the tenant ID to the existing
+installation. Use its configured audit event limit (`10000` below is an
+example), and a **new, nonexistent backup file** in private control storage:
+
+```sh
+agentsandbox migrate-control \
+  --data /private/control/tenant.sqlite \
+  --tenant-id tenant-a \
+  --backup /private/control/before-policy9.sqlite \
+  --target-version 9 \
+  --confirm-control-stopped \
+  --max-events 10000
+```
+
+The command creates, verifies and synchronizes the schema-8 backup, then
+rechecks the source audit head before committing the marker and version 9.
+Keep the backup and the JSON migration report, including the marker sequence
+and hash. The existing control namespace, projections, quota reservations and
+revision/epoch CAS values are preserved. Reopening the database does not
+restore active supervision. An existing backup is refused, and a failed
+attempt can leave a backup file: preserve it and inspect the failure before
+selecting another new destination. Never overwrite a backup or force a
+downgrade by changing `PRAGMA user_version` or rewriting audit data.
+
+Historical V1 audit validation and projection reconstruction remain available.
+On schema 9, Kubernetes mutations **and operational claim lookup/exact
+operation replay remain closed by the `MigrationRequired` guard** until the
+V2 decision producer is implemented. This includes confirming a retained
+result; the migration does not deliver operational reconciliation or a CREATE
+permission. Preserve pending journals and unknown quota reservations. Neither
+schema 9 nor a configured policy enables Kubernetes worker launch.
 
 ## Configure the Rust integration
 

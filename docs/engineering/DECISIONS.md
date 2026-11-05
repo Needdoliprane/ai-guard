@@ -1,5 +1,31 @@
 # Décisions d'industrialisation
 
+## 5 novembre — frontière de format d'audit Kubernetes 8→9
+
+Le format9 conserve les tables/index du format8, son namespace, ses projections
+et ses opérations V1 historiques. Une sauvegarde8 neuve, vérifiée et synchronisée
+précède la transaction qui ajoute un marqueur ordinaire fermé et change la
+version. Le marqueur lie séparément le vrai genesis8 et le head immédiatement
+précédent ; il consomme capacité ordinaire et un floor temporel, sans réserve
+d'identité/broker ni activation nouvelle. Une lease live existante est conservée
+dans le même processus ; une réouverture reste inactive. Le timestamp observé
+ne doit pas dépasser sa réception durable. Les quotas communs et l'exclusivité
+des sessions continuent de compter les réservations Kubernetes en9.
+
+Cette étape est une frontière de compatibilité, pas un producteur de décision.
+La validation/reconstruction de l'historique accepte8et9 ; les mutations,
+lookups et replays opérationnels Kubernetes restent strictement sur8 tant que
+EvidenceV2 et son producteur ne sont pas raccordés. Aucun nouvel enregistrement
+V1 après le marqueur9 n'est accepté. La reprise opérationnelle sous9, y compris
+le retour d'un ancien reçu exact avec une décision actuelle, reste un écart
+obligatoire. Aucun ACK live ou permis CREATE n'est déduit du format9.
+
+L'ancien writer8 doit refuser9 avant mutation ; aucun downgrade par réécriture
+de `user_version` n'est pris en charge. La [validation ciblée](VALIDATION.md)
+distingue cette preuve de compatibilité, les canaris du protocole/CLI et la
+qualification runtime toujours ouverte. Les versions propres des plans,
+identités et reçus sont conservées ; aucun guard frontend n'est inventé.
+
 ## 5 novembre — politique Kubernetes centrale, sans autorité implicite
 
 La politique `held_create_policy` est une configuration du tenant dans le

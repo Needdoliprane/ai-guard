@@ -5,7 +5,7 @@ mod support;
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    control::{ControlProtocolV1, SupervisionProtocolV1},
+    control::{ControlProtocolV1, MigrationReportV1, SupervisionProtocolV1},
     policy::Policy,
     redaction::Redactor,
 };
@@ -128,6 +128,7 @@ fn migrate_to(store: &Store, backup: &Path, version: u32) {
         6 => store.migrate_workload_v6(backup).unwrap(),
         7 => store.migrate_human_brokers_v7(backup).unwrap(),
         8 => store.migrate_kubernetes_create_v8(backup).unwrap(),
+        9 => store.migrate_kubernetes_policy_v9(backup).unwrap(),
         _ => panic!("unexpected migration target {version}"),
     };
     assert!(
@@ -173,7 +174,7 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
         let protocol = get_protocol(&router, &runner_token).await;
         check_protocol_and_schema(&protocol, &schema, 2, false, &mut failures);
 
-        for version in 3..=8 {
+        for version in 3..=9 {
             let backup = directory
                 .path()
                 .join(format!("tenant-before-v{version}.sqlite"));
@@ -183,9 +184,9 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
         }
     }
 
-    // Exact pre-migration backups remain historical readers. Neither schema6
-    // nor schema7 may inherit the source's live lease on reopen.
-    for version in [6, 7] {
+    // Exact pre-migration backups remain historical readers. Historical readers
+    // never inherit the source's live lease on reopen.
+    for version in [6, 7, 8] {
         let historical = Arc::new(
             Store::open_existing_for_tenant(
                 &directory
@@ -237,10 +238,59 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
     )
     .unwrap();
     let reopened_router = gateway_router(reopened_state);
-    assert_eq!(reopened.supervision_state().unwrap().schema_version, 8);
+    assert_eq!(reopened.supervision_state().unwrap().schema_version, 9);
     assert!(!reopened.supervision_state().unwrap().active);
     let protocol = get_protocol(&reopened_router, &runner_token).await;
-    check_protocol_and_schema(&protocol, &schema, 8, false, &mut failures);
+    check_protocol_and_schema(&protocol, &schema, 9, false, &mut failures);
+
+    // Exercise the delivered CLI on a disposable COPY of the real schema8
+    // backup; the original backup remains available for historical readers.
+    let cli_data = directory.path().join("cli-schema8-copy.sqlite");
+    let cli_backup = directory.path().join("cli-before9.sqlite");
+    let source_backup = directory.path().join("tenant-before-v9.sqlite");
+    let source_bytes = std::fs::read(&source_backup).unwrap();
+    std::fs::copy(&source_backup, &cli_data).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", directory.path())
+        .env("TMPDIR", directory.path())
+        .args(["migrate-control", "--data"])
+        .arg(&cli_data)
+        .args(["--tenant-id", "schema-contract-tenant", "--backup"])
+        .arg(&cli_backup)
+        .args([
+            "--target-version",
+            "9",
+            "--confirm-control-stopped",
+            "--max-events",
+            "10000",
+        ])
+        .output()
+        .expect("invoke the delivered CLI on private fixture data");
+    assert!(output.status.success(), "schema9 CLI migration failed");
+    let report: MigrationReportV1 =
+        serde_json::from_slice(&output.stdout).expect("CLI emits a typed migration report");
+    assert_eq!((report.from_version, report.to_version), (8, 9));
+    assert!(cli_backup.is_file());
+    assert_eq!(std::fs::read(&source_backup).unwrap(), source_bytes);
+    let cli_store = Store::open_existing_for_tenant(
+        &cli_data,
+        "schema-contract-tenant",
+        Redactor::new(vec![]),
+        10_000,
+    )
+    .unwrap();
+    let cli_integrity = cli_store.integrity().unwrap();
+    assert!(cli_integrity.valid);
+    assert_eq!(cli_integrity.head_hash, report.genesis_hash);
+    let cli_control = cli_store.supervision_state().unwrap();
+    assert_eq!(cli_control.schema_version, 9);
+    assert!(!cli_control.active);
+    assert_eq!(
+        cli_control.control_namespace_uuid,
+        protocol.control_namespace_uuid
+    );
 
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

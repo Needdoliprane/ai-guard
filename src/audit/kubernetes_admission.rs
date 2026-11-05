@@ -3,6 +3,7 @@ use super::*;
 use crate::control::kubernetes_admission::*;
 mod authorization;
 pub(crate) use authorization::KubernetesCreateAuthorization;
+mod migration;
 mod model;
 mod mutations;
 mod replay;
@@ -10,6 +11,8 @@ pub(crate) use mutations::{ConfirmedKubernetesCreateResult, FreshKubernetesCreat
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // V1 mutation capabilities stay on schema8 until the V2 producer is wired.
+    // Historical replay independently accepts schema9's format marker.
     if version == 8 {
         Ok(())
     } else {
@@ -80,6 +83,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     replay::validate(db).map_err(|_| KubernetesCreateFailureV1::Unavailable.into())
 }
 
+pub(super) fn initialize_policy(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
+    migration::initialize(store, tx)
+}
+
 #[cfg(test)]
 pub(super) fn validate_unwrapped_for_test(db: &Connection) -> anyhow::Result<()> {
     replay::validate(db)
@@ -89,6 +96,10 @@ pub(super) fn workload_audit_identity(
     event: &Event,
 ) -> anyhow::Result<Option<capacity::WorkloadAuditPrincipalV1>> {
     if event.kind == GENESIS_KIND || !event.kind.starts_with("control.kubernetes.create.") {
+        return Ok(None);
+    }
+    if event.kind == migration::POLICY_GENESIS_KIND {
+        migration::policy_event(event)?;
         return Ok(None);
     }
     let record: model::Record = serde_json::from_value(event.data.clone())?;
@@ -117,5 +128,14 @@ impl Store {
         backup_path: &Path,
     ) -> anyhow::Result<crate::control::MigrationReportV1> {
         self.migrate_control_version(backup_path, 7, 8)
+    }
+
+    /// Preserve a verified schema8 backup and append only the format marker.
+    /// The semantic migration grants neither activation nor a mutation permit.
+    pub fn migrate_kubernetes_policy_v9(
+        &self,
+        backup_path: &Path,
+    ) -> anyhow::Result<crate::control::MigrationReportV1> {
+        self.migrate_control_version(backup_path, 8, 9)
     }
 }

@@ -39,6 +39,8 @@ pub(crate) mod kubernetes_admission_state_tests;
 #[cfg(test)]
 mod kubernetes_admission_tests;
 #[cfg(test)]
+mod kubernetes_policy_tests;
+#[cfg(test)]
 pub(crate) mod read_test_observer;
 mod relay;
 mod workload;
@@ -245,37 +247,37 @@ fn schema_objects(
         } else {
             [].iter()
         })
-        .chain(if [3, 4, 5, 6, 7, 8].contains(&version) {
+        .chain(if [3, 4, 5, 6, 7, 8, 9].contains(&version) {
             control::supervision::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if [4, 5, 6, 7, 8].contains(&version) {
+        .chain(if [4, 5, 6, 7, 8, 9].contains(&version) {
             identity::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             workload::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             broker_registry::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             relay::SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             WORKLOAD_INDEX_SCHEMA.iter()
         } else {
             [].iter()
         })
-        .chain(if version == 8 {
+        .chain(if [8, 9].contains(&version) {
             kubernetes_admission::SCHEMA.iter()
         } else {
             [].iter()
@@ -302,7 +304,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        [1, 2, 3, 4, 5, 6, 7, 8].contains(&version) || (allow_legacy && version == 0),
+        [1, 2, 3, 4, 5, 6, 7, 8, 9].contains(&version) || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
@@ -325,32 +327,32 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
     }
     let automatic = AUTO_INDEX_COUNTS
         .iter()
-        .chain(if [3, 4, 5, 6, 7, 8].contains(&version) {
+        .chain(if [3, 4, 5, 6, 7, 8, 9].contains(&version) {
             control::supervision::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [4, 5, 6, 7, 8].contains(&version) {
+        .chain(if [4, 5, 6, 7, 8, 9].contains(&version) {
             identity::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             workload::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             broker_registry::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8].contains(&version) {
+        .chain(if [6, 7, 8, 9].contains(&version) {
             relay::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if version == 8 {
+        .chain(if [8, 9].contains(&version) {
             kubernetes_admission::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
@@ -448,7 +450,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "internal audit schema index is missing"
         );
     }
-    if [4, 5, 6, 7, 8].contains(&version) {
+    if [4, 5, 6, 7, 8, 9].contains(&version) {
         identity::validate_human_access_capability(db, version)?;
     }
     human_brokers::validate_capability(db, version)?;
@@ -1145,8 +1147,8 @@ impl Store {
         // During the explicit5→6 migration the projection is created/seeded
         // before its genesis events, while user_version still correctly is5.
         let project_time =
-            [6, 7, 8].contains(&schema) || (schema == 5 && workload::time_floors_present(tx)?);
-        if [5, 6, 7, 8].contains(&schema) {
+            [6, 7, 8, 9].contains(&schema) || (schema == 5 && workload::time_floors_present(tx)?);
+        if [5, 6, 7, 8, 9].contains(&schema) {
             let mut cache = self
                 .supervision_lease
                 .capacity
@@ -1167,7 +1169,7 @@ impl Store {
             };
             if let capacity::Class::Workload(principal) = &class {
                 anyhow::ensure!(
-                    [6, 7, 8].contains(&schema),
+                    [6, 7, 8, 9].contains(&schema),
                     "workload audit requires schema6"
                 );
                 let event_principal = capacity::workload_identity(&event)?
@@ -1520,7 +1522,7 @@ impl Store {
     }
     fn check_integrity(db: &Connection) -> anyhow::Result<Integrity> {
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let query = if [6, 7, 8].contains(&schema) {
+        let query = if [6, 7, 8, 9].contains(&schema) {
             "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload,e.id,e.kind,e.agent_id,e.sandbox_id,e.project_id,e.decision,f.max_received_at FROM events e LEFT JOIN audit_time_floors f ON f.event_seq=e.seq ORDER BY e.seq"
         } else {
             "SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq"
@@ -1555,7 +1557,7 @@ impl Store {
             } else {
                 false
             };
-            let time_valid = if [6, 7, 8].contains(&schema) {
+            let time_valid = if [6, 7, 8, 9].contains(&schema) {
                 let received = workload::canonical_control_time(
                     crate::broker_registry::parse_time(&received)?,
                 )?;
@@ -1582,7 +1584,7 @@ impl Store {
             prev = hash;
             count += 1;
         }
-        if [6, 7, 8].contains(&schema) {
+        if [6, 7, 8, 9].contains(&schema) {
             let floors: i64 =
                 db.query_row("SELECT COUNT(*) FROM audit_time_floors", [], |row| {
                     row.get(0)

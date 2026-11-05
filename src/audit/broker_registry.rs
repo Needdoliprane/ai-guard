@@ -331,7 +331,7 @@ impl Projection {
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [6, 7, 8].contains(&version) {
+    if [6, 7, 8, 9].contains(&version) {
         Ok(())
     } else {
         Err(BrokerRegistryFailureV1::MigrationRequired.into())
@@ -392,7 +392,7 @@ fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![6, 7, 8].contains(&version) {
+    if ![6, 7, 8, 9].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(
@@ -644,7 +644,7 @@ impl Store {
         view: &BrokerIdentityViewV1,
         heartbeat: &BrokerHeartbeatV1,
     ) -> anyhow::Result<String> {
-        require(view.version == 1 && matches!(view.schema_version, 6 | 7 | 8))?;
+        require(view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9))?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [
             &view.control_namespace_uuid,
