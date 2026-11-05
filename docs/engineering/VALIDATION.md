@@ -1,5 +1,90 @@
 # Validation courante
 
+## 5 novembre — autorités du lancement et de l'inspection dans le dashboard
+
+Base `b98e420`, worktree dédié `codex/federation-view-20261105`, sans modification
+du checkout principal. Deux fichiers TypeScript, deux fichiers de tests et
+guides locaux FR/EN ; aucun endpoint ou schéma nouveau. Le delta projette
+`launch.authority_id` séparément de `last_observation.inspection.authority_id`
+et `runtime_kind`. Absence/null reste inconnue, identifiant conservé exactement,
+chaîne non vide limitée à256octets UTF-8 sans contrôle. La projection exclut
+les autres métadonnées d'inspection ; le rendu utilise des nœuds texte.
+
+Luna exécute les sélections dans le QA LinuxARM64/Rust1.99.1/Node24.22.2,
+image épinglée `sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`.
+Admission configuration et noyau : UID1000/caps0/NNP1/seccomp2/networknone,
+root/source/registre RO,1CPU/4Gio/swap0/PID256, scratch2Gio/65536inodes,
+fsize536870912bytes/nofile1024, HOME/tmp/targets privés, env vide reconstruit.
+Le chantier Kubernetes compile simultanément dans un autre QA/target privé ;
+aucun partage de base ou cible mutable. Les délais métier restent inchangés.
+TypeScript5.9.3 vient d'un tarball public local dont SHA512/SRI correspond au
+lock ; extraction en scratch, aucun téléchargement ou lifecycle npm.
+
+| Gel et commande | Résultat constaté |
+|---|---|
+| `authority-view-red`, `node --test --test-isolation=none --test-name-pattern='les autorités de lancement' tests/control.test.mjs` dans `front/` | RED RC1 :1FAIL, autorité projetée absente. |
+| `authority-view-candidate`, même sélection | PASS RC0 :1/1. |
+| `authority-api-diagnostic`, sélection exacte `shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_only` dans `cargo test --offline --locked --test workers_api` | FAIL RC101 : A1 HTTP400, A2/B1 et assertions d'isolation non atteintes. |
+| `authority-fixture-fixed`, même sélection Rust | PASS RC0 :1/1,5filtrés,0ignoré. |
+| `authority-fixture-fixed`, `cargo test --offline --locked --manifest-path /inputs/authority-fixture-fixed/Cargo.toml --test workers_api -- --test-threads=1` | PASS RC0 :6/6,0ignoré,0filtré. Vérifie aussi les autres consommateurs du helper de fixture modifié. |
+| `authority-fixture-fixed`, `node --test --test-isolation=none tests/control.test.mjs` | PASS RC0 :9/9,0ignoré. |
+| `authority-fixture-fixed`, `node /scratch/ts-tool/package/lib/tsc.js --project /inputs/authority-fixture-fixed/front/tsconfig.json --noEmit` | PASS RC0, aucune sortie. |
+
+Les commandes Cargo ont en plus `--locked --offline --manifest-path
+/inputs/<gel>/Cargo.toml` et `-- --exact --test-threads=1` pour le parent ciblé.
+Le premier essai Rust ne compilait pas, car l'Arc de B avait été déplacé :
+aucune preuve comportementale n'en est déduite. Après correction, le400
+provient des digests fictifs `a×64`/`b×64`, contenant les credentials runner
+fictifs `a×48`/`b×48`. Le vrai Redactor global les refuse avant transaction.
+Seuls les deux digests du helper passent à `e×64`/`d×64` ; aucun contrôle
+produit n'est assoupli. Les trois réservations et décisions sont ensuite
+réellement durables dans deux Store SQLite distincts via le gateway HTTP.
+
+Le parent positif vérifie A1/A2 d'autorités différentes dans A, B1 dans B,
+headers `x-tenant-id` opposés sans effet, GET croisés404, POST de réservation
+via le dashboard refusé405 et nombre de workersA resté2. Les observations runtime
+restent nulles : ce n'est pas une recette Docker/Podman à trois workers.
+Les tests du modèle séparent les deux autorités, gardent les espaces exacts,
+refusent les types/bornes/caractères invalides et couvrent la limite UTF-8.
+
+Journaux privés0600, empreintes relues par Root :
+
+| Journal | SHA256 |
+|---|---|
+| `fed-authority-node-red.log` | `cb93b09308e7e7dd6d826ddb413fa7578ab7f447e4bc93d943b763e517d9702f` |
+| `fed-authority-node-green.log` | `de2915c02eb1ff26c034b9352611283edc9b80957c35a5e69107db3999bc458d` |
+| `fed-workers-api-diagnostic.log` | `e10311b6ad1f1cf4ba9169d7ab1651b191debb833735c1708ecdeed22aa8fab5` |
+| `fed-workers-api-fixture-green.log` | `0c238cac4dd408360760f13f256ae39052167bd176fb94d9370ebb1ed9a072b9` |
+| `fed-control-unit.log` | `a060a6900a6a0b031dd71b46e42a611a18f027ec5416ffed9dd2d5d1d8244981` |
+| `fed-typescript.log` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `fed-workers-api-final-container.log` | `57aaa95e4912fc9b892aa354b85dbe524fd36e3ac5d4971a533857c1685f94d5` |
+| `fed-workers-api-final.log`, pré-échec d'orchestration uniquement | `676db8ffce09a67d471dbc3c504d94fda362d0fa4161b0ce2df27575ebf2315b` |
+
+Les15fonctions uniques exécutées correspondent à9Node+6Rust ; le parent
+ciblé et ses replays ne sont pas ajoutés une seconde fois. Une tentative du
+lanceur pour les six parents s'est arrêtée avant Cargo, RC127 : `env -i` avait
+été appliqué côté hôte, où Cargo n'était pas présent. Aucun programme du projet
+n'a été exécuté nativement. Le log est conservé ; la commande a ensuite été
+exécutée dans le conteneur admis, avec son log distinct et ses six PASS.
+Après tous les terminaux et inventaire init+sleep, fermeture normale du QA
+à19:34:09UTC, PID0/exit143/OOMfalse, retrait exact. Aucun scratch DB/bin/cache
+n'est promu.
+
+La revue indépendante ne signale aucun défaut bloquant concret dans les
+projections, les oracles API et les guides. Ses deux corrections de portée
+documentaire sont appliquées : ne pas attribuer à ce parent une lecture quota
+A/B positive ou une interdiction de toutes les mutations.
+Format Rust ciblé, diff-check, Cargo/lock et manifests frontend inchangés
+sont PASS. Les375liens relatifs des cinq documents ont une cible existante ;
+les ancres ajoutées sont relues. Les trois secrets connus ne sont pas présents
+littéralement dans les neuf fichiers modifiés ; ce contrôle n'est pas un audit
+universel de secrets.
+Le build Vite et navigateur sont **NOT_RUN**, faute de cache LinuxARM64 complet
+confirmé pour ce lot ; aucun échec de build n'est inventé. Clippy **BLOCKED**
+dans l'image (composant absent). Runtimes réels, multi-hôtes, capacité100,
+reprise physique et release **NOT_RUN** sur ce delta. Les75warnings Rust
+préexistants de la base restent visibles. G09 FAIL,0/12 gates globaux clos.
+
 ## 5 novembre — producteur V2 et API centrale Kubernetes held-CREATE
 
 Base `734c78d`, même worktree dédié. La tranche ajoute les producteurs Store

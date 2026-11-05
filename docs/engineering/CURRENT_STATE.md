@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 5 novembre — autorités distinctes dans la vue des workers
+
+Le dashboard conserve et affiche séparément l'autorité déclarée du lancement
+et celle de la dernière inspection enregistrée, avec son runtime et sa date.
+Une absence reste inconnue ; aucun hôte, broker ou état courant n'est déduit.
+Les identifiants sont conservés exactement, bornés et validés avant affichage.
+Le même dashboard consulte plusieurs autorités d'un tenant via les contrats
+existants, sans accès moteur ni nouvelle route. Guides locaux FR/EN synchronisés.
+
+Les neuf tests du modèle frontend et le contrôle TypeScript passent. Le test
+HTTP/SQLite du dashboard partagé passe avec A1/A2 chez A et B1 chez B,
+headers de tenant opposés, lectures croisées refusées et POST de réservation
+via le dashboard refusé405. Les six tests du fichier API concerné passent.
+[Commandes, gels et limites](VALIDATION.md#5-novembre--autorités-du-lancement-et-de-linspection-dans-le-dashboard).
+Il s'agit de registres de contrôle réels dans une fixture logicielle ; aucun
+worker runtime n'est lancé. Build Vite et navigateur ne sont pas exécutés sur
+ce delta. La fédération runtime multi-hôtes et sa qualification restent ouvertes,
+ainsi que les autres exigences produit. G09 FAIL, 0/12 gates globaux clos.
+
 ## 5 novembre — décisions Kubernetes V2 et six routes centrales authentifiées
 
 Le Store émet maintenant Admission depuis la politique serveur courante et

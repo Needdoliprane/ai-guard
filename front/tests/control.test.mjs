@@ -34,6 +34,50 @@ test("le modèle de lecture worker ne conserve pas les commandes ou métadonnée
   assert.equal(parsed.launch.session_id, id);
 });
 
+test("les autorités de lancement et d’inspection sont projetées séparément sans normalisation", () => {
+  const utf8Boundary = "é".repeat(128);
+  const observed = { ...worker, launch: { ...worker.launch, authority_id: "  authority-a  " },
+    last_observation: { observed_at: "2026-11-05T10:00:00Z", status: "running", running: true,
+      started_at: "2026-11-05T09:59:00Z", finished_at: null, exit_code: null,
+      oom_killed: false, restart_count: 0,
+      inspection: { authority_id: "authority-b", runtime_kind: "podman", container_id: "ignored" } } };
+  const parsed = parseWorkerPage({ items: [observed], next_cursor: null }).items[0];
+  assert.equal(parsed.launch.authority_id, "  authority-a  ");
+  assert.deepEqual(parsed.last_observation.inspection, {
+    authority_id: "authority-b", runtime_kind: "podman",
+  });
+  assert.equal("container_id" in parsed.last_observation.inspection, false);
+
+  const unknown = parseWorkerPage({ items: [{ ...worker,
+    launch: { ...worker.launch, authority_id: null },
+    last_observation: { ...observed.last_observation,
+      inspection: { runtime_kind: "docker" } } }], next_cursor: null }).items[0];
+  assert.equal(unknown.launch.authority_id, null);
+  assert.equal(unknown.last_observation.inspection.authority_id, null);
+  const omitted = { ...worker, launch: { ...worker.launch },
+    last_observation: { ...observed.last_observation, inspection: { runtime_kind: "docker" } } };
+  delete omitted.launch.authority_id;
+  const omittedParsed = parseWorkerPage({ items: [omitted], next_cursor: null }).items[0];
+  assert.equal(omittedParsed.launch.authority_id, null);
+  assert.equal(omittedParsed.last_observation.inspection.authority_id, null);
+
+  const boundary = parseWorkerPage({ items: [{ ...worker,
+    launch: { ...worker.launch, authority_id: utf8Boundary },
+    last_observation: { ...observed.last_observation,
+      inspection: { authority_id: utf8Boundary, runtime_kind: "docker" } } }], next_cursor: null }).items[0];
+  assert.equal(boundary.launch.authority_id, utf8Boundary);
+  assert.equal(boundary.last_observation.inspection.authority_id, utf8Boundary);
+
+  for (const bad of ["", 1, "a".repeat(257), "é".repeat(129), "bad\u0000authority"]) {
+    assert.throws(() => parseWorkerPage({ items: [{ ...worker,
+      launch: { ...worker.launch, authority_id: bad } }], next_cursor: null }), /contrat/i);
+    assert.throws(() => parseWorkerPage({ items: [{ ...observed,
+      last_observation: { ...observed.last_observation,
+        inspection: { authority_id: bad, runtime_kind: "docker" } } }], next_cursor: null }), /contrat/i);
+  }
+  assert.equal(parsed.launch.authority_id, "  authority-a  ", "les valeurs ne sont pas normalisées");
+});
+
 test("les unités entières de l’allocation restent exactes au-delà de Number.MAX_SAFE_INTEGER", () => {
   const value = "9007199254740993000000001";
   assert.equal(formatExactDecimal(value, 9), "9\u202f007\u202f199\u202f254\u202f740\u202f993,000000001");

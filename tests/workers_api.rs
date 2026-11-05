@@ -26,6 +26,7 @@ fn nested_command_contract_rejects_unknown_fields() {
 struct Server {
     base: String,
     a: Arc<Store>,
+    b: Arc<Store>,
     task: tokio::task::JoinHandle<()>,
     _files: tempfile::TempDir,
 }
@@ -64,7 +65,7 @@ async fn server() -> Server {
             },
             TenantGateway {
                 tenant_id: "b".into(),
-                store: b,
+                store: b.clone(),
                 runner_token: "b".repeat(48),
                 viewer_token: "w".repeat(48),
             },
@@ -81,11 +82,20 @@ async fn server() -> Server {
     Server {
         base,
         a,
+        b,
         task,
         _files: files,
     }
 }
 async fn admission(server: &Server) -> AdmissionV1 {
+    admission_for(server, "a").await
+}
+async fn admission_for(server: &Server, tenant: &str) -> AdmissionV1 {
+    let (store, token) = if tenant == "a" {
+        (&server.a, "a")
+    } else {
+        (&server.b, "b")
+    };
     let session = uuid::Uuid::new_v4().to_string();
     let command = CommandSpec {
         argv: vec!["/usr/bin/id".into(), "-u".into()],
@@ -108,15 +118,14 @@ async fn admission(server: &Server) -> AdmissionV1 {
     };
     let reply = Client::new()
         .post(format!("{}/api/v1/decide", server.base))
-        .bearer_auth("a".repeat(48))
+        .bearer_auth(token.repeat(48))
         .json(&request)
         .send()
         .await
         .unwrap();
     assert_eq!(reply.status(), StatusCode::OK);
     let reply: Value = reply.json().await.unwrap();
-    let decision = server
-        .a
+    let decision = store
         .events(&EventQuery {
             kind: Some("security.decision".into()),
             ..Default::default()
@@ -145,7 +154,7 @@ async fn admission(server: &Server) -> AdmissionV1 {
             runtime_kind: RuntimeKindV1::Docker,
             authority_id: uuid::Uuid::new_v4().to_string(),
             image_ref: "worker:fixture".into(),
-            image_id: format!("sha256:{}", "b".repeat(64)),
+            image_id: format!("sha256:{}", "d".repeat(64)),
             network: NetworkV1::None,
             cpu_millis: 2000,
             memory_bytes: 1024 * 1024 * 1024,
@@ -153,7 +162,7 @@ async fn admission(server: &Server) -> AdmissionV1 {
             timeout_seconds: 60,
             security_preset: SecurityPresetV1::FixedSandboxV2,
             restart_policy: RestartPolicyV1::No,
-            workspace_manifest_digest: "a".repeat(64),
+            workspace_manifest_digest: "e".repeat(64),
             workspace_import_policy_version: 1,
             provider: "generic".into(),
             capture_output: false,
@@ -162,6 +171,35 @@ async fn admission(server: &Server) -> AdmissionV1 {
             provider_resolution: None,
         },
     }
+}
+
+async fn admit_with_authority(
+    server: &Server,
+    tenant: &str,
+    label: &str,
+    authority: &str,
+) -> WorkerV1 {
+    let mut request = admission_for(server, tenant).await;
+    request.launch.authority_id = authority.to_owned();
+    let token = if tenant == "a" { "a" } else { "b" };
+    let response = Client::new()
+        .post(format!("{}/api/v1/workers/reservations", server.base))
+        .bearer_auth(token.repeat(48))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "{label} reservation returned {status}: {body}"
+    );
+    serde_json::from_str::<AdmissionResultV1>(&body)
+        .unwrap()
+        .worker
+        .unwrap()
 }
 
 #[tokio::test]
@@ -557,22 +595,17 @@ async fn dashboard_refuses_a_control_token_even_if_its_file_was_misconfigured() 
 async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_only() {
     use tower::ServiceExt;
     let backend = server().await;
-    let admitted: AdmissionResultV1 = Client::new()
-        .post(format!("{}/api/v1/workers/reservations", backend.base))
-        .bearer_auth("a".repeat(48))
-        .json(&admission(&backend).await)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let worker = admitted.worker.unwrap();
+    let authority_a1 = uuid::Uuid::new_v4().to_string();
+    let authority_a2 = uuid::Uuid::new_v4().to_string();
+    let authority_b1 = uuid::Uuid::new_v4().to_string();
+    let worker_a1 = admit_with_authority(&backend, "a", "A1", &authority_a1).await;
+    let worker_a2 = admit_with_authority(&backend, "a", "A2", &authority_a2).await;
+    let worker_b1 = admit_with_authority(&backend, "b", "B1", &authority_b1).await;
     let front = support::private_tempdir();
     let dashboard =
         agentsandbox::api::dashboard_shared_router(&backend.base, front.path().to_path_buf())
             .unwrap();
-    for (token, tenant, active) in [("v", "a", 1), ("w", "b", 0)] {
+    for (token, tenant, active) in [("v", "a", 2), ("w", "b", 1)] {
         let response = dashboard
             .clone()
             .oneshot(
@@ -599,6 +632,7 @@ async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_o
                 axum::http::Request::builder()
                     .uri("/api/v1/workers")
                     .header("authorization", format!("Bearer {}", token.repeat(48)))
+                    .header("x-tenant-id", if tenant == "a" { "b" } else { "a" })
                     .body(axum::body::Body::empty())
                     .unwrap(),
             )
@@ -613,7 +647,29 @@ async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_o
         .unwrap();
         assert_eq!(page["items"].as_array().unwrap().len(), active);
         if tenant == "a" {
-            assert_eq!(page["items"][0]["worker_id"], worker.worker_id);
+            let rows = page["items"].as_array().unwrap();
+            let authorities = rows
+                .iter()
+                .map(|row| row["launch"]["authority_id"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                authorities,
+                std::collections::BTreeSet::from([authority_a1.as_str(), authority_a2.as_str(),])
+            );
+            assert!(rows.iter().all(|row| row["last_observation"].is_null()));
+            assert!(
+                rows.iter()
+                    .any(|row| row["worker_id"] == worker_a1.worker_id)
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row["worker_id"] == worker_a2.worker_id)
+            );
+        } else {
+            let rows = page["items"].as_array().unwrap();
+            assert_eq!(rows[0]["worker_id"], worker_b1.worker_id);
+            assert_eq!(rows[0]["launch"]["authority_id"], authority_b1);
+            assert!(rows[0]["last_observation"].is_null());
         }
     }
     for (method, path, token, expected) in [
@@ -637,7 +693,7 @@ async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_o
         ),
         (
             "GET",
-            format!("/api/v1/workers/{}", worker.worker_id),
+            format!("/api/v1/workers/{}", worker_a1.worker_id),
             Some("w"),
             StatusCode::NOT_FOUND,
         ),
@@ -668,6 +724,24 @@ async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_o
             expected
         );
     }
+    for (token, worker_id) in [("v", &worker_b1.worker_id), ("w", &worker_a1.worker_id)] {
+        assert_eq!(
+            dashboard
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .uri(format!("/api/v1/workers/{worker_id}"))
+                        .header("authorization", format!("Bearer {}", token.repeat(48)))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND,
+            "a viewer cannot fetch a worker from another tenant"
+        );
+    }
     // A single-viewer deployment preserves its explicit configured scope.
     let fixed = agentsandbox::api::dashboard_router(
         &backend.base,
@@ -691,7 +765,7 @@ async fn shared_dashboard_uses_the_authenticated_viewer_scope_and_remains_read_o
     );
     assert_eq!(
         backend.a.workers().unwrap().len(),
-        1,
+        2,
         "presentation cannot mutate the registry"
     );
 }

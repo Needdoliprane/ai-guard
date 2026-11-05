@@ -4,6 +4,7 @@ export type ControlView = "workers" | "quota" | "usage";
 export type WorkerState = "reserved" | "preparing" | "created" | "start_issued" |
   "running" | "stopping" | "terminal" | "in_doubt" | "cancelled";
 export interface RuntimeObservation {
+  inspection: { authority_id: string | null; runtime_kind: "docker" | "podman" } | null;
   observed_at: string;
   status: string;
   running: boolean | null;
@@ -23,6 +24,7 @@ export interface WorkerRecord {
     session_id: string;
     profile: string;
     runtime_kind: "docker" | "podman";
+    authority_id: string | null;
     provider: string;
     cpu_millis: number;
     memory_bytes: number;
@@ -92,6 +94,19 @@ function nullableText(value: unknown): boolean { return value === null || text(v
 function contract(): never {
   throw new Error("Contrat de lecture v1 incomplet ou incompatible. Vérifiez les versions du dashboard et du collecteur.");
 }
+function authority(value: unknown): string | null {
+  if (value == null) return null;
+  if (!text(value) || !value.length || value.length > 256 ||
+    new TextEncoder().encode(value).byteLength > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return contract();
+  return value;
+}
+function inspection(value: unknown): RuntimeObservation["inspection"] {
+  if (value == null) return null;
+  if (!record(value)) return contract();
+  const runtime = value.runtime_kind;
+  if (runtime !== "docker" && runtime !== "podman") return contract();
+  return { authority_id: authority(value.authority_id), runtime_kind: runtime };
+}
 function observation(value: unknown): boolean {
   if (value === null) return true;
   return record(value) && text(value.observed_at) && Number.isFinite(Date.parse(value.observed_at)) &&
@@ -127,6 +142,7 @@ export function parseWorker(value: unknown): WorkerRecord {
     launch: {
       version: source.launch.version, session_id: source.launch.session_id,
       profile: source.launch.profile, runtime_kind: source.launch.runtime_kind,
+      authority_id: authority(source.launch.authority_id),
       provider: source.launch.provider, cpu_millis: source.launch.cpu_millis,
       memory_bytes: source.launch.memory_bytes, pids_limit: source.launch.pids_limit,
       timeout_seconds: source.launch.timeout_seconds, network: source.launch.network,
@@ -136,6 +152,7 @@ export function parseWorker(value: unknown): WorkerRecord {
       container_id: source.attempt.container_id, volume_name: source.attempt.volume_name,
     },
     last_observation: latest ? {
+      inspection: inspection(latest.inspection),
       observed_at: latest.observed_at, status: latest.status, running: latest.running,
       started_at: latest.started_at, finished_at: latest.finished_at, exit_code: latest.exit_code,
       oom_killed: latest.oom_killed, restart_count: latest.restart_count,
