@@ -1,5 +1,29 @@
 # Décisions d'industrialisation
 
+## 6 novembre — un lot d'ACK sur la capacité Stops existante
+
+La préparation d'audit et sa complétion restent dans l'acteur, la queue et la
+lease du profil. Une sœur interne de `StopWriterClient`, construite seulement
+depuis Backend::Stops, évite toute conversion vers Full ou extension du Cancel.
+La réserve logique compte tous les jobs et le ticket de queue est possédé avant
+HTTP. Les données Worker et reçus restent distinctes de l'identité authentifiée.
+
+q=1 engage un lot exact et un head cible avant l'effet. Après perte d'attente
+ou résultat ambigu, aucun second publisher n'est lancé sous cette réserve.
+Le même lot peut seulement confirmer les données durables ; un autre lot est
+un conflit. L'acteur retient fortement l'input avant erreur, sans son propre
+sender afin de pouvoir se fermer ; Cancel reste admis. Une procédure explicite
+de recomptage/reprise de cette quarantaine reste à livrer.
+
+Les vérifications de scope portent sur l'ensemble des IDs et sur chaque
+historique contre ses floors, avec rejets/partiels et usage contrôlés. Le helper
+de lecture est partagé avec prepare ; les données des voisins sont libérées
+successivement. Cette composition interne ne change ni format, rôle, service
+ou stockage et ne requiert aucune nouvelle infrastructure. Son
+[périmètre vérifié](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops)
+précède le futur propriétaire authentifié et le raccord ServiceCold ; aucun
+test de ces primitives ne ferme les gates de reprise ou de runtime.
+
 ## 5 novembre — ACK HTTP privé et ownership du journal Kubernetes
 
 Le raccord broker réutilise le gateway, la base par tenant et les six routes

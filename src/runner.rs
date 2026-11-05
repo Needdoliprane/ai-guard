@@ -17,6 +17,7 @@ use std::{
 use uuid::Uuid;
 pub mod broker;
 mod cold_audit_http;
+pub(crate) use cold_audit_http::{ColdAuditBudget, ExactStoredEventReceipt};
 pub(crate) mod kubernetes_preflight;
 mod managed;
 

@@ -1,4 +1,6 @@
 use super::*;
+#[path = "cold_audit/completion_tests.rs"]
+mod completion_tests;
 use crate::{
     broker::{
         checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},

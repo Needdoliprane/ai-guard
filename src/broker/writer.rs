@@ -26,7 +26,15 @@ use std::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+mod cold_audit;
 mod queue;
+
+use cold_audit::ColdAuditCompletion;
+pub(in crate::broker) use cold_audit::{ColdAuditWriterClient, ReservedColdAudit};
+
+#[cfg(all(test, unix))]
+#[path = "writer/cold_audit_tests.rs"]
+mod cold_audit_tests;
 
 type Reply<T> = oneshot::Sender<JournalResult<T>>;
 
@@ -137,6 +145,14 @@ opaque_input!(RejectInput);
 opaque_input!(CancelInputV1);
 
 enum Command {
+    CompleteColdAudit {
+        input: ColdAuditCompletion,
+        reply: Reply<super::journal::recovery::cold_audit::completion::ConfirmedColdAudit>,
+    },
+    PrepareColdAudit {
+        operation_id: Uuid,
+        reply: Reply<super::journal::recovery::cold_audit::PreparedColdAudit>,
+    },
     Reserve {
         operation_id: Uuid,
         submit: Vec<u8>,
@@ -294,6 +310,7 @@ opaque_input!(StopWriterClient);
 pub struct ProfileWriterCapabilities {
     full: Option<WriterClient>,
     stops: StopWriterClient,
+    cold_audit: Option<ColdAuditWriterClient>,
 }
 opaque_input!(ProfileWriterCapabilities);
 
@@ -303,6 +320,7 @@ impl ProfileWriterCapabilities {
         Self {
             full: Some(writer),
             stops,
+            cold_audit: None,
         }
     }
     pub fn open_existing(
@@ -334,14 +352,14 @@ impl ProfileWriterCapabilities {
             super::journal::ExistingProfileV1::Full(journal) => {
                 WriterClient::start(journal, capacity, timeout).map(Self::from_full)
             }
-            super::journal::ExistingProfileV1::Stops(journal) => Ok(Self {
-                full: None,
-                stops: StopWriterClient(ClientState::start(
-                    Backend::Stops(journal),
-                    capacity,
-                    timeout,
-                )?),
-            }),
+            super::journal::ExistingProfileV1::Stops(journal) => {
+                let state = ClientState::start(Backend::Stops(journal), capacity, timeout)?;
+                Ok(Self {
+                    full: None,
+                    stops: StopWriterClient(Arc::clone(&state)),
+                    cold_audit: Some(ColdAuditWriterClient::from_stops_actor(state)),
+                })
+            }
         }
     }
     pub fn full(&self) -> Option<WriterClient> {
@@ -352,6 +370,9 @@ impl ProfileWriterCapabilities {
     }
     pub fn is_stop_only(&self) -> bool {
         self.full.is_none()
+    }
+    pub(in crate::broker) fn cold_audit(&self) -> Option<ColdAuditWriterClient> {
+        self.cold_audit.clone()
     }
 }
 
@@ -721,8 +742,44 @@ fn serve(journal: Journal, receiver: queue::QueueReceiver<Command>) {
 }
 
 fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
+    // At most one preparation can be live in this actor's weak registry. An
+    // error retains that strong guard before replying, so another preparation
+    // cannot refund or reuse an ambiguous publication's capacity. These inputs
+    // contain no ClientState/sender and cannot prevent graceful queue closure.
+    let mut cold_quarantine = Vec::new();
     while let Ok(command) = receiver.recv() {
         match command {
+            Command::CompleteColdAudit { mut input, reply } => {
+                let result = match &backend {
+                    Backend::Stops(journal) => input.apply(journal),
+                    Backend::Full(_) => {
+                        // No publication was attempted on this rejected route.
+                        let _ = reply.send(Err(JournalError::InvalidInput));
+                        continue;
+                    }
+                };
+                if result.is_err() {
+                    // Quarantine precedes error delivery, including when the
+                    // reply receiver has disappeared. Cancel remains admitted
+                    // on its ordinary path. Recovery/recount is explicit.
+                    cold_quarantine.push(input);
+                }
+                let _ = reply.send(result);
+            }
+            Command::PrepareColdAudit {
+                operation_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Stops(journal) => {
+                        super::journal::recovery::cold_audit::prepare(journal, operation_id)
+                    }
+                    // A private misroute is still denied; neither a facade nor
+                    // descriptive facts can convert a Full actor into Stops.
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                };
+                let _ = reply.send(result);
+            }
             Command::Reserve {
                 operation_id,
                 submit,

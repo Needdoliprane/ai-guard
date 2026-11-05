@@ -53,6 +53,17 @@ HTTP/StoredEvent seuls ne constituent pas cette preuve.
 
 ## Chantiers et validations en parallèle
 
+Pour le lot ACK retenu, sélectionner les douze parents
+`broker::journal::recovery::cold_audit::tests::` et les cinq
+`broker::writer::cold_audit_tests::`. Les snapshots de baseline précèdent les
+POST : un Store neuf contient son genesis, son head ne vaut pas forcément zéro.
+Les invariants testés doivent distinguer explicitement Unknown et NotQueued,
+compter les deux reçus attendus et préserver les lignes antérieures. Les montages
+de disparition/rollback gardent les originaux en backup et les restaurent avant
+relecture complète ; le reader brut ne doit pas modifier le floor observé.
+[Gels, corrections du harnais et limites](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops).
+Ces tests passent sans modèle ni moteur métier et ne qualifient pas ServiceCold.
+
 Le parent `broker::cold_terminal::tests::retained_terminal_checker_matches_real_facts_and_rejects_divergent_clones`
 construit une seule fixture terminale journal/HTTP/SQLite, puis recoupe les
 variantes en mémoire et l'absence de mutation des snapshots suivis. Les

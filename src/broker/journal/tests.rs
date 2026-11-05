@@ -93,7 +93,7 @@ pub(super) fn checkpoint(stage: FaultStage) -> JournalResult<()> {
     if fail { Err(JournalError::Io) } else { Ok(()) }
 }
 
-fn fail_once_at(stage: FaultStage) {
+pub(super) fn fail_once_at(stage: FaultStage) {
     FAIL_ONCE.with(|slot| {
         assert!(
             slot.replace(Some(stage)).is_none(),

@@ -1,5 +1,23 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Audit retenu et reprise logicielle — 6 novembre 2026
+
+Les contrôles purs de cohérence terminale, puis le merge d'ACK restreint et son
+acteur ont leurs reproductions et régressions distinctes. Les écarts de revue
+portent sur Claim/namespace, séquences, disparition de job et rollback d'un
+voisin sous un floor connu. Les montages de corruption appartiennent aux
+fixtures privées du contrôle ; aucun franchissement worker/tenant ni nouvelle
+vulnérabilité distante n'est établi. Le lecteur historique complet avait déjà
+les contrôles Claim/namespace.
+
+Le dernier gel passe 17 parents ciblés après les RED et les corrections de
+harnais, avec compilation toutes cibles RC0 et revue indépendante traitée.
+[Commandes, résultats et limites](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops).
+La boucle ServiceCold, son owner authentifié, D5/fencing et les moteurs restent
+ouverts. Cela ne clôture ni le candidat outbox externe, ni l'audit indépendant,
+dont ce chantier ne modifie pas les fichiers originaux.
+G09 FAIL, aucun gate global clos ; aucune qualification de produit annoncée.
+
 ## Reprise après annulation — 5 novembre 2026
 
 Défaut d'état reproduit sur le code courant, puis défaut distinct de publication

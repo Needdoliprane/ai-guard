@@ -4,7 +4,8 @@
 //! cannot obtain a full journal, start permission, runtime or credential blob.
 //! The capacity reserve is logical, in memory and conservative. It neither
 //! reserves filesystem blocks/inodes nor makes a publication immune to I/O
-//! failure. No persistent acknowledgement is exposed by this module.
+//! failure. Its completion submodule can merge only exact retained HTTP
+//! receipts; neither preparation nor completion authenticates their sender.
 
 use super::*;
 use crate::broker::{lifecycle::LocalCommandV1, outbox::OutboxEventV1};
@@ -15,6 +16,8 @@ const COMMANDS_LIMIT: u64 = 64 * 1024;
 const OUTBOX_LIMIT: u64 = 4 * 1024 * 1024;
 const COMMAND_LIMIT: u64 = 64;
 
+pub(in crate::broker) mod completion;
+
 /// The strong owner of one logical reservation, not a physical disk quota.
 /// Its only registry entry is weak, so a lost preparation response cannot pin
 /// capacity. No Drop implementation takes the journal mutex.
@@ -23,6 +26,10 @@ pub(in crate::broker::journal) struct ReservationState {
     intent_hash: String,
     head: RevisionRefV1,
     jobs: Vec<JobBound>,
+    // Includes closed rejections as well as accepted jobs. A STOP actor may
+    // append Cancel metadata, but cannot add, forget or replace scope jobs.
+    physical_job_ids: HashSet<Uuid>,
+    completion: Mutex<completion::CompletionProgress>,
 }
 
 /// A retained lease, exact selected metadata and one logical capacity reserve.
@@ -141,49 +148,13 @@ pub(in crate::broker) fn prepare(
     let mut bounds = Vec::new();
     let mut selected = None;
     for id in ids {
-        writer.observed_jobs.insert(id);
-        let mut records = Usage::default();
-        let mut blobs = RecoveryBlobBytes::default();
-        let (recovered, rejected, partial) = reader.read_job(id, &mut records, &mut blobs)?;
-        if writer
-            .rejected_floors
-            .get(&id)
-            .is_some_and(|old| Some(old) != rejected.as_ref())
-            || writer.floors.contains_key(&id) && rejected.is_some()
-        {
-            return Err(JournalError::Conflict);
-        }
-        if let Some(hash) = rejected {
-            if recovered.is_some() {
-                return Err(JournalError::Corrupt);
-            }
-            writer.rejected_floors.insert(id, hash);
-            if partial || id == operation_id {
+        let Some(recovered) = read_scope_job_locked(&reader, id, &mut physical, &mut writer)?
+        else {
+            if id == operation_id {
                 return Err(JournalError::Interrupted);
             }
-            compare_usage(&physical, id, &records, &blobs)?;
-            physical.verified_rejections.insert(id);
             continue;
-        }
-        if writer.rejected_floors.contains_key(&id) {
-            return Err(JournalError::Conflict);
-        }
-        let recovered = recovered.ok_or(if writer.floors.contains_key(&id) {
-            JournalError::Conflict
-        } else {
-            JournalError::Interrupted
-        })?;
-        if let Some(floor) = writer.floors.get(&id) {
-            let index = usize::try_from(floor.revision).map_err(|_| JournalError::Corrupt)?;
-            if recovered.chain.get(index) != Some(floor) {
-                return Err(JournalError::Conflict);
-            }
-        }
-        writer.floors.insert(id, recovered.head.clone());
-        if partial {
-            return Err(JournalError::Interrupted);
-        }
-        compare_usage(&physical, id, &records, &blobs)?;
+        };
         let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
         bounds.push(estimate_job(
             id,
@@ -227,6 +198,8 @@ pub(in crate::broker) fn prepare(
             .map_err(|_| JournalError::Corrupt)?,
         head: selected.head.clone(),
         jobs: bounds,
+        physical_job_ids: physical.jobs.keys().copied().collect(),
+        completion: Mutex::new(completion::CompletionProgress::default()),
     });
     // Install only after every bound and revalidation succeeded. The reply
     // owns the only strong reference, so an undelivered reply cannot leak it.
@@ -237,6 +210,62 @@ pub(in crate::broker) fn prepare(
         selected,
         pending_events,
     })
+}
+
+/// Read one inventoried job under the existing writer/lease and anti-rollback
+/// anchors. None is exclusively a complete, verified closed rejection, never
+/// an absent job, unknown format or generic Interrupted. This helper performs
+/// no scope inventory and retains at most this job's payload.
+fn read_scope_job_locked(
+    reader: &StopRecoveryReaderV1,
+    id: Uuid,
+    physical: &mut PhysicalUsage,
+    writer: &mut Writer,
+) -> JournalResult<Option<RecoveredJobV1>> {
+    writer.observed_jobs.insert(id);
+    let mut records = Usage::default();
+    let mut blobs = RecoveryBlobBytes::default();
+    let (recovered, rejected, partial) = reader.read_job(id, &mut records, &mut blobs)?;
+    if writer
+        .rejected_floors
+        .get(&id)
+        .is_some_and(|old| Some(old) != rejected.as_ref())
+        || writer.floors.contains_key(&id) && rejected.is_some()
+    {
+        return Err(JournalError::Conflict);
+    }
+    if let Some(hash) = rejected {
+        if recovered.is_some() {
+            return Err(JournalError::Corrupt);
+        }
+        writer.rejected_floors.insert(id, hash);
+        if partial {
+            return Err(JournalError::Interrupted);
+        }
+        compare_usage(physical, id, &records, &blobs)?;
+        physical.verified_rejections.insert(id);
+        return Ok(None);
+    }
+    if writer.rejected_floors.contains_key(&id) {
+        return Err(JournalError::Conflict);
+    }
+    let recovered = recovered.ok_or(if writer.floors.contains_key(&id) {
+        JournalError::Conflict
+    } else {
+        JournalError::Interrupted
+    })?;
+    if let Some(floor) = writer.floors.get(&id) {
+        let index = usize::try_from(floor.revision).map_err(|_| JournalError::Corrupt)?;
+        if recovered.chain.get(index) != Some(floor) {
+            return Err(JournalError::Conflict);
+        }
+    }
+    writer.floors.insert(id, recovered.head.clone());
+    if partial {
+        return Err(JournalError::Interrupted);
+    }
+    compare_usage(physical, id, &records, &blobs)?;
+    Ok(Some(recovered))
 }
 
 fn compare_usage(

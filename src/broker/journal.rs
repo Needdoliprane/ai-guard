@@ -398,6 +398,10 @@ fn stop_before_ack() -> JournalResult<()> {
     tests::checkpoint(FaultStage::BeforeAck)
 }
 #[cfg(test)]
+pub(in crate::broker) fn fail_next_cold_ack_for_test() {
+    tests::fail_once_at(FaultStage::BeforeAck);
+}
+#[cfg(test)]
 fn full_namespace_durable() -> JournalResult<()> {
     tests::checkpoint(FaultStage::NamespaceDurable)
 }

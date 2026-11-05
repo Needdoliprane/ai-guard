@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 6 novembre — ACK retenu sur l'acteur Stops
+
+La façade privée du vrai backend Stops retient la lease et les réservations
+avant HTTP, puis enfile la complétion sans nouvelle attente d'admission. Le
+merge préserve les Cancel, refuse les collisions de séquences et les divergences
+de scope/historique. Un seul lot peut publier sous la même réserve. Après une
+erreur, l'acteur retient l'input avant de répondre ; cette quarantaine ne garde
+pas son sender et n'empêche pas la fermeture de la queue.
+
+Le gel composé passe 17 parents : dix nouveaux et sept canaris budget. Ils
+utilisent de vrais journal/HTTP/SQLite, avec un peer déclaré pour les réponses
+incohérentes. Perte d'attente, erreur BeforeAck, persistance et réouverture de
+lease sont vérifiées ; revue indépendante traitée et compilation toutes cibles
+RC0. [Gels et limites](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops).
+Les 162 avertissements bibliothèque et 6 lib-test restent ouverts, Clippy absent.
+Le propriétaire authentifié, le raccord ServiceCold et la sortie explicite de
+quarantaine restent à livrer ; aucun lancement, fencing, runtime ou gate global
+n'est qualifié par ce lot.
+
 ## 5 novembre — cohérence des faits terminaux retenus
 
 Un contrôle pur recoupe le Worker central terminal avec l'intention, le scope,

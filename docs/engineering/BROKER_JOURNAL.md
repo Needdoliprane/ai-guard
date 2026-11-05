@@ -1,5 +1,40 @@
 # Journal privé du broker — contrats persistants
 
+## Complétion restreinte sur le même acteur — 6 novembre
+
+Une façade interne distincte est construite seulement pour le vrai backend
+Stops. Elle ne dérive pas du `StopWriterClient` et n'accorde aucun accès Full.
+La préparation conserve le même acteur, la lease, la réserve logique et un
+ticket de complétion unique avant tout HTTP. `submit` consomme ce ticket de
+façon synchrone ; l'attente de confirmation ne possède pas l'annulation du
+travail déjà accepté.
+
+Le merge exige les reçus HTTP exacts, l'opération, l'intention et les événements
+retenus. Une séquence connue ne peut désigner deux IDs, y compris entre le lot
+et les événements déjà ACKés. Aucune contiguïté ni ordre global des séquences
+n'est supposé. Le checkpoint courant conserve runner, supervision, ordre des
+événements et commandes Cancel concurrentes ; seules les séquences sélectionnées
+passent de None à Some, ou rejouent la même valeur.
+
+Le scope physique doit conserver exactement ses jobs. Chaque historique est
+relu contre ses floors, rejets et usage avant publication ou confirmation ;
+un vrai préfixe ancien ne peut abaisser un floor connu. Un reader partagé évite
+N inventaires globaux et les payloads des voisins sont libérés successivement.
+Le coût reste lié aux historiques bornés du scope, sans SLO déduit.
+
+Le premier lot et son head cible sont scellés avant l'effet de publication.
+Sous la même réserve, un lot différent est refusé ; le même lot ne peut que
+confirmer le head publié ou ses descendants Cancel. Une erreur met l'input
+en quarantaine forte avant réponse. Cet input ne contient aucun sender de
+l'acteur : Cancel reste admis et la fermeture de queue libère la lease.
+La sortie explicite de quarantaine/recomptage reste à raccorder ; la fermeture
+de l'acteur termine actuellement cette rétention en mémoire.
+
+Les [17 parents ciblés](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops)
+valident ce périmètre logiciel. Le reçu et le contrôle terminal restent des
+données sans authentification. Le même client authentifié, le budget HTTP
+original et la boucle réelle ServiceCold doivent encore être composés.
+
 ## Préparation bornée de l'audit retenu — 5 novembre
 
 Le module interne `journal::recovery::cold_audit` prépare uniquement les deux
@@ -28,16 +63,16 @@ réserve ACK sélectionné : B + c × δ + P
 
 L'usage physique, toutes les réserves Cancel et une réserve ACK doivent tenir
 dans les plafonds bytes/entrées du job et du scope, avec les révisions et limites
-imbriquées existantes : commandes64Kio, outbox4Mio, checkpoint32Mio. Les calculs
+imbriquées existantes : commandes 64 Kio, outbox 4 Mio, checkpoint 32 Mio. Les calculs
 sont contrôlés contre les débordements ; une seule sérialisation comptée par job
-évite de fabriquer64copies de checkpoints. Cette borne conservatrice peut refuser
+évite de fabriquer 64 copies de checkpoints. Cette borne conservatrice peut refuser
 une préparation près de la capacité. Elle ne réserve ni blocs ni inodes et
 n'immunise pas une écriture contre ENOSPC, EIO ou une panne physique.
 
 Cette préparation ne prouve ni l'identité centrale, ni le terminal, ni un reçu
-HTTP. Elle n'accorde aucun ACK, lancement, export ou nettoyage. Le raccord au
-même writer Stops, à son admission de queue et au client authentifié reste à
-composer et vérifier dans la boucle réelle. [Preuves et limites](VALIDATION.md).
+HTTP. Elle n'accorde aucun ACK, lancement, export ou nettoyage. Son raccord au
+writer Stops est décrit ci-dessus ; l'owner authentifié et la boucle réelle
+restent à composer et vérifier. [Preuves et limites](VALIDATION.md).
 
 Base `3372150fdb99d8bc71700a33dd1d49c0e75c45b5`, worktree exclusif broker-supervision. Choix techniques de l'orchestrateur dans la [direction déjà approuvée](BROKER_SUPERVISION.md). Composant implémenté avec [preuves ciblées et limites](evidence/2026-10-30/broker-journal/README.md) ; le raccord au CLI/service et tout droit d'exécution restent hors de ce lot. Le premier jet privé reste conservé ; ce contrat remplace ses choix ouverts. RED, implémentation et revue restent suivis dans [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 

@@ -1,5 +1,102 @@
 # Validation courante
 
+## 6 novembre — ACK retenu composé au writer Stops
+
+Nuit du 5 au 6 novembre, base `6401ed6`, worktree dédié
+`codex/broker-cold-audit-20261105`. Le gel final contient dix fichiers Rust :
+merge/préparation, leurs tests, façade/acteur, réexports ciblés et couture de
+faute cfg(test). Les deux fichiers ServiceCold encore rouges sont exclus.
+Aucun format persistant, dépendance, endpoint ou rôle public n'est ajouté.
+
+### Reproductions et corrections
+
+| Gel/constat | Résultat réellement atteint |
+|---|---|
+| `completion-red`, module `175042ec…` | 4 parents : 3 PASS, 1 FAIL. Les trois reçus/vues incohérents sont tous acceptés à tort avec nouvelle tête : deux IDs partageant une séquence, collision avec une séquence déjà ACKée, disparition d'un job connu après préparation. Log `b062434fb7e64e6ac2cdab33f91ec82dbea6bd21bad9bbdc44b821b888f28964`. |
+| `completion-green`, module `4d45c041…` | 11 PASS après injectivité seq→ID et snapshot exact des IDs physiques. Ces PASS ne vérifiaient pas encore les historiques des voisins. Log `d9feb3cb7894c58083caa6c9c4c687e54830da0733f4fa212722ca423a1ffefe`. |
+| Premier C4 `e4b0b2a2…` | E0382 de harnais, aucun test : NOT_RUN. Log `a7863cb7d1395676c59752bf350f306ab93370e28e4f3b5f2a04017df1bc1757`. |
+| C4 corrigé `440f4e5a…`, module `4d45c041…` | Vrai préfixe sibling head0 valide et floor1 conservé ; le merge accepte et modifie le sélectionné. Fichiers originaux restaurés, résultat et head observés ensemble. RED, log `3eabe587ee5f92f0e5f5044844459e21c53f8d81f89900f510e6e32cf168157f`. |
+
+Le correctif final partage la lecture stricte entre prepare et completion :
+floors et chaînes, rejets fermés, partiels et usage sont vérifiés pour chaque
+job du snapshot, avant publication et toutes confirmations. Une seule lecture
+d'inventaire par phase, un reader partagé et aucun ensemble de payloads voisins
+retenu. Ce travail reste borné par les caps ; aucune latence 10 s/45 s ou
+capacité 100 n'en est déduite. Les quatre RED sont des défauts de cohérence
+dans des fixtures du contrôle, pas une preuve de franchissement worker/tenant.
+
+Les essais acteur initiaux ont deux erreurs de harnais conservées : origine
+du plan distincte du scope, puis oubli du `control.schema.genesis` du Store.
+Les trois nouveaux parents échouent avant submit ; ils sont NOT_RUN pour ACK,
+pas des RED applicatifs. Logs `2209deeed793138a5f3a49825e4fb5a8c6b074b79571a91d35ab0f7af8c2af04`
+et `5b151ac39204ecb18331c5139ec385f06a57919d94974240eae829a30abf96f4`.
+L'oracle final capture head et lignes avant POST, exige exactement deux reçus
+et préserve les lignes initiales. Premier acteur complet : 5 PASS, log
+`000ff49aae4464a6e48d8220326715b757601965c541cba56c295b096e642848`.
+
+### Gel composé final
+
+Sources applicatives principales : parent `b9937ed9…`, merge `7d83a1a9…`,
+writer `5b1e9a13…`, façade `7f3338b2…`. Tests merge `440f4e5a…`, acteur
+`a422baa4…`. Luna exécute le gel RO `completion-actor-final`, target neuf
+puis partagé seulement entre sélections de cette même source inchangée :
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/completion-actor-final/Cargo.toml \
+  --lib broker::journal::recovery::cold_audit::tests:: -- --nocapture --test-threads=1
+cargo test --offline --locked --manifest-path /inputs/completion-actor-final/Cargo.toml \
+  --lib broker::writer::cold_audit_tests:: -- --nocapture --test-threads=1
+cargo check --offline --locked --manifest-path /inputs/completion-actor-final/Cargo.toml --all-targets
+```
+
+**PASS : 12 métadonnées et 5 acteur**, zéro échec/ignoré, respectivement 478 et
+485 filtrés, 37,37 s et 0,82 s. Les sept canaris budget sont compris dans les
+douze ; dix parents sont nouveaux dans ce lot. Compilation initiale 1 min 15,
+puis pas de recompilation entre sélections. La composition toutes cibles passe,
+RC0 en 38,12 s, avec **162 avertissements bibliothèque et 6 lib-test ouverts**.
+La revue indépendante traite les quatre écarts et ne relève aucun blocage
+restant dans ce périmètre. Clippy reste BLOCKED, composant absent de l'image.
+
+Les tests vérifient le même acteur/lease, le refus Full, l'exclusivité et le
+drop des réservations, le batch complet/partiel, les Cancel préservés et q=1.
+Le vrai hook BeforeAck produit Unknown Io après publication, avec réserve
+retenue et Cancel admis. La perte du waiter n'annule pas la commande ; la
+fermeture de queue libère la lease malgré la quarantaine. Réouverture réelle
+du journal et reçus exacts sont vérifiés. Aucun second POST n'est produit.
+Les gateways/HTTP/SQLite/journaux sont réels et privés ; seul le peer négatif
+des séquences incohérentes fournit des réponses déclarées comme telles.
+
+QA Linux ARM64/Rust 1.99.1, image `2115d432…`, mêmes contrôles Config et noyau
+que les lots précédents : env-i explicite, offline/locked/deux jobs/debug0,
+UID1000/caps0/NNP1/seccomp2, networknone/namespaces privés, root/input/registre
+RO, CPU2/mémoire6Gio/swap0/PID256, scratch3Gio/65536inodes, fsize512Mio,
+nofile1024/core0 et wall50min. Les compilations acteur et métadonnées ont leurs
+propriétaires/targets distincts et avancent en parallèle. Seuls les sources
+gelées et le registre public sont montés ; aucun HOME, credential, socket,
+service partagé ou répertoire de résultats retenus n'est fourni au code testé.
+
+SHA256 finaux : métadonnées
+`1affead7d81a4cdc0f5e8e177b329b230dc2fbe3690cbc957e54d5213112a381`,
+acteur `e78644896705fdbacda7685bce3fbe3518890ec27dad219f77664707ac8507d4`,
+check `36ac78f177e6a4e7824368870619c6fe8ba8bbd36962de747314f5cbfbe322b3`.
+Ce dernier log a été créé en0644 au lieu de0600 dans un répertoire0700 ; son
+mode est corrigé avant conservation. Les tests n'utilisent aucun secret réel.
+Un check préparatoire du writer avait terminé selon son log mais son RC n'a
+pas été capturé : il n'est pas utilisé comme preuve du check final RC0.
+
+**NOT_RUN :** owner détaché authentifié et même client/budget45s, réel ServiceCold,
+recomptage/sortie explicite de quarantaine, crash/fencing, NoBlob runtime,
+Docker/Podman/Kubernetes, capacité100, release et restauration. Réserve logique
+sans réservation physique bytes/inodes ; aucun SLO ni facturation qualifié.
+G09 FAIL, 0/12 gates globaux clos ; le produit demandé garde tout son périmètre.
+**NOT_APPLICABLE au lot :** frontend, navigateur et fournisseur, dont les
+contrats et sources ne changent pas ici. Leurs gates produit restent ouverts.
+Format ciblé, comparaison des dix sources au gel, manifests inchangés,
+547 liens relatifs et recherche des trois secrets littéraux connus dans
+17 fichiers PASS. Les deux propriétaires QA finaux sont arrêtés normalement
+à 23:25:13 UTC, PID0/exit143/OOMfalse, puis retirés précisément. Aucun cache,
+binaire, base ou credential n'est promu depuis leurs scratchs.
+
 ## 5 novembre — cohérence pure des faits terminaux retenus
 
 Base finale `3451a8d`, douze fichiers Rust du contrôle/des records partagés et
