@@ -1,5 +1,35 @@
 # Décisions d'industrialisation
 
+## 6 novembre — séparer livraison d'audit et admission métier
+
+Une paire V4 déjà durable et terminale peut être livrée par le vrai writer Stops
+pendant que la barrière de démarrage reste fermée. Le chemin garde l'identité
+runner fraîche, le scope exact, le même client HTTP et le recoupement du Worker
+terminal. Il n'ouvre aucun contexte métier et ne confère pas de capacité Full.
+L'index et la préparation précèdent le Job et ses essais, pour ne pas consommer
+leur capacité sur des historiques sans lot admissible.
+
+Un propriétaire détaché conserve tous les guards et réserves avant HTTP. Le
+budget45s est échantillonné avant l'identité ; aucun timeout global ne doit
+détruire le premier reçu pendant l'envoi suivant. Une erreur ou un arrêt après
+ce reçu conduit au submit synchrone du sous-ensemble obtenu. Zéro reçu ne publie
+rien. La fin de l'observateur n'annule pas le propriétaire ; sa survie ne vaut
+pas arrêt du runtime ou processus. Le drainage explicite reste le chantier
+suivant, sans modification des gardiens/D5 ou délais métier dans ce lot.
+
+NotQueued signifie qu'aucun code journal de ce lot n'a exécuté. En cas de mort
+de l'acteur, aucun ACK n'est annoncé ; les IDs prédurables restent disponibles
+pour reprise. Ajouter un slot mémoire sans récupération conserverait la lease
+sans réparer cet état : aucun nouveau stockage n'est introduit. La quarantaine
+après enqueue conserve son contrat existant. Changer un fichier local n'est
+pas annoncé comme révocation atomique d'un credential encore valide au gateway.
+
+Le parallélisme inclut les compilations et tests indépendants, conformément à
+la consigne du mainteneur. Une limite d'espace ou mémoire constatée justifie
+un environnement séparé, pas une sérialisation globale ou un délai métier relevé.
+Sources et preuves sont conservées et les échecs infrastructure ne deviennent
+ni PASS ni défaut produit. [Résultats et limites](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
+
 ## 6 novembre — un lot d'ACK sur la capacité Stops existante
 
 La préparation d'audit et sa complétion restent dans l'acteur, la queue et la

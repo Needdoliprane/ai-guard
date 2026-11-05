@@ -1,9 +1,18 @@
 # Gates de qualification production
 
+Raccord du propriétaire authentifié du 6 novembre : deux parents finaux PASS,
+compilation toutes cibles RC0 et revue indépendante traitée. Vraie boucle et
+ACK partiel sont vérifiés avec HTTP/SQLite et moteur de seed synthétique.
+118 avertissements bibliothèque/3 lib-test et Clippy absent restent ouverts.
+[Preuves](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
+Drainage des owners, sortie de quarantaine, D5/fencing et qualifications réelles
+restent ouverts. G09 FAIL,0/12 gates globaux clos.
+
 ACK retenu Stops du 6 novembre : 12 parents métadonnées et 5 acteur PASS,
 compilation composée toutes cibles RC0, revue indépendante traitée. Les erreurs
-de harnais ne sont pas créditées au comportement. Client authentifié, ServiceCold,
-sortie de quarantaine et qualifications restent ouverts ; réserve logique sans
+de harnais ne sont pas créditées au comportement. Client/ServiceCold ont depuis
+le raccord ciblé ci-dessus ; sortie de quarantaine et qualifications restent
+ouvertes ; réserve logique sans
 garantie physique. [Preuves](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops).
 162 avertissements bibliothèque/6 lib-test et Clippy absent restent ouverts.
 G09 FAIL, 0/12 gates globaux clos ; aucune qualification de release.

@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 6 novembre — propriétaire authentifié de l'audit retenu
+
+Le chemin logiciel ServiceCold est raccordé au vrai backend Stops, avant la
+barrière d'admission métier qui reste fermée. Le propriétaire détaché conserve
+ses réserves avant HTTP, authentifie le même client, vérifie scope et Worker
+terminal, puis soumet le sous-ensemble exact de reçus sans nouvelle attente.
+Il n'ouvre aucun Full/contexte métier et ne touche ni runtime, provider, Arm/Claim,
+Cancel ou finalisation gérée. Les guides broker EN/FR expliquent son usage.
+
+Les deux parents finaux passent : vraie boucle ServiceCold et owner partiel,
+avec compilation toutes cibles RC0 et revue indépendante sans blocage restant.
+Le vrai RED de publication,
+la mutation de perte du premier reçu, les erreurs de harnais/ressources et le
+check initial sont conservés séparément dans les [preuves](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
+118 avertissements bibliothèque/3 lib-test et Clippy absent restent ouverts.
+Drainage à l'arrêt du service,
+sortie de quarantaine, budget10s du writer, D5/fencing et qualifications réelles
+restent ouverts. G09 FAIL,0/12 gates globaux clos ; aucun statut de release.
+
 ## 6 novembre — ACK retenu sur l'acteur Stops
 
 La façade privée du vrai backend Stops retient la lease et les réservations
@@ -15,9 +34,9 @@ incohérentes. Perte d'attente, erreur BeforeAck, persistance et réouverture de
 lease sont vérifiées ; revue indépendante traitée et compilation toutes cibles
 RC0. [Gels et limites](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops).
 Les 162 avertissements bibliothèque et 6 lib-test restent ouverts, Clippy absent.
-Le propriétaire authentifié, le raccord ServiceCold et la sortie explicite de
-quarantaine restent à livrer ; aucun lancement, fencing, runtime ou gate global
-n'est qualifié par ce lot.
+Le propriétaire authentifié et ServiceCold ont depuis reçu le raccord ciblé
+décrit ci-dessus ; la sortie explicite de quarantaine reste ouverte. Aucun
+lancement, fencing, runtime ou gate global n'est qualifié par ce lot.
 
 ## 5 novembre — cohérence des faits terminaux retenus
 

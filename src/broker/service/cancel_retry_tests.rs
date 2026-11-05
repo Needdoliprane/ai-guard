@@ -33,6 +33,8 @@ use std::{
     path::PathBuf,
 };
 
+#[path = "cold_audit_tests.rs"]
+pub(super) mod cold_audit_tests;
 #[path = "stop_auth_tests.rs"]
 mod stop_auth_tests;
 

@@ -1,5 +1,38 @@
 # Journal privé du broker — contrats persistants
 
+## Propriétaire authentifié de l'audit terminal — 6 novembre
+
+La boucle du service possède un chemin d'audit avant sa barrière d'admission
+métier. Il utilise uniquement une capacité `cold_audit` déjà retenue par le
+vrai backend Stops ; ni création de profil, ni conversion Full. L'inventaire
+et la préparation précèdent la création du Job et le décompte de ses essais :
+un historique sans lot admissible ou une réserve Busy ne remplit pas ce cache.
+Les pools existants bornent les opérations et propriétaires concurrents.
+
+Le propriétaire détaché possède la préparation, la lease, les réserves logique
+et de queue, le Job et sa capacité avant tout POST. Il échantillonne le budget
+HTTP initial de 45 s avant `VerifiedProfile::authenticate(false)`. L'authentification
+borne son attente par cette échéance ; le même client vérifié lit le Worker puis
+envoie les seuls événements exacts retenus. Le scope complet et les faits purs
+terminaux doivent correspondre ; une donnée descriptive ne remplace jamais
+l'identité runner confirmée auprès du gateway.
+
+Si un reçu a été obtenu, une erreur de l'envoi suivant, l'expiration du budget
+ou le drapeau d'arrêt conduit au submit synchrone du sous-ensemble reçu, sans
+nouvelle attente ou acquisition. Zéro reçu n'entraîne aucune publication locale.
+Le retour de la boucle observatrice n'annule pas ce propriétaire. Cette garantie
+est limitée au processus et au runtime vivants : `serve` ne draine pas encore
+explicitement ces nouvelles tâches à son arrêt. Panne d'acteur avant enqueue :
+NotQueued ne confirme rien, les IDs prédurables restent pending pour reprise.
+Après enqueue, le contrat de rétention/quarantaine de l'acteur ci-dessous reste
+applicable. Aucune résistance à une panne physique ou à ENOSPC n'en est déduite.
+
+Ce trajet n'ouvre ni contexte métier, blob fournisseur, runtime ou credential
+worker ; il ne décide, lance, exporte, supprime ou réarme rien. Seuls les ACK
+sélectionnés de l'outbox changent. Le résultat géré, Arm/Claim, Cancel et le
+cycle du gardien restent inchangés. Les [guides EN/FR](../setup/broker/README.md)
+expliquent l'utilisation du mode restreint. [Résultats et limites](VALIDATION.md).
+
 ## Complétion restreinte sur le même acteur — 6 novembre
 
 Une façade interne distincte est construite seulement pour le vrai backend
@@ -32,8 +65,9 @@ de l'acteur termine actuellement cette rétention en mémoire.
 
 Les [17 parents ciblés](VALIDATION.md#6-novembre--ack-retenu-composé-au-writer-stops)
 valident ce périmètre logiciel. Le reçu et le contrôle terminal restent des
-données sans authentification. Le même client authentifié, le budget HTTP
-original et la boucle réelle ServiceCold doivent encore être composés.
+données sans authentification. Leur composition avec le même client vérifié,
+le budget initial et la boucle ServiceCold est décrite ci-dessus ; les preuves
+de chaque lot gardent leur périmètre distinct.
 
 ## Préparation bornée de l'audit retenu — 5 novembre
 
@@ -71,8 +105,8 @@ n'immunise pas une écriture contre ENOSPC, EIO ou une panne physique.
 
 Cette préparation ne prouve ni l'identité centrale, ni le terminal, ni un reçu
 HTTP. Elle n'accorde aucun ACK, lancement, export ou nettoyage. Son raccord au
-writer Stops est décrit ci-dessus ; l'owner authentifié et la boucle réelle
-restent à composer et vérifier. [Preuves et limites](VALIDATION.md).
+writer Stops et au propriétaire authentifié est décrit ci-dessus ; cette réserve
+seule ne constitue aucune preuve de boucle ou de reprise. [Preuves et limites](VALIDATION.md).
 
 Base `3372150fdb99d8bc71700a33dd1d49c0e75c45b5`, worktree exclusif broker-supervision. Choix techniques de l'orchestrateur dans la [direction déjà approuvée](BROKER_SUPERVISION.md). Composant implémenté avec [preuves ciblées et limites](evidence/2026-10-30/broker-journal/README.md) ; le raccord au CLI/service et tout droit d'exécution restent hors de ce lot. Le premier jet privé reste conservé ; ce contrat remplace ses choix ouverts. RED, implémentation et revue restent suivis dans [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 

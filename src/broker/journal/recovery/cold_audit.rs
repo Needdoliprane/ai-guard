@@ -65,6 +65,26 @@ impl PreparedColdAudit {
     pub(in crate::broker) fn pending_events(&self) -> &[OutboxEventV1] {
         &self.pending_events
     }
+
+    /// Borrowed descriptive facts only; no authentication or HTTP permission.
+    pub(in crate::broker) fn retained_terminal_facts(
+        &self,
+    ) -> JournalResult<crate::broker::cold_terminal::RetainedTerminalFacts<'_>> {
+        let metadata = self
+            .selected
+            .metadata
+            .as_ref()
+            .ok_or(JournalError::Corrupt)?;
+        let checkpoint = metadata
+            .checkpoint
+            .outbox()
+            .ok_or(JournalError::UnsupportedVersion)?;
+        Ok(crate::broker::cold_terminal::RetainedTerminalFacts {
+            scope: &self.owner.scope,
+            intent: &metadata.intent,
+            checkpoint,
+        })
+    }
 }
 
 /// Physical metadata accounting, including every observed job and blob size.

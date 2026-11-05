@@ -59,6 +59,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 const WRITER_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[path = "retained_audit.rs"]
+mod retained_audit;
+
 #[cfg(test)]
 #[path = "presence_material_tests.rs"]
 mod presence_material_tests;
@@ -1870,6 +1873,9 @@ impl Service {
             if self.stopping.load(Ordering::SeqCst) {
                 return;
             }
+            // A retained terminal audit is independent of business admission.
+            // Only the existing Stops capability can enter this narrow path.
+            self.reconcile_retained_audit().await;
             // A recovery fence allows inspection/cancellation but never a new
             // business start, including an autonomous reconciliation.
             if self.require_starts().await.is_err() || self.validate_control().await.is_err() {

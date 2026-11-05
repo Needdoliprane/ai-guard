@@ -53,6 +53,24 @@ HTTP/StoredEvent seuls ne constituent pas cette preuve.
 
 ## Chantiers et validations en parallèle
 
+Le raccord d'audit terminal possède deux parents ciblés :
+`broker::service::server::cancel_retry_tests::cold_audit_tests::cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability`
+et `broker::service::server::retained_audit::tests::retained_owner_submits_first_real_receipt_when_stopping_before_second_post`.
+Ils utilisent un vrai gateway/Store, une vraie lease et le writer Stops ; le
+moteur du seed reste synthétique. Le premier vérifie la vraie boucle fenced,
+deux commits exacts, ACK après réouverture et conservation des autres faits.
+Le second refuse réellement une identité, puis déclenche l'arrêt après le
+premier reçu HTTP et exige ACK partiel et second événement pending après perte
+des observateurs. Son hook ne fabrique ni reçu, ACK ou résultat. Une mutation
+qui abandonne ce reçu avant submit doit échouer sur l'ACK absent.
+
+Ces tests current_thread doivent rendre la main à Tokio pendant l'attente de
+lease. Store visible ne signifie pas réponse déjà reçue par l'owner : le test
+attend aussi le hook. Les assertions et budgets restent indépendants du poids
+de compilation. Ne pas inférer expiration45s intégrée, erreur503 du second
+POST, contrôle inactif, arrêt processus ou confinement réel de ces seuls parents.
+[Commandes, gels, résultats et limites](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
+
 Pour le lot ACK retenu, sélectionner les douze parents
 `broker::journal::recovery::cold_audit::tests::` et les cinq
 `broker::writer::cold_audit_tests::`. Les snapshots de baseline précèdent les

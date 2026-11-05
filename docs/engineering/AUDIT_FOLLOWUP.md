@@ -1,5 +1,24 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Propriétaire d'audit et ServiceCold — 6 novembre 2026
+
+Le défaut logiciel de publication est rejoué sur `02834eb` : vraie boucle
+restreinte, état V4 terminal, HTTP/SQLite vivants, aucun nouvel effet runtime.
+Le raccord conserve Starts/Full fermés et distingue identité, contrôle terminal,
+reçus descriptifs et ACK durable. Le parent partiel discrimine une mutation qui
+abandonne un reçu déjà obtenu ; ce contrôle n'est pas une nouvelle vulnérabilité.
+Les [preuves du lot](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte)
+séparent vrais RED, erreurs de harnais, limites d'espace/mémoire et deux parents
+finaux PASS, avec check toutes cibles RC0 et revue indépendante traitée.
+Aucun moteur réel ni crash processus n'est qualifié.
+
+Les pièces externes ont été rehashées le6novembre sans modification : findings
+`8e1b85a7b8a561d4d023fda8de943be1e742a95c0afb916841345cca3bec387b`, metadata
+`6865e7e4ffd5dac4b4a35e05b6e66db23488697ce4470d70db3df84fefe296a6`.
+Leur audit reste distinct. Ce lot ne confirme ni ne clôture le candidat outbox
+externe ; tout rapport final doit encore être rapproché du code courant.
+G09 FAIL, aucun gate global clos.
+
 ## Audit retenu et reprise logicielle — 6 novembre 2026
 
 Les contrôles purs de cohérence terminale, puis le merge d'ACK restreint et son

@@ -179,6 +179,32 @@ For each recovery batch, the broker retains validated targets within its configu
 
 An accepted stop reservation or cancellation confirms neither a runtime effect nor a terminal result. Partial journal coverage remains partial. The recovery transport does not prove that an older start is drained, finalise a retirement or permit a new worker to replace an ambiguous one. Missing or unsafe roots, authentication, locks or sockets require controlled recovery of those exact anchors; a new root or credential is not a substitute.
 
+### Deliver retained terminal audit events
+
+The restricted service also retries the existing V4 `observer.coverage` and
+`broker.batch.result` events of a proved terminal worker. Configure the profile's
+`runner_token_file` with its trusted runner credential. Each attempt authenticates
+that same client against the configured gateway and checks tenant, namespace,
+retained worker/attempt and terminal observation. The central worker must already
+be terminal with its quota released and consistent. An inactive control may serve
+these authenticated audit operations; this does not activate execution.
+
+The broker sends the retained events with their original IDs and payloads, then
+records only the exact returned audit sequences. If the second send fails or an
+orderly stop is observed after the first receipt, it submits the received subset.
+The other event stays pending for a later bounded retry. Identity failure or a
+terminal inconsistency leaves the events unacknowledged. No runtime observation,
+provider login, start, export or cleanup is performed by this audit path.
+Delivery updates only the local outbox acknowledgements; it does not finalise
+the managed result or retire its supervision lifecycle.
+
+The same original 45-second HTTP budget covers identity, worker read and sends.
+The detached task survives loss of the reconcile-loop observer while the process
+and async runtime remain alive; this is not a power-loss or process-death
+guarantee. A writer failure is not an ACK. Preserve the journal and event IDs for
+recovery; do not reset its root to force a retry. The [validation record](../../engineering/VALIDATION.md)
+states which software, failure and runtime scenarios have actually been run.
+
 ## Submit and inspect a job
 
 In the client terminal, set the same path variables. Choose a fresh non-nil operation UUID **once**, record it and keep the same inputs for a retry. The value below must be replaced before execution.

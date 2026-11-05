@@ -1,5 +1,84 @@
 # Validation courante
 
+## 6 novembre — propriétaire authentifié et boucle audit restreinte
+
+Base `02834eb`, worktree dédié `codex/broker-cold-audit-20261105`. Le gel final
+`owner-partial-green` contient le getter de faits retenus `889c4121…`, serveur
+`6e24edfb…`, propriétaire `30d2103d…`, registration `47b31670…`, parent Service
+`6c605ad0…` et parent partiel `c10e1510…`. Aucun endpoint, rôle, dépendance,
+format ou migration ajouté. Les guides broker EN/FR décrivent ce chemin.
+
+### Reproductions, contrôles et erreurs de harnais
+
+| Essai | Résultat constaté |
+|---|---|
+| Baseline `02834eb` + test Service original | RC101, 1 FAIL, 490 filtrés, corps228,15s. Worker terminal/quota libéré, barrières Starts/Full conservées, aucun appel runtime ou décision supplémentaire ; paire V4 absente après60s. Vrai RED. Log `0e2df0578bf7bfe6e630a357a4ea7fcabe425cf74fa27ba13ae6bf2cf93699f8`. |
+| Premier raccord `service-green` | RC101, 261,90s. Les assertions des deux publications centrales passent, puis le helper de réouverture panique Busy. Son `thread::sleep` sur un runtime current_thread empêchait la tâche propriétaire de reprendre/libérer son sender. Attente corrigée en Tokio coopératif, mêmes assertions/60s. Ce parent n'est pas PASS. Log `80220a49328049391a330c4b05608d16977e7f13d2d20cd04ef9cdf0d7895c8f`. |
+| Check initial indépendant | RC0, toutes cibles,69s ; 118 avertissements bibliothèque et3 lib-test. Target séparé pendant le scénario. Log `31088b4612d1da9e6c8beb6211a4949d1f955d521c1f6823ef51234564695a01`. |
+| Première compilation Service finale | ENOSPC avant libtest : NOT_RUN comportement. Log `16e7fd255064e55fcc3749d298d19cd468fce5b83f1673d09cc50fc5c6712d64`. |
+| Première compilation partielle finale | rustc SIGKILL avant libtest : NOT_RUN comportement. Le cgroup rapporte oom3/oom_kill1 ; cohérent avec sa limite mémoire atteinte. Log `b9ae334ba48143389be37137c337555c666bfa1fe78e961fc195d0d699fe979e`. |
+| Mutation de contrôle `9a73c29c…` | RC101 attendu, 179,68s/491 filtrés : vrai premier commit Store, puis ACK local absent à l'assertion du premier reçu. La seule mutation refuse le submit après stopping ; le test discrimine cette perte. Ce n'est pas une nouvelle vulnérabilité affirmée. Log `66f2cc85c68e378c42a7703447883df12956ce9a2efc6f818edef43588765844`. |
+
+Le second défaut du harnais partiel était une course : Store devient visible
+avant le retour HTTP et le hook d'arrêt. Son polling attend désormais événement
+ET drapeau d'arrêt. Aucun faux reçu, ACK ou résultat métier n'est injecté. La
+fixture crée un état durable réel V4/HTTP/SQLite ; son moteur Rust est synthétique.
+Le chemin froid n'appelle ensuite ni runtime, provider ou `/decide`.
+
+### Exécution finale
+
+Les deux parents ciblés passent sur le gel final inchangé, puis le check de
+toutes les cibles réussit. Les résultats sont bornés à ce périmètre logiciel :
+
+| Commande finale | Résultat |
+|---|---|
+| ServiceLoop original, QA distinct | RC0, 1 PASS/0 FAIL/0 ignoré/491 filtrés, 191,35s. Les deux publications exactes, ACK après réouverture, Cancel/Arm/Claim, quota et absence de nouvel appel runtime/décision sont vérifiés. Log `b4c6693136221ec90c7c0599df4b90d781bac8230329a142505757393d271ed9`. |
+| Owner partiel, même gel après correction de pression | RC0, 1 PASS/0 FAIL/0 ignoré/491 filtrés, 191,11s. Identité refusée sans commit, réserve réutilisable, vrai premier commit exact et ACK après abandon des observateurs, second événement pending et résultat géré inchangé. Log `9d7c2f6a84bda17a5a5dd1b8946e99f3d9b714fdf4e8444b309c495aa103917c`. |
+| Check final toutes cibles | RC0,38,43s,118 avertissements bibliothèque/3 lib-test, mêmes sources. Log `fa48a90813435df7271513f8a236ca701938da0b1bcc9f74db576ff47a1cb714`. |
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/owner-partial-green/Cargo.toml \
+  --lib broker::service::server::cancel_retry_tests::cold_audit_tests::cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability \
+  -- --exact --nocapture --test-threads=1
+cargo test --offline --locked --manifest-path /inputs/owner-partial-green/Cargo.toml \
+  --lib broker::service::server::retained_audit::tests::retained_owner_submits_first_real_receipt_when_stopping_before_second_post \
+  -- --exact --nocapture --test-threads=1
+cargo check --offline --locked --manifest-path /inputs/owner-partial-green/Cargo.toml --all-targets
+```
+
+Rust1.99.1 Linux ARM64, image épinglée
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`.
+Deux environnements admis sans réseau, UID/groupes1000, capabilities nulles,
+NNP/seccomp, racine/sources/registre RO, CPU2/mémoire6Gio/swap0/PID256 et scratch
+3Gio/65536inodes par environnement. Cibles, HOME, TMPDIR et Cargo homes séparés.
+Après ENOSPC, seuls trois anciens targets terminés ont été retirés ; sources,
+logs, données et volumes sont conservés. Le Service final a son environnement
+distinct ; le parent partiel reprend la même source après correction de pression.
+Les logs sont privés0600 sous parent0700. Le premier log Service initialement
+0644 a été corrigé0600 sous ce parent privé ; aucune exposition connue de secret.
+
+Après les RC terminaux, seuls init/sleep restent dans chaque environnement.
+Les deux propriétaires sont arrêtés puis supprimés par leurs IDs exacts,
+PID0/exit143 le5novembre à23:55:21UTC. L'ancien conserve OOMKilled=true et son
+compteur historique1 ; le nouveau reste false/compteur0. Aucun volume utilisateur,
+source ou preuve n'est supprimé. Les archives privées conservent sources et logs.
+
+Format pinned sur les six sources, comparaison exacte WT/gel et manifests
+inchangés : PASS. Vérification documentaire :700 liens relatifs/0 cible manquante
+sur10 fichiers, ancres nouvelles recoupées ; scan des16 fichiers modifiés contre
+les3 secrets littéraux connus :0 correspondance. Ce scan ciblé n'est pas une
+détection universelle de secrets ni un nouvel audit complet.
+
+Revue statique indépendante sans blocage restant sur ce gel. Restent NOT_RUN :
+expiration intégrée du budget45s, véritable erreur503 au second POST, contrôle
+inactif intégré, arrêt réel du processus/runtime, panne physique et moteurs
+Docker/Podman/Kubernetes. Le writer des fixtures vaut60s ; son délai produit10s
+reste non qualifié. Le nouveau propriétaire survit à l'observateur tant que le
+runtime vit ; `serve` ne draine pas encore explicitement ces tâches. La sortie
+de quarantaine/recomptage, finalisation gérée, D5/fencing et qualifications
+restent ouverts. Clippy BLOCKED car composant absent de l'image épinglée.
+G09 FAIL,0/12 gates globaux clos ; aucun statut de release qualifiée.
+
 ## 6 novembre — ACK retenu composé au writer Stops
 
 Nuit du 5 au 6 novembre, base `6401ed6`, worktree dédié

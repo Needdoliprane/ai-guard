@@ -179,6 +179,35 @@ Pour chaque lot de reprise, le broker retient les cibles validées dans sa capac
 
 Une réservation d'arrêt ou une annulation acceptée ne confirme ni effet runtime ni résultat terminal. Une couverture partielle du journal reste partielle. Le transport de reprise ne prouve pas le drainage d'un ancien démarrage, ne finalise pas un retrait et n'autorise pas un nouveau worker à remplacer une cible ambiguë. Des racines, authentifications, verrous ou sockets manquants ou dangereux nécessitent une récupération contrôlée de ces ancres exactes ; une nouvelle racine ou un nouveau credential ne les remplace pas.
 
+### Transmettre l'audit terminal retenu
+
+Le service restreint retente aussi les événements V4 existants
+`observer.coverage` et `broker.batch.result` d'un worker dont le terminal est
+prouvé. Configurer `runner_token_file` du profil avec son credential runner de
+confiance. Chaque essai authentifie ce même client auprès du gateway configuré
+et recoupe tenant, namespace, worker/tentative retenus et observation terminale.
+Le worker central doit déjà être terminal, son quota libéré et cohérent. Un
+contrôle inactif peut servir ces opérations d'audit authentifiées ; cela ne
+réactive pas l'exécution.
+
+Le broker transmet les événements retenus avec leurs IDs et contenus d'origine,
+puis inscrit uniquement les séquences d'audit exactes reçues. Si le second envoi
+échoue ou qu'un arrêt normal est observé après le premier reçu, il soumet le
+sous-ensemble obtenu. L'autre événement reste en attente pour un retry borné
+ultérieur. Un refus d'identité ou une incohérence terminale laisse les événements
+sans ACK. Ce chemin ne fait aucune observation runtime, connexion fournisseur,
+exécution, export ou suppression.
+La transmission modifie uniquement les ACK de l'outbox locale ; elle ne finalise
+pas le résultat géré et ne retire pas son cycle de supervision.
+
+Le même budget HTTP initial de 45 secondes couvre identité, lecture du worker
+et envois. La tâche détachée survit à la disparition de l'observateur de la boucle
+tant que le processus et le runtime asynchrone restent vivants ; cela ne garantit
+pas une reprise après coupure électrique ou mort du processus. Une erreur writer
+n'est pas un ACK. Préserver journal et IDs pour la reprise ; ne pas réinitialiser
+sa racine pour forcer un retry. Le [registre de validation](../../engineering/VALIDATION.md)
+précise les scénarios logiciels, de panne et runtime réellement exécutés.
+
 ## Soumettre et consulter un job
 
 Dans le terminal client, renseigner les mêmes variables de chemins. Choisir **une seule fois** un UUID d'opération neuf non nul, le conserver et garder les mêmes entrées lors d'un retry. La valeur ci-dessous doit être remplacée avant exécution.

@@ -1,5 +1,27 @@
 # Plan d'industrialisation
 
+## 6 novembre — composition de l'audit retenu
+
+La référence d'entrée est désormais `02834eb`, avec les lots capacité logique,
+cohérence terminale et ACK sur l'acteur Stops. Le raccord ServiceCold possède
+son propriétaire authentifié et ses tests de vraie boucle et de reçu partiel.
+Ses [preuves finales](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte)
+conditionnent l'intégration ; aucun ancien PASS de primitive ne le remplace.
+Les binaires, formats, rôles et frontières de déploiement sont conservés.
+
+Priorités suivantes : drainage explicite des propriétaires déjà acceptés à
+l'arrêt du service, puis reprise/recomptage de la quarantaine du writer et
+qualification froide avec pannes. Ne pas confondre audit livré, finalisation
+gérée, retrait du gardien ou autorisation de remplacement. Les travaux D5
+protégés restent indépendants et ne sont ni repris ni réécrits ici.
+
+Relais runtime selon sa proposition, fédération multi-hôtes réelle, admission
+Kubernetes complète et qualifications Docker/Podman/cloud restent obligatoires.
+Les tâches indépendantes, y compris build/tests/revue, avancent en parallèle
+avec sources, targets et données distincts. Une pression mesurée explique un
+essai lent ou une limite d'infrastructure ; elle n'assouplit aucun invariant.
+G09 FAIL, aucun gate global clos.
+
 ## Lots intégrés le 5 novembre et priorité suivante
 
 La référence de validation est `bfa992c`, poussée et vérifiée après intégration
