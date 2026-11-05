@@ -9,6 +9,16 @@ pas le lancement de workers. La qualification sur ce cluster réel reste
 `NOT_RUN`. Il n'existe pas d'option de lancement
 `--runtime kubernetes` ni de profil dotenv Kubernetes.
 
+Le chemin interne de CREATE retenu relie le broker à l'API authentifiée du
+contrôle et conserve demande, candidat résultat et ACK dans un journal privé.
+La permission exige un201 live exact reçu dans la fenêtre du claim original ;
+un replay ou GET ne peut pas la donner. La reprise soumet le même résultat
+sans répéter CREATE Kubernetes. Ce composant n'a pas encore de constructeur
+d'activation de production ni de commande utilisateur de lancement. Ses tests
+HTTP/SQLite et peer TLS local ne qualifient ni le cluster Docker Desktop ni
+le confinement des workers ; voir le [contrat d'ingénierie](../../engineering/KUBERNETES_ADMISSION.md)
+et les [preuves](../../engineering/VALIDATION.md).
+
 ## Préparer l'identité d'inspection Docker Desktop
 
 Le [profil public de lecture](../../../deploy/kubernetes/local-inspection.json)

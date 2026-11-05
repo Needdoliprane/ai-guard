@@ -15,6 +15,102 @@ use std::path::Path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[tokio::test]
+async fn bounded_io_retains_candidate_after_its_waiter_is_dropped() {
+    use super::super::journal_io::JournalIo;
+    use std::{sync::Arc, time::Duration};
+    let fixture = Fixture::new();
+    let journal = fixture.historical_emission();
+    let candidate = fixture.candidate();
+    let expected = candidate.clone();
+    let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = Arc::clone(&capacity).try_acquire_owned().unwrap();
+    let owned = JournalIo::new(journal, permit);
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (retained_tx, retained_rx) = tokio::sync::oneshot::channel();
+    let waiter = owned.dispatch(move |journal| {
+        started_tx.send(()).map_err(|_| JournalError::Unavailable)?;
+        release_rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| JournalError::Unavailable)?;
+        let retained = journal.retain_candidate(&candidate, None)?;
+        retained_tx
+            .send(())
+            .map_err(|_| JournalError::Unavailable)?;
+        Ok(retained)
+    });
+    tokio::time::timeout(Duration::from_secs(30), started_rx)
+        .await
+        .expect("owned FS work must be dispatched")
+        .expect("the closure reached the controlled retention boundary");
+    assert!(Arc::clone(&capacity).try_acquire_owned().is_err());
+    drop(waiter);
+    assert!(
+        Arc::clone(&capacity).try_acquire_owned().is_err(),
+        "dropping the waiter must not free the closure's filesystem admission"
+    );
+    release_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(30), retained_rx)
+        .await
+        .unwrap()
+        .expect("the actual candidate reached the durable journal after waiter drop");
+    let finished = tokio::time::timeout(
+        Duration::from_secs(30),
+        Arc::clone(&capacity).acquire_owned(),
+    )
+    .await
+    .unwrap()
+    .expect("the completed closure releases its capacity");
+    let recovered = fixture.recover().unwrap().unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::CandidateRetained);
+    assert_eq!(recovered.into_journal().candidate(), Some(&expected));
+    drop(finished);
+}
+
+#[tokio::test]
+async fn bounded_io_preserves_capacity_and_first_refusal_between_dispatches() {
+    use super::super::journal_io::JournalIo;
+    use std::{sync::Arc, time::Duration};
+    let fixture = Fixture::new();
+    let mut journal = fixture.historical_emission();
+    let candidate = fixture.candidate();
+    journal.retain_candidate(&candidate, None).unwrap();
+    let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit = Arc::clone(&capacity).try_acquire_owned().unwrap();
+    let owned = JournalIo::new(journal, permit);
+    let first_candidate = candidate.clone();
+    let first = owned.dispatch(move |journal| {
+        journal.retain_candidate(&first_candidate, Some(CandidateRefusal::ControlRejected))
+    });
+    let (owned, first) = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the first retention segment must complete without acquiring capacity")
+        .unwrap()
+        .expect("retention returns the still-admitted journal owner");
+    assert_eq!(first.refusal(), Some(CandidateRefusal::ControlRejected));
+    assert_eq!(capacity.available_permits(), 0);
+    assert_eq!(
+        owned.journal().candidate_refusal(),
+        Some(CandidateRefusal::ControlRejected)
+    );
+    let next = owned.dispatch(move |journal| journal.retain_candidate(&candidate, None));
+    let (owned, retained) = tokio::time::timeout(Duration::from_secs(30), next)
+        .await
+        .expect("the returned owner must reuse its already-held admission")
+        .unwrap()
+        .expect("the next segment must not reacquire its own occupied slot");
+    assert_eq!(retained.refusal(), Some(CandidateRefusal::ControlRejected));
+    assert_eq!(capacity.available_permits(), 0);
+    drop(owned);
+    assert_eq!(capacity.available_permits(), 1);
+    let recovered = fixture.recover().unwrap().unwrap().into_journal();
+    assert_eq!(
+        recovered.candidate_refusal(),
+        Some(CandidateRefusal::ControlRejected)
+    );
+}
+
 struct Fixture {
     root: TempDir,
     intent: KubernetesCreateIntentV1,

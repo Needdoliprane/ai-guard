@@ -1,5 +1,16 @@
 # Gates de qualification production
 
+Raccord broker HTTP Kubernetes du5novembre :17fonctions ciblées uniques PASS
+sur leurs gels, ACK live privé, journal borné et reprise exacte après perte
+de lecture de réponse centrale. La vue workers distingue aussi les autorités
+de lancement/inspection,15fonctions Node/API et contrôle TypeScript PASS.
+[Preuves et limites](VALIDATION.md) ; ces lots ne ferment aucun gate global.
+Le peer Kubernetes reste déclaré, activation/session de production fermées,
+reprise froide/fencing, relais runtime et vraie fédération multi-hôtes ouverts.
+Compilation composée toutes cibles PASS,115warnings bibliothèque et3lib-test,
+garde sans avertissement non satisfaite ; Clippy Linux BLOCKED (composant absent).
+G09 reste FAIL,0/12 gates globaux clos ; aucune qualification de release.
+
 Réconciliation après annulation, 5 novembre : quatre parents fonctionnels
 et deux canaris PASS, compilation toutes cibles et format ciblé PASS, revue
 indépendante traitée. Le terminal retenu et sa publication convergent sans

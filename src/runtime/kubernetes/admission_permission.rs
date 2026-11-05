@@ -5,7 +5,13 @@ use super::{
 };
 use crate::{
     audit::{FreshKubernetesCreateClaimCommit, KubernetesCreateAuthorization, Store},
-    broker::clock::{HostClock, NativeHostClock},
+    broker::{
+        clock::{HostClock, NativeHostClock},
+        held_create_client::{
+            HeldCreateClaimAttempt, HeldCreateClaimExchange, HeldCreateClientError,
+            LiveHeldCreateClaimAck,
+        },
+    },
     broker_registry::BrokerIdentityV1,
     control::{HostClockSampleV1, kubernetes_admission::*},
     runtime::kubernetes::{
@@ -99,14 +105,153 @@ pub(crate) struct FreshKubernetesCreatePermission {
     activation: HeldCreateActivation,
     clock: Arc<dyn HostClock>,
     before_claim: HostClockSampleV1,
-    fresh: FreshKubernetesCreateClaimCommit,
+    fresh: ClaimProvenance,
     checkpoint: EmissionCheckpoint,
     intent: KubernetesCreateIntentV1,
     prepared: PreparedHeldCreate,
 }
+
+// Both sources are opaque, non-serializable, and obtained from a live commit.
+// Boxing keeps a larger HTTP proof from enlarging every permission on the stack.
+enum ClaimProvenance {
+    Store(Box<FreshKubernetesCreateClaimCommit>),
+    Http(Box<LiveHeldCreateClaimAck>),
+}
+impl ClaimProvenance {
+    fn tenant_id(&self) -> &str {
+        match self {
+            Self::Store(proof) => proof.tenant_id(),
+            Self::Http(proof) => proof.tenant_id(),
+        }
+    }
+    fn claim(&self) -> &KubernetesCreateClaimV1 {
+        match self {
+            Self::Store(proof) => proof.claim(),
+            Self::Http(proof) => proof.claim(),
+        }
+    }
+    fn receipt(&self) -> &KubernetesCreateReceiptV1 {
+        match self {
+            Self::Store(proof) => proof.receipt(),
+            Self::Http(proof) => proof.receipt(),
+        }
+    }
+    fn revalidate_material(&self) -> KubernetesResult<()> {
+        match self {
+            Self::Store(_) => Ok(()),
+            Self::Http(proof) => proof
+                .revalidate_material()
+                .map_err(|_| KubernetesError::HeldCreateAuthorizationDenied),
+        }
+    }
+}
 impl PendingHeldCreateClaim {
     pub(crate) fn intent(&self) -> &KubernetesCreateIntentV1 {
         &self.intent
+    }
+
+    fn remote_context(&self, journal: &AdmissionJournal) -> KubernetesResult<()> {
+        self.activation.revalidate(&self.intent)?;
+        if journal.intent() != &self.intent
+            || journal.target() != self.prepared.target()
+            || journal.claim_request().create_id != self.intent.create_id
+            || journal.claim_request().intent_hash != self.activation.intent_hash
+        {
+            return Err(KubernetesError::HeldCreateAuthorizationDenied);
+        }
+        Ok(())
+    }
+
+    /// Synchronous preparation runs in the caller's admitted journal worker.
+    pub(crate) fn remote_attempt(
+        &self,
+        journal: &AdmissionJournal,
+    ) -> KubernetesResult<HeldCreateClaimAttempt> {
+        self.remote_context(journal)?;
+        HeldCreateClaimAttempt::from_clock_origin(
+            journal,
+            Arc::clone(&self.clock),
+            self.before_claim.clone(),
+        )
+        .map_err(|error| match error {
+            HeldCreateClientError::UnsafeFilesystem => {
+                KubernetesError::HeldCreateJournalUnavailable
+            }
+            _ => KubernetesError::HeldCreateAuthorizationDenied,
+        })
+    }
+
+    pub(crate) fn accept_remote_history(
+        self,
+        response: KubernetesCreateClaimResponseV1,
+        journal: &mut AdmissionJournal,
+    ) -> KubernetesResult<HeldCreateClaimOutcome> {
+        self.remote_context(journal)?;
+        response
+            .receipt
+            .validate()
+            .map_err(|_| KubernetesError::HeldCreateAuthorizationDenied)?;
+        if response.version != 1
+            || response.disposition != KubernetesCreateDispositionV1::ObserveOnly
+            || response.snapshot.intent != self.intent
+            || response.snapshot.target != *self.prepared.target()
+            || response.snapshot.claim.as_ref() != Some(journal.claim_request())
+        {
+            return Err(KubernetesError::HeldCreateAuthorizationDenied);
+        }
+        let tenant = journal.tenant_id().to_owned();
+        journal
+            .retain_observed_claim(&tenant, &response)
+            .map_err(|_| KubernetesError::HeldCreateJournalUnavailable)?;
+        Ok(HeldCreateClaimOutcome::ObserveOnly { response })
+    }
+
+    pub(crate) fn accept_remote_exchange(
+        self,
+        exchange: HeldCreateClaimExchange,
+        journal: &mut AdmissionJournal,
+    ) -> KubernetesResult<HeldCreateClaimOutcome> {
+        self.remote_context(journal)?;
+        let mut response = exchange.response().clone();
+        let Some(live) = exchange.into_live_ack() else {
+            // Local observation mode: central receipt and snapshot stay exact.
+            // A central EmitOnce response alone never authorizes this broker.
+            response.disposition = KubernetesCreateDispositionV1::ObserveOnly;
+            return self.accept_remote_history(response, journal);
+        };
+        if response.version != 1
+            || response.disposition != KubernetesCreateDispositionV1::EmitOnce
+            || response.snapshot.intent != self.intent
+            || response.snapshot.target != *self.prepared.target()
+            || response.snapshot.state != KubernetesCreateStateV1::EmissionPossible
+            || live.tenant_id() != journal.tenant_id()
+            || live.claim() != journal.claim_request()
+            || live.receipt() != &response.receipt
+            || live.snapshot() != &response.snapshot
+            || !Arc::ptr_eq(&live.clock(), &self.clock)
+            || live.before_claim().version != self.before_claim.version
+            || live.before_claim().method != self.before_claim.method
+            || live.before_claim().boot_id != self.before_claim.boot_id
+            || live.before_claim().continuous_ns_decimal != self.before_claim.continuous_ns_decimal
+            || live.before_claim().observed_utc != self.before_claim.observed_utc
+        {
+            return Err(KubernetesError::HeldCreateAuthorizationDenied);
+        }
+        let checkpoint = journal
+            .commit_remote_emission_possible(&live)
+            .map_err(|_| KubernetesError::HeldCreateJournalUnavailable)?;
+        Ok(HeldCreateClaimOutcome::Ready {
+            response,
+            permission: FreshKubernetesCreatePermission {
+                activation: self.activation,
+                clock: self.clock,
+                before_claim: self.before_claim,
+                fresh: ClaimProvenance::Http(Box::new(live)),
+                checkpoint,
+                intent: self.intent,
+                prepared: self.prepared,
+            },
+        })
     }
     pub(crate) fn begin(
         activation: HeldCreateActivation,
@@ -223,7 +368,7 @@ impl PendingHeldCreateClaim {
                 activation: self.activation,
                 clock: self.clock,
                 before_claim: self.before_claim,
-                fresh,
+                fresh: ClaimProvenance::Store(Box::new(fresh)),
                 checkpoint,
                 intent: self.intent,
                 prepared: self.prepared,
@@ -252,6 +397,7 @@ impl FreshKubernetesCreatePermission {
         journal
             .revalidate_emission(&self.checkpoint)
             .map_err(|_| KubernetesError::HeldCreateJournalUnavailable)?;
+        self.fresh.revalidate_material()?;
         credentials.revalidate()?;
         self.activation.revalidate(&self.intent)?;
         if binding != &self.intent.authority

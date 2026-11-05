@@ -1,5 +1,140 @@
 # Validation courante
 
+## 5 novembre — client broker HTTP et journal Kubernetes composé
+
+Base logicielle `b98e420`, puis intégration sans conflit de la vue des autorités
+`6c2b7f7`. Le client interne négocie les vraies routes HTTP du gateway et le
+coordinateur relie l'ACK live à la permission, au journal et au transport TLS
+existant. Aucun constructeur d'activation de production, commande utilisateur
+de création, release de gate ou appel cluster. SQLite reste au contrôle et
+credentials Kubernetes au broker ; aucune conversion DTO en capacité Store.
+
+Luna exécute les sélections ciblées dans trois propriétaires QA successifs,
+image LinuxARM64/Rust1.99.1 épinglée
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`.
+Configuration et noyau admis : UID1000/caps0/NNP1/seccomp2/networknone,
+root/source/registre RO,1CPU/6Gio/swap0/PID256, scratch3Gio/65536inodes,
+fsize536870912bytes/nofile1024, HOME/tmp/cache/target privés, env reconstruit,
+offline/locked/un job. La fédération compile simultanément dans son propre
+QA, sans partage de cible ou base mutable. La pression du Mac n'autorise
+aucun allongement des fenêtres métier8s/5s/10s et ne qualifie aucun SLO.
+
+Sélections après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` :
+
+| Gel, sélection bibliothèque | Résultat constaté |
+|---|---|
+| `io-red-reviewed`, les deux `bounded_io_` du journal | RED :2FAIL au stubUnavailable, puis PASS2/2 sur `client-red-compile-fixed`. |
+| `client-red-compile-fixed`, cinq parents client initiaux | FAIL5/5 au constructeurUnavailable ; HTTP/journal non atteints. |
+| `client-candidate-journal-red`, sept parents client | PASS5/FAIL2, tous deux au commit d'émission local encore indisponible. |
+| `emission-green-result-ack-red`, parent Claim exact | PASS1/1, reçu201 réel puis émission locale durable. |
+| Même gel, parent Result exact | RED1FAIL à l'ACK local encore indisponible, après vrai Result HTTP vérifié. |
+| `client9-config-red-ack-green`, `broker::held_create_client::tests::` | PASS8/FAIL1, constructeur acceptant une entrée connue vide. Le détail sur gel suivant confirme aussi4097octets acceptés. |
+| `config-bounds-green`, parent constructeur exact | PASS1/1 après refus d'une entrée connue vide ou supérieure à4096octets, borne64valeurs distinctes bearer inclus ; un Vec vide reste admis. |
+| `config-details-runtime-red`, parent coordinateur distant initial | RED1FAIL au coordinateur indisponible après préparation/Reserve HTTP. |
+| `runtime-clock-fixed`, deux parents coordinateur | PASS1/FAIL1, refus local de Result attribué à tort au contrôle. |
+| `runtime-local-refusal-green`, `runtime::kubernetes::admission::remote_coordinator_tests::` | PASS2/2, reprise du résultat exact et refus localUnavailable. |
+| `runtime-remote-400-reviewed-red`, nouveau parent400 | FAIL avant compteurs/candidat : aucune preuve du trajet complet créditée à ce gel. |
+| `runtime-remote-400-path-red`, parent400 réordonné | RED1FAIL : compteurs Result1/Kubernetes1 et candidat durable ApiRejected503 passent, puis refus durableUnavailable au lieu deControlRejected. |
+| `runtime-remote-400-green`, `runtime::kubernetes::admission::remote_coordinator_tests::` | PASS3/3,0ignoré,459filtrés ; refus local et400 distant distincts, reprise exacte existante conservée. |
+| Même gel, canaris legacy de permission puis coordinateur, chacun sélectionné avec `--exact` | PASS1/1 chacun,0ignoré,461filtrés ; chemin Store8 conservé. |
+| `runtime-ack-loss-final`, parent exact `remote_result_ack_loss_replays_the_committed_result_without_a_new_claim_or_runtime_post` | PASS1/1,0ignoré,462filtrés ; vrai commit Result200 puis stream HTTP en erreur. |
+| `runtime-ack-framing-final`, même parent | PASS1/1,0ignoré,462filtrés ; seul helper renforcé pour lire le corps200 réel et fixer explicitement Content-Length avant coupure. |
+
+Les compilations échouées sont distinguées des RED comportementaux : premier
+gel client (Bytes.resize/Vec/type de grant), premier coordinateur (comparaison
+HostClockSample sans PartialEq), et deux premiers gels400 (imports Ordering
+puis HeldCreateControlClient) n'ont exécuté aucun test. Un troisième gel400
+avec import privé de CoordinatorError est arrêté par lecture avant exécution,
+**NOT_RUN**. Tous restent conservés ; aucun test absent/ignoré n'est compté.
+La correction d'horloge compare explicitement les cinq champs, dont UTC,
+sans ajouter de PartialEq ou modifier le domaine.
+
+Les huit parents client positifs utilisent vrai HTTP/SQLite/fichiers privés :
+tenant A/B, Reserve/Claim/replay/Cancel, réponse201 seule live, lecture200/GET
+descriptive, identité renouvelée après commit et fenêtre dépassée sans nouveau
+permis, Result après contrôle inactif/politique retirée/quota0, JSON unique et
+bornes, masquage refusé, TLS AC exacte contre AC étrangère. Une réponse Result
+dont emitter ou fenêtre historique est altéré ne peut écrire ACK ni handle ;
+le replay exact reste acquittable. Un test filesystem bloque la closure puis
+perd son attente : le slot reste pris jusqu'à son terme et aucun HTTP détaché
+ne commence. Le premier parent JournalIo conserve capacité et candidat après
+disparition du JoinHandle ; le second conserve le premier refus entre deux
+dispatches joints. Ces preuves distinctes utilisent des fichiers réels en tmpfs.
+Ces pertes d'attente ne qualifient pas arrêt runtime/processus ou panne physique.
+
+Le premier refus local est reproduit par une valeur fictive `api_rejected`
+connue du client seul : aucun Result central, candidat retenuUnavailable.
+Le cas inverse connaît ce marqueur côté gateway seul et atteint son vrai
+refus400. La correction ajoute un variant opaque réservé au400 reçu ;
+InvalidRequest reste local. Horloge, capacité, transport, JSON ou matériel
+indisponibles conservent leur classification prudenteUnavailable. Aucun
+texte d'erreur distant brut n'est persisté ou affiché.
+
+Le parent ACK perdu vérifie le vrai commit central avant erreur de lecture
+HTTP injectée. Après première tentative : candidat privé, refusUnavailable,
+aucun ACK local, un seul Result central et un seul POST Kubernetes. Reprise
+du journal CandidateRetained puis même Result exact : deux requêtes Result,
+un seul événement, head stable, aucun nouveau CREATE, candidat et premier
+refus identiques octet pour octet, ACK durable. Client/Gateway/Store restent
+vivants ; seule la réouverture du journal est couverte, pas un restart froid.
+Les17fonctions uniques sont2JournalIo+9client+4coordinateur+2legacy ; les
+gels RED, diagnostics, renforcement de framing et replays ne sont pas ajoutés.
+
+Journaux privés0600 principaux, empreintes relues par Root :
+
+| Journal | SHA256 |
+|---|---|
+| `held-http-io-red.log` | `3f1aa53fa2b27b9cb9fb63b9e85d9a136cbea68f4072189e542098fe19c1937f` |
+| `held-http-io-green-fixed.log` | `7c571e741f3457d8effbab8aab51c2e00ee8f9de69f1f10fd8dbb203c3b04869` |
+| `held-http-client-candidate-journal-red.log` | `1308f124ac2211c891f2eb7485dd5638be68208fa2c608b1675f5885301126fa` |
+| `held-http-result-ack-red.log` | `bd6d1167f8a2731c9c379280ab732700d76891cac7dcd80b47ff2e7d6e19328e` |
+| `held-http-client9-ack-config-red.log` | `b028ff4aa21a9cf2c2cfc9356f67315243862ac467ef3f5c1e5697c21ca3f9bd` |
+| `held-http-config-bounds-red-details.log` | `9ddbdc1f89dc61ced265bccaf8ab36e245de516085831e9016fb70bbdec362a5` |
+| `held-http-config-bounds-green.log` | `e3b29630d19977a5209ce0d1733797c623d3459130c04230270c601aa9485d41` |
+| `held-http-runtime-coordinator-red.log` | `c6afa67f0434b2b2d8eddd756faee3d6a5780b8c2929db2d8891a204a6e38826` |
+| `held-http-runtime-clock-fixed.log` | `6f1f171761b48dc2da976eca86d7aa1b3e49e48b04c28425db2c3cb3d3e0cc89` |
+| `held-runtime-local-refusal-green.log` | `1bd639cbdce272e6eb89728f70863f88dc54d141c34fc7b3cb5a2a65e6fbd245` |
+| `held-runtime-remote-400-red.log`, compilation uniquement | `641f1979c79aa2d1deda83a8d2da3931d772888bfa20013adccc4020ce0c838b` |
+| `held-runtime-remote-400-compile-fixed-red.log`, compilation uniquement | `17ea177529fef9bcdaf82da11cde61aec9bf74457cb3dd592bbbc5e5d5777ee7` |
+| `held-runtime-remote-400-reviewed-red.log` | `1bd6ec33e7564ae0da0c3effc983bead82787d1c2205c9636ca1e401282727c0` |
+| `held-runtime-remote-400-path-red.log` | `9ee830760d1b70fa03ab3441deff0f2cece573991ca58e970ffc20c54240f90a` |
+| `held-runtime-remote-400-green.log` | `194449491111c6002a3c51621537fa5e2a90d2c82200057523b94ac670c55177` |
+| `held-runtime-legacy-permission.log` | `926fe144fefe962c20a2707b4d9306f06fc52706622574dee72435f0b73edfde` |
+| `held-runtime-legacy-coordinator.log` | `6999fb9d88a44a675c51aab40a35246931ab40f396becaa35f9dfc9103fcec0a` |
+| `held-runtime-ack-loss.log` | `31cb2fba5e6c68d0ea779cf71c6b11e612b5eb1ea8ccdfb48092cea9b37601c5` |
+| `held-runtime-ack-framing.log` | `da717ad18c4bd7ea4b8a95323bd6dd74e055fdb545688945981a0f258cf50897` |
+| `held-runtime-final-all-targets.log` | `762ad9850402cdccc6771a0303b0b169f06d38f384b6282e7612d7a979cf8e50` |
+
+`cargo check --offline --locked --manifest-path /inputs/runtime-ack-framing-final/Cargo.toml --all-targets`
+est PASS RC0,59,93secondes ;115warnings de bibliothèque et3lib-test subsistent.
+Ces chemins internes sans entrée de production ne satisfont pas la garde sans
+avertissement. Le format des14fichiers Rust, leur comparaison avec le gel RO,
+diff-check et manifests/locks inchangés sont PASS. Les557liens relatifs des
+huit documents ont une cible existante ; les ancres ajoutées sont relues.
+Les3secrets connus ne sont pas présents littéralement dans les22fichiers
+modifiés ; ce contrôle limité n'est pas un audit universel de secrets.
+
+La revue indépendante des sources, tests et guides est traitée : la confusion
+locale/distante reproduite est corrigée, et les preuves de perte d'attente
+et de premier refus restent séparées. La première version du helper ACK
+est testée puis renforcée pour fixer explicitement la longueur du vrai corps
+avant sa coupure ; cette seule différence est gelée et son parent rejoué.
+Aucune modification produit supplémentaire entre ces deux gels.
+
+Premier propriétaire fermé normalement à18:15:26UTC, PID0/exit143/OOMfalse.
+Le second termine son attente bornée à19:12:15UTC, PID0/exit0/OOMfalse, après
+fin réelle des commandes. Le dernier est fermé normalement à19:53:57UTC,
+après tous les résultats terminaux et inventaire init+sleep, PID0/exit143/OOMfalse.
+Chaque retrait est exact ; aucune DB, binaire ou cache scratch n'est promu.
+
+Les réponses Kubernetes du peer TLS sont **déclarées**, sans Pod ni worker réel.
+Activation/workspace/session, cluster, charge100, transport inter-workers,
+reprise froide/fencing et pannes physiques restent ouverts. Clippy **BLOCKED**,
+composant absent ; release, E2E moteur et fournisseurs **NOT_RUN** sur ce delta.
+Le nouveau variant, la perte d'ACK et les contrôles composés finaux passent
+dans les périmètres ci-dessus.
+G09 FAIL,0/12 gates globaux clos ; aucune qualification de production.
+
 ## 5 novembre — autorités du lancement et de l'inspection dans le dashboard
 
 Base `b98e420`, worktree dédié `codex/federation-view-20261105`, sans modification

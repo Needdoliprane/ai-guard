@@ -1,5 +1,30 @@
 # Décisions d'industrialisation
 
+## 5 novembre — ACK HTTP privé et ownership du journal Kubernetes
+
+Le raccord broker réutilise le gateway, la base par tenant et les six routes
+existantes. Le client produit une capacité non sérialisable après réception
+d'un201 exact, contrôles de scope/horloge et négociation identité/protocole
+avant et après Claim. Cette capacité est distincte de FreshStore ; ni réponse
+JSON,200replay ou lecture du journal ne fabrique cette dernière. Les deux
+lectures détectent une divergence, sans révocation atomique distribuée après
+la dernière réponse. Activation et session de production restent fermées.
+
+La capacité filesystem et le journal sont possédés avant effet possible et
+POST Result. Après Outcome/ACK/refus, dispatch du travail bloquant sans nouvelle
+attente d'admission, puis jointure ; la closure conserve l'ownership si son
+attente async est perdue. Aucun réseau dans la closure, aucun fichier SQLite
+au broker, aucun credential Kubernetes au gateway. L'annulation de tâche
+bloquante en file, l'arrêt du runtime/processus et la panne physique ne sont
+pas qualifiés par le test de perte d'attente async. Le snapshot Result attendu
+complet précède l'ACK local et tout handle. Reprise avec mêmes candidat et
+identités uniquement, sans nouvelle émission ; premier refus conservé.
+
+Les [bornes et états](KUBERNETES_ADMISSION.md#raccord-broker-http-et-journal-privé)
+font partie de ce raccord local dans l'architecture autorisée ; aucun nouveau
+service, stockage ou accès cluster. Les [preuves](VALIDATION.md) distinguent
+les composants HTTP/SQLite/fichiers réels et le peer Kubernetes TLS déclaré.
+
 ## 5 novembre — décisions V2 et API centrale du CREATE retenu
 
 La même base SQLite par tenant et le même gateway produisent deux scopes

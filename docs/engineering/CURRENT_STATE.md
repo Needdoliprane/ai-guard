@@ -1,5 +1,33 @@
 # État constaté — suivi du développement
 
+## 5 novembre — client broker HTTP et reprise du résultat Kubernetes
+
+Le client Rust négocie le protocole et l'identité réels avant/après Claim,
+conserve l'horloge originale et produit un ACK live privé uniquement pour
+un201 exact encore valide. Le coordinateur compose cette capacité avec le
+permis consommable, le transport et le journal, sans reconstruire de preuve
+Store depuis JSON. Le journal vérifie le snapshot attendu complet avant ACK
+durable. La capacité filesystem précède l'effet ou Result HTTP ; sa closure
+conserve l'ownership après perte de son attente async.
+
+**PASS logiciel ciblé :17fonctions uniques** sur leurs gels distingués :
+2JournalIo,9client,4coordinateur distant et2canaris Store8. Le refus local
+et le vrai400 central ont chacun leur RED et leur classification durable.
+Une lecture HTTP d'ACK est interrompue après vrai commit central : reprise
+du candidat exact, premier refus conservé, un seul événement Result et un
+seul POST Kubernetes. [Preuves et limites](VALIDATION.md#5-novembre--client-broker-http-et-journal-kubernetes-composé).
+La compilation composée toutes cibles passe, RC0 ; revue indépendante
+source et oracles traitée, guides Kubernetes FR/EN synchronisés. Les115warnings
+de bibliothèque et3lib-test restent visibles : garde sans avertissement non
+satisfaite, chemins internes encore sans entrée de production.
+
+HTTP/SQLite/fichiers sont réels, le peer TLS Kubernetes est déclaré et ne
+lance aucun Pod. La reprise journal conserve le client et le contrôle vivants ;
+elle ne qualifie pas un redémarrage froid. Activation de production, workspace,
+sessions, cluster, fencing et pannes physiques restent ouverts. Aucun nouvel
+endpoint de lancement ni `--runtime kubernetes` n'est annoncé. Clippy BLOCKED,
+composant absent ; G09 FAIL,0/12 gates globaux clos, périmètre produit inchangé.
+
 ## 5 novembre — autorités distinctes dans la vue des workers
 
 Le dashboard conserve et affiche séparément l'autorité déclarée du lancement

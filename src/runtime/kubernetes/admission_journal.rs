@@ -3,6 +3,7 @@
 //! and refused on reopen; there is deliberately no repair or overwrite path.
 use super::PreparedHeldCreate;
 use crate::audit::{ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit};
+use crate::broker::held_create_client::{ConfirmedHeldCreateResultAck, LiveHeldCreateClaimAck};
 use crate::control::kubernetes_admission::{
     KubernetesCreateClaimV1, KubernetesCreateIntentV1, KubernetesCreateReceiptV1,
     KubernetesCreateResultV1, KubernetesCreateSnapshotV1,
@@ -171,22 +172,55 @@ impl AdmissionJournal {
         })
     }
 
+    /// Only the real client can construct this distinct live HTTP proof.
+    pub(crate) fn commit_remote_emission_possible(
+        &mut self,
+        live: &LiveHeldCreateClaimAck,
+    ) -> JournalResult<EmissionCheckpoint> {
+        // Caller owns bounded FS admission. HTTP provenance stays a separate
+        // opaque type; no wire value or disk record manufactures StoreFresh.
+        live.revalidate_material()
+            .map_err(|_| JournalError::UnsafeMaterial)?;
+        self.commit_emission_record(
+            live.tenant_id(),
+            live.claim(),
+            live.receipt(),
+            live.snapshot(),
+        )
+    }
+
     pub(crate) fn commit_emission_possible(
         &mut self,
         fresh: &FreshKubernetesCreateClaimCommit,
+    ) -> JournalResult<EmissionCheckpoint> {
+        self.commit_emission_record(
+            fresh.tenant_id(),
+            fresh.claim(),
+            fresh.receipt(),
+            fresh.snapshot(),
+        )
+    }
+
+    fn commit_emission_record(
+        &mut self,
+        tenant_id: &str,
+        claim: &KubernetesCreateClaimV1,
+        receipt: &KubernetesCreateReceiptV1,
+        snapshot: &KubernetesCreateSnapshotV1,
     ) -> JournalResult<EmissionCheckpoint> {
         self.disk.revalidate()?;
         if self.recovered || self.emission.is_some() {
             return Err(JournalError::Conflict);
         }
-        records::require(fresh.tenant_id() == self.prepared.tenant_id)?;
-        // This proof is Store-owned; disk records can never call this transition.
+        records::require(tenant_id == self.prepared.tenant_id)?;
+        // Only the two opaque proof entry points above reach this private
+        // persistence routine. Disk records can never call the transition.
         let record = EmissionRecord {
             version: 1,
             prepared_sha256: self.disk.commitment("prepared.json")?.into(),
-            claim: fresh.claim().clone(),
-            receipt: fresh.receipt().clone(),
-            snapshot: fresh.snapshot().clone(),
+            claim: claim.clone(),
+            receipt: receipt.clone(),
+            snapshot: snapshot.clone(),
         };
         record.validate(&self.prepared, self.disk.commitment("prepared.json")?)?;
         if self.candidate.is_some() || self.ack.is_some() {
@@ -296,23 +330,53 @@ impl AdmissionJournal {
         Ok(())
     }
 
+    /// A remote result confirmation is descriptive and grants no emission.
+    pub(crate) fn acknowledge_remote_result(
+        &mut self,
+        confirmed: ConfirmedHeldCreateResultAck,
+    ) -> JournalResult<Option<KubernetesPodHandle>> {
+        // The HTTP proof binds transport/request provenance. This routine also
+        // requires the whole locally predicted snapshot before persisting ACK.
+        self.acknowledge_result_record(
+            confirmed.tenant_id(),
+            confirmed.result(),
+            confirmed.receipt(),
+            confirmed.snapshot(),
+        )
+    }
+
     pub(crate) fn acknowledge_result(
         &mut self,
         confirmed: ConfirmedKubernetesCreateResult,
+    ) -> JournalResult<Option<KubernetesPodHandle>> {
+        self.acknowledge_result_record(
+            confirmed.tenant_id(),
+            confirmed.result(),
+            confirmed.receipt(),
+            confirmed.snapshot(),
+        )
+    }
+
+    fn acknowledge_result_record(
+        &mut self,
+        tenant_id: &str,
+        result: &KubernetesCreateResultV1,
+        receipt: &KubernetesCreateReceiptV1,
+        snapshot: &KubernetesCreateSnapshotV1,
     ) -> JournalResult<Option<KubernetesPodHandle>> {
         self.disk.revalidate()?;
         let candidate = self.candidate.as_ref().ok_or(JournalError::InvalidInput)?;
         let emission = self.emission.as_ref().ok_or(JournalError::Corrupt)?;
         records::require(
-            confirmed.tenant_id() == self.prepared.tenant_id
-                && confirmed.result() == candidate
-                && *confirmed.snapshot() == records::result_snapshot(emission, candidate)?,
+            tenant_id == self.prepared.tenant_id
+                && result == candidate
+                && *snapshot == records::result_snapshot(emission, candidate)?,
         )?;
         let record = AckRecord {
             version: 1,
             prepared_sha256: self.disk.commitment("prepared.json")?.into(),
             candidate_sha256: self.disk.commitment("candidate.json")?.into(),
-            receipt: confirmed.receipt().clone(),
+            receipt: receipt.clone(),
         };
         records::validate_ack(
             &self.prepared,

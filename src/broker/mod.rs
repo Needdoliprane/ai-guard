@@ -7,6 +7,7 @@ pub mod clock;
 pub(crate) mod discovery;
 #[doc(hidden)]
 pub mod enforcer;
+pub(crate) mod held_create_client;
 pub mod intent;
 pub mod journal;
 pub mod lifecycle;

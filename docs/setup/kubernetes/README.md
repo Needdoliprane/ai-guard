@@ -8,6 +8,16 @@ adapter supplies HTTPS diagnostics, inspection and an audited admission dry-run,
 not worker launch. Qualification against that real cluster remains `NOT_RUN`.
 There is no `--runtime kubernetes` launch option or Kubernetes dotenv profile.
 
+The internal held-CREATE path connects the broker to the authenticated control
+API and retains its request, result candidate and ACK in a private journal.
+Launch permission requires an exact live201 received within the original
+claim window; replay or GET responses cannot grant it. Recovery submits the
+same result and never repeats Kubernetes CREATE. This component has no
+production activation constructor or user launch command yet. Its HTTP/SQLite
+and local TLS-peer tests do not qualify the Docker Desktop cluster or worker
+confinement; see the [engineering contract](../../engineering/KUBERNETES_ADMISSION.md)
+and [validation record](../../engineering/VALIDATION.md).
+
 ## Prepare the Docker Desktop inspection identity
 
 The public [inspection profile](../../../deploy/kubernetes/local-inspection.json)

@@ -11,12 +11,16 @@ use serde_json::Value;
 pub(crate) mod coordinator;
 #[path = "admission_journal.rs"]
 pub(crate) mod journal;
+#[path = "admission_journal_io.rs"]
+pub(crate) mod journal_io;
 #[path = "admission_json.rs"]
 mod json;
 #[path = "admission_permission.rs"]
 pub(crate) mod permission;
 #[path = "admission_profile.rs"]
 mod profile;
+#[path = "admission_remote_coordinator.rs"]
+pub(crate) mod remote_coordinator;
 #[path = "admission_response.rs"]
 mod response;
 #[path = "admission_transport.rs"]
@@ -71,8 +75,12 @@ mod flow_tests;
 
 #[cfg(test)]
 #[path = "admission_transport_tests.rs"]
-mod transport_tests;
+pub(crate) mod transport_tests;
 
 #[cfg(test)]
 #[path = "admission_coordinator_tests.rs"]
 mod coordinator_tests;
+
+#[cfg(test)]
+#[path = "admission_remote_coordinator_tests.rs"]
+mod remote_coordinator_tests;

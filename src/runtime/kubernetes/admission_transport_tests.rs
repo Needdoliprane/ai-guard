@@ -32,14 +32,14 @@ pub(super) const POD_UID: &str = "33333333-3333-4333-8333-333333333333";
 pub(super) const CHANGED_NAMESPACE_UID: &str = "44444444-4444-4444-8444-444444444444";
 const PRIVATE_CANARY: &str = "private-api-body-must-not-escape";
 
-struct TlsMaterial {
+pub(crate) struct TlsMaterial {
     _root: tempfile::TempDir,
-    certificate: PathBuf,
-    key: PathBuf,
-    ca: PathBuf,
+    pub(crate) certificate: PathBuf,
+    pub(crate) key: PathBuf,
+    pub(crate) ca: PathBuf,
 }
 impl TlsMaterial {
-    async fn create() -> Self {
+    pub(crate) async fn create() -> Self {
         let root = tempfile::Builder::new()
             .permissions(fs::Permissions::from_mode(0o700))
             .prefix("held-create-tls-")

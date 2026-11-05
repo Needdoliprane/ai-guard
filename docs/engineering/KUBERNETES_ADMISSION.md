@@ -10,7 +10,47 @@ la [stratégie de test](TEST_STRATEGY.md) restent applicables.
 
 ## Besoin et état existant
 
-### Contrat central suivant — configuration, décision et raccord HTTP
+### Raccord broker HTTP et journal privé
+
+Le client interne du broker utilise les six routes centrales et négocie
+l'identité/protocole avant et après le Claim. Le tenant, namespace de
+contrôle, broker, credential et incarnation doivent correspondre exactement.
+Une régression de révision est refusée ; un changement entre les deux
+lectures ne produit pas d'ACK live. Seule une réponse201 exacte, reçue dans
+la fenêtre UTC et HostClock8s issue du prélèvement avant demande, peut créer
+la capacité privée consommable. Une réponse200, un GET ou un retour tardif
+reste descriptif ; aucun DTO ne devient une capacité mémoire Store.
+
+Le client ne découvre ni proxy, identité ou origine. Origine HTTPS et AC
+explicite, ou HTTP loopback IP explicitement choisi ; aucun redirect ou retry.
+Les requêtes restent limitées à64Kio, réponses128Kio, headers64/32Kio et JSON
+unique de profondeur64. Le bearer et les secrets connus sont criblés avant
+envoi et dans les réponses, clés comprises ; erreurs opaques, aucune donnée
+distante brute dans leur affichage. Le dictionnaire conserve au plus64valeurs
+distinctes, bearer inclus, chacune non vide et limitée à4096octets ; une
+configuration invalide est refusée sans tronquer silencieusement sa protection.
+
+Le coordinateur distant possède le journal et une capacité filesystem déjà
+acquise avant un effet possible ou un POST Result. Après résultat runtime,
+ACK ou refus HTTP, il soumet la rétention au worker bloquant sans nouvelle
+attente d'admission. La closure conserve verrou et capacité même si son
+attente async disparaît. Seule la jointure attend ensuite ; aucune garantie
+n'en découle pour l'arrêt du runtime/processus, l'annulation d'une tâche
+bloquante encore en file ou une panne physique. La revalidation des fichiers du client a sa propre capacité
+logique bornée ; aucun réseau n'est exécuté dans ces closures filesystem.
+Toute erreur d'I/O ou de jointure des opérations JournalIo reste
+JournalUnavailable ; le matériel client indisponible garde son erreur opaque
+distincte et n'est pas attribué au journal.
+
+Le journal vérifie le candidat et le snapshot attendu complets avant ACK local
+durable et handle. Sa reprise réutilise candidat, opération et CAS exacts sans
+nouveau Claim ni POST Kubernetes ; le premier refus conservé reste historique.
+Les [preuves ciblées](VALIDATION.md) distinguent HTTP/SQLite/fichiers réels et
+peer Kubernetes TLS déclaré. Le raccord n'ajoute toujours aucun constructeur
+d'activation de production, commande de création ou session exploitable ;
+aucun effet cluster ou confinement n'est qualifié.
+
+### Contrat central — configuration et décision
 
 Direction technique locale du5novembre, dans les frontières existantes.
 La politique et son chargement, le prédicat d'image partagé, la migration9
@@ -20,8 +60,8 @@ Reconcile, puis les utilise dans six routes HTTP authentifiées du gateway ;
 le [contrat API](../api.md#kubernetes-held-create-http-v1) décrit leurs DTO,
 bornes et erreurs. Les capacités mémoire V1 restent refusées sous9 avant
 lookup ; une V2 appropriée peut restituer un ancien reçu/snapshot V1 exact,
-sans append ni Fresh. Le client HTTP broker, sa preuve d'ACK live et le
-Coordinator9 restent à raccorder. Aucun appel cluster n'en découle.
+sans append ni Fresh. Le client HTTP et le coordinateur décrits ci-dessus
+composent ce contrat côté broker, sans activation de production ni appel cluster.
 
 La configuration de chaque tenant porte une option `held_create_policy`.
 Absence/null interdit l'admission ; une politique présente vide est une erreur
@@ -85,7 +125,7 @@ Un nouveau résultat/une annulation sur une réservation V1 s'appuie sur une
 décision V2 de réconciliation et ne fabrique pas de politique V1 absente.
 
 Le raccord utilise le broker authentifié et des opérations HTTP v1 fermées,
-avec une capacité d'ACK live à implémenter, distincte de la preuve mémoire Store.
+avec une capacité d'ACK live privée, distincte de la preuve mémoire Store.
 Le gateway conserve politique et SQLite ; le broker conserve journal,
 HostClock et credentials Kubernetes. Un reçu JSON, le schéma9 ou un grant
 seul ne suffit jamais à ouvrir CREATE. Les routes, négociations et producteurs
@@ -108,8 +148,8 @@ de secrets inclut le bearer courant, pour entrées, données Store dérivées et
 sorties, clés JSON comprises. Une réponse nécessitant un masquage est refusée
 sans réécrire ses faits ; son commit peut néanmoins déjà être durable.
 Claim201 exige le premier commit Store exact et une fenêtre encore valide
-avant restitution ; GET/replay restent ObserveOnly. L'arrivée HTTP et sa
-fenêtre doivent encore être vérifiées par le futur client broker.
+avant restitution ; GET/replay restent ObserveOnly. Le client vérifie aussi
+la fenêtre à réception et conserve le prélèvement HostClock original.
 
 **Point de développement du 5 novembre, base `7155ab3`, worktree dédié non
 encore intégré.** Le code local ajoute les DTO fermés, le rendu/projection,

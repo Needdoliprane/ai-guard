@@ -1,5 +1,46 @@
 # Stratégie de qualification
 
+## Chantiers et validations en parallèle
+
+Consigne du mainteneur du5novembre : exploiter les tâches indépendantes,
+y compris les compilations et tests, sans imposer une sérialisation globale
+pour ménager le poste. Chaque chantier garde ses propriétaires de fichiers,
+son worktree et ses preuves. Les environnements d'exécution restent admis
+séparément, bornés et privés ; seuls sources et caches publics vérifiés peuvent
+être partagés en lecture seule. Deux commandes Cargo ne partagent pas un
+répertoire cible mutable ou une base de test.
+
+La pression du MacBookAirM3/16Go peut allonger un essai de30secondes à2minutes.
+Les budgets du harnais doivent le permettre ; un timeout d'observation n'arrête
+pas le processus et ne justifie pas son redémarrage. Reprendre le même handle.
+Les échéances métier, fenêtres d'émission, contrôles d'identité et barrières
+de durabilité restent inchangés. Une durée observée sous charge ne qualifie
+ni SLO, ni capacité, ni confinement. Conserver le périmètre exact des PASS/FAIL
+et distinguer une panne du produit d'une limite d'infrastructure démontrée.
+
+## Client held-CREATE et reprise du résultat
+
+Pour le client interne, sélectionner les neuf parents de
+`broker::held_create_client::tests::`, les deux `bounded_io_` de
+`runtime::kubernetes::admission::journal::tests::` et les parents de
+`runtime::kubernetes::admission::remote_coordinator_tests::`. Ils utilisent
+HTTP/SQLite/fichiers réels et un peer Kubernetes TLS explicitement déclaré,
+sans cluster ou fournisseur. Le canari legacy de permission
+`pending_claim_samples_before_the_real_commit_and_replay_never_mints_permission`
+et celui du coordinateur `coordinator_commits_unknown_result_without_publishing_a_handle`
+protègent le chemin Store8 lors d'un changement de provenance du permis.
+
+Le premier défaut doit être reproduit sur son vrai trajet avant correction.
+Une compilation échouée ou une assertion antérieure aux compteurs utiles
+ne démontre pas un refus distant. Distinguer précriblage local sans Result
+HTTP,400 réellement reçu, perte de lecture de réponse après commit central
+et reprise exacte du candidat. Vérifier candidat/premier refus inchangés,
+ACK seulement après snapshot complet et absence de second CREATE. Le test
+de perte d'attente async garde capacité/closure jusqu'à terme ; aucune
+qualification d'arrêt runtime/processus ou de panne physique n'en découle.
+Conserver les gels par source et les commandes/résultats dans
+[VALIDATION](VALIDATION.md#5-novembre--client-broker-http-et-journal-kubernetes-composé).
+
 ## Prérequis du paquet source avant build
 
 Pour ce chemin, sélectionner dans `tests/runtime_program.rs` les trois

@@ -256,7 +256,7 @@ fn retain_result_refusal(
     Err(error)
 }
 
-fn pending_error(error: KubernetesError) -> CoordinatorError {
+pub(super) fn pending_error(error: KubernetesError) -> CoordinatorError {
     match error {
         KubernetesError::HeldCreateJournalUnavailable => CoordinatorError::JournalUnavailable,
         KubernetesError::HeldCreateControlUnavailable => CoordinatorError::ControlUnavailable,
@@ -269,7 +269,10 @@ fn control_error(error: anyhow::Error) -> CoordinatorError {
         Some(_) => CoordinatorError::ControlRejected,
     }
 }
-fn pre_send_unknown(error: KubernetesError, cancelled: &AtomicBool) -> KubernetesCreateOutcomeV1 {
+pub(super) fn pre_send_unknown(
+    error: KubernetesError,
+    cancelled: &AtomicBool,
+) -> KubernetesCreateOutcomeV1 {
     let reason = if cancelled.load(Ordering::Acquire) {
         KubernetesCreateUnknownReasonV1::CancelledAfterClaim
     } else if matches!(
