@@ -1,4 +1,22 @@
-# État constaté — suivi des 3 et 4 novembre 2026
+# État constaté — suivi du développement
+
+## 5 novembre — documentation alignée sur les accès humains existants
+
+Les prérequis d'exploitation pointent désormais vers les guides d'identité
+locale et de SSO Web/CLI ; l'ancienne affirmation « intégration absente »
+est retirée. Le périmètre UI distingue les vues techniques viewer, les
+lectures nominatives et le registre brokers permissionné de la cible unifiée
+complète. Les deux copies de couverture restent identiques et n'annoncent
+plus ces lectures comme entièrement absentes. Sources Rust/TypeScript relues,
+liens corrigés et vérifiés ; aucune nouvelle qualification SSO ou frontend.
+[Résultats et limites](VALIDATION.md#5-novembre--cohérence-des-guides-et-contrats-kubernetes).
+
+Le contrat Kubernetes retenu est précisé et ses trois écarts de revue traités,
+sans code CREATE ni action cluster. Les donneurs documentaires sont intégrés,
+poussés, leurs références distantes vérifiées, puis retirés normalement après
+fin des consommateurs ; branches et preuves conservées. La reprise d'un
+worker annulé demeure un chantier séparé en validation : le défaut d'état est
+reproduit, le correctif n'est pas encore intégré. G09 reste FAIL, 0/12 gates clos.
 
 ## 4 novembre — direction Kubernetes locale approuvée, aucune admission ajoutée
 

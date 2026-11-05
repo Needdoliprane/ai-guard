@@ -1,5 +1,38 @@
 # Validation courante
 
+## 5 novembre — cohérence des guides et contrats Kubernetes
+
+**Changements.** L'exploitation, l'introduction et le périmètre de `docs/ui.md`,
+ainsi que les deux copies de `requirements-coverage.md`, sont rapprochés des
+fonctions présentes : sélection nominative dans `front/src/main.ts`, lecture
+du registre dans `front/src/human-view.ts`, routes Rust humaines/OIDC et commandes
+de `src/identity_cli.rs`. L'administration unifiée complète et la qualification
+restent ouvertes. Deux liens introduits dans la copie racine ont échoué au
+premier contrôle ; ils sont remplacés par des chemins communs aux deux copies.
+
+**PASS statique.** `git diff --check`, égalité `cmp` des deux couvertures,
+contrôle final des 32 liens relatifs dans les quatre documents concernés,
+scan des trois littéraux secrets connus sans occurrence. Ce scan limité n'est
+pas un audit universel de secrets. Le lot documentaire `fef348a` et sa correction
+`658f67f` sont composés en `64777ec`/`a7ac844` ; `46ab71b` corrige le prérequis
+SSO. Références distantes exactes vérifiées. Donneur propre retiré normalement
+après fin de l'agent et relevé lsof vide, branche distante conservée.
+
+La conception de [CREATE Kubernetes retenu](KUBERNETES_ADMISSION.md) précise
+DTO, projection, quota commun, migration, reprise sans réémission et limite
+du budget logiciel. La revue indépendante a fait corriger l'observation
+metadata/status incomplète, la confusion avec une échéance réseau/cluster et
+la persistance prétendue d'un incident tardif sans voie centrale. Le delta
+est relu : trois écarts traités documentairement. 25 liens relatifs et le
+scan limité passent. Donneur `2e66bbb` composé en `07513f4`, fichiers égaux,
+push et références exactes vérifiés ; donneur propre retiré, branche conservée.
+
+**NOT_RUN pour ces lots de texte :** compilation, tests applicatifs, SSO/IdP,
+navigateur, modèles, moteurs et Kubernetes. **BLOCKED :** activation CREATE
+avant preuves d'autorité, NamespaceUID, admission, droits et audit cluster.
+Le code CREATE décrit n'est pas encore implémenté. Aucun compte, secret,
+volume ou cluster existant modifié ; G09 FAIL, aucun gate global clos.
+
 ## 4 novembre — grants broker durables depuis le CLI
 
 Base `b77edbf`, donneur `codex/broker-grants-cli-20261104`. Les nouvelles
