@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Préparation de capacité d'audit du 5 novembre : 7 parents ciblés PASS et compilation
+toutes cibles RC0, revue indépendante sans blocage dans ce périmètre. Réserve
+logique seulement ; writer/identité/terminal/ACK et boucle froide à composer.
+Les 170 avertissements bibliothèque et 5 lib-test restent ouverts, Clippy absent.
+[Preuves](VALIDATION.md#5-novembre--capacité-logique-de-laudit-v4-retenu).
+G09 FAIL, 0/12 gates globaux clos ; aucune qualification runtime supplémentaire.
+
 Admissions du writer du5novembre :8parents ciblés PASS, compilation toutes
 cibles RC0, revue indépendante traitée ;139avertissements bibliothèque/3lib-test
 restent ouverts. La réserve de queue n'est pas une réserve durable ni une

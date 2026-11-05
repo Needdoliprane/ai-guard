@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 5 novembre — capacité logique pour l'audit V4 retenu
+
+La préparation interne du reader restreint conserve une seule réservation
+logique par acteur, après inventaire physique complet du scope et validation
+des jobs/rejets. Elle compte les futurs Cancel et un ACK sélectionné, avec
+plafonds bytes/entrées/révisions et tailles imbriquées. Le drop libère la
+réservation faible sans modifier le journal ; les Cancel sélectionnés et
+voisins restent possibles.
+
+Sept parents ciblés passent, dont la comparaison avec l'encodeur de production
+aux largeurs maximales, la promotion réelle V1/V2 par Cancel et le refus d'un
+sibling incomplet. Revue indépendante source et oracles sans blocage identifié.
+[Contrat](BROKER_JOURNAL.md#préparation-bornée-de-laudit-retenu--5-novembre)
+et [preuves](VALIDATION.md#5-novembre--capacité-logique-de-laudit-v4-retenu).
+La réserve ne garantit ni blocs/inodes disponibles, ni terminal/authentification,
+ni ACK. Le raccord au writer et à la boucle froide reste ouvert ; G09 FAIL,
+aucun gate global clos et aucun moteur supplémentaire qualifié.
+
 ## 5 novembre — bornes HTTP pendant une lecture en flux
 
 Les deux limites des premiers tests du port HTTP sont maintenant discriminées :

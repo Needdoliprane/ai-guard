@@ -1,5 +1,44 @@
 # Journal privé du broker — contrats persistants
 
+## Préparation bornée de l'audit retenu — 5 novembre
+
+Le module interne `journal::recovery::cold_audit` prépare uniquement les deux
+événements V4 retenus, sous la lease et le mutex existants de `StopJournal`.
+Il ne convertit pas cette capacité en `Journal` complet et n'ouvre pas le
+contenu des blobs. Les tailles physiques comprennent les métadonnées des blobs ;
+un inventaire incomplet ou divergent refuse la préparation.
+
+Une seule préparation peut rester vivante par acteur. Son propriétaire conserve
+la lease et une réservation logique ; le registre garde une référence faible.
+Un reply perdu ou l'abandon de la préparation libère cette réservation sans
+verrou dans Drop. Les Cancel existants gardent leur admission et leur publication.
+Les rejets fermés sont comptés après validation du reader ; une réservation
+inachevée ne devient pas un rejet vide.
+
+Pour chaque job mutable, `c = 64 - nombre total de commandes locales`, `B`
+borne l'enveloppe du prochain checkpoint, `P` le pointeur Current maximal et
+`δ` l'ajout d'un Cancel avec son séparateur. Les V1/V2 sont comptés dans la forme
+V3 de leur prochain Cancel. Pour le job sélectionné, B inclut les deux séquences
+d'audit à leur largeur maximale, sans écrire ces séquences fictives.
+
+```text
+réserve Cancel du job : c × (B + P) + δ × c × (c + 1) / 2
+réserve ACK sélectionné : B + c × δ + P
+```
+
+L'usage physique, toutes les réserves Cancel et une réserve ACK doivent tenir
+dans les plafonds bytes/entrées du job et du scope, avec les révisions et limites
+imbriquées existantes : commandes64Kio, outbox4Mio, checkpoint32Mio. Les calculs
+sont contrôlés contre les débordements ; une seule sérialisation comptée par job
+évite de fabriquer64copies de checkpoints. Cette borne conservatrice peut refuser
+une préparation près de la capacité. Elle ne réserve ni blocs ni inodes et
+n'immunise pas une écriture contre ENOSPC, EIO ou une panne physique.
+
+Cette préparation ne prouve ni l'identité centrale, ni le terminal, ni un reçu
+HTTP. Elle n'accorde aucun ACK, lancement, export ou nettoyage. Le raccord au
+même writer Stops, à son admission de queue et au client authentifié reste à
+composer et vérifier dans la boucle réelle. [Preuves et limites](VALIDATION.md).
+
 Base `3372150fdb99d8bc71700a33dd1d49c0e75c45b5`, worktree exclusif broker-supervision. Choix techniques de l'orchestrateur dans la [direction déjà approuvée](BROKER_SUPERVISION.md). Composant implémenté avec [preuves ciblées et limites](evidence/2026-10-30/broker-journal/README.md) ; le raccord au CLI/service et tout droit d'exécution restent hors de ce lot. Le premier jet privé reste conservé ; ce contrat remplace ses choix ouverts. RED, implémentation et revue restent suivis dans [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
 ## Périmètre réel

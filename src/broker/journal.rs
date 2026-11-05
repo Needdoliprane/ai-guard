@@ -116,6 +116,7 @@ struct Writer {
     floors: HashMap<Uuid, RevisionRefV1>,
     rejected_floors: HashMap<Uuid, String>,
     observed_jobs: HashSet<Uuid>,
+    cold_audit: Weak<recovery::cold_audit::ReservationState>,
 }
 pub(super) enum ExistingProfileV1 {
     Full(Journal),

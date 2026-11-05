@@ -138,6 +138,7 @@ opaque!(
     StopJobSnapshotV1
 );
 
+pub(in crate::broker) mod cold_audit;
 pub mod inventory;
 
 impl StopJobSnapshotV1 {

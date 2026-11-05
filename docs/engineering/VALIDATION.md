@@ -1,5 +1,61 @@
 # Validation courante
 
+## 5 novembre — capacité logique de l'audit V4 retenu
+
+Base `156bdddcb44b78da4266975ad29186acf76d473c`, worktree dédié
+`codex/broker-cold-audit-20261105`. Périmètre Rust : champ Weak du writer
+interne du journal, déclaration de module, `journal/recovery/cold_audit.rs`
+et son fichier de tests. Ni façade Full/Stops, ni format persistant, ni
+endpoint ne change. L'implémentation est SourceReady `efed6eef…`, les tests
+finaux `6fee511f…` ; copie de ces quatre fichiers comparée avant exécution.
+
+Luna exécute seulement les cibles retenues. Les premiers essais ne sont pas
+confondus : un E0277 du harnais est NOT_RUN ; après correction, quatre parents
+atteignent les refus des stubs (RED), tandis qu'un cinquième échoue dans une
+transition de fixture incorrecte. Le harnais est corrigé sans modifier les
+invariants du produit. Le premier candidat passe 5/5 ; la revue indépendante
+demande une comparaison avec les vraies enveloppes, ajoutée avant le gel final.
+
+QA finale Linux ARM64/Rust 1.99.1, image 2115d432 épinglée, Config et contrôles
+noyau vérifiés : UID 1000/caps 0/NNP 1/seccomp 2/network none, namespaces privés,
+root/sources/registre RO, 2 CPU/6 Gio/swap 0/PID 256, scratch 3 Gio/65536 inodes,
+fsize 536870912/nofile 1024/core 0. Aucun socket ni service partagé ; HOME/tmp,
+Cargo et target privés. Nouvelle cible pour ce gel ; pas de dépendance réseau.
+
+```sh
+CARGO_NET_OFFLINE=true CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 \
+  cargo test --offline --locked --manifest-path /inputs/budget-final/Cargo.toml \
+  --lib broker::journal::recovery::cold_audit::tests:: -- --nocapture --test-threads=1
+```
+
+**PASS : 7 parents, 0 FAIL, 0 ignoré, 472 filtrés**, compilation 1 min 18 puis 35,62 s,
+RC0. Les tests exercent le vrai journal et son encodeur, sans moteur métier :
+
+- enveloppe V4 et séquences i64 maximales comparées exactement à la taille
+  comptée, sans publication d'un head synthétique ; largeur décimale du pointeur ;
+- départs V1/V2 et 1–3 Cancel réellement publiés, bornes de croissance vérifiées ;
+- marges bytes/entrées/révisions exactes et refus unitaire en dessous, outbox
+  près de son plafond imbriqué ;
+- préparation unique, libération après abandon, rejet fermé et sibling incomplet ;
+- Cancel du job sélectionné et d'un voisin conservés pendant la préparation.
+
+La revue indépendante du code puis des oracles renforcés ne relève aucun défaut
+bloquant. Le log final porte SHA256
+`b09be049e9b6a0f58dd3c06a483a9afa721e748af389b5fa14db20a2b25ad13f`.
+`cargo check --offline --locked --all-targets` passe ensuite sur le même gel
+inchangé et sa cible privée, RC0 en 36,57 s ; log SHA256
+`39938e793f6cc9a40ebbc3280b5d64a689187d228f195e9349c7577f17defb32`.
+Les 170 avertissements bibliothèque et 5 lib-test (dont un doublon), notamment
+les chemins internes pas encore raccordés, restent ouverts et ne sont pas
+masqués. La garde sans avertissement n'est pas satisfaite.
+
+**NOT_RUN :** raccord de cette réserve au writer actor, admission Backend::Stops,
+authentification, ACK, batch partiel, perte d'attente et boucle froide complète.
+Ces tests directs du journal n'en sont pas une simulation de réussite. Pas
+d'écriture immune à ENOSPC/EIO, ni quota physique bytes/inodes, crash/restauration,
+Docker/Podman/Kubernetes ou capacité 100 qualifiés. **BLOCKED :** Clippy Linux,
+composant absent de l'image admise. G09 FAIL, 0/12 gates globaux clos.
+
 ## 5 novembre — bornes HTTP en flux et fraîcheur des preuves
 
 Base `bfa992c`, worktree `codex/cold-http-boundary-tests-20261105`, puis

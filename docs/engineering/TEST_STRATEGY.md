@@ -53,6 +53,14 @@ HTTP/StoredEvent seuls ne constituent pas cette preuve.
 
 ## Chantiers et validations en parallèle
 
+Pour la préparation de capacité d'audit retenu, sélectionner
+`broker::journal::recovery::cold_audit::tests::` : sept parents emploient les
+vrais reader/journal/encodeur et des copies de taille non persistées. Leur
+périmètre inclut V1/V2/V4, bytes/entrées/révisions, plafonds imbriqués,
+réservation unique, rejets/incomplets et Cancel concurrents. Cela ne remplace
+pas les tests du même writer actor, du client authentifié, du batch ACK ni de
+la boucle froide. [Preuves et limites](VALIDATION.md#5-novembre--capacité-logique-de-laudit-v4-retenu).
+
 Consigne du mainteneur du5novembre : exploiter les tâches indépendantes,
 y compris les compilations et tests, sans imposer une sérialisation globale
 pour ménager le poste. Chaque chantier garde ses propriétaires de fichiers,
