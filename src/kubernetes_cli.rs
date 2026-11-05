@@ -172,6 +172,17 @@ fn protect(file: &PrivateFile, values: &mut Vec<String>) -> Result<(), Kubernete
     Ok(())
 }
 
+fn control_identity_matches_preflight_scope(
+    identity: &crate::control::ControlProtocolV1,
+    expected_namespace: Uuid,
+) -> bool {
+    let expected_namespace = expected_namespace.to_string();
+    identity.role == "runner"
+        && (3..=8).contains(&identity.schema_version)
+        && identity.protocols == [crate::control::SupervisionProtocolV1::BrokerSupervisionV1]
+        && identity.control_namespace_uuid.as_deref() == Some(expected_namespace.as_str())
+}
+
 pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
     match args.command {
         KubernetesCommand::Doctor(args) => doctor(args).await,
@@ -366,6 +377,9 @@ fn runtime_failure(error: KubernetesError) -> (&'static str, Option<u16>) {
             PreflightAuthorizationDenied => "preflight_authorization_denied",
             PreflightProfileChanged => "preflight_profile_changed",
             WorkloadAdmissionUnavailable => "workload_admission_unavailable",
+            HeldCreateAuthorizationDenied => "held_create_authorization_denied",
+            HeldCreateControlUnavailable => "held_create_control_unavailable",
+            HeldCreateJournalUnavailable => "held_create_journal_unavailable",
         },
         if let ApiRejected(status) = error {
             Some(status)
@@ -424,12 +438,7 @@ async fn preflight(args: PreflightArgs) -> Result<(), KubernetesCliError> {
         .supervision_identity()
         .await
         .map_err(KubernetesCliError::ControlIdentity)?;
-    let expected_namespace = control.control_namespace_uuid.to_string();
-    if identity.role != "runner"
-        || !(3..=7).contains(&identity.schema_version)
-        || identity.protocols != [crate::control::SupervisionProtocolV1::BrokerSupervisionV1]
-        || identity.control_namespace_uuid.as_deref() != Some(expected_namespace.as_str())
-    {
+    if !control_identity_matches_preflight_scope(&identity, control.control_namespace_uuid) {
         return Err(KubernetesCliError::ControlScopeMismatch);
     }
     let identity_value =
@@ -538,4 +547,103 @@ async fn preflight(args: PreflightArgs) -> Result<(), KubernetesCliError> {
         .write_all(&bytes)
         .and_then(|()| stdout.flush())
         .map_err(|_| KubernetesCliError::PreflightReportUnavailable)
+}
+
+#[cfg(test)]
+mod identity_scope_tests {
+    use super::control_identity_matches_preflight_scope;
+    use crate::control::{ControlProtocolV1, SupervisionProtocolV1};
+    use uuid::Uuid;
+
+    fn protocol(
+        schema_version: u32,
+        role: &str,
+        namespace: Option<&str>,
+        protocols: Vec<SupervisionProtocolV1>,
+    ) -> ControlProtocolV1 {
+        ControlProtocolV1 {
+            version: 1,
+            schema_version,
+            control_namespace_uuid: namespace.map(str::to_owned),
+            tenant_id: "tenant-a".into(),
+            role: role.into(),
+            protocols,
+            active: false,
+        }
+    }
+
+    #[test]
+    fn schema8_runner_with_exact_protocol_and_namespace_passes_preflight_scope() {
+        let expected_namespace = Uuid::from_u128(3);
+        let identity = protocol(
+            8,
+            "runner",
+            Some(&expected_namespace.to_string()),
+            vec![SupervisionProtocolV1::BrokerSupervisionV1],
+        );
+
+        assert!(control_identity_matches_preflight_scope(
+            &identity,
+            expected_namespace
+        ));
+    }
+
+    #[test]
+    fn preflight_scope_rejects_unknown_versions_roles_protocols_and_namespaces() {
+        let expected_namespace = Uuid::from_u128(3);
+        let expected_text = expected_namespace.to_string();
+        let broker_protocol = SupervisionProtocolV1::BrokerSupervisionV1;
+        let invalid = [
+            (
+                "future schema",
+                protocol(9, "runner", Some(&expected_text), vec![broker_protocol]),
+            ),
+            (
+                "unknown schema",
+                protocol(
+                    u32::MAX,
+                    "runner",
+                    Some(&expected_text),
+                    vec![broker_protocol],
+                ),
+            ),
+            (
+                "non-runner role",
+                protocol(8, "viewer", Some(&expected_text), vec![broker_protocol]),
+            ),
+            (
+                "missing protocol",
+                protocol(8, "runner", Some(&expected_text), vec![]),
+            ),
+            (
+                "duplicate protocol",
+                protocol(
+                    8,
+                    "runner",
+                    Some(&expected_text),
+                    vec![broker_protocol, broker_protocol],
+                ),
+            ),
+            (
+                "different namespace",
+                protocol(
+                    8,
+                    "runner",
+                    Some("44444444-4444-4444-8444-444444444444"),
+                    vec![broker_protocol],
+                ),
+            ),
+            (
+                "missing namespace",
+                protocol(8, "runner", None, vec![broker_protocol]),
+            ),
+        ];
+
+        for (label, identity) in invalid {
+            assert!(
+                !control_identity_matches_preflight_scope(&identity, expected_namespace),
+                "accepted {label}"
+            );
+        }
+    }
 }

@@ -1,5 +1,74 @@
 # Décisions d'industrialisation
 
+## 5 novembre — une seule reprise du résultat de CREATE retenu
+
+Le coordinateur Rust interne compose les capacités Store, identité broker,
+autorisation exacte, runtime et journal existants ; il n'ajoute ni service,
+point d'entrée ni constructeur d'autorité de production. Sa composition locale
+est vérifiée par cinq parents ciblés. Tous les résultats, y compris incertains et
+les refus avant envoi après claim confirmé, doivent suivre la même séquence :
+candidat durable, confirmation centrale exacte, ACK local durable, puis
+publication descriptive. Un retour incertain ne publie jamais de handle.
+
+La reprise utilise exclusivement le candidat retenu avec ses identités et
+CAS originaux. Elle ne réclame pas de nouveau claim et ne joint pas Kubernetes,
+même sous contrôle rouvert inactif. Un refus central générique reste opaque ;
+aucune classification stale ni révision de rattrapage n'est inventée. Si la
+réponse n'a pas été retenue avant un crash, la reprise conserve une inconnue
+et interdit la réémission. Il n'y a aucun await entre retour runtime et
+rétention du candidat ; cela ne prétend pas rendre atomiques réseau et disque.
+
+Le raccord opérationnel broker/contrôle reste à résoudre : le service broker
+actuel emploie HTTP, alors que la capacité fraîche actuelle est produite dans
+le processus Store. Un DTO reçu par HTTP ne fabrique pas cette permission.
+Cette composition locale ne qualifie pas ce raccord et ne déplace pas les
+credentials Kubernetes dans le gateway pour le contourner.
+Les opérations Store et journal restent synchrones dans cette composition.
+L'isolation de leurs I/O sur un propriétaire de contrôle borné doit être
+résolue au raccord d'exploitation ; ce lot ne prouve pas qu'elles épargnent
+les threads Tokio partagés.
+Le code durable de refus reste également à raccorder : la conservation du
+candidat et le retour d'erreur ne satisfont pas à eux seuls cette exigence.
+
+## 5 novembre — décision exacte et journal du CREATE retenu
+
+La fondation locale du [contrat approuvé](KUBERNETES_ADMISSION.md) conserve une
+seule base tenant et ajoute une table de projection sous schema8. Le quota
+additionne les réservations de workers et de CREATE dans la même transaction.
+Une migration sauvegardée ne restaure aucune supervision après réouverture.
+
+La capacité exacte reste opaque et sans constructeur en production. L'audit
+conserve une décision descriptive `control_decision`, liée au tenant retenu,
+broker/incarnation/credential et révisions, intention, empreinte d'autorité
+complète, quota, expiration et head d'origine. Ce nom évite de prendre une
+décision sans secret pour un champ Bearer `authorization` ; le redacteur et
+le refus de toute transformation restent inchangés. Le replay vérifie les
+identités historiques à l'origine puis à la mutation, et leurs deux bornes
+d'expiration. Le reçu historique n'est jamais une identité actuelle.
+
+Seul le retour complet du premier commit peut produire une preuve fraîche,
+dans la fenêtre originale ; tout replay et toute publication périmée rendent
+`ObserveOnly`. Le journal distinct garde sept fichiers append-only bornés,
+avec contrôle des capacités, sync fichier/répertoire et revalidation avant
+succès. Les protections sont plafonnées après déduplication, sans augmenter
+les limites. Les fichiers partiels restent des erreurs conservées. Une reprise
+ou rétention de claim historique ferme irréversiblement l'émission locale ;
+un accusé exact du résultat et sa rétention durable sont nécessaires avant
+le handle d'inspection. Aucun start/release, adoption ou nettoyage automatique
+ne découle de ce handle. Transport et permission consommable sont ensuite
+reliés sur une fixture TLS locale ; leur activation en production reste fermée.
+
+Le point préclaim retient le même producteur HostClock jusqu'au dernier guard,
+sans renouveler le budget après l'ACK ou les syncs. Les reprises choisissent
+une lecture centrale sans création plutôt que le claim mutateur. Le guard
+concret est consommé après acquisition transport, construction de requête et
+revalidations FS ; seul un POST collection fixe peut suivre, sans await
+intermédiaire.201 seul confirme localement le résultat ;200/202 restent des
+inconnues conservatrices, même si l'API Kubernetes les documente comme succès.
+La vérification NamespaceUID avant/après réduit les divergences observables,
+sans prétendre être atomique avec CREATE. Aucun booléen ou trait de guard
+public ne remplace la permission opaque ni les gates d'activation.
+
 ## 4 novembre — création Kubernetes retenue, direction locale approuvée
 
 La [proposition relue](KUBERNETES_ADMISSION.md) sépare une création de Pod

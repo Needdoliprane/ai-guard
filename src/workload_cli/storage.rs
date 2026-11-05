@@ -279,7 +279,7 @@ impl Operation {
     fn validate_protocol(&self, protocol: &ControlProtocolV1) -> Result<()> {
         protocol.validate().map_err(|_| E::Protocol)?;
         if protocol.version != 1
-            || !matches!(protocol.schema_version, 6 | 7)
+            || !matches!(protocol.schema_version, 6 | 7 | 8)
             || protocol.role != "runner"
             || protocol.tenant_id != self.recovery.expected_tenant_id
             || protocol.control_namespace_uuid.as_deref()

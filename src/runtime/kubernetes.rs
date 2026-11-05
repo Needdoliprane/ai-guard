@@ -1,13 +1,14 @@
-//! Explicit Kubernetes API authority, inspection and server-side preflight.
+//! Explicit Kubernetes authority, inspection, preflight and internal held CREATE.
 //!
-//! This is a first adapter slice, not a workload launcher. It deliberately has
-//! no persisted CREATE, exec, attach, DELETE, kubeconfig or ambient context interface.
+//! Held CREATE remains closed in production. This is not a workload launcher;
+//! there is no exec, attach, DELETE, kubeconfig or ambient context interface.
 //! Pod API configuration is not proof of runtime enforcement or CPU usage.
 use crate::control_fs::PrivateFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub(crate) mod admission;
 mod observation;
 mod preflight;
 mod transport;
@@ -39,6 +40,9 @@ pub enum KubernetesError {
     InvalidPreflightPlan,
     PreflightAuthorizationDenied,
     PreflightProfileChanged,
+    HeldCreateAuthorizationDenied,
+    HeldCreateControlUnavailable,
+    HeldCreateJournalUnavailable,
     WorkloadAdmissionUnavailable,
 }
 impl std::fmt::Display for KubernetesError {
@@ -57,6 +61,9 @@ impl std::fmt::Display for KubernetesError {
             Self::InvalidPreflightPlan => f.write_str("Kubernetes admission preflight plan is invalid or differs from the retained authority"),
             Self::PreflightAuthorizationDenied => f.write_str("Kubernetes admission preflight was not durably authorized by the control"),
             Self::PreflightProfileChanged => f.write_str("Kubernetes admission changed the closed preflight profile; review the cluster admission configuration"),
+            Self::HeldCreateAuthorizationDenied => f.write_str("Held Kubernetes create is not authorized for this exact retained request"),
+            Self::HeldCreateControlUnavailable => f.write_str("Held Kubernetes create control confirmation is unavailable"),
+            Self::HeldCreateJournalUnavailable => f.write_str("Held Kubernetes create private journal is unavailable or requires reconciliation"),
             Self::WorkloadAdmissionUnavailable => f.write_str("Kubernetes workload admission is unavailable: confinement, workspace transfer and durable supervision remain unqualified"),
         }
     }
@@ -152,6 +159,9 @@ impl KubernetesAuthorityV1 {
     }
     pub fn namespace(&self) -> &str {
         &self.namespace
+    }
+    pub fn authority_id(&self) -> Uuid {
+        self.authority_id
     }
     /// An authority binding is never an admission or an enforcement attestation.
     pub fn require_workload_admission(&self) -> KubernetesResult<()> {
@@ -294,7 +304,7 @@ pub struct KubernetesDiagnosticsV1 {
     pub admission_gaps: Vec<KubernetesAdmissionGapV1>,
 }
 
-/// No persisted mutation operations are available in this slice.
+/// Inspection and internal held CREATE; production workload admission stays closed.
 pub struct KubernetesRuntime {
     binding: KubernetesAuthorityV1,
     transport: Transport,

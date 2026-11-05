@@ -1,3 +1,4 @@
+use super::admission::{journal::AdmissionJournal, permission::FreshKubernetesCreatePermission};
 use super::{
     Authentication, BeforeKubernetesPreflightGuard, KubernetesAuthorityV1, KubernetesCredentials,
     KubernetesError, KubernetesPreflightTargetV1, KubernetesResult,
@@ -7,11 +8,12 @@ use reqwest::{
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 use serde::de::DeserializeOwned;
-use std::time::Duration;
+use std::{sync::atomic::AtomicBool, time::Duration};
 use tokio::sync::Semaphore;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_PREFLIGHT_REQUEST_BYTES: usize = 64 * 1024;
+const MAX_CREATE_REQUEST_BYTES: usize = 32 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(super) struct Transport {
@@ -19,6 +21,12 @@ pub(super) struct Transport {
     endpoint: String,
     credentials: KubernetesCredentials,
     permits: Semaphore,
+}
+/// The outer Result is reserved for refusals before HTTP initiation. Once the
+/// consumed guard has admitted initiation, every failure is an uncertain effect.
+pub(super) enum HeldCreateResponse {
+    Complete(Vec<u8>),
+    Uncertain(KubernetesError),
 }
 impl Transport {
     pub(super) fn new(
@@ -108,7 +116,7 @@ impl Transport {
         read_response(response).await
     }
 
-    /// The only POST is a Pod collection server-side dry-run. The caller
+    /// This method only posts a Pod collection server-side dry-run. The caller
     /// cannot supply a path, query, HTTP method, field manager or raw body.
     pub(super) async fn dry_run_pod<T: DeserializeOwned>(
         &self,
@@ -149,11 +157,70 @@ impl Transport {
         }
         read_response(response).await
     }
+
+    /// One fixed retained-CREATE route, exact bytes from a nonserialized permit.
+    /// Neither a caller-supplied URL/body nor the dry-run guard can reach it.
+    pub(super) async fn create_held_pod(
+        &self,
+        binding: &KubernetesAuthorityV1,
+        permission: FreshKubernetesCreatePermission,
+        journal: &AdmissionJournal,
+        cancelled: &AtomicBool,
+    ) -> KubernetesResult<HeldCreateResponse> {
+        binding.validate()?;
+        if !super::valid_dns_label(binding.namespace())
+            || self.endpoint != binding.endpoint.trim_end_matches('/')
+        {
+            return Err(KubernetesError::HeldCreateAuthorizationDenied);
+        }
+        let body = permission.pod_bytes().to_vec();
+        if body.len() > MAX_CREATE_REQUEST_BYTES {
+            return Err(KubernetesError::HeldCreateAuthorizationDenied);
+        }
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| KubernetesError::Busy)?;
+        self.credentials.revalidate()?;
+        let request = self
+            .client
+            .post(format!(
+                "{}/api/v1/namespaces/{}/pods?fieldValidation=Strict",
+                self.endpoint,
+                binding.namespace()
+            ))
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .body(body.clone())
+            .build()
+            .map_err(|_| KubernetesError::HeldCreateAuthorizationDenied)?;
+        // Request construction and all filesystem work precede the last clock
+        // sample in this consumed guard. No await or further check intervenes
+        // before initiating the already-built request.
+        permission.check_before_create(binding, &body, journal, cancelled, &self.credentials)?;
+        let response = match self.client.execute(request).await {
+            Ok(response) => response,
+            Err(error) => return Ok(HeldCreateResponse::Uncertain(transport_error(error))),
+        };
+        // 201 is this adapter's confirmation policy, not a claim that the
+        // Kubernetes API has no other documented successful status codes.
+        if response.status() != reqwest::StatusCode::CREATED {
+            return Ok(HeldCreateResponse::Uncertain(KubernetesError::ApiRejected(
+                response.status().as_u16(),
+            )));
+        }
+        Ok(match read_response_bytes(response).await {
+            Ok(bytes) => HeldCreateResponse::Complete(bytes),
+            Err(error) => HeldCreateResponse::Uncertain(error),
+        })
+    }
 }
 
-async fn read_response<T: DeserializeOwned>(
-    mut response: reqwest::Response,
-) -> KubernetesResult<T> {
+async fn read_response<T: DeserializeOwned>(response: reqwest::Response) -> KubernetesResult<T> {
+    let bytes = read_response_bytes(response).await?;
+    serde_json::from_slice(&bytes).map_err(|_| KubernetesError::InvalidResponse)
+}
+async fn read_response_bytes(mut response: reqwest::Response) -> KubernetesResult<Vec<u8>> {
     if response
         .content_length()
         .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
@@ -167,7 +234,7 @@ async fn read_response<T: DeserializeOwned>(
         }
         bytes.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&bytes).map_err(|_| KubernetesError::InvalidResponse)
+    Ok(bytes)
 }
 fn transport_error(error: reqwest::Error) -> KubernetesError {
     if error.is_timeout() {

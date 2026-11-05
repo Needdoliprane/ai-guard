@@ -240,7 +240,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        [2, 3, 4, 5, 6, 7].contains(&version),
+        [2, 3, 4, 5, 6, 7, 8].contains(&version),
         "unsupported control schema"
     );
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
@@ -289,19 +289,23 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .query_map([genesis_seq], row_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
+        if stored.event.kind.starts_with("control.kubernetes.create.") {
+            anyhow::ensure!(version == 8, "held Kubernetes event requires schema8");
+            continue;
+        }
         if stored.event.kind.starts_with("control.workload.")
             || stored.event.kind.starts_with("control.broker_registry.")
             || stored.event.kind.starts_with("control.relay.")
         {
             anyhow::ensure!(
-                [6, 7].contains(&version),
+                [6, 7, 8].contains(&version),
                 "workload control event requires schema6"
             );
             continue;
         }
         if stored.event.kind.starts_with("control.identity.") {
             anyhow::ensure!(
-                [4, 5, 6, 7].contains(&version),
+                [4, 5, 6, 7, 8].contains(&version),
                 "identity event requires schema4 or5"
             );
             continue;
@@ -544,6 +548,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     super::workload::validate(db)?;
     super::broker_registry::validate(db)?;
     super::relay::validate(db)?;
+    super::kubernetes_admission::validate(db)?;
     Ok(())
 }
 
@@ -555,7 +560,7 @@ pub(in crate::audit) fn worker_at(
     uuid(worker_id)?;
     invalid(before_seq > 0)?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    invalid([6, 7].contains(&version))?;
+    invalid([6, 7, 8].contains(&version))?;
     // The partial compound index excludes helper/Arm/export records, which
     // cannot alter WorkerV1. This seeks one snapshot without scanning them.
     let query = format!(
@@ -582,7 +587,7 @@ pub(in crate::audit) fn worker_at(
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4, 5, 6, 7].contains(&version) {
+    if [2, 3, 4, 5, 6, 7, 8].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -640,8 +645,15 @@ fn admission_result(stored: &StoredEvent, record: &ControlRecord) -> AdmissionRe
         receipt: receipt(stored, record),
     }
 }
-fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
-    let (count,cpu,ram):(i64,i64,i64)=db.query_row("SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM workers WHERE quota_held=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let query = if version == 8 {
+        "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1)"
+    } else {
+        "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM workers WHERE quota_held=1"
+    };
+    let (count, cpu, ram): (i64, i64, i64) =
+        db.query_row(query, [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(QuotaUsageV1 {
         policy: policy.clone(),
         held_workers: u32::try_from(count)?,
@@ -779,6 +791,15 @@ impl Store {
             |r| r.get(0),
         )?;
         conflict(!existing)?;
+        let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema == 8 {
+            let reserved: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?1)",
+                [&admission.launch.session_id],
+                |row| row.get(0),
+            )?;
+            conflict(!reserved)?;
+        }
         let current = policy::evaluate(policy, request);
         let usage = quota_usage(tx, quota)?;
         let refusal =
@@ -1223,6 +1244,7 @@ impl Store {
                 }
             }
             7 => self.initialize_human_brokers(&tx)?,
+            8 => super::kubernetes_admission::initialize(self, &tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1243,6 +1265,7 @@ impl Store {
                 }
                 6 => "SELECT genesis_seq,genesis_hash FROM workload_meta WHERE singleton=1",
                 7 => "SELECT seq,hash FROM events WHERE kind='control.identity.brokers_access.genesis'",
+                8 => "SELECT seq,hash FROM events WHERE kind='control.kubernetes.create.genesis'",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1302,7 +1325,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if [3, 4, 5, 6, 7].contains(&version) {
+        if [3, 4, 5, 6, 7, 8].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,

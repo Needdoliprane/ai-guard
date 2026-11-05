@@ -237,7 +237,7 @@ agentsandbox broker control-info \
 ```
 
 Utiliser son `control_namespace_uuid` exact, une identité runner et un schéma
-compatible 3–7 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
+compatible 3–8 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
 ou une origine HTTP loopback explicitement choisie ; ce fichier n'ajoute pas
 d'options AC privée ou mTLS à la connexion gateway. `runner_token_file` est
 un chemin absolu vers un fichier privé contenant au plus 4 Kio, pas la valeur du jeton. Le runner du

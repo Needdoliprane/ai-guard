@@ -1,4 +1,4 @@
-//! Closed schema7 capability and atomic, budgeted human registry reads.
+//! Closed schema7 capability retained by schema8; atomic, budgeted registry reads.
 use super::*;
 use crate::{broker_registry::BrokerV1, identity::*};
 
@@ -121,7 +121,7 @@ pub(super) fn genesis(db: &Connection) -> anyhow::Result<(StoredEvent, u64)> {
     Ok((stored, marker.authorization_revision))
 }
 pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
-    if version == 7 {
+    if [7, 8].contains(&version) {
         genesis(db)?;
     } else {
         let forbidden: bool = db.query_row(
@@ -129,7 +129,10 @@ pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Resu
             params![GENESIS_KIND, READ_KIND],
             |r| r.get(0),
         )?;
-        anyhow::ensure!(!forbidden, "human broker capability requires schema7");
+        anyhow::ensure!(
+            !forbidden,
+            "human broker capability requires schema7 or schema8"
+        );
     }
     Ok(())
 }
@@ -214,7 +217,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version != 7 {
+        if ![7, 8].contains(&version) {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
         let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;

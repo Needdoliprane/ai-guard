@@ -1,5 +1,311 @@
 # Validation courante
 
+## 5 novembre — coordinateur de résultat held-CREATE, en cours
+
+La rétention commune de tous les résultats et leur reprise exacte sont en
+développement dans le même worktree, sans activation de production ni nouveau
+point d'entrée. Core possède le coordinateur, Luna les tests Store/FS/TLS,
+et un reviewer indépendant contrôle les assertions puis le code.
+
+Premier gel `coordinator-red`,57fichiers de surcouche comparés à la source :
+**NOT_RUN pour les tests**, compilation RC101/E0603. Le harnais importait
+`HostClockMethodV1` depuis un import privé de `broker::clock`, au lieu du
+réexport public dans `control`. Aucun oracle fonctionnel n'a été atteint ;
+ce résultat n'est pas un RED du comportement. Log SHA-256
+`dc431b306ce34179fc150fb3c12bb2cc6d8bfc04d1fc87a46eab139b0e51fcd2`.
+La correction de fixture et les cas complémentaires de la revue précèdent
+un nouveau gel ; aucun run n'est répété pour une correction de reporting.
+
+Le gel corrigé `coordinator-red-ready` compile puis exécute les quatre
+parents : **RED,0PASS/4FAIL/0ignoré,RC101**,37,48s de compilation et1,25s
+de tests. Trois appels `execute` rencontrent le stub `ControlUnavailable` ;
+le cas de confirmation perdue échoue faute de candidat. Les branches réelles
+de création/publication/reprise ne sont donc pas encore vérifiées. Log SHA-256
+`ea7473b37804987cd9ae24266e02c024690f800a275f0f3a11cf5a062569fa0b`.
+L'implémentation du coordinateur commence après ce RED ; les assertions
+restent propriétaires de Luna et sont relues indépendamment.
+
+Gel `coordinator-green` : **4/4PASS,0ignoré,RC0**,37,71s de compilation
+et1,79s de tests. `cargo check --offline --locked --all-targets` du même gel
+termine RC0 en29,83s,84warnings de bibliothèque et1de bibliothèque-test,
+principalement code inutilisé dans ce chemin encore fermé. Aucun attribut
+ne masque ces diagnostics. SHA des logs :
+
+```text
+a4ed27935c66ca3b295d575079b51ab5a83662f323e619c0405cfd49f0447b38 coordinator-green.log
+6a204dcdeefd47ef4e7ce6d8e443a21a013f5415d19d915151e0ec4cbba23fee coordinator-all-targets.log
+```
+
+La revue suivante détecte un diagnostic non établi : le refus opaque de
+permission est classé `AuthorityChanged`, alors qu'il peut venir du seul
+budget d'horloge expiré. Un test ciblé précède la correction ; les quatre PASS
+ne prouvent pas ce cas. La revue constate également que le refus central est
+remonté sans code durable `refusal.json` : candidat exact préservé, exigence
+de refus durable toujours ouverte dans le contrat. Raccord service/activation,
+isolation des I/O synchrones, Clippy et qualification réelle restent ouverts.
+
+Le cinquième parent, sélectionné seul sur `coordinator-diagnostic-red`,
+compile puis **FAIL RC101,0PASS/1FAIL/0ignoré**,37,95s de compilation et0,32s
+de test. La même autorité et le même boot/méthode, sans annulation, reçoivent
+un delta synthétique de9s ; le résultat attendu `TransportUnknown` n'est pas
+produit. Le mapping de source attribue le refus opaque à `AuthorityChanged`.
+Log SHA-256
+`adab3a49bcac6d4fba127550aa472ee575bb4775d087d1e04398a76a3848673e`.
+Après cette reproduction, le correctif retire uniquement les refus opaques
+du groupe d'erreurs d'autorité. Les erreurs explicites d'autorité/credentials
+gardent leur motif ; horloge, assertions et budgets restent inchangés.
+
+**Gel final `coordinator-final` :5/5PASS,0ignoré,RC0**,37,95s de compilation
+et2,01s de tests. Le contrôle toutes cibles du même gel termine RC0 en29,50s,
+avec84warnings de bibliothèque et1de test. La garde sans avertissement reste
+donc non satisfaite ; Clippy n'est pas exécuté, son composant étant absent.
+Release, moteurs, navigateur, fournisseurs et cluster ne sont pas rejoués pour
+ce changement de composition interne. Le delta9s est synthétique, sans sleep
+ni oracle de performance sur le poste sous pression.
+
+```text
+364c09c4da5189e6ecf4f20c682ca473ce0236574367c4ef16ad5664b693fd12 coordinator-final.log
+a23968f5442b73e8c98bd25b886292e163c358adb47660fe3df989f93c884daf coordinator-final-all-targets.log
+ff37a47105c576cb24389470dc70d34f92a2dac377a86469a3bfdf1aceb37648 admission_coordinator.rs
+67b1762c6bd4b3313d1990b37d9d38ed468249d3de8328b95d896c625353108f admission_coordinator_tests.rs
+37d12f586066580f37ae40cd4427e50c5d44558ffc4410c254b557994e289d01 admission_transport_tests.rs
+```
+
+Commandes du gel final, en env-i dans le sandbox Linux ARM64 admis :
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/coordinator-final/Cargo.toml --lib runtime::kubernetes::admission::coordinator_tests:: -- --test-threads=1
+cargo check --offline --locked --all-targets --manifest-path /inputs/coordinator-final/Cargo.toml
+```
+
+La revue indépendante relit les SHA finaux et confirme que le correctif ne
+change que le groupe de classification. Aucun autre défaut bloquant établi
+dans ce périmètre ; refus durable, appelant service et I/O bornées restent
+explicitement ouverts. Ce résultat est partageable comme travail de branche,
+pas comme lot intégralement terminé ou release qualifiée.
+
+Owner4 unique, image/limites identiques à owner3, PID/mémoire/réseau/UID/FS
+revalidés avant toute exécution. Après tous les retours terminaux, Root constate
+seulement init+sleep, puis arrête normalement et retire cet ID exact le5novembre
+à12:35:33UTC : PID0,exit143,OOMfalse. Aucun volume/image/service utilisateur
+supprimé ; source, logs et notes restent conservés hors scratch. Les copies
+de travail et le checkout principal sont préservés. Aucun gate global fermé.
+
+Critères visés : résultat503 réellement retenu et acquitté sans handle ;
+perte de confirmation injectée après vrai commit et reprise sous contrôle
+inactif sans POST ni nouvelle mutation ;201 sûre avec handle après ACK local ;
+refus avant envoi après claim durable conservé comme inconnu. La fixture
+ne prouve ni crash réel, ni panne physique de sync, ni effets cluster.
+
+## 5 novembre — permission et transport CREATE sur TLS local
+
+**Changements non intégrés**, même worktree/base `7155ab3`. Une permission
+opaque consommable relie l'échantillon HostClock antérieur au claim réel,
+l'ACK central exact, le journal durable et les bytes rendus. Une activation
+de test garde un listener loopback exact ; aucune factory d'activation de
+production n'existe. Le transport envoie uniquement le POST collection fixe
+avec `fieldValidation=Strict`, puis lit au plus1Mio avant le parseur sans
+doublons.201 seul confirme localement ; les autres statuts et les réponses
+invalides deviennent des inconnues sans retry ni handle. Deux GET Namespace
+précèdent le POST et deux suivent une201 sûre, sans garantie atomique d'UID.
+
+Le chemin de reprise utilise désormais une lecture historique authentifiée
+qui ne crée aucune opération absente, même sous contrôle rouvert inactif.
+Tenant, binding/grant/capacité exacte et scope sont vérifiés avant le lookup.
+Un journal préparé altéré ou une mauvaise paire intention/claim/journal sont
+refusés avant toute mutation centrale. Les propriétés GET/dry-run existantes
+restent dans leur ancien contrat, y compris200 accepté par le dry-run.
+
+**RED et diagnostics conservés.** Le premier gel permission ne compile pas :
+attendu `head().0` au lieu du compteur `i64`, puis match CLI non exhaustif des
+trois nouvelles erreurs fermées. Après corrections de fixture/mapping, le
+RED atteint vraiment `claim` indisponible après setup réel Store/FS/sample.
+Un second run du même gel pour un problème de log est un doublon, pas une
+preuve supplémentaire. La règle de run-id unique et des chemins d'outils
+absolus est rappelée ; aucun nouveau test n'est lancé pour changer un mode.
+
+La revue trouve ensuite une reprise prepared-only qui consomme le claim avant
+refus local :2parents passent, le troisième reproduit un head12 au lieu11
+(RC101). Le mode central ObserveClaim et le branchement journal récupéré
+corrigent ce défaut, sans fabriquer de Fresh ou réactiver le contrôle.
+Les quatre parents du gel `permission-green` passent ensuite. Les premières
+erreurs de compilation du harnais TLS (import/runtime et digest emprunté)
+restent `NOT_RUN`, sans être présentées comme un défaut transport.
+
+Le vrai RED TLS atteint ensuite le stub après un diagnostic HTTPS avec trois
+GET, la réservation, le claim central et le journal réels :1négatif passe sous
+refus général (non discriminant),2positifs échouent. La table de réponses
+négatives n'est pas atteinte à ce gel. Ce n'est qu'après ce RED que le transport
+réel remplace le stub. La fixture comporte une racine et une leaf distinctes,
+des compteurs par opération et un credential rétabli avant chaque cas ; ses
+changements sont séparés du correctif produit, sans oracle assoupli.
+
+| Gel / commande sélectionnée | Résultat |
+|---|---|
+| `permission-green`, `--lib runtime::kubernetes::admission::permission::tests::` | PASS,4/4,0ignoré,RC0 ; compilation36,17s, tests0,42s. |
+| `transport-green`, `--lib runtime::kubernetes::admission::transport_tests::` | PASS,3/3,0ignoré,RC0 ; compilation36,67s, tests2,42s. |
+| Même gel, `--test kubernetes_transport dry_run_accepts_the_other_documented_success_status_without_a_start_claim -- --exact` | PASS,1/1,13filtrés,RC0 ;0,39s. |
+| Même gel, `--test kubernetes_transport authenticated_observations_bind_namespace_cluster_pod_and_configuration -- --exact` | PASS,1/1,13filtrés,RC0 ;0,38s. |
+| Même gel, `--test kubernetes_transport_lifetime cancellation_closes_real_tls_peers_before_headers_and_during_partial_body -- --exact` | PASS,1/1,2filtrés,RC0 ; compilation2,96s, tests0,49s. |
+
+Commandes Cargo exécutées avec `test --offline --locked`, manifeste figé
+`/inputs/<gel>/Cargo.toml`, env-i et une compilation à la fois. Les matrices
+internes d'assertions ne gonflent pas le nombre de fonctions. Le gel final
+comporte55fichiers modifiés/ajoutés, comparés à la source avant les changements
+documentaires. Le format Rust ciblé et le diff sont PASS. Des avertissements
+`dead_code` demeurent (77dans le build de bibliothèque des canaris), sans
+suppression par attribut. Le gel composé `transverse-check` passe ensuite
+`cargo check --offline --locked --all-targets` (RC0,1min09s), avec77warnings
+de bibliothèque et un warning de bibliothèque-test ; aucun test exécuté par
+ce contrôle. Le log parent a pour SHA-256
+`0c2691d04739846b5d0bb2a5244e36c253b2c0b43c1014d6a8e1b929df9fba34`.
+Clippy demeure indisponible dans l'image locale ; release reste `NOT_RUN`
+pour cette tranche.
+
+**Critères couverts.** Le positif reçoit un unique POST aux bytes exacts,
+avec chemin/query/méthode/headers attendus, puis retient le candidat avant
+vrai commit Store et ACK journal avant handle UID. Les refus couvrent
+annulation locale, credential remplacé, budget continu expiré, boot/méthode
+changés et recul de compteur : zéro POST et quota tenu. Les réponses200/202,
+JSON dupliqué, taille excessive, spec modifiée et corps tronqué restent
+inconnues après une seule émission ; aucun canary de corps brut n'est
+persisté. Le NamespaceUID changé après201 donne `AuthorityChanged`, sans
+handle, avec quota retenu. La fermeture réelle de connexions après annulation
+du lecteur est aussi vérifiée par le canari existant.
+
+**Limites.** L'API du peer est une fixture déclarée ; TLS/HTTP, Store et FS
+sont réels mais aucun Pod, moteur worker, cluster ou fournisseur n'est joint.
+Le test n'établit ni CNI/RBAC/admission effective, ni atomicité NamespaceUID,
+ni révocation distante atomique avec POST, ni panne physique de sync, ni
+suspension réelle d'horloge, ni capacité100. Les temps synthétiques ciblent
+les bornes du guard, sans qualifier les performances du Mac sous pression.
+Le pipeline d'exploitation et l'activation de production restent ouverts.
+
+**Écart constaté après cette tranche.** Le helper TLS de ce gel persiste
+seulement `CreatedHeld` ; ses cas `OwnershipUnknown` vérifient le retour en
+mémoire et le quota retenu, sans prouver une publication centrale ni un ACK
+local de ce résultat. Le parcours Store/journal antérieur utilise un résultat
+synthétique assemblé dans le test. Un coordinateur commun et ses régressions
+de résultat incertain durable/reprise exacte sont en développement ; ces
+preuves ne leur sont pas transférées.
+
+**QA.** Owner3 unique admis neuf : image et limites du lot précédent,
+networknone/UID1000/caps0/NNP1/seccomp2/rootRO/source-cacheRO/1CPU/6Gio/PID256,
+scratch3Gio/65536inodes, fsize512Mio/nofile1024, wall3000s. OpenSSL local vérifié ;
+chaînes créées seulement dans ce sandbox, aucune clé réelle montée ni magasin
+de confiance modifié. Arrêt normal après top idle le5novembre à11:40:17UTC,
+PID0/OOMfalse/exit143, puis suppression de cet ID exact. Aucun service,
+image partagée, volume ou preuve utilisateur supprimé.
+
+Journaux parent privés, SHA-256 :
+
+```text
+de84af41385fc8c74e5c1a7b9556b832a17feefc93574ad573666ff3f36dbbe1 permission-green.log
+4fd82bc7292dc07eca9095a0882f8519ded6f32e62f3111653b70b5f460d4374 transport-green.log
+89374d392eb46f933991b885ca3fde6dabd1f8e2ecc318264cf615f9b3a0091c canary-dryrun.log
+7d80d670a6995a1388015e02f3550a13d95364117be5e913bff376ca0762be63 canary-observation.log
+dc2cb70e2736cf8bd49b234cb834fa432a1929a35fe6301e7a2746238e809423 canary-cancellation.log
+```
+
+La revue indépendante source ne relève aucun défaut bloquant non traité dans
+ce périmètre. Ceci ne clôt aucun gate global et ne qualifie pas la release.
+
+## 5 novembre — fondation d'admission Kubernetes hors cluster
+
+**Périmètre et gel.** Base `7155ab3`, worktree dédié
+`codex/kubernetes-held-create-20261105`, source encore non intégrée. Le gel
+`composed-green` contient 44 fichiers Rust/contrat modifiés ou ajoutés. DTO,
+rendu/projection, migration 7→8, transactions et replay du Store, quota partagé
+et journal privé sont implémentés. Il reste à raccorder permission consommable
+et transport CREATE. Aucune factory de production, commande CREATE, action
+cluster ou session Kubernetes n'est livrée par ce lot.
+
+Luna exécute les sélections ciblées ; Root lit les sorties terminales et leurs
+empreintes. La revue indépendante examine contrats, identité/replay, capacité
+d'audit, journal et publication. Les constats traités portent sur le filtrage
+de capacité CREATE, la borne historique binding/grant, la collision du nom de
+champ sensible, la déduplication et la publication après expiration. Aucune
+revue de source ne remplace une qualification du cluster.
+
+**Reproductions conservées.** Les premières interfaces refusent tout : trois
+parents Store et cinq FS échouent réellement après compilation. Les négatifs
+qui passent sous ce refus général ne sont pas une preuve discriminante. Le
+replay antérieur accepte une décision rehashée dépassant l'expiration du
+binding ; le contrôle voisin valide passe, puis le parent échoue au refus
+attendu. La variante grant est seulement atteinte au GREEN. Le journal refuse
+65 copies d'une protection comme 65 éléments distincts : RED puis correction
+sans augmenter les caps. Deux parcours de rétention d'un claim historique
+échouent sur la couture indisponible, puis passent après rétention ObserveOnly.
+La publication à `not_after` échoue au RED ; les bornes synthétiques passent
+avec le contrôle UTC postcommit.
+
+Deux erreurs d'oracle sont documentées et leurs journaux conservés : une base
+corrompue peut s'ouvrir en diagnostic, mais reste unhealthy, sans supervision
+ni append ; `integrity()` peut retourner une erreur typée plutôt qu'un rapport
+`valid=false`. Les contrôles positifs adjacents restent exigés. La correction
+ne relâche aucun contrôle applicatif pour faire passer ces tests.
+
+**Commandes du gel**, exécutées hors réseau avec le manifeste figé
+`/inputs/composed-green/Cargo.toml` et les dépendances publiques verrouillées :
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/composed-green/Cargo.toml --lib audit::kubernetes_admission
+cargo test --offline --locked --manifest-path /inputs/composed-green/Cargo.toml --lib runtime::kubernetes::admission::journal::tests::
+cargo test --offline --locked --manifest-path /inputs/composed-green/Cargo.toml --lib runtime::kubernetes::admission::flow_tests::
+cargo test --offline --locked --manifest-path /inputs/composed-green/Cargo.toml --test control_protocol_schema
+cargo check --offline --locked --manifest-path /inputs/composed-green/Cargo.toml --all-targets
+```
+
+| Sélection finale | Résultat constaté |
+|---|---|
+| Store / autorisation / mutation / migration-intégrité | PASS, 15/15, 0 ignoré, RC0 ; compilation 37,47 s, tests 1,50 s. |
+| Journal, vrais fichiers privés | PASS, 7/7, 0 ignoré, RC0 ; tests 0,23 s. |
+| Parcours Store + journal, preuves opaques réelles | PASS, 3/3, 0 ignoré, RC0 ; tests 0,36 s. |
+| Protocole servi / migration / réouverture inactive | PASS, 1/1, 0 ignoré, RC0 ; tests 0,16 s. |
+| Compilation toutes cibles | PASS, RC0, 53,93 s, avec avertissements. |
+| Format Rust ciblé, diff et comparaison au gel | PASS ; le contrôle du format ne lance pas Cargo natif. |
+
+Les deux gardes de préflight sont aussi PASS sur le gel composé précédent,
+via `--lib kubernetes_cli::identity_scope_tests` où résident leurs vrais tests.
+Le binaire ne les sélectionne pas. Les six parents DTO/runtime purs et le
+golden indépendant appartiennent à leurs gels antérieurs ; ne pas les
+additionner aux 26 fonctions du dernier gel comme une suite complète unique.
+Les tables d'assertions internes ne sont pas comptées comme nouveaux tests.
+
+**Limites.** Des avertissements `dead_code` subsistent : 63 dans le build de
+la bibliothèque et un dans la cible tests, liés au raccord de production
+encore incomplet. Aucun `allow` ni usage factice ne les masque. Clippy est
+`BLOCKED` dans l'image locale : son exécutable manque, aucun téléchargement
+de composant effectué. Full-suite, release build, frontend, Docker/Podman
+workers, Kubernetes réel, charge100 et pannes physiques restent `NOT_RUN`
+dans ce lot. Les heures synthétiques vérifient des bornes, pas une latence
+sur le MacBook Air sous pression. Les observations Pod sont déclarées et
+partielles ; aucune requête POST n'a été envoyée. La limite161Kio du journal
+est logique, sans preuve de quota physique bytes/inodes ni de panne fsync.
+
+**Environnement et clôture QA.** Rust1.99.1 LinuxARM64, image locale épinglée,
+réseau absent, UID1000, capabilities0, no-new-privileges, root et deux binds
+source/cache en lecture seule, PID/IPC privés. 1CPU/6Gio, swap limité au même
+total, PID256, fichier512Mio, nofile1024, scratch tmpfs3Gio/65536inodes ; aucune
+clé, home utilisateur ou socket monté. Une compilation à la fois, env-i et
+Cargo offline. L'owner1 puis l'owner2 sont fermés normalement après top idle ;
+owner2 arrêté à10:29:15UTC, PID0/OOMfalse/exit143, puis supprimé par son ID
+exact. Aucun volume, image partagée, preuve ou service utilisateur supprimé.
+
+Journaux parent conservés en privé, SHA-256 :
+
+```text
+8fb28109af193f6b5595803a8801659c447b1da37363c3e383c058517230cbd5 final-store.log
+8415dfcb658fc32dad5157ef87bf4f3945b7db420c5060f15b311d0d6d53799b final-journal.log
+1c60081a6c0c51874e2bbda6e2989dd0f77f7e08307b142d3e3ba21f7a77e93c final-flow.log
+7d935d2872619828d81b7c6ed40cf8aea83a162976f764e2439a94cf040245e4 final-protocol.log
+0d3e5890e09be976ff5bd3bcbd4f6bd22c6d86e1db777203a9d37da057ebcbbc final-all-targets.log
+```
+
+Le scan des trois littéraux secrets connus est vide, sans garantie universelle.
+Le worktree WIP est conservé jusqu'à intégration/revue de la verticale complète.
+Les exigences du produit ne sont pas réduites : G09 FAIL, 0/12 gates clos.
+
 ## 5 novembre — réconciliation logicielle après annulation
 
 **Changements intégrés.** Base `361bf69`, donneur

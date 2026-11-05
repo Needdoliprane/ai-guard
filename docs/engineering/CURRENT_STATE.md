@@ -1,5 +1,80 @@
 # État constaté — suivi du développement
 
+## 5 novembre — rétention et reprise communes des résultats Kubernetes
+
+Le coordinateur Rust local conserve maintenant le candidat exact pour une
+réponse valide, une réponse incertaine et un refus avant envoi après claim.
+Confirmation centrale puis ACK local durable précèdent tout handle
+d'inspection. La reprise du candidat ne refait ni claim ni POST Kubernetes ;
+une intention divergente est refusée. Le refus opaque d'une fenêtre expirée
+reste une inconnue conservatrice, sans inventer un changement d'autorité.
+
+**PASS logiciel ciblé :5parents, aucun ignoré**, avec Store SQLite, fichiers
+et TLS locaux réels ; compilation toutes cibles RC0 et revue indépendante
+traitée. [Gels, RED, commandes et limites](VALIDATION.md). Les réponses de Pod
+restent des fixtures déclarées ; aucun effet cluster n'est qualifié.
+
+**Travail de branche, non intégré à la référence.** Le refus central n'a pas
+encore de code durable dans `refusal.json` : cette exigence reste obligatoire
+et ouverte. Raccord broker HTTP/Store, I/O synchrones sur worker borné,
+constructeurs d'autorité/activation et parcours de session Kubernetes restent
+à implémenter ou qualifier. Le contrôle émet84warnings de bibliothèque et1de
+test ; la garde sans avertissement n'est pas satisfaite. Clippy manque dans
+l'image de validation, release n'a pas été rejouée pour cette tranche.
+Prochaine priorité locale : refus durable véridique et reprise de son candidat,
+puis raccord opérationnel conforme aux frontières existantes. G09 FAIL,
+0/12 gates globaux clos ; le mandat produit complet est inchangé.
+
+## 5 novembre — permission et transport CREATE vérifiés sur TLS local
+
+La suite du même worktree non intégré ajoute une permission consommable,
+liée au vrai claim central, au journal et à l'horloge prélevée avant ce claim.
+Le POST collection est fixe, sans retry ; le profil201 est revalidé avant
+résultat, puis l'autorité est relue. Une reprise observe l'opération existante
+sans créer de claim absent. Un retour incertain garde le quota et ne produit
+aucun handle. Les reçus exacts puis leur rétention durable restent requis.
+
+Quatre parents de permission/reprise, trois parents TLS et trois canaris
+existants GET/dry-run/annulation sont PASS, sur leurs gels distingués dans
+[VALIDATION.md](VALIDATION.md#5-novembre--permission-et-transport-create-sur-tls-local).
+La revue source indépendante ne signale pas de défaut bloquant dans ce périmètre.
+La compilation toutes cibles du gel transport passe également ; des avertissements
+de code inutilisé demeurent. Le coordinateur commun de rétention des résultats
+incertains et de reprise d'ACK est décrit ci-dessus. Le raccord d'exploitation
+et l'intégration de la verticale complète restent ouverts.
+
+L'activation n'a toujours aucun constructeur de production ; sa couture de
+test retient le listener TLS local exact. Aucun endpoint de lancement, option
+`--runtime kubernetes`, appel cluster, release ou charge métier n'est ajouté.
+Le passage logiciel sur un peer TLS détenu ne qualifie ni Kubernetes réel,
+ni CNI/admission/NamespaceUID atomique, ni les pannes physiques. Le produit et
+les gates restent ouverts, sans changement du périmètre demandé.
+
+## 5 novembre — fondation d'admission Kubernetes hors cluster, en cours
+
+Worktree `codex/kubernetes-held-create-20261105`, base `7155ab3` ; source non
+encore intégrée. Contrats/rendu fermés, migration SQLite 7→8 avec sauvegarde,
+transactions et audit/replay typés, quota partagé et journal privé sont écrits.
+Trois agents se répartissent journal, tests ciblés Luna et revue indépendante ;
+l'orchestrateur possède les contrats et transactions transverses.
+
+Le dernier gel composé vérifie 15 parents Store, 7 parents FS, 3 parcours réels
+Store/journal et un canari de protocole ; la compilation toutes cibles passe.
+Les deux gardes de préflight schema8 passent sur leur gel précédent. Les
+corrections de déduplication des protections, rétention historique et
+publication dans la fenêtre sont vérifiées et relues. Des avertissements de
+code encore inutilisé subsistent ; Clippy manque dans l'image de validation.
+Les anciens FAIL d'oracle restent documentés : l'ouverture diagnostique d'une
+base invalide est permise, avec Store unhealthy et mutations refusées.
+[Résultats par gel](VALIDATION.md#5-novembre--fondation-dadmission-kubernetes-hors-cluster).
+
+À ce gel de fondation, permission/transport CREATE n'étaient pas raccordés ; aucun appel cluster,
+start/release ni session Kubernetes n'est ajouté. L'autorisation exacte n'a
+pas de constructeur de production. Les observations Pod sont synthétiques,
+déclarées et partielles ; elles ne qualifient pas l'admission, RBAC/CNI,
+NamespaceUID, fencing, reprise réelle ou la capacité 100. Le produit complet
+et ses gates restent ouverts ; G09 FAIL, 0/12 gates globaux clos.
+
 ## 5 novembre — réconciliation après annulation, périmètre logiciel vérifié
 
 Le broker peut réconcilier le terminal du worker annulé déjà possédé, sans

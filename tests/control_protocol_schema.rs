@@ -127,6 +127,7 @@ fn migrate_to(store: &Store, backup: &Path, version: u32) {
         5 => store.migrate_human_access_v5(backup).unwrap(),
         6 => store.migrate_workload_v6(backup).unwrap(),
         7 => store.migrate_human_brokers_v7(backup).unwrap(),
+        8 => store.migrate_kubernetes_create_v8(backup).unwrap(),
         _ => panic!("unexpected migration target {version}"),
     };
     assert!(
@@ -172,7 +173,7 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
         let protocol = get_protocol(&router, &runner_token).await;
         check_protocol_and_schema(&protocol, &schema, 2, false, &mut failures);
 
-        for version in 3..=7 {
+        for version in 3..=8 {
             let backup = directory
                 .path()
                 .join(format!("tenant-before-v{version}.sqlite"));
@@ -182,33 +183,37 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
         }
     }
 
-    // The exact backup taken before7 remains a historical schema6 reader. It
-    // must reopen inactive instead of inheriting the source's live lease.
-    let historical6 = Arc::new(
-        Store::open_existing_for_tenant(
-            &directory.path().join("tenant-before-v7.sqlite"),
-            "schema-contract-tenant",
-            Redactor::new(vec![]),
-            10_000,
-        )
-        .unwrap(),
-    );
-    let historical6_router = gateway_router(
-        GatewayState::for_tenants(
-            vec![TenantGateway {
-                tenant_id: "schema-contract-tenant".into(),
-                store: Arc::clone(&historical6),
-                runner_token: runner_token.clone(),
-                viewer_token: "historical-six-viewer".repeat(3),
-            }],
-            Policy::default(),
-            None,
-            Redactor::new(vec![]),
-        )
-        .unwrap(),
-    );
-    let protocol = get_protocol(&historical6_router, &runner_token).await;
-    check_protocol_and_schema(&protocol, &schema, 6, false, &mut failures);
+    // Exact pre-migration backups remain historical readers. Neither schema6
+    // nor schema7 may inherit the source's live lease on reopen.
+    for version in [6, 7] {
+        let historical = Arc::new(
+            Store::open_existing_for_tenant(
+                &directory
+                    .path()
+                    .join(format!("tenant-before-v{}.sqlite", version + 1)),
+                "schema-contract-tenant",
+                Redactor::new(vec![]),
+                10_000,
+            )
+            .unwrap(),
+        );
+        let historical_router = gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "schema-contract-tenant".into(),
+                    store: Arc::clone(&historical),
+                    runner_token: runner_token.clone(),
+                    viewer_token: format!("historical-v{version}-viewer").repeat(3),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap(),
+        );
+        let protocol = get_protocol(&historical_router, &runner_token).await;
+        check_protocol_and_schema(&protocol, &schema, version, false, &mut failures);
+    }
 
     let reopened = Arc::new(
         Store::open_for_tenant(
@@ -232,10 +237,10 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
     )
     .unwrap();
     let reopened_router = gateway_router(reopened_state);
-    assert_eq!(reopened.supervision_state().unwrap().schema_version, 7);
+    assert_eq!(reopened.supervision_state().unwrap().schema_version, 8);
     assert!(!reopened.supervision_state().unwrap().active);
     let protocol = get_protocol(&reopened_router, &runner_token).await;
-    check_protocol_and_schema(&protocol, &schema, 7, false, &mut failures);
+    check_protocol_and_schema(&protocol, &schema, 8, false, &mut failures);
 
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

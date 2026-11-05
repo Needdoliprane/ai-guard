@@ -10,6 +10,57 @@ la [stratégie de test](TEST_STRATEGY.md) restent applicables.
 
 ## Besoin et état existant
 
+**Point de développement du 5 novembre, base `7155ab3`, worktree dédié non
+encore intégré.** Le code local ajoute les DTO fermés, le rendu/projection,
+la migration explicite 7→8, les transactions de réservation/claim/résultat/
+annulation, leur replay et le quota partagé avec Docker/Podman. Le journal
+privé conserve le claim avant l'appel central, puis un candidat exact et son
+accusé. Les [preuves](VALIDATION.md#5-novembre--fondation-dadmission-kubernetes-hors-cluster)
+distinguent les gels intermédiaires et les 26 tests ciblés du gel de fondation
+`composed-green`.
+La tranche suivante relie la permission consommable et le transport CREATE,
+avec quatre parents de permission/reprise, trois TLS et trois canaris existants
+[PASS sur leurs gels](VALIDATION.md#5-novembre--permission-et-transport-create-sur-tls-local).
+[Le coordinateur commun](VALIDATION.md) est ensuite vérifié par cinq parents
+Store/journal/TLS, sans activation de production. Aucun
+nouvel endpoint, commande de création, `RuntimeKind` ou constructeur
+d'activation en production n'est ajouté. Le raccord d'exploitation et la
+qualification complète restent ouverts ; les paragraphes de conception
+ci-dessous ne constituent pas une déclaration de leur achèvement.
+
+L'autorisation locale exacte possède une seule couture `cfg(test)` après
+authentification réelle du broker. Son engagement descriptif audité lie aussi
+credential/révisions, head d'origine et expiration ; il ne reconstruit aucune
+capacité depuis le disque. Le replay vérifie binding/grant aux préfixes
+d'établissement de cette décision et de mutation. Une publication du premier claim
+après sa fenêtre rend `ObserveOnly`, sans preuve fraîche et sans libérer le
+quota. Cette vérification UTC ne remplace pas l'échantillon HostClock
+antérieur à la requête et le contrôle final avant POST.
+
+La permission consommable conserve désormais ce même producteur HostClock,
+boot/méthode et compteur initial. Le guard final revalide journal et credentials
+avant sa dernière lecture d'horloge ; aucun await ne suit avant l'initiation.
+Une reprise prepared-only emploie une lecture centrale dédiée, jamais un
+claim créateur : l'opération absente reste absente. La couture d'activation
+`cfg(test)` retient une copie du listener loopback exact ; aucune URL seule ou
+réponse désérialisée ne fabrique la permission.
+
+Le chemin CREATE fixe `fieldValidation=Strict` et confirme seulement201, choix
+local conservateur : l'[API Pod officielle](https://v1-36.docs.kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/#post-create)
+documente aussi200/202. Ces autres statuts restent des effets inconnus, sans
+retry ni adoption. [Strict](https://kubernetes.io/docs/reference/using-api/api-concepts/#field-validation)
+ne prouve pas la sûreté de la réponse ni l'absence de mutation d'admission.
+La réponse brute est bornée puis lue sans doublons avant Value, et l'autorité
+est revérifiée après une réponse201 sûre. Ces GET ne sont pas une précondition
+atomique NamespaceUID et ne lèvent pas la fermeture de production.
+
+Le journal rouvre toujours en observation. Un claim historique exact peut être
+retenu avec `ObserveOnly`, y compris après perte d'accusé avant `emission.json` ;
+cela invalide irréversiblement tout checkpoint d'émission local antérieur.
+Les sept noms fixes bornent le contenu logique à 161 Kio, sans garantir une
+quota physique du système de fichiers. Un résidu partiel reste conservé et
+refusé ; aucune réparation, suppression ou adoption automatique n'est fournie.
+
 L'adaptateur actuel sait diagnostiquer une autorité explicite, inspecter un
 Pod retenu et soumettre un dry-run audité ; [guide opérateur](../setup/kubernetes/README.fr.md).
 `RuntimeKind` reste Docker/Podman. Leur chemin managed crée une cible avant
@@ -220,8 +271,10 @@ et d'epoch sont bornés à `i64::MAX` et utilisent une addition vérifiée.
 
 `emission_window`, quand présente, contient exactement `issued_at` et
 `not_after`, dates UTC RFC3339 canoniques du contrôle. À la transaction du
-claim : `not_after = min(grant.not_after, issued_at + 8 secondes)`, avec une
-durée strictement positive. C'est un budget de préparation et d'initiation de
+claim : `not_after = min(grant.not_after, authorization.expires_at, issued_at + 8 secondes)`,
+avec une durée strictement positive. L'expiration de l'autorisation est aussi
+bornée par celle du binding, aux deux préfixes historiques vérifiés.
+C'est un budget de préparation et d'initiation de
 la requête par le code Rust, pas une garantie de date du premier octet réseau
 ou d'acceptation par le cluster. Il ne modifie ni le timeout HTTPS, ni la durée
 de vie ou le quota du Pod.
@@ -460,6 +513,14 @@ pas le candidat avec de nouveaux CAS et n'accumule pas un historique de réponse
 La conservation emploie les vraies barrières durables ; si elle échoue, aucune
 conservation réussie n'est déclarée et la reprise reste inconnue.
 
+**Écart d'implémentation encore ouvert au 5 novembre.** Le coordinateur local
+retient le candidat exact et remonte actuellement une erreur fermée à son
+appelant ; il n'enregistre pas encore le code dans `refusal.json`. Le Store
+retourne un `Conflict` générique, qui ne permet pas de distinguer honnêtement
+révision et epoch périmés. La persistance d'un refus exact reste obligatoire
+et non couverte par ce raccord ; ni ce manque ni la classification à compléter
+ne sont transformés en preuve réussie. Aucun CAS de rattrapage n'est permis.
+
 Reprise d'un résultat perdu : si le candidat exact et son `operation_id` sont
 durables, seul son replay est permis sous identité encore autorisée. Un ACK
 historique déjà commité peut être relu sans réappliquer la transition ; il ne
@@ -493,7 +554,12 @@ des prérequis d'activation, pas une suppression implémentée par ce lot.
 | Documentation/revue indépendante | Ce document, puis guides Kubernetes EN/FR et preuves/écarts lors du lot de code ; second regard sur audit, quota, émission et reprise. |
 
 Scénarios nécessaires, avec vrais Store SQLite/fichiers et transport local
-compté lorsque pertinent ; ils restent **NOT_RUN** à ce stade :
+compté lorsque pertinent. Cette liste fixe l'acceptation de la verticale
+complète : les sous-propriétés déjà vérifiées figurent dans les
+[preuves du 5 novembre](VALIDATION.md#5-novembre--fondation-dadmission-kubernetes-hors-cluster) ;
+les parcours cluster et la qualification complète restent **NOT_RUN** ;
+les [essais TLS locaux](VALIDATION.md#5-novembre--permission-et-transport-create-sur-tls-local)
+ont leur preuve distincte :
 
 1. Sans autorité live, rôle, preuve broker courante, scope, quota, capacité
    d'audit ou activation : zéro POST ; l'erreur d'audit rollbacke réservation

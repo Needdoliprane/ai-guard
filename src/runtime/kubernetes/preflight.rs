@@ -20,7 +20,7 @@ pub struct KubernetesPreflightResourcesV1 {
     pub deadline_seconds: u32,
 }
 impl KubernetesPreflightResourcesV1 {
-    fn validate(&self) -> KubernetesResult<()> {
+    pub(super) fn validate(&self) -> KubernetesResult<()> {
         if !(1..=200_000).contains(&self.cpu_millis)
             || !(1..=102_400).contains(&self.memory_mib)
             || self.workspace_mib == 0
@@ -283,7 +283,7 @@ impl KubernetesRuntime {
     }
 }
 
-fn validate_admitted(requested: &Value, admitted: &Value) -> KubernetesResult<()> {
+pub(super) fn validate_admitted(requested: &Value, admitted: &Value) -> KubernetesResult<()> {
     if admitted.get("apiVersion") != requested.get("apiVersion")
         || admitted.get("kind") != requested.get("kind")
         || admitted.pointer("/metadata/name") != requested.pointer("/metadata/name")
