@@ -76,6 +76,123 @@ for lifecycle limits and the [French guide](setup/workloads/README.fr.md#lire-le
 An envelope containing retained credential material is refused as opaque
 `503 identity_unavailable`, without masked identifiers or a partial snapshot.
 
+## Kubernetes held-CREATE HTTP v1
+
+Les six routes suivantes du gateway exigent une preuve Bearer **broker**
+courante et le schéma 9 ; elles n'ont aucun alias `/api`. Le tenant est résolu
+par l'authentification, puis identité/grant sont revérifiés dans le segment
+Store borné. Aucun header, query ou champ de corps ne sélectionne tenant,
+politique ou quota ; les queries sont refusées. Ces routes contrôlent des
+transactions SQLite, sans credentials Kubernetes ni appel cluster au gateway.
+
+These six gateway routes require a current **broker** bearer proof and schema
+9, with no `/api` alias. Authentication selects the tenant; the bounded Store
+segment revalidates identity and grant. No header, query or body field selects
+tenant, policy or quota; queries are refused. The gateway performs control
+transactions, holds no Kubernetes credentials and makes no cluster request.
+
+| Méthode et route / Method and route | Entrée / Input | Réponse / Response |
+|---|---|---|
+| `GET /api/v1/brokers/kubernetes/held-create-protocol` | Aucun corps / No body | `200 KubernetesHeldCreateProtocolV1` |
+| `POST /api/v1/brokers/kubernetes/held-creates` | `KubernetesCreateIntentV1` | `201` première réservation, `200` replay exact / first reservation, exact replay ; `KubernetesCreateMutationResponseV1` |
+| `POST /api/v1/brokers/kubernetes/held-creates/{create_id}/claims` | `KubernetesCreateClaimV1` | `201` premier claim encore éligible, sinon `200` / first eligible claim, otherwise `200` ; `KubernetesCreateClaimResponseV1` |
+| `GET /api/v1/brokers/kubernetes/held-creates/{create_id}/claims/{operation_id}` | IDs canoniques, aucun corps / Canonical IDs, no body | `200 KubernetesCreateClaimResponseV1`, toujours / always `observe_only` |
+| `POST /api/v1/brokers/kubernetes/held-creates/{create_id}/results` | `KubernetesCreateResultV1` | `200 KubernetesCreateResultResponseV1`, ACK exact / exact ACK |
+| `POST /api/v1/brokers/kubernetes/held-creates/{create_id}/cancellations` | `KubernetesCreateCancelV1` | `200 KubernetesCreateMutationResponseV1` |
+
+DTO fermés : [intent/claim/result/cancel et reçu/snapshot](../src/control/kubernetes_admission.rs),
+[enveloppes HTTP](../src/control/kubernetes_admission/http.rs). Les POST exigent
+un seul `Content-Type: application/json` (paramètres MIME admis), au plus
+64 Kio de corps, profondeur 64, sans membre dupliqué à aucune profondeur ni
+contenu après le JSON. Champ inconnu, forme invalide ou borne dépassée donne
+un refus fermé `400 invalid_held_create_request` ; les désaccords path/body
+utilisent `400 invalid_workload_request`. La lecture du corps est bornée à 5 s
+et ne conserve pas de slot Store pendant l'upload.
+
+Closed DTOs are linked above. POST requires one JSON Content-Type header,
+a body up to 64 KiB and depth 64, with no duplicate members at any depth or
+trailing content. Unknown fields, malformed/oversized input fail with closed
+`400 invalid_held_create_request`; path/body mismatches use
+`400 invalid_workload_request`. Body upload has a five-second bound without
+holding a Store slot.
+
+Les réponses fermées portent `version:1` : mutation =
+`{version,receipt,snapshot,replayed}`, claim =
+`{version,receipt,snapshot,disposition}`, résultat = `{version,receipt,snapshot}`.
+Le snapshot appartient au reçu de l'opération, pas nécessairement à l'état
+courant. Le protocole contient schéma/tenant/namespace/broker/incarnation,
+révisions binding/grant, `admission_policy_configured` et les opérations
+`reserve|claim|observe_claim|result|cancel`. Ce booléen indique une configuration,
+pas une admission garantie. Claim `201` exige une preuve Store Fresh du premier
+commit, liée aux claim/reçu/snapshot exacts, et une fenêtre encore valide avant
+restitution ; sinon `200 observe_only`. Replay/GET ne rendent jamais Fresh.
+Les reçus JSON ne reconstruisent aucune capacité runtime.
+
+Responses use the version-1 shapes above; snapshots belong to the operation's
+receipt and may be historical. Protocol metadata reports configured policy,
+not admission availability. Claim `201` requires a matching first-commit Store
+Fresh proof and a live emission window at response preparation; otherwise it
+returns `200 observe_only`. Replays/GETs never issue Fresh. A JSON receipt is
+not a consumable runtime capability, nor a guarantee of arrival before expiry.
+
+Reserve/Claim obtiennent une décision V2 Admission depuis politique et quota
+COURANTS du `TenantState`, après authentification ; pas de politique fournie
+par le broker. Lookup/résultat/annulation obtiennent chacun une nouvelle V2
+Reconcile liée au Reserve ORIGINAL exact et au grant/quota courants, même
+après retrait de politique, baisse de quota ou réouverture inactive. Révocation,
+scope divergent et incarnation différente restent refusés. La provenance de
+politique est un snapshot déclaré de configuration, pas une approbation humaine
+nominative. Les capacités mémoire V1 sont refusées sur 9 avant replay ; une
+V2 appropriée peut relire un reçu/snapshot V1 exact sans append ni Fresh.
+
+Reserve/Claim use the current server-resolved tenant policy/quota. Each
+lookup/result/cancel obtains a separate Reconcile decision from the exact
+original Reserve and current grant/quota; policy withdrawal, lower quota or
+inactive supervision alone do not block it. Revoked/divergent identities stay
+refused. Policy provenance is declared configuration, not named human approval.
+V1 in-memory capabilities are refused on 9; an appropriate V2 can return an
+exact historical V1 receipt/snapshot without appending or issuing Fresh.
+
+Entrées et sorties sont criblées avec les secrets connus, dont le Bearer
+broker courant, clés JSON comprises. Le même dictionnaire couvre les données
+Store dérivées avant persistance. Toute modification nécessaire d'une réponse
+exacte ou réponse dépassant 128 Kio donne `503 held_create_unavailable`, sans
+troncature, masque de substitution ou corps partiel. Le commit peut déjà être
+durable : une erreur ou perte HTTP ne prouve pas son absence. Garder identités,
+candidat et CAS exacts pour la reprise autorisée, sans fabriquer un nouvel état.
+
+Input/output screening includes the current broker bearer and JSON keys;
+derived Store data uses the same secret set before persistence. A response
+requiring redaction or exceeding 128 KiB is refused with
+`503 held_create_unavailable`, never truncated or replaced with masked facts.
+A commit can precede that refusal or loss of its HTTP ACK; preserve the exact
+operation/candidate/CAS for authorized recovery.
+
+Erreurs typées de ces handlers / Typed handler errors :
+
+| HTTP | Code fermé / Closed code |
+|---|---|
+| `401` | `authentication_required` |
+| `403` | `held_create_forbidden` ou / or `workload_forbidden` |
+| `404` | `held_create_not_found` |
+| `409` | `held_create_conflict`, `stale_epoch`, `stale_revision` |
+| `429` | `held_create_quota_exceeded` ; limites I/O/audit via leurs codes existants / existing I/O/audit limit codes |
+| `503` | `held_create_unavailable` ; les erreurs d'authentification/Store héritées gardent leur mapping opaque / inherited authentication/Store failures keep their opaque mapping |
+
+Les erreurs de contrôle ont `{error:{code,message}}` ; les fallbacks d'audit
+existants peuvent avoir `{error:message}`. Aucun corps Kubernetes, chemin ou
+chaîne d'erreur brute n'est exposé. Source effective du mapping :
+[`api/kubernetes.rs`](../src/api/kubernetes.rs) et
+[`api/workload.rs`](../src/api/workload.rs), pas un `500` générique supposé.
+Control errors have a closed code/message envelope; existing audit fallbacks
+may use an opaque error string. Neither format exposes raw error chains.
+
+Le client HTTP broker/ACK live, le Coordinator 9 et l'activation cluster
+restent à raccorder et qualifier. Ces routes ne livrent ni workspace, ni
+session Kubernetes, ni permission d'activation. Broker HTTP/live ACK,
+schema-9 Coordinator, activation and real runtime qualification remain open.
+Voir les guides [EN](setup/kubernetes/README.md) / [FR](setup/kubernetes/README.fr.md).
+
 ## Authentification OIDC Web et CLI / Web and CLI OIDC authentication
 
 Le contrat HTTP ci-dessous décrit **l'implémentation candidate**, configurable explicitement, au 2 novembre 2026. La qualification Keycloak réel et navigateur reste `NOT_RUN` ; aucune qualification production n'en découle. Les guides SSO [français](setup/sso/README.fr.md) et [anglais](setup/sso/README.md) décrivent configuration, profil signé accepté, memberships et exploitation. Les [routes Rust](../src/api/oidc.rs) et leurs [handlers](../src/api/oidc/gateway.rs) font autorité sur ces DTO.

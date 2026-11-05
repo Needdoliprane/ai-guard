@@ -311,10 +311,10 @@ effects unknown; a dry-run result never releases quota or records worker usage.
 ## Configure the central tenant policy
 
 The gateway accepts an optional `held_create_policy` in each tenant entry of
-its existing `--tenants-file` registry. This is central configuration data:
-it does not enable a CREATE service, authorize a request or activate a Pod.
-The broker still cannot launch Kubernetes workers, and the diagnostic and
-dry-run commands above remain separate from this policy.
+its existing `--tenants-file` registry. The central broker HTTP API uses this
+configuration for Reserve/Claim decisions; the configuration alone is no
+runtime permission. The broker still cannot launch Kubernetes workers, and
+the diagnostic and dry-run commands above remain separate from this policy.
 
 Merge this **partial JSON object into the intended existing tenant entry**,
 preserving its database, credential references and other settings. It is not
@@ -390,12 +390,38 @@ selecting another new destination. Never overwrite a backup or force a
 downgrade by changing `PRAGMA user_version` or rewriting audit data.
 
 Historical V1 audit validation and projection reconstruction remain available.
-On schema 9, Kubernetes mutations **and operational claim lookup/exact
-operation replay remain closed by the `MigrationRequired` guard** until the
-V2 decision producer is implemented. This includes confirming a retained
-result; the migration does not deliver operational reconciliation or a CREATE
-permission. Preserve pending journals and unknown quota reservations. Neither
-schema 9 nor a configured policy enables Kubernetes worker launch.
+On schema 9, the central Store now issues V2 Admission and Reconcile decisions.
+V1 in-memory capabilities remain refused on 9; an appropriate current V2
+capability can recover an exact historical V1 receipt and its associated
+snapshot without appending or issuing Fresh permission. Preserve pending
+journals and unknown quota reservations. Neither schema 9 nor a configured
+policy enables Kubernetes worker launch.
+
+## Use the central broker control API
+
+The gateway exposes six broker-only HTTP routes under `/api/v1` for protocol
+metadata, reservation, claim, historical claim lookup, result and cancellation;
+see the [route and DTO contract](../../api.md#kubernetes-held-create-http-v1).
+They authenticate the current broker and derive the tenant from its bearer
+proof. No header, query or JSON field selects a tenant, policy or quota.
+The protocol's `admission_policy_configured` reports configuration, not
+admission availability or cluster qualification.
+
+Reserve/Claim use the current immutable tenant policy and quota, plus current
+identity, grant and active supervision. Each lookup/result/cancellation obtains
+a separate Reconcile decision from the real original reservation and current
+grant/quota; a withdrawn policy, reduced quota or inactive supervision does
+not by itself prevent this reconciliation. Revoked or divergent identities
+remain refused. Policy provenance is a declared configuration snapshot, not a
+named human approval or confinement proof.
+
+Claim returns `201` only with a matching first-commit Store proof and a live
+emission window at response preparation. Replays and historical GETs return
+`200`/`observe_only`, never Fresh. A JSON response alone is no runtime
+permission. The broker HTTP client/live ACK channel and schema-9 Coordinator
+are still to be connected; activation, workspace transfer and Kubernetes agent
+sessions remain unavailable. These control routes and preflight do not create
+or admit a Pod in a cluster.
 
 ## Configure the Rust integration
 

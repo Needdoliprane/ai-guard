@@ -1,5 +1,101 @@
 # Validation courante
 
+## 5 novembre — producteur V2 et API centrale Kubernetes held-CREATE
+
+Base `734c78d`, même worktree dédié. La tranche ajoute les producteurs Store
+Admission/Reconcile, le replay fermé V1/V2 et six routes broker HTTP réelles,
+avec tenant/politique/quota résolus au serveur. Aucun client broker live ACK,
+Coordinator9, activation ou appel cluster. Luna exécute les tests ciblés ;
+le reviewer indépendant relit source, oracles et guides FR/EN.
+
+Deux QA successifs admis sur configuration et noyau utilisent l'image épinglée
+`sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`,
+Docker29.9.2/LinuxARM64/Rust1.99.1. UID1000/caps0/NNP1/seccomp2/networknone,
+root/source/registre public RO,1CPU/6Gio/swap0/PID256, scratch3Gio/65536inodes,
+fsize536870912bytes/nofile1024. HOME/tmp/cache sont privés au scratch ; aucun
+socket, clé réelle, home opérateur ou credential cluster. Une commande Cargo
+à la fois, env vide explicitement reconstruit, offline/locked, un job. Aucune
+durée ne qualifie la latence du MacBookAirM3/16Go sous pression.
+
+Avant implémentation, les goldens sont calculés indépendamment avec sha256sum
+et OpenSSL dans le QA. V1 conserve tuple/domain/octet ; V2 engage basis en
+dernier, avec son domaine distinct et un NUL. Empreintes concordantes :
+
+| Préimage | SHA256 |
+|---|---|
+| V1,593bytes | `6ad99a96bbcad047edccbc460cdf777a55464d26bdf892f67c95e3fae956c08d` |
+| V2 Admission,1017bytes | `885c8e1a8339e82ce0f26e407580d53ae448a4a62c49c65b24621799c43dc049` |
+| V2 Reconcile,815bytes | `dae60e3aa1284187607b1475a0d828379774976842724dc2ec487fba501de803` |
+
+Les trois fixtures Admission migrent réellement9 ; les corruptions conservent
+chaîne/quota/floors et pointent un vrai head8 contenant déjà binding/grant.
+Le témoin inter-tenant configure A pour approuver aussi l'intention exacte de
+B, alors que B n'a aucune politique : un mauvais choix de tenant échouerait
+donc à l'oracle. Les contrôles parser et secret ont leurs voisins positifs.
+
+Commandes après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` :
+
+| Gel et sélection | Résultat observé |
+|---|---|
+| `v2-red`, `--lib audit::kubernetes_admission::authorization::v2_tests:: -- --test-threads=1` | RED RC101 :5FAIL, compilation réussie ; V1 golden accepté, V2 inconnu et factories indisponibles. |
+| `v2-red`, `--lib api::kubernetes_tests:: -- --test-threads=1` | RED RC101 :3FAIL,503 au lieu des réponses positives attendues. |
+| `v2-candidate`, première sélection Store ci-dessus | PASS RC0 :5/5,0ignoré,443filtrés. |
+| `v2-candidate`, sélection API ci-dessus | PASS RC0 :3/3,0ignoré,445filtrés. |
+| `v2-final`, `--lib audit::kubernetes_admission::authorization::tests:: -- --test-threads=1` | FAIL RC101 :1PASS/1FAIL ; ancien oracle attend PermissionDenied, Store rend Unavailable. |
+| `legacy-baseline-734`, `--lib audit::kubernetes_admission::authorization::tests::historical_decision_expiry_cannot_exceed_its_binding_or_grant -- --exact --test-threads=1` | FAIL RC101 : même erreur sur l'archive exacte de base sans overlay ; défaut d'oracle préexistant établi. |
+| `v2-final-corrected`, sélection legacy de deux parents ci-dessus | PASS RC0 :2/2,0ignoré,446filtrés. |
+| `v2-final-corrected`, `--lib runtime::kubernetes::admission::tests::held_response_rejects_mutation_execution_duplicate_keys_and_unbounded_input -- --exact --test-threads=1` | PASS RC0 :1/1,0ignoré,447filtrés ; decoder partagé, bornes runtime conservées. |
+
+**11fonctions uniques exécutées**, sans additionner RED, diagnostic ou gels.
+Les huit nouveaux tests ne sont pas rejoués après le seul nettoyage d'import
+et la correction legacy. Cette correction exige PermissionDenied du validateur
+brut, puis Err(Unavailable) publique sans cause typée conservée ; Ok(false) ne
+peut pas contourner cet oracle. Aucun wrapper produit n'est modifié pour le vert.
+Le lookup Reconcile manque→NotFound sans append, rend le vieux snapshot lié au
+reçu après un résultat ultérieur, et ne fabrique jamais Fresh. Retrait de politique,
+quota abaissé et contrôle rouvert inactif n'empêchent pas seuls la réconciliation.
+Les entrées refusées incluent doublons imbriqués, profondeur65, suffixe, champ
+libre de tenant/politique/quota, corps valide surdimensionné et bearer courant
+dans une image pourtant approuvée. La sortie refuse secrets en clés/valeurs et
+dépassement128Kio, sans troncature ni faux snapshot.
+
+Journaux privés0600, empreintes relues par Root :
+
+| Journal | SHA256 |
+|---|---|
+| `v2-golden-policy.log` | `675c79f73533d924ebf2ed3bd6dfdd855129f688247cdaa6bdd054beb53f1d0e` |
+| `v2-golden-tuples.log` | `ee14f0f69bbbba92051c4f424a032873d7a5cff03ed483a856281c7f134b8b41` |
+| `v2-store-red.log` | `0de82760b3460e683ae4c0f0832bb53a916f8d910091ec7a0cd88a7a0c56413f` |
+| `v2-api-red.log` | `6a313b472a2ae28c6138a014eb30348539e262aeb9ed5d83be2ee29e122473f6` |
+| `v2-store-candidate.log` | `b22ea64807f528080fdb8159650a3e44ccd07361bd55f11d892aaef4b02f0230` |
+| `v2-api-candidate.log` | `da9533c88933b2b572fc07e235d981e49773db63fc67006589234c7008973e13` |
+| `v2-final-legacy-auth.log` | `ea48dd2470f1029bbd434e50d7cbdf543011489c6651ed021898a449238c3f7b` |
+| `v2-legacy-baseline-734.log` | `74a611896cbf811deca09f202f8887750d8161d9fe2d836bc81834da3415fe3a` |
+| `v2-final-legacy-auth-fixed.log` | `1a6634d4c62c635a83cad15604d3a03d9c5bbfddf3d076103b0a84fda6e5e8a8` |
+| `v2-final-runtime-json.log` | `db4a4494ee149dd983417f21198b01fc1b3fa7ae4de1e6b1db43dc22e7a79cdc` |
+| `v2-final-all-targets.log` | `41d226243b93f75d8ff5bca4b6d62949961bee6cb3e733e29c61acb4f2c1afad` |
+
+`cargo check --offline --locked --manifest-path /inputs/v2-final-corrected/Cargo.toml --all-targets`
+est PASS RC0,54,01secondes ;75warnings bibliothèque et1lib-test subsistent,
+donc la garde sans avertissement n'est pas satisfaite. Format14fichiers Rust,
+cmp des14sources avec le gel RO,
+Cargo.toml/Cargo.lock inchangés et diff-check sont PASS. Les3clés déjà connues
+ne sont pas présentes littéralement dans les21fichiers code/docs contrôlés ;
+ce contrôle limité n'est pas un audit universel de secrets. La revue indépendante
+du code, de l'oracle final et des3documents Core ne signale aucun blocage résiduel.
+Contrôle des7documents modifiés :506liens relatifs, aucune cible absente ;
+l'ancre du nouveau contrat HTTP est également relue.
+
+Premier QA terminé puis fermé normalement à16:56:55UTC, PID0/exit143/OOMfalse
+et retrait exact. QA final admis à16:58:36UTC puis fermé normalement à17:08:52UTC
+après tous les résultats terminaux et inventaire limité à init+sleep,
+PID0/exit143/OOMfalse, retrait exact. Aucune DB, binaire ou cache du scratch
+n'est promu. Clippy **BLOCKED** (composant
+absent), release/matrice complète/frontend/SSO/fournisseurs/runtimes/cluster
+**NOT_RUN** pour cette tranche. Client broker HTTP/ACK live, Coordinator9,
+activation/workspace/session, reprise froide et qualification restent ouverts.
+G09 FAIL,0/12 gates globaux clos ; branche non intégrée à la référence.
+
 ## 5 novembre — migration d'audit Kubernetes 8→9 et compatibilité réelle des CLI
 
 Base `341dd5f`, worktree dédié inchangé. La migration conserve les objets du

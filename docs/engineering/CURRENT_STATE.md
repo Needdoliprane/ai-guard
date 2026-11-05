@@ -1,6 +1,34 @@
 # État constaté — suivi du développement
 
+## 5 novembre — décisions Kubernetes V2 et six routes centrales authentifiées
+
+Le Store émet maintenant Admission depuis la politique serveur courante et
+Reconcile depuis la vraie réservation originale. Le scope précède tout lookup
+idempotent ; Reconcile n'alloue rien et ne rend jamais Fresh. Sous9, une V2
+appropriée peut relire les reçus historiques V1, tandis que les capacités mémoire
+V1 restent refusées. Six routes du gateway authentifient le broker et déduisent
+le tenant côté serveur ; corps/réponses fermés et bornés, secrets connus criblés
+avant persistance/diffusion. [Contrat API](../api.md#kubernetes-held-create-http-v1).
+
+**PASS logiciel ciblé :11fonctions uniques**,5Store V2,3API avec vrai routeur
+Axum/SQLite,2canaris legacy et1canari JSON runtime. Aucun ignoré. Les huit
+nouveaux tests ont d'abord échoué avant implémentation. Un ancien oracle
+incompatible avec le wrapper opaque a échoué aussi sur la base `734c78d` ;
+seul ce test est corrigé, sans affaiblir le produit. [Gels et preuves](VALIDATION.md).
+Compilation toutes cibles PASS RC0 ;75warnings bibliothèque et1lib-test
+subsistent, donc la garde sans avertissement n'est pas satisfaite. Clippy est
+BLOCKED (composant absent de l'image) et release NOT_RUN sur cette tranche.
+
+Guides Kubernetes FR/EN et API synchronisés ; revue indépendante du code,
+du correctif d'oracle et des guides favorable. Client broker HTTP, preuve ACK
+live à réception, Coordinator9, activation, workspace et sessions Kubernetes
+restent à implémenter/qualifier. Aucun appel cluster, E2E moteur ou fournisseur
+dans cette tranche. Branche de travail non intégrée à la référence ; G09 FAIL,
+0/12 gates globaux clos. Le prochain raccord porte sur le vrai client broker.
+
 ## 5 novembre — format d'audit Kubernetes 9 et sauvegardes compatibles
+
+État historique au gel `734c78d`, avant le producteur V2 décrit ci-dessus.
 
 La migration explicite8→9 conserve une sauvegarde8 vérifiée et les projections,
 quotas, CAS et namespace. Un marqueur ordinaire fermé engage le vrai genesis8

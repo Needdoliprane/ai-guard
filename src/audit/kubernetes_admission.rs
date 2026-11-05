@@ -11,9 +11,21 @@ pub(crate) use mutations::{ConfirmedKubernetesCreateResult, FreshKubernetesCreat
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    // V1 mutation capabilities stay on schema8 until the V2 producer is wired.
-    // Historical replay independently accepts schema9's format marker.
+    // The legacy fixture issuer remains schema8-only. Mutation entry points
+    // separately match capability versions against their exact schema.
     if version == 8 {
+        Ok(())
+    } else {
+        Err(KubernetesCreateFailureV1::MigrationRequired.into())
+    }
+}
+
+fn require_capability_schema(
+    db: &Connection,
+    evidence: &authorization::AuthorizationEvidence,
+) -> anyhow::Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if matches!((version, *evidence.version()), (8, 1) | (9, 2)) {
         Ok(())
     } else {
         Err(KubernetesCreateFailureV1::MigrationRequired.into())
@@ -106,7 +118,8 @@ pub(super) fn workload_audit_identity(
     record.change.validate()?;
     let is_result = matches!(record.change, model::Change::Result { .. });
     model::conflict(
-        record.version == 1
+        matches!(record.version, 1 | 2)
+            && record.version == *record.authorization.version()
             && record.input_hash == record.change.input_hash()?
             && event.id == record.change.operation_id()
             && event.kind == record.change.kind()

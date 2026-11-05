@@ -15,11 +15,13 @@ la [stratégie de test](TEST_STRATEGY.md) restent applicables.
 Direction technique locale du5novembre, dans les frontières existantes.
 La politique et son chargement, le prédicat d'image partagé, la migration9
 et sa validation historique sont vérifiés par les lots locaux correspondants.
-Sous9, les mutations et lookups/replays opérationnels V1 restent refusés par
-`MigrationRequired` jusqu'au producteur EvidenceV2. Les décisions, retours de
-reçus historiques et échanges HTTP décrits ci-dessous sont le raccord cible ;
-ce producteur central et ce raccord ne sont pas livrés par ces résultats.
-Aucun appel cluster n'en découle.
+La tranche centrale suivante produit les décisions EvidenceV2 Admission et
+Reconcile, puis les utilise dans six routes HTTP authentifiées du gateway ;
+le [contrat API](../api.md#kubernetes-held-create-http-v1) décrit leurs DTO,
+bornes et erreurs. Les capacités mémoire V1 restent refusées sous9 avant
+lookup ; une V2 appropriée peut restituer un ancien reçu/snapshot V1 exact,
+sans append ni Fresh. Le client HTTP broker, sa preuve d'ACK live et le
+Coordinator9 restent à raccorder. Aucun appel cluster n'en découle.
 
 La configuration de chaque tenant porte une option `held_create_policy`.
 Absence/null interdit l'admission ; une politique présente vide est une erreur
@@ -82,12 +84,32 @@ inchangés ; un replay V1 exact rend son reçu historique sans append ni Fresh.
 Un nouveau résultat/une annulation sur une réservation V1 s'appuie sur une
 décision V2 de réconciliation et ne fabrique pas de politique V1 absente.
 
-Le raccord utilise ensuite le broker authentifié et des opérations HTTP v1
-fermées, avec une capacité d'ACK live distincte de la preuve mémoire Store.
+Le raccord utilise le broker authentifié et des opérations HTTP v1 fermées,
+avec une capacité d'ACK live à implémenter, distincte de la preuve mémoire Store.
 Le gateway conserve politique et SQLite ; le broker conserve journal,
 HostClock et credentials Kubernetes. Un reçu JSON, le schéma9 ou un grant
 seul ne suffit jamais à ouvrir CREATE. Les routes, négociations et producteurs
-doivent être vérifiés ensemble avant de présenter ce raccord comme livré.
+doivent être vérifiés ensemble avant de présenter ce raccord complet comme livré.
+
+Les six handlers centraux obtiennent identité, politique et quota depuis le
+tenant authentifié après admission dans le worker Store borné. Reserve/Claim
+exigent Admission ; lookup/résultat/annulation émettent chacun Reconcile depuis
+la réservation originale réellement relue. La vérification de scope précède
+tout lookup idempotent, y compris un Claim déjà committé. Aucune Reconcile ne
+crée d'allocation ni de Claim mutateur. La vérification historique exige
+`marker9.seq <= origin_seq < record.seq` et les hashes correspondants.
+L'erreur d'un historique invalide reste opaque ; elle ne devient pas un refus
+typé de la mutation courante.
+
+L'upload est limité à64Kio/5s sans slot Store conservé ; le décodage fermé
+refuse doublons à toute profondeur, profondeur supérieure à64 et suffixes.
+Les réponses exactes sont limitées à128Kio, sans troncature. Le dictionnaire
+de secrets inclut le bearer courant, pour entrées, données Store dérivées et
+sorties, clés JSON comprises. Une réponse nécessitant un masquage est refusée
+sans réécrire ses faits ; son commit peut néanmoins déjà être durable.
+Claim201 exige le premier commit Store exact et une fenêtre encore valide
+avant restitution ; GET/replay restent ObserveOnly. L'arrivée HTTP et sa
+fenêtre doivent encore être vérifiées par le futur client broker.
 
 **Point de développement du 5 novembre, base `7155ab3`, worktree dédié non
 encore intégré.** Le code local ajoute les DTO fermés, le rendu/projection,

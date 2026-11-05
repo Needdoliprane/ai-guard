@@ -55,7 +55,7 @@ type ClaimCommit = (
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum HeldChangeAccess {
+pub(super) enum HeldChangeAccess {
     Mutate,
     ObserveClaim,
 }
@@ -80,6 +80,33 @@ fn publication_is_eligible(
 }
 
 impl Store {
+    /// Trusted API glue only: resolve an owned retained intent before issuing
+    /// a current Admission capability. This grants no claim or runtime effect.
+    pub(crate) fn kubernetes_create_intent_for_admission(
+        &self,
+        identity: &BrokerIdentityV1,
+        create_id: &str,
+    ) -> anyhow::Result<KubernetesCreateIntentV1> {
+        crate::control::uuid(create_id)?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| KubernetesCreateFailureV1::Unavailable)?;
+        let tx = self.begin_checked(&mut db)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version != 9 {
+            return Err(KubernetesCreateFailureV1::MigrationRequired.into());
+        }
+        let clock = workload::capture_control_time(&tx)?;
+        workload::revalidate_broker_identity(&tx, identity, clock.at())?;
+        permission(identity.tenant_id() == self.tenant_id)?;
+        let snapshot =
+            replay::load_snapshot(&tx, create_id)?.ok_or(KubernetesCreateFailureV1::NotFound)?;
+        broker_scope(&tx, identity, &snapshot.intent)?;
+        self.commit_authorized(tx, &clock)?;
+        Ok(snapshot.intent)
+    }
+
     pub(crate) fn reserve_kubernetes_create(
         &self,
         identity: &BrokerIdentityV1,
@@ -170,6 +197,78 @@ impl Store {
 
     /// Authenticated historical lookup only. A missing operation is never
     /// created, supervision is never activated and no fresh proof can result.
+    pub(crate) fn observe_kubernetes_create_claim_operation(
+        &self,
+        identity: &BrokerIdentityV1,
+        authorization: &KubernetesCreateAuthorization,
+        create_id: &str,
+        operation_id: &str,
+    ) -> anyhow::Result<KubernetesCreateClaimResponseV1> {
+        crate::control::uuid(create_id)?;
+        crate::control::uuid(operation_id)?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| KubernetesCreateFailureV1::Unavailable)?;
+        let tx = self.begin_checked(&mut db)?;
+        require_capability_schema(&tx, &authorization.evidence)?;
+        let clock = workload::capture_control_time(&tx)?;
+        workload::revalidate_broker_identity(&tx, identity, clock.at())?;
+        permission(
+            identity.tenant_id() == self.tenant_id
+                && authorization.evidence.tenant_id() == &self.tenant_id,
+        )?;
+        let snapshot =
+            replay::load_snapshot(&tx, create_id)?.ok_or(KubernetesCreateFailureV1::NotFound)?;
+        authorization
+            .evidence
+            .validate(identity, &snapshot.intent, clock.at())?;
+        // Scope is checked before the operation-id lookup, independently of
+        // whether that historical claim happens to exist.
+        authorization
+            .evidence
+            .validate_observe_access(HeldChangeAccess::ObserveClaim)?;
+        broker_scope(&tx, identity, &snapshot.intent)?;
+        replay::validate_current_basis(
+            &tx,
+            &authorization.evidence,
+            &snapshot.intent,
+            &self.tenant_id,
+        )?;
+        let stored = tx
+            .query_row(
+                "SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE id=?1",
+                [operation_id],
+                row_event,
+            )
+            .optional()?
+            .ok_or(KubernetesCreateFailureV1::NotFound)?;
+        let record = replay::record(&stored)?;
+        let Change::Claim { claim } = &record.change else {
+            return Err(KubernetesCreateFailureV1::Conflict.into());
+        };
+        conflict(
+            claim.operation_id == operation_id
+                && claim.create_id == create_id
+                && record.intent == snapshot.intent
+                && claim.intent_hash == snapshot.intent_hash,
+        )?;
+        authorization
+            .evidence
+            .validate_access(&record.change, HeldChangeAccess::ObserveClaim)?;
+        replay::validate_historical_identity(&tx, &stored, &record, &self.tenant_id)?;
+        let response = KubernetesCreateClaimResponseV1 {
+            version: 1,
+            receipt: model::receipt(&stored, &record),
+            snapshot: record.snapshot,
+            disposition: KubernetesCreateDispositionV1::ObserveOnly,
+        };
+        self.commit_authorized(tx, &clock)?;
+        Ok(response)
+    }
+
+    /// Authenticated historical lookup only. A missing operation is never
+    /// created, supervision is never activated and no fresh proof can result.
     pub(crate) fn observe_kubernetes_create_claim(
         &self,
         identity: &BrokerIdentityV1,
@@ -214,7 +313,7 @@ impl Store {
         )?;
         permission(
             identity.tenant_id() == self.tenant_id
-                && authorization.evidence.tenant_id == self.tenant_id,
+                && authorization.evidence.tenant_id() == &self.tenant_id,
         )?;
         let input = serde_json::to_value(&change)?;
         permission(self.redactor.value(&input) == input)?;
@@ -223,7 +322,8 @@ impl Store {
             .lock()
             .map_err(|_| KubernetesCreateFailureV1::Unavailable)?;
         let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        require_capability_schema(&tx, &authorization.evidence)?;
+        authorization.evidence.validate_access(&change, access)?;
         let clock = workload::capture_control_time(&tx)?;
         let now = clock.at();
         workload::revalidate_broker_identity(&tx, identity, now)?;
@@ -241,6 +341,7 @@ impl Store {
         };
         authorization.evidence.validate(identity, &intent, now)?;
         let broker = broker_scope(&tx, identity, &intent)?;
+        replay::validate_current_basis(&tx, &authorization.evidence, &intent, &self.tenant_id)?;
 
         // Global event identity, not a separate permissive operations ledger.
         let old = tx
@@ -273,13 +374,13 @@ impl Store {
             conflict(!duplicate)?;
         }
         if change.requires_active() {
-            let usage = super::super::control::quota_usage(&tx, &authorization.evidence.quota)?;
+            let usage = super::super::control::quota_usage(&tx, authorization.evidence.quota())?;
             replay::ensure_quota(&usage, &intent, matches!(change, Change::Reserve { .. }))?;
         }
         let window = if matches!(change, Change::Claim { .. }) {
             Some(model::emission_window(
                 now,
-                &authorization.evidence.expires_at,
+                authorization.evidence.expires_at(),
                 &broker.not_after,
             )?)
         } else {
@@ -287,7 +388,7 @@ impl Store {
         };
         let snapshot = model::transition(&intent, previous.as_ref(), &change, window)?;
         let record = Record {
-            version: 1,
+            version: *authorization.evidence.version(),
             input_hash: change.input_hash()?,
             received_at: format_time(now),
             identity: IdentityEvidence::capture(identity),

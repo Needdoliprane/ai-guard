@@ -1,6 +1,45 @@
 # Décisions d'industrialisation
 
+## 5 novembre — décisions V2 et API centrale du CREATE retenu
+
+La même base SQLite par tenant et le même gateway produisent deux scopes
+distincts. Admission engage la politique serveur canonique courante et son
+empreinte ; Reconcile engage la vraie réservation originale et son hash de
+décision, avec un nouveau préfixe et l'identité courante. Retirer une politique,
+baisser un quota ou réouvrir le Store inactif ne doit pas empêcher de tracer
+un effet déjà possible ; cela ne redonne aucun droit d'allocation ou d'émission.
+Une identité ou un grant révoqué, un broker ou une incarnation divergente restent
+refusés. Le changement ne fournit aucune reprise froide entre incarnations.
+
+Le scope est contrôlé avant tout lookup idempotent. Une décision Reconcile ne
+peut donc pas récupérer un Claim mutateur, même déjà committé. Son lookup dédié
+restitue le reçu et snapshot historiques exacts, toujours ObserveOnly. Sous9,
+seule une V2 appropriée accède aux opérations ; les capacités V1 sont refusées
+avant lookup. Les octets, champs, ordre de tuple et domaine V1 sont conservés.
+V2 utilise son domaine distinct et engage son scope après les champs communs.
+Le marqueur9 borne l'origine de décision ; un nouvel enregistrement V1 après
+ce marqueur demeure interdit.
+
+Les six routes HTTP v1 sont exclusivement broker. Le tenant vient de sa preuve
+authentifiée, jamais d'un champ libre ; politique et quota viennent du serveur.
+L'upload borné précède le segment Store, puis identité et grant sont revérifiés.
+Les erreurs historiques sont opaques ; les conflits courants gardent leurs
+codes précis. Les données exactes contenant un secret connu sont refusées,
+sans remplacement de hash ou troncature de reçu. Un commit suivi d'un refus
+de réponse reste potentiellement durable et exige la reprise avec les mêmes
+identités et CAS.
+
+La réponse HTTP ne transforme pas un DTO en capacité mémoire Store. Claim201
+atteste seulement le premier commit exact et une fenêtre valide à la
+préparation de réponse ; sa réception encore live est une obligation du futur
+client broker. Client, Coordinator9, activation, workspace et session Kubernetes
+restent ouverts. Aucun nouveau service, stockage, credential cluster au gateway
+ou appel cluster n'est introduit. Voir [contrat](KUBERNETES_ADMISSION.md),
+[API](../api.md#kubernetes-held-create-http-v1) et [preuves](VALIDATION.md).
+
 ## 5 novembre — frontière de format d'audit Kubernetes 8→9
+
+État historique au gel `734c78d`, avant la tranche V2 décrite ci-dessus.
 
 Le format9 conserve les tables/index du format8, son namespace, ses projections
 et ses opérations V1 historiques. Une sauvegarde8 neuve, vérifiée et synchronisée

@@ -1,9 +1,8 @@
 //! Bounded canonical output and duplicate-rejecting input for the new profile.
 //! Historical inspection and dry-run decoding remain unchanged.
 use super::super::{KubernetesError, KubernetesResult};
-use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
-use serde_json::{Map, Number, Value};
-use std::{collections::BTreeMap, fmt, io::Write};
+use serde_json::Value;
+use std::{collections::BTreeMap, io::Write};
 
 pub(super) const MAX_DEPTH: usize = 64;
 
@@ -11,71 +10,7 @@ pub(super) fn decode(bytes: &[u8]) -> KubernetesResult<Value> {
     if bytes.len() > 1024 * 1024 {
         return Err(KubernetesError::ResponseTooLarge);
     }
-    let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let value = Seed(0)
-        .deserialize(&mut decoder)
-        .map_err(|_| KubernetesError::InvalidResponse)?;
-    decoder
-        .end()
-        .map_err(|_| KubernetesError::InvalidResponse)?;
-    Ok(value)
-}
-
-struct Seed(usize);
-impl<'de> DeserializeSeed<'de> for Seed {
-    type Value = Value;
-    fn deserialize<D: de::Deserializer<'de>>(self, decoder: D) -> Result<Value, D::Error> {
-        if self.0 > MAX_DEPTH {
-            return Err(de::Error::custom("held JSON depth exceeds its bound"));
-        }
-        decoder.deserialize_any(self)
-    }
-}
-impl<'de> Visitor<'de> for Seed {
-    type Value = Value;
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("bounded held JSON without duplicate object fields")
-    }
-    fn visit_bool<E: de::Error>(self, value: bool) -> Result<Value, E> {
-        Ok(Value::Bool(value))
-    }
-    fn visit_i64<E: de::Error>(self, value: i64) -> Result<Value, E> {
-        Ok(Value::Number(value.into()))
-    }
-    fn visit_u64<E: de::Error>(self, value: u64) -> Result<Value, E> {
-        Ok(Value::Number(value.into()))
-    }
-    fn visit_f64<E: de::Error>(self, value: f64) -> Result<Value, E> {
-        Number::from_f64(value)
-            .map(Value::Number)
-            .ok_or_else(|| de::Error::custom("invalid held JSON number"))
-    }
-    fn visit_str<E: de::Error>(self, value: &str) -> Result<Value, E> {
-        Ok(Value::String(value.into()))
-    }
-    fn visit_string<E: de::Error>(self, value: String) -> Result<Value, E> {
-        Ok(Value::String(value))
-    }
-    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Value, A::Error> {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(Seed(self.0 + 1))? {
-            values.push(value);
-        }
-        Ok(Value::Array(values))
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut fields: A) -> Result<Value, A::Error> {
-        let mut values = Map::new();
-        while let Some(key) = fields.next_key::<String>()? {
-            if values.contains_key(&key) {
-                return Err(de::Error::custom("duplicate held JSON field"));
-            }
-            values.insert(key, fields.next_value_seed(Seed(self.0 + 1))?);
-        }
-        Ok(Value::Object(values))
-    }
+    crate::json::decode_unique(bytes, MAX_DEPTH).map_err(|_| KubernetesError::InvalidResponse)
 }
 
 struct BoundedBytes {

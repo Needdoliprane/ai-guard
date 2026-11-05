@@ -84,7 +84,8 @@ pub(super) fn record(stored: &StoredEvent) -> anyhow::Result<Record> {
     record.intent.validate()?;
     let is_result = matches!(record.change, Change::Result { .. });
     conflict(
-        record.version == 1
+        matches!(record.version, 1 | 2)
+            && record.version == *record.authorization.version()
             && stored.event.id == record.change.operation_id()
             && stored.event.kind == record.change.kind()
             && record.input_hash == record.change.input_hash()?
@@ -96,8 +97,88 @@ pub(super) fn record(stored: &StoredEvent) -> anyhow::Result<Record> {
             && format_time(parse_time(&record.received_at)?) == record.received_at
             && parse_time(&record.received_at)? <= parse_time(&stored.received_at)?,
     )?;
+    record
+        .authorization
+        .validate_access(&record.change, mutations::HeldChangeAccess::Mutate)?;
     Ok(record)
 }
+
+fn policy_marker(db: &Connection) -> anyhow::Result<Option<i64>> {
+    Ok(db
+        .query_row(
+            "SELECT seq FROM events WHERE kind=?1",
+            [migration::POLICY_GENESIS_KIND],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+pub(super) fn validate_v2_origin(
+    db: &Connection,
+    evidence: &authorization::AuthorizationEvidence,
+    record_seq: Option<i64>,
+) -> anyhow::Result<()> {
+    let marker = policy_marker(db)?.ok_or(KubernetesCreateFailureV1::PermissionDenied)?;
+    let origin = *evidence.origin_seq();
+    permission(origin >= marker && record_seq.is_none_or(|before| origin < before))?;
+    let actual: String = db.query_row("SELECT hash FROM events WHERE seq=?1", [origin], |row| {
+        row.get(0)
+    })?;
+    permission(evidence.origin_hash() == &actual)
+}
+
+pub(super) fn reservation(
+    db: &Connection,
+    intent: &KubernetesCreateIntentV1,
+    tenant: &str,
+) -> anyhow::Result<(StoredEvent, Record)> {
+    let stored = db
+        .query_row(
+            "SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE id=?1",
+            [&intent.create_id],
+            row_event,
+        )
+        .optional()?
+        .ok_or(KubernetesCreateFailureV1::NotFound)?;
+    let record = record(&stored)?;
+    permission(
+        matches!(&record.change, Change::Reserve { intent: original } if original == intent)
+            && record.intent == *intent
+            && record.previous_revision == 0,
+    )?;
+    // A Reserve's own evidence is Admission (or historical V1), so this check
+    // cannot recursively follow a Reconcile reference or another result.
+    validate_historical_identity(db, &stored, &record, tenant)?;
+    Ok((stored, record))
+}
+
+pub(super) fn validate_current_basis(
+    db: &Connection,
+    evidence: &authorization::AuthorizationEvidence,
+    intent: &KubernetesCreateIntentV1,
+    tenant: &str,
+) -> anyhow::Result<()> {
+    let Some(basis) = evidence.basis() else {
+        return Ok(());
+    };
+    validate_v2_origin(db, evidence, None)?;
+    if let authorization::AuthorizationBasisV2::Reconcile {
+        reservation_seq,
+        reservation_hash,
+        admission_decision_hash,
+    } = basis
+    {
+        let (stored, original) = reservation(db, intent, tenant)?;
+        permission(
+            stored.seq == *reservation_seq
+                && stored.seq <= *evidence.origin_seq()
+                && stored.hash == *reservation_hash
+                && original.authorization.decision_hash() == admission_decision_hash,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn validate_historical_identity(
     db: &Connection,
     stored: &StoredEvent,
@@ -106,12 +187,18 @@ pub(super) fn validate_historical_identity(
 ) -> anyhow::Result<()> {
     let identity = record.identity.identity()?;
     let at = parse_time(&record.received_at)?;
-    permission(identity.tenant_id() == tenant && record.authorization.tenant_id == tenant)?;
+    permission(identity.tenant_id() == tenant && record.authorization.tenant_id() == tenant)?;
+    match (record.version, policy_marker(db)?) {
+        (1, Some(marker)) => permission(stored.seq < marker)?,
+        (1, None) => {}
+        (2, Some(marker)) => permission(stored.seq > marker)?,
+        _ => return Err(KubernetesCreateFailureV1::PermissionDenied.into()),
+    }
     workload::validate_broker_identity_at(db, &identity, at, stored.seq)?;
     record
         .authorization
         .validate(&identity, &record.intent, at)?;
-    let origin = record.authorization.origin_seq;
+    let origin = *record.authorization.origin_seq();
     let before_origin = origin
         .checked_add(1)
         .ok_or(KubernetesCreateFailureV1::InvalidRequest)?;
@@ -125,8 +212,12 @@ pub(super) fn validate_historical_identity(
         [GENESIS_KIND],
         |row| row.get(0),
     )?;
-    permission(origin_hash == record.authorization.origin_hash && origin >= genesis)?;
-    let issued_at = parse_time(&record.authorization.issued_at)?;
+    permission(&origin_hash == record.authorization.origin_hash() && origin >= genesis)?;
+    if record.version == 2 {
+        validate_v2_origin(db, &record.authorization, Some(stored.seq))?;
+        validate_current_basis(db, &record.authorization, &record.intent, tenant)?;
+    }
+    let issued_at = parse_time(record.authorization.issued_at())?;
     workload::validate_broker_identity_at(db, &identity, issued_at, before_origin)?;
     // The capability was issued against one exact durable prefix. Reusing it
     // after other events must not compare issuance with their later time floor.
@@ -136,8 +227,8 @@ pub(super) fn validate_historical_identity(
         let grant = broker_registry::broker_at(db, identity.broker_id(), before)?
             .ok_or(KubernetesCreateFailureV1::PermissionDenied)?;
         permission(
-            parse_time(&record.authorization.expires_at)? <= parse_time(&binding.expires_at)?
-                && parse_time(&record.authorization.expires_at)? <= parse_time(&grant.not_after)?
+            parse_time(record.authorization.expires_at())? <= parse_time(&binding.expires_at)?
+                && parse_time(record.authorization.expires_at())? <= parse_time(&grant.not_after)?
                 && parse_time(&binding.updated_at)? <= issued_at
                 && parse_time(&grant.granted_at)? <= issued_at,
         )?;
@@ -286,10 +377,9 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             policy_seen = true;
             continue;
         }
-        // V1 remains readable only before the format boundary. V2 writers and
-        // readers are a separate change; no new V1 append is valid on schema9.
-        conflict(create_genesis.is_some() && !policy_seen)?;
+        conflict(create_genesis.is_some())?;
         let record = record(&stored)?;
+        conflict(record.version == if policy_seen { 2 } else { 1 })?;
         validate_historical_identity(db, &stored, &record, &tenant)?;
         let previous = creates
             .get(record.change.create_id())
@@ -309,7 +399,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             }
         }
         if record.change.requires_active() {
-            let usage = historical_usage(db, stored.seq, &record.authorization.quota, &creates)?;
+            let usage = historical_usage(db, stored.seq, record.authorization.quota(), &creates)?;
             ensure_quota(
                 &usage,
                 &record.intent,
@@ -321,7 +411,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                 .ok_or(KubernetesCreateFailureV1::PermissionDenied)?;
             Some(model::emission_window(
                 parse_time(&record.received_at)?,
-                &record.authorization.expires_at,
+                record.authorization.expires_at(),
                 &broker.not_after,
             )?)
         } else {

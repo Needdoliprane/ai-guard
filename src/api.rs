@@ -46,6 +46,9 @@ mod held_policy_tests;
 mod human;
 mod human_state;
 mod human_streams;
+mod kubernetes;
+#[cfg(test)]
+mod kubernetes_tests;
 mod oidc;
 #[cfg(test)]
 mod read_execution_tests;
@@ -681,6 +684,7 @@ pub fn gateway_router(state: GatewayState) -> Router {
                 .merge(workload::routes())
                 .merge(relay::routes())
                 .merge(brokers::routes())
+                .merge(kubernetes::routes())
                 .merge(human::routes()),
         )
         .nest("/api", routes)

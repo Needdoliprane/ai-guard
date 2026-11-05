@@ -326,11 +326,11 @@ pas d'usage worker.
 ## Configurer la politique centrale du tenant
 
 Le gateway accepte une option `held_create_policy` dans chaque entrée tenant
-de son registre existant `--tenants-file`. Ce sont des données de configuration
-centrale : elles n'activent aucun service CREATE, n'autorisent aucune demande
-et n'activent aucun Pod. Le broker ne peut toujours pas lancer de workers
-Kubernetes ; diagnostic et dry-run ci-dessus restent distincts de cette
-politique.
+de son registre existant `--tenants-file`. L'API HTTP centrale des brokers
+utilise cette configuration pour les décisions Reserve/Claim ; elle seule
+n'est pas une permission runtime. Le broker ne peut toujours pas lancer de
+workers Kubernetes ; diagnostic et dry-run ci-dessus restent distincts de
+cette politique.
 
 Insérer cet **objet JSON partiel dans l'entrée tenant existante visée**, en
 conservant sa base, ses références de credentials et ses autres réglages.
@@ -410,13 +410,39 @@ Ne jamais écraser une sauvegarde ni forcer un downgrade par modification de
 `PRAGMA user_version` ou réécriture de l'audit.
 
 La validation de l'audit V1 historique et la reconstruction des projections
-restent disponibles. Au schéma 9, les mutations Kubernetes **ainsi que le lookup
-opérationnel de claim/replay exact d'opération restent fermés par la garde
-`MigrationRequired`**, jusqu'à l'implémentation du producteur de décision V2.
-Cela inclut la confirmation d'un résultat retenu ; la migration ne livre ni
-réconciliation opérationnelle ni permission CREATE. Conserver les journaux en
-attente et les quotas des inconnues. Ni le schéma 9 ni la politique configurée
-n'activent le lancement de workers Kubernetes.
+restent disponibles. Au schéma 9, le Store central produit maintenant les
+décisions V2 Admission et Reconcile. Les capacités mémoire V1 restent refusées
+sur 9 ; une capacité V2 courante appropriée peut récupérer le reçu historique
+V1 exact et son snapshot associé, sans append ni permission Fresh. Conserver
+les journaux en attente et les quotas des inconnues. Ni le schéma 9 ni la
+politique configurée n'activent le lancement de workers Kubernetes.
+
+## Utiliser l'API centrale de contrôle des brokers
+
+Le gateway expose six routes HTTP réservées au broker sous `/api/v1` :
+métadonnées de protocole, réservation, claim, lookup historique du claim,
+résultat et annulation ; voir le [contrat des routes et DTO](../../api.md#kubernetes-held-create-http-v1).
+Elles authentifient le broker courant et déduisent le tenant de sa preuve
+Bearer. Aucun header, query ou champ JSON ne choisit tenant, politique ou quota.
+`admission_policy_configured` décrit la configuration, pas une admission
+disponible ni une qualification cluster.
+
+Reserve/Claim utilisent politique et quota courants du tenant immuable, avec
+identité, grant et supervision active. Chaque lookup/résultat/annulation obtient
+une décision Reconcile distincte depuis la vraie réservation originale et les
+grant/quota courants ; retrait de politique, baisse de quota ou supervision
+inactive n'interdisent pas seuls cette réconciliation. Une identité révoquée
+ou divergente reste refusée. La provenance de politique est un snapshot de
+configuration déclaré, pas une approbation humaine nominative ni une preuve
+de confinement.
+
+Claim renvoie `201` seulement avec la preuve Store du premier commit exact et
+une fenêtre d'émission encore valide à la préparation de la réponse. Replays
+et GET historiques renvoient `200`/`observe_only`, jamais Fresh. Un JSON seul
+n'est pas une permission runtime. Le client HTTP broker/canal ACK live et le
+Coordinator au schéma 9 restent à raccorder ; activation, transfert workspace
+et sessions d'agents Kubernetes restent indisponibles. Ces routes de contrôle
+et le préflight ne créent ni n'admettent de Pod dans un cluster.
 
 ## Configurer l'intégration Rust
 

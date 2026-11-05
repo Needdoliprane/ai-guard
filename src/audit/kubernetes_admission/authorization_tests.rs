@@ -16,8 +16,11 @@ fn rewrite_last_decision_expiry(path: &Path, expires_at: &str) {
     assert_eq!(event["kind"], "control.kubernetes.create.emission_possible");
     let mut decision: AuthorizationEvidence =
         serde_json::from_value(event["data"]["control_decision"].clone()).unwrap();
-    decision.expires_at = expires_at.into();
-    decision.decision_hash = decision.commitment().unwrap();
+    let AuthorizationEvidence::V1(legacy) = &mut decision else {
+        panic!("the legacy fixture must retain V1 evidence");
+    };
+    legacy.expires_at = expires_at.into();
+    legacy.decision_hash = legacy.commitment().unwrap();
     event["data"]["control_decision"] = serde_json::to_value(decision).unwrap();
     let payload = serde_json::to_string(&event).unwrap();
     let hash = crate::audit::digest(seq, &received_at, &previous, &payload);
@@ -62,10 +65,15 @@ fn rewritten_expiry_is_valid(binding: &str, grant: &str, rewritten_expiry: &str)
     let path = f._directory.path().join("tenant.sqlite");
     drop(f.store);
     rewrite_last_decision_expiry(&path, rewritten_expiry);
-    let reopened =
-        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10_000).unwrap();
-    let valid = match reopened.integrity() {
-        Ok(report) => report.valid,
+    // Keep the specific expiry oracle at the internal verification boundary.
+    // Store integrity deliberately returns an opaque, cause-free failure.
+    let raw_db = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let raw_valid = match super::super::validate_unwrapped_for_test(&raw_db) {
+        Ok(()) => true,
         Err(error) => {
             assert_eq!(
                 error.downcast_ref::<KubernetesCreateFailureV1>(),
@@ -75,6 +83,37 @@ fn rewritten_expiry_is_valid(binding: &str, grant: &str, rewritten_expiry: &str)
             false
         }
     };
+    drop(raw_db);
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10_000).unwrap();
+    let valid = match reopened.integrity() {
+        Ok(report) => {
+            assert!(
+                raw_valid,
+                "invalid raw history must return an opaque public error"
+            );
+            report.valid
+        }
+        Err(error) => {
+            assert_eq!(
+                error.downcast_ref::<KubernetesCreateFailureV1>(),
+                Some(&KubernetesCreateFailureV1::Unavailable),
+                "public integrity does not expose a historical decision as a current refusal"
+            );
+            assert!(
+                !error
+                    .chain()
+                    .any(|cause| cause.downcast_ref::<KubernetesCreateFailureV1>()
+                        == Some(&KubernetesCreateFailureV1::PermissionDenied)),
+                "the public error must not retain the historical refusal as a cause"
+            );
+            false
+        }
+    };
+    assert_eq!(
+        valid, raw_valid,
+        "the opaque public result preserves the internal validity verdict"
+    );
     assert_eq!(reopened.healthy(), valid);
     if !valid {
         assert!(
@@ -121,7 +160,7 @@ fn an_exact_capability_can_be_reused_after_a_later_control_event() {
     // Arrange a later millisecond, not a performance/latency assertion. A host
     // pause advances UTC too; bounded waiting only detects a nonadvancing clock.
     let wait_started = std::time::Instant::now();
-    while format_time(Utc::now()) <= authorization.evidence.issued_at {
+    while format_time(Utc::now()) <= *authorization.evidence.issued_at() {
         assert!(
             wait_started.elapsed() < std::time::Duration::from_secs(30),
             "fixture UTC clock did not advance"
@@ -138,7 +177,7 @@ fn an_exact_capability_can_be_reused_after_a_later_control_event() {
             ..Default::default()
         })
         .unwrap();
-    assert!(later[0].received_at > authorization.evidence.issued_at);
+    assert!(later[0].received_at > *authorization.evidence.issued_at());
     let claim = KubernetesCreateClaimV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
