@@ -276,6 +276,12 @@ An explicit export after cancellation requires its own subsequent audited grant 
 
 The CLI prints JSON replies and exits with an error for `error` and `rejected`. Transport errors distinguish a request not sent from an unknown outcome or unavailable reply. Preserve operation/command identities before retrying; a nonzero client exit is not proof that no durable mutation occurred.
 
+The runner's control HTTP client disables implicit retries, redirects and proxy
+discovery. Its connection timeout is 3 seconds and each request is limited to
+15 seconds. A lost response can follow a committed mutation: inspect durable
+status and replay only the same admissible operation identity. These limits do
+not provide an automatic restart, extend a worker deadline or reactivate control.
+
 | Code or symptom | Meaning and next action |
 |---|---|
 | `unauthorized` | The presented credential was not authenticated. Check the private file reference and selected gateway/profile without exposing its contents. |

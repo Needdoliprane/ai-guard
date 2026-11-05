@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Port HTTP d'audit retenu du5novembre :3nouveaux parents et1canari existant
+PASS après RED, compilation toutes cibles RC0, revue indépendante traitée.
+Les133avertissements bibliothèque/3lib-test et Clippy absent restent ouverts.
+Ce port descriptif et son reçu exact ne sont pas encore composés au writer ;
+la boucle froide reproduit toujours l'absence de publication de2événementsV4.
+[Preuves et limites](VALIDATION.md#5-novembre--port-http-exact-de-laudit-retenu).
+Aucun gate global clos ; G09 reste FAIL, aucun runtime ou cluster qualifié.
+
 Raccord broker HTTP Kubernetes du5novembre :17fonctions ciblées uniques PASS
 sur leurs gels, ACK live privé, journal borné et reprise exacte après perte
 de lecture de réponse centrale. La vue workers distingue aussi les autorités

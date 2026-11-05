@@ -276,6 +276,13 @@ Un export explicite après annulation exige son propre grant audité ultérieur 
 
 La CLI affiche les réponses JSON et sort en erreur pour `error` et `rejected`. Les erreurs de transport distinguent une requête non envoyée d'un résultat inconnu ou d'une réponse indisponible. Préserver les identités opération/commande avant retry ; un exit client non nul ne prouve pas l'absence de mutation durable.
 
+Le client HTTP de contrôle du runner désactive les réessais implicites, les
+redirections et la découverte de proxy. Sa connexion est limitée à 3 secondes
+et chaque requête à 15 secondes. Une réponse perdue peut suivre une mutation
+engagée : examiner l'état durable et rejouer seulement la même identité
+d'opération admissible. Ces limites ne redémarrent rien automatiquement,
+ne prolongent aucune échéance worker et ne réactivent pas le contrôle.
+
 | Code ou symptôme | Sens et prochaine action |
 |---|---|
 | `unauthorized` | Le credential présenté n'est pas authentifié. Vérifier référence de fichier privé et gateway/profil choisi sans exposer le contenu. |

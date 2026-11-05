@@ -1,5 +1,26 @@
 # Stratégie de qualification
 
+## Port HTTP exact de l'audit retenu
+
+Sélection ciblée : `cargo test --locked --lib runner::cold_audit_http::tests::`.
+Les trois parents couvrent le vrai gateway et deux Stores SQLite pour A/B,
+la lecture Worker, l'ingestion exacte et son replay sans second append ; un
+peer HTTP possédé couvre les reçus incomplets, divergents, inconnus, dupliqués,
+surdimensionnés, les statuts et redirections, et le refus local sans envoi.
+L'oracle des corps compare le vecteur avant/après ; le compteur des requêtes
+inclut aussi les GET. Le test d'échéance expire synthétiquement le même objet
+entre appels et vérifie zéro nouvel envoi. Il ne mesure pas 45 secondes réelles
+et ne discrimine pas une expiration pendant une lecture ni la borne d'un flux
+sans longueur déclarée. Les gardes de code ne valent pas qualification de ces cas.
+
+Un changement du constructeur HTTP partagé justifie le canari existant
+`unavailable_or_unacknowledged_audit_never_yields_allow` de
+`tests/runtime_authorization.rs`, puis une compilation toutes cibles.
+Ne pas relancer modèles, navigateur ou matrice moteur pour ce seul port.
+Le scénario froid complet exige encore identité/terminal recoupés, réservation
+de queue et capacité durable sur le même acteur, puis ACK exact du journal.
+HTTP/StoredEvent seuls ne constituent pas cette preuve.
+
 ## Chantiers et validations en parallèle
 
 Consigne du mainteneur du5novembre : exploiter les tâches indépendantes,

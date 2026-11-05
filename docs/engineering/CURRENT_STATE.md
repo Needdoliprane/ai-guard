@@ -1,5 +1,25 @@
 # État constaté — suivi du développement
 
+## 5 novembre — reçu HTTP exact pour l'audit retenu
+
+Le port Rust interne lit un worker descriptif et publie uniquement les deux
+kinds d'audit retenu, sur les routes versionnées existantes. Il exige un vrai
+HTTP 200 et le StoredEvent complet identique à l'événement soumis : doublons,
+champs inconnus, transformation, clipping et reçus réduits à une séquence sont
+refusés. Une échéance monotone commune borne les échanges ; les corps et la
+profondeur JSON sont limités. Aucun droit de journal, tenant ou terminal ne
+découle de ces données. Le client partagé interdit les réessais implicites.
+
+Les trois parents ciblés passent après RED réel, avec HTTP/SQLite réels pour
+le périmètre A/B et le replay, et un peer adverse déclaré pour les refus.
+Le canari d'autorisation existant et la compilation toutes cibles passent aussi,
+avec133avertissements bibliothèque et3lib-test ; Clippy reste BLOCKED.
+[Gels, commandes et limites](VALIDATION.md#5-novembre--port-http-exact-de-laudit-retenu).
+Ce port n'est pas encore composé au writer ni à la boucle froide. La reprise
+froide reste ouverte : son harnais distinct reproduit l'absence de publication
+de deux événements V4 en mode restreint. Aucun moteur, modèle ou cluster n'est
+qualifié par ce lot ; fencing, G09 et les gates globaux restent ouverts.
+
 ## 5 novembre — client broker HTTP et reprise du résultat Kubernetes
 
 Le client Rust négocie le protocole et l'identité réels avant/après Claim,

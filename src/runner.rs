@@ -16,6 +16,7 @@ use std::{
 };
 use uuid::Uuid;
 pub mod broker;
+mod cold_audit_http;
 pub(crate) mod kubernetes_preflight;
 mod managed;
 
@@ -237,6 +238,7 @@ impl AuditClient {
                 .timeout(Duration::from_secs(15))
                 .connect_timeout(Duration::from_secs(3))
                 .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .no_proxy()
                 .build()?,
             redactor: Redactor::new(vec![token.into()]),

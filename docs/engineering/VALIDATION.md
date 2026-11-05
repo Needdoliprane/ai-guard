@@ -1,5 +1,68 @@
 # Validation courante
 
+## 5 novembre — port HTTP exact de l'audit retenu
+
+Base `e22e8b9`, worktree dédié `codex/cold-audit-http-20261105`.
+Core possède le port, Luna ses tests/exécutions, Root les contrats, preuves,
+guides EN/FR et l'intégration ; revue indépendante du code et des oracles.
+Aucun nouvel endpoint, format, service ou dépendance. Le reader Worker reste
+descriptif ; le reçu opaque n'accorde aucun ACK journal ou droit de lancement.
+
+Environnement Linux ARM64/Rust 1.99.1, même image épinglée que le lot précédent,
+propriétaire HTTP distinct : UID1000/caps0/NNP1/seccomp2/networknone,
+root/sources/registre RO, 2 CPU, swap0/PID256, scratch2Gio/65536inodes,
+fsize536870912/nofile1024, environnement reconstruit, Cargo offline/locked,
+deux jobs et cible privée. Le harnais froid compile et teste simultanément
+dans un autre propriétaire, sans cible ni données mutables partagées.
+
+| Gel et commande après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` | Résultat constaté |
+|---|---|
+| `http-red`, sélection `--lib runner::cold_audit_http::tests::` | FAIL compilation, emprunt de fixture ; aucun test exécuté. |
+| `http-oracles-red`, même sélection | RED réel : 0PASS/3FAIL/0ignoré/463filtrés au stubUnavailable ; branches suivantes non atteintes. |
+| `http-green`, même sélection, plafond mémoire4Gio | FAIL infrastructure : rustcSIGKILL, memory.events oom_kill1 et peak4Gio ; aucun test exécuté. |
+| Même gel après admission mémoire6Gio, délais produit inchangés | 2PASS/1FAIL/0ignoré : oracle du test compare8corpsPOST à10requêtes incluant2GET. Le refus secret et son compteur sans envoi passent. |
+| `http-final`, même sélection, sources formatées et seul oracle corrigé | PASS3/3,0ignoré,463filtrés. Le vecteur des corps est inchangé après refus local. |
+
+Sur le gel final, `runner.rs` vaut
+`054ac35beb0c45b683503955f725595727ea3f5fddfcc8b290e01bb4a78af43f`,
+le port `b014985fd8b0b491b7416aa2637c53c888194d8bd0c12fb544c53b242558eb6b`
+et les tests `d2249a88c311027bc85cb3e98a56fdc40e217dad8d03750d55d9a86ecf52bac3`.
+Journal RED SHA256 `a3760d1ccae3e3cc9a6752754871b773ba6a25adb1d42f04f1a8da9813590af4` ;
+OOM `f71328f9570be17522ac53333c06cb30f9cc95137f9dbd7764c3c7e10480a1eb` ;
+oracle FAIL `b037ac141af17daa8b6be36ef59ceccf8bce15217e3b3fe0ca6417b8083d463c` ;
+PASS final `f5a6ea0c64c110efe9dcf014df2c5289273fd42c36b15c761d78ac0463025000`.
+Le même gel passe `cargo check --offline --locked --all-targets`, RC0,
+133avertissements bibliothèque et3lib-test : la garde sans avertissement reste
+non satisfaite. SHA256 `5c9d87e52fd9675a742597968b4b6e1d720d40ba16c707d4560bc88f84a6b4c8`.
+Le canari `--test runtime_authorization unavailable_or_unacknowledged_audit_never_yields_allow -- --exact`
+passe,1PASS/0ignoré/7filtrés, SHA256
+`28df57edb477bbf49cac6141255e43fe2033b8b2087987b58d3f396ff0be77ec`.
+Total : quatre fonctions uniques PASS, dont un canari existant. Clippy demeure
+BLOCKED, composant absent de l'image ; release et matrice E2E NOT_RUN sur ce delta.
+La première tentative de gel a échoué sur le parent RO avant tout Cargo ;
+elle ne constitue ni résultat de compilation ni test.
+
+Limites : le test d'échéance expire synthétiquement un objet entre appels ;
+expiration pendant lecture et flux excessif sans longueur ne sont pas
+discriminés. Aucun droit tenant/terminal, vérification indépendante de chaîne
+ou ACK local ne découle du wrapper. Aucune qualification moteur, processus
+froid, fournisseur ou cluster. Le harnais froid séparé atteint réellement
+`Service::reconcile_loop` après fermeture/réouverture des propriétaires broker,
+mais conserve gateway/Store vivants : 1FAIL/0ignoré à l'attente des deux événements,
+SHA256 `e0c95e029199b3de04423d7f76cb87333858c5c2fd2410b98055cfe4fdf5e75d`.
+Ses échecs de compilation/setup antérieurs ne sont pas des RED comportementaux.
+Le port HTTP ne corrige pas encore ce défaut. G09 FAIL, aucun gate global clos.
+La revue indépendante source/oracles/guides ne signale aucun défaut bloquant
+dans ce périmètre. Format ciblé, diff-check, comparaison des trois sources au
+gel testé et manifestes Cargo inchangés PASS ;500liens relatifs vérifiés sans
+cible manquante,10fichiers criblés sans les3secrets connus. Les ancres sont
+relues séparément ; ce criblage n'est pas une détection générale de secrets.
+Les deux propriétaires QA sont fermés normalement puis supprimés précisément,
+sans promouvoir cible, base, cache ou clé. Le propriétaire HTTP conserve
+`OOMKilled=true` de sa compilation initiale à4Gio ; son arrêt final a PID0/exit143.
+Sources et journaux sont conservés dans le checkpoint privé
+`cold-audit-http-checkpoint-20261105` du suivi d'ingénierie.
+
 ## 5 novembre — client broker HTTP et journal Kubernetes composé
 
 Base logicielle `b98e420`, puis intégration sans conflit de la vue des autorités

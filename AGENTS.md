@@ -163,6 +163,14 @@ Préférence de test du mainteneur (30 octobre 2026) : utiliser **Luna pour les 
 
 **Parallélisme obligatoire lorsque des tâches indépendantes peuvent avancer utilement.** Rechercher ces occasions à chaque lot et les déléguer sans attendre une nouvelle demande du mainteneur : implémentation, infrastructure, documentation, tests et revue peuvent avancer en parallèle lorsque leurs dépendances le permettent. Une compilation ou un test en cours ne justifie pas de laisser un chantier indépendant à l'arrêt.
 
+Cette règle inclut les compilations et validations indépendantes : ne pas imposer
+une file globale uniquement pour ménager le poste de développement. Attribuer des
+cibles et données distinctes, borner les ressources et mesurer la pression réelle.
+Un essai peut durer plusieurs minutes sur le Mac chargé ; distinguer lenteur,
+expiration d'une observation, limite de ressources et défaut du produit. Adapter
+les budgets du harnais lorsque c'est justifié, sans augmenter silencieusement les
+échéances du produit ni affaiblir une assertion de sûreté.
+
 Attribuer des propriétaires de fichiers clairs et des worktrees distincts lorsque nécessaire. Transmettre à chaque sous-agent la présente politique, le contrat d'architecture, son périmètre et la preuve attendue. Coordonner les fichiers partagés, les mutations de runtime et les caches de compilation ; ne pas paralléliser une dépendance ni multiplier les tests pour occuper les agents. Conserver la préférence Luna et les validations ciblées ci-dessus. Intégrer puis faire relire les modifications de sécurité, d'audit, d'import/export et de lancement par un second regard.
 
 Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance externe manque, marquer la qualification concernée `BLOCKED` ou `NOT_RUN`, continuer les travaux indépendants et indiquer précisément ce qui manque. Une fonctionnalité factice, un mock permanent ou une exception qui transforme le blocage en succès ne clôture pas le lot.
