@@ -41,6 +41,8 @@ use std::{
 mod audit_capacity_tests;
 mod auth;
 mod brokers;
+#[cfg(test)]
+mod held_policy_tests;
 mod human;
 mod human_state;
 mod human_streams;
@@ -157,6 +159,8 @@ struct TenantState {
     human_streams: Arc<human_streams::Admission>,
     rate: Arc<Mutex<(Instant, u32)>>,
     worker_quota: QuotaPolicyV1,
+    held_create_policy:
+        Option<Arc<crate::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>>,
     io: Arc<store_io::Gate>,
     shared_io: Arc<store_io::Gate>,
     control_proof: Option<Arc<ControlProof>>,
@@ -178,6 +182,7 @@ impl TenantState {
             human_streams: Arc::new(human_streams::Admission::new()),
             rate: Arc::new(Mutex::new((Instant::now(), 0))),
             worker_quota: QuotaPolicyV1::default(),
+            held_create_policy: None,
             io: Arc::new(store_io::Gate::new(false)),
             shared_io,
             control_proof: None,
@@ -250,6 +255,31 @@ impl GatewayState {
         }
         Ok(self)
     }
+    /// Resolve operator policy data for registered identities before serving.
+    pub fn with_kubernetes_held_create_policies(
+        mut self,
+        policies: Vec<(
+            String,
+            crate::control::kubernetes_admission::KubernetesHeldCreatePolicyV1,
+        )>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, policy) in policies {
+            let policy = policy.canonicalized()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate held CREATE policy identity"
+            );
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| anyhow::anyhow!("held CREATE policy identity is not registered"))?;
+            tenant.held_create_policy = Some(Arc::new(policy));
+        }
+        Ok(self)
+    }
+
     /// Invalid identity configuration denies every authenticated route.
     pub fn new(
         store: Arc<Store>,

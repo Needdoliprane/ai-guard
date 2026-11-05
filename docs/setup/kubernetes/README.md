@@ -308,6 +308,54 @@ authorized audit by operation UUID and reconcile the possible reception before
 preparing an explicit new attempt with a fresh operation UUID. Keep unknown
 effects unknown; a dry-run result never releases quota or records worker usage.
 
+## Configure the central tenant policy
+
+The gateway accepts an optional `held_create_policy` in each tenant entry of
+its existing `--tenants-file` registry. This is central configuration data:
+it does not enable a CREATE service, authorize a request or activate a Pod.
+The broker still cannot launch Kubernetes workers, and the diagnostic and
+dry-run commands above remain separate from this policy.
+
+Merge this **partial JSON object into the intended existing tenant entry**,
+preserving its database, credential references and other settings. It is not
+a complete registry file or a field for the preflight control file. The
+fingerprint and image below are fictitious; replace them with the approved
+full authority fingerprint reported by `doctor` and exact immutable image:
+
+```json
+{
+  "held_create_policy": {
+    "version": 1,
+    "decision_ttl_seconds": 30,
+    "approvals": [
+      {
+        "authority_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "image": "registry.example.invalid/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "profile": "kubernetes_held_pod_v1"
+      }
+    ]
+  }
+}
+```
+
+An absent or `null` policy leaves admission closed; `{}` is invalid. A policy
+requires version 1, a decision TTL of 1–300 seconds and 1–64 distinct approval
+tuples, within 16 KiB of compact JSON. Unknown fields and duplicate approval
+tuples are refused. Each fingerprint is 64 lowercase hexadecimal characters,
+not the CA hash or authority UUID. The image must be at most 256 bytes, with
+an explicit repository name and `@sha256:` followed by 64 lowercase hexadecimal
+characters; a tag alone is refused. The repository name starts with a lowercase
+ASCII letter or digit, uses only lowercase ASCII letters, digits and `/._-:`,
+and contains neither `..` nor `//`. The profile is exactly
+`kubernetes_held_pod_v1`. Matching uses the complete fingerprint/image/profile
+tuple: a different repository name with the same digest does not match.
+
+The gateway validates and sorts approvals when loading the registry, without
+normalizing their strings; entry order does not affect the policy hash.
+`worker_quota` remains the tenant's separate durable quota configuration.
+These checks validate configuration only; they do not qualify Namespace
+ownership, cluster admission, RBAC or CNI enforcement.
+
 ## Configure the Rust integration
 
 Trusted control code uses

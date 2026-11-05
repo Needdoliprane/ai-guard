@@ -1,5 +1,31 @@
 # Décisions d'industrialisation
 
+## 5 novembre — politique Kubernetes centrale, sans autorité implicite
+
+La politique `held_create_policy` est une configuration du tenant dans le
+gateway existant. Aucun corps de requête ni label de worker ne la choisit.
+Absence/null laisse l'admission fermée ; un objet présent invalide empêche le
+chargement avant ouverture des bases. Version1, TTL1à300secondes et1à64tuples
+distincts sont validés, avec taille canonique maximale16Kio. Chaque tuple lie
+l'empreinte complète d'autorité, le nom ET digest exacts d'image immuable et
+le profil `kubernetes_held_pod_v1`. Aucun joker ni normalisation de ces valeurs.
+
+La copie canonique trie les tuples, jamais le fichier opérateur. Le hash
+sépare son domaine, inclut un NUL et engage tout le document canonique,
+y compris version et TTL. La même validation d'image que le préflight est
+réutilisée ; le profil n'acquiert aucune permission par sa sérialisation.
+Le builder refuse doublons et identités non enregistrées, et ne modifie pas
+les anciens clones de l'état gateway. Cette tranche ne crée pas de producteur
+d'autorisation, de rechargement dynamique ou d'activation de cluster.
+
+La suite doit engager cette politique dans une décision durable distincte
+de la réconciliation, avec une migration explicite du format d'audit. Le
+retrait d'une politique ne doit pas empêcher de conserver un résultat déjà
+inconnu, ni redonner une permission de création par un simple replay. Le
+[contrat de raccord](KUBERNETES_ADMISSION.md) précise cette cible encore ouverte.
+Mêmes services, mêmes frontières et SQLite par tenant ; aucun stockage ou
+service supplémentaire n'est introduit.
+
 ## 5 novembre — motifs de refus établis et premier diagnostic durable
 
 Direction technique du lot local, vérifiée sur17fonctions ciblées : les erreurs de CAS

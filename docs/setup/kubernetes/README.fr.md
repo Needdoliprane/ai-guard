@@ -323,6 +323,57 @@ nouvel essai explicite avec un UUID d'opération neuf. Garder inconnus les
 effets inconnus ; un résultat dry-run ne libère aucun quota et n'enregistre
 pas d'usage worker.
 
+## Configurer la politique centrale du tenant
+
+Le gateway accepte une option `held_create_policy` dans chaque entrée tenant
+de son registre existant `--tenants-file`. Ce sont des données de configuration
+centrale : elles n'activent aucun service CREATE, n'autorisent aucune demande
+et n'activent aucun Pod. Le broker ne peut toujours pas lancer de workers
+Kubernetes ; diagnostic et dry-run ci-dessus restent distincts de cette
+politique.
+
+Insérer cet **objet JSON partiel dans l'entrée tenant existante visée**, en
+conservant sa base, ses références de credentials et ses autres réglages.
+Ce n'est ni un registre complet, ni un champ du fichier de contrôle du
+préflight. L'empreinte et l'image ci-dessous sont fictives ; les remplacer
+par l'empreinte complète d'autorité approuvée rapportée par `doctor` et
+l'image immuable exacte :
+
+```json
+{
+  "held_create_policy": {
+    "version": 1,
+    "decision_ttl_seconds": 30,
+    "approvals": [
+      {
+        "authority_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "image": "registry.example.invalid/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "profile": "kubernetes_held_pod_v1"
+      }
+    ]
+  }
+}
+```
+
+Une politique absente ou `null` laisse l'admission fermée ; `{}` est invalide.
+Elle exige version 1, un TTL de décision de 1 à 300 secondes et 1 à 64 tuples
+d'approbation distincts, dans 16 Kio de JSON compact. Champs inconnus et tuples
+dupliqués sont refusés. Chaque empreinte contient 64 caractères hexadécimaux
+minuscules ; ce n'est ni l'empreinte de l'AC ni l'UUID d'autorité. L'image fait
+au plus 256 octets, avec un nom de dépôt explicite et `@sha256:` suivi de
+64 caractères hexadécimaux minuscules ; un tag seul est refusé. Le nom de dépôt
+commence par une lettre ASCII minuscule ou un chiffre, ne contient que lettres
+ASCII minuscules, chiffres et `/._-:`, et ne contient ni `..` ni `//`. Le profil est
+exactement `kubernetes_held_pod_v1`. La correspondance porte sur le tuple
+complet empreinte/image/profil : un autre nom de dépôt avec le même digest
+ne correspond pas.
+
+Le gateway valide et trie les approbations au chargement du registre, sans
+normaliser leurs chaînes ; leur ordre ne change pas l'empreinte de politique.
+`worker_quota` reste la configuration distincte du quota durable du tenant.
+Ces contrôles valident seulement la configuration ; ils ne qualifient ni
+propriété du Namespace, admission cluster, RBAC ou confinement CNI.
+
 ## Configurer l'intégration Rust
 
 Le contrôle de confiance utilise

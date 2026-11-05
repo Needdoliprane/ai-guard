@@ -1,5 +1,73 @@
 # Validation courante
 
+## 5 novembre — politique centrale Kubernetes, configuration et identité tenant
+
+Base `522e6a9`, worktree `kubernetes-held-create-20261105` dédié. Ce lot ajoute
+la donnée de politique centrale et son chargement ; il ne produit encore aucune
+autorisation de CREATE, aucun nouvel endpoint ni mutation sur un cluster.
+Luna possède les tests ciblés ; le second regard est indépendant du développeur.
+Pas de nouveau scan global, de matrice runtime ou d'appel fournisseur.
+
+Le sandbox neuf est vérifié sur configuration et noyau : Docker29.9.2,
+LinuxARM64/Rust1.99.1, UID1000/caps0/NNP1/seccomp2/networknone/rootRO,
+registre public et source figée RO,1CPU/6Gio/swap0/PID256, scratch3Gio et
+65536inodes, fsize536870912bytes/nofile1024. Aucun socket, clé réelle,
+home opérateur, checkout original ou accès cluster. Le MacBookAirM3/16Go
+reste sous pression ; aucune durée observée n'est un engagement de latence.
+Une commande Cargo à la fois, hors réseau, avec env-i et le cache verrouillé.
+
+Les commandes suivantes ont réellement atteint leurs assertions :
+
+| Gel, commande ciblée après `cargo test --offline --locked --manifest-path /inputs/<gel>/Cargo.toml` | Résultat |
+|---|---|
+| `policy-red`, `--lib control::kubernetes_admission::policy::tests:: -- --test-threads=1` | RED :3FAIL/0ignoré/RC101, après compilation, sur les stubs explicites. |
+| `policy-green-config-red`, même filtre | PASS :3/3, hash golden indépendant, bornes, canonisation et correspondance exacte ; aucun ignoré. |
+| `policy-green-config-red`, `--test kubernetes_preflight` | PASS :2canaris existants après extraction du même prédicat d'image immuable. |
+| `policy-green-config-red`, `--bin agentsandbox gateway_config::policy_tests::loads_registry_v1_with_a_held_create_policy -- --test-threads=1` | RED : champ inconnu `held_create_policy` atteint dans le vrai loader. |
+| `policy-config-api-red`, `--bin agentsandbox gateway_config::policy_tests:: -- --test-threads=1` | PASS :2/2 ; anciennes configurations et null, canonisation non mutante, refus avant création d'un Store. |
+| `policy-config-api-red`, `--lib api::held_policy_tests:: -- --test-threads=1` | RED :1FAIL positif atteint le stub du builder,1PASS négatif alors non discriminant ; RC101. |
+| `policy-api-green`, même filtre API | PASS :2/2 après correction du builder ; clone antérieur intact et refus des mappings inconnus/doublons/invalides. |
+| `policy-api-green`, `cargo check --offline --locked --manifest-path /inputs/policy-api-green/Cargo.toml --all-targets` | PASS RC0 ;85warnings bibliothèque et1lib-test, garde sans avertissement non satisfaite. |
+
+Le golden est calculé avant implémentation par SHA256 et OpenSSL, sans appel
+à la fonction applicative : domaine ASCII
+`ai-guard:kubernetes-held-create-policy:v1`, un octet NUL puis925octets JSON
+canonique, total967octets. Résultat commun :
+`016a863fd235ae19ecad4d05032b01875202847ebbffd118dcf6981329bb6134`.
+Il reste une constante dans la régression. Les9fonctions sélectionnées
+au total ne sont pas additionnées à nouveau lors des différents gels.
+
+Journaux privés conservés hors checkout, SHA256 relus par Root :
+
+| Journal | SHA256 |
+|---|---|
+| `policy-golden.log` | `91ff5833a36d09f11e28c1d9fe838dd41755da76787612bad7f85998c6c7b1c6` |
+| `policy-red.log` | `c614dffb751ad231fb98e26ee38cebf9c4301e39b50ff03eb3aae2775b14ea4e` |
+| `policy-green.log` | `27d1ea37b3a442d3018043ba8c48feb3b4101ed9a6a25c787e6bf5998bc47a41` |
+| `policy-preflight-canary.log` | `efbbe52151128a51e99e47b27bdd5df97708b70326484e7ad5bcb9abc6b32d26` |
+| `policy-config-red.log` | `24b10b829a6579871170ad48fc8f458313e849ed2f7040e232da18483170e5f7` |
+| `policy-api-red.log` | `c746866166f0f71558cae0b7e4fe74dc26e57a793c162a176e65dd20dd3cd5a2` |
+| `policy-config-green.log` | `1eed5e94d160eb50f10c763415afbd8b9f10525aa32db9c0ae6ee0513cbe7e0a` |
+| `policy-api-green.log` | `8102c5e2bafcee407fffc7840fcf023df6c0ae00fd2f95613db340a213231c15` |
+| `policy-final-all-targets.log` | `ada5fccd7565d9cc9bc4b617876ca160c2cb033d757acd04e501f7462749bc04` |
+
+Le gel final `policy-api-green` contient la correction du builder après RED.
+Ses10fichiers Rust sont comparés à la source finale ; les fonctions pures,
+tests de configuration et canaris déjà PASS ne sont pas rejoués sans delta.
+Contrôles statiques du delta : formatage des10fichiers Rust, `git diff --check`
+et absence de changement Cargo.toml/Cargo.lock PASS ;454liens relatifs dans
+6documents, aucune cible absente. Le contrôle des3clés réelles déjà connues
+sur16fichiers du delta ne trouve aucun littéral ; ce n'est pas un audit de
+secrets universel. Le second regard indépendant couvre source et documentation.
+Après résultats terminaux et inventaire limité à init+sleep, arrêt normal
+du seul owner QA à15:00:40UTC, PID0/exit143/OOMfalse puis retrait exact.
+Ni volume utilisateur, image, service ou preuve existante n'est supprimé.
+Ne pas en déduire une admission runtime. Migration9, preuve V2 avec politique courante, ACK broker
+HTTP réel, worker I/O borné, activation, workspace et cycle Kubernetes restent
+ouverts. Clippy est **BLOCKED**, composant absent ; release, cluster et
+qualification Docker/Podman de ce lot sont **NOT_RUN**. G09 reste FAIL,
+0/12 gates globaux clos ; aucune qualification produit n'est annoncée.
+
 ## 5 novembre — refus durable de résultat, validation en cours
 
 Base de travail `66e9dc1`, même worktree dédié ; checkout principal préservé.

@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+mod policy;
 mod validation;
+
+pub use policy::{KubernetesHeldCreateApprovalV1, KubernetesHeldCreatePolicyV1};
 
 pub const KUBERNETES_HELD_PROFILE_V1: &str = "kubernetes_held_pod_v1";
 

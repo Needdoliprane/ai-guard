@@ -176,6 +176,19 @@ pub(super) fn valid_digest(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
+pub(crate) fn valid_immutable_image(image: &str) -> bool {
+    image.split_once("@sha256:").is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && image.len() <= 256
+            && (name.as_bytes()[0].is_ascii_lowercase() || name.as_bytes()[0].is_ascii_digit())
+            && !name.contains("..")
+            && !name.contains("//")
+            && name.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"/._-:".contains(&byte)
+            })
+            && valid_digest(digest)
+    })
+}
 pub(super) fn valid_uid(value: &str) -> bool {
     Uuid::parse_str(value).is_ok_and(|uid| !uid.is_nil() && uid.to_string() == value)
 }

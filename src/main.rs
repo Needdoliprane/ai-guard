@@ -494,6 +494,7 @@ async fn main() -> Result<()> {
                         .as_deref()
                         .map(Store::load_workload_audit_policy)
                         .transpose()?,
+                    held_create_policy: None,
                 }]
             };
             let mut secrets: Vec<String> = tenants
@@ -593,10 +594,14 @@ async fn main() -> Result<()> {
             };
             let mut gateways = Vec::new();
             let mut quotas = Vec::new();
+            let mut held_create_policies = Vec::new();
             let mut event_count = 0_u64;
             let mut capacity_diagnostics = Vec::with_capacity(tenants.len());
             for tenant in tenants {
                 quotas.push((tenant.tenant_id.clone(), tenant.worker_quota));
+                if let Some(held_create_policy) = tenant.held_create_policy {
+                    held_create_policies.push((tenant.tenant_id.clone(), held_create_policy));
+                }
                 let store = if let Some(root) = &backup_root {
                     root.revalidate()?;
                     let name = format!(
@@ -686,7 +691,8 @@ async fn main() -> Result<()> {
                 .transpose()?;
             let mut state =
                 GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?
-                    .with_worker_quotas(quotas)?;
+                    .with_worker_quotas(quotas)?
+                    .with_kubernetes_held_create_policies(held_create_policies)?;
             if let Some(oidc) = oidc {
                 state = state.with_oidc(oidc)?;
             }

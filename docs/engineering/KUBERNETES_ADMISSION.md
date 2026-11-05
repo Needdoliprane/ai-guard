@@ -10,6 +10,70 @@ la [stratégie de test](TEST_STRATEGY.md) restent applicables.
 
 ## Besoin et état existant
 
+### Contrat central suivant — configuration, décision et raccord HTTP
+
+Direction technique locale du5novembre, à implémenter et vérifier dans les
+frontières existantes. La validation pure de politique et le prédicat d'image
+partagé ont leurs essais ciblés ; le producteur central, format9 et raccord
+HTTP ne sont pas livrés par ce résultat. Aucun appel cluster n'en découle.
+
+La configuration de chaque tenant porte une option `held_create_policy`.
+Absence/null interdit l'admission ; une politique présente vide est une erreur
+de configuration. Le format1 est fermé :1à64approbations distinctes du tuple
+exact `{authority_fingerprint,image,profile}`, TTL de décision1à300secondes,
+politique canonique au plus16Kio. L'image garde la grammaire immutable actuelle
+et sa limite256bytes ; aucune normalisation de référence ni wildcard.
+Les approbations sont triées par tuple sans changer leurs strings. Le hash
+engage toute la politique : domaine ASCII
+`ai-guard:kubernetes-held-create-policy:v1`, un NUL, JSON UTF-8 compact à clés
+triées récursivement. Aucun secret ou chemin de configuration n'est audité.
+
+La politique courante est celle du `TenantState` immuable du processus, dérivé
+de la configuration opérateur et consulté après authentification du broker et
+admission dans le worker borné. Elle ne provient jamais du corps d'une demande.
+Il n'y a pas de reload implicite ; un redémarrage doit terminer les anciens
+issuers. Cette règle ne prouve pas une révocation atomique entre plusieurs
+gateways aux configurations divergentes. La provenance déclarée de configuration
+ne constitue pas une approbation humaine nominative ni une preuve de confinement.
+
+| Scope de décision | Preuve centrale nécessaire | Opérations permises |
+|---|---|---|
+| Admission | Politique résolue courante approuvant l'empreinte complète, l'image et le profil ; identité, grant et quota serveur valides. Expiration min(TTLpolitique,binding,grant). | Réserver et demander un nouveau claim ; aucun effet sans les autres preuves et activation. |
+| Réconciliation | Intention et réservation réellement relues dans le Store validé, tenant/broker/incarnation courants stricts ; expiration min(60s,binding,grant). Aucune politique retirée présentée comme approbation courante. | Lookup exact du claim historique, résultat et annulation ; aucun Reserve, Claim mutateur, Fresh ou nouvelle allocation. |
+
+Retirer la politique interdit toute admission nouvelle et conserve la possibilité
+de tracer/réconcilier un effet déjà possible. Révoquer identité ou grant reste
+un refus ; ce lot ne relâche pas les contrôles d'incarnation pour une reprise
+froide. Un claim absent reste absent : lookup `NotFound`, annulation préclaim
+possible selon l'état réel, sans inventer de preuve d'émission.
+
+EvidenceV2 engage explicitement scope et mode de preuve. Admission contient
+snapshot/hash de la politique courante. Réconciliation lie séparément la
+réservation originale (`reservation_seq/hash`, `admission_decision_hash`) et
+le préfixe de nouvelle émission de cap (`origin_seq/hash`, dates et révisions
+d'identité courantes). La réservation précède ce préfixe ; tenant, intention
+et décision historique V1/V2 doivent correspondre. Une sérialisation reste
+descriptive ; seuls les producteurs privés après ces vérifications créent
+les capacités non sérialisables.
+
+La frontière sémantique8→9 exige une sauvegarde neuve et un marqueur de format
+unique lié au tenant, namespace et préfixe, sans table supplémentaire ni
+activation. Ancien writer8 refusé avant mutation ; schéma9 sans marqueur,
+marqueur sur8, V2 avant marqueur et nouveaux V1 après marqueur sont refusés.
+Le marqueur est une opération de maintenance, pas un principal broker.
+Les quotas Kube partagés, planchers temporels, gardes de schéma et protocole
+doivent évoluer ensemble. Les anciens tuples/hashes/records V1 restent
+inchangés ; un replay V1 exact rend son reçu historique sans append ni Fresh.
+Un nouveau résultat/une annulation sur une réservation V1 s'appuie sur une
+décision V2 de réconciliation et ne fabrique pas de politique V1 absente.
+
+Le raccord utilise ensuite le broker authentifié et des opérations HTTP v1
+fermées, avec une capacité d'ACK live distincte de la preuve mémoire Store.
+Le gateway conserve politique et SQLite ; le broker conserve journal,
+HostClock et credentials Kubernetes. Un reçu JSON, le schéma9 ou un grant
+seul ne suffit jamais à ouvrir CREATE. Les routes, négociations et producteurs
+doivent être vérifiés ensemble avant de présenter ce raccord comme livré.
+
 **Point de développement du 5 novembre, base `7155ab3`, worktree dédié non
 encore intégré.** Le code local ajoute les DTO fermés, le rendu/projection,
 la migration explicite 7→8, les transactions de réservation/claim/résultat/

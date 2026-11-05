@@ -2,7 +2,7 @@
 //! This is deliberately not a start permit or a producer of owned Pod handles.
 use super::{
     KubernetesAdmissionGapV1, KubernetesAuthorityV1, KubernetesError, KubernetesPodHandle,
-    KubernetesResult, KubernetesRuntime, valid_digest,
+    KubernetesResult, KubernetesRuntime, valid_immutable_image,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -72,23 +72,7 @@ impl KubernetesPreflightPlanV1 {
     fn validate(&self, authority: &KubernetesAuthorityV1) -> KubernetesResult<()> {
         authority.validate()?;
         self.resources.validate()?;
-        let image_valid = self
-            .image
-            .split_once("@sha256:")
-            .is_some_and(|(name, digest)| {
-                !name.is_empty()
-                    && self.image.len() <= 256
-                    && (name.as_bytes()[0].is_ascii_lowercase()
-                        || name.as_bytes()[0].is_ascii_digit())
-                    && !name.contains("..")
-                    && !name.contains("//")
-                    && name.bytes().all(|byte| {
-                        byte.is_ascii_lowercase()
-                            || byte.is_ascii_digit()
-                            || b"/._-:".contains(&byte)
-                    })
-                    && valid_digest(digest)
-            });
+        let image_valid = valid_immutable_image(&self.image);
         if self.version != 1
             || self.authority_fingerprint != authority.fingerprint()
             || self.session_id.is_nil()

@@ -25,6 +25,8 @@ struct TenantFiles {
     worker_quota: agentsandbox::control::QuotaPolicyV1,
     audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
     workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
+    held_create_policy:
+        Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
 }
 
 pub struct ConfiguredTenant {
@@ -37,6 +39,8 @@ pub struct ConfiguredTenant {
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
     pub audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
     pub workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
+    pub held_create_policy:
+        Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
 }
 
 #[derive(Deserialize)]
@@ -165,6 +169,11 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             .worker_quota
             .validate()
             .context("Quota workers invalide")?;
+        let held_create_policy = tenant
+            .held_create_policy
+            .map(|policy| policy.canonicalized())
+            .transpose()
+            .context("Politique Kubernetes du tenant invalide")?;
         agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
         anyhow::ensure!(
             ids.insert(tenant.tenant_id.clone()),
@@ -194,6 +203,7 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             worker_quota: tenant.worker_quota,
             audit_capacity_policy: tenant.audit_capacity_policy,
             workload_audit_policy: tenant.workload_audit_policy,
+            held_create_policy,
         });
     }
     Ok(result)
@@ -213,6 +223,11 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
             .worker_quota
             .validate()
             .context("Quota workers invalide")?;
+        if let Some(policy) = &tenant.held_create_policy {
+            policy
+                .validate()
+                .context("Politique Kubernetes du tenant invalide")?;
+        }
         agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
         for credential in [&tenant.runner_token, &tenant.viewer_token] {
             use sha2::Digest;
@@ -237,6 +252,10 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
 #[cfg(test)]
 #[path = "workload/gateway_config_tests.rs"]
 mod workload_tests;
+
+#[cfg(test)]
+#[path = "gateway_config_policy_tests.rs"]
+mod policy_tests;
 
 #[cfg(test)]
 mod tests {

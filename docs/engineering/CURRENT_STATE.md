@@ -1,5 +1,28 @@
 # État constaté — suivi du développement
 
+## 5 novembre — politique Kubernetes centrale chargée par tenant
+
+Le gateway charge et canonise désormais `held_create_policy` depuis sa
+configuration serveur. Validation fermée, empreinte de politique stable,
+correspondance exacte autorité/image/profil et isolation des clones gateway
+sont vérifiées. Une configuration invalide est refusée avant ouverture des
+bases ; absence/null ne donne aucune autorité. Le fichier opérateur reste
+inchangé. Les guides de configuration Kubernetes FR/EN décrivent ce champ.
+
+**PASS logiciel ciblé :9fonctions uniques**,3politique pure,2configuration,
+2état API et2canaris préflight existants ; aucun ignoré. Compilation toutes
+cibles RC0. Les [gels, RED, commandes et preuves](VALIDATION.md) distinguent
+chaque étape ; seuls les tests touchés sont rejoués.85warnings bibliothèque
+et1lib-test subsistent : garde sans avertissement non satisfaite.
+
+Cette tranche fournit de la donnée de configuration, sans producteur central
+d'autorisation ni activation Pod. Migration9, décisions admission/réconciliation
+avec politique courante, raccord broker HTTP et ses ACK live restent ouverts.
+La suite conserve SQLite au gateway et credentials Kubernetes au broker,
+sans nouveau service. Clippy BLOCKED (composant absent) ; release et moteurs
+réels NOT_RUN sur cette tranche. Branche de travail non intégrée à la référence,
+G09 FAIL et0/12 gates globaux clos ; le mandat produit complet reste actif.
+
 ## 5 novembre — refus de résultat durable et provenance vérifiée
 
 Le Store distingue désormais, pour un résultat lié à son intention et à son
