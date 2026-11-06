@@ -345,7 +345,7 @@ On the manual route, the operator must create an active OIDC account and members
 
 Replace every sample UUID with a fresh canonical lowercase non-nil UUID for its new operation or membership; keep each identity stable for exact retries. Replace `REPLACE_WITH_VERIFIED_SUBJECT`, issuer, tenant, organization and resource ID consistently. For the DEMO, use its exact HTTP issuer in all three templates. No subject IDs are preassigned by these files. Creating an account without a membership grants no access; a membership alone grants no ownership of historical resources.
 
-Save each reviewed mutation privately under the existing control authority. For an existing validated schema4–7 database with inactive supervision, run the following command, then repeat it with `oidc-membership.json` and `oidc-resource-grant.json` after each preceding command succeeds:
+Save each reviewed mutation privately under the existing control authority. For an existing validated schema4–10 database with inactive supervision, run the following command, then repeat it with `oidc-membership.json` and `oidc-resource-grant.json` after each preceding command succeeds:
 
 ```sh
 AIGUARD_BIN="/absolute/path/to/agentsandbox"

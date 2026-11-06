@@ -345,7 +345,7 @@ Dans le parcours manuel, l’opérateur doit créer un compte OIDC actif et un m
 
 Remplacez chaque UUID d’exemple par un UUID canonique neuf en minuscules et non nul pour son opération ou membership ; conservez chaque identité pour les retries exacts. Remplacez `REPLACE_WITH_VERIFIED_SUBJECT`, issuer, tenant, organisation et ID ressource de façon cohérente. Pour la DEMO, reprenez son issuer HTTP exact dans les trois modèles. Ces fichiers ne préattribuent aucun ID sujet. Un compte sans membership n’accorde aucun accès ; un membership seul n’attribue pas les ressources historiques.
 
-Enregistrez chaque mutation relue dans un fichier privé sous l’autorité de contrôle existante. Pour une base schéma4–7 existante validée à supervision inactive, lancez la commande suivante, puis répétez-la avec `oidc-membership.json` et `oidc-resource-grant.json` après la réussite de chaque commande précédente :
+Enregistrez chaque mutation relue dans un fichier privé sous l’autorité de contrôle existante. Pour une base schéma4–10 existante validée à supervision inactive, lancez la commande suivante, puis répétez-la avec `oidc-membership.json` et `oidc-resource-grant.json` après la réussite de chaque commande précédente :
 
 ```sh
 AIGUARD_BIN="/absolute/path/to/agentsandbox"

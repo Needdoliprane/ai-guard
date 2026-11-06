@@ -88,7 +88,7 @@ A full upload budget can return **429** for a request with a body, while bodyles
 
 Open `AIGUARD_DASHBOARD` in your browser. The gateway URL is for CLI/API access; `/healthz` reports service availability, not permission to run a worker or proof that an AI provider is authenticated.
 
-Use your named ai-guard account for a personal view and explicitly switch to an administrative scope when authorized. Local identity works without an IdP. [Keycloak/OIDC](../keycloak/README.md) is a separate identity choice; it does not select your AI provider. Personal views include your own sessions and explicitly shared resources. Tenant membership alone must not reveal another user's prompts, output or files.
+The `init` and base Compose commands above prepare technical runner/viewer access, not a named account. For a personal view without an IdP, follow [named local access](../identity/README.md): migrate the existing tenant store explicitly, provision an account and grant its real resources before signing in. Select an offered administrative context only when authorized. Personal resources require an explicit owner or share grant; tenant membership and a matching session name give no access or authorship. [Keycloak/OIDC](../sso/README.md) is a separate identity choice and does not select your AI provider.
 
 Keep technical credentials separate from that identity: `viewer` grants its configured read scope and `runner` belongs to trusted control. For a viewer-key connection, obtain the viewer value from the private source file in a private editor and enter it only in the trusted connection form. Never paste the runner credential into a browser, worker or chat. Older events identified only by a shared key remain shared-key history; a later login does not establish their human author.
 
@@ -102,7 +102,7 @@ A 401/403 refusal on an active read closes the viewer session and removes its da
 
 ## Execute a first command
 
-Start with a small offline command. It uses the strict policy and disables worker networking:
+The commands below use the technical runner credential retained in `AIGUARD_CONFIG`, independently of a human dashboard login. They do not create authenticated human initiation or delegation; the [human-to-broker execution contract](../../engineering/HUMAN_EXECUTION.md) remains proposed. Start with a small offline command using the strict policy and disabled worker networking:
 
 ```sh
 "$AIGUARD_BIN" run --project "$AIGUARD_PROJECT" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY" --runtime docker --profile strict --network none --timeout 30 -- /usr/bin/id

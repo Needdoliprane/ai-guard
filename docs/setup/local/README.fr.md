@@ -88,7 +88,7 @@ Un budget de lecture plein peut répondre **429** à une requête avec corps, ta
 
 Ouvrir `AIGUARD_DASHBOARD` dans le navigateur. L'URL gateway sert au CLI et aux API ; `/healthz` indique la disponibilité du service, pas l'autorisation de lancer un worker ni l'authentification auprès d'un fournisseur IA.
 
-Utiliser son compte ai-guard nominatif pour la vue personnelle et sélectionner explicitement un périmètre d'administration lorsqu'on y est autorisé. L'identité locale fonctionne sans IdP. [Keycloak/OIDC](../keycloak/README.fr.md) est un choix d'identité indépendant du fournisseur IA. La vue personnelle comprend ses propres sessions et les ressources explicitement partagées. L'appartenance au même tenant ne doit pas révéler les prompts, sorties ou fichiers d'un autre utilisateur.
+Les commandes `init` et Compose de base ci-dessus préparent l'accès technique runner/viewer, pas un compte nominatif. Pour une vue personnelle sans IdP, suivre l'[accès local nominatif](../identity/README.fr.md) : migrer explicitement la base tenant existante, créer un compte puis lui attribuer des ressources réelles avant connexion. Sélectionner un contexte d'administration proposé seulement lorsqu'on y est autorisé. Les ressources personnelles exigent un grant explicite de propriété ou de partage ; l'appartenance au tenant et un nom de session identique ne donnent ni accès ni attribution d'auteur. [Keycloak/OIDC](../sso/README.fr.md) est un choix d'identité distinct, indépendant du fournisseur IA.
 
 Séparer les credentials techniques de cette identité : `viewer` donne son périmètre de lecture configuré et `runner` appartient au contrôle de confiance. Pour une connexion par clé viewer, consulter sa source dans un éditeur privé et saisir la valeur uniquement dans le formulaire de connexion de confiance. Ne jamais placer le credential runner dans un navigateur, un worker ou une conversation. Les événements anciens identifiés seulement par une clé partagée conservent cette provenance ; une connexion ultérieure ne prouve pas leur auteur humain.
 
@@ -102,7 +102,7 @@ Un refus 401/403 d'une lecture active ferme la session viewer et retire ses donn
 
 ## Exécuter une première commande
 
-Commencer par une petite commande hors ligne. Elle utilise la politique stricte et coupe le réseau du worker :
+Les commandes suivantes utilisent le credential runner technique conservé dans `AIGUARD_CONFIG`, indépendamment d'une connexion humaine au dashboard. Elles ne créent pas d'initiation ou de délégation humaine authentifiée ; le [contrat d'exécution humaine via le broker](../../engineering/HUMAN_EXECUTION.md) reste proposé. Commencer par une petite commande hors ligne avec la politique stricte et le réseau du worker coupé :
 
 ```sh
 "$AIGUARD_BIN" run --project "$AIGUARD_PROJECT" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY" --runtime docker --profile strict --network none --timeout 30 -- /usr/bin/id
