@@ -1,5 +1,17 @@
 # Stratégie de qualification
 
+## Reprise du publisher de présence
+
+Choisir le module `--lib broker::presence::http_tests::` et la cible
+`--test broker_presence_cli` pour cette modification de boucle :17 fonctions
+uniques PASS, une observation de coût ignorée NOT_RUN. Les nouveaux parents
+attendent des refus observés, puis contrôlent même acteur/opération, ACK perdu
+après commit réel, permits et arrêt ; le vrai service reste dans le même processus.
+Les canaris existants de scope, capacité, protocole, historique et rotation
+restent dans cette sélection. [Gels et limites](evidence/2026-11-06/presence-recovery/README.md).
+Pas de matrice E2E/modèle/moteur ; cadence5s, plafond30 vérifié en source,
+fédération physique et reprise de processus à qualifier séparément.
+
 ## Confiance gateway du CLI humain
 
 Les nouvelles cibles `human_gateway_trust` et `human_sso_gateway_trust`

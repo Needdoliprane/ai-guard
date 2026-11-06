@@ -1,5 +1,20 @@
 # Validation courante
 
+## 6 novembre — reprise automatique du publisher de présence
+
+Source `9f3f96d` depuis `d330064`, composition `f0fa2ea` avec TLS humain.
+Le RED a compilé puis atteint l'oracle attendu : après quatre503, l'acteur
+sort Unavailable. GREEN :14 fonctions HTTP et3 CLI PASS ; une observation
+manuelle ignorée reste NOT_RUN. Check toutes cibles RC0/37.49s ; composition
+réelle sur cible neuve RC0/51.86s après vérification des19 fichiers identiques.
+Warnings lot118 lib/3 lib-test ; composition118/3/2 de fixture TLS, Clippy BLOCKED.
+Root a lu les résultats et SHA, revue source indépendante sans défaut bloquant,
+fmt/whitespace/24 liens guides/scan5 fichiers : PASS. Les
+[commandes, logs, archive et limites](evidence/2026-11-06/presence-recovery/README.md)
+bornent cette preuve à HTTP/SQLite/processus possédés locaux. QA K fermée et
+supprimée, PID0/exit143/OOMfalse. Aucun modèle ou worker/moteur de produit
+appelé ; G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — CA gateway du CLI humain local et OIDC
 
 Base `d330064`, source `68f0fb4`, composition `f295908`. Les14 fichiers

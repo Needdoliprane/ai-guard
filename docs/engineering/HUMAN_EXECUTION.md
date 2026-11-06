@@ -219,6 +219,31 @@ Versionner également les enveloppes privées d'intention/attribution et le prot
 Préserver lecture/replay legacy ; binaire ancien incapable du11 refuse proprement, retour au10 uniquement par restauration sauvegardée et fencing.
 L'API d'accès séparée évite de glisser des capacités inconnues dans `HumanContextV1` ; la configuration/mapping d'exécution reçoit sa version explicite.
 
+## Prérequis H1a vérifiés en source — aucune admission du schéma11
+
+L'inventaire au gel `f0fa2ea` relève trois contraintes supplémentaires à traiter
+avant tout code qui accepte11. Ce sont des travaux proposés, sans preuve runtime :
+
+- L'admission OIDC actuelle exige une intersection non vide de `HumanCapabilityV1`
+  ([gateway](../../src/api/oidc/gateway.rs)). Un nouveau contexte ne suffit pas
+  aux grants seuls : prévoir plafond, mapping/configuration, admission, refresh
+  et revalidation d'exécution distincts, sans droit de lecture compensatoire.
+  Un mapping V1 existant ne donne aucun droit d'exécution. Le format du ledger
+  d'authentification est indépendant : sa compatibilité reste à examiner.
+- Les nouvelles demandes/statuts/replays exigent une classe et une politique
+  explicites dans [capacity](../../src/audit/capacity.rs), avec plafonds événements
+  et octets par principal et tenant, reconstruction du cache et propagation aux
+  clones. Aucune consommation de la réserve `IdentityMaintenance` ni faux
+  événement de lecture ; absence de politique explicite = exécution désactivée.
+- Le Pending [présence](../../src/broker/presence/storage.rs) conserve l'identité
+  exacte, dont `schema_version`. Après10→11, l'égalité contrôlée par
+  [l'acteur](../../src/broker/presence/actor.rs) échoue pour un Pending10, même si
+  le hash heartbeat reste compatible. Résoudre exactement sous10 avant upgrade ;
+  Pending non résolu = maintien10/réconciliation, sans réécriture ni omission de
+  version. Pour un broker distant, silence et attestation opérateur ne prouvent
+  pas l'absence de Pending. Un franchissement compatible demande son propre
+  contrat et ses preuves ; il reste NOT_RUN.
+
 ## Lots verticaux, propriétaires et vérifications ciblées
 
 | Lot dépendant | Fichiers concrets et acceptation ; QA Luna après autorisation Root |

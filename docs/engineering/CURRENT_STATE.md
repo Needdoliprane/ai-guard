@@ -1,5 +1,20 @@
 # État constaté — suivi du développement
 
+## 6 novembre — reprise de présence après panne temporaire du gateway
+
+Le lot `9f3f96d`, composé dans `f0fa2ea`, garde le même publisher, client,
+identité épinglée et Pending après les quatre premiers refus temporaires.
+Après les trois attentes courtes, la cadence devient `min(interval_seconds,30)`
+secondes, interruptible ; seuls Transport/Unavailable reprennent. Refus de
+droits, conflit, horloge, protocole, capacité et matériau privé restent terminaux.
+
+Dix-sept fonctions ciblées passent ; l'observation manuelle de coût ignorée
+reste NOT_RUN. Le check toutes cibles du lot puis de sa composition TLS passe,
+revue indépendante traitée et guides EN/FR synchronisés.
+[Preuves](evidence/2026-11-06/presence-recovery/README.md).
+Ce résultat n'établit ni fédération physique multi-hôtes, inventaire runtime,
+arrêt de worker, reprise/fencing complet ou capacité100. G09 FAIL,0 gate clos.
+
 ## 6 novembre — confiance HTTPS explicite du CLI humain
 
 Le lot `68f0fb4`, composé dans `f295908`, ajoute `--gateway-ca-file` au CLI

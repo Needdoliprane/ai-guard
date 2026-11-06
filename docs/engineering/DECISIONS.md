@@ -1,5 +1,15 @@
 # Décisions d'industrialisation
 
+## 6 novembre — reprise bornée de la seule déclaration de présence
+
+Conserver l'acteur et son client/stream/binding/Pending, puis attendre sans
+permit permet le retour après une panne temporaire sans accepter une rotation
+ou créer une nouvelle séquence pour une opération incertaine. Après les trois
+backoffs courts, une cadence `min(interval_seconds,30)` ne redémarre pas une
+rafale avant ACK local. Droits, conflit, horloge, protocole, capacité et fichiers
+privés conservent leurs refus terminaux. Les décisions d'exécution métier
+gardent leur contrat. [Tests et portée](evidence/2026-11-06/presence-recovery/README.md).
+
 ## 6 novembre — snapshot CA explicite du CLI humain
 
 Choix d'implémentation dans les frontières existantes : `--gateway-ca-file`

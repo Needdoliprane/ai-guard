@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Reprise de présence du6novembre : même acteur/Pending après panne temporaire,
+dix-sept fonctions et check lot/composition toutes cibles PASS, revue traitée.
+[Preuves](evidence/2026-11-06/presence-recovery/README.md). Cette disponibilité
+de déclaration ne qualifie ni fédération physique, worker, runtime ou fencing.
+Observation de coût ignorée NOT_RUN, G12 warnings/Clippy ouverts ; G09 FAIL,
+0/12 gates globaux clos.
+
 Confiance gateway du CLI humain du6novembre : option CA publique explicite,
 snapshot local/OIDC immuable, reprise export liée au bundle, dix fonctions
 ciblées et check toutes cibles PASS, revue traitée. Les

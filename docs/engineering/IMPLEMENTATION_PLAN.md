@@ -1,5 +1,16 @@
 # Plan d'industrialisation
 
+## 6 novembre — présence récupérable, contrats humains en préparation
+
+La reprise du publisher après panne temporaire est intégrée, sans nouvelle
+identité ni opération pour un Pending existant, avec17 fonctions et composition
+vérifiées. [Preuves](evidence/2026-11-06/presence-recovery/README.md).
+Le [contrat humain](HUMAN_EXECUTION.md) est relu mais reste proposé ; H1a demande
+d'abord l'inventaire des admissions OIDC, budgets et consommateurs du schéma11,
+avec reprise des Pending présence existants. Aucun élargissement aveugle de
+version ou droit de lecture implicite. Relais runtime, fencing, fédération
+physique, Kubernetes complet et qualifications restent les priorités obligatoires.
+
 ## 6 novembre — CLI HTTPS et reprise de présence en parallèle
 
 Le lot CA gateway humain est intégré : option explicite, snapshot conservé
