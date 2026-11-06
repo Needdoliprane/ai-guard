@@ -1,5 +1,21 @@
 # Plan d'industrialisation
 
+## 6 novembre — fédération technique et contrôle réseau obligatoire
+
+La projection centrale workers/brokers a ses preuves API→SQLite→TS et ses
+guides EN/FR. Elle conserve WorkerV1 et n'attribue pas implicitement de nouveaux
+droits humains. La prochaine verticale de cette vue doit raccorder permission
+humaine explicite, audit, révocation et retrait des données devenues interdites.
+La connexion réelle de brokers/hôtes et le transport du relais restent ouverts.
+
+En parallèle du broker Full et de Kubernetes, le chantier P1 réseau doit
+figer contrôle Rust hors worker, refus par défaut, décisions durables avant
+connexion, destinations temporaires/révocables et visibilité dans le dashboard.
+La proposition structurelle et sa revue précèdent l'implémentation ; aucun
+filtrage livré n'est déduit d'un proxy d'environnement. Les critères incluent
+DNS, redirection, IP directe, IPv6, tunnel et couverture des outils distants,
+sur moteurs réels, avec guides EN/FR et preuves G05/G07/G11.
+
 ## 6 novembre — prérequis Kubernetes vérifiés, session complète ouverte
 
 Le CLI consomme maintenant les prérequis typés et les avis SSAR explicites ;

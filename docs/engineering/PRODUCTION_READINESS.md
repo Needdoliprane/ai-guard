@@ -1,5 +1,16 @@
 # Gates de qualification production
 
+Projection centrale du 6 novembre :4 parents Rust (dont vrai worker refusé),
+wire Rust→TS,24 fonctions Node et tsc PASS ; revue traitée, check toutes cibles
+RC0 après augmentation du budget mémoire de la QA. Les PASS ne qualifient pas
+la connexion multi-hôtes, le navigateur ni la vue SSO humaine.
+[Preuves et limites](VALIDATION.md#6-novembre--projection-fédérée-du-registre).
+P1 obligatoire supplémentaire : contrôle des destinations réseau depuis le
+périmètre Rust de confiance, révocation et audit avant connexion, avec
+qualifications Docker/Podman/Kubernetes et couverture G05/G07/G11. Ce contrôle
+n'est pas livré par bridge, une variable proxy ou la seule politique Jev.
+G09 FAIL,0/12 gates clos.
+
 Prérequis Kubernetes du 6 novembre : CLI opt-in, avis SSAR bornés et refus des
 namespaces non actifs raccordés au préflight/CREATE retenu. Vingt-deux fonctions
 ciblées PASS, reprise du parent d'oracles corrigés PASS, revue source et check

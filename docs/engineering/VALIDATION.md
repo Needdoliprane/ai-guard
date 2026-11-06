@@ -1,5 +1,112 @@
 # Validation courante
 
+## 6 novembre — composition broker, prérequis Kubernetes et projection
+
+La référence735cda716bad71a42a9a65c31badb90d07c30809 assemble le broker
+e9415ac, les prérequis Kubernetes5a04979 et la projection9528d0f, sans conflit
+de code. Le gel Git exact `composed-735cda7` et sa cible neuve sont compilés
+par Luna en QA C, offline/locked : `cargo check --all-targets` RC0,46,92s,
+118 avertissements bibliothèque/3 lib-test. Log SHA-256
+`07ef0aa826ea7111e9abe155665b3d616bf3bbc9159a4d21b4a53da4885da647`.
+Cette compilation clôt la vérification de composition annoncée ci-dessous ;
+les tests de comportement gardent les gels et limites propres à chaque lot.
+Les mises à jour documentaires suivantes ne changent aucun code de ce gel.
+
+La QA bd944 conserve jusqu'à sa fermeture son historique oom1/oom_kill1 du
+check précédent sous4Gio. Après tous les RC terminaux et inventaire init/sleep
+seuls, elle est arrêtée puis retirée par son ID exact à02:05:03.909285092UTC,
+PID0/exit143/OOMKilled=true (historique conservé). Les sources, logs et
+checkpoints restent privés ; aucune donnée ou volume utilisateur n'était monté.
+Les réponses wire de fixture ont été lues et vérifiées dans cette QA seule.
+L'environnement indépendant du prochain test Full reste ouvert ; cet état
+ne prouve pas une qualification runtime ou cloud. G09 FAIL,0/12 gates clos.
+
+## 6 novembre — projection fédérée du registre
+
+Base856dd0e, worktree dédié `codex/federation-runtime-20261106`, commit9528d0f.
+Endpoint technique versionné, WorkerV1 et rôles inchangés, sans migration.
+Les guides et le contrat API distinguent gateway viewer/runner et proxy
+dashboard viewer seul. Une association historique d'autorité peut postdater
+le fait : elle ne prouve pas son broker d'exécution ni sa santé actuelle.
+
+### RED et erreurs de harnais
+
+Le premier test Rust préparé pour schéma6 était invalide ; remplacé avant
+exécution. Le second échoue dans la préparation des workers avant HTTP
+(CPU/autorités invalides), log `94a16ce34b8e37fb6a7ba9e97bd641cd16d917c00779d6bdcd7b794f3df5c9a9` :
+NOT_RUN pour la route. La fixture corrigée utilise les vraies admissions
+supervisées et des autorités UUID. Ses trois parents atteignent404vs200,
+RC101, log `2366b51e5f3bd25330b4e9cb876b64fbbdb33f32404f3617b6583a0751f71dde`.
+Le backend est implémenté ensuite.
+
+Le Node initial confirme l'absence du parseur et de l'accès GET,3FAIL,
+log `df00e5abbca23b8cda3ff1768966daacb90b1b83b15d40ddd4bb1b2ea5fa6ef8`.
+Le premier cas legacy manque unknown_reason :3FAIL/1PASS, sans oracle legacy
+isolé, log `5392d56c79a853375d01ec9a5734d9c2133cee77658da2038f01238a30175299`.
+La fixture corrigée35772fa atteint3PASS/1legacyRED,
+log `74ffbacf84d6e21bb7fdcaa51dfa3bee8c2295763483d9b953674aa77e32dc48`,
+avant implémentation de registry_status et de son bandeau/procédure.
+
+### GREEN réellement exécutés
+
+| Sélection | Résultat et SHA-256 du log |
+|---|---|
+| federation_workers_api | RC0,3PASS ; `6245ae0e7b17f6859a61c3483685c7ff0d6732273d22eff7662f7571a299da21`. |
+| worker_relay_api::directed_worker_messages_are_tenant_scoped_idempotent_and_do_not_duplicate_bodies_in_audit | RC0,1PASS/16filtrés ; `539e195dce96d5a6c61e9b1524bee61cbf31c946af52e3810f206cb2c50a653f`. Vrais bindings Running A1/A2/B1 et send positif ; seul le nouveau chemin refusé401 est ajouté. |
+| federation-wire.test.mjs | RC0,1PASS ; `6d4d41f4112783f8d8541a877435409cd1488029e5e75a0410de9e5fc1892e6f`. Consomme les trois réponses HTTP Rust réelles dans la même QA. |
+| federation-control/control/api Node, gel final | RC0,24PASS ; `b97bbf49e91cf894317c93eb4babc8b60f13768f6488d72e4fe5488775f2a901`. |
+| TypeScript5.9.3 --noEmit, gel final | RC0,log vide SHA `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. |
+| check --all-targets après correction mémoire | RC0,25,63s,118 avertissements lib/3tests ; `41b610eecda0ca71b3e6a4904fed3b41359438c76851655952036234cb005114`. |
+
+Le premier tsc échoue RC2 sur replaceChildren recevant un élément nullable,
+log `1b8acdefa1dde2d275e4f50ff9e4e0bf0fb3e90e9b5c083ff32daf7df5349d24`.
+Seul cet appel ajoute le repli texte vide ; vue finale43bfcd93. La revue corrige
+aussi un pathname d'attente navigateur, l'oracle100/101 avec IDs distincts
+triés et témoin100positif, et les libellés de rôles des deux guides.
+Le navigateur n'a pas été exécuté pour créditer ces modifications de harnais.
+
+Le premier all-targets s'arrête avant achèvement par rustc SIGKILL, RC101,
+log `e438bbeb7e187d64059373f8106ecc112b94bbc0fd014423bfa3ceef6c547cf7`.
+Le cgroup rapporte oom1/oom_kill1 sous4Gio, cohérent avec la contrainte mémoire.
+La même QA passe à6Gio/swap0, admission Config+noyau revérifiée ; retry de
+la même source/cible, sans changement produit, RC0 ci-dessus. Les tests déjà
+verts ne sont pas répétés pour masquer cette erreur de ressource.
+
+Luna utilise Rust1.99.1 Linux ARM64 et Node24.22.2 dans l'image2115d432…a207,
+UID1000/caps0/NNP/seccomp, réseau none, namespaces privés, racine/inputs/registre
+public RO, CPU2/PID256, scratch2Gio/65536inodes, core0/nofile1024/fsize512Mio.
+Env vide puis allowlist, Cargo offline/locked/jobs2/debug0. TypeScript provient
+du cache public local existant, SRI recoupé au lock, sans téléchargement.
+Le gel Rust green1 et les fichiers Rust green2 sont identiques ; le dernier
+delta est front/test/docs. Les sorties wire ne sont jamais exportées sur l'hôte.
+Les parents API utilisent les vraies identités, transactions et réponses HTTP ;
+leurs snapshots runtime sont des fixtures déclarées. Ils ne lancent pas les
+trois conteneurs de la recette de qualification sur moteur réel.
+
+```sh
+AIGUARD_FEDERATION_WIRE_DIR=/scratch/federation-wire-green \
+  cargo test --offline --locked --manifest-path /inputs/federation-green/Cargo.toml \
+  --test federation_workers_api -- --test-threads=1
+AIGUARD_FEDERATION_WIRE_DIR=/scratch/federation-wire-green \
+  node --experimental-strip-types --test /inputs/federation-green/front/tests/federation-wire.test.mjs
+node --experimental-strip-types --test /inputs/federation-green2/front/tests/federation-control.test.mjs \
+  /inputs/federation-green2/front/tests/control.test.mjs /inputs/federation-green2/front/tests/api.test.mjs
+node /scratch/ts-federation/package/bin/tsc --noEmit -p /inputs/federation-green2/front/tsconfig.json
+```
+
+Revue indépendante source, contrats et documents sans blocage restant.
+Fmt sur8sources, diff, manifests, comparaison app/gel PASS. Quatre documents,
+198liens relatifs/0manquant ; scan22fichiers/3secretsconnus/0correspondance.
+Checkpoint privé des sources et14logs, manifeste
+`57c578c072ebe83372ca1083542a1407d22ff54c4accd1ed21c1e27e8ad91b72`.
+Ces résultats restent propres au lot fédération ; la compilation de
+composition735cda7 est créditée séparément ci-dessus.
+BLOCKED : build Vite complet et navigateur, paquets binaires Linux ARM64 et
+Playwright/Chromium absents du cache autorisé ; Clippy absent de l'image.
+NOT_RUN : parcours SSO humain de cette vue, vraie fédération multi-hôtes,
+transport runtime du relais, Kubernetes,100workers et facturation. Les quatre
+autres preuves ne remplacent pas ces qualifications. G09 FAIL,0/12gates clos.
+
 ## 6 novembre — prérequis Kubernetes explicites
 
 Base du gel `4856db6` (proposition documentaire sur856dd0e). Le RED ajoute
@@ -41,8 +148,8 @@ Le check final toutes cibles du même gel green2 termine RC0,1min11s,
 118 avertissements bibliothèque/3 lib-test ; log
 `c948c4005af688fa517174c506ba38f4146a64c4998ee7b7531f625a63168cce`.
 Ces PASS et checks portent sur le gel green2 basé sur4856db6. Le worktree a
-depuis intégré le drainage broker e9415ac ; cette composition demande encore
-sa compilation distincte, elle n'est pas créditée par les résultats ci-dessus.
+depuis intégré le drainage broker e9415ac ; la compilation de composition735cda7
+est créditée séparément en tête de ce document.
 
 Rust1.99.1 Linux ARM64, image épinglée `2115d432…a207`, même QA isolée2abf
 que la validation du drainage : UID1000/caps0/NNP/seccomp, réseau none, racine

@@ -1,5 +1,18 @@
 # Stratégie de qualification
 
+## Projection centrale workers et brokers
+
+`--test federation_workers_api` couvre les réponses réelles du gateway A/B,
+historique d'autorités et schéma2. Le parent dirigé existant de
+`worker_relay_api` vérifie aussi le refus avec une identité worker réelle.
+Le hook optionnel privé `AIGUARD_FEDERATION_WIRE_DIR` conserve trois réponses
+dans la même QA pour `front/tests/federation-wire.test.mjs` ; aucune réponse
+de fixture JavaScript ne remplace ce raccord Rust→TS. Aucun fichier n'est
+produit sans l'option. Le dossier doit être privé et neuf, les noms exclusifs.
+Les tests Node control/api/federation et tsc sont ciblés ; navigateur, build
+complet et moteurs ont leurs statuts séparés dans les
+[preuves](VALIDATION.md#6-novembre--projection-fédérée-du-registre).
+
 ## Prérequis Kubernetes explicites
 
 Sélections ciblées : `--lib runtime::kubernetes::prerequisites_tests::`,
