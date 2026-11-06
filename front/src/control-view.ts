@@ -3,9 +3,9 @@ import { button, el, icon } from "./dom.ts";
 import { asText, formatBytes, formatDate, formatMetric } from "./model.ts";
 import {
   allocationDuration, controlPageUrl, formatExactDecimal, parseAllocationPage,
-  parseQuota, parseWorker, parseWorkerPage, relatedWorkers, workerRelation, workerUrl,
+  parseQuota, parseWorker, parseFederationWorkerPage as parseWorkerPage, relatedWorkers, workerRelation, workerUrl,
 } from "./control.ts";
-import type { AllocationRecord, ControlPage, ControlView, QuotaRecord, WorkerRecord } from "./control.ts";
+import type { AllocationRecord, AuthorityBrokerAssociation, ControlPage, ControlView, QuotaRecord, WorkerRecord } from "./control.ts";
 import type { Agent, Sandbox } from "./types.ts";
 
 interface Resource<T> {
@@ -45,6 +45,29 @@ function state(worker: WorkerRecord) {
   const [label, tone] = labels[worker.state];
   return badge(label, tone);
 }
+function brokerAssociation(association: AuthorityBrokerAssociation | undefined, label: string) {
+  const node = el("div", "stacked", el("span", "muted", label));
+  if (association?.status === "registry_unavailable") {
+    node.append(el("span", "muted", "Association inconnue · registre indisponible"));
+  } else if (!association || association.status === "authority_unknown") {
+    node.append(el("span", "muted", "Association inconnue · autorité absente"));
+  } else if (association.status === "unregistered" || !association.broker) {
+    node.append(el("span", "muted", "Autorité non enregistrée"));
+  } else {
+    const broker = association.broker;
+    const names: Record<typeof broker.state, string> = {
+      unseen: "Aucun heartbeat", current: "Bail courant à l’évaluation", stale: "Bail périmé",
+      expired: "Autorisation expirée", revoked: "Autorisation révoquée", clock_uncertain: "Horloge incertaine",
+    };
+    node.append(el("span", "mono control-id", broker.broker_id),
+      badge(names[broker.state], broker.state === "current" ? "neutral" : "amber"),
+      el("span", "muted", `Runtime du registre : ${association.runtime_kind}`),
+      el("span", "muted", broker.last_received_at ? `Dernière réception : ${formatDate(broker.last_received_at, true)}` : "Aucune réception enregistrée"));
+    if (!association.in_current_grant) node.append(el("span", "control-warning", "Autorité retirée du grant courant"));
+    if (!association.runtime_matches) node.append(el("span", "control-warning", "Runtime différent du fait worker"));
+  }
+  return node;
+}
 function failure(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 404) return "Cette lecture n’est pas disponible sur le collecteur connecté. Vérifiez sa version.";
@@ -74,6 +97,7 @@ export class ControlDashboard {
   #view: ControlView | null = null;
   #slot: HTMLElement | null = null;
   #closed = false;
+  #migrationProcedureOpen = false;
   #connected = false;
   #generation = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -91,6 +115,7 @@ export class ControlDashboard {
   }
   close() {
     this.#closed = true;
+    this.#migrationProcedureOpen = false;
     clearTimeout(this.#timer);
     this.#slot = null;
     this.#workers = collection();
@@ -206,6 +231,21 @@ export class ControlDashboard {
     return el("div", "empty-state", el("span", "empty-icon", icon("box")),
       el("h3", "", title), el("p", "", description));
   }
+  #registryLimit() {
+    if (this.#workers.value?.registry_status !== "migration_required") return null;
+    const summary = el("summary", "", "Voir la procédure de migration du registre");
+    summary.dataset.focusKey = "registry-migration-procedure";
+    const procedure = el("details", "", summary,
+      el("p", "", "Migrations successives 2 → 3 → 4 → 5 → 6, à partir de la version constatée. Faire intervenir l’opérateur de confiance sur l’installation existante."),
+      el("p", "", "Arrêter tous les consommateurs du contrôle, préserver les données et ancres existantes, puis appliquer migrate-control avec une sauvegarde privée neuve distincte pour chaque étape et le max-events réel de l’installation. Vérifier chaque rapport avant de poursuivre."),
+      el("p", "", "Procédure et commandes : docs/setup/workloads/README.fr.md, section Préparer le stockage sans activer l’exécution. Le dashboard n’effectue aucune migration et cette lecture n’active aucune exécution."));
+    procedure.open = this.#migrationProcedureOpen;
+    procedure.addEventListener("toggle", () => { if (!this.#closed) this.#migrationProcedureOpen = procedure.open; });
+    return el("div", "control-warning",
+      el("p", "", "Registre des brokers indisponible · migration explicite requise"),
+      el("p", "", "Les workers durables restent visibles. Leurs associations aux brokers restent inconnues tant que le registre n’est pas migré."),
+      procedure);
+  }
   #pagination<T>(target: Collection<T>, kind: "workers" | "usage", parse: (input: unknown) => ControlPage<T>) {
     const summary = el("span", "control-page-summary", target.value ?
       `${target.value.items.length} résultat${target.value.items.length === 1 ? "" : "s"} sur cette page · page ${target.history.length + 1}${target.history.length || target.value.next_cursor ? " · lecture partielle" : ""}` : "Périmètre : client du jeton de lecture");
@@ -259,12 +299,14 @@ export class ControlDashboard {
     return el("section", "panel control-panel",
       el("div", "panel-heading", el("div", "", el("h2", "", "Registre des workers"),
         el("p", "", "État durable du contrôle. Le dernier état runtime reste une observation datée, distincte d’une disponibilité actuelle."),
-        el("p", "muted", "Les autorités identifient le lancement déclaré et la dernière inspection enregistrée. Elles ne prouvent ni un hôte ou broker associé, ni un inventaire runtime complet."),
+        el("p", "muted", "Les brokers indiqués sont les propriétaires historiques des autorités du lancement et de l’inspection. Une association peut être enregistrée après ces faits : elle ne prouve pas quel broker les a effectués. Inventaire runtime inconnu."),
+        page?.evaluated_at ? el("p", "muted", `Évaluation serveur : ${formatDate(page.evaluated_at, true)}. Une transaction par page ; traversée live, sans total ni instantané global.`) : null,
         el("p", "control-scroll-hint", "Faites défiler le tableau horizontalement pour consulter toutes les colonnes."))),
+      this.#registryLimit(),
       !page ? this.#empty(this.#workers.loading ? "Chargement des workers…" : "Registre indisponible",
         "La liste reste inconnue tant que cette lecture n’a pas abouti.") :
       !page.items.length ? this.#empty("Aucun worker sur cette page", "Aucun enregistrement dans ce périmètre de lecture. Les sessions s’autorisent depuis le CLI de confiance.") :
-      table("Workers du client authentifié", ["Worker / session", "État du contrôle", "Dernière observation runtime", "Réservation", ""],
+      table("Workers du client authentifié", ["Worker / session", "État du contrôle", "Dernière observation runtime", "Associations historiques aux brokers", "Réservation", ""],
         page.items.map((worker) => el("tr", "",
           el("td", "", el("strong", "mono control-id", worker.worker_id),
             el("span", "muted mono control-id", worker.launch.session_id),
@@ -279,6 +321,8 @@ export class ControlDashboard {
             el("span", "mono control-id", worker.last_observation.inspection?.authority_id ?? "Inconnue"),
             el("span", "muted", worker.last_observation.inspection?.runtime_kind ?? "Runtime inspecté inconnu"),
             el("span", "muted", formatDate(worker.last_observation.observed_at, true))) : el("span", "muted", "Inconnue · aucune observation")),
+          el("td", "", brokerAssociation(worker.federation?.launch_broker, "Autorité du lancement"),
+            brokerAssociation(worker.federation?.observation_broker, "Autorité de l’inspection")),
           el("td", "", badge(worker.quota_held ? "Quota retenu" : "Quota libéré", worker.quota_held ? "blue" : "neutral"),
             el("p", "muted", `${formatMetric(worker.launch.cpu_millis)} milliCPU · ${formatBytes(worker.launch.memory_bytes)}`)),
           el("td", "", action("Détails", `worker-${worker.worker_id}`, () => { void this.showWorker(worker.worker_id); }))))),
@@ -354,7 +398,8 @@ export class ControlDashboard {
       }, this.#workers.loading)) : null;
     error?.setAttribute("role", "alert");
     slot.replaceChildren(el("h3", "", "Workers liés explicitement"), this.#status(this.#workers),
-      el("p", "muted", "Source : registre durable /api/v1/workers du client authentifié. Recherche limitée à la page chargée ; aucun total du client n’est déduit. Une session identique ne prouve pas l’exécution d’un agent."),
+      el("p", "muted", "Source : projection durable /api/v1/federation/workers du client authentifié. Recherche limitée à la page chargée ; aucun total du client n’est déduit. Une session identique ne prouve pas l’exécution d’un agent."),
+      this.#registryLimit() ?? "",
       error ?? "",
       !page ? el("p", "muted", this.#workers.loading ? "Chargement des liens du registre…" : "Les liens restent inconnus tant que le registre n’a pas été lu.") :
         workers.length ? el("ul", "resource-link-list", ...workers.map((worker) => el("li", "",

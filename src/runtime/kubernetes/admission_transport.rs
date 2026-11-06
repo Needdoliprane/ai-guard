@@ -22,7 +22,7 @@ impl KubernetesRuntime {
         }
         // The two namespace anchors detect divergence but are not an atomic
         // NamespaceUID precondition on the following Pod CREATE.
-        self.verify_authority().await?;
+        self.verify_active_authority().await?;
         let intent = permission.intent().clone();
         let bytes = match self
             .transport
@@ -39,7 +39,7 @@ impl KubernetesRuntime {
         };
         // Recheck after a safe 201; a changed or unreadable authority cannot
         // become a successful retained observation after the possible effect.
-        if let Err(error) = self.verify_authority().await {
+        if let Err(error) = self.verify_active_authority().await {
             return Ok(unknown(error));
         }
         Ok(outcome)
@@ -55,6 +55,7 @@ fn unknown(error: KubernetesError) -> KubernetesCreateOutcomeV1 {
         | KubernetesError::TransportUnavailable
         | KubernetesError::Busy => (KubernetesCreateUnknownReasonV1::TransportUnknown, None),
         KubernetesError::AuthorityChanged
+        | KubernetesError::NamespaceNotActive
         | KubernetesError::InvalidAuthority
         | KubernetesError::InvalidCredentials => {
             (KubernetesCreateUnknownReasonV1::AuthorityChanged, None)

@@ -11,7 +11,7 @@ use crate::{
         BeforeKubernetesPreflightGuard, KubernetesAdmissionGapV1, KubernetesAuthorityV1,
         KubernetesCredentials, KubernetesDiagnosticsV1, KubernetesError,
         KubernetesPreflightObservationV1, KubernetesPreflightPlanV1, KubernetesPreflightTargetV1,
-        KubernetesRuntime,
+        KubernetesPrerequisitesV1, KubernetesRuntime,
     },
 };
 use clap::{ArgGroup, Args, Subcommand};
@@ -44,9 +44,18 @@ pub struct KubernetesArgs {
 #[derive(Subcommand)]
 enum KubernetesCommand {
     /// Inspect an explicit Kubernetes authority over HTTPS; never admit work.
-    Doctor(DoctorArgs),
+    Doctor(DoctorCommandArgs),
     /// Audit and inspect a closed Pod profile using server-side dry-run; never start work.
     Preflight(PreflightArgs),
+}
+
+#[derive(Args)]
+struct DoctorCommandArgs {
+    #[command(flatten)]
+    connection: DoctorArgs,
+    /// Query the current identity's explicit permissions with SSAR POSTs; never grant admission.
+    #[arg(long)]
+    check_permissions: bool,
 }
 
 #[derive(Args)]
@@ -149,6 +158,8 @@ struct KubernetesDoctorReportV1 {
     admission_available: bool,
     diagnostics: KubernetesDiagnosticsV1,
     admission_gap_reasons: Vec<AdmissionGapReasonV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prerequisites: Option<KubernetesPrerequisitesV1>,
 }
 
 #[derive(Serialize)]
@@ -235,17 +246,28 @@ fn load_connection(args: DoctorArgs) -> Result<LoadedConnection, KubernetesCliEr
     })
 }
 
-async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
+async fn doctor(args: DoctorCommandArgs) -> Result<(), KubernetesCliError> {
     let LoadedConnection {
         source,
         runtime,
         protected,
-    } = load_connection(args)?;
+    } = load_connection(args.connection)?;
     let redactor = Redactor::new(protected);
-    let diagnostics = runtime
-        .doctor()
-        .await
-        .map_err(KubernetesCliError::Inspection)?;
+    let (diagnostics, prerequisites) = if args.check_permissions {
+        let (diagnostics, prerequisites) = runtime
+            .doctor_with_prerequisites()
+            .await
+            .map_err(KubernetesCliError::Inspection)?;
+        (diagnostics, Some(prerequisites))
+    } else {
+        (
+            runtime
+                .doctor()
+                .await
+                .map_err(KubernetesCliError::Inspection)?,
+            None,
+        )
+    };
     let admission_gap_reasons = diagnostics
         .admission_gaps
         .iter()
@@ -260,6 +282,7 @@ async fn doctor(args: DoctorArgs) -> Result<(), KubernetesCliError> {
         admission_available: false,
         diagnostics,
         admission_gap_reasons,
+        prerequisites,
     };
     let value = serde_json::to_value(&report).map_err(|_| KubernetesCliError::OutputUnavailable)?;
     if redactor.value_unclipped(&value) != value {
@@ -372,6 +395,7 @@ fn runtime_failure(error: KubernetesError) -> (&'static str, Option<u16>) {
             ApiRejected(_) => "api_rejected",
             InvalidResponse => "invalid_response",
             AuthorityChanged => "authority_changed",
+            NamespaceNotActive => "namespace_not_active",
             PodChanged => "pod_changed",
             InvalidPreflightPlan => "invalid_preflight_plan",
             PreflightAuthorizationDenied => "preflight_authorization_denied",

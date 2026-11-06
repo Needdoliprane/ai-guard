@@ -11,6 +11,9 @@ use serde::de::DeserializeOwned;
 use std::{sync::atomic::AtomicBool, time::Duration};
 use tokio::sync::Semaphore;
 
+#[path = "prerequisites_transport.rs"]
+mod prerequisites;
+
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_PREFLIGHT_REQUEST_BYTES: usize = 64 * 1024;
 const MAX_CREATE_REQUEST_BYTES: usize = 32 * 1024;
@@ -220,16 +223,22 @@ async fn read_response<T: DeserializeOwned>(response: reqwest::Response) -> Kube
     let bytes = read_response_bytes(response).await?;
     serde_json::from_slice(&bytes).map_err(|_| KubernetesError::InvalidResponse)
 }
-async fn read_response_bytes(mut response: reqwest::Response) -> KubernetesResult<Vec<u8>> {
+async fn read_response_bytes(response: reqwest::Response) -> KubernetesResult<Vec<u8>> {
+    read_response_bytes_limited(response, MAX_RESPONSE_BYTES).await
+}
+async fn read_response_bytes_limited(
+    mut response: reqwest::Response,
+    maximum: usize,
+) -> KubernetesResult<Vec<u8>> {
     if response
         .content_length()
-        .is_some_and(|size| size > MAX_RESPONSE_BYTES as u64)
+        .is_some_and(|size| size > maximum as u64)
     {
         return Err(KubernetesError::ResponseTooLarge);
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(transport_error)? {
-        if chunk.len() > MAX_RESPONSE_BYTES.saturating_sub(bytes.len()) {
+        if chunk.len() > maximum.saturating_sub(bytes.len()) {
             return Err(KubernetesError::ResponseTooLarge);
         }
         bytes.extend_from_slice(&chunk);

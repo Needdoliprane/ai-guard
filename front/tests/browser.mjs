@@ -5,6 +5,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { federationPage } from "./federation-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -104,6 +105,7 @@ const secondWorkerId = "00000000-0000-4000-8000-000000000002";
 const worker = {
   worker_id: workerId, state: "in_doubt", quota_held: true, revision: 4,
   launch: { version: 1, session_id: workerId, profile: "strict", runtime_kind: "docker",
+    authority_id: "qa-federation-authority",
     provider: malicious, cpu_millis: 2000, memory_bytes: 1073741824, pids_limit: 256,
     timeout_seconds: 60, network: "none" },
   attempt: { attempt_id: workerId, stable_name: "worker-known", container_id: null, volume_name: "volume-known" },
@@ -121,6 +123,14 @@ const streams = new Set();
 let streamCount = 0;
 const requests = [];
 const json = (response, value) => {
+  if (response.federationRead) value = federationPage({ ...value,
+    registry_status: controlMode === "legacy" ? "migration_required" : "available" }, {
+    authority_id: "qa-federation-authority",
+    broker: { broker_id: "90000000-0000-4000-8000-000000000001",
+      current_incarnation_id: "90000000-0000-4000-8000-000000000002", state: "stale",
+      grant_revision: "2", heartbeat_revision: "1", last_received_at: "2026-11-06T01:00:00.000Z",
+      lease_expires_at: "2026-11-06T01:02:00.000Z" },
+  });
   response.writeHead(200, {
     "content-type": "application/json",
     "cache-control": "no-store",
@@ -129,6 +139,7 @@ const json = (response, value) => {
 };
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
+  response.federationRead = url.pathname === "/api/v1/federation/workers";
   requests.push({
     path: request.url,
     auth: request.headers.authorization,
@@ -143,7 +154,7 @@ const server = createServer(async (request, response) => {
     }
     if (url.pathname === "/api/v1/identity") return json(response, { tenant_id: "local", role: "viewer" });
     if (url.pathname.startsWith("/api/v1/")) {
-      if (controlReadBarrier && url.pathname === "/api/v1/workers") await controlReadBarrier;
+      if (controlReadBarrier && url.pathname === "/api/v1/federation/workers") await controlReadBarrier;
       if (controlMode === "outage" || controlMode === "forbidden") {
         response.writeHead(controlMode === "forbidden" ? 403 : 503);
         response.end();
@@ -154,14 +165,14 @@ const server = createServer(async (request, response) => {
           max_memory_bytes: 3221225472, max_timeout_seconds: 3600 },
         held_workers: 1, held_cpu_millis: 2000, held_memory_bytes: 1073741824,
       });
-      if (url.pathname === "/api/v1/workers" && controlMode === "large") {
+      if (url.pathname === "/api/v1/federation/workers" && controlMode === "large") {
         const offset = url.searchParams.has("cursor") ? 50 : 0;
         const items = Array.from({ length: 50 }, (_, index) => ({ ...worker,
           worker_id: `00000000-0000-4000-8000-${String(offset + index + 1).padStart(12, "0")}`,
         }));
         return json(response, { items, next_cursor: offset ? null : items.at(-1).worker_id });
       }
-      if (url.pathname === "/api/v1/workers") return json(response,
+      if (url.pathname === "/api/v1/federation/workers") return json(response,
         controlMode === "invalid" ? { items: [{ worker_id: workerId }], next_cursor: null } : {
           items: controlMode === "empty" ? [] : [url.searchParams.has("cursor") ?
             { ...worker, worker_id: secondWorkerId, state: "cancelled", quota_held: false } : worker],
@@ -505,6 +516,11 @@ try {
   controlReadBarrier = null;
   releaseControlRead();
   await page.locator(".control-view").getByText("État incertain", { exact: true }).waitFor();
+  await page.getByRole("columnheader", { name: "Associations historiques aux brokers", exact: true }).waitFor();
+  assert.equal(await page.locator(".control-view").getByText("90000000-0000-4000-8000-000000000001", { exact: true }).count(), 1);
+  assert.equal(await page.locator(".control-view").getByText("Bail périmé", { exact: true }).count(), 1);
+  assert.equal(await page.locator(".control-view").getByText("Autorité retirée du grant courant", { exact: true }).count(), 1);
+  assert.ok((await page.locator(".control-view").innerText()).includes("elle ne prouve pas quel broker les a effectués"));
   await page.screenshot({ path: join(root, "tests", "artifacts", "workers-desktop.png"), fullPage: true });
   assert.ok((await page.locator(".control-view").innerText()).includes("Inconnue · aucune observation"));
   assert.equal(await page.locator("#app img").count(), 0, "Le fournisseur worker reste du texte");
@@ -517,7 +533,7 @@ try {
   const detachedTrigger = await detailTrigger.elementHandle();
   await page.keyboard.press("Enter");
   await page.getByRole("dialog").getByText("Aucune observation reçue. L’état et la durée runtime restent inconnus.", { exact: true }).waitFor();
-  const refreshedWhileModal = page.waitForResponse((response) => response.url().endsWith("/api/v1/workers?limit=50"));
+  const refreshedWhileModal = page.waitForResponse((response) => response.url().endsWith("/api/v1/federation/workers?limit=50"));
   const modalEvent = { seq: 16, id: "worker-modal-refresh", kind: "control.worker.transition", timestamp: "2026-10-29T12:19:00Z" };
   for (const stream of streams) stream.write(`id: ${modalEvent.seq}\nevent: audit\ndata: ${JSON.stringify(modalEvent)}\n\n`);
   await refreshedWhileModal;
@@ -535,7 +551,7 @@ try {
   await page.keyboard.press("Enter");
   await page.getByRole("dialog").getByText("Aucune observation reçue. L’état et la durée runtime restent inconnus.", { exact: true }).waitFor();
   controlMode = "empty";
-  const disappearedWhileModal = page.waitForResponse((response) => response.url().endsWith("/api/v1/workers?limit=50"));
+  const disappearedWhileModal = page.waitForResponse((response) => response.url().endsWith("/api/v1/federation/workers?limit=50"));
   const missingEvent = { ...modalEvent, seq: 17, id: "worker-modal-disappeared" };
   for (const stream of streams) stream.write(`id: ${missingEvent.seq}\nevent: audit\ndata: ${JSON.stringify(missingEvent)}\n\n`);
   await disappearedWhileModal;
@@ -553,7 +569,7 @@ try {
   await page.locator(".control-view").getByText("État incertain", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Page suivante", exact: true }).click();
   await page.getByText("Réservation annulée", { exact: true }).waitFor();
-  assert.ok(requests.some((item) => item.path === `/api/v1/workers?limit=50&cursor=${workerId}`));
+  assert.ok(requests.some((item) => item.path === `/api/v1/federation/workers?limit=50&cursor=${workerId}`));
   assert.equal(await page.locator(".control-view").evaluate((node) => node.contains(document.activeElement)), true, "Le focus reste dans le contenu après pagination");
   await page.getByRole("button", { name: "Page précédente", exact: true }).click();
   await page.locator(".control-view").getByText("État incertain", { exact: true }).waitFor();
@@ -566,8 +582,17 @@ try {
   await page.getByRole("button", { name: "Réessayer", exact: true }).click();
   await page.getByText(/Contrat de lecture v1 incomplet/).waitFor();
   assert.equal(await page.getByText("Aucun worker sur cette page", { exact: true }).count(), 0, "Une réponse invalide ne devient pas une liste vide");
-  controlMode = "data";
+  controlMode = "legacy";
   await page.getByRole("button", { name: "Réessayer", exact: true }).click();
+  await page.getByText("Registre des brokers indisponible · migration explicite requise", { exact: true }).waitFor();
+  assert.equal(await page.locator(".control-view").getByText("État incertain", { exact: true }).count(), 1,
+    "Les vrais workers restent visibles sans registre broker");
+  await page.getByText("Voir la procédure de migration du registre", { exact: true }).click();
+  await page.getByText(/Migrations successives 2 → 3 → 4 → 5 → 6/).waitFor();
+  assert.equal(await page.locator(".control-view").getByText("Autorité non enregistrée", { exact: true }).count(), 0,
+    "Une absence structurelle de registre ne devient pas une autorité non enregistrée");
+  controlMode = "data";
+  await page.getByRole("button", { name: "Actualiser", exact: true }).click();
   await page.getByText("Lecture réussie", { exact: true }).waitFor();
   controlMode = "large";
   await page.getByRole("button", { name: "Actualiser", exact: true }).click();
@@ -585,13 +610,13 @@ try {
   controlMode = "data";
   await page.getByRole("button", { name: "Première page", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".control-table tbody tr").length === 1);
-  const readsBeforeBurst = requests.filter((item) => item.path.startsWith("/api/v1/workers?")).length;
+  const readsBeforeBurst = requests.filter((item) => item.path.startsWith("/api/v1/federation/workers?")).length;
   for (let index = 0; index < 200; index++) {
     const event = { seq: 1000 + index, id: `burst-${index}`, kind: "control.worker.transition", timestamp: "2026-10-29T12:20:00Z" };
     for (const stream of streams) stream.write(`id: ${event.seq}\nevent: audit\ndata: ${JSON.stringify(event)}\n\n`);
   }
   await page.waitForTimeout(2300);
-  const burstReads = requests.filter((item) => item.path.startsWith("/api/v1/workers?")).length - readsBeforeBurst;
+  const burstReads = requests.filter((item) => item.path.startsWith("/api/v1/federation/workers?")).length - readsBeforeBurst;
   assert.ok(burstReads >= 1 && burstReads <= 2, "200 événements worker déclenchent une relecture bornée du registre");
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   await page.getByRole("button", { name: "Détails", exact: true }).first().click();

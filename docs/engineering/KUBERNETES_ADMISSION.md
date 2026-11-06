@@ -1,5 +1,72 @@
 # Admission Kubernetes — proposition de création retenue avant exécution
 
+## Proposition du 6 novembre — sessions exécutables et canal worker
+
+**Décision du mainteneur attendue avant cette extension.** La direction du
+4 novembre ci-dessous ne couvre pas ce nouveau profil. Cette proposition ne
+change aucun code, constructeur d'activation ou état du cluster.
+
+Le profil retenu V1, ses hashes, ses journaux et son programme `/usr/bin/id`
+restent lisibles sans conversion. Une vraie session demande un profil V2 :
+image immuable, commande/arguments séparés, ressources, identité de session,
+résolution fournisseur, binding privé de credential, manifest de workspace et
+transport batch/interactif. Les valeurs de secrets et l'argv métier ne figurent
+pas dans le PodSpec : un mode bootstrap Rust du binaire existant attend le
+handoff autorisé avant toute commande métier.
+Le dispatch reste versionné : aucune capacité ou factory V1 ne peut être
+convertie en autorisation de session V2 ; les hashes historiques sont conservés.
+
+Le canal broker↔worker proposé partage le framing fermé avec le transport de
+relais Docker/Podman en [décision séparée](DECISIONS.md). Les transports restent
+spécifiques : exec-i dans le CID exact pour Docker/Podman, attach sans TTY au
+bootstrap pour Kubernetes, avec PTY Rust interne si nécessaire. Le contenu
+d'une trame ne prouve aucune identité ni autorité. Le broker conserve ses
+credentials de contrôle ; chaque opération est liée à la session/tentative,
+au runtime, à son époque et à une autorisation fraîche. Le sous-protocole
+Kubernetes proposé est [v5.channel.k8s.io](https://raw.githubusercontent.com/kubernetes/kubernetes/v1.36.1/staging/src/k8s.io/apimachinery/pkg/util/remotecommand/constants.go).
+Une bibliothèque WebSocket Rust maintenue et épinglée est à évaluer ; aucune
+dépendance ou téléchargement n'est encore ajouté.
+
+Le workspace de session doit être persistant pour une reprise après perte de
+Pod : PVC exact et UID retenu, StorageClass approuvée et exclusivité qualifiée,
+aucun hostPath/projet original. tmp/home restent temporaires. Import et export
+réutilisent les filtres, bornes, refus de liens et publication neuve existants.
+Le résultat du programme déclaré par bootstrap et le terminal observé du
+runtime restent distincts. Une perte de transport ou un nœud inaccessible ne
+libère pas quota/stockage et ne donne aucun droit de relancer ou supprimer.
+Le Pod référence le PVC par claimName, sans précondition d'UID : retenir cet UID
+ne garantit pas le montage attendu. Reprise et export attendent une preuve de
+propriété, d'exclusivité et de quiescence adaptée ; [ReadWriteOnce seul](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes)
+ne suffit pas. Ces prérequis bloquent l'activation tant qu'ils ne sont pas prouvés.
+
+Les étapes CREATE, release du bootstrap, handoff, démarrage métier, arrêt,
+réconciliation et suppression ont des capacités opaques distinctes. Intention
+et audit sont durables avant chaque effet ; UID/resourceVersion/spec/époque sont
+liés et revalidés. PATCH/DELETE utilisent leurs préconditions applicables.
+CREATE/attach adressent par nom et ne fournissent pas une précondition atomique
+NamespaceUID/PodUID : aucune suite GET→effet→GET n'est présentée comme garantie
+atomique. L'activation restera fermée jusqu'à preuve des identités, permissions,
+admission, isolation réseau et propriété/exclusivité réellement applicables.
+
+L'échéance est armée durablement avant release et indépendante du CLI. Le
+champ [activeDeadlineSeconds](https://v1-36.docs.kubernetes.io/docs/reference/kubernetes-api/core/pod-v1/)
+est une défense runtime supplémentaire, pas une preuve de quiescence. Export,
+retrait, suppression du PVC et libération de quota demandent chacun leur preuve
+admissible ; 2xx/404 d'une demande DELETE ne vaut pas terminal indépendant.
+
+Le changement de persistance sera une migration explicite, sauvegardée et
+coordonnée avec l'époque exclusive du relais ; son numéro/schéma définitif
+reste à fixer avec le stockage courant. Les anciens writers seront refusés,
+sans réécriture des traces V1 ni réactivation implicite. Le réseau reste coupé
+par défaut ; les parcours fournisseurs exigeant Internet restent refusés sans
+binding d'egress autorisé et qualifié.
+
+Portée de la décision demandée : **conception, code Rust et tests locaux** de
+ce profil/canal commun, du stockage de session et du lifecycle complet. Aucune
+action cluster/cloud, installation de service, lecture de secrets externes ou
+suppression de données existantes n'est incluse. La qualification Docker Desktop
+reste une étape distincte avec preuves réelles, pas des simulations.
+
 **4 novembre 2026 · direction approuvée pour conception/code/tests locaux ; aucune qualification.**
 Lecture initiale de la base `361bf69`. Le mainteneur a autorisé la direction
 et le code local décrits ci-dessous. Cet accord n'autorise aucun appel cluster,

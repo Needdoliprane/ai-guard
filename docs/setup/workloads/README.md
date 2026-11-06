@@ -33,7 +33,7 @@ For an existing schema 5 store, replace every installation reference below. The 
   --target-version 6 --max-events 100000 --confirm-control-stopped
 ```
 
-For older sources, apply each next migration with a separate new backup: 3→4→5→6, following [offline storage maintenance](../../operations.md#répertoire-sqlite-privé). Update all readers together; older binaries refuse newer schemas. Preserve tenant binding, namespace, events, consumed claims, credentials and verified backups. Never replace migration with a SQLite `user_version` edit. For container-owned storage, use the existing control UID/GID and its inspected existing data volume with other consumers stopped; the [identity guide](../identity/README.md#prepare-storage-and-authority) explains that maintenance boundary. Do not guess a volume name or initialize a replacement store.
+For older sources, apply each next migration with a separate new backup: 2→3→4→5→6, following [offline storage maintenance](../../operations.md#répertoire-sqlite-privé). Update all readers together; older binaries refuse newer schemas. Preserve tenant binding, namespace, events, consumed claims, credentials and verified backups. Never replace migration with a SQLite `user_version` edit. For container-owned storage, use the existing control UID/GID and its inspected existing data volume with other consumers stopped; the [identity guide](../identity/README.md#prepare-storage-and-authority) explains that maintenance boundary. Do not guess a volume name or initialize a replacement store.
 
 ## Enable named broker registry reads
 
@@ -345,6 +345,52 @@ After preparing the broker binding, a runner grants that broker's authority scop
 A new grant uses a previously unused incarnation UUID and a matching broker binding. Replacing a grant also requires a new incarnation and matching subject/binding; rotating a credential alone does not invent a new incarnation. Compare the durable grant revision, not a cached guess. A heartbeat carries the exact current heartbeat revision, the grant's incarnation and the next sequence (first 1, then previous+1). Heartbeat replay still requires a current authenticated binding and unexpired/unrevoked grant; a previous receipt does not restore authority. Runner mutations and heartbeat receipts contain broker metadata, grant/heartbeat revisions, operation/input hash and audit sequence/hash, with `replayed` explicitly reported.
 
 `last_heartbeat.heartbeat_provenance:"declared"` describes the broker assertion. `reception_provenance:"observed"` and `received_at` describe the gateway's reception, not a runtime effect. `lease_expires_at` is bounded by both reception plus the configured lease and `not_after`. Views expose `state` (`unseen`, `current`, `stale`, `expired`, `revoked`, `clock_uncertain`), `evaluated_at` and `runtime_inventory_complete:false`. A stale broker means its lease is no longer current; it does not mean zero workers, stopped workers, released quota or a complete runtime inventory. Preserve last known facts and investigate the same authority.
+
+## Read workers across registered brokers
+
+The gateway accepts `GET /api/v1/federation/workers?limit=50` from a technical
+viewer or runner. The technical Workers view uses the dashboard's read-only
+proxy, which accepts only a viewer credential; it refuses runner credentials.
+The authenticated credential selects the tenant; there is no tenant or
+authority selector. Worker/broker credentials and human credentials cannot
+use this route. The existing `/api/v1/workers` list and detail contracts remain
+unchanged. The new projection retains real workers from schemas2–5, with
+`registry_status:"migration_required"` and `registry_unavailable` associations;
+their broker registry is structurally absent. The view provides a named
+migration procedure, without performing a migration. Schema6 and later
+supported schemas report `registry_status:"available"`. An I/O, integrity or
+worker-read failure is an error, never this structural limit or an empty list.
+
+The separate version1 page contains `source:"tenant_worker_broker_registry"`,
+`consistency:"snapshot_per_page"`, `evaluated_at`,
+`runtime_inventory:"unknown"`, `registry_status`, `items` and `next_cursor`. Each item contains
+the existing `worker`, plus `launch_broker` and `observation_broker` resolved
+from their separate authority IDs in the same checked transaction. A missing
+authority is `authority_unknown`; an authority absent from the registry is
+`unregistered`. Neither means zero workers or a disconnected broker.
+
+A `registered` association reports the historical owning broker, its
+`current_incarnation_id`, current grant/heartbeat revisions as decimal strings,
+lease state and last received/expiry times. `in_current_grant` distinguishes
+historical ownership from inclusion in the current grant; `runtime_matches`
+compares the registered runtime kind with this worker fact. No credential or
+host path is included in this broker projection. An association may be
+registered after the worker's launch or observation. It does not prove which
+broker performed either action, runtime availability, a complete inventory
+or permission to run or exchange messages. Revoked and stale records remain
+visible.
+
+Pages are bounded to 1–100 rows (default50) and 512KiB. A byte-limited page may
+contain fewer rows; continue with its exact UUID `next_cursor`. Each page is
+coherent, but the live keyset traversal is not a frozen snapshot of all pages
+or a tenant total. Errors remain errors; the UI preserves its last successful
+page as stale and offers retry. This metadata view does not qualify remote
+broker connectivity, runtime relay transport or the 100-worker target.
+
+The unified workers view for named human/SSO access remains required and open.
+It needs an explicit applicable permission with audit and revocation;
+`read_metadata` or `read_broker_registry` alone does not imply this right.
+No human permission is broadened by this technical endpoint.
 
 ## Authorize directed messages
 

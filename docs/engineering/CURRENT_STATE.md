@@ -1,5 +1,45 @@
 # État constaté — suivi du développement
 
+## 6 novembre — projection centrale workers et brokers
+
+Le gateway expose une lecture versionnée séparée des WorkerV1 historiques.
+Une transaction par page associe les workers du tenant authentifié aux
+propriétaires historiques de leurs autorités de lancement et d'inspection.
+Le dashboard technique affiche provenance, incarnation courante, fraîcheur,
+divergence runtime/grant et limite de migration, sans inventer un inventaire
+runtime. Les workers des schémas2–5 restent visibles avec une limite explicite.
+
+Trois parents Rust, le canari avec identité worker réelle, la lecture TS des
+trois réponses HTTP réelles,24 tests Node et tsc passent. Revue indépendante
+traitée ; compilation toutes cibles après correction de ressource. Les erreurs
+de fixtures, TypeScript et OOM sont séparées dans les
+[preuves](VALIDATION.md#6-novembre--projection-fédérée-du-registre).
+Build frontend complet et navigateur BLOCKED par l'outillage offline absent.
+Vue humaine SSO unifiée, transport inter-workers, connexion physique multi-hôtes,
+fencing, sessions Kubernetes et qualifications restent obligatoires et ouverts.
+
+La nouvelle exigence P1 réseau est prise en compte : autorisations de
+destinations, audit avant connexion, révocation et couverture vérifiable sur
+les trois moteurs. Le mode bridge existant n'est pas ce contrôle ; la
+proposition de frontière avance séparément. G09 FAIL,0/12 gates clos.
+
+## 6 novembre — prérequis Kubernetes consommés par le CLI
+
+`kubernetes doctor --check-permissions` interroge les douze actions fixes du
+profil via SelfSubjectAccessReview. Le rapport distingue namespace actif,
+terminating/inconnu, avis allowed/denied/unknown et vérifications sautées.
+Le diagnostic sans option conserve ses trois GET et son rapport historique.
+Préflight et CREATE retenu refusent désormais un namespace non actif avant
+et après l'opération ; les avis SSAR ne créent aucune capacité d'activation.
+
+Le préflight acceptant Terminating a son RED local TLS. Vingt-deux fonctions
+ciblées passent, avec compilation toutes cibles et revue source ; les deux
+oracles doublon/profondeur ont été rendus discriminants et leur parent repassé.
+Les [preuves](VALIDATION.md#6-novembre--prérequis-kubernetes-explicites)
+distinguent ce peer déclaré du cluster Docker Desktop, toujours NOT_RUN ici.
+Sessions complètes, stockage exclusif, start/release, confinement et reprise
+restent ouverts. G09 FAIL ; aucun gate global clos.
+
 ## 6 novembre — drainage des propriétaires d'audit à l'arrêt normal
 
 Le service ferme le registre borné des tâches d'audit avec leur admission,

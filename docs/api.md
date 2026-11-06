@@ -54,6 +54,49 @@ The HTTP backend alone does not connect a `network:none` worker, deliver remote
 federation or qualify a unified cloud dashboard. Those paths require their own
 transport, authorization and runtime evidence.
 
+### Projection workers et brokers / Worker and broker projection
+
+`GET /api/v1/federation/workers` est une lecture technique gateway pour viewer
+ou runner authentifié. Le proxy dashboard accepte seulement un viewer. Les
+preuves humaines, worker et broker n'acquièrent aucun accès à cette route.
+Il n'existe ni alias `/api/federation/workers`, ni sélecteur de tenant/autorité.
+Query fermée : `limit` facultatif1–100, défaut50 ; `cursor` facultatif UUID
+canonique non nul, correspondant au dernier worker émis. Champs inconnus,
+doublons et valeurs invalides sont refusés. La réponse est limitée à512Kio ;
+une première entrée trop grande est une erreur, jamais une page vide simulée.
+
+L'enveloppe version1 contient `source:"tenant_worker_broker_registry"`,
+`consistency:"snapshot_per_page"`, `evaluated_at`, `runtime_inventory:"unknown"`,
+`registry_status`, `items` et `next_cursor` nullable. Chaque item conserve le
+`worker:WorkerV1` historique et ajoute `launch_broker` et `observation_broker`.
+Ces associations portent `status`, `broker`, `runtime_kind`, `runtime_matches`
+et `in_current_grant`. Les quatre derniers champs sont null pour
+`authority_unknown`, `unregistered` ou `registry_unavailable`. Avec `registered`,
+le broker expose seulement `broker_id`, `current_incarnation_id`, `state`,
+révisions `grant_revision`/`heartbeat_revision` en chaînes décimales, et dates
+`last_received_at`/`lease_expires_at` nullables. Aucun credential ou chemin hôte.
+Les [DTO Rust](../src/broker_registry/federation.rs) font foi pour les types.
+
+Une transaction vérifiée par page recoupe workers et registre du tenant
+authentifié. Les pages successives sont des lectures live, sans inventaire
+complet ni snapshot global garanti. Les schémas2–5 conservent leurs workers
+avec `registry_status:"migration_required"` et associations
+`registry_unavailable` ; les schémas6–9 utilisent `available`. Une erreur
+d'intégrité/I/O reste une erreur503, sans repli vers cette limite structurelle.
+Les gardes d'identité et de lecture conservent leurs refus401/429 ; une query
+authentifiée invalide renvoie400. L'association historique peut être enregistrée
+après le fait worker : elle ne prouve pas quel broker l'a exécuté, sa santé,
+une incarnation au lancement ou une observation runtime actuelle.
+
+The gateway read accepts technical viewer/runner credentials; the dashboard
+proxy accepts viewers only. The separate bounded version1 page preserves
+WorkerV1, reports historical authority ownership and current registry freshness,
+and keeps runtime inventory unknown. Legacy schemas2–5 retain real workers
+with an explicit migration limit; read failures never become empty pages.
+The [English guide](setup/workloads/README.md#read-workers-across-registered-brokers)
+documents operation and migration. This route supplies no runtime transport,
+human SSO permission, physical multi-host qualification or billing authority.
+
 ### Identité du broker / Broker identity
 
 `GET /api/v1/brokers/identity` utilise exclusivement le Bearer Broker courant,

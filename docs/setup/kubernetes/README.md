@@ -85,8 +85,9 @@ separate qualification steps.
 ## Run the read-only CLI diagnostic
 
 Use `agentsandbox kubernetes doctor` with an explicit, retained authority file
-and either a static Bearer token file or a client certificate/key pair. It
-performs only three authenticated GET requests: the `kube-system` Namespace,
+and either a static Bearer token file or a client certificate/key pair.
+Without `--check-permissions`, it performs only three authenticated GET requests:
+the `kube-system` Namespace,
 the exact tenant Namespace and `/version`. It does not create Pods, configure
 RBAC, admit work, exec, attach or change the cluster. No kubeconfig, context,
 credential plugin or environment discovery is performed by the product.
@@ -179,6 +180,54 @@ according to that category. If a typed observation contains retained
 credential material, the whole report is refused; identities are never
 replaced with invented redacted values. Correct the source privately before
 retrying. Changed credentials require a newly prepared invocation.
+
+### Inspect namespace readiness and the current identity's permissions
+
+Add `--check-permissions` to the same explicit `doctor` command when you intend
+to query the authorization API. This opt-in performs
+`POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews`; it does not create
+Pods, grant rights or configure RBAC. It uses the same retained TLS trust and
+identity, without proxy, redirect or automatic retry. If that identity cannot
+create SelfSubjectAccessReviews, the diagnostic fails with an opaque HTTP
+error; it never broadens its permissions.
+
+The report retains `version: 1` and `admission_available: false`, and adds a
+closed `prerequisites` object with its own `version: 1`. Without this flag the
+field is omitted and the original report is unchanged. Both retained Namespace
+anchors are classified as `active`, `terminating` or `unknown`. A deletion
+timestamp takes precedence over an `Active` phase. Missing or unrecognised
+phase remains unknown. If either Namespace is not active, the report explicitly
+sets `permission_review_status: skipped_namespace_not_active` and makes no
+SSAR request. Preflight and held CREATE refuse these same inactive or unknown
+Namespace conditions before a Pod POST; a matching name or UID alone is
+insufficient.
+
+For active anchors, each query uses the exact tenant Namespace and the current
+identity, with no impersonation or caller-controlled scope. The twelve actions
+are get/create/patch/update/delete Pods, create Pod binding/exec/attach, get Pod
+logs, get/list Secrets, and create ServiceAccount tokens. Reviews expose only
+the action, `allowed`/`denied`/`unknown`, whether an evaluation error occurred,
+and the local observation time. Remote reason/error text is discarded. No
+opinion or an evaluation error remains unknown; contradictory status, changed
+scope, malformed data or transport failure fails the command without partial
+JSON. The adapter rechecks both anchors after the reviews.
+
+`complete` means that all twelve queries completed, not that the principal is
+safe or sufficiently privileged. The explicit coverage is
+`queried_actions_only`: answers do not prove named-resource grants, actor
+exclusivity, admission, CNI isolation or future authorization. No access to
+Secrets, tokens or Pod subresources is exercised by asking these questions.
+These observations never create an activation capability or close a readiness
+gate. Kubernetes documents SSAR as an authorization query for the current
+identity. [Official authorization API](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#checking-api-access).
+
+The opt-in has a 30-second asynchronous diagnostic deadline; each request keeps
+the existing eight-second timeout and three-second connection timeout. An SSAR
+response is limited to 32 KiB and JSON depth 16, with duplicate fields rejected.
+There are three initial GETs, twelve SSAR POSTs and two final GETs when all
+queries complete. Reads are not an atomic snapshot. Local TLS-peer and CLI
+regressions do not qualify a real cluster; real Docker Desktop permission and
+admission effects remain `NOT_RUN` for this change.
 
 ## Run an audited admission preflight
 
@@ -489,6 +538,7 @@ cargo test --locked --test kubernetes_transport_lifetime -- --test-threads=1
 cargo test --locked --test kubernetes_cli -- --test-threads=1
 cargo test --locked --test kubernetes_preflight -- --test-threads=1
 cargo test --locked --test kubernetes_preflight_cli -- --test-threads=1
+cargo test --locked --lib runtime::kubernetes::prerequisites_tests:: -- --test-threads=1
 ```
 
 They exercise the actual Rust HTTPS transport against local TLS fixtures,

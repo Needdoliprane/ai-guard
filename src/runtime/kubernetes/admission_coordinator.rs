@@ -280,6 +280,7 @@ pub(super) fn pre_send_unknown(
         KubernetesError::InvalidCredentials
             | KubernetesError::InvalidAuthority
             | KubernetesError::AuthorityChanged
+            | KubernetesError::NamespaceNotActive
     ) {
         KubernetesCreateUnknownReasonV1::AuthorityChanged
     } else {

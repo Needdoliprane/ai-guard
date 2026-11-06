@@ -1,5 +1,18 @@
 # Décisions d'industrialisation
 
+## 6 novembre — séparer avis de permission et activation Kubernetes
+
+Le diagnostic historique reste GET-only ; les avis SelfSubjectAccessReview
+exigent `doctor --check-permissions`. Douze actions internes fixent le scope,
+sans URL/corps/identité fournis par l'appelant. Un avis allowed n'est ni une
+capacité de session, ni une preuve de policy, CNI ou admission effective.
+Les namespaces inconnus, supprimés ou non actifs interdisent préflight et
+CREATE retenu ; aucun diagnostic ne répare le cluster ou régénère son identité.
+Le budget opt-in est global30s, requête8s/connexion3s, réponse SSAR32Kio/profondeur16,
+sans redirection, proxy ambiant ou retry. Motifs distants et secrets restent
+hors rapport. Le profil de sessions V2 demeure une proposition distincte,
+sans activation ni conversion des capacités historiques.
+
 ## 6 novembre — drainer les seules tâches d'audit acceptées
 
 Le suivi des owners cold appartient au service existant, avec N slots physiques
@@ -629,6 +642,37 @@ après simple livraison, polling illimité ou nouvel UUID pour contourner un
 refus. Le contrôle doit être réellement actif et le worker Running avec
 quota et inspection cohérents ; aucun faux état ou contournement de la
 réactivation froide n'alimente cette verticale.
+
+### Coordination proposée le 6 novembre avec les sessions Kubernetes V2
+
+Le canal applicatif Rust broker↔worker doit être commun aux deux transports,
+avec un seul framing fermé, ses DTO versionnés et ses bornes de corps,
+en-têtes, concurrence, débit et temps. Les consommateurs sont le bootstrap
+Rust retenu, le pont du broker et les opérations existantes du relais
+send/inbox/ACK ; le handoff de session ne crée pas un second bootstrap ou un
+proxy libre. Les messages Ready, release et résultat déclaré restent distincts
+des opérations du relais et des observations indépendantes du runtime. Les
+identifiants présents dans une trame servent à la corrélation : ils ne créent
+ni identité, tenant, permission ni preuve d'exécution. Le format exact et les
+limites communes doivent être figés ensemble avant leur implémentation.
+
+La [proposition de sessions Kubernetes V2](https://github.com/Needdoliprane/ai-guard/blob/4856db693c1012775fb25d26f5ab9c905c0d856f/docs/engineering/KUBERNETES_ADMISSION.md#proposition-du-6-novembre--sessions-exécutables-et-canal-worker)
+porte le même canal applicatif sur un attach sans TTY. Les enveloppes de
+transport restent spécifiques : exec-i dans le CID exact avec StartedAt et
+RestartCount retenus pour Docker/Podman ; protocole remotecommand et PodUID
+retenu pour Kubernetes. Une trame Ready ou la fermeture du transport ne
+remplace aucune vérification indépendante de l'identité, du confinement ou de
+la quiescence. Les credentials de contrôle restent au broker, sans secret
+runner/SSO ou réseau général remis au worker.
+
+Le propriétaire exclusif central décrit ci-dessus et la migration explicite
+doivent être communs aux consommateurs send/inbox/ACK et session. Les anciens
+bindings non exclusifs ne conservent aucun chemin d'autorisation concurrent
+du nouveau canal. Les profils et traces historiques restent lisibles, sans
+conversion en capacité de session V2, sans réactivation implicite et sans
+renouvellement des échéances. Cette coordination reste une proposition ; la
+projection workers↔brokers en lecture seule ne fournit ni transport runtime,
+époque exclusive ni qualification multi-hôtes.
 
 Un probe d'outils OS sur Docker Desktop 29.9.2 ARM64 a depuis confirmé une
 copie stdin exacte de 27 octets, incluant NUL, et une sortie de 23 octets

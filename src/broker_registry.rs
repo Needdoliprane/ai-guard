@@ -8,6 +8,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod federation;
+pub use federation::{
+    AuthorityBrokerAssociationV1, AuthorityBrokerStatusV1, FederationBrokerV1,
+    FederationWorkerPageV1, FederationWorkerV1, MAX_FEDERATION_PAGE_BYTES,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerRegistryFailureV1 {
     InvalidRequest,

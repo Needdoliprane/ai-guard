@@ -44,6 +44,25 @@ export interface WorkerRecord {
   unknown_reason: string | null;
   cleanup_removed?: boolean | null;
   cleanup_error?: string | null;
+  federation?: {
+    launch_broker: AuthorityBrokerAssociation;
+    observation_broker: AuthorityBrokerAssociation;
+  };
+}
+export interface AuthorityBrokerAssociation {
+  status: "registry_unavailable" | "authority_unknown" | "unregistered" | "registered";
+  runtime_kind: "docker" | "podman" | "kubernetes" | null;
+  runtime_matches: boolean | null;
+  in_current_grant: boolean | null;
+  broker: {
+    broker_id: string;
+    current_incarnation_id: string;
+    state: "unseen" | "current" | "stale" | "expired" | "revoked" | "clock_uncertain";
+    grant_revision: string;
+    heartbeat_revision: string;
+    last_received_at: string | null;
+    lease_expires_at: string | null;
+  } | null;
 }
 export interface QuotaRecord {
   policy: {
@@ -76,7 +95,12 @@ export interface AllocationRecord {
     provenance: "observed";
   };
 }
-export interface ControlPage<T> { items: T[]; next_cursor: string | null }
+export interface ControlPage<T> {
+  items: T[];
+  next_cursor: string | null;
+  evaluated_at?: string;
+  registry_status?: "available" | "migration_required";
+}
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const states = new Set<WorkerState>(["reserved", "preparing", "created", "start_issued",
   "running", "stopping", "terminal", "in_doubt", "cancelled"]);
@@ -167,6 +191,68 @@ function parsePage<T>(value: unknown, parseItem: (item: unknown) => T): ControlP
 export function parseWorkerPage(value: unknown): ControlPage<WorkerRecord> {
   return parsePage(value, parseWorker);
 }
+function revisionText(value: unknown, positive = false): value is string {
+  return text(value) && /^(0|[1-9][0-9]{0,18})$/.test(value) &&
+    (value.length < 19 || value <= "9223372036854775807") && (!positive || value !== "0");
+}
+function timestamp(value: unknown): value is string {
+  return text(value) && value.length <= 64 && Number.isFinite(Date.parse(value));
+}
+function parseAssociation(value: unknown, authorityId: string | null,
+  runtime: "docker" | "podman" | null, registryAvailable: boolean): AuthorityBrokerAssociation {
+  if (!record(value)) return contract();
+  if (!registryAvailable) {
+    if (value.status !== "registry_unavailable" || value.broker !== null || value.runtime_kind !== null ||
+      value.runtime_matches !== null || value.in_current_grant !== null) return contract();
+    return { status: "registry_unavailable", broker: null, runtime_kind: null, runtime_matches: null, in_current_grant: null };
+  }
+  if (value.status === "authority_unknown" || value.status === "unregistered") {
+    if ((value.status === "authority_unknown") !== (authorityId === null) || value.broker !== null ||
+      value.runtime_kind !== null || value.runtime_matches !== null || value.in_current_grant !== null) return contract();
+    return { status: value.status, broker: null, runtime_kind: null, runtime_matches: null, in_current_grant: null };
+  }
+  const broker = value.broker;
+  if (value.status !== "registered" || authorityId === null || runtime === null || !record(broker) ||
+    !identifier(broker.broker_id) || !identifier(broker.current_incarnation_id) ||
+    broker.broker_id === "00000000-0000-0000-0000-000000000000" ||
+    broker.current_incarnation_id === "00000000-0000-0000-0000-000000000000" ||
+    !["unseen", "current", "stale", "expired", "revoked", "clock_uncertain"].includes(String(broker.state)) ||
+    !revisionText(broker.grant_revision, true) || !revisionText(broker.heartbeat_revision) ||
+    !((broker.last_received_at === null && broker.lease_expires_at === null) ||
+      (timestamp(broker.last_received_at) && timestamp(broker.lease_expires_at))) ||
+    !["docker", "podman", "kubernetes"].includes(String(value.runtime_kind)) ||
+    value.runtime_matches !== (value.runtime_kind === runtime) || typeof value.in_current_grant !== "boolean") return contract();
+  return {
+    status: "registered", runtime_kind: value.runtime_kind as AuthorityBrokerAssociation["runtime_kind"],
+    runtime_matches: value.runtime_matches as boolean, in_current_grant: value.in_current_grant,
+    broker: { broker_id: broker.broker_id, current_incarnation_id: broker.current_incarnation_id,
+      state: broker.state as NonNullable<AuthorityBrokerAssociation["broker"]>["state"],
+      grant_revision: broker.grant_revision, heartbeat_revision: broker.heartbeat_revision,
+      last_received_at: broker.last_received_at as string | null, lease_expires_at: broker.lease_expires_at as string | null },
+  };
+}
+/** Strict separate envelope; historical ownership is never execution authority. */
+export function parseFederationWorkerPage(value: unknown): ControlPage<WorkerRecord> {
+  if (!record(value) || value.version !== 1 || value.source !== "tenant_worker_broker_registry" ||
+    value.consistency !== "snapshot_per_page" || value.runtime_inventory !== "unknown" ||
+    (value.registry_status !== "available" && value.registry_status !== "migration_required") ||
+    !timestamp(value.evaluated_at) || new TextEncoder().encode(JSON.stringify(value)).byteLength > 512 * 1024) return contract();
+  const page = parsePage(value, (item) => {
+    if (!record(item)) return contract();
+    const worker = parseWorker(item.worker);
+    worker.federation = {
+      launch_broker: parseAssociation(item.launch_broker, worker.launch.authority_id, worker.launch.runtime_kind,
+        value.registry_status === "available"),
+      observation_broker: parseAssociation(item.observation_broker,
+        worker.last_observation?.inspection?.authority_id ?? null, worker.last_observation?.inspection?.runtime_kind ?? null,
+        value.registry_status === "available"),
+    };
+    return worker;
+  });
+  if (page.items.some((item, index) => index > 0 && item.worker_id <= (page.items[index - 1]?.worker_id ?? "")) ||
+    (page.next_cursor !== null && page.next_cursor !== page.items.at(-1)?.worker_id)) return contract();
+  return { ...page, evaluated_at: value.evaluated_at, registry_status: value.registry_status };
+}
 export function parseQuota(value: unknown): QuotaRecord {
   if (!record(value) || !record(value.policy) || value.policy.version !== 1 ||
     ![value.policy.max_active_workers, value.policy.max_cpu_millis, value.policy.max_memory_bytes,
@@ -192,14 +278,14 @@ export function controlPageUrl(view: "workers" | "usage", cursor: string | null 
   if (cursor !== null && !identifier(cursor)) throw new Error("Curseur de lecture invalide.");
   const query = new URLSearchParams({ limit: "50" });
   if (cursor !== null) query.set("cursor", cursor);
-  return `/api/v1/${view}?${query}`;
+  return `/api/v1/${view === "workers" ? "federation/workers" : view}?${query}`;
 }
 export function workerUrl(id: string): string {
   if (!identifier(id)) throw new Error("Identifiant de worker invalide.");
   return `/api/v1/workers/${id}`;
 }
 export function isControlReadPath(path: string): boolean {
-  const match = /^\/api\/v1\/(workers|quota|usage)(?:\/([^/?#]+))?(?:\?([^#]*))?$/.exec(path);
+  const match = /^\/api\/v1\/(federation\/workers|workers|quota|usage)(?:\/([^/?#]+))?(?:\?([^#]*))?$/.exec(path);
   if (!match) return false;
   if (match[2]) return match[1] === "workers" && identifier(match[2]) && match[3] === undefined;
   if (match[1] === "quota") return match[3] === undefined;

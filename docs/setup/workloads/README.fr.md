@@ -33,7 +33,7 @@ Pour une base existante de schéma 5, remplacer chaque référence d'installatio
   --target-version 6 --max-events 100000 --confirm-control-stopped
 ```
 
-Pour les sources plus anciennes, appliquer chaque migration suivante avec une sauvegarde neuve distincte : 3→4→5→6, suivant [la maintenance hors ligne](../../operations.md#répertoire-sqlite-privé). Mettre tous les lecteurs à jour ensemble ; les anciens binaires refusent les nouveaux schémas. Préserver binding du tenant, namespace, événements, claims consommés, credentials et sauvegardes vérifiées. Une édition SQLite de `user_version` ne remplace jamais une migration. Pour le stockage appartenant à un conteneur, utiliser l'UID/GID du contrôle existant et son volume existant inspecté, autres consommateurs arrêtés ; le [guide d'identité](../identity/README.fr.md#préparer-le-stockage-et-lautorité) explique cette frontière de maintenance. Ne pas deviner un nom de volume ni initialiser une base de remplacement.
+Pour les sources plus anciennes, appliquer chaque migration suivante avec une sauvegarde neuve distincte : 2→3→4→5→6, suivant [la maintenance hors ligne](../../operations.md#répertoire-sqlite-privé). Mettre tous les lecteurs à jour ensemble ; les anciens binaires refusent les nouveaux schémas. Préserver binding du tenant, namespace, événements, claims consommés, credentials et sauvegardes vérifiées. Une édition SQLite de `user_version` ne remplace jamais une migration. Pour le stockage appartenant à un conteneur, utiliser l'UID/GID du contrôle existant et son volume existant inspecté, autres consommateurs arrêtés ; le [guide d'identité](../identity/README.fr.md#préparer-le-stockage-et-lautorité) explique cette frontière de maintenance. Ne pas deviner un nom de volume ni initialiser une base de remplacement.
 
 ## Activer la lecture nominative du registre brokers
 
@@ -357,6 +357,55 @@ Après préparation du binding broker, un runner accorde son périmètre d'autor
 Un nouveau grant utilise un UUID d'incarnation jamais employé et un binding broker correspondant. Remplacer un grant exige aussi nouvelle incarnation et sujet/binding correspondant ; tourner un credential seul n'invente pas une incarnation. Comparer la révision durable du grant, pas une supposition en cache. Un heartbeat porte la révision heartbeat courante exacte, l'incarnation du grant et la séquence suivante (d'abord 1, puis précédente+1). Son rejeu exige toujours binding authentifié courant et grant non expiré/non révoqué ; un ancien reçu ne rétablit pas l'autorité. Les résultats des mutations runner et heartbeats contiennent métadonnées broker, révisions grant/heartbeat, opération/empreinte d'entrée et séquence/empreinte d'audit, avec `replayed` explicite.
 
 `last_heartbeat.heartbeat_provenance:"declared"` décrit la déclaration du broker. `reception_provenance:"observed"` et `received_at` décrivent sa réception par le gateway, pas un effet runtime. `lease_expires_at` est borné par réception plus lease configurée et par `not_after`. Les vues exposent `state` (`unseen`, `current`, `stale`, `expired`, `revoked`, `clock_uncertain`), `evaluated_at` et `runtime_inventory_complete:false`. Un broker périmé signifie que sa lease n'est plus courante ; cela ne signifie ni zéro worker, ni workers arrêtés, ni quota libérée ou inventaire runtime complet. Préserver les derniers faits connus et examiner la même autorité.
+
+## Lire les workers répartis entre brokers enregistrés
+
+Le gateway accepte `GET /api/v1/federation/workers?limit=50` avec un credential
+viewer ou runner technique. La vue technique Workers utilise le proxy en
+lecture seule du dashboard, qui accepte uniquement un viewer et refuse les
+credentials runner. Le credential authentifié sélectionne le tenant ; aucun
+sélecteur tenant ou autorité n'est accepté. Les credentials worker/broker et humains ne
+peuvent pas utiliser cette route. Les contrats existants de liste et détail
+`/api/v1/workers` restent inchangés. La nouvelle projection conserve les vrais
+workers des schémas2–5 avec `registry_status:"migration_required"` et des
+associations `registry_unavailable` : leur registre broker est structurellement
+absent. La vue propose une procédure de migration nommée, sans l'effectuer.
+Les schémas6 et ultérieurs supportés indiquent `registry_status:"available"`.
+Un échec d'I/O, d'intégrité ou de lecture worker reste une erreur, jamais
+cette limite structurelle ou une liste vide.
+
+La page version1 séparée contient `source:"tenant_worker_broker_registry"`,
+`consistency:"snapshot_per_page"`, `evaluated_at`,
+`runtime_inventory:"unknown"`, `registry_status`, `items` et `next_cursor`. Chaque élément
+contient le `worker` existant, puis `launch_broker` et `observation_broker`
+résolus depuis leurs IDs d'autorité distincts dans la même transaction
+vérifiée. Une autorité absente est `authority_unknown` ; une autorité absente
+du registre est `unregistered`. Aucun de ces états ne signifie zéro worker
+ou broker déconnecté.
+
+Une association `registered` indique le broker propriétaire historique,
+son `current_incarnation_id`, les révisions courantes grant/heartbeat en
+chaînes décimales, l'état du bail et les derniers horaires de réception et
+d'expiration. `in_current_grant` distingue propriété historique et inclusion
+dans le grant courant ; `runtime_matches` compare le runtime enregistré à
+ce fait worker. La projection broker n'inclut ni credential ni chemin hôte.
+Une association peut être enregistrée après le lancement ou l'observation du
+worker. Elle ne prouve ni quel broker a effectué ces actions, ni disponibilité
+runtime, inventaire complet ou permission d'exécuter ou d'échanger. Les états
+révoqués et périmés restent visibles.
+
+Les pages sont bornées à 1–100 lignes (50 par défaut) et 512Kio. La borne
+d'octets peut produire une page plus courte ; reprendre son `next_cursor`
+UUID exact. Chaque page est cohérente, mais la traversée live par clé n'est
+ni un instantané figé de toutes les pages ni un total du tenant. Une erreur
+reste une erreur ; l'UI conserve la dernière page réussie comme périmée et
+propose de réessayer. Cette vue de métadonnées ne qualifie ni connexion de
+brokers distants, ni transport runtime du relais, ni cible100workers.
+
+La vue workers unifiée pour l'accès humain nominatif/SSO reste obligatoire
+et ouverte. Elle exige une permission explicite applicable, avec audit et
+révocation ; `read_metadata` ou `read_broker_registry` seuls n'impliquent pas
+ce droit. Cette route technique n'élargit aucune permission humaine.
 
 ## Autoriser des messages dirigés
 

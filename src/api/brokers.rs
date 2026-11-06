@@ -6,6 +6,7 @@ use crate::broker_registry::*;
 pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/brokers", get(list))
+        .route("/federation/workers", get(federation_workers))
         .route("/brokers/grants", post(grant))
         .route("/brokers/{id}/revoke", post(revoke))
         .route("/brokers/heartbeat", post(heartbeat))
@@ -110,6 +111,29 @@ fn identity_unavailable() -> (StatusCode, Json<Value>) {
 struct ListQuery {
     cursor: Option<String>,
     limit: Option<u32>,
+}
+async fn federation_workers(
+    ReadIdentity(tenant, _): ReadIdentity,
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> ApiResult<Json<FederationWorkerPageV1>> {
+    let Query(query) = query.map_err(|_| workload::invalid())?;
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(workload::invalid());
+    }
+    if let Some(cursor) = &query.cursor {
+        registry_uuid(cursor).map_err(workload::failure)?;
+    }
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                tenant
+                    .store
+                    .federation_workers_page(query.cursor.as_deref(), limit)
+                    .map_err(|error| workload::store_failure(&tenant.store, error))?,
+            ))
+        })
+        .await
 }
 async fn list(
     ReadIdentity(tenant, _): ReadIdentity,

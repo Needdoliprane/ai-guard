@@ -52,10 +52,19 @@ async fn kubernetes_doctor_is_an_available_read_only_cli_command() {
         "--token-file",
         "--client-cert-file",
         "--client-key-file",
+        "--check-permissions",
     ] {
         assert!(help.contains(option), "explicit credential option absent");
     }
     assert!(output.stderr.is_empty());
+    let mut preflight = crate::command();
+    preflight.args(["kubernetes", "preflight", "--help"]);
+    let output = run(preflight, directory.path()).await;
+    assert!(output.status.success());
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("--check-permissions"),
+        "the diagnostic opt-in must not leak into the preflight connection arguments"
+    );
 }
 
 fn command() -> Command {
@@ -243,6 +252,9 @@ struct Behavior {
     authentication_valid: bool,
     status: u16,
     version: String,
+    namespace_phase: Option<String>,
+    access_reviews: Vec<Value>,
+    ssar_status: u16,
 }
 struct Server {
     endpoint: String,
@@ -290,6 +302,9 @@ impl Server {
             authentication_valid: true,
             status: 200,
             version: "v1.36.1".into(),
+            namespace_phase: Some("Active".into()),
+            access_reviews: Vec::new(),
+            ssar_status: 201,
         }));
         let observed = state.clone();
         let task = tokio::spawn(async move {
@@ -309,8 +324,14 @@ impl Server {
                                     request.push(byte[0]);
                                     assert!(request.len() <= 16_384, "request headers bounded");
                                 }
-                                let request = std::str::from_utf8(&request).unwrap();
+                                let request = String::from_utf8(request).unwrap();
                                 let first = request.lines().next().unwrap();
+                                let content_length: usize = request.lines().find_map(|line| line.split_once(':')
+                                    .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                                    .map(|(_, value)| value.trim().parse().unwrap())).unwrap_or(0);
+                                assert!(content_length <= 4096, "authorization query body bounded");
+                                let mut request_body = vec![0; content_length];
+                                if stream.read_exact(&mut request_body).await.is_err() { return; }
                                 let authorization = request.lines().find_map(|line| line.split_once(':').filter(|(name, _)| name.eq_ignore_ascii_case("authorization")).map(|(_, value)| value.trim()));
                                 let (status, body) = {
                                     let mut state = state.lock().unwrap();
@@ -318,12 +339,23 @@ impl Server {
                                     let expected = state.expected_token.as_ref().map(|token| format!("Bearer {token}"));
                                     let valid = authorization == expected.as_deref();
                                     state.authentication_valid &= valid;
-                                    let status = if valid { state.status } else { 401 };
-                                    let body = if status != 200 { json!({"private":BODY_CANARY}) } else {
+                                    let is_ssar = first == "POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews HTTP/1.1";
+                                    let status = if !valid { 401 } else if state.status != 200 { state.status }
+                                        else if is_ssar { state.ssar_status } else { 200 };
+                                    let body = if ![200,201].contains(&status) { json!({"private":BODY_CANARY}) } else {
                                         match first {
-                                            "GET /api/v1/namespaces/kube-system HTTP/1.1" => json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":CLUSTER_UID}}),
-                                            "GET /api/v1/namespaces/tenant-a HTTP/1.1" => json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":NAMESPACE_UID,"labels":{"pod-security.kubernetes.io/enforce":"restricted"}}}),
+                                            "GET /api/v1/namespaces/kube-system HTTP/1.1" => json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":CLUSTER_UID},"status":{"phase":"Active"}}),
+                                            "GET /api/v1/namespaces/tenant-a HTTP/1.1" => json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":NAMESPACE_UID,"labels":{"pod-security.kubernetes.io/enforce":"restricted"}},"status":{"phase":state.namespace_phase}}),
                                             "GET /version HTTP/1.1" => json!({"gitVersion":state.version}),
+                                            "POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews HTTP/1.1" => {
+                                                let query: Value = serde_json::from_slice(&request_body).unwrap();
+                                                state.access_reviews.push(query.clone());
+                                                let allowed = query["spec"]["resourceAttributes"]["verb"] == "create"
+                                                    && query["spec"]["resourceAttributes"]["resource"] == "pods"
+                                                    && query["spec"]["resourceAttributes"].get("subresource").is_none();
+                                                json!({"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview",
+                                                    "spec":query["spec"],"status":{"allowed":allowed,"denied":!allowed,"reason":BODY_CANARY}})
+                                            }
                                             _ => panic!("unexpected mutation or read outside the diagnostic scope"),
                                         }
                                     };
@@ -396,6 +428,10 @@ async fn doctor_uses_real_https_static_authentication_and_reports_admission_gaps
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["version"], 1);
     assert_eq!(report["admission_available"], false);
+    assert!(
+        report.get("prerequisites").is_none(),
+        "legacy report shape must be preserved without opt-in"
+    );
     let diagnostics = &report["diagnostics"];
     assert_eq!(diagnostics["server_version"], "v1.36.1");
     assert_eq!(diagnostics["namespace"], "tenant-a");
@@ -545,6 +581,85 @@ async fn doctor_uses_real_https_static_authentication_and_reports_admission_gaps
         3,
         "mismatched key must fail before HTTP"
     );
+}
+
+#[tokio::test]
+async fn doctor_opt_in_reports_scoped_queries_without_granting_admission() {
+    let pki = Pki::new().await;
+    let server = Server::new(&pki, false).await;
+    let authority = server.authority(&pki);
+    let mut command = bearer_doctor(&authority, &pki);
+    command.arg("--check-permissions");
+    let output = run(command, &pki.directory).await;
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["version"], 1);
+    assert_eq!(report["admission_available"], false);
+    let prerequisites = &report["prerequisites"];
+    assert_eq!(prerequisites["version"], 1);
+    assert_eq!(prerequisites["namespace"]["state"], "active");
+    assert_eq!(prerequisites["namespace"]["uid"], NAMESPACE_UID);
+    assert_eq!(prerequisites["permission_review_status"], "complete");
+    assert_eq!(prerequisites["permission_coverage"], "queried_actions_only");
+    let reviews = prerequisites["access_reviews"].as_array().unwrap();
+    assert_eq!(reviews.len(), 12);
+    assert!(
+        reviews
+            .iter()
+            .any(|review| review["action"] == "create_pods" && review["decision"] == "allowed")
+    );
+    assert!(
+        reviews
+            .iter()
+            .any(|review| review["action"] == "create_pod_exec" && review["decision"] == "denied")
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.contains(TOKEN));
+    assert!(!text.contains(BODY_CANARY));
+    let state = server.state.lock().unwrap();
+    assert!(state.authentication_valid);
+    assert_eq!(state.requests.len(), 17);
+    assert_eq!(state.access_reviews.len(), 12);
+    assert!(state.access_reviews.iter().all(|query| {
+        query["spec"].as_object().unwrap().len() == 1
+            && query["spec"]["resourceAttributes"]["namespace"] == "tenant-a"
+            && query["spec"]["resourceAttributes"]["version"] == "v1"
+    }));
+}
+
+#[tokio::test]
+async fn doctor_opt_in_shows_namespace_unknown_and_fails_opaque_on_ssar_refusal() {
+    let pki = Pki::new().await;
+    let server = Server::new(&pki, false).await;
+    let authority = server.authority(&pki);
+    for (phase, expected) in [
+        (None, "unknown"),
+        (Some("Terminating".into()), "terminating"),
+    ] {
+        server.state.lock().unwrap().namespace_phase = phase;
+        let mut command = bearer_doctor(&authority, &pki);
+        command.arg("--check-permissions");
+        let output = run(command, &pki.directory).await;
+        assert!(output.status.success());
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["prerequisites"]["namespace"]["state"], expected);
+        assert_eq!(
+            report["prerequisites"]["permission_review_status"],
+            "skipped_namespace_not_active"
+        );
+        assert_eq!(report["prerequisites"]["access_reviews"], json!([]));
+        assert!(server.state.lock().unwrap().access_reviews.is_empty());
+    }
+    {
+        let mut state = server.state.lock().unwrap();
+        state.namespace_phase = Some("Active".into());
+        state.ssar_status = 403;
+    }
+    let mut command = bearer_doctor(&authority, &pki);
+    command.arg("--check-permissions");
+    refused(&run(command, &pki.directory).await, "HTTP 403", &[]);
+    assert!(server.state.lock().unwrap().access_reviews.is_empty());
 }
 
 #[tokio::test]
