@@ -30,8 +30,12 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::atomic::{AtomicBool, AtomicUsize},
+    sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicUsize},
+    },
 };
+use tokio::sync::oneshot;
 
 const TENANT: &str = "tenant-committed-draft-test";
 const RUNNER: &str = "runner-committed-draft-aaaaaaaaaaaaaaaaaaaaaaaa";
@@ -59,6 +63,7 @@ struct Fixture {
     config: Directory,
     requests: Arc<AtomicUsize>,
     drop_next_worker_transition_response: Arc<AtomicBool>,
+    audit_response_gate: Arc<StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>>,
     gateway: tokio::task::JoinHandle<()>,
     root: tempfile::TempDir,
 }
@@ -71,6 +76,20 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
+    /// Pause one successful event response after its real gateway handler has
+    /// committed the event to SQLite, but before the response reaches the
+    /// client. This is a test-only ownership barrier, not a fake receipt.
+    pub(super) fn pause_next_audit_response_for_test(
+        &self,
+    ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let mut gate = self.audit_response_gate.lock().unwrap();
+        assert!(gate.is_none(), "only one audit response gate may be armed");
+        *gate = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
     async fn new() -> Self {
         Self::new_with_writer_timeout(Duration::from_secs(10)).await
     }
@@ -122,6 +141,10 @@ impl Fixture {
         let observed = Arc::clone(&requests);
         let drop_next_worker_transition_response = Arc::new(AtomicBool::new(false));
         let observed_fault = Arc::clone(&drop_next_worker_transition_response);
+        let audit_response_gate: Arc<
+            StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+        > = Arc::new(StdMutex::new(None));
+        let observed_audit_response_gate = Arc::clone(&audit_response_gate);
         let app = gateway_router(GatewayState::new(
             Arc::clone(&store),
             RUNNER.into(),
@@ -134,11 +157,14 @@ impl Fixture {
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let observed = Arc::clone(&observed);
                 let observed_fault = Arc::clone(&observed_fault);
+                let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
                 async move {
                     let decision = request.uri().path() == "/api/decide";
                     let worker_transition = request.method() == axum::http::Method::POST
                         && request.uri().path().starts_with("/api/v1/workers/")
                         && request.uri().path().ends_with("/transitions");
+                    let audit_event = request.method() == axum::http::Method::POST
+                        && request.uri().path() == "/api/v1/events";
                     if decision {
                         observed.fetch_add(1, Ordering::SeqCst);
                         eprintln!("cancelled_recovery_fixture phase=decision_http_enter");
@@ -168,6 +194,13 @@ impl Fixture {
                             )),
                         ));
                         return axum::response::Response::from_parts(parts, body);
+                    }
+                    if audit_event && response.status().is_success() {
+                        let gate = observed_audit_response_gate.lock().unwrap().take();
+                        if let Some((entered, release)) = gate {
+                            let _ = entered.send(());
+                            let _ = release.await;
+                        }
                     }
                     response
                 }
@@ -214,6 +247,7 @@ impl Fixture {
             config,
             requests,
             drop_next_worker_transition_response,
+            audit_response_gate,
             gateway,
             root,
         }

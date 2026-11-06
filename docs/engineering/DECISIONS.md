@@ -1,5 +1,21 @@
 # Décisions d'industrialisation
 
+## 6 novembre — drainer les seules tâches d'audit acceptées
+
+Le suivi des owners cold appartient au service existant, avec N slots physiques
+liés à sa capacité configurée. La fermeture et leur enregistrement sont atomiques.
+Le shutdown joint d'abord le producteur, puis tous les handles retenus, même
+après erreur. Attendre tous les permis execution ferait attendre aussi Full
+DeferredRun et changerait un autre contrat : ils restent indépendants.
+
+Le registre conserve handles et premier échec pendant poll, cancellation de
+l'observateur et reap. Un sémaphore d'observateur évite de remplacer leurs
+wakers entre drains concurrents, sans bloquer les producteurs. Les erreurs
+restent fermées et agrégées après joins ; aucun timeout global ne cache leur
+abandon. PartialConfirmed signifie uniquement que tous les reçus obtenus ont
+été ACKés : stopping continue d'empêcher le second POST. Le Job reste à
+réconcilier. [Reproduction et validation](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+
 ## 6 novembre — séparer livraison d'audit et admission métier
 
 Une paire V4 déjà durable et terminale peut être livrée par le vrai writer Stops

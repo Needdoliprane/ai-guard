@@ -200,6 +200,17 @@ exécution, export ou suppression.
 La transmission modifie uniquement les ACK de l'outbox locale ; elle ne finalise
 pas le résultat géré et ne retire pas son cycle de supervision.
 
+Lors d'un arrêt normal, le broker ferme les admissions, joint le producteur de
+reprise, puis attend tous les owners d'audit retenu déjà acceptés. Il ne les
+abandonne pas à l'expiration d'un délai global de drainage. Si l'arrêt commence
+après le premier reçu, ce reçu exact est acquitté et le second événement reste en
+attente ; le job demeure incomplet pour un retry borné ultérieur. Une erreur
+d'owner ou de jointure rend l'arrêt dégradé seulement après le drainage des
+autres owners acceptés. Ce comportement est testé en interne sur le même helper
+d'arrêt que `serve` ; cela ne qualifie pas SIGTERM, la mort du processus, une
+panne physique ou un délai de 10 secondes. Le budget HTTP de 45 secondes et les
+budgets writer ne changent pas, et ces contrôles n'établissent aucun SLO de durée.
+
 Le même budget HTTP initial de 45 secondes couvre identité, lecture du worker
 et envois. La tâche détachée survit à la disparition de l'observateur de la boucle
 tant que le processus et le runtime asynchrone restent vivants ; cela ne garantit

@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 6 novembre — drainage des propriétaires d'audit à l'arrêt normal
+
+Le service ferme le registre borné des tâches d'audit avec leur admission,
+joint le producteur puis tous les propriétaires acceptés. Les handles restent
+retenus si un observateur abandonne l'attente ; la première erreur demeure
+visible après reap. Aucun timeout global n'abandonne ces tâches comme un succès.
+Un sous-ensemble reçu et confirmé reste une fin sûre partielle : le Job conserve
+NeedsReconciliation et l'événement non envoyé reste pending. Un ACK incertain
+ou une tâche en erreur produit un arrêt dégradé après les autres joins.
+
+Six fonctions ciblées passent : trois unitaires du registre et trois parents
+HTTP/SQLite (drain, propriétaire partiel, boucle complète), puis compilation
+toutes cibles RC0. La revue indépendante est traitée. [Preuves et limites](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+Les 118 avertissements bibliothèque/3 lib-test et Clippy absent restent ouverts.
+Cette preuve interne ne qualifie pas SIGTERM réel, mort du runtime, deadline
+produit10s, panne physique, D5/fencing, ni moteur réel. Les exécutions Full
+DeferredRun gardent leur contrat indépendant ; G09 FAIL,0/12 gates globaux clos.
+
 ## 6 novembre — propriétaire authentifié de l'audit retenu
 
 Le chemin logiciel ServiceCold est raccordé au vrai backend Stops, avant la
@@ -15,8 +33,8 @@ Le vrai RED de publication,
 la mutation de perte du premier reçu, les erreurs de harnais/ressources et le
 check initial sont conservés séparément dans les [preuves](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
 118 avertissements bibliothèque/3 lib-test et Clippy absent restent ouverts.
-Drainage à l'arrêt du service,
-sortie de quarantaine, budget10s du writer, D5/fencing et qualifications réelles
+Le drainage ciblé ci-dessus est depuis vérifié. Sortie de quarantaine,
+budget10s du writer, D5/fencing et qualifications réelles
 restent ouverts. G09 FAIL,0/12 gates globaux clos ; aucun statut de release.
 
 ## 6 novembre — ACK retenu sur l'acteur Stops

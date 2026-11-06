@@ -740,6 +740,17 @@ impl ColdRecoverySeed {
     pub(crate) fn retained_gateway_is_live(&self) -> bool {
         !self.base.gateway.is_finished()
     }
+    /// Arm a test-only barrier after a successful audit POST has committed in
+    /// the retained gateway's real Store and before its HTTP response is
+    /// delivered to the broker client.
+    pub(crate) fn pause_next_audit_response_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.base.pause_next_audit_response_for_test()
+    }
 }
 
 /// Build the same real V4 lost-ACK state as the existing recovery scenario,

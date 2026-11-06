@@ -1,5 +1,82 @@
 # Validation courante
 
+## 6 novembre — drainage des propriétaires d'audit
+
+Base `856dd0e`, worktree `codex/broker-cold-drain-20261106`. Extraction mécanique
+du bloc shutdown de serve avant correction, puis test du même helper interne.
+La barrière du vrai gateway retient une réponse après commit SQLite ; le même
+producteur est déjà terminé et les JoinSets présence/IPC sont vides. La réponse
+est toujours libérée pour cleanup, même en RED. Il ne s'agit pas d'un test de
+signal réel ou de mort de processus.
+
+### Baselines et erreurs de compilation conservées
+
+| Gel | Résultat constaté |
+|---|---|
+| baseline-red, serveur f34d9e9e/owner6890e3c6 | E0282 du type Option de barrière et import inutilisé, avant libtest : comportement NOT_RUN. Log `255d6f08d868ad776ee11c7cc690717bea8c2c26c42dbdf0ccdd5e3becd09823`. |
+| baseline-red2, mêmes app, testc66c396e/helpers5eb4a24f/c8167d94 | RC101,1FAIL/492filtrés,185,37s. Vrai commit, réponse libérée, ACK après cleanup, puis échec précis « shutdown must wait for the admitted owner, not just its producer ». Retour prématuré reproduit, log `eacf2932f7ffb5e600af16520511ebf6f6ccfc9b0607b7154d34984e4019e6fc`. |
+| drain-green initial | Les deux compilations échouent E0583 : chemin owners incorrect, aucun test exécuté. Logs `a864cc1ed6e91b3015d712ea5b8225219dddc5e2b68b9fb05cbb2b65d51e6526` et `c4c1222a4a8fa6bd47714a0ff246e692e5630a70c4d940dbc600a715d094dd37`. Seul l'attribut path est corrigé ensuite. |
+
+Lors de l'édition du test non suivi, une sortie rustfmt de configuration a
+écrasé son fichier ; restauration exacte depuis le gel RO b74aa3e6, puis retrait
+du seul import inutilisé. Aucun original perdu ou faux test remplacé. Les cibles
+de compilation échouée seules ont été retirées après RC terminal ; sources et
+logs sont conservés. Chaque nouveau gel a une cible Cargo distincte.
+
+### Gel final drain-green2
+
+Dix sources Rust figées : serveur `bff104ee…`, owner `471062e5…`, registre
+`872c2b44…`, unitaires `e7520170…`, parent d'arrêt `c66c396e…`, helpers
+`5eb4a24f…`/`c8167d94…`, initialisations fixtures `8acaeef6…`/`63950557…`
+et appel du canari `c9d90fe8…`. Aucun format persistant, rôle, dépendance ou
+endpoint ajouté par ce lot. Le canari existant utilise le vrai slot ; ses
+assertions et sa sémantique partielle sont inchangées.
+
+| Sélection exécutée par Luna | Résultat |
+|---|---|
+| retained_audit::owners::tests:: | RC0,3PASS/493filtrés,0,01s ; capacité0/1025 refusée, N exact/reap, fermeture et start tardif non pollé, erreur réapée persistante et nouvel observateur joignant l'owner restant. Log `9f4d50fc1843d0b2ef8d909da03bd71c85507d12a49f208a5eb7a3ca208ca985`. |
+| retained_audit::shutdown_tests::normal_shutdown_waits_for_a_retained_owner_to_ack_its_committed_receipt | RC0,1PASS/495filtrés,191,24s. La même attente reste pending avant libération, puis ACK du premier reçu sur writer vivant et après réouverture, second pending. Log `eef2d385220c5d2e0dceef5550526fd2a5ab6e4dfcf1edf7247812c9d98edc61`. |
+| retained_audit::tests::retained_owner_submits_first_real_receipt_when_stopping_before_second_post | RC0,1PASS/495filtrés,190,52s. Identité refusée et propriétaire partiel conservés. Log `f8e277f9480d5a1091b6c30c39992a155a77188f90934b107fd14cb4194ecfef`. |
+| cancel_retry_tests::cold_audit_tests::cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability | RC0,1PASS/495filtrés,226,77s. Paire complète, Starts/Full fermés et faits conservés. Log `ea65a9a4114bde8c20db3443c2bcdcf98d1c5953668eca4be21a3059f3b92692`. |
+| cargo check --all-targets | RC0,118 avertissements bibliothèque et3 lib-test inchangés. Log `9577a213854d435a3cb43b50d6a789e8ccdf4cd870f0bb1b3e64b8d24daeedf5`. |
+
+Commandes communes, Rust1.99.1 Linux ARM64 :
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/drain-green2/Cargo.toml \
+  --lib broker::service::server::retained_audit::owners::tests:: -- --nocapture --test-threads=1
+# Chacun des trois autres parents ci-dessus est sélectionné par son chemin
+# complet broker::service::server::<sélection>, avec --exact.
+cargo check --offline --locked --manifest-path /inputs/drain-green2/Cargo.toml --all-targets
+```
+
+Image épinglée `sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207`.
+Deux QA distinctes pour compilations indépendantes : UID/groupes1000, toutes
+capabilities nulles, NNP/seccomp, réseau none, racine/sources/registre RO,
+PID/IPC/cgroup privés, CPU2/mémoire6Gio/swap0/PID256, scratch3Gio/65536inodes,
+shm64Kio et mqueue4Kio RO avec plafonds d'inodes, core0/nofile1024/fsize512Mio.
+HOME/TMPDIR/Cargo/targets et données distincts, logs0600 sous parent0700.
+La QA de baseline80694 est fermée/supprimée PID0/exit143/OOMfalse à
+2026-11-06T01:03:44.010515388Z ; ses sources/logs restent conservés.
+
+Revue indépendante source/tests/guides sans blocage restant, suivie du correctif
+de chemin uniquement et des vrais GREEN. Les unitaires contrôlent le registre,
+pas un moteur. Les parents utilisent de vrais HTTP/Store/journal, mais un moteur
+synthétique pour leur seed ; aucune commande modèle ou moteur réel n'en découle.
+NOT_RUN : vrai SIGINT/SIGTERM, runtime/processus disparu, panne physique,
+injection de panic, deadline produit writer10s et matrice Docker/Podman/cloud.
+Les budgets HTTP45s et fixture writer60s sont inchangés. La quarantaine, D5,
+fencing et drainage Full restent ouverts. Clippy BLOCKED (composant absent).
+G09 FAIL,0/12 gates globaux clos, aucun statut de release qualifiée.
+
+Contrôles finaux du lot : rustfmt épinglé sur les dix sources, diff sans erreur,
+comparaison exacte des dix sources avec le gel testé et manifests inchangés :
+PASS. Sur les dix documents modifiés, 707 liens relatifs vérifiés et aucune
+cible manquante. Le scan des vingt fichiers contre les trois secrets littéraux
+connus ne trouve aucune correspondance ; il ne remplace pas une détection
+générale de secrets. Sources et neuf logs de reproduction/validation sont
+conservés dans le checkpoint privé du drainage, avec manifeste SHA-256.
+
 ## 6 novembre — propriétaire authentifié et boucle audit restreinte
 
 Base `02834eb`, worktree dédié `codex/broker-cold-audit-20261105`. Le gel final

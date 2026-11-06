@@ -132,7 +132,9 @@ async fn retained_owner_submits_first_real_receipt_when_stopping_before_second_p
         stored.event.id != first_id.to_string() && stored.event.id != second_id.to_string()
     }));
 
-    owner.start();
+    owner
+        .start(service.cold_owners.try_reserve().expect("cold owner slot"))
+        .expect("cold owner registered before HTTP");
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let stored_first = loop {

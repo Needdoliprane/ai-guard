@@ -6,9 +6,24 @@ use crate::{
     runner::ColdAuditBudget,
 };
 
+#[path = "retained_audit/owners.rs"]
+mod owners;
+pub(super) use owners::ColdOwners;
+use owners::{ColdOwnerError, ColdOwnerSlot};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RetainedAuditSuccess {
+    Complete,
+    PartialConfirmed,
+}
+
 #[cfg(test)]
 #[path = "cold_owner_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "cold_drain_tests.rs"]
+mod shutdown_tests;
 
 impl Service {
     pub(super) async fn reconcile_retained_audit(&self) {
@@ -62,6 +77,9 @@ impl Service {
                         continue;
                     }
                     let operation = entry.operation_id();
+                    let Ok(slot) = self.cold_owners.try_reserve() else {
+                        return;
+                    };
                     // Preparation proves an admissible pending batch and owns
                     // both reserves. Historical/Busy entries consume neither a
                     // Job cache entry nor its bounded autonomous retry budget.
@@ -77,7 +95,7 @@ impl Service {
                     if !job.autonomous_attempt() {
                         continue;
                     }
-                    RetainedAuditOwner {
+                    let _ = RetainedAuditOwner {
                         registry: Arc::clone(&self.registry),
                         profile_id: profile.id.clone(),
                         credential,
@@ -89,7 +107,7 @@ impl Service {
                         #[cfg(test)]
                         stop_after_first_receipt: false,
                     }
-                    .start();
+                    .start(slot);
                     // At most one owner per retained actor at a time. Its
                     // completion reservation remains live through all HTTP.
                     break 'pages;
@@ -117,16 +135,27 @@ struct RetainedAuditOwner {
 }
 
 impl RetainedAuditOwner {
-    fn start(self) {
-        // Dropping an observer or the reconcile-loop task does not abort this
-        // owner. The process/runtime lifetime is a separate, unqualified gate.
-        tokio::spawn(async move {
+    fn start(self, slot: ColdOwnerSlot) -> std::result::Result<(), ColdOwnerError> {
+        let not_started = Arc::clone(&self.job);
+        let result = slot.start(async move {
             let job = Arc::clone(&self.job);
-            job.result(self.publish().await.err());
+            let outcome = self.publish().await;
+            job.result(match outcome {
+                Ok(RetainedAuditSuccess::Complete) => None,
+                Ok(RetainedAuditSuccess::PartialConfirmed) => {
+                    Some(BrokerErrorCodeV1::NeedsReconciliation)
+                }
+                Err(code) => Some(code),
+            });
+            outcome
         });
+        if result.is_err() {
+            not_started.result(Some(BrokerErrorCodeV1::Unavailable));
+        }
+        result
     }
 
-    async fn publish(self) -> std::result::Result<(), BrokerErrorCodeV1> {
+    async fn publish(self) -> std::result::Result<RetainedAuditSuccess, BrokerErrorCodeV1> {
         let budget = ColdAuditBudget::start();
         // Bound identity by the original budget, not an outer timeout that
         // could drop an already received first POST receipt during the second.
@@ -205,9 +234,9 @@ impl RetainedAuditOwner {
             .await
             .map_err(|_| BrokerErrorCodeV1::NeedsReconciliation)?;
         if incomplete {
-            Err(BrokerErrorCodeV1::NeedsReconciliation)
+            Ok(RetainedAuditSuccess::PartialConfirmed)
         } else {
-            Ok(())
+            Ok(RetainedAuditSuccess::Complete)
         }
     }
 }
