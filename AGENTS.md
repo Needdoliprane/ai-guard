@@ -56,6 +56,8 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 4. `docs/engineering/TEST_STRATEGY.md` : tests existants, tests manquants et preuves.
 5. Le code, les contrats et les documents directement concernés par la tâche.
 
+Pour tout correctif de sécurité, lire le [suivi du rapport final run-1](docs/engineering/AUDIT_FOLLOWUP.md#audit-final-run-1), puis les pièces primaires et le lot concernés indiqués dans ce registre. Revérifier les constats contre la source courante et conserver reproduction, régression, revue et limites ; un ancien correctif partiel ne clôture pas le constat résiduel. Si les pièces privées ne sont pas accessibles, le signaler explicitement et poursuivre les travaux indépendants.
+
 Pour le chantier global, lire aussi `PROMPT_PRODUCTION.md` et `docs/engineering/IMPLEMENTATION_PLAN.md`. Pour l'identité, les permissions, la configuration, l'inférence interne ou la découverte, lire le contrat canonique `docs/sso.md` ; pour les vues et les travaux visuels, lire `docs/ui.md`. Pour une publication, lire `docs/engineering/RELEASE_CHECKLIST.md`. Pour TLS, mTLS, certificats ou le NAS, lire d'abord `docs/engineering/INFRASTRUCTURE_PKI.md`.
 
 Ces consignes s'appliquent aux agents principaux, sous-agents et revues. Les exigences récentes du mainteneur priment sur les anciens plans. Signaler un conflit réel ; ne pas réinterpréter un document historique pour réduire la cible à un MVP.

@@ -1,5 +1,106 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+<a id="audit-final-run-1"></a>
+
+## Rapport final run-1 et comparaison au code du 6 novembre 2026
+
+**Ce registre est une entrée obligatoire des prochaines itérations.** Lire le
+rapport primaire et les consignes du lot avant de modifier le code ; confronter
+chaque constat à la source courante et reproduire son déclencheur. Les preuves
+historiques ci-dessous conservent leur périmètre et ne clôturent pas les défauts
+résiduels du rapport final. Aucun verdict de qualification production n'est acquis.
+
+Les pièces primaires restent privées dans
+`~/security-audit-skill/ai-guard/run-1/` : `REPORT.md` (notamment section 10),
+`PROMPT-CORRECTIFS-SUITE.md`, `FINDINGS-DETAIL.md`, `NEEDS-VALIDATION.md`,
+`findings.json` et `comparison-5e52807.json`. Ce registre en conserve la provenance
+et les suites ; il ne publie ni leurs reproductions ni leurs traces intégrales.
+Si ces pièces ne sont pas accessibles, signaler cette limite avant de prétendre
+avoir vérifié un constat. Ne pas reconstruire une conclusion depuis le seul
+résumé du chat.
+
+### Provenance et seuil de preuve
+
+L'audit porte sur `main@c4c4d2a`, avec une extension limitée au diff de
+`codex/broker-service@d6cb136`. La comparaison
+ultérieure porte sur `codex/human-brokers-validation-20261104@5e52807`, 135 commits
+après la base de correctifs `0a41aac`. **Comparé ne signifie pas audité** : le
+nouveau code, notamment workloads, relais, Kubernetes et registre des brokers,
+demande encore une revue propre. Les instantanés et les pièces externes ne sont
+pas modifiés par les correctifs du produit.
+
+Empreintes SHA-256 des pièces reçues le 6 novembre :
+
+| Pièce | SHA-256 |
+|---|---|
+| `REPORT.md` | `b3fd166102292135e426b007ef217bf41d6574ac4dfaabcbdc2ba2505c117296` |
+| `PROMPT-CORRECTIFS-SUITE.md` | `77bd0538b71e89536620ccfb65d7a2c923e701378a67d9ea3e984970b80ea0f9` |
+| `FINDINGS-DETAIL.md` | `5ccc8a8e66b8c7e5c6230085bb38218dae0479f0f319d9d3b455bafe7ea61e3d` |
+| `NEEDS-VALIDATION.md` | `eb6609e6dc362b5eae87344e54360a6d7acba233e9a89ef78f29251a4ce3a695` |
+| `comparison-5e52807.json` | `a8fc63d69aa87dc582e2d0149bdef13f102dedf5a0af5eaa52d8372b99f4f41a` |
+| `findings.json` | `70699c25107b7d00bb8e7393c9442936bafb19025f697c72b0d0a3c04861d888` |
+
+Le rapport démontre 13 vulnérabilités sur les instantanés audités : une haute,
+dix moyennes et deux faibles ; il distingue deux risques à vérifier, seize
+exigences absentes à cette date et un candidat rejeté. Il n'établit pas de fuite
+inter-tenant, de contournement d'authentification ou d'exécution HTTP non autorisée
+dans ce périmètre. Cette absence de constat ne garantit pas le code ajouté depuis.
+
+Sur `5e52807`, le déclencheur d'annulation du broker est corrigé ; sept correctifs
+restent partiels (export, collision, lectures synchrones, moniteur, descripteurs,
+capacité des lectures humaines et ledger OIDC), cinq défauts restent présents
+(trois pièges de quota, perte d'audit des fichiers et limiteur d'écritures partagé).
+Les seize exigences initiales ne sont pas seize absences inchangées : la
+comparaison distingue cinq absences, le contrôle réseau encore au stade de
+conception et dix implémentations partielles. Restent notamment absents
+l'approbation humaine authentifiée, la signature des enregistrements broker et
+des checkpoints, l'attribution des délégations et la sortie auditée des réservations dont
+l'absence de démarrage est prouvée.
+
+### Lots de correction et acceptation
+
+Les lots G à M de `PROMPT-CORRECTIFS-SUITE.md` remplacent les anciennes listes
+incomplètes comme point de départ, sans invalider leurs preuves datées. Chaque
+lot exige reproduction avant correction, régression conservée, tests ciblés par
+Luna, revue indépendante, documentation des contrats EN/FR concernés, puis
+intégration et push. Aucun succès de test ne change seul le verdict externe.
+
+| Lot | Problème et preuve attendue | État au démarrage du suivi final |
+|---|---|---|
+| G | Trois réservations sans issue : rejeu idempotent des mutations et claims, absence de double démarrage, sortie auditée seulement si jamais démarré est prouvé. | `OPEN` ; dépendances avec le chantier D5 à coordonner, sans écriture concurrente dans les mêmes fichiers. |
+| H | Ingress : les pools anonymes résiduels ne doivent plus priver les opérations de contrôle de leur capacité. | `OPEN` ; isoler la capacité de contrôle sans supposer qu'une adresse de pair est une identité. |
+| I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `SOURCE_READY`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807` ; reproductions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
+| J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `SOURCE_READY`, worktree `codex/audit-j-export-20261106` depuis `5e52807` ; régressions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
+| K | Un store voisin ne doit pas bloquer l'autorisation ni les lectures d'un autre tenant ; budgets et lectures coûteuses bornés. | `OPEN` ; les scans inter-stores et listes de reviews doivent être revérifiés après composition, pas seulement les handlers déplacés hors Tokio. |
+| L | Pénurie de descripteurs : admission HTTP bornée, récupération sans trafic authentifié et comportement du moniteur explicite. | `PARTIAL` ; correction Store publiée, disponibilité TCP et moniteur non qualifiés. Fenêtre de réessai soumise à décision distincte. |
+| M | Capacité d'audit : lecteurs, preuves SSO répétées et écritures ordinaires ne doivent pas épuiser la réserve indispensable aux actions et révocations. | `OPEN` ; budgets durables et déduplication à reprendre, sans effacement de ledger pour obtenir un test vert. |
+
+Le correctif Store `6871634` est composé dans `987898e`. Les deux régressions API
+de `6fa1bcc` sont déjà composées dans `4494760`, ancêtre de `5e52807` : ne pas les
+réintégrer une seconde fois. Leur fichier `api_cases.rs` conserve l'empreinte
+`ef33d945d2176995b1d797550de41ad163eaf87a4703fe4e3feb17580d512175`.
+Ces dix tests Store et deux tests API ne prouvent pas la disponibilité HTTP ni
+l'absence d'arrêt d'un worker sous pression FD.
+
+### Décision et qualifications encore ouvertes
+
+La [proposition de fenêtre transitoire du moniteur](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md)
+reste **PROPOSED** : aucune autorisation explicite du mainteneur n'est enregistrée
+pour changer le comportement documenté. Les autres lots avancent indépendamment.
+Ne pas étendre cette fenêtre aux lancements, claims ou audits obligatoires.
+
+`NOT_RUN` dans l'audit : moteurs réels Docker/Podman, confinement, réseaux,
+`--env-file`, disque plein et matrices Linux/macOS. Les deux risques dépendant du
+déploiement ou du CLI restent à valider : volume worker face au stockage de
+contrôle et amplification de capture face à l'outbox. Le test checkpoint dépassant
+520 s sur machine calme reste à diagnostiquer ; le test outbox précédemment lent
+a passé en 8,1 s sur machine calme, sans qualifier les autres scénarios.
+
+À chaque intégration, compléter ici le lot, ses sources exactes, commandes,
+résultats `PASS`/`FAIL`/`BLOCKED`/`NOT_RUN`, revue, limites et worktree fermé ou
+consommateur restant. Préserver la distinction entre défaut reproduit, correction
+logicielle et qualification runtime. G09 reste `FAIL` ; aucun gate global clos.
+
 ## Pénurie FD du Store — 6 novembre 2026
 
 Le latch est reproduit sur `0843c41` avec EMFILE réel limité à un enfant : après
@@ -645,7 +746,7 @@ Le checkout a évolué indépendamment. Le candidat209 et ses essais Docker/navi
 |---|---|
 | `api/preauth-linear-tenant-credential-hash-amplification` | Correctif de développement : index privé partagé, digest d'entrée borné calculé une fois, pas de copie complète des secrets/politique au clonage de l'état. Guards typés avant JSON/query/path. RED4FAIL/2PASS puis51PASS ciblés, vraie réponse401 sans attendre le corps et revue du delta acceptée. [Preuves](evidence/2026-10-30/api-auth/README.md). Impact/charge DoS et transport lent non qualifiés ; verdict original needs_validation conservé. |
 | `api/sse-graceful-shutdown-without-drain-deadline` | Correctif gateway/dashboard : drainage cinq secondes après signal, pattern ingress conservé, setup Unix fallible avant readiness. Vrais flux SSE maintenus >6 s avant SIGTERM puis sorties en5007/5010ms, SIGINT au repos vérifié ; revue et build PASS. [Preuves](evidence/2026-10-30/http-shutdown/README.md). IO/teardown bloqués, charge lente et autres environnements restent hors preuve ; verdict d'audit initial inchangé. |
-| `api/viewer-synchronous-reads-control-store-contention` | Lectures Store synchrones sur les futures HTTP et connexion partagée. La nouvelle validation v2 ajoute du travail, sans preuve de contention mesurée ; admission et exécution bloquante à qualifier. |
+| `api/viewer-synchronous-reads-control-store-contention` | Constat historique : lectures Store synchrones sur les futures HTTP et connexion partagée. Sur `5e52807`, le déplacement de handlers hors des threads Tokio est partiel : les scans de collision vers des stores voisins et certaines lectures coûteuses restent à traiter dans le lot K du [suivi final](#audit-final-run-1). Les preuves historiques ne clôturent pas ce résidu. |
 | `audit/preexisting-database-permissions-not-enforced` | StoreStorage refuse parent non privé et main/WAL/SHM/journal non600/UID/lienunique/ACLadmise sans réparation. Gel327, tests macOS/Linux, ACL POSIX et deux UID réels, backup commun relu et maintenance QA explicite dans le [dossier SQLite](evidence/2026-10-30/sqlite-storage/README.md). Filesystems/ACL/UID non couverts et pannes restent ouverts ; verdict historique needs_validation inchangé. |
 | `audit/sqlite-connection-path-reopen-identity-race` | Parents privés ancrés/revalidés, métadonnées par nom et HAS_MOVED obligatoire ; verrou distinct par parent et noms main ASCII évitent les collisions du namespace. Suppression du FD brut main après RED/GREEN F_GETLK : sa fermeture annulait les locks d'une autre connexion du même processus. VFS conserve ses FD actifs ; migration/backup utilisent le même garde. Handoff pathname contre sameUID/root/admin et substitution A→B→A non qualifiés ; [preuves et limites](evidence/2026-10-30/sqlite-storage/README.md), aucun verdict original réécrit. |
 | `dashboard/static-root-symlink-follow-disclosure` | ServeDir configurable reste à examiner ; l'image QA readonly avec dashboard sans montage réduit certaines préconditions, sans qualifier tout front-dir hôte ou image dérivée. |
