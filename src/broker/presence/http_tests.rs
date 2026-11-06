@@ -1,4 +1,4 @@
-//! Real gateway/SQLite regressions. The sole fault injection is the HTTP ACK.
+//! Real gateway/SQLite regressions. Faults affect only the HTTP exchange.
 #[path = "cost_tests.rs"]
 mod cost_tests;
 
@@ -29,7 +29,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{
     sync::{Semaphore, watch},
@@ -43,6 +43,22 @@ struct Probe {
     statuses: Mutex<Vec<u16>>,
     lose_ack: AtomicBool,
     tamper_ack: AtomicBool,
+    temporary_refusals: Mutex<usize>,
+    temporary_lost_acks: Mutex<usize>,
+    faults_observed: Semaphore,
+    post_times: Mutex<Vec<Instant>>,
+    identity_refusal: Mutex<Option<(u16, &'static str)>>,
+    identity_requests: Mutex<usize>,
+}
+
+fn consume_fault(remaining: &Mutex<usize>) -> bool {
+    let mut remaining = remaining.lock().unwrap();
+    if *remaining == 0 {
+        false
+    } else {
+        *remaining -= 1;
+        true
+    }
 }
 
 fn record_paths(state: &std::path::Path, leaf: &str) -> Vec<PathBuf> {
@@ -56,6 +72,26 @@ fn record_paths(state: &std::path::Path, leaf: &str) -> Vec<PathBuf> {
 }
 
 async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> Response<Body> {
+    if request.uri().path() == "/api/v1/brokers/identity" {
+        *probe.identity_requests.lock().unwrap() += 1;
+        let response = next.run(request).await;
+        let refusal = *probe.identity_refusal.lock().unwrap();
+        if let Some((status, code)) = refusal {
+            assert_eq!(
+                response.status(),
+                200,
+                "real Broker authentication precedes the HTTP fault"
+            );
+            return Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"error":{"code":code}}).to_string(),
+                ))
+                .unwrap();
+        }
+        return response;
+    }
     if request.uri().path() != "/api/v1/brokers/heartbeat" {
         return next.run(request).await;
     }
@@ -65,6 +101,7 @@ async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> 
     // Count the attempted POST before assertions: a broken preparation cannot
     // disappear from the test's observations when this middleware refuses it.
     probe.requests.lock().unwrap().push(heartbeat.clone());
+    probe.post_times.lock().unwrap().push(Instant::now());
     // The break caught here is POST-before-persist. This reads the real record
     // from the retained stream namespace before the actual gateway sees it.
     let state = probe.state.lock().unwrap().clone();
@@ -78,6 +115,17 @@ async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> 
         durable["heartbeat"],
         serde_json::to_value(&heartbeat).unwrap()
     );
+    if consume_fault(&probe.temporary_refusals) {
+        probe.statuses.lock().unwrap().push(503);
+        // Refuse before the real mutation. The barrier counts actual requests,
+        // rather than assuming four attempts from an elapsed sleep.
+        probe.faults_observed.add_permits(1);
+        return Response::builder()
+            .status(503)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+    }
     let response = next
         .run(Request::from_parts(parts, Body::from(bytes)))
         .await;
@@ -89,7 +137,8 @@ async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> 
     if response.status() != 200 {
         return response;
     }
-    if probe.lose_ack.load(Ordering::SeqCst) {
+    if probe.lose_ack.load(Ordering::SeqCst) || consume_fault(&probe.temporary_lost_acks) {
+        probe.faults_observed.add_permits(1);
         return Response::builder()
             .status(200)
             .header("content-type", "application/json")
@@ -197,6 +246,12 @@ impl LiveFixture {
             statuses: Mutex::new(Vec::new()),
             lose_ack: AtomicBool::new(false),
             tamper_ack: AtomicBool::new(false),
+            temporary_refusals: Mutex::new(0),
+            temporary_lost_acks: Mutex::new(0),
+            faults_observed: Semaphore::new(0),
+            post_times: Mutex::new(Vec::new()),
+            identity_refusal: Mutex::new(None),
+            identity_requests: Mutex::new(0),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut scope = filesystem.scope();
@@ -230,6 +285,17 @@ impl LiveFixture {
         prepared.finalize(&[]).unwrap();
         prepared
     }
+
+    fn prepared_with_five_second_interval(&self) -> PreparedPresence {
+        let mut config = self.filesystem.value.clone();
+        config["interval_seconds"] = serde_json::json!(5);
+        fs::write(
+            &self.filesystem.config,
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        self.prepared()
+    }
 }
 
 fn actor(
@@ -260,28 +326,265 @@ async fn wait_for_receipt_count(state: &std::path::Path, count: usize) {
     .unwrap();
 }
 
+async fn wait_for_faults(probe: &Probe, count: u32) -> bool {
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        probe.faults_observed.acquire_many(count),
+    )
+    .await
+    {
+        Ok(Ok(permits)) => {
+            permits.forget();
+            true
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug)]
+enum RecoveryProgress {
+    Receipt,
+    Exited(std::result::Result<Result<(), PresenceError>, tokio::task::JoinError>),
+    Watchdog,
+}
+
+async fn receipt_or_exit(
+    state: &std::path::Path,
+    task: &mut JoinHandle<Result<(), PresenceError>>,
+) -> RecoveryProgress {
+    match tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if !record_paths(state, "receipt.json").is_empty() {
+                return RecoveryProgress::Receipt;
+            }
+            tokio::select! {
+                result = &mut *task => return RecoveryProgress::Exited(result),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {},
+            }
+        }
+    })
+    .await
+    {
+        Ok(progress) => progress,
+        Err(_) => RecoveryProgress::Watchdog,
+    }
+}
+
+async fn finish_recovery_actor(
+    shutdown: &watch::Sender<bool>,
+    task: &mut JoinHandle<Result<(), PresenceError>>,
+    progress: &RecoveryProgress,
+) -> bool {
+    let _ = shutdown.send(true);
+    if let RecoveryProgress::Exited(result) = progress {
+        // The observing select already joined this handle. Do not poll it twice.
+        return matches!(result, Ok(Ok(())));
+    }
+    match tokio::time::timeout(Duration::from_secs(5), &mut *task).await {
+        Ok(result) => matches!(result, Ok(Ok(()))),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            false
+        }
+    }
+}
+
+#[tokio::test]
+async fn temporary_gateway_refusals_resume_in_the_same_actor_after_the_fourth_failure() {
+    let fixture = LiveFixture::new().await;
+    // One further failure after the first burst distinguishes a slow retry
+    // sequence from an incorrectly restarted 100/250/500ms burst.
+    *fixture.probe.temporary_refusals.lock().unwrap() = 5;
+    let before = fixture.store.head().unwrap();
+    let (shutdown, mut task) = actor(fixture.prepared_with_five_second_interval());
+    let four_failures = wait_for_faults(&fixture.probe, 4).await;
+    let progress = receipt_or_exit(&fixture.filesystem.state, &mut task).await;
+    let clean_stop = finish_recovery_actor(&shutdown, &mut task, &progress).await;
+
+    // The old actor returns Unavailable at request four. A restarted actor or a
+    // new operation cannot satisfy the live handle and exact-pending oracles.
+    assert!(four_failures, "four actual HTTP refusals must be observed");
+    assert!(
+        matches!(progress, RecoveryProgress::Receipt) && clean_stop,
+        "same actor must resume after four 503 responses; progress={progress:?}, clean_stop={clean_stop}"
+    );
+    assert_eq!(
+        *fixture.probe.statuses.lock().unwrap(),
+        vec![503, 503, 503, 503, 503, 200]
+    );
+    let requests = fixture.probe.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    assert!(requests.iter().all(|request| request == &requests[0]));
+    let times = fixture.probe.post_times.lock().unwrap();
+    assert!(times[4].duration_since(times[3]) >= Duration::from_secs(5));
+    assert!(times[5].duration_since(times[4]) >= Duration::from_secs(5));
+    assert_eq!(fixture.store.head().unwrap(), before + 1);
+    assert_eq!(
+        record_paths(&fixture.filesystem.state, "pending.json").len(),
+        1
+    );
+    assert_eq!(
+        record_paths(&fixture.filesystem.state, "receipt.json").len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn four_lost_committed_acks_resume_the_exact_pending_without_a_restart() {
+    let fixture = LiveFixture::new().await;
+    *fixture.probe.temporary_lost_acks.lock().unwrap() = 4;
+    let before = fixture.store.head().unwrap();
+    let (shutdown, mut task) = actor(fixture.prepared_with_five_second_interval());
+    let four_failures = wait_for_faults(&fixture.probe, 4).await;
+    let head_after_faults = fixture.store.head().unwrap();
+    let progress = receipt_or_exit(&fixture.filesystem.state, &mut task).await;
+    let clean_stop = finish_recovery_actor(&shutdown, &mut task, &progress).await;
+
+    assert!(
+        four_failures,
+        "four real committed ACK losses must be observed"
+    );
+    assert_eq!(head_after_faults, before + 1);
+    assert!(
+        matches!(progress, RecoveryProgress::Receipt) && clean_stop,
+        "same actor must recover its committed pending; progress={progress:?}, clean_stop={clean_stop}"
+    );
+    let requests = fixture.probe.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(requests.iter().all(|request| request == &requests[0]));
+    assert_eq!(*fixture.probe.statuses.lock().unwrap(), vec![200; 5]);
+    assert_eq!(fixture.store.head().unwrap(), before + 1);
+    let pending = record_paths(&fixture.filesystem.state, "pending.json");
+    let receipts = record_paths(&fixture.filesystem.state, "receipt.json");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(receipts.len(), 1);
+    let retained_pending: Value = serde_json::from_slice(&fs::read(&pending[0]).unwrap()).unwrap();
+    let retained_receipt: Value = serde_json::from_slice(&fs::read(&receipts[0]).unwrap()).unwrap();
+    assert_eq!(
+        retained_pending["heartbeat"]["operation_id"],
+        requests[0].operation_id
+    );
+    assert_eq!(
+        retained_receipt["receipt"]["operation_id"],
+        requests[0].operation_id
+    );
+}
+
+#[tokio::test]
+async fn shutdown_during_slow_recovery_releases_permits_and_never_posts_after_join() {
+    let fixture = LiveFixture::new().await;
+    *fixture.probe.temporary_refusals.lock().unwrap() = 4;
+    let before = fixture.store.head().unwrap();
+    let attempts = Arc::new(Semaphore::new(1));
+    let io = Arc::new(Semaphore::new(1));
+    let (shutdown, receiver) = watch::channel(false);
+    let mut task = tokio::spawn(fixture.prepared_with_five_second_interval().run(
+        receiver,
+        Arc::clone(&attempts),
+        Arc::clone(&io),
+    ));
+    let four_failures = wait_for_faults(&fixture.probe, 4).await;
+    let permits_released = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if attempts.available_permits() == 1 && io.available_permits() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    let still_running = !task.is_finished();
+    let progress = RecoveryProgress::Watchdog;
+    let clean_stop = finish_recovery_actor(&shutdown, &mut task, &progress).await;
+    let count_after_join = fixture.probe.requests.lock().unwrap().len();
+    // Cross the configured retry cadence after join; a detached timer/HTTP
+    // owner would produce a fifth POST and a real Store mutation here.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    let count_after_interval = fixture.probe.requests.lock().unwrap().len();
+
+    assert!(
+        four_failures && still_running && permits_released && clean_stop,
+        "backoff must keep the actor alive without permits; four_failures={four_failures}, still_running={still_running}, permits_released={permits_released}, clean_stop={clean_stop}"
+    );
+    assert_eq!(count_after_join, 4);
+    assert_eq!(count_after_interval, count_after_join);
+    assert_eq!(fixture.store.head().unwrap(), before);
+    assert!(record_paths(&fixture.filesystem.state, "receipt.json").is_empty());
+}
+
+#[tokio::test]
+async fn closed_refusals_and_changed_private_material_remain_terminal_without_retry() {
+    for (status, code, expected) in [
+        (401, "fixture_authentication", PresenceError::Authentication),
+        (403, "fixture_permission", PresenceError::Forbidden),
+        (409, "fixture_conflict", PresenceError::Conflict),
+        (429, "fixture_capacity", PresenceError::Capacity),
+        (503, "control_clock_uncertain", PresenceError::Clock),
+        (503, "fixture_unknown", PresenceError::Protocol),
+    ] {
+        let fixture = LiveFixture::new().await;
+        *fixture.probe.identity_refusal.lock().unwrap() = Some((status, code));
+        let before = fixture.store.head().unwrap();
+        let (shutdown, mut task) = actor(fixture.prepared());
+        let actual = match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(result)) => Some(result),
+            Ok(Err(_)) => None,
+            Err(_) => {
+                let _ =
+                    finish_recovery_actor(&shutdown, &mut task, &RecoveryProgress::Watchdog).await;
+                None
+            }
+        };
+        assert_eq!(actual, Some(Err(expected)), "status={status}, code={code}");
+        assert_eq!(*fixture.probe.identity_requests.lock().unwrap(), 1);
+        assert!(fixture.probe.requests.lock().unwrap().is_empty());
+        assert!(record_paths(&fixture.filesystem.state, "pending.json").is_empty());
+        assert_eq!(fixture.store.head().unwrap(), before);
+    }
+
+    let fixture = LiveFixture::new().await;
+    let prepared = fixture.prepared();
+    let before = fixture.store.head().unwrap();
+    fs::write(
+        fixture.filesystem.value["broker_token_file"]
+            .as_str()
+            .unwrap(),
+        b"changed-private-fixture-bearer-0123456789abcdef",
+    )
+    .unwrap();
+    let (shutdown, mut task) = actor(prepared);
+    let actual = match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+        Ok(Ok(result)) => Some(result),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            let _ = finish_recovery_actor(&shutdown, &mut task, &RecoveryProgress::Watchdog).await;
+            None
+        }
+    };
+    assert_eq!(actual, Some(Err(PresenceError::UnsafeFilesystem)));
+    assert_eq!(*fixture.probe.identity_requests.lock().unwrap(), 0);
+    assert!(fixture.probe.requests.lock().unwrap().is_empty());
+    assert_eq!(fixture.store.head().unwrap(), before);
+}
+
 #[tokio::test]
 async fn committed_lost_ack_restart_replays_same_durable_operation_without_duplicate_audit() {
     let fixture = LiveFixture::new().await;
     let original_head = fixture.store.head().unwrap();
     fixture.probe.lose_ack.store(true, Ordering::SeqCst);
-    let (_first_shutdown, first) = actor(fixture.prepared());
-    assert!(
-        tokio::time::timeout(Duration::from_secs(10), first)
-            .await
-            .unwrap()
-            .unwrap()
-            .is_err()
-    );
+    let (first_shutdown, mut first) = actor(fixture.prepared());
+    let fault_observed = wait_for_faults(&fixture.probe, 1).await;
+    let first_stopped =
+        finish_recovery_actor(&first_shutdown, &mut first, &RecoveryProgress::Watchdog).await;
+    assert!(fault_observed && first_stopped);
     assert!(record_paths(&fixture.filesystem.state, "receipt.json").is_empty());
     let requests = fixture.probe.requests.lock().unwrap().clone();
-    assert_eq!(
-        requests.len(),
-        4,
-        "initial request plus at most three retries"
-    );
+    assert!(!requests.is_empty());
     assert!(requests.iter().all(|request| request == &requests[0]));
     assert_eq!(fixture.store.head().unwrap(), original_head + 1);
+    let first_attempts = requests.len();
 
     fixture.probe.lose_ack.store(false, Ordering::SeqCst);
     let (shutdown, second) = actor(fixture.prepared());
@@ -293,7 +596,7 @@ async fn committed_lost_ack_restart_replays_same_durable_operation_without_dupli
         .unwrap()
         .unwrap();
     let requests = fixture.probe.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), first_attempts + 1);
     assert!(requests.iter().all(|request| request == &requests[0]));
     assert_eq!(fixture.store.head().unwrap(), original_head + 1);
     assert_eq!(
