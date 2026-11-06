@@ -72,7 +72,7 @@ intégration et push. Aucun succès de test ne change seul le verdict externe.
 | I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `SOURCE_READY`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807` ; reproductions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
 | J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `SOURCE_READY`, worktree `codex/audit-j-export-20261106` depuis `5e52807` ; régressions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
 | K | Un store voisin ne doit pas bloquer l'autorisation ni les lectures d'un autre tenant ; budgets et lectures coûteuses bornés. | `OPEN` ; les scans inter-stores et listes de reviews doivent être revérifiés après composition, pas seulement les handlers déplacés hors Tokio. |
-| L | Pénurie de descripteurs : admission HTTP bornée, récupération sans trafic authentifié et comportement du moniteur explicite. | `PARTIAL` ; correction Store publiée, disponibilité TCP et moniteur non qualifiés. Fenêtre de réessai soumise à décision distincte. |
+| L | Pénurie de descripteurs : admission HTTP bornée, récupération sans trafic authentifié et comportement du moniteur explicite. | `PARTIAL` ; correction Store publiée, disponibilité TCP et moniteur non qualifiés. Fenêtre de réessai du moniteur approuvée le 6 novembre, implémentation et preuves encore ouvertes. |
 | M | Capacité d'audit : lecteurs, preuves SSO répétées et écritures ordinaires ne doivent pas épuiser la réserve indispensable aux actions et révocations. | `OPEN` ; budgets durables et déduplication à reprendre, sans effacement de ledger pour obtenir un test vert. |
 
 Le correctif Store `6871634` est composé dans `987898e`. Les deux régressions API
@@ -84,9 +84,12 @@ l'absence d'arrêt d'un worker sous pression FD.
 
 ### Décision et qualifications encore ouvertes
 
-La [proposition de fenêtre transitoire du moniteur](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md)
-reste **PROPOSED** : aucune autorisation explicite du mainteneur n'est enregistrée
-pour changer le comportement documenté. Les autres lots avancent indépendamment.
+Le mainteneur a explicitement approuvé le 6 novembre la
+[fenêtre transitoire du moniteur](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md),
+bornée à 60 secondes dès le début du premier refresh défaillant, après démarrage
+acquitté. Implémentation, tests et documentation du comportement livré restent
+ouverts. Échéance initiale, STOP et erreurs d'identité/audit restent prioritaires ;
+le callback de démarrage est exclu. Les autres lots avancent indépendamment.
 Ne pas étendre cette fenêtre aux lancements, claims ou audits obligatoires.
 
 `NOT_RUN` dans l'audit : moteurs réels Docker/Podman, confinement, réseaux,
