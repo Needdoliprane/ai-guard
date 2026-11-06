@@ -1,5 +1,19 @@
 # Plan d'industrialisation
 
+## 6 novembre — vue administrative humaine du registre workers
+
+La verticale permission/migration/API/curseurs/UI du registre workers humain
+est intégrée dans `b14b9ce`, avec guides EN/FR, revue et validations ciblées.
+La permission est administrée explicitement ; un rôle IdP ou une autre lecture
+de métadonnées ne l'accorde pas. [État et limites](CURRENT_STATE.md#6-novembre--registre-workers-pour-les-identités-humaines).
+
+La vue personnelle liée à l'initiateur reste ouverte, sans déduire un propriétaire
+d'un session_id déclaré. Le transport multi-hôtes, la capacité100 et le parcours
+unifié complet ne sont pas fermés par cette tranche administrative. En parallèle,
+la récupération de quarantaine du broker avance dans son périmètre dédié ;
+ses tests et sa revue précèdent toute intégration. Kubernetes et réseau conservent
+leurs décisions de frontière et qualifications propres.
+
 ## 6 novembre — propriétaire Full livré, vue humaine en parallèle
 
 Le lot `5026f07` traite la possession des tâches Full et la réservation avant

@@ -1,5 +1,105 @@
 # Validation courante
 
+## 6 novembre — registre workers humain
+
+Base `0b09d96`, lot `1bede3b` (55 fichiers), intégré sans conflit dans
+`b14b9ce35e9c63723348af0e8a5a73c41acc14a6`. Permission explicite
+ReadWorkerRegistry, migration9→10, projection whitelistée256Kio, transaction
+autorisation/lecture/audit puis droits revérifiés avant publication. Les
+curseurs Workers restent distincts de Brokers, liés au contexte et bornés ;
+les budgets F1 sont partagés. Aucun droit attribué par une autre permission
+ou un nom de compte. Les guides identité/SSO/workload EN/FR sont synchronisés.
+
+### RED et corrections de revue
+
+Le baseline avec tests seuls atteint quatre404 de route et le refus du nouvel
+enum fermé,5FAIL/RC101, log
+`2b79e81f17f43a1b3c437ee5bafbb71f0f223e42e904f380656e45b47762f474`.
+Cela établit l'absence de cette verticale, pas une fuite de données.
+
+Sur la première implémentation, la revue relève trois incompatibilités.
+Les trois contre-exemples utilisent vraies admissions/transitions, intégrité
+et migration avant GET : nil session valide donne503, start non interprétable
+conservé InDoubt donne503, exit9007199254740993 est numérique au lieu de chaîne.
+Rust3RC101, log
+`3c20fbc5f5702dd9744fea801925864f07dbc15ccbd5495b5d2c674e3099acca`.
+Le Node lit les trois réponses effectivement capturées dans la même QA,
+sans ENOENT/setup manquant :3FAIL/RC1, log
+`71bac8fed1bd0316eb4fdbc46246b6745eadfe78dfe3bf9afa539bf0cd940ea5`.
+La correction garde WorkerV1/Observe inchangés, accepte les UUID historiques
+canoniques, distingue known/absent/unknown et transmet l'i64 exact en chaîne.
+
+Un bord supplémentaire est reproduit avant correction : deux RFC3339 valides
+avec offset sortent du domaine UTC à quatre chiffres, le DTO devient invalide.
+Le parent strict atteint les deux cas, RC101, log
+`84d10391b130ef3a9bf7b36c59af20ce296ad8554f96e86bff0e8cda1eed87fb`.
+Le rendu final exige roundtrip même instant/nanosecondes : source valide mais
+UTC non représentable devient null/unknown ; brut obligatoire invalide reste
+refusé, absent interdit. Starts nonpositifs restent inconnus, finish epoch0
+reste connu, aucune durée n'est calculée.
+
+Les43 tests Node initiaux passent mais ne compilent pas human-view. Le tsc
+réel échoue RC2 sur une parenthèse manquante ligne409, log
+`e9e0a360ec10ae5d26e952c5dde50e624b4a802fe353b6aa4b31806ea5e343ce`.
+Cette parenthèse seule est ajoutée dans le delta UTC ; Node et tsc sont alors
+réexécutés. Ne pas transformer le premier Node PASS en build frontend PASS.
+
+### GREEN ciblés
+
+| Sélection | Gel, résultat et SHA-256 du log |
+|---|---|
+| API hors legacy | LegacyGreen55,RC0,9PASS ; `1c4c25b5ee4a99ff3a16c4baefc7f71d432f2f3d36c95628af599c492c7630e5`. |
+| human_workers_migration | LegacyGreen55,RC0,3PASS ; `ffe6ced05e3d8b01984c90cf813ef9f15473c3b098dfb38ec2190b0e8036ea8b`. CLI réel, backup9 exact, reopen10, restore9 neuf, capacité d'audit et marker contrôlés. |
+| lib human_workers::tests | LegacyGreen55,RC0,3PASS ; `17d328614e230f9696bfdd01dd5baded47d71e131c845058e6cf12e99512c55a`. Inclut SQLite FULL pendant l'audit obligatoire. |
+| Curseurs Workers distincts | LegacyGreen55,RC0,1PASS ; `94e891e40780caab05e48e1dddb8c8b71c4903772dcf29cdfcd9152135d1e35f`. |
+| Position UUID nil | LegacyGreen55,RC0,1PASS ; `76e0d7be65be978e3fdbad3707c3367368f62570782cb90a3d86cb05d2480a5d`. |
+| Révocation après lecture durable | LegacyGreen55,RC0,1PASS ; `eaab4baf8f7b6d75fd564ce733ec95c4826ed408b1ebfe8864013f1113284959`. |
+| Canaris compatibilité | LegacyGreen55,RC0,22PASS : protocole2,fédération3,brokers humains12,migration brokers4,budget1 ; `8d4ad30ca0af76e29fcb48099b91b9f76a717eeeae4c8c235adea657dad48179`. |
+| Parent UTC hors domaine | UTCGreen55,RC0,1PASS,2cas ; `0974d948893f5b8a9e9363a90af884a5ede5937c871c282639888d7c089f5f06`. |
+| Source obligatoire/epoch0/1ns | UTCGreen55,RC0,1PASS ; `c89b000755638de8d8ba544e7b453040a05687a7445f8f83e7aa485f5410148a`. |
+| Legacy HTTP réel | UTCGreen55,RC0,3PASS ; `4740830023c24916645126f35dd89c1acc58a152c022f0d3bc0f055c2270b88f`. |
+| Wire Rust→Node | UTCGreen55,RC0,3PASS ; `c5a56f0887c798b4bca137240f6af4eadb1934eb05b98e632c2f731e76110839`. |
+| Node human-model/api/workers | UTCGreen55,RC0,43PASS ; `daf0947b2499e1c6172989729adde7ed738d3fbd285a762047f74fb0ba5af270`. |
+| tsc5.9.3 --noEmit | UTCGreen55,RC0,log vide ; `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. |
+| check --all-targets | UTCGreen55,RC0,36,07s,3 dead_code ; `40a93c29ee52cd49eaf0485f2e9b6390d9d056531607b7aa825761ddaf8f3607`. |
+| check composition b14b9ce | QA H/cible neuve,RC0,44,62s,3 dead_code ; `576bd241896846b09467a397eea742c520ac7c84fe4b37cabfd71e2bff91e7fe`. |
+
+Soit45 fonctions Rust et46 Node uniques. Les legacy/wire/Node répétés avant
+le dernier delta ne sont pas recomptés. Les permissions, migrations et budgets
+ne changent pas après leurs canaris ; seuls dix fichiers du rendu temporel,
+des oracles et des guides changent dans UTCGreen55. Manifeste55 final
+`ad85cb4d7c63d678115ab5dff7d05afc468dc06b4214eeb2fd35778b9c7a02d5`.
+Root vérifie chaque fichier au gel, rustfmt épinglé, diff,303liens/0manquant et
+55fichiers/3secrets connus/0correspondance. Contre-revue finale sans blocage
+dans le périmètre source.
+
+### Environnement, conservation et limites
+
+Luna utilise les QA Linux ARM64 isolées, image2115d432…a207, Rust1.99.1,
+Node24.22.2, Cargo locked/offline. Aucun code projet sur l'hôte. Contrôles
+Config+noyau : UID1000/caps0/NNP1/seccomp2, réseau none, racine/inputs/cache
+public RO, CPU2/mémoire6Gio/swap0/PID256, scratch privé3Gio/65536inodes,
+limites core/nofile/fsize et environnement allowlist. Cible neuve par gel.
+TypeScript vient du cache public local vérifié, sans téléchargement.
+Les logs sont privés par leur parent0700 ; des feuilles créées0644 ont été
+corrigées0600 avant conservation, les suivantes précréées0600. Les sources,
+notes ignorées d'auteur et logs parent sont conservés hors worktree ; aucun
+exécutable ou JSON brut de la QA n'est promu.
+
+F et G sont arrêtées après tous les tests terminaux et inventaire init/sleep
+seuls, puis retirées par ID exact à03:53:29.046101130Z et03:53:28.937252964Z :
+PID0,exit143,OOMfalse et événements mémoire0. Aucun volume utilisateur monté
+ou supprimé. Le check de composition utilise H, indépendante, encore active.
+
+Build Vite et navigateur : BLOCKED, paquets/binaires offline nécessaires
+absents. Le scénario320/390/desktop/thèmes n'est pas exécuté. OIDC ici passe
+par des identités/jetons de fixture validés par le vrai Rust, pas par une
+nouvelle connexion Keycloak. Vue personnelle liée à l'initiateur, chaîne de
+délégation complète, transport multi-hôtes, capacité100, moteurs, fournisseurs
+et qualifications de panne : NOT_RUN pour ce lot ou exigences ouvertes.
+Aucune propriété n'est déduite du session_id déclaré ni d'un rôle IdP seul.
+Clippy BLOCKED, composant absent ; G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — propriétaires Full et admission avant ACK
 
 Base `e9415ac`, lot `5026f07`, neuf fichiers dont les guides broker EN/FR.

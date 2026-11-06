@@ -1,5 +1,14 @@
 # Gates de qualification production
 
+Registre workers humain du 6 novembre : permission explicite, migration9→10,
+projection/audit/curseurs et vue administrative intégrés. Quarante-cinq fonctions
+Rust et quarante-six Node uniques PASS sur leurs gels, tsc et check de composition
+RC0, revue indépendante traitée. [Preuves](VALIDATION.md#6-novembre--registre-workers-humain).
+Le navigateur/build frontend complet restent BLOCKED ; aucune permission ou
+preuve de transport distant, propriété personnelle, capacité100 ou moteur réel
+n'est déduite. Attribution initiateur/délégation et parcours cloud complet restent
+ouverts. G09 FAIL, aucun gate global clos.
+
 Propriétaires Full du 6 novembre : quatre parents Full et cinq canaris Cold
 PASS, compilation toutes cibles RC0 et revue indépendante traitée. Le refus de
 capacité précède les mutations/ACK ; les futurs acceptés restent possédés pendant

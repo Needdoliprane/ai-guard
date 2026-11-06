@@ -1,5 +1,25 @@
 # État constaté — suivi du développement
 
+## 6 novembre — registre workers pour les identités humaines
+
+Le lot `1bede3b`, composé dans `b14b9ce`, ajoute une lecture administrative
+du registre workers avec permission explicite `read_worker_registry`, identité
+locale nominative ou OIDC admise, contexte et tenant vérifiés côté Rust. La
+projection bornée et son reçu durable partagent les budgets humains existants.
+Révocation, curseurs distincts, refus avant publication et purge de la vue sont
+traités. La migration9→10 est explicite, avec sauvegarde ; elle n'accorde aucun
+droit et n'active pas l'exécution. [Guides EN](../setup/identity/WORKERS.md)/[FR](../setup/identity/WORKERS.fr.md).
+
+Les régressions couvrent aussi UUID historiques, dates inconnues ou hors format
+et code de sortie i64 exact sous forme de chaîne. Quarante-cinq fonctions Rust
+et quarante-six Node uniques passent sur leurs gels ; tsc et compilation de
+la composition RC0, revue indépendante traitée. [Preuves](VALIDATION.md#6-novembre--registre-workers-humain).
+Build frontend complet et navigateur restent BLOCKED par l'outillage offline.
+Cette vue administrative ne clôture pas la vue personnelle : l'attribution
+authentifiée initiateur/délégation/admission reste obligatoire. Transport
+multi-hôtes, relais, capacité100 et moteurs réels restent à qualifier.
+G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — propriétaires Full et admission avant accusé de réception
 
 Le lot `5026f07` retient les futures Full acceptées jusqu'à leur fin et attend

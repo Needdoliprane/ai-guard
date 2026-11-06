@@ -1,5 +1,28 @@
 # Stratégie de qualification
 
+## Registre workers humain
+
+`--test human_workers_api` vérifie identité/contextes A/B, permission explicite,
+projection whitelistée, budgets durables, révocation et refus d'auto-promotion.
+Les trois parents legacy utilisent de vraies admissions et transitions, une
+migration et le routeur : UUID nil canonique, date runtime non interprétable
+et grand i64. Le hook privé opt-in `AIGUARD_HUMAN_WORKERS_WIRE_DIR` enregistre
+trois réponses exclusives et bornées dans la QA ; `human-workers-wire.test.mjs`
+lit ces réponses réelles, sans leur substituer des objets JavaScript.
+
+`--test human_workers_migration` utilise le CLI réel, sauvegarde exacte9,
+réouverture10, restauration9 dans une destination neuve et refus de capacité
+d'audit. Les filtres lib couvrent SQLite FULL, contrat des dates/UUID, curseur
+workers distinct et droits révoqués après le commit de lecture. Les canaris
+protocole, fédération, broker humain et budget sont exécutés une fois sur les
+coutures de schéma/permission inchangées. Une correction localisée de date
+justifie ses deux parents, le vrai wire, Node/tsc et le check ; ne pas répéter
+les migrations ou la matrice fournisseur sans nouvelle raison.
+
+Les tests frontend ciblent modèle/API/workers. Le scénario navigateur Workers
+prépare les tailles320/390/desktop et thèmes, mais sa présence ne vaut pas un
+PASS. [Gels, commandes et statuts](VALIDATION.md#6-novembre--registre-workers-humain).
+
 ## Propriétaires Full et admission avant ACK
 
 Sélection : `cargo test --locked --lib full_owner_tests -- --test-threads=1 --nocapture`.

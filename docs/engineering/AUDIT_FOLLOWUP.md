@@ -1,5 +1,18 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Registre workers humain — 6 novembre 2026
+
+Le lot `1bede3b` ajoute une permission explicite et une projection administrative
+bornée, auditée et révoquée côté Rust. La revue a trouvé quatre incompatibilités
+historiques : UUID nil, date runtime non interprétable, i64 arrondi et UTC hors
+format. Les contre-exemples sont reproduits avant correction ; les trois réponses
+HTTP des cas legacy sont aussi lues par TypeScript. Les [preuves](VALIDATION.md#6-novembre--registre-workers-humain)
+séparent ces défauts du premier endpoint absent et de l'erreur de syntaxe TS.
+Migration, limites de lecture et interdiction d'auto-promotion ont leurs canaris.
+Revue traitée et composition RC0, sans verdict nouveau sur les pièces externes,
+le transport multi-hôtes, le navigateur ou les moteurs. La vue personnelle liée
+à l'initiateur reste obligatoire et ouverte ; aucun gate global clos.
+
 ## Propriétaires Full et admission — 6 novembre 2026
 
 Le lot `5026f07`, intégré dans `485eb6b`, corrige le retour d'arrêt normal
