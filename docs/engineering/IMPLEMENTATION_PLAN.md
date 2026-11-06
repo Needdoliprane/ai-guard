@@ -1,5 +1,15 @@
 # Plan d'industrialisation
 
+## 6 novembre — reprise FD intégrée, réconciliateur D5 en validation
+
+La récupération backing EMFILE/ENFILE est intégrée avec témoin postcommit,
+validation complète et dix régressions ciblées. [Preuves](evidence/2026-11-06/store-resource-recovery/README.md).
+Le port D5 garde son worktree : réponse perdue, Pending périmé et Final en cours
+doivent atteindre leurs oracles avant correction/intégration. Les erreurs de
+compilation/fixture ne constituent pas ces reproductions. Relais runtime,
+fédération réelle, Kubernetes complet, exécution humaine et qualifications
+restent des exigences ouvertes.
+
 ## 6 novembre — présence récupérable, contrats humains en préparation
 
 La reprise du publisher après panne temporaire est intégrée, sans nouvelle

@@ -1,5 +1,20 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Pénurie FD du Store — 6 novembre 2026
+
+Le latch est reproduit sur `0843c41` avec EMFILE réel limité à un enfant : après
+restitution des FDs, chaîne valide et origine fermée. `6871634`, composé dans
+`987898e`, conserve le refus courant puis réconcilie automatiquement la suspension
+typée, sans réarmer les invalidations permanentes. Le témoin du commit précède
+la dernière vérification des noms ; rejeu/débit/activation ont leurs régressions
+avec connexion sœur. Dix fonctions finales, compilation et revues passent dans
+leur [périmètre documenté](evidence/2026-11-06/store-resource-recovery/README.md).
+
+Les FAIL intermédiaires sont conservés. Ce résultat logiciel ne prouve pas une
+exposition TCP ni sa disponibilité sous pression. Les verdicts/fichiers externes
+restent inchangés ; les attentes Daybreak ci-dessous sont historiques. Aucun
+nouvel audit global ou gate production clôturé.
+
 ## Confirmation de quarantaine — 6 novembre 2026
 
 Le lot `7b630ff` apporte une confirmation metadata-only sur l'input exact du

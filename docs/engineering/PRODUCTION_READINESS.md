@@ -1,5 +1,10 @@
 # Gates de qualification production
 
+Reprise FD du6novembre : dix fonctions Store ciblées, compilation et revues
+passent ; [preuves](evidence/2026-11-06/store-resource-recovery/README.md).
+Ce résultat ne qualifie ni disponibilité TCP sous pression, ni workers/moteurs,
+ni autres plateformes. G06/G08 restent ouverts, G09 FAIL,0/12 gates clos.
+
 Reprise de présence du6novembre : même acteur/Pending après panne temporaire,
 dix-sept fonctions et check lot/composition toutes cibles PASS, revue traitée.
 [Preuves](evidence/2026-11-06/presence-recovery/README.md). Cette disponibilité

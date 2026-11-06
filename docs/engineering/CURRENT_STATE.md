@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 6 novembre — récupération du Store après pénurie de descripteurs
+
+Le lot `6871634`, composé dans `987898e`, distingue EMFILE/ENFILE typés des
+invalidations permanentes. La requête fautive reste refusée ; le prochain accès
+validant contrôle le snapshot complet avant de rouvrir l'origine partagée.
+Le témoin postcommit, l'activation retenue et le débit idempotent survivent
+à une réponse perdue, y compris par une connexion sœur.
+
+Dix fonctions ciblées passent après les RED, avec compilation toutes cibles,
+revue indépendante et guides EN/FR. [Preuves](evidence/2026-11-06/store-resource-recovery/README.md).
+Disponibilité TCP, autres plateformes et workers réels non qualifiés par ce
+résultat Store ; G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — cohérence des guides local, Keycloak et SSO
 
 Les sept guides du lot `4195450`, composé dans `bca854f`, distinguent l'accès

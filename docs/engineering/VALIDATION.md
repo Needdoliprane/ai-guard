@@ -1,5 +1,23 @@
 # Validation courante
 
+## 6 novembre — récupération du Store après pénurie FD
+
+Base `0843c41`, source `6871634`, composition `987898e` : sept hashes source/Cargo
+identiques à GREEN05. RED01 reproduit EMFILE dans un enfant puis le latch malgré
+une chaîne valide ; RED02 passe4parents/échoue3 sur la reprise. GREEN04 échoue
+en compilation (getter SQLite u64), comportements NOT_RUN. GREEN05 corrige
+uniquement ce type de test, puis passe huit parents unitaires et deux FD réels.
+Le helper enfant ignoré n'est pas compté séparément. Check toutes cibles
+RC0/59.78s ; warnings118lib/3lib-test/2fixtureTLS, Clippy BLOCKED.
+
+Root a lu les résultats et SHA ; revue source, parent sibling/compteurs et
+guides relus. La phrase HTTP503 est bornée au mapping d'une erreur par une
+route atteinte. Fmt/diff-check,45 liens de guides et scans des clés connues
+passent. [Commandes, sources, logs et environnement](evidence/2026-11-06/store-resource-recovery/README.md).
+ENFILE injecté, EMFILE réel limité aux enfants. Disponibilité TCP, macOS,
+workers/moteurs, fournisseur, navigateur et capacité100 NOT_RUN. Audit externe
+inchangé ; aucune qualification globale, G09 FAIL.
+
 ## 6 novembre — cohérence des guides local, Keycloak et SSO
 
 Base `164d597`, source documentaire `4195450`, composition `bca854f` : sept
