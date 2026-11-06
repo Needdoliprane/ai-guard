@@ -1,5 +1,28 @@
 # Stratégie de qualification
 
+## Confirmation de quarantaine sans republication
+
+Sélections : `--lib broker::writer::cold_audit_tests::` (8),
+`--lib broker::journal::recovery::cold_audit::tests::completion_tests::` (5),
+les parents service `retained_reconcile_confirms_quarantine_before_any_fresh_owner_or_post`
+et `cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability`,
+puis `unconfirmable_quarantine_in_first_profile_does_not_starve_second_profile_audit`.
+
+Le dernier appelle la vraie réconciliation de deux profils construits dès
+l'origine avec la même installation et des scopes distincts. A est présent dans l'inventaire
+mais sa confirmation exacte échoue ; B a deux événements pending admissibles.
+La précondition validate_control est enregistrée avant l'appel et vérifiée après
+les restaurations/drains ; le seul oracle produit final exige les deux commits
+B et leur ACK exact. Un refus global ou un échec de nettoyage n'est pas ce RED.
+Les helpers de scope sont opt-in, sans état global ; les defaults historiques
+restent inchangés.
+
+Garder les preuves des canaris antérieurs au changement de portée : les sources
+writer/journal sont identiques, les chemins service normal/monoprofil préservés.
+Rejouer le parent deux profils qui discrimine le changement et le check, sans
+répéter ces quinze fonctions. Les seeds runtime/enforcer restent déclarés et
+les requêtes HTTP/Stores/journaux sont réels. [Détails](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).
+
 ## Registre workers humain
 
 `--test human_workers_api` vérifie identité/contextes A/B, permission explicite,

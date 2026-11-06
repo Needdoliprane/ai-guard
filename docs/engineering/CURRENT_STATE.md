@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 6 novembre — confirmation des ACK en quarantaine
+
+Le lot `7b630ff` permet au même acteur Stops de confirmer son lot exact déjà
+scellé, sans republier un checkpoint, effectuer de HTTP, créer un droit Full
+ou libérer sa lease. Une preuve incomplète conserve l'input et sa réservation.
+Absence ou répétition renvoie None, sans preuve d'ACK. Le service tente cette
+confirmation sur Busy avant tout Job ou nouvel envoi ; les autres profils
+continuent après la fin de la pagination de l'acteur concerné.
+
+La régression de progression trouvée en revue a son RED strict avec contrôles
+valides, puis son GREEN : B commet et confirme ses deux événements malgré
+l'erreur A. Seize fonctions ciblées passent sur leurs gels, revue traitée et
+check toutes cibles RC0,118 avertissements lib/3 lib-test.
+[Preuves](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).
+Tentatives non scellées, cible non prouvée, perte du processus, reprise froide
+complète et D5/fencing restent ouverts. Aucun moteur réel ou gate global
+n'est qualifié ; G09 FAIL.
+
 ## 6 novembre — registre workers pour les identités humaines
 
 Le lot `1bede3b`, composé dans `b14b9ce`, ajoute une lecture administrative

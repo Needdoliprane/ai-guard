@@ -1,5 +1,21 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Confirmation de quarantaine — 6 novembre 2026
+
+Le lot `7b630ff` apporte une confirmation metadata-only sur l'input exact du
+même acteur Stops, sans republication ni réarmement. L'API était absente sur
+la base : ses tests de contrat écrits d'abord ne constituent pas un RED
+comportemental avant compilation. La revue du premier raccord découvre ensuite
+un retour trop large qui prive les profils suivants de progression.
+
+Ce défaut distinct est reproduit avec contrôles valides, A encore retenu et B
+sans ses deux événements, après tous les nettoyages. Le correctif passe le même
+oracle strict, avec les canaris de rétention/publication et une revue traitée.
+[Sources et résultats](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).
+Ce lot ne modifie pas les pièces d'audit externes ; aucun candidat outbox ou
+fencing externe n'est clôturé. Non scellé, processus perdu et moteurs restent
+ouverts ; G09 FAIL.
+
 ## Registre workers humain — 6 novembre 2026
 
 Le lot `1bede3b` ajoute une permission explicite et une projection administrative

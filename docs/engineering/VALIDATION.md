@@ -1,5 +1,87 @@
 # Validation courante
 
+## 6 novembre — confirmation de quarantaine sans republication
+
+Base `b14b9ce`, lot `7b630ff`, dix fichiers dont deux helpers cfg(test) opt-in
+et les guides broker EN/FR. La commande privée du même acteur Stops sélectionne
+son input exact par opération non nulle. Le journal revalide reçus, scope,
+floors et descendance du head déjà scellé. ConfirmOnly refuse avant tout
+nouveau scellement/publisher. Erreur conserve l'input fort ; succès seul rend
+sa réservation logique, sans relâcher la lease du backend. None ne prouve
+aucun ACK et ne libère pas une autre préparation. Le service appelle ce chemin
+sur Busy avant Job/essai/HTTP ; seule la pagination de cet acteur se termine.
+
+### Préconditions et RED
+
+L'API de récupération n'existait pas sur la base. Les tests de contrat sont
+écrits et conservés avant l'implémentation, mais non compilables alors :
+NOT_RUN, sans faux stub ni RED comportemental revendiqué.
+
+La revue trouve ensuite un `return` qui quitte tous les profils après la
+confirmation ou son erreur. Le contre-exemple utilise deux vrais profils,
+journaux/acteurs et gateways/Stores, avec installation commune créée opt-in.
+Le premier run s'arrête en compilation E0599, trait OpenOptionsExt absent :
+RC101, test NOT_RUN, log
+`b23755801280897c10e49a9aa97b1bb2995407248c9b018590f3de89e79f5cd7`.
+Un seul import de test est ajouté. RED2 atteint Bhead18 contre20 après
+nettoyage, RC101/361,92s, log
+`3ae612b6d16bd7b572a587aa91df0ab1460a0c007f245d7a8b8b0061a2d5a42b`.
+Il ne journalise pas encore le contrôle global préalable : preuve plus faible,
+non retenue comme oracle final.
+
+La revue demande cette précondition explicite. Le test seul enregistre
+validate_control avant l'appel, puis diagnostique/assert après restauration et
+drainage. RED3 strict : RC101/414,95s, contrôle valide, A inventorié/Conflict/
+Busy sans POST réussi observé, Bhead18 contre20 et ACK absent, log
+`df5639f37a7c2d4a45dbdcfb67aa26adc340ba62ce6abcab6956fa517f0989c4`.
+Le défaut est corrigé seulement ensuite par `break 'pages`, avec guides précisant
+que les autres profils continuent. Le test strict reste identique.
+
+### GREEN ciblés et composition
+
+| Sélection | Gel, résultat et SHA-256 du log |
+|---|---|
+| broker::writer::cold_audit_tests | Red3,RC0,8PASS,1,78s ; `b654829135cf99ad6b2964ec3008632b777c5f01254d15f368619c1f86864d3c`. |
+| journal::recovery::cold_audit::tests::completion_tests | Red3,RC0,5PASS,1,24s ; `8eb1c2f1e50fdbe83735f731bbaeb8e4db5c7c14f2e86d901208df53c204a091`. |
+| Service, confirmation avant nouveau Job/POST | Red3,RC0,1PASS,220,95s ; `9fd08044734b368bcb8614320cd81c0c31bc3edeb0188e78bd2b93fadc37d1c1`. |
+| Canari normal ServiceCold | Red3,RC0,1PASS,180,66s ; `972b0f0973ebb94a59bc164f1dc7f6ba25e0f857ba51a67d26c12501676f0c5a`. |
+| Deux profils, oracle strict inchangé | Green,RC0,1PASS,375,47s ; `c984e107434141e1891c8398776239ddc4b349a8df82837aa188423b6c80b882`. Contrôle valide, A toujours Conflict/Busy et sans POST réussi observé, Bhead20/20 et ACK exact présent. |
+| check --locked --all-targets | Green,RC0,35,13s,118 avertissements lib/3 lib-test ; `c63bd5bfb1b420f826de2d8a420dcfa54358ea63bd874b8336ef3585aa7e4d3d`. |
+| check composition b4b0795 | Cible neuve,RC0,43,87s,118 avertissements lib/3 lib-test ; `972a514c0bca482785714fd00e3d895afa1ed4a31313cc4c6472c3e367d29478`. |
+
+Seize fonctions uniques passent. Les sept fichiers hors guides/portée de
+pagination sont identiques entre Red3 et Green, dont test strict SHA
+`8924309afe8dea165fecf08fff71e921361aee0411c4d51faad907fb0fe914d3`.
+Les sources writer/journal et chemins service normal/monoprofil restent
+préservés ; le parent deux profils vérifie le seul changement de parcours.
+Les canaris ne sont pas répétés par réflexe après ce delta. Les scénarios
+couvrent lot partiel exact/Cancel, mauvaise opération/Full refusés, input non
+scellé gardé sans republication, waiter perdu, FIFO et lease retenue.
+
+L'intégration sans conflit est `b4b07955c758dc2640db9be6961669736ae99ba5`.
+Archive source Git exacte SHA
+`a1bb519220c04c3808bbe9c61ec71f10f5bc73b5b90fe3b0db4203db2650ecb7`.
+Contre-revue source finale sans blocage ; rustfmt épinglé/diff/comparaison au gel
+PASS,58liens guides/0manquant et10fichiers/3secrets connus/0correspondance.
+Les corrections documentaires ultérieures ne modifient pas le code compilé.
+
+Luna exécute H/I en parallèle, Linux ARM64/Rust1.99.1, image2115d432…a207,
+Cargo offline/locked et cibles neuves par gel. Config+noyau vérifiés :
+UID1000/caps0/NNP1/seccomp2/réseau none, racine/inputs/cache public RO, namespaces
+privés, CPU2/mémoire6Gio/swap0/PID256, scratch privé3Gio/65536inodes, limites
+core/nofile/fsize et environnement allowlist. Logs parent0700/feuilles0600.
+Aucun fichier binaire ou résultat sandbox promu sur l'hôte. H est fermé puis
+retiré à04:29:46.979734847Z après tous les RC terminaux et init/sleep seuls :
+PID0/exit143/OOMfalse, événements mémoire0. Après le check final et inventaire
+init/sleep seuls, I est arrêtée puis retirée à04:45:48.184712458Z : PID0,
+exit143/OOMfalse, événements mémoire0. Aucun volume utilisateur n'est concerné.
+
+Les seeds runtime et le peer enforcer sont déclarés : pas de Docker/Podman/
+Kubernetes réel qualifié. Les durées sous charge ne sont pas des SLO produit.
+Non scellé, cible non prouvée, perte d'acteur/processus, reprise entre epochs,
+D5/fencing et qualifications runtime restent ouverts. Aucun nouveau modèle,
+fournisseur ou navigateur testé. Clippy BLOCKED ; G09 FAIL, aucun gate clos.
+
 ## 6 novembre — registre workers humain
 
 Base `0b09d96`, lot `1bede3b` (55 fichiers), intégré sans conflit dans
@@ -61,8 +143,8 @@ réexécutés. Ne pas transformer le premier Node PASS en build frontend PASS.
 | Wire Rust→Node | UTCGreen55,RC0,3PASS ; `c5a56f0887c798b4bca137240f6af4eadb1934eb05b98e632c2f731e76110839`. |
 | Node human-model/api/workers | UTCGreen55,RC0,43PASS ; `daf0947b2499e1c6172989729adde7ed738d3fbd285a762047f74fb0ba5af270`. |
 | tsc5.9.3 --noEmit | UTCGreen55,RC0,log vide ; `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`. |
-| check --all-targets | UTCGreen55,RC0,36,07s,3 dead_code ; `40a93c29ee52cd49eaf0485f2e9b6390d9d056531607b7aa825761ddaf8f3607`. |
-| check composition b14b9ce | QA H/cible neuve,RC0,44,62s,3 dead_code ; `576bd241896846b09467a397eea742c520ac7c84fe4b37cabfd71e2bff91e7fe`. |
+| check --all-targets | UTCGreen55,RC0,36,07s,118 avertissements lib et3 lib-test ; `40a93c29ee52cd49eaf0485f2e9b6390d9d056531607b7aa825761ddaf8f3607`. |
+| check composition b14b9ce | QA H/cible neuve,RC0,44,62s,118 avertissements lib et3 lib-test ; `576bd241896846b09467a397eea742c520ac7c84fe4b37cabfd71e2bff91e7fe`. |
 
 Soit45 fonctions Rust et46 Node uniques. Les legacy/wire/Node répétés avant
 le dernier delta ne sont pas recomptés. Les permissions, migrations et budgets
@@ -146,7 +228,7 @@ La réservation du propriétaire passe alors avant les mutations/ACK.
 | Arrêt Cold réel HTTP/SQLite, GREEN1 | RC0,1PASS,218,08s ; `8bb76faf49c0f3b731d36d65119e46a07b7e806edd0f0d22db05d03248198036`. |
 | Propriétaire Cold partiel, GREEN1 | RC0,1PASS,195,05s ; `5a8a787f304726f1a1cb70ddded542ebd357ac89a7f29fc765f281bd37c9a7bd`. |
 | P2 seul avec assertion !resume_recorded, GREEN3 | RC0,1PASS,158,74s ; `fea89b2d5ff636ab807d84c4f23e8566dcb00af6b7c5df92181cff4ff038af02`. |
-| check --all-targets, GREEN3 | RC0,34,54s,3 avertissements dead_code ; `c50abeb53accb5dea775be45314eb455262ea2cdf57d91aa6cc49c1add67ee73`. |
+| check --all-targets, GREEN3 | RC0,34,54s,118 avertissements lib et3 lib-test ; `c50abeb53accb5dea775be45314eb455262ea2cdf57d91aa6cc49c1add67ee73`. |
 
 Neuf fonctions uniques passent ; le dernier rejeu ne recompte pas P2 comme
 fonction supplémentaire. GREEN3 diffère de GREEN2 par une seule assertion de
@@ -177,7 +259,7 @@ aux lots déjà vérifiés, sans changement après l'archive Git exacte. Gel
 `composed-485eb6b`, SHA de l'archive
 `264684c5281c339fdf06eca267862671c6dc5e2a7ad508023eba92de76e33f12`.
 Luna exécute `cargo check --locked --all-targets` offline sur une cible neuve
-dans la QA F indépendante : RC0,46,16s,3 avertissements dead_code, log SHA
+dans la QA F indépendante : RC0,46,16s,118 avertissements lib et3 lib-test, log SHA
 `13b53a0dfbc831bab4065db6f7cc20594d7398e27d0c81587df7a2e41b45628f`.
 Les tests comportementaux gardent leurs gels propres ; cette composition
 n'ajoute aucun essai runtime, fournisseur ou cluster. Les mises à jour

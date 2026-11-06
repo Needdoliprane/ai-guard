@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 6 novembre — quarantaine confirmable, reprise complète ouverte
+
+La confirmation des lots déjà scellés est intégrée avec son vrai appel service,
+des tests ciblés et la correction du blocage des profils suivants.
+[Preuves et limites](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).
+Elle ne réessaie pas une publication non scellée et ne réarme rien. La reprise
+après perte de l'acteur/processus et le fencing restent des exigences distinctes.
+
+Le rapprochement en lecture seule des worktrees montre que broker-supervision
+est déjà intégré ; le candidat D5 enforcer-full3 reste actif, divergent et non
+qualifié. Son intégration exige un handoff technique stabilisé et la résolution
+ou délimitation du défaut signal.enqueue avant les oracles Q/F. Préserver ses
+travaux et les coutures Cold/Full actuelles ; ne pas extraire des formats morts
+ou transférer ses anciens PASS. Les autres travaux produit continuent.
+
 ## 6 novembre — vue administrative humaine du registre workers
 
 La verticale permission/migration/API/curseurs/UI du registre workers humain

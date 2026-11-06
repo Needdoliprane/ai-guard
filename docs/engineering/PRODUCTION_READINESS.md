@@ -1,5 +1,14 @@
 # Gates de qualification production
 
+Confirmation de quarantaine du 6 novembre : seize fonctions ciblées PASS sur
+leurs gels, vraie boucle service, revue indépendante traitée et check toutes
+cibles RC0,118 avertissements lib/3 lib-test. [Preuves](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).
+Le refus d'une publication non scellée reste fermé ; la fin d'une pagination
+n'empêche plus les autres profils d'avancer. Aucun nouveau droit d'exécution,
+checkpoint publié, HTTP ou arrêt runtime n'est déduit d'une confirmation.
+Perte de processus, reprise froide complète, D5/fencing et moteurs restent
+ouverts ; G09 FAIL, aucun gate global clos.
+
 Registre workers humain du 6 novembre : permission explicite, migration9→10,
 projection/audit/curseurs et vue administrative intégrés. Quarante-cinq fonctions
 Rust et quarante-six Node uniques PASS sur leurs gels, tsc et check de composition
