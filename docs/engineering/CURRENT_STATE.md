@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 6 novembre — confiance HTTPS explicite du CLI humain
+
+Le lot `68f0fb4`, composé dans `f295908`, ajoute `--gateway-ca-file` au CLI
+local et à `human sso`. Le bundle public borné est chargé avant credentials
+ou login ; le même snapshot suit admission, lectures/export, refresh et logout
+ai-guard. La confiance IdP reste distincte. L'export lie les octets du bundle
+à sa reprise ; les digests du mode par défaut restent compatibles.
+
+Dix fonctions ciblées passent après le RED d'option absente, ainsi que le
+check toutes cibles ; revue indépendante traitée et guides EN/FR synchronisés.
+[Preuves et limites](evidence/2026-11-06/human-gateway-trust/README.md).
+Les avertissements118 lib,3 lib-test et2 de fixture partagée restent visibles ;
+Clippy est BLOCKED dans l'image QA. Les tests TLS locaux ne qualifient ni PKI
+d'entreprise, Keycloak, navigateur, clients IA ou transport multi-hôtes réel.
+G09 FAIL ; aucun gate global clos.
+
 ## 6 novembre — confirmation des ACK en quarantaine
 
 Le lot `7b630ff` permet au même acteur Stops de confirmer son lot exact déjà

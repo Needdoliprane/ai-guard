@@ -1,5 +1,18 @@
 # Plan d'industrialisation
 
+## 6 novembre — CLI HTTPS et reprise de présence en parallèle
+
+Le lot CA gateway humain est intégré : option explicite, snapshot conservé
+pendant OIDC et binding de reprise export, guides EN/FR, dix fonctions ciblées
+et compilation toutes cibles. [Preuves](evidence/2026-11-06/human-gateway-trust/README.md).
+Le prochain vertical de fédération traite le publisher qui termine après
+quatre erreurs temporaires : régression reproduite, acteur et identité exacts
+à conserver lors d'une reprise interruptible, sans regrant ni nouvelle rafale.
+Le [contrat proposé d'exécution humaine](HUMAN_EXECUTION.md) continue séparément ; aucune file, permission
+d'exécution, migration11 ou consumer délégué n'est livré par le lot TLS.
+Reprise/fencing complet, relais, sessions Kubernetes et qualifications restent
+obligatoires ; les attentes de frontière ne bloquent pas ces travaux indépendants.
+
 ## 6 novembre — quarantaine confirmable, reprise complète ouverte
 
 La confirmation des lots déjà scellés est intégrée avec son vrai appel service,

@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Confiance gateway du CLI humain du6novembre : option CA publique explicite,
+snapshot local/OIDC immuable, reprise export liée au bundle, dix fonctions
+ciblées et check toutes cibles PASS, revue traitée. Les
+[preuves](evidence/2026-11-06/human-gateway-trust/README.md) restent logicielles
+sur TLS/SQLite locaux. Aucune qualification G08/G11 d'IdP réel, navigateur,
+PKI entreprise ou transport multi-hôtes ; G12 conserve avertissements et
+Clippy absent, G09 FAIL et0/12 gates globaux clos.
+
 Confirmation de quarantaine du 6 novembre : seize fonctions ciblées PASS sur
 leurs gels, vraie boucle service, revue indépendante traitée et check toutes
 cibles RC0,118 avertissements lib/3 lib-test. [Preuves](VALIDATION.md#6-novembre--confirmation-de-quarantaine-sans-republication).

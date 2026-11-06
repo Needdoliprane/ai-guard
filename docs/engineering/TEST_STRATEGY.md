@@ -1,5 +1,21 @@
 # Stratégie de qualification
 
+## Confiance gateway du CLI humain
+
+Les nouvelles cibles `human_gateway_trust` et `human_sso_gateway_trust`
+exercent CLI/TLS/SQLite réels sur loopback, avec PKI de fixture uniquement.
+Quatre parents couvrent CA/default/SAN/validité et export ; un parent SSO
+remplace le fichier CA après profil et avant admission, puis exerce
+lectures/export/refresh/logout. Deux négatifs `human_cli human_gateway_ca_`
+refusent les configurations invalides avant credentials ; trois canaris
+préservent export/default, origine/redirect et session native/rotation.
+Les dix fonctions, RED et check toutes cibles ont leurs
+[gels et limites](evidence/2026-11-06/human-gateway-trust/README.md).
+Ce lot n'ajoute pas de suite de qualification du générateur PKI : il utilise
+le binaire existant uniquement pour les certificats éphémères du test produit.
+Pas de modèle ou matrice E2E ; exclusion WebPKI vérifiée en source, IdP réel,
+navigateur, révocation de certificats et runtimes qualifiés séparément.
+
 ## Confirmation de quarantaine sans republication
 
 Sélections : `--lib broker::writer::cold_audit_tests::` (8),

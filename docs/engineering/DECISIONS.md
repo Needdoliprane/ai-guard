@@ -1,5 +1,18 @@
 # Décisions d'industrialisation
 
+## 6 novembre — snapshot CA explicite du CLI humain
+
+Choix d'implémentation dans les frontières existantes : `--gateway-ca-file`
+configure le seul trajet HTTPS CLI→gateway et remplace ses racines intégrées.
+Charger une fois avant credentials/login, partager ce snapshot jusqu'au logout
+et conserver la confiance IdP distincte évite une rotation implicite pendant
+l'admission ou une reprise. Les octets du bundle rejoignent le binding export
+avec un domaine versionné ; le digest par défaut ne change pas. Aucun schéma,
+nouveau composant, PKI externe ou droit d'identité n'est ajouté.
+[Implémentation, revue et preuves](evidence/2026-11-06/human-gateway-trust/README.md).
+Une rotation approuvée demande un nouveau client/login explicite ; ce choix
+n'apporte ni mTLS, installation système ni polling de révocation de certificat.
+
 ## 6 novembre — séparer avis de permission et activation Kubernetes
 
 Le diagnostic historique reste GET-only ; les avis SelfSubjectAccessReview

@@ -1,5 +1,23 @@
 # Validation courante
 
+## 6 novembre — CA gateway du CLI humain local et OIDC
+
+Base `d330064`, source `68f0fb4`, composition `f295908`. Les14 fichiers
+applicatifs/tests/guides du gel sont identiques après intégration. Luna a
+exécuté une seule sélection RED puis dix fonctions uniques GREEN et le check
+toutes cibles RC0 sur Linux ARM64/Rust1.99.1, sans réseau externe. Root a lu
+les résultats terminaux et vérifié les SHA des gels/logs. La revue indépendante
+n'a trouvé aucun défaut applicatif bloquant ; deux phrases canoniques SSO
+obsolètes ont été corrigées. Guides EN/FR,96 liens relatifs et contrôle des
+trois secrets connus dans14 fichiers : PASS. Le contrôle toutes cibles rapporte
+118 avertissements lib,3 lib-test et2 de fixture partagée ; Clippy BLOCKED.
+
+Les [commandes, résultats, SHA, sandbox et limites](evidence/2026-11-06/human-gateway-trust/README.md)
+distinguent la chaîne/SAN/validité et la reprise réelle d'export de l'exclusion
+WebPKI vérifiée en source. QA J arrêtée/supprimée après fin des tâches,
+PID0/exit143/OOMfalse. Aucun modèle, IdP externe, navigateur ou worker/runtime
+de produit lancé ; G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — confirmation de quarantaine sans republication
 
 Base `b14b9ce`, lot `7b630ff`, dix fichiers dont deux helpers cfg(test) opt-in
