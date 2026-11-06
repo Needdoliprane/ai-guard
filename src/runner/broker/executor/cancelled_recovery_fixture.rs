@@ -50,26 +50,49 @@ pub(super) struct ResultPublicationSnapshot {
 impl RecoveryFixture {
     pub(super) async fn new(case: Case) -> Self {
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || Self::seed(case, &handle, false))
+        tokio::task::spawn_blocking(move || Self::seed(case, &handle, false, None))
             .await
             .unwrap()
     }
 
     async fn new_for_cold_audit_test() -> Self {
         let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || Self::seed(Case::TerminalAfterCancel, &handle, true))
-            .await
-            .unwrap()
+        tokio::task::spawn_blocking(move || {
+            Self::seed(Case::TerminalAfterCancel, &handle, true, None)
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn new_for_cold_audit_test_with_scope(scope: (Uuid, String)) -> Self {
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            Self::seed(Case::TerminalAfterCancel, &handle, true, Some(scope))
+        })
+        .await
+        .unwrap()
     }
 
     // The calling test keeps its original runtime/IO driver alive while it
     // awaits this single blocking owner. Each phase has a separate polling
     // frame; no runtime, larger stack or detached seed is introduced here.
-    fn seed(case: Case, handle: &tokio::runtime::Handle, service_layout: bool) -> Self {
+    fn seed(
+        case: Case,
+        handle: &tokio::runtime::Handle,
+        service_layout: bool,
+        scope_override: Option<(Uuid, String)>,
+    ) -> Self {
         eprintln!("cancelled_recovery_fixture phase=seed_begin");
         // Domain proof with writer_timeout=60s; production writer_timeout=10s is NOT qualified.
         eprintln!("cancelled_recovery_fixture budget writer_timeout_seconds=60 domain_only=true");
-        let base = Arc::new(if service_layout {
+        let base = Arc::new(if let Some((installation, profile)) = scope_override {
+            assert!(service_layout);
+            handle.block_on(Fixture::new_cold_recovery_with_scope(
+                Duration::from_secs(60),
+                installation,
+                profile,
+            ))
+        } else if service_layout {
             handle.block_on(Fixture::new_cold_recovery_with_writer_timeout(
                 Duration::from_secs(60),
             ))
@@ -658,6 +681,13 @@ pub(crate) struct ColdRecoverySeed {
 }
 
 impl ColdRecoverySeed {
+    pub(crate) async fn with_scope_for_cold_audit_test(
+        installation_id: Uuid,
+        profile_id: &str,
+    ) -> Self {
+        terminal_pending_seed_with_scope(Some((installation_id, profile_id.to_owned()))).await
+    }
+
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -757,9 +787,20 @@ impl ColdRecoverySeed {
 /// then release all broker-side journal owners and verify that a fresh
 /// StopRecoveryReader can acquire the exact configured profile lease.
 pub(crate) async fn terminal_pending_seed_for_cold_audit_test() -> ColdRecoverySeed {
+    terminal_pending_seed_with_scope(None).await
+}
+
+async fn terminal_pending_seed_with_scope(
+    scope_override: Option<(Uuid, String)>,
+) -> ColdRecoverySeed {
     let driver = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        let fixture = driver.block_on(RecoveryFixture::new_for_cold_audit_test());
+        let fixture = match scope_override {
+            Some(scope) => {
+                driver.block_on(RecoveryFixture::new_for_cold_audit_test_with_scope(scope))
+            }
+            None => driver.block_on(RecoveryFixture::new_for_cold_audit_test()),
+        };
         let before = fixture.worker();
         assert_eq!(before.state, WorkerStateV1::Running);
         assert!(before.quota_held);

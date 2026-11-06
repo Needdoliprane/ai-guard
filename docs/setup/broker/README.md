@@ -198,6 +198,24 @@ provider login, start, export or cleanup is performed by this audit path.
 Delivery updates only the local outbox acknowledgements; it does not finalise
 the managed result or retire its supervision lifecycle.
 
+After an ambiguous local completion, the running writer retains the exact input
+and its logical reservation in quarantine. On a later reconcile pass, the
+restricted service can confirm that same sealed receipt batch and durable target,
+including later Cancel revisions, using the existing actor and lease. This
+confirmation writes no checkpoint and sends no HTTP. It releases the reservation
+only after all exact metadata checks succeed. After confirmation or a confirmation
+error, that actor receives no further attempt in this pass; the other profiles
+continue. A remaining event is considered by a later normal pass. Losing the
+confirmation waiter does not cancel accepted work, and repeating it after success
+supplies no new confirmation or release.
+
+An unsealed attempt, an unproved target or a failed metadata check stays in
+quarantine. That broader recovery is not implemented by this confirmation path;
+new cold-audit preparation remains blocked while ordinary cancellation stays
+available. Quarantine is process-local: actor shutdown drops its in-memory input
+without proving a completion or providing recovery after process death. Preserve
+the journal; do not delete partial files or replace its root to bypass a refusal.
+
 On normal shutdown, the broker closes admission, joins the reconcile producer,
 and waits for every retained-audit owner already accepted. It does not abandon
 those owners on a global drain timeout. If shutdown begins after the first
