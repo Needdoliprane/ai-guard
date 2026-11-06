@@ -2,6 +2,8 @@
 use super::*;
 use std::{io, os::unix::fs::PermissionsExt, sync::atomic::AtomicUsize};
 
+mod api_cases;
+
 type Hook = Box<dyn FnMut() -> anyhow::Result<()> + Send>;
 
 #[derive(Default)]
