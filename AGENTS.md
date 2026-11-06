@@ -175,6 +175,42 @@ Attribuer des propriétaires de fichiers clairs et des worktrees distincts lorsq
 
 Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance externe manque, marquer la qualification concernée `BLOCKED` ou `NOT_RUN`, continuer les travaux indépendants et indiquer précisément ce qui manque. Une fonctionnalité factice, un mock permanent ou une exception qui transforme le blocage en succès ne clôture pas le lot.
 
+### Délégations bornées et refus d'outillage
+
+Chaque délégation fournit un contexte compact propre au sous-agent, avec :
+
+- l'objectif concret et la demande du mainteneur qui autorise le travail ;
+- le dépôt, le checkout/base, les fichiers possédés et les contrats à lire ;
+- les surfaces réellement locales ou externes, et les actions permises/interdites ;
+- les tests pertinents, la régression minimale, les données synthétiques éventuelles ;
+- les ressources et budgets autorisés, la preuve attendue et le critère d'arrêt.
+
+Une référence dans le code à un service externe n'autorise pas à agir sur ce service.
+Nommer explicitement tout besoin d'accès, de donnée réelle ou d'action externe non
+déjà autorisé ; poursuivre les travaux qui n'en dépendent pas. Transmettre les
+instructions utiles et des pointeurs précis, sans recopier conversation, journaux
+complets, secrets ou blocs de mémoire de session. Décrire honnêtement l'intention
+et le périmètre défensif ; l'autorisation du mainteneur ne supprime pas les contrôles.
+
+Après un refus, conserver le message exact non secret, en signalant toute expurgation,
+et les éléments observables : heure, lot, agent, source du refus, modèle, surface et
+identifiant de requête. Ne pas inventer les champs absents ni attribuer sans preuve
+le refus à une cause. Marquer l'opération bloquée `BLOCKED` et ses tests non exécutés
+`NOT_RUN`, jamais `PASS`. Ne pas répéter une requête identique en boucle.
+
+Ne pas dissimuler l'intention, retirer un contrôle ou changer de modèle pour forcer
+une réponse, ni fragmenter l'opération refusée pour en reconstituer l'exécution.
+Le dépannage normal d'un modèle approuvé reste permis ; une clarification conserve
+l'intention et l'autorisation réelles. Continuer les tâches distinctes autorisées ;
+nommer précisément la dépendance nécessitant une décision ou information du mainteneur.
+
+Daybreak ne garantit pas l'absence de refus. Vérifier droits, réglages et modèle
+approuvé observables sur chaque surface, sans supposer leur propagation aux sous-agents
+ni déduire la cause d'un état UI périmé. Si nécessaire, proposer un signalement au
+support expurgé des secrets avec les faits disponibles ; aucun taux de réussite non mesuré.
+Consulter la documentation officielle à jour : [contrôles supplémentaires](https://help.openai.com/en/articles/20001326)
+et [dépannage Daybreak](https://help.openai.com/en/articles/20001259).
+
 ### Cycle de vie complet des worktrees
 
 Le mainteneur demande de gérer les worktrees de leur création à leur suppression. Un checkout secondaire n'est pas une archive permanente.
