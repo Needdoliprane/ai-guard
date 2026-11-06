@@ -75,8 +75,8 @@ async fn run_owned(
     let client = http::Client::new(&p)?;
     let mut binding_this_run: Option<u64> = None;
     loop {
-        let mut acknowledged = false;
-        for retry in 0..=3u32 {
+        let mut short_backoffs = 0usize;
+        loop {
             let permit = interrupt(shutdown, async {
                 Arc::clone(&attempts)
                     .acquire_owned()
@@ -152,26 +152,25 @@ async fn run_owned(
             .await;
             drop(permit);
             match attempt {
-                Ok(()) => {
-                    acknowledged = true;
-                    break;
-                }
-                Err(error @ (PresenceError::Transport | PresenceError::Unavailable))
-                    if retry < 3 =>
-                {
-                    let millis = [100, 250, 500][retry as usize];
+                Ok(()) => break,
+                Err(PresenceError::Transport | PresenceError::Unavailable) => {
+                    let delay = if short_backoffs < 3 {
+                        let millis = [100, 250, 500][short_backoffs];
+                        short_backoffs += 1;
+                        Duration::from_millis(millis)
+                    } else {
+                        Duration::from_secs(u64::from(p.config.interval_seconds.min(30)))
+                    };
+                    // Keep the same client, stream and pinned binding. A slow
+                    // retry never starts another short burst before an ACK.
                     interrupt(shutdown, async {
-                        tokio::time::sleep(Duration::from_millis(millis)).await;
+                        tokio::time::sleep(delay).await;
                         Ok(())
                     })
                     .await?;
-                    let _ = error;
                 }
                 Err(error) => return Err(error),
             }
-        }
-        if !acknowledged {
-            return Err(PresenceError::Transport);
         }
         interrupt(shutdown, async {
             tokio::time::sleep(Duration::from_secs(u64::from(p.config.interval_seconds))).await;

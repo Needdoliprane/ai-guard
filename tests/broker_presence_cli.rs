@@ -19,7 +19,12 @@ use agentsandbox::{
     redaction::Redactor,
     workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
-use axum::serve;
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, Response},
+    middleware::{self, Next},
+    serve,
+};
 use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -32,13 +37,14 @@ use std::{
     },
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     process::{Child, Command},
+    sync::Semaphore,
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -56,6 +62,53 @@ struct Gateway {
     task: JoinHandle<()>,
 }
 
+struct TemporaryGatewayRefusals {
+    remaining: Mutex<usize>,
+    observed: Semaphore,
+    posts: Mutex<Vec<Vec<u8>>>,
+}
+impl TemporaryGatewayRefusals {
+    fn new(count: usize) -> Self {
+        Self {
+            remaining: Mutex::new(count),
+            observed: Semaphore::new(0),
+            posts: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+async fn refuse_temporary_heartbeat(
+    faults: Arc<TemporaryGatewayRefusals>,
+    request: Request<Body>,
+    next: Next,
+) -> Response<Body> {
+    if request.uri().path() != "/api/v1/brokers/heartbeat" {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = to_bytes(body, 16_384).await.unwrap();
+    faults.posts.lock().unwrap().push(bytes.to_vec());
+    let refused = {
+        let mut remaining = faults.remaining.lock().unwrap();
+        if *remaining == 0 {
+            false
+        } else {
+            *remaining -= 1;
+            true
+        }
+    };
+    if refused {
+        faults.observed.add_permits(1);
+        return Response::builder()
+            .status(503)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+    }
+    next.run(Request::from_parts(parts, Body::from(bytes)))
+        .await
+}
+
 impl Drop for Gateway {
     fn drop(&mut self) {
         self.task.abort();
@@ -69,6 +122,13 @@ fn private_write(path: &Path, bytes: &[u8]) {
 }
 
 fn start_gateway(root: &Path) -> (Arc<Store>, Gateway, Uuid) {
+    start_gateway_with_refusals(root, Arc::new(TemporaryGatewayRefusals::new(0)))
+}
+
+fn start_gateway_with_refusals(
+    root: &Path,
+    faults: Arc<TemporaryGatewayRefusals>,
+) -> (Arc<Store>, Gateway, Uuid) {
     let db = root.join("tenant.sqlite");
     let store =
         Arc::new(Store::open_for_tenant(&db, TENANT, Redactor::new(vec![]), 10_000).unwrap());
@@ -140,8 +200,11 @@ fn start_gateway(root: &Path) -> (Arc<Store>, Gateway, Uuid) {
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let listener = TcpListener::from_std(listener).unwrap();
+    let app = gateway_router(state).layer(middleware::from_fn(move |request, next| {
+        refuse_temporary_heartbeat(Arc::clone(&faults), request, next)
+    }));
     let task = tokio::spawn(async move {
-        serve(listener, gateway_router(state)).await.unwrap();
+        serve(listener, app).await.unwrap();
     });
     (
         store,
@@ -537,9 +600,19 @@ async fn wait_child(child: &mut Child, timeout: Duration) -> Option<std::process
 
 #[tokio::test]
 async fn real_broker_serve_publishes_durable_presence_and_stops_after_shutdown() {
+    exercise_real_broker_presence(0).await;
+}
+
+#[tokio::test]
+async fn real_broker_serve_recovers_presence_after_four_temporary_gateway_refusals() {
+    exercise_real_broker_presence(4).await;
+}
+
+async fn exercise_real_broker_presence(temporary_refusals: usize) {
     let fixture: TempDir = support::private_tempdir();
     let root = fixture.path().canonicalize().unwrap();
-    let (store, _gateway, namespace) = start_gateway(&root);
+    let faults = Arc::new(TemporaryGatewayRefusals::new(temporary_refusals));
+    let (store, _gateway, namespace) = start_gateway_with_refusals(&root, Arc::clone(&faults));
     let initial = store.broker(BROKER_ID).unwrap().unwrap();
     assert!(initial.broker.last_heartbeat.is_none());
     assert_eq!(initial.broker.heartbeat_revision, 0);
@@ -554,10 +627,38 @@ async fn real_broker_serve_publishes_durable_presence_and_stops_after_shutdown()
     let stdout = tokio::spawn(drain_bounded(child.stdout.take().unwrap()));
     let stderr = tokio::spawn(drain_bounded(child.stderr.take().unwrap()));
 
-    let sequence = wait_for_heartbeat(&store, &mut child, Duration::from_secs(90)).await;
+    let refusals_observed = if temporary_refusals == 0 {
+        true
+    } else {
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            faults
+                .observed
+                .acquire_many(u32::try_from(temporary_refusals).unwrap()),
+        )
+        .await
+        {
+            Ok(Ok(permits)) => {
+                permits.forget();
+                true
+            }
+            _ => false,
+        }
+    };
+    let publication_watchdog = if temporary_refusals == 0 { 90 } else { 30 };
+    let sequence = wait_for_heartbeat(
+        &store,
+        &mut child,
+        Duration::from_secs(publication_watchdog),
+    )
+    .await;
     let initial_publication = sequence.is_some();
     let service_still_running = child.try_wait().ok().flatten().is_none();
-    let enforcer = if initial_publication && service_still_running {
+    // Four refused heartbeat requests also prove the service reached its
+    // initialized publisher. Retain the existing helper for cleanup even when
+    // the baseline publisher stops before its first successful heartbeat.
+    let publisher_reached = initial_publication || (temporary_refusals > 0 && refusals_observed);
+    let enforcer = if publisher_reached && service_still_running {
         let enforcer_root = Directory::open_existing(&broker_root.join("enforcer")).ok();
         let executable = PathBuf::from(env!("CARGO_BIN_EXE_agentsandbox"))
             .canonicalize()
@@ -645,7 +746,17 @@ async fn real_broker_serve_publishes_durable_presence_and_stops_after_shutdown()
         .flatten()
         .map(|view| view.broker.heartbeat_revision)
         .unwrap_or(0);
-    let success = initial_publication
+    let same_pending_recovered = {
+        let posts = faults.posts.lock().unwrap();
+        temporary_refusals == 0
+            || (posts.len() >= temporary_refusals + 1
+                && posts[..=temporary_refusals]
+                    .iter()
+                    .all(|post| post == &posts[0]))
+    };
+    let success = refusals_observed
+        && same_pending_recovered
+        && initial_publication
         && sequence.is_some_and(|value| value > 0)
         && stopped_revision.is_some_and(|revision| revision >= 1)
         && exit_success
@@ -659,7 +770,7 @@ async fn real_broker_serve_publishes_durable_presence_and_stops_after_shutdown()
     if !success {
         let preserved = fixture.keep();
         panic!(
-            "broker presence CLI oracle failed: published={initial_publication}, positive_sequence={}, exit_success={exit_success}, signal_sent={}, helper_shutdown={helper_shutdown}, forced_cleanup={forced_cleanup}, stable_after_interval={stable_after_interval}, heartbeat_revision={heartbeat_revision}, worker_usage_empty={worker_usage_empty}, quota_empty={quota_empty}, output_secret_free={outputs_secret_free}, retained_output_bytes={}; private fixture retained at {preserved:?}",
+            "broker presence CLI oracle failed: temporary_refusals={temporary_refusals}, refusals_observed={refusals_observed}, same_pending_recovered={same_pending_recovered}, published={initial_publication}, positive_sequence={}, exit_success={exit_success}, signal_sent={}, helper_shutdown={helper_shutdown}, forced_cleanup={forced_cleanup}, stable_after_interval={stable_after_interval}, heartbeat_revision={heartbeat_revision}, worker_usage_empty={worker_usage_empty}, quota_empty={quota_empty}, output_secret_free={outputs_secret_free}, retained_output_bytes={}; private fixture retained at {preserved:?}",
             sequence.is_some_and(|value| value > 0),
             signal_result == 0,
             stdout.retained.len() + stderr.retained.len()
