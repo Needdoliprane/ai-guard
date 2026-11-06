@@ -1522,6 +1522,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         .unwrap_or_else(|| request.uri().path().to_owned());
     let human_path =
         request.uri().path().starts_with("/api/v1/human/") && human_dashboard_path(&canonical_path);
+    let federation_path = request.uri().path() == "/api/v1/federation/workers";
     let token = (if human_path {
         oidc::human_bearer(request.headers())
     } else {
@@ -1561,6 +1562,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
         "/api/usage",
     ]
     .contains(&canonical_path.as_str())
+        && !federation_path
         && !human_path
         && !canonical_path
             .strip_prefix("/api/workers/")

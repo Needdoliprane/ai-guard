@@ -3,6 +3,8 @@ use super::*;
 use crate::broker_registry::*;
 use chrono::{DateTime, Duration, Utc};
 
+mod federation;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (
         "table",

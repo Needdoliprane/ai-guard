@@ -5,6 +5,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { federationPage } from "./federation-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -87,7 +88,7 @@ const server = createServer(async (request, response) => {
         kind: "command.completed", agent_id: `${mark}AGENT`, command: { argv: ["printf", `${mark}COMMAND`] } }],
       next_cursor: url.searchParams.has("before") ? null : 14,
     });
-    if (url.pathname === "/api/v1/workers") return json(response, { items: [worker(tenant)], next_cursor: url.searchParams.has("cursor") ? null : worker(tenant).worker_id });
+    if (url.pathname === "/api/v1/federation/workers") return json(response, federationPage({ items: [worker(tenant)], next_cursor: url.searchParams.has("cursor") ? null : worker(tenant).worker_id }));
     if (url.pathname === `/api/v1/workers/${worker(tenant).worker_id}`) return json(response, worker(tenant));
     if (url.pathname === "/api/v1/quota") return json(response, {
       policy: { version: 1, max_active_workers: 3, max_cpu_millis: 3000, max_memory_bytes: 4096, max_timeout_seconds: 60 },

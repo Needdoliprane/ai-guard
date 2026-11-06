@@ -5,6 +5,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { federationPage } from "./federation-fixture.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -29,11 +30,13 @@ let agentName = "Agent A";
 const requests = [];
 const streams = new Set();
 const json = (response, value) => {
+  if (response.federationRead) value = federationPage(value);
   response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
   response.end(JSON.stringify(value));
 };
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
+  response.federationRead = url.pathname === "/api/v1/federation/workers";
   if (url.pathname.startsWith("/api/")) {
     const tenant = request.headers.authorization === "Bearer fixture-a" ? "a" :
       request.headers.authorization === "Bearer fixture-b" ? "b" : null;
@@ -59,7 +62,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/api/export" && scenario === "summary-notice") {
       response.writeHead(502); response.end(); return;
     }
-    if (url.pathname === "/api/v1/workers") {
+    if (url.pathname === "/api/v1/federation/workers") {
       if (workerMode === "outage" && tenant === "a") { response.writeHead(503); response.end(); return; }
       const related = tenant === "b" || url.searchParams.has("cursor") || ["single", "updated"].includes(workerMode);
       const item = worker(tenant, related);
@@ -160,13 +163,13 @@ const runRegression = async () => {
       await restart(); await openUsageWorker();
       await modal().getByRole("button", { name: destination, exact: true }).click();
       await links().getByRole("button", { name: ids[1], exact: true }).waitFor();
-      const before = requests.filter((item) => item.path.startsWith("/api/v1/workers?")).length;
+      const before = requests.filter((item) => item.path.startsWith("/api/v1/federation/workers?")).length;
       workerMode = "updated";
-      const reread = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/workers", { timeout: 4000 });
+      const reread = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/v1/federation/workers", { timeout: 4000 });
       emit("control.worker.transition");
       try { await reread; await links().getByRole("button", { name: ids[2], exact: true }).waitFor(); }
       catch { findings.push({ destination, defect: "Le registre ouvert depuis Allocations n’a pas été relu ou son lien n’a pas changé",
-        before, after: requests.filter((item) => item.path.startsWith("/api/v1/workers?")).length,
+        before, after: requests.filter((item) => item.path.startsWith("/api/v1/federation/workers?")).length,
         text: await links().innerText() }); }
     }
   } else if (["retry-focus", "removed-link-focus"].includes(scenario)) {
@@ -286,7 +289,7 @@ try {
   await links().getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
   assert.equal(await links().getByRole("button", { name: ids[1], exact: true }).count(), 1);
   workerMode = "data";
-  await hold("/api/v1/workers?");
+  await hold("/api/v1/federation/workers?");
   await links().getByRole("button", { name: "Réessayer le registre" }).click();
   await held();
   await page.keyboard.press("Escape");
@@ -296,7 +299,7 @@ try {
     "Échap après navigation entre détails rejoint le titre de la vue lorsque le déclencheur a disparu");
   // A transport can finish before logout while its JavaScript continuation arrives after login B.
   await openAgent();
-  await hold("/api/v1/workers?");
+  await hold("/api/v1/federation/workers?");
   await links().getByRole("button", { name: "Première page", exact: true }).click();
   await held();
   await page.keyboard.press("Escape");

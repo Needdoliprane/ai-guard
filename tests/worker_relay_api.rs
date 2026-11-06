@@ -2500,6 +2500,7 @@ async fn directed_worker_messages_are_tenant_scoped_idempotent_and_do_not_duplic
         StatusCode::FORBIDDEN
     );
     for path in [
+        "/api/v1/federation/workers",
         "/api/v1/workers",
         "/api/v1/quota",
         "/api/v1/events",
