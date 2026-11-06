@@ -1,5 +1,88 @@
 # Validation courante
 
+## 6 novembre — propriétaires Full et admission avant ACK
+
+Base `e9415ac`, lot `5026f07`, neuf fichiers dont les guides broker EN/FR.
+Intégration sans conflit avec Kubernetes/projection dans `485eb6b` ; la
+compilation de cette composition est enregistrée séparément de celle du lot.
+Luna exécute Cargo offline/locked dans la QA isolée Linux ARM64, Rust1.99.1,
+image2115d432…a207, sans réseau/socket moteur ni credential. Sources et registre
+public RO, racine RO, UID1000, caps0, NNP/seccomp, namespaces privés, CPU2,
+mémoire6Gio/swap0, PID256, scratch privé3Gio/65536inodes, limites fichiers et
+environnement allowlist. Cible neuve par gel ; aucun binaire projet sur l'hôte.
+
+### Reproductions et erreurs de harnais
+
+Le premier parent ne dépasse pas sa barrière : le hook attendait `/api/v1/events`
+alors que le chemin Full émet `/api/events`. Log `full-owner-red.log`, SHA
+`5a4a9d293ec0488f2456ca9925d656b23ca6813160fc83b08aab0793ce332d8d` ;
+libtest FAIL, RC Cargo non conservé après perte du handle. Le deuxième parent
+atteint la barrière mais son nettoyage exige deux ACK en plus de la fin de la
+tâche, sans journaliser le prédicat manquant : RC101, log SHA
+`26f46d594dd7ec5e7015795e146a211f22516a4f0d94720b39d9f5b675d8ce2f`.
+Ces deux échecs ne reproduisent pas à eux seuls le défaut produit.
+
+Le troisième parent garde la tâche Full réellement en cours et observe le
+retour prématuré de shutdown avec lease libérée. Il relâche ensuite sa barrière,
+attend la vraie fin, observe dans ce run deux ACK recoupés avec SQLite et l'absence de mutation des faits
+runtime/Arm/Claim avant son assertion finale : RC101,218,81s, log SHA
+`29fb8d8245647bba6b978f0a876770dbef686741f63d9f0053e36dd3bcbab556`.
+
+La première correction passe ses tests mais la revue détecte une course entre
+permis d'exécution rendu et handle terminé. Le parent P2 étend cette fenêtre
+avec une barrière, puis soumet un vrai Resume : ACK et événement sont produits
+avant un refus tardif `Busy`. Nettoyage et faits inchangés sont vérifiés avant
+l'assertion : RC101,160,67s, log `full-owner-p2-red.log`, SHA
+`5dae2eac806cd5225160b12bc99e6ecc6a738150a1eb66c346b69f09230e4874`.
+La réservation du propriétaire passe alors avant les mutations/ACK.
+
+### GREEN et limites
+
+| Sélection et gel | Résultat et SHA-256 du log |
+|---|---|
+| full_owner_tests, GREEN2 | RC0,4PASS,397,96s ; `adf160c91e441577f226c327cf97b738ad74db4caa543d851a8e297fe6a28c1f`. |
+| check --all-targets, GREEN2 | RC0,34,47s ; `1f92e21ae4529576fb587c00db5f5528c68a7713bf4c60f5f9292008ea5aa251`. |
+| Registre Cold partagé, GREEN1 | RC0,3PASS ; `fdd19e140631037eb8ff891f9419196ab51fc2cdeeadcb7dced5543339aa8fb0`. |
+| Arrêt Cold réel HTTP/SQLite, GREEN1 | RC0,1PASS,218,08s ; `8bb76faf49c0f3b731d36d65119e46a07b7e806edd0f0d22db05d03248198036`. |
+| Propriétaire Cold partiel, GREEN1 | RC0,1PASS,195,05s ; `5a8a787f304726f1a1cb70ddded542ebd357ac89a7f29fc765f281bd37c9a7bd`. |
+| P2 seul avec assertion !resume_recorded, GREEN3 | RC0,1PASS,158,74s ; `fea89b2d5ff636ab807d84c4f23e8566dcb00af6b7c5df92181cff4ff038af02`. |
+| check --all-targets, GREEN3 | RC0,34,54s,3 avertissements dead_code ; `c50abeb53accb5dea775be45314eb455262ea2cdf57d91aa6cc49c1add67ee73`. |
+
+Neuf fonctions uniques passent ; le dernier rejeu ne recompte pas P2 comme
+fonction supplémentaire. GREEN3 diffère de GREEN2 par une seule assertion de
+test ; le mécanisme Cold n'a pas changé après ses cinq canaris. Les réponses
+Resume finales portent `Busy`, aucun DeferredRun ni événement Resume ; replays
+accepté/refusé exacts, divergence refusée et Submit neuf sans ticket sont
+vérifiés. Le statut du writer est un indice d'admission ; sa réservation reste
+l'autorité de comparaison exacte et des floors d'identité.
+
+Contre-revue finale sans blocage dans ce périmètre, dont l'oracle manquant
+explicitement ajouté puis rejoué. Rustfmt épinglé, diff et comparaison des neuf
+fichiers au gel final PASS ;58 liens des guides/0 cible manquante et recherche
+des trois secrets connus sur neuf fichiers/0 correspondance. Le checkpoint
+privé conserve sources et logs hors worktree, sans données persistantes ni
+exécutable sandbox promu sur l'hôte.
+
+Le runtime du seed et le peer enforcer sont déclarés, pas un moteur réel.
+L'attente sans timeout global conserve la lease mais n'établit aucune durée
+maximale d'arrêt. Une fin de future, un ACK ou `needs_reconciliation` ne prouve
+pas une fin runtime. SIGTERM réel, crash/processus, reprise froide, fencing,
+relais et sessions Kubernetes restent NOT_RUN pour ce lot ; Clippy BLOCKED,
+composant absent. G09 FAIL, aucun gate global clos.
+
+### Composition Full, Kubernetes et projection
+
+La référence `485eb6b0c49ac3c9cc3d409904c79ec004f98d1c` assemble `5026f07`
+aux lots déjà vérifiés, sans changement après l'archive Git exacte. Gel
+`composed-485eb6b`, SHA de l'archive
+`264684c5281c339fdf06eca267862671c6dc5e2a7ad508023eba92de76e33f12`.
+Luna exécute `cargo check --locked --all-targets` offline sur une cible neuve
+dans la QA F indépendante : RC0,46,16s,3 avertissements dead_code, log SHA
+`13b53a0dfbc831bab4065db6f7cc20594d7398e27d0c81587df7a2e41b45628f`.
+Les tests comportementaux gardent leurs gels propres ; cette composition
+n'ajoute aucun essai runtime, fournisseur ou cluster. Les mises à jour
+documentaires suivantes ne changent pas le code de ce gel.
+
 ## 6 novembre — composition broker, prérequis Kubernetes et projection
 
 La référence735cda716bad71a42a9a65c31badb90d07c30809 assemble le broker

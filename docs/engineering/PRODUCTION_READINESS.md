@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Propriétaires Full du 6 novembre : quatre parents Full et cinq canaris Cold
+PASS, compilation toutes cibles RC0 et revue indépendante traitée. Le refus de
+capacité précède les mutations/ACK ; les futurs acceptés restent possédés pendant
+l'arrêt normal. [Preuves](VALIDATION.md#6-novembre--propriétaires-full-et-admission-avant-ack).
+Aucune borne maximale d'arrêt, observation terminale runtime, mort de processus,
+reprise froide ou garantie D5/fencing n'en découle. La qualification des moteurs
+réels reste obligatoire ; G09 FAIL, aucun gate global clos.
+
 Projection centrale du 6 novembre :4 parents Rust (dont vrai worker refusé),
 wire Rust→TS,24 fonctions Node et tsc PASS ; revue traitée, check toutes cibles
 RC0 après augmentation du budget mémoire de la QA. Les PASS ne qualifient pas

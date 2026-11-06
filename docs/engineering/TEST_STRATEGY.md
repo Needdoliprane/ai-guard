@@ -1,5 +1,23 @@
 # Stratégie de qualification
 
+## Propriétaires Full et admission avant ACK
+
+Sélection : `cargo test --locked --lib full_owner_tests -- --test-threads=1 --nocapture`.
+Les deux parents de registre couvrent fermeture, échec retenu et observateur
+annulé. Les deux parents de service utilisent le vrai journal, HTTP et SQLite :
+arrêt bloqué avant retour de la future/lease conservée, et refus `Busy` avant
+Resume avec absence explicite de nouvelle commande. Le second vérifie aussi
+replays acceptés/refusés exacts à capacité pleine, conflit sur divergence et
+Submit neuf sans ticket. Une barrière possédée étend déterministement la fenêtre
+entre libération d'une capacité et fin du handle ; elle ne mesure pas sa durée
+sur un ordonnanceur réel. Les cinq canaris Cold du mécanisme commun gardent
+leurs gels et résultats séparés. Ne pas répéter ces canaris pour une assertion
+Full seule ; rejouer le parent concerné et le check toutes cibles.
+
+Le seed runtime et le peer enforcer sont déclarés par le harnais. Aucun moteur,
+fournisseur, signal OS ou fencing après crash n'est qualifié par ces tests.
+[Commandes, RED, GREEN et limites](VALIDATION.md#6-novembre--propriétaires-full-et-admission-avant-ack).
+
 ## Projection centrale workers et brokers
 
 `--test federation_workers_api` couvre les réponses réelles du gateway A/B,

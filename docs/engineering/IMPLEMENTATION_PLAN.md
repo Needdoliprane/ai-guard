@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 6 novembre — propriétaire Full livré, vue humaine en parallèle
+
+Le lot `5026f07` traite la possession des tâches Full et la réservation avant
+ACK, avec RED/GREEN, canaris du mécanisme Cold partagé et revue indépendante.
+L'arrêt normal attend les propriétaires acceptés ; il ne prouve pas une mort
+runtime, une reprise froide ni le fencing. La quarantaine du writer et D5
+restent des écarts distincts, sans modifier les worktrees protégés.
+
+La verticale humaine workers avance dans son propre worktree : permission
+explicite, projection bornée et auditée, migration, révocation et UI unifiée.
+Ses validations et la revue conditionnent son intégration ; aucun PASS Full
+ne lui est transféré. Le transport worker et la session Kubernetes complète
+gardent leur proposition de frontière, et le contrôle réseau sa décision
+soumise. Continuer les travaux indépendants pendant ces décisions.
+
 ## 6 novembre — fédération technique et contrôle réseau obligatoire
 
 La projection centrale workers/brokers a ses preuves API→SQLite→TS et ses

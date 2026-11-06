@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 6 novembre — propriétaires Full et admission avant accusé de réception
+
+Le lot `5026f07` retient les futures Full acceptées jusqu'à leur fin et attend
+leur drainage avant de libérer la lease du broker à l'arrêt normal. Chaque
+admission réserve son propriétaire avant mutation ou ACK ; une saturation
+renvoie `Busy` sans nouvelle commande Resume ni ticket Submit. Les replays
+exacts acceptés ou refusés restent lisibles à capacité pleine, et un contenu
+divergent reste un conflit. Le registre Full et le registre Cold partagent un
+mécanisme privé typé, sans conversion de leurs droits.
+
+Quatre parents Full et cinq canaris Cold passent sur leurs gels. La course
+d'admission découverte en revue a son RED et son GREEN ; l'oracle final exige
+explicitement l'absence d'événement Resume. Compilation toutes cibles RC0 et
+contre-revue traitée ; [preuves et limites](VALIDATION.md#6-novembre--propriétaires-full-et-admission-avant-ack).
+La composition avec les autres lots est vérifiée séparément. Une tâche finie
+ne prouve pas un runtime arrêté : SIGTERM réel, mort du processus, reprise
+froide, fencing et D5 restent ouverts. G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — projection centrale workers et brokers
 
 Le gateway expose une lecture versionnée séparée des WorkerV1 historiques.
