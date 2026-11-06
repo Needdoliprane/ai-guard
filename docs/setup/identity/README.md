@@ -21,7 +21,7 @@ AIGUARD_PRIVATE="/absolute/private/ai-guard"
   --target-version 5 --max-events 100000 --confirm-control-stopped
 ```
 
-Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision, resume-provision and apply can maintain validated schemas4–7 with inactive supervision; ordinary HTTP human reads support5–7 and report `migration_required` before emitting their read audit on an older store. Broker registry reads and the new membership capability require7. The [workload guide](../workloads/README.md#enable-named-broker-registry-reads) covers explicit5→6→7 maintenance, including a store created by `setup prepare` at5.
+Schema5 adds the durable human-read audit protocol. Changing `user_version` manually cannot replace migration. Update all readers together: old binaries refuse newer schemas. No automatic downgrade, restore, activation or account creation occurs. Provision, resume-provision and apply can maintain validated schemas4–10 with inactive supervision; ordinary HTTP human reads support5–10 and report `migration_required` before emitting their read audit on an older store. Broker registry reads and the new membership capability require7. The [workload guide](../workloads/README.md#enable-named-broker-registry-reads) covers explicit5→6→7 maintenance, including a store created by `setup prepare` at5.
 
 For a container-owned database, run offline maintenance as the existing control UID/GID against its existing data volume, with every other consumer stopped. A host CLI cannot assume ownership of a Docker Desktop volume. The one-shot container needs only that data volume and its trusted image; it needs neither a socket, runner credential, provider secret nor network. Preserve the original Compose project/volume identity. Do not initialize a replacement database to bypass a failed upgrade.
 
@@ -268,8 +268,8 @@ prepared UTF-8 payload stored in the audit, rather than response bytes or SQLite
 file size. The physical payload limit is 256 MiB; `--max-events` sets the event
 limit. Very small automatic capacities that cannot represent protected human
 budgets disable new human reads explicitly, without raising the physical limit
-or invalidating existing storage. Ordinary human reads require validated schema5–7;
-broker registry reads require7 and consume the same cumulative human budgets.
+or invalidating existing storage. Ordinary human reads require validated schema5–10;
+broker registry reads require7–10, worker registry reads require10, and both consume the same cumulative human budgets.
 
 [audit-capacity.json](examples/audit-capacity.json) gives the resolved defaults
 for `--max-events 100000`. Copy it into your existing private control directory
@@ -309,3 +309,7 @@ permits until drop, including after a terminal error or observed EOF; a client
 that does not poll can occupy its share. Every poll still rechecks expiry and
 revocation. These bounds do not establish a limit on all HTTP sockets or an
 autonomous eviction guarantee.
+
+## Authorize named worker registry readers
+
+The separate administration capability `read_worker_registry` requires explicit9→10 migration and trusted membership approval. Follow [named worker registry reads](WORKERS.md) for the local/OIDC procedure, shared audit budgets, restore behavior, data limits and the obligatory personal-attribution gap. No existing broker/resource permission grants this right.

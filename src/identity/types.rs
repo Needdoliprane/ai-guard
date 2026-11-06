@@ -75,6 +75,7 @@ pub enum HumanCapabilityV1 {
     ManageMemberships,
     ManageGrants,
     ReadBrokerRegistry,
+    ReadWorkerRegistry,
 }
 
 impl HumanCapabilityV1 {
@@ -85,6 +86,7 @@ impl HumanCapabilityV1 {
                 | Self::ManageMemberships
                 | Self::ManageGrants
                 | Self::ReadBrokerRegistry
+                | Self::ReadWorkerRegistry
         )
     }
 }

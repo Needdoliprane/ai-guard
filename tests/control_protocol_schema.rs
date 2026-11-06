@@ -129,6 +129,7 @@ fn migrate_to(store: &Store, backup: &Path, version: u32) {
         7 => store.migrate_human_brokers_v7(backup).unwrap(),
         8 => store.migrate_kubernetes_create_v8(backup).unwrap(),
         9 => store.migrate_kubernetes_policy_v9(backup).unwrap(),
+        10 => store.migrate_human_workers_v10(backup).unwrap(),
         _ => panic!("unexpected migration target {version}"),
     };
     assert!(
@@ -292,5 +293,60 @@ async fn served_control_protocol_versions_match_schema_enum_and_active_constrain
         protocol.control_namespace_uuid
     );
 
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn human_worker_feature_is_advertised_only_after_the_explicit10_migration() {
+    let files = support::private_tempdir();
+    let store = Arc::new(
+        Store::open_for_tenant(
+            &files.path().join("tenant.sqlite"),
+            "schema-contract-tenant",
+            Redactor::new(vec![]),
+            10_000,
+        )
+        .unwrap(),
+    );
+    for version in 3..=9 {
+        migrate_to(
+            &store,
+            &files.path().join(format!("before{version}")),
+            version,
+        );
+    }
+    let token = "worker-schema-contract-runner".repeat(3);
+    let router = gateway_router(
+        GatewayState::for_tenants(
+            vec![TenantGateway {
+                tenant_id: "schema-contract-tenant".into(),
+                store: store.clone(),
+                runner_token: token.clone(),
+                viewer_token: "worker-schema-contract-viewer".repeat(3),
+            }],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let schema: Value = serde_json::from_str(CONTROL_PROTOCOL_SCHEMA).unwrap();
+    let mut failures = vec![];
+    check_protocol_and_schema(
+        &get_protocol(&router, &token).await,
+        &schema,
+        9,
+        true,
+        &mut failures,
+    );
+    migrate_to(&store, &files.path().join("before10"), 10);
+    check_protocol_and_schema(
+        &get_protocol(&router, &token).await,
+        &schema,
+        10,
+        true,
+        &mut failures,
+    );
+    assert!(store.integrity().unwrap().valid);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

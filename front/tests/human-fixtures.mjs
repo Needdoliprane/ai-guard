@@ -32,6 +32,21 @@ export const brokerPage = (items = [broker()], extra = {}) => ({ version: 1, con
   evaluated_at: "2026-11-01T12:00:02Z", runtime_inventory: "unknown", items, has_more: false, next_cursor: null,
   read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
 
+export const workerIdentity = () => ({ ...identity(), contexts: [{ ...context("context-workers", "administration"), capabilities: ["read_worker_registry"] }] });
+export const workerObservation = (extra = {}) => ({ observed_at: "2026-10-29T10:00:02.000000000Z", observed_at_status: "known",
+  status: "exited", running: false, started_at: "2026-10-29T10:00:00.000000000Z", started_at_status: "known",
+  finished_at: "2026-10-29T10:00:01.000000000Z", finished_at_status: "known", exit_code: "0", oom_killed: false, restart_count: 0, provenance: "observed", ...extra });
+export const worker = (extra = {}) => ({ worker_id: uuid, request_id: secondUuid, attempt_id: uuid, revision: "9223372036854775807",
+  state: "reserved", quota_held: true, session_id: secondUuid, session_provenance: "declared", runtime_kind: "docker",
+  cpu_millis: 2000, memory_bytes: "1073741824", pids_limit: 256, timeout_seconds: 60, network: "none",
+  observed_started_at: null, observed_started_at_status: "absent", allocation_inconsistent: false, cleanup_removed: null, last_observation: null,
+  launch_broker: { status: "unregistered", broker: null, runtime_kind: null, runtime_matches: null, in_current_grant: null },
+  observation_broker: { status: "authority_unknown", broker: null, runtime_kind: null, runtime_matches: null, in_current_grant: null }, ...extra });
+export const workerPage = (items = [worker()], extra = {}) => ({ version: 1, context_id: "context-workers", authorization_version: "a".repeat(64),
+  source: "tenant_worker_broker_registry", consistency: "snapshot_per_page", evaluated_at: "2026-11-01T12:00:02Z",
+  runtime_inventory: "unknown", registry_status: "available", items, has_more: false, next_cursor: null,
+  read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
+
 // A full requested page, with registry states and old-incarnation evidence kept distinct.
 export const denseBrokerItems = () => {
   const id = (number) => `10000000-0000-4000-8000-${number.toString(16).padStart(12, "0")}`;

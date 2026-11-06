@@ -195,7 +195,7 @@ async fn protocol(broker: VerifiedBroker, request: Request) -> ApiResult<Respons
                 .store
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&tenant.store, e))?;
-            if view.schema_version != 9 {
+            if ![9, 10].contains(&view.schema_version) {
                 return Err(unavailable_reply());
             }
             let body = KubernetesHeldCreateProtocolV1 {

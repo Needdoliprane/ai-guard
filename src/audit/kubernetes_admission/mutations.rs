@@ -94,7 +94,7 @@ impl Store {
             .map_err(|_| KubernetesCreateFailureV1::Unavailable)?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version != 9 {
+        if ![9, 10].contains(&version) {
             return Err(KubernetesCreateFailureV1::MigrationRequired.into());
         }
         let clock = workload::capture_control_time(&tx)?;

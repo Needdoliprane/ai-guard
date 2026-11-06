@@ -42,9 +42,10 @@ pub(super) fn protocol(
 ) -> ClientResult<()> {
     require(
         identity.version == 1
-            && identity.schema_version == 9
+            && [9, 10].contains(&identity.schema_version)
             && protocol.version == 1
-            && protocol.schema_version == 9
+            && [9, 10].contains(&protocol.schema_version)
+            && identity.schema_version == protocol.schema_version
             && revision(identity.binding_revision)
             && revision(identity.grant_revision),
     )?;

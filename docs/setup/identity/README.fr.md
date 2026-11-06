@@ -21,7 +21,7 @@ AIGUARD_PRIVATE="/chemin/prive/ai-guard"
   --target-version 5 --max-events 100000 --confirm-control-stopped
 ```
 
-Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision, resume-provision et apply acceptent les schémas4–7 validés avec supervision inactive ; les lectures HTTP humaines ordinaires prennent en charge5–7 et renvoient `migration_required` avant leur audit sur une base plus ancienne. La lecture du registre brokers et sa nouvelle capacité exigent7. Le [guide workload](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers) décrit5→6→7, y compris pour une base préparée en5 par `setup prepare`.
+Le schéma5 ajoute le protocole d'audit durable des lectures humaines. Modifier `user_version` manuellement ne remplace pas la migration. Mettre à jour tous les lecteurs ensemble : les anciens binaires refusent les nouveaux schémas. Aucun downgrade, restauration, activation ou compte n'est créé automatiquement. Provision, resume-provision et apply acceptent les schémas4–10 validés avec supervision inactive ; les lectures HTTP humaines ordinaires prennent en charge5–10 et renvoient `migration_required` avant leur audit sur une base plus ancienne. La lecture du registre brokers et sa nouvelle capacité exigent7. Le [guide workload](../workloads/README.fr.md#activer-la-lecture-nominative-du-registre-brokers) décrit5→6→7, y compris pour une base préparée en5 par `setup prepare`.
 
 Pour une base appartenant à un conteneur, exécuter la maintenance avec l'UID/GID du contrôle sur son volume existant, après arrêt de tous les autres consommateurs. Le CLI hôte ne peut pas supposer qu'il possède un volume Docker Desktop. Le conteneur ponctuel n'a besoin que de ce volume et de son image de confiance, sans socket, credential runner, secret fournisseur ou réseau. Conserver l'identité du projet Compose et de son volume ; ne pas initialiser une autre base pour contourner une migration refusée.
 
@@ -271,7 +271,7 @@ physique de payload est 256 Mio ; `--max-events` règle celui des événements.
 Les capacités automatiques trop petites pour représenter les budgets protégés
 désactivent explicitement les nouvelles lectures humaines, sans relever le
 plafond physique ni invalider le stockage existant. Les lectures exigent aussi
-un schéma5–7 validé ; les lectures brokers exigent7 et partagent les mêmes budgets humains cumulatifs.
+un schéma5–10 validé ; les lectures brokers exigent7–10, les lectures workers exigent10 et partagent les mêmes budgets humains cumulatifs.
 
 [audit-capacity.json](examples/audit-capacity.json) donne les défauts résolus pour
 `--max-events 100000`. Copier ce fichier dans le répertoire de contrôle privé
@@ -314,3 +314,7 @@ retenu garde ses permis jusqu'au drop, même après erreur terminale ou EOF
 observé ; un client qui ne poll pas peut immobiliser sa part. Chaque poll
 revérifie expiration et révocation. Ces bornes ne prouvent ni un plafond de tous
 les sockets HTTP ni une éviction autonome.
+
+## Autoriser la lecture nominative du registre workers
+
+La capacité administrative distincte `read_worker_registry` exige la migration explicite9→10 et l’accord du contrôle sur le membership. Suivre la [lecture nominative des workers](WORKERS.fr.md) pour la procédure locale/OIDC, les budgets d’audit partagés, la restauration, les limites des données et l’écart obligatoire d’attribution personnelle. Aucun droit brokers/ressources existant n’accorde ce droit.

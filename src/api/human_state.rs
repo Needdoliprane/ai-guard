@@ -214,6 +214,61 @@ impl RegisteredContext {
         self.check_broker_state(state)?;
         self.cipher.seal(&self.broker_aad(query)?, state)
     }
+    fn worker_aad<Q: Serialize>(&self, query: &Q) -> Result<Vec<u8>, StateFailure> {
+        self.aad(&("human_worker_registry_live_keyset_v1", query))
+    }
+    pub fn start_workers<Q: Serialize>(
+        &self,
+        query: &Q,
+        token: Option<&str>,
+    ) -> Result<WorkerCursorStateV1, StateFailure> {
+        self.ensure_valid()?;
+        let state = match token {
+            Some(token) => self.cipher.open_value(&self.worker_aad(query)?, token)?,
+            None => WorkerCursorStateV1 {
+                version: 1,
+                after_worker_id: None,
+                pages: 0,
+                bytes: 0,
+                started_millis: self.elapsed_millis()?,
+                deadline_millis: self.deadline_millis()?,
+            },
+        };
+        self.check_worker_state(&state)?;
+        Ok(state)
+    }
+    fn check_worker_state(&self, state: &WorkerCursorStateV1) -> Result<(), StateFailure> {
+        if state.version != 1
+            || state.after_worker_id.as_ref().is_some_and(|value| {
+                !uuid::Uuid::parse_str(value).is_ok_and(|id| id.to_string() == *value)
+            })
+        {
+            return Err(StateFailure::InvalidCursor);
+        }
+        self.check_budget(
+            state.pages,
+            state.bytes,
+            state.started_millis,
+            state.deadline_millis,
+        )
+    }
+    pub fn advance_workers(
+        &self,
+        mut state: WorkerCursorStateV1,
+        bytes: usize,
+    ) -> Result<WorkerCursorStateV1, StateFailure> {
+        self.check_worker_state(&state)?;
+        add_budget(&mut state.pages, &mut state.bytes, bytes)?;
+        Ok(state)
+    }
+    pub fn seal_workers<Q: Serialize>(
+        &self,
+        query: &Q,
+        state: &WorkerCursorStateV1,
+    ) -> Result<String, StateFailure> {
+        self.check_worker_state(state)?;
+        self.cipher.seal(&self.worker_aad(query)?, state)
+    }
 }
 fn add_budget(pages: &mut u32, total: &mut u64, bytes: usize) -> Result<(), StateFailure> {
     *pages = pages.checked_add(1).ok_or(StateFailure::Capacity)?;
@@ -230,6 +285,17 @@ fn add_budget(pages: &mut u32, total: &mut u64, bytes: usize) -> Result<(), Stat
 pub(super) struct BrokerCursorStateV1 {
     version: u32,
     pub after_broker_id: Option<String>,
+    pages: u32,
+    bytes: u64,
+    started_millis: u64,
+    deadline_millis: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct WorkerCursorStateV1 {
+    version: u32,
+    pub after_worker_id: Option<String>,
     pages: u32,
     bytes: u64,
     started_millis: u64,
@@ -858,5 +924,90 @@ mod tests {
             entry.start_brokers(&"same-query", Some(&broker_token)),
             Err(StateFailure::Expired)
         ));
+    }
+
+    #[test]
+    fn worker_cursors_are_separate_from_brokers_resources_limits_contexts_and_budgets() {
+        let registry = ContextRegistry::new();
+        let entry = registry
+            .obtain(binding(), CONTEXT_TTL, "expiry".into())
+            .unwrap();
+        let worker = entry.start_workers(&25, None).unwrap();
+        let token = entry.seal_workers(&25, &worker).unwrap();
+        assert!(entry.start_brokers(&25, Some(&token)).is_err());
+        assert!(entry.start(&25, Some(&token)).is_err());
+        assert!(entry.start_workers(&26, Some(&token)).is_err());
+        let brokers = entry.start_brokers(&25, None).unwrap();
+        let broker_token = entry.seal_brokers(&25, &brokers).unwrap();
+        assert!(entry.start_workers(&25, Some(&broker_token)).is_err());
+        let resource = entry.start(&25, None).unwrap();
+        let resource_token = entry.seal(&25, &resource).unwrap();
+        assert!(entry.start_workers(&25, Some(&resource_token)).is_err());
+        let mut position = worker.clone();
+        position.after_worker_id = Some("a".repeat(64));
+        assert!(entry.seal_workers(&25, &position).is_err());
+        let mut exhausted = worker.clone();
+        exhausted.pages = 1000;
+        assert!(matches!(
+            entry.advance_workers(exhausted, 1),
+            Err(StateFailure::Capacity)
+        ));
+        let mut exhausted = worker;
+        exhausted.bytes = 16 * 1024 * 1024;
+        assert!(matches!(
+            entry.advance_workers(exhausted, 1),
+            Err(StateFailure::Capacity)
+        ));
+        let foreign = registry
+            .obtain(
+                ContextBinding {
+                    digest: [8; 32],
+                    ..binding()
+                },
+                CONTEXT_TTL,
+                "expiry".into(),
+            )
+            .unwrap();
+        assert!(foreign.start_workers(&25, Some(&token)).is_err());
+        for (index, cursor) in [token, broker_token, resource_token].iter().enumerate() {
+            let wire = hex::decode(cursor).unwrap();
+            assert_eq!(
+                &wire[5..13],
+                &u64::try_from(index).unwrap().to_be_bytes(),
+                "one nonce sequence serves all cursor domains"
+            );
+        }
+    }
+
+    #[test]
+    fn nil_worker_keyset_position_seals_for_a_following_page_without_widening_brokers() {
+        let registry = ContextRegistry::new();
+        let context = registry
+            .obtain(binding(), CONTEXT_TTL, "expiry".into())
+            .unwrap();
+        let nil = uuid::Uuid::nil().to_string();
+        let mut workers = context.start_workers(&25, None).unwrap();
+        // A first human page whose last accepted legacy worker ID is nil still
+        // needs to seal/advance when has_more is true.
+        workers.after_worker_id = Some(nil.clone());
+        let workers = context.advance_workers(workers, 256).unwrap();
+        let next = context.seal_workers(&25, &workers).unwrap();
+        assert_eq!(
+            context
+                .start_workers(&25, Some(&next))
+                .unwrap()
+                .after_worker_id
+                .as_deref(),
+            Some(nil.as_str())
+        );
+        let mut brokers = context.start_brokers(&25, None).unwrap();
+        brokers.after_broker_id = Some(nil);
+        assert!(
+            matches!(
+                context.seal_brokers(&25, &brokers),
+                Err(StateFailure::InvalidCursor)
+            ),
+            "the independent broker UUID contract remains nonnil"
+        );
     }
 }

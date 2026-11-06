@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { identity, page as envelope, resource, event, uuid } from "./human-fixtures.mjs";
 import { brokerIdentity, brokerPage, denseBrokerItems } from "./human-fixtures.mjs";
+import { workerIdentity, workerPage, worker, workerObservation } from "./human-fixtures.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -21,8 +22,9 @@ let revoked = false; let authDenied = false; let detailDenied = false; let resou
 let viewerDenied = null;
 let brokersDown = false; let brokerDenied = false; let budgetExhausted = false; let brokerCapRemoved = false;
 let brokerDisplay = "standard"; let credentialExpiresAt = null;
+let workerDenied = false;
 const humanIdentity = () => {
-  const value = scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
+  const value = scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
   if (brokerCapRemoved) value.contexts[0].capabilities = value.contexts[0].capabilities.filter((cap) => cap !== "read_broker_registry");
   if (scenario === "brokers-lifecycle") value.authentication.expires_at = credentialExpiresAt;
   return value;
@@ -56,6 +58,14 @@ const server = createServer(async (request, response) => {
     if (!String(url.pathname).startsWith("/api/v1/human/")) { response.writeHead(404); response.end(); return; }
     if (!humanIdentity().contexts.some((context) => context.id === contextId)) return error(response, 403, "context_invalid", "select_context");
     if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
+    if (url.pathname === "/api/v1/human/workers") {
+      if (workerDenied) return error(response, 403, "permission_denied", "review_permissions");
+      if (brokersDown) return error(response, 503, "audit_unavailable", "retry");
+      if (brokerDisplay === "empty") return json(response, workerPage([]));
+      if (brokerDisplay === "dense") return json(response, workerPage(Array.from({ length: 25 }, (_, index) => worker({ worker_id: `10000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`, state: ["reserved", "running", "in_doubt", "terminal"][index % 4],
+        ...(index % 4 === 2 ? { last_observation: workerObservation({ started_at: null, started_at_status: "unknown", exit_code: "9007199254740993" }) } : {}) }))));
+      return json(response, workerPage([worker()], url.searchParams.has("cursor") ? {} : { has_more: true, next_cursor: "worker-next-cursor" }));
+    }
     if (url.pathname === "/api/v1/human/brokers") {
       if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
       if (brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
@@ -119,7 +129,7 @@ await page.addInitScript(() => {
   window.fetch = async (...args) => {
     window.__humanFetches.push(String(args[0]));
     const response = await nativeFetch(...args);
-    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers"))) {
+    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/workers"))) {
       window.__humanHold = false; const body = await response.text();
       await new Promise((release) => window.__humanHeld.push(release));
       return new Response(body, { status: response.status, headers: response.headers });
@@ -236,7 +246,43 @@ const runBrokerLifecycle = async () => {
   assert.equal(downloadCount, 0);
 };
 const runRegression = async () => {
-  if (scenario === "brokers-states") {
+  if (scenario === "workers") {
+    await loginHuman(); assert.equal(requests.length, 1);
+    await page.evaluate(() => { window.__humanHold = true; }); await choose("administration");
+    await page.waitForFunction(() => window.__humanHeld.length > 0);
+    await page.getByRole("heading", { name: "Chargement des workers…", exact: true }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: "Aucun worker sur cette page", exact: true }).count(), 0);
+    await page.evaluate(() => window.__humanRelease());
+    await page.getByText("Lecture réussie", { exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table tbody tr").count(), 1);
+    await tab("Page suivante"); await page.getByText(/page 2/).waitFor();
+    await tab("Page précédente"); await page.getByText(/page 1/).waitFor();
+    await tab("Détails"); await page.getByRole("dialog").waitFor(); await page.keyboard.press("Escape");
+    assert.equal(await page.locator("dialog[open]").count(), 0);
+    brokersDown = true; await tab("Actualiser"); await page.getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table tbody tr").count(), 1);
+    brokersDown = false; brokerDisplay = "empty"; await tab("Réessayer");
+    await page.getByRole("heading", { name: "Aucun worker sur cette page", exact: true }).waitFor();
+    brokerDisplay = "dense"; await tab("Actualiser"); await page.locator(".human-broker-table tbody tr").nth(24).waitFor();
+    assert.ok(await page.getByText("Début fourni : Inconnu · date hors format ou non interprétable", { exact: true }).count());
+    assert.ok(await page.getByText("Code de sortie : 9007199254740993", { exact: true }).count(), "aucun arrondi dans le tableau");
+    await mkdir(artifacts, { recursive: true });
+    for (const width of [1440, 390, 320]) for (const theme of ["light", "dark"]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.evaluate((value) => { document.documentElement.dataset.theme = value; window.scrollTo(0, 0); }, theme);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+      await page.screenshot({ path: join(artifacts, `human-workers-dense-${width}-${theme}.png`) });
+    }
+    await page.setViewportSize({ width: 1440, height: 1050 });
+    await page.getByRole("button", { name: "Détails", exact: true }).first().click();
+    workerDenied = true; await page.evaluate(() => { window.__humanAdvance(31000); window.__humanPoll.forEach((poll) => poll()); });
+    await page.getByText("Refus permission_denied", { exact: true }).waitFor();
+    assert.equal(await page.locator("dialog[open], .human-broker-table").count(), 0, "le refus retire tableau et détail");
+    assert.ok(!requests.some((request) => /\/human\/(resources|events|export|stream|brokers)/.test(request.path)), "Workers seul n’emprunte aucune autre autorité");
+    await tab("Se déconnecter");
+    assert.equal(await page.locator(".human-shell, dialog").count(), 0);
+    assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  } else if (scenario === "brokers-states") {
     await runBrokerStates();
   } else if (scenario === "brokers-lifecycle") {
     await runBrokerLifecycle();

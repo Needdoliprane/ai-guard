@@ -1,4 +1,4 @@
-//! Closed schema7 capability retained by schemas8–9; atomic, budgeted registry reads.
+//! Closed schema7 capability retained by schemas8–10; atomic, budgeted registry reads.
 use super::*;
 use crate::{broker_registry::BrokerV1, identity::*};
 
@@ -45,12 +45,18 @@ pub(super) fn validate_read(record: &HumanBrokerReadAuditV1) -> anyhow::Result<(
     Ok(())
 }
 pub(super) fn is_human_read(kind: &str) -> bool {
-    matches!(kind, "control.identity.access" | READ_KIND)
+    matches!(kind, "control.identity.access" | READ_KIND) || kind == super::human_workers::READ_KIND
 }
 /// Classification depends on the authenticated event kind and validated closed
 /// payload. JSON cannot nominate an audit capacity class or reserve.
 pub(super) fn read_principal(event: &Event) -> anyhow::Result<PrincipalRefV1> {
     match event.kind.as_str() {
+        super::human_workers::READ_KIND => {
+            let record: super::human_workers::HumanWorkerReadAuditV1 =
+                serde_json::from_value(event.data.clone())?;
+            super::human_workers::validate_read(&record)?;
+            Ok(record.principal)
+        }
         READ_KIND => {
             let record: HumanBrokerReadAuditV1 = serde_json::from_value(event.data.clone())?;
             validate_read(&record)?;
@@ -121,7 +127,7 @@ pub(super) fn genesis(db: &Connection) -> anyhow::Result<(StoredEvent, u64)> {
     Ok((stored, marker.authorization_revision))
 }
 pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
-    if [7, 8, 9].contains(&version) {
+    if [7, 8, 9, 10].contains(&version) {
         genesis(db)?;
     } else {
         let forbidden: bool = db.query_row(
@@ -131,7 +137,7 @@ pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Resu
         )?;
         anyhow::ensure!(
             !forbidden,
-            "human broker capability requires schema7, schema8 or schema9"
+            "human broker capability requires schema7, schema8, schema9 or schema10"
         );
     }
     Ok(())
@@ -217,7 +223,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![7, 8, 9].contains(&version) {
+        if ![7, 8, 9, 10].contains(&version) {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
         let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;
