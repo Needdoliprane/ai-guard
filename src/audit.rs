@@ -51,6 +51,8 @@ pub(crate) use human_brokers::HumanBrokerFrameV1;
 pub(crate) use human_workers::HumanWorkerFrameV1;
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
+#[cfg(test)]
+mod resource_tests;
 
 #[derive(Debug, Serialize)]
 pub struct Integrity {
@@ -99,6 +101,7 @@ struct SupervisionOrigin {
     state: Mutex<SupervisionLease>,
     capacity: Mutex<capacity::Cache>,
     invalidated: AtomicBool,
+    suspended: AtomicBool,
 }
 
 // This capability is deliberately outside SQLite and is never serialized.
@@ -110,6 +113,7 @@ struct SupervisionLease {
     floor: (i64, String),
     fresh_origin: bool,
     active: bool,
+    pending_activation: bool,
     invalidated: bool,
 }
 
@@ -127,6 +131,7 @@ impl<'a> std::ops::Deref for CheckedTransaction<'a> {
 impl SupervisionLease {
     fn invalidate(&mut self) {
         self.active = false;
+        self.pending_activation = false;
         self.invalidated = true;
     }
     fn verify(&self, backing: &StoreStorage, db: &Connection) -> anyhow::Result<()> {
@@ -694,9 +699,11 @@ impl Store {
                 floor: initial_head,
                 fresh_origin: backing.created_here() && empty && initial_valid,
                 active: false,
+                pending_activation: false,
                 invalidated: !initial_valid,
             }),
             invalidated: AtomicBool::new(!initial_valid),
+            suspended: AtomicBool::new(false),
         });
         Ok(Self {
             tenant_id: tenant_id.into(),
@@ -740,6 +747,7 @@ impl Store {
         self.redactor.union(additional)
     }
     fn sibling_with_redactor(&self, redactor: Redactor) -> anyhow::Result<Self> {
+        self.recover_before_access()?;
         anyhow::ensure!(
             self.healthy(),
             "cannot share an unhealthy supervision origin"
@@ -775,6 +783,9 @@ impl Store {
         &self.tenant_id
     }
     pub fn healthy(&self) -> bool {
+        self.permanently_healthy() && !self.supervision_lease.suspended.load(Ordering::Acquire)
+    }
+    fn permanently_healthy(&self) -> bool {
         !self.unhealthy.load(Ordering::Acquire)
             && !self.supervision_lease.invalidated.load(Ordering::Acquire)
     }
@@ -787,36 +798,124 @@ impl Store {
             anyhow::anyhow!("supervision lease lock poisoned")
         })
     }
+    fn invalidate_storage(&self, lease: &mut SupervisionLease) {
+        self.unhealthy.store(true, Ordering::Release);
+        lease.invalidate();
+        self.supervision_lease
+            .invalidated
+            .store(true, Ordering::Release);
+    }
+    fn storage_failure(&self, lease: &mut SupervisionLease, error: &anyhow::Error) {
+        if storage::descriptor_shortage(error) {
+            // Do not invalidate or recreate the live execution capability. It
+            // remains closed until its exact backing and witness are validated.
+            self.supervision_lease
+                .suspended
+                .store(true, Ordering::Release);
+        } else {
+            self.invalidate_storage(lease);
+        }
+    }
+    fn recover_before_access(&self) -> anyhow::Result<()> {
+        if !self.supervision_lease.suspended.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let mut lease = self.lock_supervision_lease()?;
+        let result = self.recover_suspended(&db, &mut lease);
+        if let Err(error) = &result {
+            self.storage_failure(&mut lease, error);
+        }
+        result
+    }
+    /// Called only with DB then shared lease locked. The shared flag is checked
+    /// again here so concurrent siblings do not each scan a recovered origin.
+    fn recover_suspended(
+        &self,
+        db: &Connection,
+        lease: &mut SupervisionLease,
+    ) -> anyhow::Result<()> {
+        if !self.supervision_lease.suspended.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            self.permanently_healthy() && !lease.invalidated,
+            "audit integrity failure is latched; recovery required"
+        );
+        let tx = db.unchecked_transaction()?;
+        self.backing.verify(&tx)?;
+        let before_snapshot: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        validate_schema(&tx, false)?;
+        Self::validate_metadata(&tx, &self.tenant_id)?;
+        anyhow::ensure!(Self::check_integrity(&tx)?.valid, "audit integrity failure");
+        control::validate(&tx)?;
+        lease.verify(&self.backing, &tx)?;
+        let head = audit_head(&tx)?;
+        anyhow::ensure!(
+            head.0 >= lease.floor.0,
+            "audit head regressed during recovery"
+        );
+        let current_version: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
+        let checked_changes = tx.total_changes();
+        let mut capacity = self
+            .supervision_lease
+            .capacity
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+        let prefix = capacity.prepare(&tx)?;
+        self.backing.verify(&tx)?;
+        // All fallible validation is complete on one stable snapshot. The
+        // permanent latches are never reset, and activation comes exclusively
+        // from a known committed transaction retained by this live origin.
+        capacity.publish(prefix);
+        lease.floor = head;
+        if std::mem::take(&mut lease.pending_activation) {
+            lease.active = true;
+        }
+        if before_snapshot == current_version {
+            self.validated_data_version
+                .store(current_version, Ordering::Release);
+        }
+        self.validated_total_changes
+            .store(checked_changes, Ordering::Release);
+        self.supervision_lease
+            .suspended
+            .store(false, Ordering::Release);
+        Ok(())
+    }
     fn verify_storage(&self, db: &Connection) -> anyhow::Result<()> {
         let mut lease = self.lock_supervision_lease()?;
-        let result = self
-            .backing
-            .verify(db)
-            .and_then(|()| lease.verify(&self.backing, db));
-        if result.is_err() {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+        let result = (|| {
+            self.recover_suspended(db, &mut lease)?;
+            self.backing.verify(db)?;
+            lease.verify(&self.backing, db)
+        })();
+        if let Err(error) = &result {
+            self.storage_failure(&mut lease, error);
         }
         result
     }
     fn verify_diagnostic_backing(&self, db: &Connection) -> anyhow::Result<()> {
         let mut lease = self.lock_supervision_lease()?;
-        let result = self.backing.verify(db);
-        if result.is_err() {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+        let result = (|| {
+            // A permanently fenced Store remains readable for diagnosis, but
+            // diagnosis must never restore its authority.
+            if self.permanently_healthy() {
+                self.recover_suspended(db, &mut lease)?;
+            }
+            self.backing.verify(db)
+        })();
+        if let Err(error) = &result {
+            self.storage_failure(&mut lease, error);
         }
         result
     }
     fn prepare_event(&self, mut event: Event) -> anyhow::Result<(Event, String)> {
         anyhow::ensure!(
-            self.healthy(),
+            self.permanently_healthy(),
             "audit integrity failure is latched; recovery required"
         );
         event.validate()?;
@@ -855,33 +954,25 @@ impl Store {
         self.read_test_observer
             .record(read_test_observer::Call::BeginChecked);
         let mut lease = self.lock_supervision_lease()?;
+        if let Err(error) = self.recover_suspended(db, &mut lease) {
+            self.storage_failure(&mut lease, &error);
+            return Err(error);
+        }
         anyhow::ensure!(
             self.healthy() && !lease.invalidated,
             "audit integrity failure is latched; recovery required"
         );
         if let Err(error) = self.backing.verify(db) {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+            self.storage_failure(&mut lease, &error);
             return Err(error);
         }
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         if let Err(error) = self.backing.verify(&tx) {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+            self.storage_failure(&mut lease, &error);
             return Err(error);
         }
         if let Err(error) = lease.verify(&self.backing, &tx) {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+            self.storage_failure(&mut lease, &error);
             return Err(error);
         }
         // data_version changes for commits made by another SQLite connection,
@@ -912,11 +1003,7 @@ impl Store {
             Ok(())
         })();
         if let Err(error) = verification {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+            self.storage_failure(&mut lease, &error);
             return Err(error);
         }
         self.validated_data_version
@@ -964,12 +1051,16 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
             let capacity_prefix = capacity.prepare(&transaction)?;
             transaction.commit()?;
+            // A known committed mutation must advance the rollback witness
+            // even if its pathname check cannot run. The shared guard still
+            // closes all authority; activation and counters remain unpublished.
+            lease.floor = next_head;
+            lease.namespace = namespace;
+            lease.pending_activation = activate_supervision;
             self.backing.verify_names()?;
             capacity.publish(capacity_prefix);
             // The shared guard still covers this publication, before an ACK or EmitOnce.
-            lease.floor = next_head;
-            lease.namespace = namespace;
-            if activate_supervision {
+            if std::mem::take(&mut lease.pending_activation) {
                 lease.active = true;
             }
             // Publish only our checked changes. In particular, do not read and
@@ -979,12 +1070,8 @@ impl Store {
                 .store(checked_changes, Ordering::Release);
             Ok(())
         })();
-        if result.is_err() {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+        if let Err(error) = &result {
+            self.storage_failure(&mut lease, error);
         }
         result
     }
@@ -1431,6 +1518,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| -> anyhow::Result<Integrity> {
+            if self.permanently_healthy() {
+                self.recover_suspended(&db, &mut lease)?;
+            }
             self.backing.verify(&db)?;
             // Keep schema, quota and event checks on one consistent snapshot,
             // even when another legitimate Store is appending concurrently.
@@ -1488,12 +1578,10 @@ impl Store {
             }
             Ok(integrity)
         })();
-        if result.as_ref().map_or(true, |r| !r.valid) {
-            self.unhealthy.store(true, Ordering::Release);
-            lease.invalidate();
-            self.supervision_lease
-                .invalidated
-                .store(true, Ordering::Release);
+        match &result {
+            Err(error) => self.storage_failure(&mut lease, error),
+            Ok(integrity) if !integrity.valid => self.invalidate_storage(&mut lease),
+            Ok(_) => {}
         }
         result
     }

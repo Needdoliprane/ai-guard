@@ -153,11 +153,22 @@ The copy excludes known sensitive names and dependency/cache directories, but it
 | Stack unavailable | Check Compose `ps` and bounded `logs --tail 100 gateway dashboard ingress` with the same configuration. Check host-port collisions and private credential projections. Never publish raw logs without reviewing them for secrets. |
 | HTTP 429 through ingress | Distinguish the [upload/exchange budgets](#http-ingress-limits) from upstream quotas using the returned message. Reduce parallel requests and retry a read after capacity is available. Check the recorded session before repeating a launch. |
 | HTTP 408 or 413 while sending a body | Check the 5-second total/2-second idle deadlines and 256-KiB body limit. Reduce the payload or fix a stalled sender; changing the dotenv file does not extend these bounds. |
+| HTTP 503 with audit descriptor exhaustion (`EMFILE`/`ENFILE`) | Preserve the session and operation identity. Once descriptors are available, retry an authorized read that reaches Store validation; see [audit descriptor recovery](#audit-descriptor-recovery) before replaying a mutation. |
 | Unauthenticated or forbidden | Reconnect with the appropriate identity and authorized tenant/scope. Do not substitute a runner key for a missing user permission. |
 | Policy deny or review | Read the decision reason and requested scope. Adjust the request or obtain approval for that exact request. |
 | Project copy or export refused | Check size, links, destination freshness and directory permissions. Preserve the original and any already published export. |
 | Runtime unavailable or status unknown | Preserve the session, plans and volume. Query status and reconcile the recorded runtime authority; do not create another start to hide uncertainty. |
 | Provider login or client unavailable | Follow the [provider diagnosis](../providers/README.md#diagnose-provider-problems); health checks do not validate provider access. |
+
+### Audit descriptor recovery
+
+When backing-file validation retains a typed OS error `EMFILE` or `ENFILE`, the Store refuses the operation without a successful acknowledgement or execution permission for it. Gateway routes receiving this error map it to HTTP **503**; descriptor exhaustion may also prevent accepting a connection or transmitting the response. The live supervision origin and sibling connections sharing it remain suspended. Once descriptors are available, the next authorized access reaching Store validation automatically checks a complete, consistent SQLite snapshot: file identity, schema, tenant binding, metadata/quota, event chain, control projections and the live rollback witness. Only successful validation restores that shared origin; a sibling connection can perform the recovery. `/healthz` alone does not trigger it.
+
+SQLite may already have committed before the final file check fails. Preserve the event or operation identity and its exact content. Use that operation's existing idempotent replay path where available: the durable result is reused without another event or quota debit. A new identity or session is a new operation, and a consumed start claim stays consumed. Do not infer that an error response means nothing was committed.
+
+`EIO`, substituted file identity, corruption and a poisoned supervision lock keep the origin permanently invalidated. Apparent file repair, refreshes and `worker-resume` cannot reactivate it; there is no operator override. Preserve data and session references for diagnosis. Descriptor recovery, HTTP status, health checks and a valid audit chain do not prove engine availability or a worker's stop. Continue to use the recorded runtime observations; consult the [dated validation evidence](../../engineering/VALIDATION.md) for the scope actually qualified.
+
+### Reconcile the recorded worker
 
 The normal recovery commands use the session's recorded engine authority:
 

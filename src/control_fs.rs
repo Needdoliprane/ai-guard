@@ -567,11 +567,10 @@ fn open_child_directory(parent: &File, name: &CString, create: bool) -> Result<F
             )
         };
     }
-    ensure!(
-        fd >= 0,
-        "control directory must exist without symbolic links: {}",
-        std::io::Error::last_os_error()
-    );
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("control directory must exist without symbolic links");
+    }
     // SAFETY: a successful openat returned a uniquely owned FD.
     Ok(unsafe { File::from_raw_fd(fd) })
 }
