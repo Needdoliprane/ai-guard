@@ -1,5 +1,22 @@
 # Plan d'industrialisation
 
+## 6 novembre — drainage vérifié et chantiers parallèles
+
+Le drainage des owners cold a son RED réel et six fonctions ciblées PASS,
+avec revue et compilation composée. Les owners acceptés restent suivis à
+l'arrêt normal, sans modifier Full/D5 ou qualifier une mort de processus.
+[Preuves](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+Reprise/recomptage de quarantaine et qualification froide restent des P1.
+
+Deux worktrees indépendants avancent en parallèle : projection fédérée des
+workers/brokers et prérequis Kubernetes consommés par le CLI. La vue fédérée
+humaine SSO exige une permission explicite et reste obligatoire ; une première
+projection technique ne la clôture pas. Le profil complet Kubernetes V2 et le
+canal worker/transport du relais ont une proposition structurelle distincte,
+sans activation ou action cluster implicite. Chaque lot garde ses contrats,
+sources figées, tests Luna pertinents et revue avant intégration. Ces travaux
+ne réduisent pas la cible à une démonstration ; aucun gate global n'est clos.
+
 ## 6 novembre — composition de l'audit retenu
 
 La référence d'entrée est désormais `02834eb`, avec les lots capacité logique,

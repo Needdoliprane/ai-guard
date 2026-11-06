@@ -1,11 +1,18 @@
 # Gates de qualification production
 
+Drainage des owners d'audit du 6 novembre : six fonctions ciblées PASS,
+compilation toutes cibles RC0 et revue indépendante traitée. Cette preuve
+sur le même helper d'arrêt que serve ne qualifie ni SIGTERM/processus, ni
+runtime réel, ni le drainage des exécutions Full. [Résultats](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+Sortie de quarantaine, D5/fencing et qualifications réelles restent ouverts.
+G09 FAIL,0/12 gates globaux clos ; Clippy absent et avertissements inchangés.
+
 Raccord du propriétaire authentifié du 6 novembre : deux parents finaux PASS,
 compilation toutes cibles RC0 et revue indépendante traitée. Vraie boucle et
 ACK partiel sont vérifiés avec HTTP/SQLite et moteur de seed synthétique.
 118 avertissements bibliothèque/3 lib-test et Clippy absent restent ouverts.
 [Preuves](VALIDATION.md#6-novembre--propriétaire-authentifié-et-boucle-audit-restreinte).
-Drainage des owners, sortie de quarantaine, D5/fencing et qualifications réelles
+Le drainage ciblé figure ci-dessus ; sortie de quarantaine, D5/fencing et qualifications réelles
 restent ouverts. G09 FAIL,0/12 gates globaux clos.
 
 ACK retenu Stops du 6 novembre : 12 parents métadonnées et 5 acteur PASS,

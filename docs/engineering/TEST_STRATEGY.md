@@ -53,6 +53,19 @@ HTTP/StoredEvent seuls ne constituent pas cette preuve.
 
 ## Chantiers et validations en parallèle
 
+Pour le drainage cold, sélectionner les trois parents
+`broker::service::server::retained_audit::owners::tests::`, puis le parent
+`broker::service::server::retained_audit::shutdown_tests::normal_shutdown_waits_for_a_retained_owner_to_ack_its_committed_receipt`
+et les deux canaris de propriétaire partiel/boucle complète. Le registre seul
+emploie des futures contrôlées par Notify et des polls explicites, sans sleep.
+Le parent d'arrêt retient une vraie réponse HTTP après commit SQLite ; le même
+producteur est déjà terminé et les autres JoinSets sont vides. L'attente ne
+peut donc pas venir d'eux. La réponse est toujours libérée avant l'assertion
+RED finale ; les ACK sont recoupés via snapshot du writer vivant puis vraie
+réouverture de lease. Le snapshot est séquencé, pas une mesure atomique de
+l'instant du retour. [Gels, résultats et limites](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+Ce test interne ne qualifie ni vrai signal, runtime mort ou moteur Docker/Podman.
+
 Le raccord d'audit terminal possède deux parents ciblés :
 `broker::service::server::cancel_retry_tests::cold_audit_tests::cold_stop_only_reconcile_loop_publishes_pending_v4_without_start_capability`
 et `broker::service::server::retained_audit::tests::retained_owner_submits_first_real_receipt_when_stopping_before_second_post`.

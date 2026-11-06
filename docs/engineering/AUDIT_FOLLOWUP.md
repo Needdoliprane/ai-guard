@@ -1,5 +1,16 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Drainage des tâches d'audit — 6 novembre 2026
+
+Retour prématuré du même chemin shutdown que serve reproduit avant correction :
+le producteur était fini, un vrai POST avait committé, sa réponse restait retenue.
+Le registre borné et son drainage passent six fonctions ciblées après correction,
+avec revue et compilation toutes cibles. Les erreurs de harnais de compilation
+sont séparées des RED/PASS comportementaux dans les [preuves](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+Ce résultat ne confirme pas le candidat outbox externe et ne qualifie pas un
+SIGTERM/processus ou moteur réel. Les pièces externes ne sont pas modifiées.
+Quarantaine, D5/fencing et pannes restent ouverts ; G09 FAIL,aucun gate clos.
+
 ## Propriétaire d'audit et ServiceCold — 6 novembre 2026
 
 Le défaut logiciel de publication est rejoué sur `02834eb` : vraie boucle

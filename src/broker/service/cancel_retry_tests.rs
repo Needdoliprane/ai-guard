@@ -315,6 +315,8 @@ impl Fixture {
             .set(ProfileWriterCapabilities::from_full(writer.clone()))
             .unwrap();
         let service = Service {
+            cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)
+                .unwrap(),
             registry,
             root: Directory::open_existing(&base.join("root")).unwrap(),
             material: Arc::new(Material {

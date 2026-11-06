@@ -1,5 +1,33 @@
 # Journal privé du broker — contrats persistants
 
+## Arrêt normal et registre des propriétaires — 6 novembre
+
+Le registre est borné exactement par max_enforcer_slots (1..1024). Réservation,
+fermeture et spawn/enregistrement utilisent la même synchronisation courte.
+Un slot est retenu avant préparation/essai autonome/POST ; un start tardif est
+refusé sans poller sa future. Les réservations jamais démarrées ne font pas
+attendre leur observateur indéfiniment. Les tâches finies restent comptées
+jusqu'au vrai reap, qui conserve toute erreur avant de réutiliser leur place.
+
+Un seul observateur de drain poll les JoinHandles à la fois, indépendamment du
+sémaphore d'exécution. Ces handles restent empruntés dans le registre ; annuler
+cette attente ne les prend, n'aborte ou n'oublie pas. La première erreur reste
+retenue même après reap et nouvel observateur. Les codes sont fermés ; aucun
+payload de JoinError n'est formaté dans le diagnostic.
+
+L'arrêt normal ferme admission/registre, abort puis joint le producteur et
+attend tous les propriétaires cold, même après une erreur. Les drains existants
+présence/IPC restent conservés. Aucun délai global ne rend Ok en abandonnant
+ces owners. Leurs budgets HTTP et writer restent inchangés ; aucune durée
+maximale d'arrêt sous starvation/IO bloqué n'est promise. Le résultat est
+dégradé si un owner ou le suivi échoue, après les joins restants.
+
+Complete et PartialConfirmed ne sont produits qu'après confirmation locale
+des reçus obtenus. PartialConfirmed conserve Job NeedsReconciliation et le
+second événement pending ; ce n'est pas une livraison de toute l'outbox. Les
+exécutions Full et les gardiens/D5 ne sont pas drainés par ce registre.
+[Six fonctions et limites](VALIDATION.md#6-novembre--drainage-des-propriétaires-daudit).
+
 ## Propriétaire authentifié de l'audit terminal — 6 novembre
 
 La boucle du service possède un chemin d'audit avant sa barrière d'admission
@@ -21,8 +49,9 @@ Si un reçu a été obtenu, une erreur de l'envoi suivant, l'expiration du budge
 ou le drapeau d'arrêt conduit au submit synchrone du sous-ensemble reçu, sans
 nouvelle attente ou acquisition. Zéro reçu n'entraîne aucune publication locale.
 Le retour de la boucle observatrice n'annule pas ce propriétaire. Cette garantie
-est limitée au processus et au runtime vivants : `serve` ne draine pas encore
-explicitement ces nouvelles tâches à son arrêt. Panne d'acteur avant enqueue :
+est limitée au processus et au runtime vivants ; le drain normal ci-dessus
+ajoute l'attente explicite de ces tâches, sans qualifier une mort brutale.
+Panne d'acteur avant enqueue :
 NotQueued ne confirme rien, les IDs prédurables restent pending pour reprise.
 Après enqueue, le contrat de rétention/quarantaine de l'acteur ci-dessous reste
 applicable. Aucune résistance à une panne physique ou à ENOSPC n'en est déduite.

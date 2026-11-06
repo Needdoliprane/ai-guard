@@ -113,6 +113,8 @@ pub(in crate::broker::service) async fn stop_only_service(
     let child = recovery_child(&enforcer_root, None);
     let stop_enforcer = warmed_recovery_client(&enforcer_root).await;
     let service = Arc::new(Service {
+        cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)
+            .unwrap(),
         registry,
         root: broker_root,
         material,

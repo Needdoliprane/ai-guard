@@ -198,6 +198,17 @@ provider login, start, export or cleanup is performed by this audit path.
 Delivery updates only the local outbox acknowledgements; it does not finalise
 the managed result or retire its supervision lifecycle.
 
+On normal shutdown, the broker closes admission, joins the reconcile producer,
+and waits for every retained-audit owner already accepted. It does not abandon
+those owners on a global drain timeout. If shutdown begins after the first
+receipt, that exact receipt is acknowledged and the second event remains pending;
+the job stays incomplete for a later bounded retry. An owner error or join error
+makes shutdown degraded only after the other accepted owners have also been
+drained. This is an internal test of the same shutdown helper used by `serve`;
+it does not qualify SIGTERM handling, process death, physical failures or a
+10-second delay. The 45-second HTTP budget and writer budgets are unchanged, and
+these checks establish no duration SLO.
+
 The same original 45-second HTTP budget covers identity, worker read and sends.
 The detached task survives loss of the reconcile-loop observer while the process
 and async runtime remain alive; this is not a power-loss or process-death

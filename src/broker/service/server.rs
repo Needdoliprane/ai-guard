@@ -255,6 +255,7 @@ struct Service {
     blocking: Arc<Semaphore>,
     preparation: Arc<Semaphore>,
     execution: Arc<Semaphore>,
+    cold_owners: Arc<retained_audit::ColdOwners>,
     stopping: Arc<AtomicBool>,
     fenced: AtomicBool,
 }
@@ -475,6 +476,7 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
         .map(|profile| (profile.id.clone(), Arc::new(ProfileJobs::new())))
         .collect();
     let service = Arc::new(Service {
+        cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)?,
         execution: Arc::new(Semaphore::new(registry.data.max_enforcer_slots as usize)),
         registry,
         root,
@@ -560,33 +562,66 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
             }
         }
     }
-    service.stopping.store(true, Ordering::SeqCst);
-    let _ = presence_shutdown.send(true);
-    for profile in service.profiles.values() {
-        profile.invalidate_all();
-    }
-    reconciler.abort();
-    // HTTP exists only in these owned futures. A cancelled blocking filesystem
-    // closure may finish later while retaining its lock; it cannot send a POST.
-    let presence_drain = async { while presence_tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(Duration::from_secs(15), presence_drain)
-        .await
-        .is_err()
-    {
-        presence_tasks.abort_all();
-        while presence_tasks.join_next().await.is_some() {}
-    }
-    // In-flight framing/writer ACKs receive a short bounded drain. A lost reply
-    // never rolls back an already durable accepted job or enforcer registration.
-    let drain = async { while requests.join_next().await.is_some() {} };
-    let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
-    requests.abort_all();
+    let result = service
+        .shutdown(
+            reconciler,
+            &presence_shutdown,
+            &mut presence_tasks,
+            &mut requests,
+        )
+        .await;
     drop(listener);
     drop(lease);
-    Ok(())
+    result
 }
 
 impl Service {
+    async fn shutdown(
+        &self,
+        reconciler: tokio::task::JoinHandle<()>,
+        presence_shutdown: &watch::Sender<bool>,
+        presence_tasks: &mut JoinSet<()>,
+        requests: &mut JoinSet<()>,
+    ) -> Result<()> {
+        self.stopping.store(true, Ordering::SeqCst);
+        let mut degraded = self.cold_owners.close().is_err();
+        let _ = presence_shutdown.send(true);
+        for profile in self.profiles.values() {
+            profile.invalidate_all();
+        }
+        reconciler.abort();
+        if let Err(error) = reconciler.await
+            && !error.is_cancelled()
+        {
+            degraded = true;
+        }
+        // Presence HTTP lives only in these owned futures. A cancelled blocking
+        // filesystem closure may retain its lock; it cannot send a POST.
+        let presence_drain = async { while presence_tasks.join_next().await.is_some() {} };
+        if tokio::time::timeout(Duration::from_secs(15), presence_drain)
+            .await
+            .is_err()
+        {
+            presence_tasks.abort_all();
+            while presence_tasks.join_next().await.is_some() {}
+        }
+        // In-flight framing/writer ACKs receive a short bounded drain. A lost reply
+        // never rolls back an already durable accepted job or enforcer registration.
+        let drain = async { while requests.join_next().await.is_some() {} };
+        let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
+        requests.abort_all();
+        // Only cold owners are tracked here. Full DeferredRun and its shared
+        // execution permits retain their existing independent semantics.
+        if self.cold_owners.drain().await.is_err() {
+            degraded = true;
+        }
+        if degraded {
+            Err(anyhow!("cold audit shutdown needs reconciliation"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn recovery_only(&self) -> bool {
         self.stop_enforcer.is_some()
     }
