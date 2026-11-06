@@ -1,5 +1,19 @@
 # Suivi de l'audit indépendant — 29 octobre 2026
 
+## Propriétaires Full et admission — 6 novembre 2026
+
+Le lot `5026f07`, intégré dans `485eb6b`, corrige le retour d'arrêt normal
+avant fin de la future Full, puis la course d'admission découverte en revue.
+Les deux défauts ont un RED comportemental ; les erreurs de harnais antérieures
+restent distinctes. Quatre parents Full et cinq canaris Cold passent, avec
+compilation du lot et de sa composition, guides EN/FR et contre-revue traitée.
+Le refus de saturation précède mutation/ACK, sans événement Resume ajouté ni
+ticket Submit neuf ; les replays exacts à capacité pleine restent admis.
+[Commandes, sources et limites](VALIDATION.md#6-novembre--propriétaires-full-et-admission-avant-ack).
+Ce résultat logiciel ne clôture pas le candidat outbox externe et ne qualifie
+ni SIGTERM réel, ni crash, ni fencing. La confirmation de quarantaine, la
+reprise froide et les moteurs réels restent ouverts ; G09 FAIL, aucun gate clos.
+
 ## Drainage des tâches d'audit — 6 novembre 2026
 
 Retour prématuré du même chemin shutdown que serve reproduit avant correction :
