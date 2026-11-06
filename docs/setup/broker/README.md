@@ -341,6 +341,15 @@ Request cancellation for affected jobs, then check their durable and observed st
 
 The foreground broker handles SIGINT/SIGTERM by closing admissions and invalidating its start generations; its distinct enforcer retains already armed targets and original deadlines. This is not a general cleanup or disarm procedure. Restart the foreground broker with the same binary/configuration/root and compatible control only after investigating the previous owner. The active-control restriction above still applies after gateway restart.
 
+Normal shutdown also waits for every accepted Full batch task before releasing
+the broker lease. A completed task can still report `needs_reconciliation` or
+leave audit events pending; its completion does not prove that a runtime has
+stopped. An operation already in flight may prolong shutdown until its task
+returns. There is no global abort deadline or qualified maximum shutdown time.
+Keep the control process alive and preserve its lease during that wait. The
+internal shutdown helper does not qualify real SIGTERM handling, process death
+or ambiguous-start fencing.
+
 Preserve the private registry, installation identity, broker journal, export-input records, configuration and credential bindings, gateway databases and coherent backups, retained runtime authorities and worker volumes together. Backup/restore must account for SQLite WAL state, confidentiality and the authority of outstanding claims. Restoring old files does not restore fresh execution permission. No automatic retention or safe rollback is established by this guide; follow [operations](../../operations.md) and the [journal/recovery contract](../../engineering/BROKER_JOURNAL.md) for the applicable boundaries.
 
 The complete product also requires safe control reactivation, OS-managed lifecycle, ambiguous-start fencing, terminal continuity and real platform/failure qualification. Their current status and required evidence remain in [engineering](../../engineering/PRODUCTION_READINESS.md), including [the supervision contract](../../engineering/BROKER_SUPERVISION.md). Do not substitute the foreground commands or a configuration example for those results.

@@ -164,7 +164,7 @@ impl Fixture {
                         && request.uri().path().starts_with("/api/v1/workers/")
                         && request.uri().path().ends_with("/transitions");
                     let audit_event = request.method() == axum::http::Method::POST
-                        && request.uri().path() == "/api/v1/events";
+                        && matches!(request.uri().path(), "/api/events" | "/api/v1/events");
                     if decision {
                         observed.fetch_add(1, Ordering::SeqCst);
                         eprintln!("cancelled_recovery_fixture phase=decision_http_enter");

@@ -69,6 +69,9 @@ mod presence_material_tests;
 #[cfg(test)]
 #[path = "cancel_retry_tests.rs"]
 mod cancel_retry_tests;
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "full_owner_tests.rs"]
+mod full_owner_tests;
 #[cfg(test)]
 type ServiceEnforcer = cancel_retry_tests::TestEnforcer;
 #[cfg(not(test))]
@@ -256,11 +259,18 @@ struct Service {
     preparation: Arc<Semaphore>,
     execution: Arc<Semaphore>,
     cold_owners: Arc<retained_audit::ColdOwners>,
+    full_owners: Arc<FullOwners>,
     stopping: Arc<AtomicBool>,
     fenced: AtomicBool,
 }
 
+// This registry owns only process-local Full task outcomes. It grants neither
+// an enforcer role nor a journal capability and is independent of ColdOwners.
+type FullOwners = retained_audit::OwnerTasks<()>;
+type FullOwnerSlot = retained_audit::OwnerSlot<()>;
+
 struct DeferredRun {
+    owner: FullOwnerSlot,
     executor: BatchExecutor,
     operation: Uuid,
     context: AuthenticatedBatchContext,
@@ -270,26 +280,53 @@ struct DeferredRun {
     stopping: Arc<AtomicBool>,
 }
 impl DeferredRun {
-    fn start(self) {
-        tokio::spawn(async move {
-            if self.stopping.load(Ordering::SeqCst) {
-                self.job.result(Some(BrokerErrorCodeV1::Unavailable));
-                return;
+    fn start(self) -> std::result::Result<(), retained_audit::OwnerError> {
+        let Self {
+            owner,
+            executor,
+            operation,
+            context,
+            job,
+            _running,
+            _capacity,
+            stopping,
+        } = self;
+        let not_started = Arc::clone(&job);
+        // Admission already reserved this non-clone slot before its reply.
+        // Starting consumes it; it never competes for a new slot after ACK.
+        let result = owner.start(async move {
+            if stopping.load(Ordering::SeqCst) {
+                job.result(Some(BrokerErrorCodeV1::Unavailable));
+                return Err(BrokerErrorCodeV1::Unavailable);
             }
-            let outcome = self.executor.run(self.operation, &self.context).await;
-            match outcome {
-                Ok(BatchOutcome::AwaitingReview) => self.job.result(None),
-                Ok(_) => {
-                    self.job.result(None);
-                    let _ = self.job.set_source(None);
+            let outcome = executor.run(operation, &context).await;
+            let result = match outcome {
+                Ok(BatchOutcome::AwaitingReview) => {
+                    job.result(None);
+                    Ok(())
                 }
-                Err(_) => self
-                    .job
-                    .result(Some(BrokerErrorCodeV1::NeedsReconciliation)),
-            }
-            // These capabilities remain owned across the complete async run.
-            drop(self);
+                Ok(_) => {
+                    job.result(None);
+                    let _ = job.set_source(None);
+                    Ok(())
+                }
+                Err(_) => {
+                    job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
+                    Err(BrokerErrorCodeV1::NeedsReconciliation)
+                }
+            };
+            // Explicit captures keep both capabilities for the complete run,
+            // including every early-return path before this normal completion.
+            drop((_running, _capacity));
+            result
         });
+        if let Err(error) = result {
+            not_started.result(Some(match error {
+                retained_audit::OwnerError::Busy => BrokerErrorCodeV1::Busy,
+                _ => BrokerErrorCodeV1::Unavailable,
+            }));
+        }
+        result
     }
 }
 struct Response {
@@ -477,6 +514,7 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
         .collect();
     let service = Arc::new(Service {
         cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)?,
+        full_owners: FullOwners::new(registry.data.max_enforcer_slots as usize)?,
         execution: Arc::new(Semaphore::new(registry.data.max_enforcer_slots as usize)),
         registry,
         root,
@@ -576,6 +614,13 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
 }
 
 impl Service {
+    fn reserve_full_owner(&self) -> Result<FullOwnerSlot, BrokerErrorCodeV1> {
+        self.full_owners.try_reserve().map_err(|error| match error {
+            retained_audit::OwnerError::Busy => BrokerErrorCodeV1::Busy,
+            _ => BrokerErrorCodeV1::Unavailable,
+        })
+    }
+
     async fn shutdown(
         &self,
         reconciler: tokio::task::JoinHandle<()>,
@@ -585,6 +630,9 @@ impl Service {
     ) -> Result<()> {
         self.stopping.store(true, Ordering::SeqCst);
         let mut degraded = self.cold_owners.close().is_err();
+        if self.full_owners.close().is_err() {
+            degraded = true;
+        }
         let _ = presence_shutdown.send(true);
         for profile in self.profiles.values() {
             profile.invalidate_all();
@@ -610,13 +658,25 @@ impl Service {
         let drain = async { while requests.join_next().await.is_some() {} };
         let _ = tokio::time::timeout(Duration::from_secs(5), drain).await;
         requests.abort_all();
-        // Only cold owners are tracked here. Full DeferredRun and its shared
-        // execution permits retain their existing independent semantics.
+        // Complete producer cancellation before releasing a prepared DeferredRun
+        // held by a response. A closed registry cannot accept any late spawn.
+        while let Some(result) = requests.join_next().await {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                degraded = true;
+            }
+        }
         if self.cold_owners.drain().await.is_err() {
             degraded = true;
         }
+        // Join every accepted Full future without an abort or global timeout.
+        // Its completion is not a terminal runtime or fencing observation.
+        if self.full_owners.drain().await.is_err() {
+            degraded = true;
+        }
         if degraded {
-            Err(anyhow!("cold audit shutdown needs reconciliation"))
+            Err(anyhow!("broker shutdown needs reconciliation"))
         } else {
             Ok(())
         }
@@ -981,7 +1041,7 @@ impl Service {
         .await;
         // Client disappearance does not cancel a durable accepted job.
         if let Some(run) = response.run {
-            run.start();
+            let _ = run.start();
         }
     }
     async fn dispatch(
@@ -1186,9 +1246,23 @@ impl Service {
         let operation = submit.operation_id;
         let job = jobs.job(operation)?;
         let preparation_generation = job.cancel.current();
+        // Status is only a capacity preflight hint. The same live Journal
+        // records every known ID/floor: an existing operation cannot legally
+        // become New again. reserve below still validates the exact payload,
+        // and rejects disappearance, rollback or divergent bytes itself.
+        let owner = if writer
+            .status(operation)
+            .await
+            .map_err(jobs::journal_error)?
+            .is_none()
+        {
+            Some(self.reserve_full_owner()?)
+        } else {
+            None
+        };
         // Reserve the exact runnable payload before opening a provider or a
         // source directory. The authentication envelope is never persisted.
-        let ticket = match writer
+        let (ticket, owner) = match writer
             .reserve(operation, payload.into_bytes())
             .await
             .map_err(jobs::journal_error)?
@@ -1199,7 +1273,17 @@ impl Service {
             }
             ReserveResult::InProgress => return Err(BrokerErrorCodeV1::Busy),
             ReserveResult::Interrupted => return Err(BrokerErrorCodeV1::Interrupted),
-            ReserveResult::New(ticket) => ticket,
+            ReserveResult::New(ticket) => {
+                let Some(owner) = owner else {
+                    // This contradicts the live writer's observed-ID floor.
+                    // Preserve the interrupted reservation for reconciliation;
+                    // no preparation, acceptance or execution is permitted.
+                    job.result(Some(BrokerErrorCodeV1::NeedsReconciliation));
+                    drop(ticket);
+                    return Err(BrokerErrorCodeV1::NeedsReconciliation);
+                };
+                (ticket, owner)
+            }
         };
         let running = match job.enter() {
             Ok(running) => running,
@@ -1309,6 +1393,7 @@ impl Service {
         Ok(Response {
             reply: accepted(&accepted_job, false),
             run: Some(DeferredRun {
+                owner,
                 executor,
                 operation,
                 context,
@@ -1388,6 +1473,7 @@ impl Service {
         if actual != hash {
             return Err(BrokerErrorCodeV1::Conflict);
         }
+        let owner = self.reserve_full_owner()?;
         let acknowledgement = writer
             .append_command(
                 operation,
@@ -1418,6 +1504,7 @@ impl Service {
         Ok(Response {
             reply: command_ack(operation, &acknowledgement),
             run: Some(DeferredRun {
+                owner,
                 executor,
                 operation,
                 context,
@@ -1570,6 +1657,7 @@ impl Service {
             return Err(BrokerErrorCodeV1::Conflict);
         }
         let event = resume_event(&durable, command)?;
+        let owner = self.reserve_full_owner()?;
         let pending = writer
             .enqueue_event(operation, event.clone())
             .await
@@ -1622,6 +1710,7 @@ impl Service {
                 checkpoint_hash: receipt.head().hash().into(),
             },
             run: Some(DeferredRun {
+                owner,
                 executor,
                 operation,
                 context,
@@ -1955,6 +2044,9 @@ impl Service {
                         let Ok(capacity) = Arc::clone(&self.execution).try_acquire_owned() else {
                             continue;
                         };
+                        let Ok(owner) = self.reserve_full_owner() else {
+                            continue;
+                        };
                         if !job.autonomous_attempt() {
                             continue;
                         }
@@ -1993,7 +2085,8 @@ impl Service {
                                 continue;
                             }
                         };
-                        DeferredRun {
+                        let _ = DeferredRun {
+                            owner,
                             executor,
                             operation,
                             context,

@@ -345,6 +345,15 @@ Demander l'annulation des jobs concernés, puis vérifier leur état durable et 
 
 Le broker au premier plan traite SIGINT/SIGTERM en fermant les admissions et en invalidant ses générations de start ; son enforcer distinct conserve les cibles déjà armées et leurs échéances originales. Ce n'est pas une procédure générale de nettoyage ou de désarmement. Redémarrer le broker au premier plan avec les mêmes binaire/configuration/racine et un contrôle compatible seulement après investigation du précédent propriétaire. La restriction de contrôle actif ci-dessus reste applicable après redémarrage du gateway.
 
+L'arrêt normal attend aussi chaque tâche batch Full acceptée avant de relâcher
+la lease broker. Une tâche terminée peut encore signaler `needs_reconciliation`
+ou laisser des événements d'audit en attente ; sa fin ne prouve pas l'arrêt
+d'un runtime. Une opération déjà en cours peut prolonger l'arrêt jusqu'au retour
+de sa tâche. Aucun délai global d'abandon ni durée maximale d'arrêt qualifiée
+n'est fourni. Conserver le processus de contrôle vivant et sa lease pendant
+cette attente. Le helper d'arrêt interne ne qualifie ni un vrai SIGTERM, ni la
+mort du processus, ni le fencing d'un démarrage ambigu.
+
 Préserver ensemble registre privé, identité d'installation, journal broker, enregistrements d'entrées d'export, configuration et bindings de credentials, bases gateway et sauvegardes cohérentes, autorités runtime retenues et volumes worker. La sauvegarde/restauration doit tenir compte du WAL SQLite, de la confidentialité et de l'autorité des claims en cours. Restaurer d'anciens fichiers ne restaure pas une permission d'exécution fraîche. Ce guide n'établit ni rétention automatique ni rollback sûr ; suivre [l'exploitation](../../operations.md) et le [contrat journal/reprise](../../engineering/BROKER_JOURNAL.md) pour les frontières applicables.
 
 Le produit complet exige aussi réactivation sûre du contrôle, cycle de vie géré par l'OS, fencing des starts ambigus, continuité du terminal et qualification réelle des plateformes/pannes. Leur état courant et les preuves requises restent dans [engineering](../../engineering/PRODUCTION_READINESS.md), avec [le contrat de supervision](../../engineering/BROKER_SUPERVISION.md). Ne pas remplacer ces résultats par les commandes au premier plan ou un exemple de configuration.

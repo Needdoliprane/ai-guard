@@ -8,8 +8,10 @@ use crate::{
 
 #[path = "retained_audit/owners.rs"]
 mod owners;
-pub(super) use owners::ColdOwners;
+#[cfg(test)]
+pub(super) use owners::DrainError;
 use owners::{ColdOwnerError, ColdOwnerSlot};
+pub(super) use owners::{ColdOwners, OwnerError, OwnerSlot, OwnerTasks};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RetainedAuditSuccess {
