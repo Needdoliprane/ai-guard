@@ -15,12 +15,29 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[derive(Debug)]
+struct DescriptorShortage;
+
+impl std::fmt::Display for DescriptorShortage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("audit filesystem descriptor resources temporarily unavailable")
+    }
+}
+
+/// Only filesystem validation introduces this marker. In particular, an
+/// unrelated IO, SQLite, integrity or projection failure cannot become retryable.
+pub(super) fn descriptor_shortage(error: &anyhow::Error) -> bool {
+    error.is::<DescriptorShortage>()
+}
+
 pub(super) struct StoreStorage {
     parent: Directory,
     name: OsString,
     path: PathBuf,
     identity: PrivateEntryIdentity,
     created: bool,
+    #[cfg(test)]
+    pub(super) test_hook: super::resource_tests::StorageHook,
 }
 
 /// Serializes creation and initialization, including case/Unicode aliases on
@@ -153,6 +170,8 @@ impl StoreStorage {
                 path,
                 identity,
                 created,
+                #[cfg(test)]
+                test_hook: super::resource_tests::StorageHook::default(),
             },
             guard,
         ))
@@ -182,6 +201,22 @@ impl StoreStorage {
 
     /// Metadata/ACL only. Never opens a database or shared-memory inode.
     pub(super) fn verify_names(&self) -> Result<()> {
+        self.verify_names_inner().map_err(|error| {
+            if error.chain().any(|cause| {
+                cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                    matches!(io.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE))
+                })
+            }) {
+                error.context(DescriptorShortage)
+            } else {
+                error
+            }
+        })
+    }
+
+    fn verify_names_inner(&self) -> Result<()> {
+        #[cfg(test)]
+        self.test_hook.run()?;
         ensure!(
             self.parent.private_entry(&self.name)? == Some(self.identity),
             "audit database identity changed or disappeared; recovery required"

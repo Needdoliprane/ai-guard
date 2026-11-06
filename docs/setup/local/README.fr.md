@@ -153,11 +153,22 @@ La copie exclut des noms sensibles connus et des répertoires de dépendances/ca
 | Pile indisponible | Consulter Compose `ps` et `logs --tail 100 gateway dashboard ingress` avec la même configuration. Vérifier collisions de ports et projections privées des credentials. Examiner les logs avant toute publication pour exclure les secrets. |
 | HTTP 429 via l'ingress | Distinguer les [budgets de lecture/échange](#bornes-du-relais-http) des quotas amont à l'aide du message retourné. Réduire les requêtes parallèles et réessayer une lecture lorsque la capacité est disponible. Vérifier la session enregistrée avant de répéter un lancement. |
 | HTTP 408 ou 413 pendant l'envoi d'un corps | Vérifier les délais de 5 secondes au total/2 secondes sans fragment et la limite de 256 Kio. Réduire le contenu ou corriger l'émetteur bloqué ; modifier le fichier dotenv ne relève pas ces bornes. |
+| HTTP 503 avec pénurie de descripteurs d'audit (`EMFILE`/`ENFILE`) | Conserver la session et l'identité de l'opération. Une fois les descripteurs disponibles, reprendre une lecture autorisée qui atteint la validation du Store ; consulter la [reprise des descripteurs d'audit](#reprise-des-descripteurs-daudit) avant de rejouer une mutation. |
 | Non authentifié ou interdit | Se reconnecter avec l'identité et le tenant/périmètre autorisés. Ne pas remplacer une permission utilisateur manquante par une clé runner. |
 | Refus de politique ou review | Lire le motif et le périmètre demandé. Adapter la demande ou obtenir une approbation pour cette demande exacte. |
 | Copie ou export refusé | Vérifier taille, liens, nouveauté de la destination et permissions des répertoires. Préserver l'original et tout export déjà publié. |
 | Runtime indisponible ou état inconnu | Conserver session, plans et volume. Consulter le statut et réconcilier l'autorité runtime enregistrée ; ne pas créer un autre démarrage pour masquer l'incertitude. |
 | Connexion fournisseur ou client indisponible | Suivre le [diagnostic fournisseur](../providers/README.fr.md#diagnostiquer-les-problèmes-fournisseur) ; les contrôles de disponibilité ne valident pas cet accès. |
+
+### Reprise des descripteurs d'audit
+
+Lorsqu'une vérification des fichiers de la base conserve une erreur OS typée `EMFILE` ou `ENFILE`, le Store refuse l'opération sans accusé de réussite ni autorisation d'exécution pour cette requête. Lorsqu'une route du gateway reçoit cette erreur, elle la traduit en HTTP **503** ; une pénurie de descripteurs peut aussi empêcher l'acceptation d'une connexion ou la transmission de la réponse. L'origine de supervision vivante et les connexions sœurs qui la partagent restent suspendues. Une fois les descripteurs disponibles, le prochain accès autorisé qui atteint la validation du Store vérifie automatiquement un même snapshot SQLite complet : identité des fichiers, schéma, liaison tenant, métadonnées/quota, chaîne d'événements, projections de contrôle et témoin vivant contre le recul de l'audit. Seule une validation réussie restaure cette origine partagée ; une connexion sœur peut effectuer la reprise. `/healthz` seul ne la déclenche pas.
+
+SQLite peut avoir déjà committé avant l'échec du contrôle final des fichiers. Conserver l'identité de l'événement ou de l'opération et son contenu exact. Utiliser le chemin de rejeu idempotent existant de cette opération lorsqu'il existe : le résultat durable est réutilisé sans autre événement ni nouveau débit du quota. Une nouvelle identité ou session constitue une nouvelle opération, et un claim de démarrage consommé reste consommé. Une réponse en erreur ne signifie pas qu'aucune mutation n'a été committée.
+
+`EIO`, une identité de fichier substituée, une corruption et un verrou de supervision empoisonné maintiennent l'invalidation permanente de l'origine. Ni l'apparente réparation des fichiers, ni les actualisations, ni `worker-resume` ne peuvent la réactiver ; aucune option opérateur ne le force. Préserver données et références de session pour le diagnostic. La reprise des descripteurs, le statut HTTP, les contrôles de santé et une chaîne d'audit valide ne prouvent ni la disponibilité du moteur ni l'arrêt d'un worker. Continuer à utiliser les observations runtime enregistrées ; les [preuves de validation datées](../../engineering/VALIDATION.md) délimitent la qualification obtenue.
+
+### Réconcilier le worker enregistré
 
 La reprise ordinaire utilise l'autorité moteur enregistrée pour la session :
 
