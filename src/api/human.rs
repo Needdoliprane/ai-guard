@@ -12,6 +12,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 mod brokers;
+mod workers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
 pub(super) struct HumanAccessState {
@@ -693,6 +694,7 @@ pub(super) fn routes() -> Router<GatewayState> {
     Router::new()
         .route("/human/identity", get(identity))
         .route("/human/brokers", get(brokers::brokers))
+        .route("/human/workers", get(workers::workers))
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
         .route("/human/events/{id}", get(event))

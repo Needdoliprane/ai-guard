@@ -1,4 +1,4 @@
-//! Audited supervision for exact schemas3–9. No automatic migration.
+//! Audited supervision for exact schemas3–10. No automatic migration.
 use super::*;
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
@@ -225,7 +225,7 @@ pub(super) fn operation_receipt(
 }
 fn require_v3(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [3, 4, 5, 6, 7, 8, 9].contains(&version) {
+    if [3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -372,7 +372,7 @@ impl Replay {
         Ok(state)
     }
     pub(super) fn new(db: &Connection, version: i64, namespace: String) -> anyhow::Result<Self> {
-        let (genesis_seq, genesis_hash) = if [3, 4, 5, 6, 7, 8, 9].contains(&version) {
+        let (genesis_seq, genesis_hash) = if [3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
             let row: (i64, String) = db.query_row(
                 "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                 [],
@@ -944,12 +944,12 @@ impl Store {
             } else {
                 None
             },
-            protocols: if [3, 4, 5, 6, 7, 8, 9].contains(&schema_version) {
+            protocols: if [3, 4, 5, 6, 7, 8, 9, 10].contains(&schema_version) {
                 vec![SupervisionProtocolV1::BrokerSupervisionV1]
             } else {
                 vec![]
             },
-            active: [3, 4, 5, 6, 7, 8, 9].contains(&schema_version) && tx.lease.active,
+            active: [3, 4, 5, 6, 7, 8, 9, 10].contains(&schema_version) && tx.lease.active,
         };
         state.validate()?;
         self.commit_checked(tx)?;

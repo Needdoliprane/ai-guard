@@ -12,7 +12,7 @@ fn empty_association(status: AuthorityBrokerStatusV1) -> AuthorityBrokerAssociat
     }
 }
 
-fn association(
+pub(in crate::audit) fn association(
     db: &Connection,
     fact: Option<(&str, RuntimeKindV1)>,
     evaluated_at: &str,
@@ -96,7 +96,7 @@ impl Store {
         let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let registry_available = match schema {
             2..=5 => false,
-            6..=9 => true,
+            6..=10 => true,
             _ => return Err(crate::control::ControlFailure::MigrationRequired.into()),
         };
         let evaluated_at = format_time(Utc::now());

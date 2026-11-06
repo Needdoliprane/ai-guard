@@ -25,7 +25,7 @@ fn require_capability_schema(
     evidence: &authorization::AuthorizationEvidence,
 ) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if matches!((version, *evidence.version()), (8, 1) | (9, 2)) {
+    if matches!((version, *evidence.version()), (8, 1) | (9, 2) | (10, 2)) {
         Ok(())
     } else {
         Err(KubernetesCreateFailureV1::MigrationRequired.into())

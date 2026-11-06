@@ -1,5 +1,5 @@
 import { createSseParser } from "./sse.ts";
-import { HumanContractError, boundedText, humanBrokersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
+import { HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
 import type { HumanContext, HumanEventPage, HumanIdentity, HumanSelection, ResourceRef } from "./human-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
@@ -105,7 +105,7 @@ export class HumanApiClient {
   }
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
-    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
     if (this.#readBudgetStopped) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
@@ -207,6 +207,11 @@ export class HumanApiClient {
     const snapshot = this.#snapshot(true);
     const body = await this.#json(await this.#request(humanBrokersUrl(cursor), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
+  }
+  async workers(cursor: string | null = null, signal?: AbortSignal) {
+    const snapshot = this.#snapshot(true);
+    const body = await this.#json(await this.#request(humanWorkersUrl(cursor), snapshot, signal), snapshot);
+    return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
   }
   async events(selection: HumanSelection, signal?: AbortSignal): Promise<HumanEventPage> {
     const snapshot = this.#snapshot(true);

@@ -184,6 +184,73 @@ pub const HUMAN_MAX_PAGE_BYTES: usize = 262_144;
 pub(crate) const HUMAN_PAGE_ENVELOPE_RESERVE: usize = 4096;
 pub(crate) const HUMAN_CURSOR_HEX_BYTES: usize = (1 + 12 + 512 + 16) * 2;
 
+/// Closed infrastructure metadata; never the technical WorkerV1/LaunchSpecV1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanWorkerTimeStatusV1 {
+    Known,
+    Absent,
+    Unknown,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanWorkerObservationV1 {
+    pub observed_at: Option<String>,
+    pub observed_at_status: HumanWorkerTimeStatusV1,
+    pub status: crate::control::RuntimeStatusV1,
+    pub running: Option<bool>,
+    pub started_at: Option<String>,
+    pub started_at_status: HumanWorkerTimeStatusV1,
+    pub finished_at: Option<String>,
+    pub finished_at_status: HumanWorkerTimeStatusV1,
+    pub exit_code: Option<String>,
+    pub oom_killed: Option<bool>,
+    pub restart_count: Option<u32>,
+    pub provenance: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanWorkerItemV1 {
+    pub worker_id: String,
+    pub request_id: String,
+    pub attempt_id: String,
+    pub revision: String,
+    pub state: crate::control::WorkerStateV1,
+    pub quota_held: bool,
+    /// A launch reference, not evidence of a human owner or delegation.
+    pub session_id: String,
+    pub session_provenance: String,
+    pub runtime_kind: crate::control::RuntimeKindV1,
+    pub cpu_millis: u32,
+    pub memory_bytes: String,
+    pub pids_limit: u32,
+    pub timeout_seconds: u32,
+    pub network: crate::control::NetworkV1,
+    pub observed_started_at: Option<String>,
+    pub observed_started_at_status: HumanWorkerTimeStatusV1,
+    pub allocation_inconsistent: bool,
+    pub cleanup_removed: Option<bool>,
+    pub last_observation: Option<HumanWorkerObservationV1>,
+    pub launch_broker: crate::broker_registry::AuthorityBrokerAssociationV1,
+    pub observation_broker: crate::broker_registry::AuthorityBrokerAssociationV1,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HumanWorkerRegistryPageV1 {
+    pub version: u32,
+    pub context_id: String,
+    pub authorization_version: String,
+    pub source: String,
+    pub consistency: String,
+    pub evaluated_at: String,
+    pub runtime_inventory: String,
+    pub registry_status: String,
+    pub items: Vec<HumanWorkerItemV1>,
+    pub has_more: bool,
+    pub next_cursor: Option<String>,
+    pub read_receipt: HumanReadReceiptV1,
+}
+
 /// Tenant-wide infrastructure metadata, distinct from resource ACL projections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

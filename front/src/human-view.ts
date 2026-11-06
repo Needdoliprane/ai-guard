@@ -3,7 +3,7 @@ import { formatDate } from "./model.ts";
 import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
 import { HumanContractError } from "./human-model.ts";
 import "./human.css";
-import type { HumanBroker, HumanBrokerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
+import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 
 interface ReadState<T> {
   value: T | null; loading: boolean; error: string; loadedAt: string | null; stale: boolean;
@@ -14,7 +14,12 @@ const readState = <T>(): ReadState<T> => ({ value: null, loading: false, error: 
 const modeName = (context: HumanContext) => context.mode === "administration" ? "Administration" : "Personnel";
 const kindName: Record<HumanResource["resource"]["kind"], string> = { session: "Session", sandbox: "Sandbox", agent: "Agent", project: "Projet" };
 const brokerStateName: Record<HumanBroker["state"], string> = { unseen: "Heartbeat non reçu", current: "Bail courant", stale: "Bail périmé", expired: "Autorisation expirée", revoked: "Autorisation révoquée", clock_uncertain: "Horloge incertaine" };
-type DashboardMode = "contexts" | "resources" | "events" | "brokers";
+function workerTimeLabel(value: string | null, status: HumanWorkerTimeStatus) {
+  if (status === "absent") return "Non fourni";
+  if (status === "unknown") return "Inconnu · date hors format ou non interprétable";
+  return value && Number.isFinite(Date.parse(value)) ? formatDate(value, true) : value ?? "Inconnu";
+}
+type DashboardMode = "contexts" | "resources" | "events" | "brokers" | "workers";
 function badge(label: string, tone = "neutral") { return el("span", `badge badge-${tone}`, label); }
 function action(label: string, key: string, call: () => void, disabled = false) {
   const node = button(label, "button button-secondary", call); node.dataset.focusKey = key; node.disabled = disabled; return node;
@@ -44,6 +49,11 @@ export class HumanDashboard {
   #brokerGeneration = 0;
   #brokerForbidden = false;
   #brokerLastLaunch = 0;
+  #workers = readState<HumanWorkerPage>();
+  #workerAbort = new AbortController();
+  #workerGeneration = 0;
+  #workerForbidden = false;
+  #workerLastLaunch = 0;
   #selection: { item: HumanResource; view: HumanView } | null = null;
   #mode: DashboardMode = "contexts";
   #generation = 0;
@@ -77,7 +87,7 @@ export class HumanDashboard {
   #mounted = false;
   #visibility = () => {
     if (document.visibilityState !== "visible") { this.#streamAbort.abort(); return; }
-    if (this.#closed || this.#api.readBudgetStopped || this.#mode === "brokers" && this.#brokerForbidden) return;
+    if (this.#closed || this.#api.readBudgetStopped || (this.#mode === "brokers" && this.#brokerForbidden || this.#mode === "workers" && this.#workerForbidden)) return;
     const generation = this.#generation;
     void this.#loadIdentity().then((success) => {
       if (!success || this.#closed || generation !== this.#generation || !this.#context) return;
@@ -97,7 +107,7 @@ export class HumanDashboard {
       },
       onReadBudgetExhausted: () => {
         this.#streamAbort.abort(); this.#exportAbort.abort(); clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
-        this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true;
+        this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true;
         this.#streamStatus = "Lecture automatique suspendue"; this.#render();
       },
     });
@@ -127,6 +137,7 @@ export class HumanDashboard {
     clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
     this.#context = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
     this.#purgeBrokers(); this.#brokerForbidden = false; this.#brokerLastLaunch = 0;
+    this.#purgeWorkers(); this.#workerForbidden = false; this.#workerLastLaunch = 0;
     if (this.#identity) this.#identity = { ...this.#identity, contexts: [] };
     this.#identityLoading = false;
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
@@ -143,6 +154,11 @@ export class HumanDashboard {
     this.#brokerGeneration++; this.#brokerAbort.abort(); this.#brokerAbort = new AbortController(); this.#brokers = readState();
     if (this.#mode === "brokers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
+  #canWorkers() { return this.#context?.mode === "administration" && this.#context.capabilities.includes("read_worker_registry"); }
+  #purgeWorkers() {
+    this.#workerGeneration++; this.#workerAbort.abort(); this.#workerAbort = new AbortController(); this.#workers = readState();
+    if (this.#mode === "workers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
+  }
   #stopViewReads() {
     this.#generation++; this.#selectionGeneration++; this.#scope.abort(); this.#scope = new AbortController();
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController(); this.#streamAbort.abort();
@@ -156,14 +172,20 @@ export class HumanDashboard {
     if (mode === "contexts") {
       this.#api.clearContext(); this.#purgeContext(); this.#mode = mode;
       if (!this.#api.readBudgetStopped) void this.#loadIdentity();
+    } else if (mode === "workers" && this.#canWorkers()) {
+      if (this.#mode !== mode) {
+        this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode;
+      }
+      this.#streamStatus = "Registre · lectures ponctuelles"; this.#refreshActive(false);
     } else if (mode === "brokers" && this.#canBrokers()) {
       if (this.#mode !== mode) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
-        this.#purgeBrokers(); this.#mode = mode;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode;
       }
       this.#streamStatus = "Registre · sans flux temps réel"; this.#refreshActive(false);
     } else if (mode === "resources" && this.#canResources()) {
-      this.#stopViewReads(); this.#purgeBrokers(); this.#mode = mode; this.#resources = readState();
+      this.#stopViewReads(); this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode; this.#resources = readState();
       this.#events = readState(); this.#selection = null;
       this.#startStream(); this.#refreshActive(false);
     } else if (mode === "events" && this.#selection && this.#canResources()) {
@@ -173,7 +195,8 @@ export class HumanDashboard {
   }
   #refreshActive(automatic: boolean) {
     if (this.#closed || this.#api.readBudgetStopped || automatic && document.visibilityState !== "visible") return;
-    if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) void this.#loadBrokers(undefined, undefined, automatic);
+    if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
+    else if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) void this.#loadBrokers(undefined, undefined, automatic);
     else if (this.#mode === "resources" && this.#canResources()) void this.#loadResources();
     else if (this.#mode === "events" && this.#selection && this.#canResources()) void this.#loadEvents();
   }
@@ -201,32 +224,32 @@ export class HumanDashboard {
     this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte personnel"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message; this.#notice.textContent = this.#message;
-    const destinations: DashboardMode[] = ["contexts", "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : [])];
+    const destinations: DashboardMode[] = ["contexts", "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : [])];
     const nav = destinations.map((mode) => {
-      const label = { contexts: "Contextes", resources: "Ressources", events: "Événements", brokers: "Brokers" }[mode];
+      const label = { contexts: "Contextes", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
         mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canResources()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     this.#navigation.replaceChildren(el("div", "human-nav", ...nav), action("Actualiser", "human-refresh", () => {
       if (this.#mode === "contexts") void this.#loadIdentity(); else this.#refreshActive(false);
-    }, this.#identityLoading || this.#api.readBudgetStopped || this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden)));
-    const heading = el("h1", "", { contexts: "Choisir un contexte.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant." }[this.#mode]);
+    }, this.#identityLoading || this.#api.readBudgetStopped || (this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden) || this.#mode === "workers" && (this.#workers.loading || this.#workerForbidden))));
+    const heading = el("h1", "", { contexts: "Choisir un contexte.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant." }[this.#mode]);
     heading.tabIndex = -1;
     this.#page.replaceChildren(el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
-      el("p", "page-description", this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
+      el("p", "page-description", this.#mode === "workers" ? "Workers de tout le tenant · autorisation read_worker_registry. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
           this.#api.allowReadAfterOperatorAction();
           void this.#refreshAfterOperatorAction();
-        }, this.#identityLoading || this.#brokers.loading || this.#resources.loading || this.#events.loading))] : []),
+        }, this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#resources.loading || this.#events.loading))] : []),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
         el("p", "", `Contexte valable jusqu’au ${formatDate(this.#context.expires_at, true)}. Source : identité authentifiée du contrôle.`))) : "",
-      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#renderEvents());
+      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#renderEvents());
     if (active && focusScope) {
       const replacement = key ? [...focusScope.querySelectorAll<HTMLElement>("[data-focus-key]")]
         .find((node) => node.dataset.focusKey === key && node.isConnected && !node.matches(":disabled") &&
@@ -237,6 +260,9 @@ export class HumanDashboard {
     }
   }
   async #refreshAfterOperatorAction() {
+    if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) {
+      await this.#loadWorkers(undefined, undefined, false, true); return;
+    }
     if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) {
       await this.#loadBrokers(undefined, undefined, false, true); return;
     }
@@ -261,7 +287,7 @@ export class HumanDashboard {
       return true;
     } catch (error) {
       if (!this.#closed && generation === this.#generation && !(error instanceof HumanSuperseded)) {
-        this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true;
+        this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true;
         this.#message = this.#context ? `Revalidation des accès impossible. ${failure(error)}` : this.#message;
       }
       return false;
@@ -290,10 +316,12 @@ export class HumanDashboard {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = "";
             if (this.#canResources()) this.#openView("resources");
+            else if (this.#canWorkers()) this.#openView("workers");
             else if (this.#canBrokers()) this.#openView("brokers");
             else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune vue de consultation disponible avec ses capacités. Faites vérifier vos accès."; this.#render(); }
           } catch (error) { this.#identityError = failure(error); this.#render(); }
         }, this.#identityLoading || Date.parse(context.expires_at) <= Date.now()))),
+      el("p", "field-help", "La vue personnelle des workers reste à raccorder à une chaîne authentifiée d’initiation et de délégation. Une référence de session déclarée ne prouve pas la propriété humaine."),
       el("p", "field-help", "La déconnexion efface ce jeton de l’onglet. Sa révocation et ses permissions restent contrôlées côté serveur."));
   }
   #error(message: string, retry: () => void) {
@@ -329,12 +357,92 @@ export class HumanDashboard {
     } catch (error) {
       if (this.#closed || generation !== this.#generation || request !== this.#brokerGeneration || error instanceof HumanSuperseded) return;
       if (error instanceof HumanApiError && error.status === 403) {
-        this.#purgeBrokers(); this.#brokerForbidden = true; this.#brokers.error = failure(error); this.#brokers.stale = true;
+        this.#purgeBrokers(); this.#brokerForbidden = true; this.#brokers.error = failure(error); this.#brokers.stale = true; this.#workers.stale = true;
       } else { state.error = failure(error); state.stale = true; }
     } finally {
       state.loading = false;
       if (!this.#closed && generation === this.#generation && this.#mode === "brokers") this.#render();
     }
+  }
+  async #loadWorkers(cursor = this.#workers.cursor, history = this.#workers.history, automatic = false, operatorRetry = false) {
+    if (!this.#canWorkers() || this.#mode !== "workers" || this.#closed || this.#workers.loading || this.#workerForbidden ||
+      this.#api.readBudgetStopped && !operatorRetry || automatic && (document.visibilityState !== "visible" || Date.now() - this.#workerLastLaunch < 30000)) return;
+    const state = this.#workers; const generation = this.#generation; const request = this.#workerGeneration;
+    this.#workerLastLaunch = Date.now(); state.loading = true; this.#render();
+    try {
+      const page = await this.#api.workers(cursor, this.#workerAbort.signal);
+      if (this.#closed || generation !== this.#generation || request !== this.#workerGeneration || this.#mode !== "workers" || !this.#canWorkers()) return;
+      this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
+      state.value = page; state.cursor = cursor; state.history = [...history]; state.loadedAt = new Date().toISOString(); state.error = ""; state.stale = false;
+    } catch (error) {
+      if (this.#closed || generation !== this.#generation || request !== this.#workerGeneration || error instanceof HumanSuperseded) return;
+      if (error instanceof HumanApiError && error.status === 403) {
+        this.#purgeWorkers(); this.#workerForbidden = true; this.#workers.error = failure(error); this.#workers.stale = true;
+      } else { state.error = failure(error); state.stale = true; }
+    } finally {
+      state.loading = false;
+      if (!this.#closed && generation === this.#generation && this.#mode === "workers") this.#render();
+    }
+  }
+  #workerAssociation(value: HumanWorkerAssociation, label: string) {
+    const broker = value.broker;
+    const status = { registry_unavailable: "Registre indisponible", authority_unknown: "Autorité inconnue", unregistered: "Autorité non enregistrée", registered: "Association historique" }[value.status];
+    return el("div", "", el("strong", "", label), el("p", "muted", status), broker ? el("p", "mono control-id", broker.broker_id) : null,
+      broker ? el("p", "muted", `${brokerStateName[broker.state]} · incarnation courante ${broker.current_incarnation_id}`) : null,
+      broker ? el("p", "muted", `Runtime ${value.runtime_kind} · correspondance ${value.runtime_matches ? "oui" : "non"} · dans le grant courant ${value.in_current_grant ? "oui" : "non"}`) : null);
+  }
+  #renderWorkers() {
+    const state = this.#workers;
+    const table = el("table", "human-broker-table");
+    table.append(el("caption", "", "Métadonnées du registre durable · cette page n’est ni un total du tenant ni un inventaire runtime complet."),
+      el("thead", "", el("tr", "", ...["Worker / session déclarée", "État du contrôle", "Dernière observation runtime", "Associations historiques", "Réservation", "Détail"].map((title) => el("th", "", title)))));
+    const rows = state.value?.items.map((item) => el("tr", "",
+      el("td", "", el("p", "mono control-id", item.worker_id), el("p", "muted", `Session déclarée : ${item.session_id}`), el("p", "muted", `Révision ${item.revision} · ${item.runtime_kind}`)),
+      el("td", "", badge(item.state), item.allocation_inconsistent ? badge("Allocation incohérente", "amber") : null),
+      el("td", "", item.last_observation ? el("div", "", badge(`Observé : ${item.last_observation.status}`),
+        el("p", "muted", `Relevé : ${workerTimeLabel(item.last_observation.observed_at, item.last_observation.observed_at_status)}`),
+        el("p", "muted", `Début fourni : ${workerTimeLabel(item.last_observation.started_at, item.last_observation.started_at_status)}`),
+        el("p", "muted", `Fin fournie : ${workerTimeLabel(item.last_observation.finished_at, item.last_observation.finished_at_status)}`),
+        el("p", "mono", `Code de sortie : ${item.last_observation.exit_code ?? "Non fourni"}`)) : el("p", "muted", "Observation inconnue")),
+      el("td", "", this.#workerAssociation(item.launch_broker, "Autorité du lancement"), this.#workerAssociation(item.observation_broker, "Autorité de l’inspection")),
+      el("td", "", badge(item.quota_held ? "Quota réservé" : "Quota non réservé"), el("p", "muted", `${item.cpu_millis} milliCPU · ${item.memory_bytes} octets alloués`), el("p", "muted", "Consommation réelle inconnue · non facturable")),
+      el("td", "", action("Détails", `human-worker-${item.worker_id}`, () => this.#showWorker(item))))) ?? [];
+    table.append(el("tbody", "", ...rows));
+    const scroll = el("div", "human-broker-scroll", table); scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Tableau des workers autorisés, défilement horizontal");
+    return el("section", "panel human-broker-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Registre des workers"),
+      el("p", "", "Source : contrôle du tenant authentifié. Une référence de session déclarée n’attribue aucun propriétaire humain."))),
+      this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_worker_broker_registry · snapshot par page, pages successives vivantes.`) : null,
+      this.#workerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-worker-access", () => this.#openView("contexts"))) :
+        state.error ? this.#error(state.error, () => { void this.#loadWorkers(); }) : null,
+      !state.value ? empty(state.loading ? "Chargement des workers…" : "Workers inconnus", "La lecture doit réussir avant de conclure sur l’activité.") :
+        !state.value.items.length ? empty("Aucun worker sur cette page", "Le registre n’a retourné aucune ligne pour cette lecture autorisée. L’inventaire runtime reste inconnu.") : scroll,
+      this.#pagination(state, (cursor, history) => { void this.#loadWorkers(cursor, history); }),
+      el("p", "human-broker-footnote muted", "Une date connue est une valeur interprétable fournie, sans preuve de chronologie cohérente ou de fin réelle. Aucune durée n’est calculée depuis ces dates. Une date inconnue reste distincte d’une valeur non fournie."),
+      el("p", "human-broker-footnote muted", "Une association historique d’autorité peut être postérieure au fait worker ; elle ne prouve pas le broker physique ayant exécuté ou inspecté la session. Le bail du broker ne prouve aucun état du worker."),
+      el("p", "human-broker-footnote muted", "Actualisation au plus toutes les 30 secondes lorsque cette vue est visible. Aucun flux worker implicite ni délai garanti de notification. La vue personnelle reste un écart obligatoire tant que sa chaîne d’attribution authentifiée manque."));
+  }
+  #showWorker(item: HumanWorker) {
+    const page = this.#workers.value;
+    if (!this.#canWorkers() || this.#mode !== "workers" || !page?.items.some((row) => row.worker_id === item.worker_id)) return;
+    this.#dialog?.close(); this.#dialog?.remove();
+    const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const heading = el("h2", "", "Métadonnées du worker"); heading.id = "human-worker-detail-title";
+    const dialog = el("dialog", "detail-dialog"); dialog.setAttribute("aria-labelledby", heading.id);
+    const close = button("", "icon-button", () => dialog.close(), "x"); close.setAttribute("aria-label", "Fermer les détails");
+    const data = el("pre", "code-block"); data.textContent = JSON.stringify(item, null, 2);
+    dialog.append(el("div", "detail-header", heading, close), el("div", "detail-body",
+      el("p", "muted", `Projection sans commande ni credential · lecture du ${formatDate(page.evaluated_at, true)}. Reçu durable ${page.read_receipt.audit_event_id} ; il ne prouve ni livraison ni effet runtime.`),
+      el("p", "muted", `Début historique : ${workerTimeLabel(item.observed_started_at, item.observed_started_at_status)}. Une date connue indique une valeur interprétable, pas une chronologie validée.`),
+      item.last_observation ? el("p", "mono", `Code de sortie exact : ${item.last_observation.exit_code ?? "Non fourni"}`) : null,
+      data));
+    document.body.append(dialog); this.#dialog = dialog; dialog.showModal();
+    dialog.addEventListener("close", () => {
+      if (this.#dialog === dialog) this.#dialog = null; dialog.remove();
+      if (this.#closed || document.querySelector("dialog[open]")) return;
+      const key = trigger?.dataset.focusKey;
+      const replacement = key ? [...this.#page?.querySelectorAll<HTMLElement>("[data-focus-key]") ?? []].find((node) => node.dataset.focusKey === key) : null;
+      (trigger?.isConnected ? trigger : replacement ?? this.#page?.querySelector<HTMLElement>("h1"))?.focus({ preventScroll: true });
+    }, { once: true });
   }
   #brokerAuthorities(item: HumanBroker) {
     return el("ul", "human-broker-authorities", ...item.authorities.map((authority) => el("li", "",

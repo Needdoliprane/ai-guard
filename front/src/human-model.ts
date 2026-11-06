@@ -1,6 +1,6 @@
 export type HumanView = "metadata" | "content";
 export type ResourceKind = "session" | "sandbox" | "agent" | "project";
-export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants" | "read_broker_registry";
+export type Capability = "read_metadata" | "read_content" | "export" | "read_tenant_metadata" | "manage_memberships" | "manage_grants" | "read_broker_registry" | "read_worker_registry";
 export type Principal = { kind: "human_local"; installation_id: string; account_id: string } |
   { kind: "human_oidc"; issuer: string; subject: string };
 export interface HumanContext {
@@ -97,8 +97,8 @@ export function parseHumanIdentity(value: unknown): HumanIdentity {
     requireContract(object(item) && opaque(item.id) && !seen.has(item.id) && boundedText(item.tenant_id, 128) &&
       boundedText(item.organization_scope, 1024) && ["personal", "administration"].includes(String(item.mode)) &&
       revision(item.membership_revision) && authorizationVersion(item.authorization_version) && timestamp(item.expires_at) &&
-      Array.isArray(item.capabilities) && item.capabilities.length <= 7 && new Set(item.capabilities).size === item.capabilities.length && item.capabilities.every((capability) =>
-        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants", "read_broker_registry"].includes(String(capability))));
+      Array.isArray(item.capabilities) && item.capabilities.length <= 8 && new Set(item.capabilities).size === item.capabilities.length && item.capabilities.every((capability) =>
+        ["read_metadata", "read_content", "export", "read_tenant_metadata", "manage_memberships", "manage_grants", "read_broker_registry", "read_worker_registry"].includes(String(capability))));
     seen.add(item.id);
     return { id: item.id, tenant_id: item.tenant_id, organization_scope: item.organization_scope,
       mode: item.mode as HumanContext["mode"], membership_revision: item.membership_revision,
@@ -234,4 +234,117 @@ export function humanBrokersUrl(cursor: string | null = null): string {
   const query = new URLSearchParams({ limit: "25" });
   if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
   return `/api/v1/human/brokers?${query}`;
+}
+
+export interface HumanWorkerAssociation {
+  status: "registry_unavailable" | "authority_unknown" | "unregistered" | "registered";
+  runtime_kind: "docker" | "podman" | "kubernetes" | null; runtime_matches: boolean | null; in_current_grant: boolean | null;
+  broker: { broker_id: string; current_incarnation_id: string; state: HumanBroker["state"]; grant_revision: string;
+    heartbeat_revision: string; last_received_at: string | null; lease_expires_at: string | null } | null;
+}
+export type HumanWorkerTimeStatus = "known" | "absent" | "unknown";
+export interface HumanWorker {
+  worker_id: string; request_id: string; attempt_id: string; revision: string;
+  state: "reserved" | "preparing" | "created" | "start_issued" | "running" | "stopping" | "terminal" | "in_doubt" | "cancelled";
+  quota_held: boolean; session_id: string; session_provenance: "declared"; runtime_kind: "docker" | "podman";
+  cpu_millis: number; memory_bytes: string; pids_limit: number; timeout_seconds: number; network: "none" | "bridge";
+  observed_started_at: string | null; observed_started_at_status: HumanWorkerTimeStatus; allocation_inconsistent: boolean; cleanup_removed: boolean | null;
+  last_observation: { observed_at: string | null; observed_at_status: "known" | "unknown"; status: "created" | "running" | "exited" | "dead" | "unknown";
+    running: boolean | null; started_at: string | null; started_at_status: HumanWorkerTimeStatus;
+    finished_at: string | null; finished_at_status: HumanWorkerTimeStatus; exit_code: string | null;
+    oom_killed: boolean | null; restart_count: number | null; provenance: "observed" } | null;
+  launch_broker: HumanWorkerAssociation; observation_broker: HumanWorkerAssociation;
+}
+export interface HumanWorkerPage {
+  version: 1; context_id: string; authorization_version: string; source: "tenant_worker_broker_registry";
+  consistency: "snapshot_per_page"; evaluated_at: string; runtime_inventory: "unknown"; registry_status: "available";
+  items: HumanWorker[]; has_more: boolean; next_cursor: string | null; read_receipt: ReadReceipt;
+}
+function workerUuid(value: unknown): value is string {
+  return uuid(value) && value === value.toLowerCase();
+}
+/** Rust emits UTC with nanoseconds. Validate the calendar without Date.parse,
+ * which cannot represent every RFC3339 value accepted by the historical Store. */
+function canonicalWorkerTime(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d):(\d\d)\.\d{9}Z$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+  const hour = Number(match[4]); const minute = Number(match[5]); const second = Number(match[6]);
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return month >= 1 && month <= 12 && day >= 1 && day <= (days[month - 1] ?? 0) &&
+    hour <= 23 && minute <= 59 && second <= 60;
+}
+function workerTime(value: unknown, status: unknown, credibleStart = false) {
+  return status === "known" ? canonicalWorkerTime(value) && (!credibleStart || value >= "1970-01-01T00:00:01.000000000Z") :
+    (status === "absent" || status === "unknown") && value === null;
+}
+function workerExitCode(value: unknown): value is string {
+  return typeof value === "string" && /^(?:0|[1-9][0-9]{0,18}|-[1-9][0-9]{0,18})$/.test(value) &&
+    BigInt(value) >= -9223372036854775808n && BigInt(value) <= 9223372036854775807n;
+}
+function nullableTime(value: unknown) { return value === null || timestamp(value); }
+function nullableBool(value: unknown) { return value === null || typeof value === "boolean"; }
+function boundedInteger(value: unknown, max: number, min = 0): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max;
+}
+function workerAssociation(value: unknown): HumanWorkerAssociation {
+  closed(value, ["status", "broker", "runtime_kind", "runtime_matches", "in_current_grant"]);
+  if (value.status !== "registered") {
+    requireContract(["registry_unavailable", "authority_unknown", "unregistered"].includes(String(value.status)) &&
+      [value.broker, value.runtime_kind, value.runtime_matches, value.in_current_grant].every((field) => field === null));
+  } else {
+    requireContract(["docker", "podman", "kubernetes"].includes(String(value.runtime_kind)) &&
+      typeof value.runtime_matches === "boolean" && typeof value.in_current_grant === "boolean");
+    closed(value.broker, ["broker_id", "current_incarnation_id", "state", "grant_revision", "heartbeat_revision", "last_received_at", "lease_expires_at"]);
+    const broker = value.broker;
+    requireContract(brokerUuid(broker.broker_id) && brokerUuid(broker.current_incarnation_id) &&
+      ["unseen", "current", "stale", "expired", "revoked", "clock_uncertain"].includes(String(broker.state)) &&
+      brokerRevision(broker.grant_revision, true) && brokerRevision(broker.heartbeat_revision) &&
+      nullableTime(broker.last_received_at) && nullableTime(broker.lease_expires_at) &&
+      (broker.last_received_at === null) === (broker.lease_expires_at === null));
+  }
+  return structuredClone(value) as unknown as HumanWorkerAssociation;
+}
+export function parseHumanWorkerPage(value: unknown): HumanWorkerPage {
+  closed(value, ["version", "context_id", "authorization_version", "source", "consistency", "evaluated_at", "runtime_inventory", "registry_status", "items", "has_more", "next_cursor", "read_receipt"]);
+  requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
+    value.source === "tenant_worker_broker_registry" && value.consistency === "snapshot_per_page" && timestamp(value.evaluated_at) &&
+    value.runtime_inventory === "unknown" && value.registry_status === "available" &&
+    Array.isArray(value.items) && value.items.length <= 100 && typeof value.has_more === "boolean" &&
+    (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null));
+  closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
+  requireContract(brokerUuid(value.read_receipt.request_id) && brokerUuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  const items = value.items.map((item): HumanWorker => {
+    closed(item, ["worker_id", "request_id", "attempt_id", "revision", "state", "quota_held", "session_id", "session_provenance", "runtime_kind", "cpu_millis", "memory_bytes", "pids_limit", "timeout_seconds", "network", "observed_started_at", "observed_started_at_status", "allocation_inconsistent", "cleanup_removed", "last_observation", "launch_broker", "observation_broker"]);
+    requireContract([item.worker_id, item.request_id, item.attempt_id, item.session_id].every(workerUuid) &&
+      brokerRevision(item.revision, true) && ["reserved", "preparing", "created", "start_issued", "running", "stopping", "terminal", "in_doubt", "cancelled"].includes(String(item.state)) &&
+      typeof item.quota_held === "boolean" && item.session_provenance === "declared" &&
+      ["docker", "podman"].includes(String(item.runtime_kind)) && boundedInteger(item.cpu_millis, 200000, 1) &&
+      brokerRevision(item.memory_bytes, true) && BigInt(item.memory_bytes) <= 107374182400n &&
+      boundedInteger(item.pids_limit, 4294967295, 1) && boundedInteger(item.timeout_seconds, 86400, 1) &&
+      ["none", "bridge"].includes(String(item.network)) && workerTime(item.observed_started_at, item.observed_started_at_status, true) &&
+      typeof item.allocation_inconsistent === "boolean" && nullableBool(item.cleanup_removed));
+    if (item.last_observation !== null) {
+      closed(item.last_observation, ["observed_at", "observed_at_status", "status", "running", "started_at", "started_at_status", "finished_at", "finished_at_status", "exit_code", "oom_killed", "restart_count", "provenance"]);
+      const observation = item.last_observation;
+      requireContract((observation.observed_at_status === "known" || observation.observed_at_status === "unknown") &&
+        workerTime(observation.observed_at, observation.observed_at_status) && ["created", "running", "exited", "dead", "unknown"].includes(String(observation.status)) &&
+        nullableBool(observation.running) && workerTime(observation.started_at, observation.started_at_status, true) && workerTime(observation.finished_at, observation.finished_at_status) &&
+        (observation.exit_code === null || workerExitCode(observation.exit_code)) &&
+        nullableBool(observation.oom_killed) && (observation.restart_count === null || boundedInteger(observation.restart_count, 4294967295)) &&
+        observation.provenance === "observed");
+    }
+    const launch_broker = workerAssociation(item.launch_broker);
+    const observation_broker = workerAssociation(item.observation_broker);
+    return { ...structuredClone(item), launch_broker, observation_broker } as unknown as HumanWorker;
+  });
+  requireContract(new Set(items.map((item) => item.worker_id)).size === items.length);
+  return { ...structuredClone(value), items } as unknown as HumanWorkerPage;
+}
+export function humanWorkersUrl(cursor: string | null = null): string {
+  const query = new URLSearchParams({ limit: "25" });
+  if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
+  return `/api/v1/human/workers?${query}`;
 }
