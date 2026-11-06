@@ -376,10 +376,10 @@ async fn kube_handler(State(state): State<ApiState>, request: Request) -> Respon
         assert_eq!(request.method(), "GET");
         match path.as_str() {
             "/api/v1/namespaces/kube-system" => {
-                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":CLUSTER}})
+                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":CLUSTER},"status":{"phase":"Active"}})
             }
             "/api/v1/namespaces/tenant-a" => {
-                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":NAMESPACE}})
+                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":NAMESPACE},"status":{"phase":"Active"}})
             }
             _ => panic!("unexpected API path"),
         }

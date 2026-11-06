@@ -1,5 +1,13 @@
 # Gates de qualification production
 
+Prérequis Kubernetes du 6 novembre : CLI opt-in, avis SSAR bornés et refus des
+namespaces non actifs raccordés au préflight/CREATE retenu. Vingt-deux fonctions
+ciblées PASS, reprise du parent d'oracles corrigés PASS, revue source et check
+toutes cibles. [Périmètre et preuves](VALIDATION.md#6-novembre--prérequis-kubernetes-explicites).
+Ni SSAR ni peer TLS ne qualifient le cluster Docker Desktop, les sessions ou
+le confinement. Sessions V2, permissions effectives et stockage exclusif
+restent ouverts ; G09 FAIL,0/12 gates clos.
+
 Drainage des owners d'audit du 6 novembre : six fonctions ciblées PASS,
 compilation toutes cibles RC0 et revue indépendante traitée. Cette preuve
 sur le même helper d'arrêt que serve ne qualifie ni SIGTERM/processus, ni

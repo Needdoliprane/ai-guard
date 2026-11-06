@@ -261,10 +261,10 @@ async fn endpoint_handler(
         let body = match request.uri().path() {
             "/version" => json!({"gitVersion":"v1.36.1"}),
             "/api/v1/namespaces/kube-system" => {
-                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":state.cluster_uid}})
+                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"kube-system","uid":state.cluster_uid},"status":{"phase":"Active"}})
             }
             "/api/v1/namespaces/tenant-a" => {
-                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":state.namespace_uid,"labels":{"pod-security.kubernetes.io/enforce":"restricted"}}})
+                json!({"apiVersion":"v1","kind":"Namespace","metadata":{"name":"tenant-a","uid":state.namespace_uid,"labels":{"pod-security.kubernetes.io/enforce":"restricted"}},"status":{"phase":"Active"}})
             }
             "/api/v1/namespaces/tenant-a/pods/worker-a" => state.pod.clone(),
             _ => return Response::builder().status(404).body(Body::empty()).unwrap(),

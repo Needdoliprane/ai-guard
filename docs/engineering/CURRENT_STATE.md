@@ -1,5 +1,22 @@
 # État constaté — suivi du développement
 
+## 6 novembre — prérequis Kubernetes consommés par le CLI
+
+`kubernetes doctor --check-permissions` interroge les douze actions fixes du
+profil via SelfSubjectAccessReview. Le rapport distingue namespace actif,
+terminating/inconnu, avis allowed/denied/unknown et vérifications sautées.
+Le diagnostic sans option conserve ses trois GET et son rapport historique.
+Préflight et CREATE retenu refusent désormais un namespace non actif avant
+et après l'opération ; les avis SSAR ne créent aucune capacité d'activation.
+
+Le préflight acceptant Terminating a son RED local TLS. Vingt-deux fonctions
+ciblées passent, avec compilation toutes cibles et revue source ; les deux
+oracles doublon/profondeur ont été rendus discriminants et leur parent repassé.
+Les [preuves](VALIDATION.md#6-novembre--prérequis-kubernetes-explicites)
+distinguent ce peer déclaré du cluster Docker Desktop, toujours NOT_RUN ici.
+Sessions complètes, stockage exclusif, start/release, confinement et reprise
+restent ouverts. G09 FAIL ; aucun gate global clos.
+
 ## 6 novembre — drainage des propriétaires d'audit à l'arrêt normal
 
 Le service ferme le registre borné des tâches d'audit avec leur admission,

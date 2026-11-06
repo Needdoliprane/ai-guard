@@ -11,6 +11,10 @@ use uuid::Uuid;
 pub(crate) mod admission;
 mod observation;
 mod preflight;
+mod prerequisites;
+#[cfg(test)]
+#[path = "kubernetes/prerequisites_tests.rs"]
+mod prerequisites_tests;
 mod transport;
 pub use observation::{
     KubernetesConfiguredLimitsV1, KubernetesPodHandle, KubernetesPodObservationV1,
@@ -19,6 +23,11 @@ pub use observation::{
 pub use preflight::{
     BeforeKubernetesPreflightGuard, KubernetesPreflightObservationV1, KubernetesPreflightPlanV1,
     KubernetesPreflightResourcesV1, KubernetesPreflightTargetV1,
+};
+pub use prerequisites::{
+    KubernetesAccessReviewV1, KubernetesNamespacePrerequisiteV1, KubernetesNamespaceStateV1,
+    KubernetesPermissionActionV1, KubernetesPermissionCoverageV1, KubernetesPermissionDecisionV1,
+    KubernetesPermissionReviewStatusV1, KubernetesPrerequisitesV1,
 };
 use transport::Transport;
 
@@ -36,6 +45,7 @@ pub enum KubernetesError {
     ApiRejected(u16),
     InvalidResponse,
     AuthorityChanged,
+    NamespaceNotActive,
     PodChanged,
     InvalidPreflightPlan,
     PreflightAuthorizationDenied,
@@ -57,6 +67,7 @@ impl std::fmt::Display for KubernetesError {
             Self::ApiRejected(status) => write!(f, "Kubernetes API rejected inspection with HTTP {status}"),
             Self::InvalidResponse => f.write_str("Kubernetes API inspection response is invalid or incomplete"),
             Self::AuthorityChanged => f.write_str("Kubernetes cluster or namespace identity differs from the retained authority"),
+            Self::NamespaceNotActive => f.write_str("Kubernetes namespace readiness is inactive or unknown; an observed Active phase is required before admission preflight or held create"),
             Self::PodChanged => f.write_str("Kubernetes Pod identity or configuration differs from the retained handle"),
             Self::InvalidPreflightPlan => f.write_str("Kubernetes admission preflight plan is invalid or differs from the retained authority"),
             Self::PreflightAuthorizationDenied => f.write_str("Kubernetes admission preflight was not durably authorized by the control"),
@@ -372,6 +383,12 @@ impl KubernetesRuntime {
     }
     pub async fn doctor(&self) -> KubernetesResult<KubernetesDiagnosticsV1> {
         let namespace = self.verify_authority().await?;
+        self.diagnostics_for(&namespace).await
+    }
+    async fn diagnostics_for(
+        &self,
+        namespace: &Namespace,
+    ) -> KubernetesResult<KubernetesDiagnosticsV1> {
         #[derive(Deserialize)]
         struct Version {
             #[serde(rename = "gitVersion")]

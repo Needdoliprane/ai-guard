@@ -1,5 +1,16 @@
 # Stratégie de qualification
 
+## Prérequis Kubernetes explicites
+
+Sélections ciblées : `--lib runtime::kubernetes::prerequisites_tests::`,
+`--test kubernetes_cli`, `--test kubernetes_transport dry_run_`, plus les
+canaris exacts préflight CLI et CREATE retenu. Le peer TLS déclare ses réponses ;
+les requêtes réellement observées vérifient chemins, corps, scope et absence
+d'effet Pod après refus du namespace. Les mutations doublon/profondeur gardent
+une enveloppe SSAR valide, afin de discriminer les gardes correspondantes.
+Ces tests n'établissent ni les permissions du cluster ni son confinement.
+Commandes, gels et limites : [validation](VALIDATION.md#6-novembre--prérequis-kubernetes-explicites).
+
 ## Admissions et réservation privée du writer
 
 Sélection ciblée : `cargo test --locked --lib broker::writer:: -- --test-threads=1`.

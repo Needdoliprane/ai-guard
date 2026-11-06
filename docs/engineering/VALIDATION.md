@@ -1,5 +1,80 @@
 # Validation courante
 
+## 6 novembre — prérequis Kubernetes explicites
+
+Base du gel `4856db6` (proposition documentaire sur856dd0e). Le RED ajoute
+uniquement un parent au préflight existant : une réponse TLS déclarée avec
+namespace Terminating est acceptée et atteint le POST dry-run. RC101/1FAIL,
+492filtrés,0,29s, log `c65a6034594daf4f67e98ef898f8f65e80f6ff56b86abeaa54a2e5eff683e14f`.
+La branche missing-phase ultérieure de ce parent n'a pas été atteinte avant
+l'échec : aucune reproduction distincte n'en est déduite. Le code candidat
+était préparé en parallèle, mais ce test porte bien sur l'image préchangement.
+
+Quinze fichiers gelés : CLI `8ae98ab8…`, runtime `0e68fc63…`, prérequis
+`624b0a77…`, transport `1daeb8f0…`. Aucun rôle, migration, dépendance ou
+constructeur d'activation ajouté. Les fixtures existantes ajoutent seulement
+phase Active ; leurs hashes de Pod/journal ne changent pas.
+
+| Sélection Luna | Résultat constaté |
+|---|---|
+| prerequisites_tests, premier gel | 5PASS/492filtrés ; log `43936c6c1750399ae09cce071e42b3569302a8d9c2f53258d14a9c55f3495901`. |
+| kubernetes_cli | 6PASS ; log `c3ee7db345f86f1449b7912fd2e6d1402fe2ae2fe5b5e955cbb4014b4d8d8689`. |
+| kubernetes_transport dry_run_ | 9PASS/5filtrés ; log `81869e264dd8a0b5a25172eab1ca4a68adde169167edab4a9fafe6fd09b83b1b`. |
+| preflight_cli_requires_durable_request_before_https_and_durable_result_before_success | 1PASS/8filtrés ; log `6082caaf5557a656c03ff397898f3e2e924caf7758df4c315cc28669502f358a`. |
+| fresh_claim_posts_exact_retained_bytes_and_acknowledges_only_the_201_uid | 1PASS/496filtrés ; log `9ceacf4db4f97c71af93b5c215aa2cc650611b7aac8ca50c0cc6799ceaf91b7c`. |
+| check --all-targets, premier gel | RC0,118 avertissements lib/3tests ; log `2e7db2b7be29b548507e0afeaa7bdf610f91b99f1a6ed72b3eb6994f3a3d69a2`. |
+
+Le premier essai du canari claim utilise par erreur un chemin RUSTC macOS
+dans la QA Linux ; RC101 avant compilation, comportement NOT_RUN, log
+`b69604881b75a391c4b9dd668e68c5a99081711779b83a8020681118f5900036`.
+Le retry ci-dessus corrige seulement cette commande, pas le code.
+
+Revue indépendante : les deux fixtures Duplicate/Deep étaient refusées pour
+enveloppe/spec absentes, indépendamment des gardes annoncées. Le seul fichier
+test passe de20fc433a à `22f70191130c4733e4923e18478159f7558a226b46bfdbd861f4fda271906c52` :
+enveloppe positive exacte puis membre allowed dupliqué (dernière valeur valide)
+ou champ ignoré contenant vingt tableaux. La logique produit est inchangée.
+Le même parent d'erreurs SSAR repasse RC0/1PASS/496filtrés sur cible neuve,
+log `d4c1c0a0b448b34803632b45ad32b85407ba215721783c449739b2594c7ece49`.
+Vingt-deux fonctions uniques sont couvertes ; ce rerun n'en ajoute pas une.
+Le check final toutes cibles du même gel green2 termine RC0,1min11s,
+118 avertissements bibliothèque/3 lib-test ; log
+`c948c4005af688fa517174c506ba38f4146a64c4998ee7b7531f625a63168cce`.
+Ces PASS et checks portent sur le gel green2 basé sur4856db6. Le worktree a
+depuis intégré le drainage broker e9415ac ; cette composition demande encore
+sa compilation distincte, elle n'est pas créditée par les résultats ci-dessus.
+
+Rust1.99.1 Linux ARM64, image épinglée `2115d432…a207`, même QA isolée2abf
+que la validation du drainage : UID1000/caps0/NNP/seccomp, réseau none, racine
+et entrées RO, CPU2/mémoire6Gio/swap0/PID256, scratch3Gio/65536inodes,
+core0/nofile1024/fsize512Mio. Chaque gel a une cible Cargo neuve, offline/locked,
+deux jobs/debug0, HOME/TMPDIR privés et logs0600 sous parent0700.
+Après les RC terminaux, QA2abf et QA32fd ne contiennent plus qu'init/sleep ;
+arrêt normal puis retrait par IDs exacts, PID0/exit143/OOMfalse à
+2026-11-06T01:51:41.908920887Z et01:51:42.214273762Z. Sources et logs sont
+conservés ; aucune donnée ou volume utilisateur n'était monté.
+
+```sh
+cargo test --offline --locked --manifest-path /inputs/kube-prereq-green/Cargo.toml \
+  --lib runtime::kubernetes::prerequisites_tests:: -- --test-threads=1
+cargo test --offline --locked --manifest-path /inputs/kube-prereq-green/Cargo.toml --test kubernetes_cli
+cargo test --offline --locked --manifest-path /inputs/kube-prereq-green/Cargo.toml --test kubernetes_transport dry_run_
+cargo test --offline --locked --manifest-path /inputs/kube-prereq-green2/Cargo.toml \
+  --lib runtime::kubernetes::prerequisites_tests::ssar_status_unknown_and_protocol_failures_never_grant_activation \
+  -- --exact --test-threads=1
+```
+
+NOT_RUN : cluster Docker Desktop, RBAC/admission/CNI effectifs, sockets de
+streaming, bootstrap, PVC exclusif, sessions, panne et reprise sur moteur.
+Clippy BLOCKED car absent de l'image. Le diagnostic ne donne aucune capacité
+de lancement. G09 FAIL,0/12 gates clos, aucune qualification de release.
+
+Contrôles du lot : fmt épinglé sur13 sources, comparaison exacte des15 fichiers
+avec green2, manifests inchangés et diff sans erreur : PASS. Huit documents,
+641 liens relatifs et0 cible manquante ; scan21 fichiers contre3 secrets connus,
+0 correspondance. Checkpoint privé : sources et dix logs, manifeste SHA-256
+`f0052cc2a1c95d671f34bd634ff334667338a965ddec1088c572e376f4bd4459`.
+
 ## 6 novembre — drainage des propriétaires d'audit
 
 Base `856dd0e`, worktree `codex/broker-cold-drain-20261106`. Extraction mécanique

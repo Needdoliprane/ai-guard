@@ -1,5 +1,15 @@
 # Plan d'industrialisation
 
+## 6 novembre — prérequis Kubernetes vérifiés, session complète ouverte
+
+Le CLI consomme maintenant les prérequis typés et les avis SSAR explicites ;
+préflight/CREATE retenu exigent un namespace actif. Le lot a son RED, ses
+tests ciblés et sa revue. Prochaine verticale Kubernetes : session exécutable
+et protocole worker commun, selon la proposition soumise au mainteneur.
+Stockage exclusif, transport, autorisations effectives, crash/reprise et
+qualification réelle restent des exigences, sans être remplacés par doctor.
+Les travaux broker Full et fédération continuent dans leurs périmètres séparés.
+
 ## 6 novembre — drainage vérifié et chantiers parallèles
 
 Le drainage des owners cold a son RED réel et six fonctions ciblées PASS,

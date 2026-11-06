@@ -1,5 +1,18 @@
 # Décisions d'industrialisation
 
+## 6 novembre — séparer avis de permission et activation Kubernetes
+
+Le diagnostic historique reste GET-only ; les avis SelfSubjectAccessReview
+exigent `doctor --check-permissions`. Douze actions internes fixent le scope,
+sans URL/corps/identité fournis par l'appelant. Un avis allowed n'est ni une
+capacité de session, ni une preuve de policy, CNI ou admission effective.
+Les namespaces inconnus, supprimés ou non actifs interdisent préflight et
+CREATE retenu ; aucun diagnostic ne répare le cluster ou régénère son identité.
+Le budget opt-in est global30s, requête8s/connexion3s, réponse SSAR32Kio/profondeur16,
+sans redirection, proxy ambiant ou retry. Motifs distants et secrets restent
+hors rapport. Le profil de sessions V2 demeure une proposition distincte,
+sans activation ni conversion des capacités historiques.
+
 ## 6 novembre — drainer les seules tâches d'audit acceptées
 
 Le suivi des owners cold appartient au service existant, avec N slots physiques

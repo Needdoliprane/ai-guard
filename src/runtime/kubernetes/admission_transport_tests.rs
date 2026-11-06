@@ -344,7 +344,8 @@ async fn api_handler(
         ("GET", "/api/v1/namespaces/kube-system") => Some(json!({
             "apiVersion": "v1",
             "kind": "Namespace",
-            "metadata": {"name": "kube-system", "uid": CLUSTER_UID}
+            "metadata": {"name": "kube-system", "uid": CLUSTER_UID},
+            "status": {"phase": "Active"}
         })),
         ("GET", "/api/v1/namespaces/tenant-a") => Some(json!({
             "apiVersion": "v1",
@@ -353,7 +354,8 @@ async fn api_handler(
                 "name": "tenant-a",
                 "uid": if changed_namespace_uid { CHANGED_NAMESPACE_UID } else { NAMESPACE_UID },
                 "labels": {"pod-security.kubernetes.io/enforce": "restricted"}
-            }
+            },
+            "status": {"phase": "Active"}
         })),
         ("GET", "/version") => Some(json!({"gitVersion": "v1.36.1"})),
         _ => None,

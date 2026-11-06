@@ -245,7 +245,7 @@ impl KubernetesRuntime {
     ) -> KubernetesResult<KubernetesPreflightObservationV1> {
         let requested = plan.pod(&self.binding)?;
         let target = plan.target(&self.binding)?;
-        self.verify_authority().await?;
+        self.verify_active_authority().await?;
         let admitted: Value = self
             .transport
             .dry_run_pod(&self.binding.namespace, &requested, &target, guard)
@@ -253,7 +253,7 @@ impl KubernetesRuntime {
         // Pod CREATE has no namespace-UID precondition. The dry-run has no
         // persisted workload effect, but do not report success against a
         // namespace that changed between the preflight authority checks.
-        self.verify_authority().await?;
+        self.verify_active_authority().await?;
         validate_admitted(&requested, &admitted)?;
         Ok(KubernetesPreflightObservationV1 {
             version: 1,
