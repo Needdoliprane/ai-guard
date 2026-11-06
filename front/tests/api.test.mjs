@@ -127,13 +127,14 @@ test("les vues workers lisent les contrats v1 sans ouvrir les mutations ou un au
   });
   const id = "00000000-0000-4000-8000-000000000001";
   for (const path of [
+    "/api/v1/federation/workers?limit=50",
     "/api/v1/workers?limit=50",
     `/api/v1/workers?limit=50&cursor=${id}`,
     `/api/v1/workers/${id}`,
     "/api/v1/quota",
     "/api/v1/usage?limit=50",
   ]) await client.get(path);
-  assert.equal(seen.length, 5);
+  assert.equal(seen.length, 6);
   assert.ok(seen.every((request) => request.method === "GET" && request.auth === "Bearer viewer"));
   for (const path of [
     "/api/v1/workers/admit",
@@ -144,7 +145,7 @@ test("les vues workers lisent les contrats v1 sans ouvrir les mutations ou un au
     "/api/v1/workers?limit=100000",
     "/api/v1/workers#secret",
   ]) await assert.rejects(client.get(path), /lecture/i);
-  assert.equal(seen.length, 5, "Aucun appel hors des lectures bornées");
+  assert.equal(seen.length, 6, "Aucun appel hors des lectures bornées");
   client.close();
 });
 

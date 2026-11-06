@@ -139,7 +139,7 @@ test("les liens worker-sandbox-agent distinguent chaque identifiant explicite de
 
 test("la pagination ne transporte qu’un curseur UUID et une taille bornée", () => {
   const url = new URL(controlPageUrl("workers", id), "http://localhost");
-  assert.equal(url.pathname, "/api/v1/workers");
+  assert.equal(url.pathname, "/api/v1/federation/workers");
   assert.equal(url.searchParams.get("cursor"), id);
   assert.equal(url.searchParams.get("limit"), "50");
   assert.throws(() => controlPageUrl("workers", "../autre"), /curseur/i);
