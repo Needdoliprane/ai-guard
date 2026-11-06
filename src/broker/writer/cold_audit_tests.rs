@@ -28,7 +28,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -153,6 +153,19 @@ impl Fixture {
                 Err(error) => panic!("writer actor did not release its lease: {error}"),
             }
         }
+    }
+
+    fn job_path(&self) -> std::path::PathBuf {
+        let mut scopes = fs::read_dir(self.root.path().join("broker-journal-v1"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(scopes.len(), 1, "this fixture owns exactly one scope");
+        scopes
+            .pop()
+            .unwrap()
+            .join("jobs")
+            .join(self.operation_id.to_string())
     }
 }
 
@@ -448,6 +461,22 @@ async fn full_capability_has_no_cold_audit_client_and_rejects_a_misrouted_prepar
         receive.await.unwrap(),
         Err(JournalError::InvalidInput)
     ));
+
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    assert!(
+        full.0
+            .sender
+            .try_send(Command::RecoverColdAudit {
+                operation_id: fixture.operation_id,
+                reply,
+            })
+            .is_ok(),
+        "a private recovery misroute also reaches the actual Full actor"
+    );
+    assert!(matches!(
+        receive.await.unwrap(),
+        Err(JournalError::InvalidInput)
+    ));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -622,6 +651,15 @@ async fn before_ack_unknown_quarantines_metadata_but_not_actor_sender_or_fifo_ca
         Some(JournalError::Busy),
         "quarantine keeps the single logical reservation after the ambiguous reply"
     );
+    let inventory = stops.recovery_inventory(None, 100).await.unwrap();
+    assert!(
+        inventory.entries().iter().any(|entry| {
+            entry.operation_id() == fixture.operation_id
+                && !entry.incomplete()
+                && entry.head().revision() == before.revision() + 1
+        }),
+        "a fully ACKed job in quarantine remains discoverable for service recovery"
+    );
     assert!(
         stops
             .append_cancel(CancelInputV1::new(fixture.operation_id, Uuid::new_v4()).unwrap())
@@ -643,4 +681,285 @@ async fn before_ack_unknown_quarantines_metadata_but_not_actor_sender_or_fifo_ca
     );
     assert_durable_receipts(&journal, &fixture, &expected_pairs);
     assert_eq!(gateway.post_count(), 2);
+}
+
+// Contract-first tests: recover_quarantined and RecoverColdAudit do not exist
+// on the baseline. A missing API is a compilation precondition, not a RED
+// behavioral reproduction. No test-only recovery implementation is supplied.
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_confirms_only_the_quarantined_lot_and_preserves_cancel_without_republication() {
+    let mut gateway = HttpGatewayFixture::new("tenant-cold-audit-writer").await;
+    let fixture = Fixture::new_with_origin(&gateway.origin);
+    let capabilities = stop_capabilities(&fixture);
+    let cold_audit = capabilities.cold_audit().unwrap();
+    let stops = capabilities.stops();
+    let reserved = cold_audit
+        .prepare(fixture.operation_id)
+        .await
+        .unwrap()
+        .with_test_before_ack_fault();
+    let before = reserved.prepared().head().clone();
+    let mut receipts = gateway.submit_pending(&reserved).await;
+    assert_http_store_matches(&gateway, &receipts);
+    // Both HTTP receipts are real, but only coverage enters this completion.
+    // Recovery must never fabricate the unsubmitted result acknowledgement.
+    receipts.truncate(1);
+    let expected_pairs = receipt_pairs(&receipts);
+    assert_eq!(expected_pairs[0].0, fixture.coverage_id);
+    assert!(matches!(
+        reserved.submit(receipts).unwrap().confirmed().await,
+        Err(CompletionFailure::Unknown {
+            error: JournalError::Io
+        })
+    ));
+    assert_eq!(
+        cold_audit.prepare(fixture.operation_id).await.err(),
+        Some(JournalError::Busy)
+    );
+    assert_eq!(
+        cold_audit.recover_quarantined(Uuid::nil()).await.err(),
+        Some(JournalError::InvalidInput)
+    );
+    assert!(
+        cold_audit
+            .recover_quarantined(Uuid::new_v4())
+            .await
+            .unwrap()
+            .is_none(),
+        "a different operation receives no confirmation"
+    );
+    assert_eq!(
+        cold_audit.prepare(fixture.operation_id).await.err(),
+        Some(JournalError::Busy),
+        "a mismatched recovery cannot release the quarantined reservation"
+    );
+
+    let marker = fixture.job_path().join("current-next.json");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&marker)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    let interrupted = cold_audit.recover_quarantined(fixture.operation_id).await;
+    fs::remove_file(marker).unwrap();
+    assert_eq!(interrupted.err(), Some(JournalError::Interrupted));
+    assert_eq!(
+        cold_audit.prepare(fixture.operation_id).await.err(),
+        Some(JournalError::Busy),
+        "a failed confirmation must retain the original strong quarantine"
+    );
+
+    let cancel = stops
+        .append_cancel(CancelInputV1::new(fixture.operation_id, Uuid::new_v4()).unwrap())
+        .await
+        .unwrap();
+    let after_cancel = cancel.receipt().head().clone();
+    assert_eq!(after_cancel.revision(), before.revision() + 2);
+    drop(cancel);
+    let confirmed = cold_audit
+        .recover_quarantined(fixture.operation_id)
+        .await
+        .unwrap()
+        .expect("the same actor can confirm its exact durable quarantined lot");
+    assert_eq!(confirmed.operation_id(), fixture.operation_id);
+    assert_eq!(confirmed.event_ids(), &[fixture.coverage_id]);
+    assert_eq!(confirmed.head(), &after_cancel);
+    assert!(capabilities.full().is_none());
+
+    let remaining = cold_audit.prepare(fixture.operation_id).await.unwrap();
+    assert_eq!(remaining.prepared().head(), &after_cancel);
+    assert_eq!(remaining.prepared().pending_events().len(), 1);
+    assert_eq!(
+        remaining.prepared().pending_events()[0].event_id(),
+        fixture.result_id
+    );
+    assert!(
+        cold_audit
+            .recover_quarantined(fixture.operation_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "repeating a completed recovery is not a fresh confirmation"
+    );
+    assert_eq!(
+        cold_audit.prepare(fixture.operation_id).await.err(),
+        Some(JournalError::Busy),
+        "a repeated recovery cannot release a different live preparation"
+    );
+    drop(remaining);
+    let snapshot = stops
+        .recovery_status(fixture.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.head(), &after_cancel);
+    drop(snapshot);
+    assert_eq!(gateway.post_count(), 2);
+    assert_eq!(gateway.store.head().unwrap(), gateway.initial_head + 2);
+
+    gateway.close().await;
+    drop(stops);
+    drop(cold_audit);
+    drop(capabilities);
+    let journal = fixture.reopen_after_actor_exit();
+    let job = journal.load(fixture.operation_id).unwrap().unwrap();
+    assert_eq!(job.head(), &after_cancel);
+    assert_durable_receipts(&journal, &fixture, &expected_pairs);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dropped_recovery_reply_keeps_accepted_fifo_work_and_releases_no_actor_lease_early() {
+    let mut gateway = HttpGatewayFixture::new("tenant-cold-audit-writer").await;
+    let fixture = Fixture::new_with_origin(&gateway.origin);
+    let report = fixture.report();
+    // Two ordinary slots admit recovery and the following Cancel without an
+    // actor scheduling assumption; completion uses its separate reserved slot.
+    let capabilities =
+        ProfileWriterCapabilities::from_recovery_report(&report, true, 2, Duration::from_secs(10))
+            .unwrap();
+    drop(report);
+    let cold_audit = capabilities.cold_audit().unwrap();
+    let stops = capabilities.stops();
+    let reserved = cold_audit
+        .prepare(fixture.operation_id)
+        .await
+        .unwrap()
+        .with_test_before_ack_fault();
+    let before = reserved.prepared().head().clone();
+    let mut receipts = gateway.submit_pending(&reserved).await;
+    assert_http_store_matches(&gateway, &receipts);
+    receipts.truncate(1);
+    let expected_pairs = receipt_pairs(&receipts);
+    drop(reserved.submit(receipts).unwrap());
+
+    let (reply, receive) = tokio::sync::oneshot::channel();
+    assert!(
+        stops
+            .0
+            .sender
+            .try_send(Command::RecoverColdAudit {
+                operation_id: fixture.operation_id,
+                reply,
+            })
+            .is_ok()
+    );
+    drop(receive);
+    let cancel = stops
+        .append_cancel(CancelInputV1::new(fixture.operation_id, Uuid::new_v4()).unwrap())
+        .await
+        .unwrap();
+    let after_cancel = cancel.receipt().head().clone();
+    assert_eq!(after_cancel.revision(), before.revision() + 2);
+    drop(cancel);
+    let remaining = cold_audit.prepare(fixture.operation_id).await.unwrap();
+    assert_eq!(remaining.prepared().head(), &after_cancel);
+    assert_eq!(remaining.prepared().pending_events().len(), 1);
+    assert_eq!(
+        remaining.prepared().pending_events()[0].event_id(),
+        fixture.result_id
+    );
+    drop(remaining);
+    let directory = Directory::open_existing(&fixture.root.path().canonicalize().unwrap()).unwrap();
+    assert!(matches!(
+        Journal::open(
+            &directory,
+            fixture.scope.clone(),
+            &FsExclusions::new(),
+            JournalLimitsV1::default(),
+            ControlSecrets::new(Vec::new()).unwrap(),
+        ),
+        Err(JournalError::Busy)
+    ));
+    assert_eq!(gateway.post_count(), 2);
+    assert_eq!(gateway.store.head().unwrap(), gateway.initial_head + 2);
+
+    gateway.close().await;
+    drop(stops);
+    drop(cold_audit);
+    drop(capabilities);
+    let journal = fixture.reopen_after_actor_exit();
+    let job = journal.load(fixture.operation_id).unwrap().unwrap();
+    assert_eq!(job.head(), &after_cancel);
+    assert_durable_receipts(&journal, &fixture, &expected_pairs);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_never_publishes_an_unsealed_completion_after_its_preflight_is_repaired() {
+    let mut gateway = HttpGatewayFixture::new("tenant-cold-audit-writer").await;
+    let fixture = Fixture::new_with_origin(&gateway.origin);
+    let capabilities = stop_capabilities(&fixture);
+    let cold_audit = capabilities.cold_audit().unwrap();
+    let stops = capabilities.stops();
+    let reserved = cold_audit.prepare(fixture.operation_id).await.unwrap();
+    let before = reserved.prepared().head().clone();
+    let receipts = gateway.submit_pending(&reserved).await;
+    assert_http_store_matches(&gateway, &receipts);
+    let job_path = fixture.job_path();
+    let pointer_before = fs::read(job_path.join("current.json")).unwrap();
+    let marker = job_path.join("current-next.json");
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&marker)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    // The real strict reader sees an incomplete publication before complete
+    // can seal a target. Remove only this test-created marker before recovery:
+    // a blind call to complete would now publish, making the guard observable.
+    let outcome = reserved.submit(receipts).unwrap().confirmed().await;
+    fs::remove_file(marker).unwrap();
+    assert!(matches!(
+        outcome,
+        Err(CompletionFailure::Unknown {
+            error: JournalError::Interrupted
+        })
+    ));
+    assert_eq!(
+        cold_audit
+            .recover_quarantined(fixture.operation_id)
+            .await
+            .err(),
+        Some(JournalError::Interrupted),
+        "confirmation-only recovery cannot retry an unsealed publication"
+    );
+    assert_eq!(
+        fs::read(job_path.join("current.json")).unwrap(),
+        pointer_before,
+        "repairing preflight does not authorize a new ACK revision"
+    );
+    let snapshot = stops
+        .recovery_status(fixture.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.head(), &before);
+    drop(snapshot);
+    assert_eq!(
+        cold_audit.prepare(fixture.operation_id).await.err(),
+        Some(JournalError::Busy),
+        "the unsealed input keeps its original reservation after refusal"
+    );
+    let cancel = stops
+        .append_cancel(CancelInputV1::new(fixture.operation_id, Uuid::new_v4()).unwrap())
+        .await
+        .unwrap();
+    let after_cancel = cancel.receipt().head().clone();
+    assert_eq!(after_cancel.revision(), before.revision() + 1);
+    drop(cancel);
+    assert_eq!(gateway.post_count(), 2);
+    assert_eq!(gateway.store.head().unwrap(), gateway.initial_head + 2);
+
+    gateway.close().await;
+    drop(stops);
+    drop(cold_audit);
+    drop(capabilities);
+    let journal = fixture.reopen_after_actor_exit();
+    let job = journal.load(fixture.operation_id).unwrap().unwrap();
+    assert_eq!(job.head(), &after_cancel);
+    assert_durable_receipts(&journal, &fixture, &[]);
 }

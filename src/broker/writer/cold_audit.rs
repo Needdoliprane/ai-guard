@@ -109,13 +109,31 @@ impl ColdAuditWriterClient {
             before_ack_fault: false,
         })
     }
+
+    /// Confirm only the actor's retained exact lot on the same STOP lease.
+    /// None means no matching quarantine, never evidence of an ACK. An error
+    /// or lost reply does not discard an input whose confirmation failed.
+    pub(in crate::broker) async fn recover_quarantined(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<ConfirmedColdAudit>> {
+        if operation_id.is_nil() {
+            return Err(JournalError::InvalidInput);
+        }
+        self.0
+            .call(move |reply| Command::RecoverColdAudit {
+                operation_id,
+                reply,
+            })
+            .await
+    }
 }
 
 impl ReservedColdAudit {
     /// Exercise the existing publisher fault on the actual actor thread. It
     /// neither replaces publication nor supplies a simulated confirmation.
     #[cfg(test)]
-    pub(super) fn with_test_before_ack_fault(mut self) -> Self {
+    pub(in crate::broker) fn with_test_before_ack_fault(mut self) -> Self {
         self.before_ack_fault = true;
         self
     }
@@ -173,12 +191,24 @@ impl ReservedColdAudit {
 }
 
 impl ColdAuditCompletion {
+    pub(super) fn operation_id(&self) -> Uuid {
+        self.prepared.operation_id()
+    }
+
     pub(super) fn apply(&mut self, journal: &StopJournal) -> JournalResult<ConfirmedColdAudit> {
         #[cfg(test)]
         if std::mem::take(&mut self.before_ack_fault) {
             crate::broker::journal::fail_next_cold_ack_for_test();
         }
         crate::broker::journal::recovery::cold_audit::completion::complete(
+            journal,
+            &self.prepared,
+            &self.receipts,
+        )
+    }
+
+    pub(super) fn confirm(&self, journal: &StopJournal) -> JournalResult<ConfirmedColdAudit> {
+        crate::broker::journal::recovery::cold_audit::completion::confirm(
             journal,
             &self.prepared,
             &self.receipts,

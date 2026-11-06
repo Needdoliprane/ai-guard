@@ -200,6 +200,26 @@ exécution, export ou suppression.
 La transmission modifie uniquement les ACK de l'outbox locale ; elle ne finalise
 pas le résultat géré et ne retire pas son cycle de supervision.
 
+Après une complétion locale ambiguë, le writer vivant conserve l'input exact et
+sa réservation logique en quarantaine. Lors d'une itération de reprise suivante,
+le service restreint peut confirmer ce même lot scellé et sa cible durable, y
+compris ses révisions Cancel ultérieures, sur l'acteur et la lease existants.
+Cette confirmation n'écrit aucun checkpoint et n'envoie aucun HTTP. Elle libère
+la réservation seulement après réussite de tous les contrôles exacts. Après
+confirmation ou échec de confirmation, aucun nouvel essai ne vise cet acteur dans
+cette itération ; les autres profils poursuivent leur reprise. Un événement
+restant sera examiné lors d'une itération normale ultérieure. La disparition du
+waiter n'annule pas le travail accepté ; répéter après réussite ne fournit ni
+nouvelle confirmation ni nouvelle libération.
+
+Une tentative non scellée, une cible non prouvée ou un contrôle de métadonnées en
+échec reste en quarantaine. Cette confirmation n'implémente pas cette reprise plus
+large ; elle bloque les nouvelles préparations d'audit froid tout en conservant
+l'annulation ordinaire. La quarantaine reste locale au processus : la fermeture
+de l'acteur abandonne son input en mémoire sans prouver une complétion ni fournir
+de reprise après la mort du processus. Préserver le journal ; ne pas supprimer
+des fichiers partiels ou remplacer sa racine pour contourner un refus.
+
 Lors d'un arrêt normal, le broker ferme les admissions, joint le producteur de
 reprise, puis attend tous les owners d'audit retenu déjà acceptés. Il ne les
 abandonne pas à l'expiration d'un délai global de drainage. Si l'arrêt commence

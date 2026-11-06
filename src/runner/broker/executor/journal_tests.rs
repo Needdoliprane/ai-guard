@@ -95,17 +95,29 @@ impl Fixture {
     }
 
     async fn new_with_writer_timeout(writer_timeout: Duration) -> Self {
-        Self::new_with_layout(writer_timeout, false).await
+        Self::new_with_layout(writer_timeout, false, None).await
     }
 
     /// Use the broker service's real `root/journals/<profile>` layout for a
     /// cold-recovery test. All other executor fixtures retain their original
     /// directory layout.
     pub(super) async fn new_cold_recovery_with_writer_timeout(writer_timeout: Duration) -> Self {
-        Self::new_with_layout(writer_timeout, true).await
+        Self::new_with_layout(writer_timeout, true, None).await
     }
 
-    async fn new_with_layout(writer_timeout: Duration, service_layout: bool) -> Self {
+    pub(super) async fn new_cold_recovery_with_scope(
+        writer_timeout: Duration,
+        installation_id: Uuid,
+        profile_id: String,
+    ) -> Self {
+        Self::new_with_layout(writer_timeout, true, Some((installation_id, profile_id))).await
+    }
+
+    async fn new_with_layout(
+        writer_timeout: Duration,
+        service_layout: bool,
+        scope_override: Option<(Uuid, String)>,
+    ) -> Self {
         #[cfg(target_os = "linux")]
         let temporary_root = std::env::temp_dir();
         #[cfg(target_os = "macos")]
@@ -214,9 +226,10 @@ impl Fixture {
             fs::set_permissions(base.join(name), fs::Permissions::from_mode(0o700)).unwrap();
         }
         let config = Directory::open_existing(&base.join("config")).unwrap();
+        let (installation, profile) =
+            scope_override.unwrap_or_else(|| (Uuid::new_v4(), "committed-test".to_owned()));
         let scope =
-            JournalScopeV1::new(Uuid::new_v4(), TENANT, &origin, namespace, "committed-test")
-                .unwrap();
+            JournalScopeV1::new(installation, TENANT, &origin, namespace, &profile).unwrap();
         let journal_path = if service_layout {
             base.join("journals").join(scope.profile_id())
         } else {

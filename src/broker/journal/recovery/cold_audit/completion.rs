@@ -5,8 +5,9 @@
 //! PreparedColdAudit and the exact receipts in strong quarantine before it
 //! answers an error/Unknown. This primitive cannot enforce that actor lifetime.
 //! It never stores PreparedColdAudit in Writer (which would cycle Arc<Inner>).
-//! A sealed failed attempt stays closed until explicit recovery/recount; even
-//! an error before the first filesystem write does not permit a blind retry.
+//! Confirmation-only recovery can prove an already sealed target, but never
+//! unseals, repairs or republishes an attempt. Even an error before the first
+//! filesystem write does not permit a blind recovery retry.
 
 use super::*;
 use crate::{model::StoredEvent, runner::ExactStoredEventReceipt};
@@ -50,10 +51,40 @@ struct BoundReceipt<'a> {
     receipt: &'a ExactStoredEventReceipt,
 }
 
+enum CompletionMode {
+    PublishOrConfirm,
+    ConfirmOnly,
+}
+
 pub(in crate::broker) fn complete(
     journal: &StopJournal,
     prepared: &PreparedColdAudit,
     receipts: &[ExactStoredEventReceipt],
+) -> JournalResult<ConfirmedColdAudit> {
+    complete_with_mode(
+        journal,
+        prepared,
+        receipts,
+        CompletionMode::PublishOrConfirm,
+    )
+}
+
+/// Recheck an already sealed publication on its retained reservation. This
+/// path never publishes, seals a fresh target or releases the owner's input
+/// on failure. A missing proof leaves recovery explicitly incomplete.
+pub(in crate::broker) fn confirm(
+    journal: &StopJournal,
+    prepared: &PreparedColdAudit,
+    receipts: &[ExactStoredEventReceipt],
+) -> JournalResult<ConfirmedColdAudit> {
+    complete_with_mode(journal, prepared, receipts, CompletionMode::ConfirmOnly)
+}
+
+fn complete_with_mode(
+    journal: &StopJournal,
+    prepared: &PreparedColdAudit,
+    receipts: &[ExactStoredEventReceipt],
+    mode: CompletionMode,
 ) -> JournalResult<ConfirmedColdAudit> {
     if !Arc::ptr_eq(&journal.core, &prepared.owner) {
         return Err(JournalError::Conflict);
@@ -130,6 +161,11 @@ pub(in crate::broker) fn complete(
         checked_scope(&journal.core, reserved, &mut writer)?;
         reader.check_shared()?;
         return confirmation(reserved.operation_id, current.head.clone(), &bindings);
+    }
+    if let CompletionMode::ConfirmOnly = mode {
+        // Even a now-valid preflight or an ACK found without this attempt's
+        // sealed target cannot authorize a fresh publication or confirmation.
+        return Err(JournalError::Interrupted);
     }
     if all_acked {
         checked_scope(&journal.core, reserved, &mut writer)?;

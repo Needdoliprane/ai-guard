@@ -153,6 +153,10 @@ enum Command {
         operation_id: Uuid,
         reply: Reply<super::journal::recovery::cold_audit::PreparedColdAudit>,
     },
+    RecoverColdAudit {
+        operation_id: Uuid,
+        reply: Reply<Option<super::journal::recovery::cold_audit::completion::ConfirmedColdAudit>>,
+    },
     Reserve {
         operation_id: Uuid,
         submit: Vec<u8>,
@@ -761,9 +765,41 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                 if result.is_err() {
                     // Quarantine precedes error delivery, including when the
                     // reply receiver has disappeared. Cancel remains admitted
-                    // on its ordinary path. Recovery/recount is explicit.
+                    // on its ordinary path. Recovery is confirmation-only.
                     cold_quarantine.push(input);
                 }
+                let _ = reply.send(result);
+            }
+            Command::RecoverColdAudit {
+                operation_id,
+                reply,
+            } => {
+                if operation_id.is_nil() {
+                    let _ = reply.send(Err(JournalError::InvalidInput));
+                    continue;
+                }
+                let result = match &backend {
+                    Backend::Full(_) => Err(JournalError::InvalidInput),
+                    Backend::Stops(journal) => {
+                        if let Some(index) = cold_quarantine
+                            .iter()
+                            .position(|input| input.operation_id() == operation_id)
+                        {
+                            match cold_quarantine[index].confirm(journal) {
+                                Ok(confirmed) => {
+                                    // Only a proved exact sealed target may
+                                    // release its original logical reserve.
+                                    // The backend still owns the same lease.
+                                    drop(cold_quarantine.remove(index));
+                                    Ok(Some(confirmed))
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            Ok(None)
+                        }
+                    }
+                };
                 let _ = reply.send(result);
             }
             Command::PrepareColdAudit {

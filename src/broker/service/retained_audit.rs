@@ -85,8 +85,20 @@ impl Service {
                     // Preparation proves an admissible pending batch and owns
                     // both reserves. Historical/Busy entries consume neither a
                     // Job cache entry nor its bounded autonomous retry budget.
-                    let Ok(reserved) = cold.prepare(operation).await else {
-                        continue;
+                    let reserved = match cold.prepare(operation).await {
+                        Ok(reserved) => reserved,
+                        Err(crate::broker::journal::JournalError::Busy) => {
+                            // A different inventoried job may precede the
+                            // quarantined operation. None grants no proof and
+                            // lets discovery reach that operation. Once found,
+                            // try confirmation only once for this actor;
+                            // never reprepare, POST or spend a Job retry here.
+                            match cold.recover_quarantined(operation).await {
+                                Ok(None) => continue,
+                                Ok(Some(_)) | Err(_) => break 'pages,
+                            }
+                        }
+                        Err(_) => continue,
                     };
                     let Ok(job) = jobs.job(operation) else {
                         continue;
