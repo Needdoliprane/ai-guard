@@ -192,6 +192,19 @@ Cette vue ne qualifie ni transport multi-brokers, ni fédération, ni agrégatio
 
 Redémarrer uniquement les services concernés avec le binaire à jour et les données existantes. Indiquer l'origine du gateway, sans chemin `/api`. HTTPS est vérifié ; HTTP local exige une IP loopback littérale, par exemple `127.0.0.1`. Ce client désactive proxy ambiant, redirections et retries automatiques.
 
+Pour un gateway HTTPS signé par une AC privée approuvée, ajouter `--gateway-ca-file /chemin/absolu/approuve/gateway-ca.pem` à chaque commande `human identity`, `resources`, `events`, `export` et `resume-export`. Employer un bundle PEM public vérifié ne contenant que des certificats, au plus 65536 octets et 8 certificats, dans un répertoire protégé. Un fichier privé `0600` ou une projection en lecture seule `0444` est pris en charge ; alias modifiables, liens, propriétaires/ancêtres non fiables et ACL non prises en charge sont refusés. Ce bundle remplace les racines intégrées du seul client gateway, avec contrôle de chaîne, SAN et validité conservé. Sans l'option, la confiance WebPKI intégrée existante reste inchangée. L'option exige HTTPS et ne change ni confiance système, ni navigateur, ni fournisseur OIDC.
+
+```sh
+AIGUARD_GATEWAY="https://approved-gateway.example.invalid"
+AIGUARD_GATEWAY_CA="/chemin/absolu/approuve/gateway-ca.pem"
+AIGUARD_CREDENTIAL="$AIGUARD_PRIVATE/human-alice/credential"
+"$AIGUARD_BIN" human identity \
+  --gateway "$AIGUARD_GATEWAY" --gateway-ca-file "$AIGUARD_GATEWAY_CA" \
+  --credential-file "$AIGUARD_CREDENTIAL"
+```
+
+Remplacer cette origine d'exemple non fonctionnelle et le chemin d'AC par les valeurs approuvées par l'opérateur. Le CLI charge un snapshot immuable de confiance par invocation ; remplacer le fichier ne change pas une commande en cours. Un export conservé lie les octets exacts du bundle, en plus du gateway, du credential et du contexte. Garder les mêmes octets pour `resume-export`, même si le bundle passe dans un autre chemin vérifié. Un bundle modifié exige un nouvel export explicite vers une destination neuve ; préserver la préparation non résolue. `gateway CA configuration is invalid or unavailable` demande de corriger fichier ou PEM avant de réessayer. `--gateway-ca-file requires an HTTPS gateway origin` indique un transport incompatible. Un refus de connexion/TLS ne désactive jamais la vérification et ne bascule vers aucune autre source de confiance.
+
 ```sh
 AIGUARD_GATEWAY="http://127.0.0.1:8787"
 AIGUARD_CREDENTIAL="$AIGUARD_PRIVATE/human-alice/credential"

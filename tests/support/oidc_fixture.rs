@@ -206,9 +206,19 @@ impl ControlledIssuer {
         salt: &str,
         roles: &[&str],
     ) -> String {
-        let access = self.token("web-public", subject, None, roles, salt);
+        self.login_response_for_client("web-public", nonce, subject, salt, roles)
+    }
+    pub fn login_response_for_client(
+        &self,
+        client: &str,
+        nonce: &str,
+        subject: &str,
+        salt: &str,
+        roles: &[&str],
+    ) -> String {
+        let access = self.token(client, subject, None, roles, salt);
         self.state.lock().unwrap().response = json!({"token_type":"Bearer","access_token":access,"refresh_token":format!("private-refresh-{salt}"),
-            "id_token":self.token("web-public",subject,Some(nonce),roles,salt),"expires_in":120});
+            "id_token":self.token(client,subject,Some(nonce),roles,salt),"expires_in":120});
         access
     }
     pub fn requests(&self) -> Vec<(String, String)> {

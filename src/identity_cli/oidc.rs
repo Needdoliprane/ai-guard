@@ -4,7 +4,10 @@ use super::{
     oidc_callback::{Callback, CallbackListener},
     oidc_session::Session,
 };
-use crate::oidc::{OidcClientKind, OidcConfigV1, OidcProvider, VerifiedLogin};
+use crate::{
+    oidc::{OidcClientKind, OidcConfigV1, OidcProvider, VerifiedLogin},
+    tls::ClientTrust,
+};
 use anyhow::{Result, ensure};
 use clap::{Args, ValueEnum};
 use futures_util::{FutureExt, StreamExt};
@@ -14,6 +17,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
 };
@@ -23,6 +27,9 @@ pub struct SsoArgs {
     /// Trusted gateway origin. This is ai-guard login, independent of AI provider credentials.
     #[arg(long)]
     pub gateway: String,
+    /// Approved public CA PEM for this HTTPS gateway only; independent of IdP trust.
+    #[arg(long)]
+    pub gateway_ca_file: Option<PathBuf>,
     /// External browser launch. Manual prints only the ephemeral authorization URL.
     #[arg(long, value_enum, default_value = "system")]
     pub browser: Browser,
@@ -94,14 +101,20 @@ struct FinishReply {
 pub(super) struct AuthHttp {
     http: reqwest::Client,
     origin: Url,
+    gateway_trust: ClientTrust,
 }
 impl AuthHttp {
-    pub(super) fn new(gateway: &str) -> Result<Self> {
+    pub(super) fn new(gateway: &str, ca_file: Option<&Path>) -> Result<Self> {
         let origin = http::validate_origin(gateway)?;
+        let gateway_trust = super::trust::load(&origin, ca_file)?;
         Ok(Self {
-            http: http::build_http(&origin)?,
+            http: http::build_http(&origin, &gateway_trust)?,
             origin,
+            gateway_trust,
         })
+    }
+    pub(super) fn gateway_trust(&self) -> &ClientTrust {
+        &self.gateway_trust
     }
     async fn profile(&self) -> Result<Profile> {
         let mut url = self.origin.clone();
@@ -365,7 +378,7 @@ fn closed(audit: &str) -> Result<()> {
 }
 pub async fn execute(args: SsoArgs) -> Result<()> {
     let mut cancellation = Cancellation::new()?;
-    let control = AuthHttp::new(&args.gateway)?;
+    let control = AuthHttp::new(&args.gateway, args.gateway_ca_file.as_deref())?;
     let profile = control.profile().await?;
     if cancellation.observed() {
         return closed("not_required");

@@ -1,4 +1,4 @@
-//! Bounded TLS material and listener for the trusted model transport. No
+//! Bounded TLS material and listener for trusted transports. No
 //! authentication, tenant authority, system trust installation or automatic reload.
 use std::{
     future::Future,
@@ -109,6 +109,41 @@ pub(crate) fn certificates(bytes: &[u8]) -> Result<Vec<CertificateDer<'static>>,
 }
 pub(crate) fn read_material(path: &Path, maximum: usize) -> Result<Vec<u8>, TlsError> {
     crate::control_fs::read_trusted_projected_file(path, maximum as u64).map_err(|_| TlsError)
+}
+
+/// Immutable, explicit client roots. Loading never changes system or IdP trust.
+#[derive(Clone, Default)]
+pub(crate) struct ClientTrust(Option<Arc<ExplicitClientTrust>>);
+struct ExplicitClientTrust {
+    certificates: Vec<CertificateDer<'static>>,
+    digest: String,
+}
+impl ClientTrust {
+    pub(crate) fn from_ca_file(path: &Path) -> Result<Self, TlsError> {
+        use sha2::{Digest, Sha256};
+        let bytes = read_material(path, MAX_CERT_BYTES)?;
+        Ok(Self(Some(Arc::new(ExplicitClientTrust {
+            certificates: certificates(&bytes)?,
+            digest: hex::encode(Sha256::digest(&bytes)),
+        }))))
+    }
+    pub(crate) fn digest(&self) -> Option<&str> {
+        self.0.as_ref().map(|trust| trust.digest.as_str())
+    }
+    pub(crate) fn apply_to_client(
+        &self,
+        mut builder: reqwest::ClientBuilder,
+    ) -> Result<reqwest::ClientBuilder, TlsError> {
+        if let Some(trust) = &self.0 {
+            builder = builder.tls_built_in_root_certs(false);
+            for certificate in &trust.certificates {
+                builder = builder.add_root_certificate(
+                    reqwest::Certificate::from_der(certificate.as_ref()).map_err(|_| TlsError)?,
+                );
+            }
+        }
+        Ok(builder)
+    }
 }
 
 #[derive(Clone)]
