@@ -1,5 +1,20 @@
 # Validation courante
 
+## 6 novembre — reprise FD par les routes authentifiées
+
+Le complément de tests `6fa1bcc`, composé dans `4494760`, passe deux parents
+authentification/HTTP/SQLite A/B sur API01 : erreur après commit visible par
+une connexion readonly indépendante, absence de reçu503, reprise EMFILE/rejeu
+exact sans double ligne/quota, et clôture persistante EIO de A pendant que B
+écrit. Header/query contradictoires ne sélectionnent pas le tenant.
+
+Premier lancement dans le mauvais workdir : setup RC101 avant compilation,
+aucun RED produit. Run corrigé sans changement source :2PASS/530 filtrés,0.09s,
+build1m43s,3 warnings lib-test. Neuf hashes et peer review vérifiés ; aucune
+suite complète répétée pour ces deux fichiers de tests. [Preuves](evidence/2026-11-06/store-resource-recovery/README.md#authenticated-api-coverage).
+Tower sans TCP, fautes injectées, aucun worker/fournisseur réel. Ce complément
+de couverture n'ajoute aucune fonctionnalité ni qualification globale.
+
 ## 6 novembre — récupération du Store après pénurie FD
 
 Base `0843c41`, source `6871634`, composition `987898e` : sept hashes source/Cargo

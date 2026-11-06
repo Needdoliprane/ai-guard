@@ -87,3 +87,34 @@ a connection or transmitting a response during FD exhaustion. Fmt, whitespace,
 product workers/runtimes/providers, frontend/browser, physical storage faults
 and100-worker capacity. External audit artifacts remain unchanged. G09 FAIL;
 no global production gate is closed by this Store software result.
+
+## Authenticated API coverage
+
+Source `6fa1bcc`, composed in `4494760`, adds two test-only parents to the
+published fix. Both pass on frozen API01: real gateway routes/authentication
+and separate SQLite stores A/B, exercised with Tower. A read-only SQLite
+observer sees the committed event before injecting the backing-file error.
+
+EMFILE yields503 without a receipt; B retains its scope despite contradictory
+tenant header/query. A's authenticated exact replay returns the original
+receipt with one row and quota debit. After permanent EIO and removal of the
+fault, three A routes remain refused while a fresh B POST succeeds.
+
+Command: `cargo test --manifest-path /inputs/api-store-recovery01/Cargo.toml --lib --locked --offline audit::resource_tests::api_cases:: -- --nocapture --test-threads=1`.
+Docker workdir was explicitly `/inputs/api-store-recovery01`. The earlier
+invocation from `/workspace` failed before compilation and is retained as a
+setup error, not a behavioral RED. Corrected run:2 PASS/530 filtered,0.09s,
+build1m43s,3 lib-test warnings, no OOM. Same pinned sandbox/profile above,
+with jobs1/dev+testdebug0 and a separate Cargo target; no provider calls.
+
+Input manifest SHA256
+`0a571bfa7e9e3fd2253ad80d2c3afa0dd2aa63e0c205448bb32dac5679cef315`;
+raw PASS log `2d0cd7dedcedf63e9af47fedec5cfbd19381720d386601f1462adcc850b4f95e`;
+setup log `75787515040b1e97cd1774d3cf8fd9570dc246a052fff1bd35617d3591938d79`.
+Root verified nine hashes after testing/integration; independent review
+confirmed the observer, failure phase, isolation and replay oracles.
+The private API checkpoint retains source-only inputs and parent logs.
+
+This is coverage of existing functionality, not a new feature. Faults are
+injected and Tower opens no TCP connection. No actual worker, TCP availability,
+provider or global production qualification is established.
