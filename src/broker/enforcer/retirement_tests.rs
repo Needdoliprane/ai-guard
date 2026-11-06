@@ -5,7 +5,36 @@ use crate::{
 };
 use serde_json::json;
 use std::sync::{OnceLock, Weak};
-use std::{os::unix::fs::PermissionsExt, path::Path, sync::mpsc::sync_channel};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::mpsc::sync_channel,
+};
+
+/// Startup-only opt-in for short Unix socket fixture paths in read-only-root
+/// QA. Keep the historical /tmp default instead of macOS's often long TMPDIR.
+fn short_ipc_fixture_root() -> PathBuf {
+    let configured = std::env::var_os("AI_GUARD_TEST_D5_IPC_ROOT").map(PathBuf::from);
+    let requested = configured.as_deref().unwrap_or_else(|| Path::new("/tmp"));
+    assert!(
+        requested.is_absolute(),
+        "AI_GUARD_TEST_D5_IPC_ROOT must name an absolute directory"
+    );
+    let canonical = std::fs::canonicalize(requested)
+        .expect("AI_GUARD_TEST_D5_IPC_ROOT or default /tmp must exist");
+    assert!(
+        canonical.is_dir(),
+        "the D5 IPC fixture root must be a directory"
+    );
+    if configured.is_some() {
+        assert_eq!(
+            requested,
+            canonical.as_path(),
+            "AI_GUARD_TEST_D5_IPC_ROOT must already be canonical"
+        );
+    }
+    canonical
+}
 
 // Explicitly SYNTHETIC Ready for IPC capability tests only. The real original
 // thread and NativeOwners handoff/join remain in use. No runtime is invoked,
@@ -83,7 +112,7 @@ impl OriginalIpcFixture {
         let files = tempfile::Builder::new()
             .prefix("f3r-")
             .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .tempdir_in(short_ipc_fixture_root())
             .unwrap();
         let parent = Directory::open_existing(files.path()).unwrap();
         let ledger = Arc::new(
@@ -907,7 +936,7 @@ async fn explicit_full3_and_stop3_use_separate_authenticated_connections() {
     let files = tempfile::Builder::new()
         .prefix("f3-")
         .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .tempdir_in(short_ipc_fixture_root())
         .unwrap();
     let parent = Directory::open_existing(files.path()).unwrap();
     let owned_parent = parent.clone();
@@ -968,7 +997,7 @@ async fn explicit_full3_refuses_a_live_legacy_role_without_fallback_or_rekey() {
     let files = tempfile::Builder::new()
         .prefix("f3l-")
         .permissions(std::fs::Permissions::from_mode(0o700))
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .tempdir_in(short_ipc_fixture_root())
         .unwrap();
     let parent = Directory::open_existing(files.path()).unwrap();
     let root = parent.persistent_child("legacy", true).unwrap().unwrap();
