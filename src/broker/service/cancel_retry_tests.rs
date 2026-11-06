@@ -315,6 +315,7 @@ impl Fixture {
             .set(ProfileWriterCapabilities::from_full(writer.clone()))
             .unwrap();
         let service = Service {
+            full_owners: FullOwners::new(registry.data.max_enforcer_slots as usize).unwrap(),
             cold_owners: retained_audit::ColdOwners::new(registry.data.max_enforcer_slots as usize)
                 .unwrap(),
             registry,

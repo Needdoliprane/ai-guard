@@ -1,4 +1,5 @@
-//! Bounded cold-owner tasks. Execution permits and Full runs are independent.
+//! Bounded, typed owner tasks. Each registry has its own admission and results;
+//! sharing this mechanism never converts a Cold owner into a Full capability.
 //! Handles and their first failure stay here when an observer is cancelled.
 use super::{BrokerErrorCodeV1, RetainedAuditSuccess};
 use std::{
@@ -10,10 +11,15 @@ use std::{
 };
 use tokio::{sync::Semaphore, task::JoinHandle};
 
-type OwnerResult = Result<RetainedAuditSuccess, BrokerErrorCodeV1>;
+type OwnerResult<T> = Result<T, BrokerErrorCodeV1>;
+pub(in crate::broker::service::server) type ColdOwners = OwnerTasks<RetainedAuditSuccess>;
+pub(in crate::broker::service::server) type ColdOwnerSlot = OwnerSlot<RetainedAuditSuccess>;
+pub(in crate::broker::service::server) type ColdOwnerError = OwnerError;
+#[cfg(test)]
+type ColdDrainError = DrainError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::broker::service::server) enum ColdOwnerError {
+pub(in crate::broker::service::server) enum OwnerError {
     InvalidCapacity,
     Busy,
     Closed,
@@ -21,70 +27,70 @@ pub(in crate::broker::service::server) enum ColdOwnerError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::broker::service::server) enum ColdDrainError {
+pub(in crate::broker::service::server) enum DrainError {
     OwnerFailed,
     Unavailable,
 }
 
-impl fmt::Display for ColdOwnerError {
+impl fmt::Display for OwnerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidCapacity => "invalid cold owner capacity",
-            Self::Busy => "cold owner capacity unavailable",
-            Self::Closed => "cold owner registration closed",
-            Self::Unavailable => "cold owner tracking unavailable",
+            Self::InvalidCapacity => "invalid broker owner capacity",
+            Self::Busy => "broker owner capacity unavailable",
+            Self::Closed => "broker owner registration closed",
+            Self::Unavailable => "broker owner tracking unavailable",
         })
     }
 }
-impl std::error::Error for ColdOwnerError {}
+impl std::error::Error for OwnerError {}
 
-impl fmt::Display for ColdDrainError {
+impl fmt::Display for DrainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::OwnerFailed => "cold audit shutdown needs reconciliation",
-            Self::Unavailable => "cold audit shutdown tracking unavailable",
+            Self::OwnerFailed => "broker shutdown needs reconciliation",
+            Self::Unavailable => "broker shutdown tracking unavailable",
         })
     }
 }
-impl std::error::Error for ColdDrainError {}
+impl std::error::Error for DrainError {}
 
-pub(in crate::broker::service::server) struct ColdOwners {
-    state: Mutex<State>,
+pub(in crate::broker::service::server) struct OwnerTasks<T> {
+    state: Mutex<State<T>>,
     // Serialize observers only, so two JoinHandle polls cannot replace each
     // other's wakers. Producers never acquire this permit; it is unrelated to
     // execution capacity. Dropping a drain future releases it, not a handle.
     observers: Semaphore,
 }
 
-struct State {
+struct State<T> {
     open: bool,
-    slots: Vec<Slot>,
-    failure: Option<ColdDrainError>,
+    slots: Vec<Slot<T>>,
+    failure: Option<DrainError>,
 }
 
-enum Slot {
+enum Slot<T> {
     Vacant,
     Reserved,
-    Running(JoinHandle<OwnerResult>),
+    Running(JoinHandle<OwnerResult<T>>),
 }
 
-pub(in crate::broker::service::server) struct ColdOwnerSlot {
-    owners: Arc<ColdOwners>,
+pub(in crate::broker::service::server) struct OwnerSlot<T> {
+    owners: Arc<OwnerTasks<T>>,
     index: Option<usize>,
 }
 
-impl fmt::Debug for ColdOwners {
+impl<T> fmt::Debug for OwnerTasks<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ColdOwners(<private>)")
+        f.write_str("OwnerTasks(<private>)")
     }
 }
-impl fmt::Debug for ColdOwnerSlot {
+impl<T> fmt::Debug for OwnerSlot<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ColdOwnerSlot(<private>)")
+        f.write_str("OwnerSlot(<private>)")
     }
 }
 
-impl State {
+impl<T> State<T> {
     fn reap(&mut self, cx: &mut Context<'_>, finished_only: bool) {
         let Self { slots, failure, .. } = self;
         for slot in slots {
@@ -98,7 +104,7 @@ impl State {
                 if !matches!(result, Ok(Ok(_))) {
                     // Record before making the slot reusable. Never format a
                     // JoinError: its panic payload can contain private data.
-                    failure.get_or_insert(ColdDrainError::OwnerFailed);
+                    failure.get_or_insert(DrainError::OwnerFailed);
                 }
                 *slot = Slot::Vacant;
             }
@@ -106,12 +112,12 @@ impl State {
     }
 }
 
-impl ColdOwners {
+impl<T> OwnerTasks<T> {
     pub(in crate::broker::service::server) fn new(
         capacity: usize,
-    ) -> Result<Arc<Self>, ColdOwnerError> {
+    ) -> Result<Arc<Self>, OwnerError> {
         if !(1..=1024).contains(&capacity) {
-            return Err(ColdOwnerError::InvalidCapacity);
+            return Err(OwnerError::InvalidCapacity);
         }
         Ok(Arc::new(Self {
             state: Mutex::new(State {
@@ -123,7 +129,7 @@ impl ColdOwners {
         }))
     }
 
-    fn state(&self) -> (MutexGuard<'_, State>, bool) {
+    fn state(&self) -> (MutexGuard<'_, State<T>>, bool) {
         match self.state.lock() {
             Ok(state) => (state, false),
             Err(error) => {
@@ -131,7 +137,7 @@ impl ColdOwners {
                 // handles must still be joined instead of forgotten.
                 let mut state = error.into_inner();
                 state.open = false;
-                state.failure.get_or_insert(ColdDrainError::Unavailable);
+                state.failure.get_or_insert(DrainError::Unavailable);
                 (state, true)
             }
         }
@@ -139,13 +145,13 @@ impl ColdOwners {
 
     pub(in crate::broker::service::server) fn try_reserve(
         self: &Arc<Self>,
-    ) -> Result<ColdOwnerSlot, ColdOwnerError> {
+    ) -> Result<OwnerSlot<T>, OwnerError> {
         let (mut state, poisoned) = self.state();
         if poisoned {
-            return Err(ColdOwnerError::Unavailable);
+            return Err(OwnerError::Unavailable);
         }
         if !state.open {
-            return Err(ColdOwnerError::Closed);
+            return Err(OwnerError::Closed);
         }
         // Only handles already finished are polled here, never awaited. Their
         // outcome is retained even when this same call reuses their slot.
@@ -154,25 +160,25 @@ impl ColdOwners {
             .slots
             .iter()
             .position(|slot| matches!(slot, Slot::Vacant))
-            .ok_or(ColdOwnerError::Busy)?;
+            .ok_or(OwnerError::Busy)?;
         state.slots[index] = Slot::Reserved;
-        Ok(ColdOwnerSlot {
+        Ok(OwnerSlot {
             owners: Arc::clone(self),
             index: Some(index),
         })
     }
 
-    pub(in crate::broker::service::server) fn close(&self) -> Result<(), ColdOwnerError> {
+    pub(in crate::broker::service::server) fn close(&self) -> Result<(), OwnerError> {
         let (mut state, poisoned) = self.state();
         state.open = false;
         if poisoned {
-            Err(ColdOwnerError::Unavailable)
+            Err(OwnerError::Unavailable)
         } else {
             Ok(())
         }
     }
 
-    pub(in crate::broker::service::server) async fn drain(&self) -> Result<(), ColdDrainError> {
+    pub(in crate::broker::service::server) async fn drain(&self) -> Result<(), DrainError> {
         // Closing is atomic with reserve/start. Reserved tokens remain counted
         // until refusal/drop, but can no longer start or emit any HTTP. They
         // therefore do not make shutdown wait for an external token holder.
@@ -181,7 +187,7 @@ impl ColdOwners {
             .observers
             .acquire()
             .await
-            .map_err(|_| ColdDrainError::Unavailable)?;
+            .map_err(|_| DrainError::Unavailable)?;
         poll_fn(|cx| {
             let (mut state, _) = self.state();
             state.reap(cx, false);
@@ -201,15 +207,15 @@ impl ColdOwners {
     }
 }
 
-impl ColdOwnerSlot {
+impl<T: Send + 'static> OwnerSlot<T> {
     pub(in crate::broker::service::server) fn start<F>(
         mut self,
         future: F,
-    ) -> Result<(), ColdOwnerError>
+    ) -> Result<(), OwnerError>
     where
-        F: Future<Output = OwnerResult> + Send + 'static,
+        F: Future<Output = OwnerResult<T>> + Send + 'static,
     {
-        let index = self.index.take().ok_or(ColdOwnerError::Unavailable)?;
+        let index = self.index.take().ok_or(OwnerError::Unavailable)?;
         let (mut state, poisoned) = self.owners.state();
         let State {
             open,
@@ -218,20 +224,20 @@ impl ColdOwnerSlot {
         } = &mut *state;
         let Some(slot) = slots.get_mut(index) else {
             *open = false;
-            failure.get_or_insert(ColdDrainError::Unavailable);
-            return Err(ColdOwnerError::Unavailable);
+            failure.get_or_insert(DrainError::Unavailable);
+            return Err(OwnerError::Unavailable);
         };
         if !matches!(slot, Slot::Reserved) {
             *open = false;
-            failure.get_or_insert(ColdDrainError::Unavailable);
-            return Err(ColdOwnerError::Unavailable);
+            failure.get_or_insert(DrainError::Unavailable);
+            return Err(OwnerError::Unavailable);
         }
         if !*open || poisoned {
             *slot = Slot::Vacant;
             return Err(if poisoned {
-                ColdOwnerError::Unavailable
+                OwnerError::Unavailable
             } else {
-                ColdOwnerError::Closed
+                OwnerError::Closed
             });
         }
         // No await between closure check, spawn and handle registration. An
@@ -241,7 +247,7 @@ impl ColdOwnerSlot {
     }
 }
 
-impl Drop for ColdOwnerSlot {
+impl<T> Drop for OwnerSlot<T> {
     fn drop(&mut self) {
         let Some(index) = self.index.take() else {
             return;
