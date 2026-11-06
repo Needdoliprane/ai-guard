@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 6 novembre — cohérence des guides local, Keycloak et SSO
+
+Les sept guides du lot `4195450`, composé dans `bca854f`, distinguent l'accès
+technique runner/viewer, le provisionnement des comptes nominatifs et leurs
+lectures/exports autorisés. Ils renvoient au mapping OIDC exact `(issuer, sub)`
+et à la maintenance des schémas4–10. Le lancement humain via le broker reste
+proposé ; une connexion ne l'autorise ni ne lui attribue une exécution technique.
+
+Revue indépendante et contrôles documentaires ciblés passent ; aucune procédure
+produit, connexion IdP ou exécution runtime n'est relancée pour ce lot de texte.
+[Validation](VALIDATION.md#6-novembre--cohérence-des-guides-local-keycloak-et-sso).
+Aucune fonctionnalité supplémentaire ni gate global qualifié.
+
 ## 6 novembre — reprise de présence après panne temporaire du gateway
 
 Le lot `9f3f96d`, composé dans `f0fa2ea`, garde le même publisher, client,

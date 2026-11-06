@@ -1,5 +1,27 @@
 # Validation courante
 
+## 6 novembre — cohérence des guides local, Keycloak et SSO
+
+Base `164d597`, source documentaire `4195450`, composition `bca854f` : sept
+guides,16 insertions/12 suppressions. Le quick start et les guides EN/FR
+local/Keycloak/SSO sont confrontés au code courant : `init` ne provisionne pas
+de compte nominatif, les ressources demandent leurs grants, l'identité OIDC
+reste le couple vérifié `(issuer, sub)`, `human apply` accepte les schémas4–10.
+Le lancement humain reste un contrat proposé, distinct du credential runner.
+
+**PASS documentaire :** revue source indépendante puis corrections Root,
+`git diff --check`,173 liens relatifs sans cible manquante et scan des trois
+secrets connus dans les sept fichiers sans correspondance. Contrôle final avec
+les deux entrées d'ingénierie :534 liens sans cible manquante et neuf fichiers
+sans correspondance des secrets connus ; diff-check sans diagnostic. Les liens vérifient
+les chemins, sans audit exhaustif des ancres ni accès HTTP. La composition ne
+change aucun fichier applicatif, test, dépendance, frontend ou déploiement.
+
+**NOT_RUN pour ce lot :** commandes produit, Compose, IdP, navigateur, fournisseur
+et runtime. Aucun test applicatif relancé pour ces corrections de texte. Les
+preuves précédentes gardent leur source et leur périmètre ; G09 FAIL, aucun gate
+global clos.
+
 ## 6 novembre — reprise automatique du publisher de présence
 
 Source `9f3f96d` depuis `d330064`, composition `f0fa2ea` avec TLS humain.
