@@ -5,6 +5,7 @@ use crate::{
         HumanEventItemV1, HumanIdentityV1, HumanPageV1, HumanReadViewV1, HumanResourceItemV1,
     },
     redaction::Redactor,
+    tls::ClientTrust,
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::StreamExt;
@@ -25,6 +26,7 @@ struct LiteralBudget {
 
 pub(super) struct Client {
     http: reqwest::Client,
+    gateway_trust: ClientTrust,
     origin: Url,
     credential: Option<PrivateFile>,
     memory_expires_at: Option<i64>,
@@ -55,9 +57,12 @@ impl PreparedMemoryClient {
         self.0.bound_memory_expiry(expires_at)?;
         // This receipt identifies the exact foreground admission/generation.
         // It is intentionally independent of raw token bytes.
-        self.0.credential_digest = hex::encode(Sha256::digest(format!(
-            "ai-guard/foreground-oidc/v1/{authentication_id}/{generation}"
-        )));
+        self.0.credential_digest = super::trust::bind_digest(
+            &self.0.gateway_trust,
+            hex::encode(Sha256::digest(format!(
+                "ai-guard/foreground-oidc/v1/{authentication_id}/{generation}"
+            ))),
+        );
         Ok(self.0)
     }
 }
@@ -80,16 +85,21 @@ pub(super) fn credential_text(bytes: &[u8]) -> Result<&str> {
 impl Client {
     pub fn new(args: &ConnectionArgs) -> Result<Self> {
         let origin = validate_origin(&args.gateway)?;
+        let gateway_trust = super::trust::load(&origin, args.gateway_ca_file.as_deref())?;
         let credential = PrivateFile::open(&absolute_path(&args.credential_file)?, 128)?;
         let token = credential_text(credential.bytes())?;
         let mut authorization = header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| anyhow::anyhow!("private credential cannot be used for authentication"))?;
         authorization.set_sensitive(true);
         let redactor = Redactor::new(vec![token.to_owned()]);
-        let credential_digest = hex::encode(Sha256::digest(token.as_bytes()));
-        let http = build_http(&origin)?;
+        let credential_digest = super::trust::bind_digest(
+            &gateway_trust,
+            hex::encode(Sha256::digest(token.as_bytes())),
+        );
+        let http = build_http(&origin, &gateway_trust)?;
         Ok(Self {
             http,
+            gateway_trust,
             origin,
             credential: Some(credential),
             memory_expires_at: None,
@@ -102,23 +112,9 @@ impl Client {
     }
 
     /// A foreground OIDC session never creates or adopts a credential file.
-    pub(super) fn in_memory(
-        gateway: &str,
-        token: &str,
-        authentication_id: &str,
-        generation: u32,
-        expires_at: i64,
-        private_values: Vec<String>,
-    ) -> Result<Self> {
-        Self::prepare_in_memory(gateway, token, expires_at, private_values)?.bind_admission(
-            authentication_id,
-            generation,
-            expires_at,
-        )
-    }
-
     pub(super) fn prepare_in_memory(
         gateway: &str,
+        gateway_trust: ClientTrust,
         token: &str,
         expires_at: i64,
         private_values: Vec<String>,
@@ -157,7 +153,8 @@ impl Client {
         };
         let redactor = Redactor::new(secrets).union(&Redactor::new(vec![]));
         let client = Self {
-            http: build_http(&origin)?,
+            http: build_http(&origin, &gateway_trust)?,
+            gateway_trust,
             origin,
             credential: None,
             memory_expires_at: Some(expires_at),
@@ -354,8 +351,10 @@ impl Client {
     }
 }
 
-pub(super) fn build_http(origin: &Url) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+pub(super) fn build_http(origin: &Url, trust: &ClientTrust) -> Result<reqwest::Client> {
+    trust
+        .apply_to_client(reqwest::Client::builder())
+        .map_err(|_| anyhow::anyhow!("gateway CA configuration is invalid or unavailable"))?
         .https_only(origin.scheme() == "https")
         .http1_only()
         .no_proxy()

@@ -264,7 +264,18 @@ Les endpoints d’autorisation, token, JWKS et logout facultatif sont des URL ex
 
 Les chemins `authentication_audit.path` et `ca_bundle_file` sont absolus ou relatifs au parent du fichier OIDC. Traversées parent et liens symboliques sont refusés. Préparez les fichiers sous l’UID réel du contrôle, fichiers privés `0600`, répertoires privés `0700` et ancêtres/ACL protégés. Le parent de la base d’authentification doit être inscriptible par cet UID ; rendre le fichier de configuration en lecture seule ne rend pas son parent entier adapté à un audit en lecture seule. L’entrée OIDC est limitée à 1 Mio.
 
-Pour une AC d’entreprise, donnez à `ca_bundle_file` un fichier vérifié contenant uniquement les certificats publics approuvés, au plus 64 Kio et 8 certificats. Ces racines remplacent les racines intégrées du seul client OIDC, avec contrôle de chaîne, nom et validité conservé. Le gateway publie aussi ces certificats publics dans le profil CLI. Cette option ne change ni le magasin de confiance du navigateur ni la confiance TLS du CLI humain pour le **gateway**. `human sso` n’expose actuellement aucun drapeau d’AC gateway spécifique ; utilisez un certificat gateway déjà reconnu et qualifiez ce trajet. Ne fournissez aucune clé privée et ne désactivez pas TLS.
+Pour une AC d’entreprise, donnez à `ca_bundle_file` un fichier vérifié contenant uniquement les certificats publics approuvés, au plus 64 Kio et 8 certificats. Ces racines remplacent les racines intégrées du seul client OIDC, avec contrôle de chaîne, nom et validité conservé. Le gateway publie aussi ces certificats publics dans le profil CLI. Cette option ne change ni le magasin de confiance du navigateur ni la confiance TLS du CLI humain pour le **gateway**. Ne fournissez aucune clé privée et ne désactivez pas TLS.
+
+Pour un gateway possédant sa propre AC privée approuvée, transmettez explicitement son bundle public distinct :
+
+```sh
+"$AIGUARD_BIN" human sso --gateway "https://approved-gateway.example.invalid" \
+  --gateway-ca-file "/chemin/absolu/approuve/gateway-ca.pem" --browser manual
+```
+
+Remplacez cette origine d'exemple non fonctionnelle et ce chemin par les valeurs approuvées. `--gateway-ca-file` accepte uniquement des certificats PEM, au plus 65536 octets / 8 certificats, suivant les [règles de fichier vérifié de l'accès humain](../identity/README.fr.md#consulter-avec-le-cli). Ces racines remplacent WebPKI intégré pour le seul gateway HTTPS. Les racines indépendantes du fournisseur OIDC viennent toujours de `ca_bundle_file` et du profil CLI vérifié. Les confiances système et navigateur restent inchangées. HTTP avec cette option échoue avec `--gateway-ca-file requires an HTTPS gateway origin` ; un fichier invalide, indisponible, trop gros ou contenant une clé échoue avec `gateway CA configuration is invalid or unavailable` avant connexion.
+
+Un snapshot immuable du gateway couvre profil, intentions natives, admission, lectures/export métier, refresh et logout ai-guard pendant toute la session au premier plan. Remplacer son fichier source ne recharge pas la confiance. Terminez la session puis lancez une nouvelle connexion explicite pour adopter une rotation approuvée ; aucun repli automatique n'est effectué. Un bundle modifié ne reprend pas un export conservé avec une autre confiance. OIDC exige en plus la même admission au premier plan et la même génération, comme décrit plus bas. Cette option ne fournit ni mTLS ni interrogation active de révocation des certificats ; la qualification du transport et de la révocation du déploiement reste distincte.
 
 ### Configurer les accusés de déconnexion fournisseur
 

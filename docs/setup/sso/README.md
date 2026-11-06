@@ -264,7 +264,18 @@ Authorization, token, JWKS and optional logout endpoints are exact operator-appr
 
 Paths in `authentication_audit.path` and `ca_bundle_file` are absolute or relative to the OIDC file's parent. Parent traversal and symlinks are refused. Prepare files as the actual control UID, with private files `0600`, private directories `0700` and protected ancestors/ACLs. The authentication database parent must be writable by that UID; making the configuration file read-only does not make its whole parent suitable as a read-only audit destination. The OIDC input is limited to 1 MiB.
 
-For an enterprise CA, set `ca_bundle_file` to a checked file containing only the approved public certificates, at most 64 KiB and 8 certificates. These roots replace the OIDC client's built-in roots while preserving chain, name and validity checks. The gateway also publishes these public certificates in the CLI profile. This option does not change the browser's trust store or the human CLI's TLS trust for the **gateway**. There is currently no custom gateway-CA flag on `human sso`; use an already trusted gateway certificate and qualify that route. Never supply a private key or disable TLS verification.
+For an enterprise CA, set `ca_bundle_file` to a checked file containing only the approved public certificates, at most 64 KiB and 8 certificates. These roots replace the OIDC client's built-in roots while preserving chain, name and validity checks. The gateway also publishes these public certificates in the CLI profile. This option does not change the browser's trust store or the human CLI's TLS trust for the **gateway**. Never supply a private key or disable TLS verification.
+
+For a gateway with its own approved private CA, pass its separate public bundle explicitly:
+
+```sh
+"$AIGUARD_BIN" human sso --gateway "https://approved-gateway.example.invalid" \
+  --gateway-ca-file "/absolute/approved/gateway-ca.pem" --browser manual
+```
+
+Replace the nonfunctional example origin and path with approved values. `--gateway-ca-file` accepts only certificate PEM, at most 65536 bytes / 8 certificates, through the [checked file rules for human access](../identity/README.md#read-from-the-cli). These roots replace embedded WebPKI only for the HTTPS gateway. The independent OIDC-provider roots still come from `ca_bundle_file` and the verified CLI profile. System and browser trust are unchanged. HTTP with this option fails with `--gateway-ca-file requires an HTTPS gateway origin`; an invalid, unavailable, oversized or key-bearing file fails with `gateway CA configuration is invalid or unavailable` before login.
+
+One immutable gateway snapshot covers profile, native intents, admission, business reads/export, refresh and ai-guard logout for the entire foreground session. Replacing its source file does not reload trust. Finish the session and start a new explicit login to adopt an approved rotation; no automatic fallback is made. A changed bundle cannot resume a retained export from another trust snapshot. OIDC additionally requires the same foreground admission and generation, as described below. This option supplies neither mTLS nor active certificate-revocation polling; the deployment's transport and revocation qualification remain separate.
 
 ### Configure provider logout acknowledgements
 

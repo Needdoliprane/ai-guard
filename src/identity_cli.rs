@@ -12,6 +12,7 @@ mod offline;
 mod oidc;
 mod oidc_callback;
 mod oidc_session;
+mod trust;
 
 #[derive(Args)]
 pub struct HumanArgs {
@@ -124,6 +125,9 @@ pub struct ConnectionArgs {
     /// Gateway origin: verified HTTPS, or HTTP on a loopback address.
     #[arg(long)]
     pub gateway: String,
+    /// Approved public CA PEM for this HTTPS gateway only; replaces built-in roots.
+    #[arg(long)]
+    pub gateway_ca_file: Option<PathBuf>,
     /// Checked private local human credential file; no token argv/env option.
     #[arg(long)]
     pub credential_file: PathBuf,

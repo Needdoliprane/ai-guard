@@ -824,6 +824,17 @@ async fn export_retains_complete_pages_on_transport_failure_and_resumes_exact_sn
     let stage = fixture.directory.path().join("resumable.preparing");
     assert!(stage.join("page-0001.json").exists());
     assert!(!stage.join("completion.json").exists());
+    // Existing default trust keeps the historical export binding exactly.
+    {
+        use sha2::{Digest, Sha256};
+        let plan: Value =
+            serde_json::from_slice(&std::fs::read(stage.join("selection.json")).unwrap()).unwrap();
+        let token = std::fs::read_to_string(&fixture.credential_a1).unwrap();
+        assert_eq!(
+            plan["credential_digest"],
+            hex::encode(Sha256::digest(token.trim().as_bytes()))
+        );
+    }
     let retained_page = std::fs::read(stage.join("page-0001.json")).unwrap();
     let retained_lock = std::fs::File::open(stage.join("selection.json")).unwrap();
     // SAFETY: this test owns a valid private non-SQLite record descriptor.
@@ -1342,4 +1353,83 @@ async fn public_authorization_version_refuses_numeric_or_noncanonical_hex() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("opaque authorization version"));
     }
     server.abort();
+}
+
+#[test]
+fn human_gateway_ca_configuration_is_rejected_before_credentials_or_http() {
+    let temp = support::private_tempdir();
+    let missing_credential = temp.path().join("credential-must-not-be-opened");
+    for (label, bytes) in [
+        ("invalid", b"not a PEM certificate".to_vec()),
+        (
+            "key",
+            b"-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n".to_vec(),
+        ),
+        (
+            "unknown-section",
+            b"-----BEGIN OPAQUE TEST BLOCK-----\nAA==\n-----END OPAQUE TEST BLOCK-----\n".to_vec(),
+        ),
+        ("oversized", vec![b' '; 65_537]),
+    ] {
+        let ca = temp.path().join(label);
+        private_file(&ca, &bytes);
+        for mode in ["identity", "sso"] {
+            let mut cmd = command();
+            cmd.env_clear()
+                .args([
+                    "human",
+                    mode,
+                    "--gateway",
+                    "https://127.0.0.1:9",
+                    "--gateway-ca-file",
+                ])
+                .arg(&ca);
+            if mode == "identity" {
+                cmd.arg("--credential-file").arg(&missing_credential);
+            } else {
+                cmd.args(["--browser", "manual"]);
+            }
+            let rejected = cmd.output().unwrap();
+            failure(&rejected);
+            let stderr = String::from_utf8_lossy(&rejected.stderr);
+            assert!(
+                stderr.contains("gateway CA configuration is invalid or unavailable"),
+                "invalid CA must fail as configuration, before credentials or HTTP; unknown option is not an accepted refusal"
+            );
+            assert!(!stderr.contains(ca.to_str().unwrap()));
+            assert!(!stderr.contains(missing_credential.to_str().unwrap()));
+            assert!(!stderr.contains("BEGIN "));
+        }
+    }
+}
+
+#[test]
+fn human_gateway_ca_requires_https_in_both_modes() {
+    let temp = support::private_tempdir();
+    // No file is needed: an explicit CA on HTTP is an incompatible choice,
+    // rejected before either trust or credential paths are opened.
+    let ca = temp.path().join("not-opened.pem");
+    for mode in ["identity", "sso"] {
+        let mut cmd = command();
+        cmd.env_clear()
+            .args([
+                "human",
+                mode,
+                "--gateway",
+                "http://127.0.0.1:9",
+                "--gateway-ca-file",
+            ])
+            .arg(&ca);
+        if mode == "identity" {
+            cmd.arg("--credential-file")
+                .arg(temp.path().join("not-opened-credential"));
+        } else {
+            cmd.args(["--browser", "manual"]);
+        }
+        let rejected = cmd.output().unwrap();
+        failure(&rejected);
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("--gateway-ca-file requires an HTTPS gateway origin"));
+        assert!(!stderr.contains(ca.to_str().unwrap()));
+    }
 }

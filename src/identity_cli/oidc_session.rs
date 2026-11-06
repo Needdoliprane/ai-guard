@@ -151,6 +151,7 @@ impl Session {
             .collect();
         let prepared = match Client::prepare_in_memory(
             &gateway,
+            control.gateway_trust().clone(),
             tokens.access_token(),
             access.expires_at(),
             private,
@@ -565,13 +566,17 @@ impl Session {
             .map(str::to_owned)
             .or_else(|| self.refresh_token.clone());
         let private = refresh_token.iter().cloned().collect();
-        let mut client = Client::in_memory(
+        let mut client = Client::prepare_in_memory(
             &self.gateway,
+            self.control.gateway_trust().clone(),
             tokens.access_token(),
+            access.expires_at(),
+            private,
+        )?
+        .bind_admission(
             &self.admission.authentication_id,
             next_generation,
             access.expires_at(),
-            private,
         )?;
         // Retain every known literal before rotating server authority. A full
         // dictionary fails while the original admission can still be closed.

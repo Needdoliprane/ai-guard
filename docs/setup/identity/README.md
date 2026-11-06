@@ -192,6 +192,19 @@ This registry view does not qualify multi-broker transport, federation, worker/s
 
 Restart only the intended control services with the upgraded binary and existing data. Choose the gateway origin, not its `/api` path. HTTPS is verified; local HTTP requires a literal loopback IP such as `127.0.0.1`. Ambient proxies, redirects and automatic retries are disabled by this client.
 
+For an HTTPS gateway signed by an approved private CA, add `--gateway-ca-file /absolute/approved/gateway-ca.pem` to each `human identity`, `resources`, `events`, `export` and `resume-export` command. Use a checked certificate-only public PEM bundle, at most 65536 bytes and 8 certificates, in a protected directory. A private `0600` file or a read-only `0444` projection is supported; mutable aliases, links, untrusted ownership/ancestors and unsupported ACLs are refused. The bundle replaces the built-in roots for this gateway client, preserving chain, SAN and validity checks. Without the option, the existing embedded WebPKI trust is unchanged. The option requires HTTPS and does not change system, browser or OIDC-provider trust.
+
+```sh
+AIGUARD_GATEWAY="https://approved-gateway.example.invalid"
+AIGUARD_GATEWAY_CA="/absolute/approved/gateway-ca.pem"
+AIGUARD_CREDENTIAL="$AIGUARD_PRIVATE/human-alice/credential"
+"$AIGUARD_BIN" human identity \
+  --gateway "$AIGUARD_GATEWAY" --gateway-ca-file "$AIGUARD_GATEWAY_CA" \
+  --credential-file "$AIGUARD_CREDENTIAL"
+```
+
+Replace that nonfunctional example origin and CA path with the operator-approved values. The CLI loads one immutable trust snapshot per invocation; replacing the file does not change an in-flight command. A retained export binds the exact bundle bytes as well as the gateway, credential and context. Keep the same bytes for `resume-export`, including when moving the bundle to another checked path. A changed bundle requires a new explicit export into a fresh destination; retain the unresolved preparation. `gateway CA configuration is invalid or unavailable` means the file or PEM must be corrected before retrying. `--gateway-ca-file requires an HTTPS gateway origin` means the selected transport is incompatible. A connection/TLS refusal never disables verification or falls back to another trust source.
+
 ```sh
 AIGUARD_GATEWAY="http://127.0.0.1:8787"
 AIGUARD_CREDENTIAL="$AIGUARD_PRIVATE/human-alice/credential"
