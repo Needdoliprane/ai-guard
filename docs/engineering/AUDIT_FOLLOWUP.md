@@ -69,8 +69,8 @@ intégration et push. Aucun succès de test ne change seul le verdict externe.
 |---|---|---|
 | G | Trois réservations sans issue : rejeu idempotent des mutations et claims, absence de double démarrage, sortie auditée seulement si jamais démarré est prouvé. | `OPEN` ; dépendances avec le chantier D5 à coordonner, sans écriture concurrente dans les mêmes fichiers. |
 | H | Ingress : les pools anonymes résiduels ne doivent plus priver les opérations de contrôle de leur capacité. | `OPEN` ; isoler la capacité de contrôle sans supposer qu'une adresse de pair est une identité. |
-| I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `SOURCE_READY`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807` ; reproductions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
-| J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `SOURCE_READY`, worktree `codex/audit-j-export-20261106` depuis `5e52807` ; régressions préparées, exécution `NOT_RUN`, aucun correctif applicatif encore accepté. |
+| I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `REPRODUCED`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807`. Budget partagé et perte des fichiers jusqu'à la reprise observés ; oracle initial de succès CLI corrigé sans modifier l'app. Correctif en QA ; trois résidus de revue ci-dessous restent ouverts avant intégration. |
+| J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `REPRODUCED`, worktree `codex/audit-j-export-20261106` depuis `5e52807`. Quatre RED avant correction ; 48 fonctions PASS et compilation toutes cibles sur `audit-j-fix03`. Revue traitée, mais un canari CLI expire à sa borne d'observation de 20 s : diagnostic et nouvelle validation nécessaires avant intégration. |
 | K | Un store voisin ne doit pas bloquer l'autorisation ni les lectures d'un autre tenant ; budgets et lectures coûteuses bornés. | `OPEN` ; les scans inter-stores et listes de reviews doivent être revérifiés après composition, pas seulement les handlers déplacés hors Tokio. |
 | L | Pénurie de descripteurs : admission HTTP bornée, récupération sans trafic authentifié et comportement du moniteur explicite. | `PARTIAL` ; correction Store publiée, disponibilité TCP et moniteur non qualifiés. Fenêtre de réessai du moniteur approuvée le 6 novembre, implémentation et preuves encore ouvertes. |
 | M | Capacité d'audit : lecteurs, preuves SSO répétées et écritures ordinaires ne doivent pas épuiser la réserve indispensable aux actions et révocations. | `OPEN` ; budgets durables et déduplication à reprendre, sans effacement de ledger pour obtenir un test vert. |
@@ -81,6 +81,24 @@ réintégrer une seconde fois. Leur fichier `api_cases.rs` conserve l'empreinte
 `ef33d945d2176995b1d797550de41ad163eaf87a4703fe4e3feb17580d512175`.
 Ces dix tests Store et deux tests API ne prouvent pas la disponibilité HTTP ni
 l'absence d'arrêt d'un worker sous pression FD.
+
+Point de développement du 6 novembre à 23 h 25 UTC (7 novembre en France) :
+ces correctifs ne sont pas encore intégrés. Les trois résidus de revue du gel I
+portent sur une entrée de chemin valide dépassant le plafond de rétention de
+12 KiB et faisant refuser le batch, une interruption avant création du journal
+laissant une reprise sans scan/couverture, et l'effacement possible d'un diagnostic
+de moniteur extérieur au journal. Ils demandent leurs régressions et corrections ;
+ils ne sont pas ajoutés arbitrairement aux treize constats du rapport primaire.
+Le journal de reprise reste un format privé séparé, sans champ ajouté aux plans
+stricts 1/2/3. Les tests API/transport passés ne clôturent pas ces trois résidus.
+
+Pour J, le second regard a aussi fait reproduire un ajout incompatible au schéma
+fermé d'ACK V1, avant sa suppression. L'accusé et l'ancien fait d'export gardent
+leurs champs ; les omissions passent par un événement descriptif distinct.
+Le délai CLI de 20 s n'est pas attribué à la charge ou au produit sans preuve :
+le nouveau harnais ajoute étape/cas et une observation de 120 s, en conservant
+tous les oracles fonctionnels et les délais du produit. Une expiration reste un
+`FAIL`, jamais une réussite ni un constat de sécurité déduit du seul temps.
 
 ### Décision et qualifications encore ouvertes
 
