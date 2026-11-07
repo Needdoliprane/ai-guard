@@ -1,5 +1,24 @@
 # Validation courante
 
+## 7 novembre — export, modes et compatibilité V1
+
+Source `b896c7c`, composition `df8b9ab` : 49 fonctions uniques passent sur leurs
+gels attribués. Les 48 premières couvrent export, modes, durabilité et compatibilité
+fermée V1 ; la dernière exerce trois reprises CLI/import avec moteur de fixture,
+un seul démarrage et un seul usage. Le canari initial expire avec observation de 20 s ;
+le harnais 04 porte cette observation à 120 s, sans changer oracles ni délais du
+produit. Un chemin valide de reprise y dure 22,879 s. L'ancien échec reste conservé,
+sans attribution rétrospective de sa phase au seul temps total.
+
+Compilation toutes cibles du gel 03 : RC0, 119 avertissements lib/2 SSO-test/3 lib-test.
+Rustfmt, diff, 108 liens/0 manquant et recherche des 3 secrets connus sur 18 fichiers passent.
+Le manifeste final est vérifié dans la composition ; src/tests sont byte-identiques
+au gel 04, avec Cargo inchangé. Les commandes, hashes bruts et périmètres sont dans
+le [dossier de preuve](evidence/2026-11-07/workspace-export/README.md).
+Revue du défaut IPC traitée avant intégration. Aucun test modèle, Git d'export,
+APFS réel, worker Docker/Podman/Kubernetes ou panne physique n'est crédité.
+Le worktree source est fermé après intégration/push, inventaires et sauvegarde.
+
 ## 6 novembre — reprise FD par les routes authentifiées
 
 Le complément de tests `6fa1bcc`, composé dans `4494760`, passe deux parents

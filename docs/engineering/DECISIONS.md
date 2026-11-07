@@ -1,5 +1,17 @@
 # Décisions d'industrialisation
 
+## 7 novembre — conserver les contrats fermés de l'export
+
+Le compteur d'omissions ne s'ajoute ni à l'ACK IPC V1 ni au fait fermé
+`broker.batch.export`. Un nouveau fait générique descriptif `workspace.export.policy`
+le corrèle à la requête et au manifeste ; une absence historique reste inconnue.
+La revue a fait reproduire le rejet d'un champ supplémentaire par l'ancien
+décodeur avant restauration du contrat. Les modes ajoutés aux fingerprints sont
+facultatifs à la lecture ; l'import projette uniquement l'observation vers la
+couverture réellement enregistrée, sans changer les bytes/hashes historiques ni
+affaiblir l'égalité générale. Le scan final conserve ses observations nouvelles.
+[Sources et limites](evidence/2026-11-07/workspace-export/README.md).
+
 ## 6 novembre — reprise bornée de la seule déclaration de présence
 
 Conserver l'acteur et son client/stream/binding/Pending, puis attendre sans

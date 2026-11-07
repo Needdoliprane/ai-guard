@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Export du 7 novembre : filtrage renforcé, modes observés et compatibilité fermée V1
+intégrés après RED et revue. 49 fonctions ciblées passent sur leurs gels et toutes
+cibles du gel 03 compilent ; [preuves](evidence/2026-11-07/workspace-export/README.md).
+Le harnais de reprise corrigé ne change aucun délai produit. APFS, moteurs réels,
+migration de processus et pannes physiques restent NOT_RUN dans ce lot. Le contenu
+exporté reste non fiable et les avertissements/Clippy ouverts. G09 FAIL, 0/12 gates clos.
+
 Reprise FD du6novembre : dix fonctions Store ciblées, compilation et revues
 passent ; [preuves](evidence/2026-11-06/store-resource-recovery/README.md).
 Ce résultat ne qualifie ni disponibilité TCP sous pression, ni workers/moteurs,

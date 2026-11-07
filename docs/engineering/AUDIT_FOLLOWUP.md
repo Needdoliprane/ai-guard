@@ -69,8 +69,8 @@ intégration et push. Aucun succès de test ne change seul le verdict externe.
 |---|---|---|
 | G | Trois réservations sans issue : rejeu idempotent des mutations et claims, absence de double démarrage, sortie auditée seulement si jamais démarré est prouvé. | `OPEN` ; dépendances avec le chantier D5 à coordonner, sans écriture concurrente dans les mêmes fichiers. |
 | H | Ingress : les pools anonymes résiduels ne doivent plus priver les opérations de contrôle de leur capacité. | `OPEN` ; isoler la capacité de contrôle sans supposer qu'une adresse de pair est une identité. |
-| I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `REPRODUCED`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807`. Budget partagé et perte des fichiers jusqu'à la reprise observés ; oracle initial de succès CLI corrigé sans modifier l'app. Correctif en QA ; trois résidus de revue ci-dessous restent ouverts avant intégration. |
-| J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `REPRODUCED`, worktree `codex/audit-j-export-20261106` depuis `5e52807`. Quatre RED avant correction ; 48 fonctions PASS et compilation toutes cibles sur `audit-j-fix03`. Revue traitée, mais un canari CLI expire à sa borne d'observation de 20 s : diagnostic et nouvelle validation nécessaires avant intégration. |
+| I | Sortie déclarée refusée ou saturée : scan/diff fiable conservé, couverture partielle explicite, reprise et budget de contrôle indépendants. | `REPRODUCED`, worktree `codex/audit-i-file-audit-20261106` depuis `5e52807`. Budget partagé et perte des fichiers jusqu'à la reprise observés ; oracle initial de succès CLI corrigé sans modifier l'app. Quatre corrections supplémentaires sont en préparation de validation ; deux autres résidus de revue restent ouverts avant intégration. |
+| J | Export : dépôt nu, métadonnées exécutables et alias de chemins écartés, modes publiés sûrs, omissions visibles et détection des changements de mode conservée. | `IMPLEMENTED_AND_TARGETED_VALIDATED` : `b896c7c` composé dans `df8b9ab`, 49 fonctions PASS sur les gels 03/04 attribués, compilation toutes cibles 03, revue et guides EN/FR traités. [Preuves](evidence/2026-11-07/workspace-export/README.md). Harnais corrigé après timeout conservé ; worktree fermé. Qualification APFS/runtime et verdict formel de l'audit ne sont pas déduits. |
 | K | Un store voisin ne doit pas bloquer l'autorisation ni les lectures d'un autre tenant ; budgets et lectures coûteuses bornés. | `OPEN` ; les scans inter-stores et listes de reviews doivent être revérifiés après composition, pas seulement les handlers déplacés hors Tokio. |
 | L | Pénurie de descripteurs : admission HTTP bornée, récupération sans trafic authentifié et comportement du moniteur explicite. | `PARTIAL` ; correction Store publiée, disponibilité TCP et moniteur non qualifiés. Fenêtre de réessai du moniteur approuvée le 6 novembre, implémentation et preuves encore ouvertes. |
 | M | Capacité d'audit : lecteurs, preuves SSO répétées et écritures ordinaires ne doivent pas épuiser la réserve indispensable aux actions et révocations. | `OPEN` ; budgets durables et déduplication à reprendre, sans effacement de ledger pour obtenir un test vert. |
@@ -82,15 +82,19 @@ réintégrer une seconde fois. Leur fichier `api_cases.rs` conserve l'empreinte
 Ces dix tests Store et deux tests API ne prouvent pas la disponibilité HTTP ni
 l'absence d'arrêt d'un worker sous pression FD.
 
-Point de développement du 6 novembre à 23 h 25 UTC (7 novembre en France) :
-ces correctifs ne sont pas encore intégrés. Les trois résidus de revue du gel I
+Point de développement actualisé le 7 novembre après intégration J : le lot I
+reste non intégré. Les trois premiers résidus de revue du gel I
 portent sur une entrée de chemin valide dépassant le plafond de rétention de
 12 KiB et faisant refuser le batch, une interruption avant création du journal
 laissant une reprise sans scan/couverture, et l'effacement possible d'un diagnostic
-de moniteur extérieur au journal. Ils demandent leurs régressions et corrections ;
-ils ne sont pas ajoutés arbitrairement aux treize constats du rapport primaire.
+de moniteur extérieur au journal. Un quatrième témoin reproduit la répétition
+du callback de démarrage sous un 429 typé, hors de la fenêtre autorisée du moniteur.
+Leurs corrections sont présentes dans le worktree, mais pas encore créditées PASS.
+Deux résidus restent à reproduire : résultat historique sans diff ni journal,
+et collision de chemins après masquage qui fait refuser le batch entier.
+Ces cas ne sont pas ajoutés arbitrairement aux treize constats du rapport primaire.
 Le journal de reprise reste un format privé séparé, sans champ ajouté aux plans
-stricts 1/2/3. Les tests API/transport passés ne clôturent pas ces trois résidus.
+stricts 1/2/3. Les tests API/transport antérieurs ne qualifient pas ces corrections.
 
 Pour J, le second regard a aussi fait reproduire un ajout incompatible au schéma
 fermé d'ACK V1, avant sa suppression. L'accusé et l'ancien fait d'export gardent
@@ -99,6 +103,8 @@ Le délai CLI de 20 s n'est pas attribué à la charge ou au produit sans preuve
 le nouveau harnais ajoute étape/cas et une observation de 120 s, en conservant
 tous les oracles fonctionnels et les délais du produit. Une expiration reste un
 `FAIL`, jamais une réussite ni un constat de sécurité déduit du seul temps.
+Le run 04 a depuis terminé les trois scénarios et observe une reprise à 22,879 s ;
+ce PASS est intégré avec ses limites, sans réécrire le résultat 03.
 
 ### Décision et qualifications encore ouvertes
 
@@ -109,6 +115,12 @@ acquitté. Implémentation, tests et documentation du comportement livré resten
 ouverts. Échéance initiale, STOP et erreurs d'identité/audit restent prioritaires ;
 le callback de démarrage est exclu. Les autres lots avancent indépendamment.
 Ne pas étendre cette fenêtre aux lancements, claims ou audits obligatoires.
+
+La première implémentation du moniteur reste non intégrée : la revue a détecté
+un journal de fin d'exécution pouvant retenir la finalisation et un arrêt de
+reprise encore précédé de requêtes au gateway indisponible. Les régressions de
+ces deux cas sont en préparation. La cohérence des états de réponse fait l'objet
+d'une vérification du contrat, sans être annoncée comme un nouveau défaut établi.
 
 `NOT_RUN` dans l'audit : moteurs réels Docker/Podman, confinement, réseaux,
 `--env-file`, disque plein et matrices Linux/macOS. Les deux risques dépendant du

@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 7 novembre — export filtré et modes observés, lot J
+
+`b896c7c` est composé dans `df8b9ab`. Les structures Git racine/imbriquées et
+`commondir` sont refusées avant publication ; les alias Unicode couverts et les
+métadonnées d'activation sont filtrés. Les modes observés restent distincts des
+fichiers exportés en 0644 ; un ancien mode absent conserve une couverture inconnue.
+L'ACK IPC V1 et l'ancien fait d'export restent inchangés ; les omissions ont un
+événement descriptif séparé.
+
+Quatre RED initiaux et un défaut de compatibilité découvert en revue sont
+reproduits avant correction. Quarante-huit fonctions ciblées passent sur le gel 03,
+la reprise CLI à trois scénarios passe sur le gel 04 après correction du seul harnais
+d'observation, et toutes cibles compilent sur le gel 03. Les différences 03→04 et la
+composition sont vérifiées par contenu complet src/tests et hashes Cargo/Rust.
+[Preuves, échec intermédiaire et limites](evidence/2026-11-07/workspace-export/README.md).
+Guides EN/FR, revue et push traités ; worktree fermé sans force, preuves privées
+conservées hors checkout. APFS et moteurs réels non qualifiés ; 119 avertissements
+de compilation lib et gate Clippy ouvert. G09 FAIL, aucun gate global clos.
+
 ## 6 novembre — récupération du Store après pénurie de descripteurs
 
 Le lot `6871634`, composé dans `987898e`, distingue EMFILE/ENFILE typés des
