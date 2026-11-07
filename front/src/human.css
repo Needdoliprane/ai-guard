@@ -39,12 +39,18 @@
 .human-broker-details dt { font-size: 13px; color: var(--muted); }
 .human-broker-details dd { margin: 0; font: 13px/1.7 "Courier New", monospace; overflow-wrap: anywhere; }
 .human-budget-stop { margin-bottom: 24px; }
+.human-federation, .human-federation-registries { display: grid; gap: 24px; min-width: 0; }
+.human-federation-coverage { align-items: flex-start; }
+.human-federation-coverage p { margin-top: 10px; }
+.human-federation-links { display: grid; gap: 12px; min-width: 220px; }
 @media (max-width: 740px) {
   .human-shell { --dock-height: 124px; }
   .human-toolbar { display: grid; grid-template-columns: 1fr; gap: 8px; padding: 12px var(--gutter); }
   .human-nav { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
   .human-nav:has(> :nth-child(4)) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .human-shell:has(.human-nav > :nth-child(4)) { --dock-height: 164px; }
+  .human-nav:has(> :nth-child(6)) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .human-shell:has(.human-nav > :nth-child(6)) { --dock-height: 176px; }
   .human-toolbar .button { padding: 8px 6px; font-size: 11px; min-width: 0; }
   .human-shell .stream-pill { white-space: normal; max-width: 44%; text-align: right; }
   .human-resource-row, .human-event-row { flex-direction: column; padding: 18px; gap: 16px; }

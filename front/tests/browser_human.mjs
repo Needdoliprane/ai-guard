@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { identity, page as envelope, resource, event, uuid } from "./human-fixtures.mjs";
 import { brokerIdentity, brokerPage, denseBrokerItems } from "./human-fixtures.mjs";
 import { workerIdentity, workerPage, worker, workerObservation } from "./human-fixtures.mjs";
+import { federationIdentity, federationPage, broker } from "./human-fixtures.mjs";
 
 const require = createRequire(import.meta.url);
 let chromium;
@@ -22,9 +23,11 @@ let revoked = false; let authDenied = false; let detailDenied = false; let resou
 let viewerDenied = null;
 let brokersDown = false; let brokerDenied = false; let budgetExhausted = false; let brokerCapRemoved = false;
 let brokerDisplay = "standard"; let credentialExpiresAt = null;
-let workerDenied = false;
+let workerDenied = false; let identityDenied = false;
+let federationHeaders403 = false; let identityHeaders403 = false;
+const unfinishedRefusals = [];
 const humanIdentity = () => {
-  const value = scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
+  const value = scenario.startsWith("federation") ? federationIdentity() : scenario === "workers" ? workerIdentity() : scenario.startsWith("brokers") ? brokerIdentity(scenario === "brokers-mixed") : identity();
   if (brokerCapRemoved) value.contexts[0].capabilities = value.contexts[0].capabilities.filter((cap) => cap !== "read_broker_registry");
   if (scenario === "brokers-lifecycle") value.authentication.expires_at = credentialExpiresAt;
   return value;
@@ -32,6 +35,12 @@ const humanIdentity = () => {
 const requests = []; const streams = new Map();
 const json = (response, value, status = 200) => { response.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" }); response.end(JSON.stringify(value)); };
 const error = (response, status, code, retry_action) => json(response, { error: { code, message: `Refus ${code}`, retry_action } }, status);
+// Transport fixture: deliver real HTTP403 headers while deliberately keeping
+// its body open. Product code receives no test hook or synthetic notification.
+const refuseHeadersOnly = (response) => {
+  unfinishedRefusals.push({ response, released: false });
+  response.writeHead(403, { "content-type": "application/json", "cache-control": "no-store" }); response.flushHeaders();
+};
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, "http://localhost");
   if (url.pathname.startsWith("/api/")) {
@@ -52,15 +61,38 @@ const server = createServer(async (request, response) => {
     }
     if (request.headers.authorization !== `Bearer ${bearer}` || authDenied) return error(response, 401, "credential_invalid", "authenticate");
     if (url.pathname === "/api/v1/human/identity") {
+      if (identityHeaders403) return refuseHeadersOnly(response);
+      if (identityDenied) return error(response, 403, "permission_denied", "review_permissions");
       const value = humanIdentity(); if (revoked) value.contexts = value.contexts.filter((context) => context.id !== "context-admin");
       return json(response, value);
     }
     if (!String(url.pathname).startsWith("/api/v1/human/")) { response.writeHead(404); response.end(); return; }
     if (!humanIdentity().contexts.some((context) => context.id === contextId)) return error(response, 403, "context_invalid", "select_context");
     if (budgetExhausted) return error(response, 429, "audit_read_budget_exhausted", "contact_operator");
+    if (url.pathname === "/api/v1/human/federation/workers") {
+      if (federationHeaders403) return refuseHeadersOnly(response);
+      if (workerDenied || brokerDenied || brokerCapRemoved) return error(response, 403, "permission_denied", "review_permissions");
+      if (brokersDown) return error(response, 503, "audit_unavailable", "retry");
+      const association = { status: "registered", runtime_kind: "docker", runtime_matches: true, in_current_grant: true,
+        broker: { broker_id: uuid, current_incarnation_id: "00000000-0000-4000-8000-000000000002", state: "current", grant_revision: "1", heartbeat_revision: "2",
+          last_received_at: "2026-11-01T12:00:01Z", lease_expires_at: "2099-01-01T00:00:00Z" } };
+      const workers = brokerDisplay === "empty" ? [] : brokerDisplay === "dense" ? Array.from({ length: 25 }, (_, index) => worker({
+        worker_id: `10000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`, state: index % 2 ? "in_doubt" : "running",
+        last_observation: workerObservation({ started_at: null, started_at_status: "unknown", exit_code: "9007199254740993" }) })) : [worker({ launch_broker: association })];
+      const brokers = brokerDisplay === "empty" ? [] : brokerDisplay === "dense" ? denseBrokerItems() : [broker(),
+        broker({ broker_id: "00000000-0000-4000-8000-000000000003", state: "unseen", last_heartbeat: null }),
+        broker({ broker_id: "00000000-0000-4000-8000-000000000004", state: "revoked", revoked_at: "2026-11-01T12:00:02Z" })];
+      const frame = federationPage(); frame.workers.items = workers; frame.brokers.items = brokers;
+      if (brokerDisplay === "standard") {
+        if (!url.searchParams.has("worker_cursor")) Object.assign(frame.workers, { has_more: true, next_cursor: "federation-worker-next" });
+        if (!url.searchParams.has("broker_cursor")) Object.assign(frame.brokers, { has_more: true, next_cursor: "federation-broker-next" });
+      }
+      return json(response, frame);
+    }
     if (url.pathname === "/api/v1/human/workers") {
       if (workerDenied) return error(response, 403, "permission_denied", "review_permissions");
       if (brokersDown) return error(response, 503, "audit_unavailable", "retry");
+      if (scenario.startsWith("federation")) return json(response, workerPage([worker()], { context_id: contextId }));
       if (brokerDisplay === "empty") return json(response, workerPage([]));
       if (brokerDisplay === "dense") return json(response, workerPage(Array.from({ length: 25 }, (_, index) => worker({ worker_id: `10000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, "0")}`, state: ["reserved", "running", "in_doubt", "terminal"][index % 4],
         ...(index % 4 === 2 ? { last_observation: workerObservation({ started_at: null, started_at_status: "unknown", exit_code: "9007199254740993" }) } : {}) }))));
@@ -104,7 +136,7 @@ const server = createServer(async (request, response) => {
   } catch { response.writeHead(404); response.end(); }
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined, args: ["--no-sandbox"] });
+const browser = await chromium.launch({ headless: true, chromiumSandbox: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || undefined });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1050 } });
 const page = await context.newPage(); page.setDefaultTimeout(7000);
 const errors = []; page.on("pageerror", (error) => errors.push(error.message));
@@ -118,7 +150,13 @@ await page.addInitScript(() => {
     if (delay >= 90000 && delay <= 150000 && typeof handler === "function") window.__humanExpiryTimers.push(() => handler(...args));
     return nativeTimeout(handler, delay, ...args);
   };
-  const nativeNow = Date.now; let advance = 0; Date.now = () => nativeNow() + advance;
+  const NativeDate = Date; const nativeNow = Date.now; let advance = 0;
+  // Keep successful read timestamps and freshness/expiry checks on one fixture clock.
+  window.Date = new Proxy(NativeDate, {
+    apply: () => new NativeDate(nativeNow() + advance).toString(),
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length ? args : [nativeNow() + advance], newTarget),
+  });
+  Date.now = () => nativeNow() + advance;
   window.__humanAdvance = (milliseconds) => { advance += milliseconds; };
   window.__humanPoll = [];
   window.setInterval = (handler, delay, ...args) => {
@@ -129,7 +167,7 @@ await page.addInitScript(() => {
   window.fetch = async (...args) => {
     window.__humanFetches.push(String(args[0]));
     const response = await nativeFetch(...args);
-    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/workers"))) {
+    if (window.__humanHold && (String(args[0]).includes("/human/events/") || String(args[0]).includes("/human/brokers") || String(args[0]).includes("/human/workers") || String(args[0]).includes("/human/federation/workers"))) {
       window.__humanHold = false; const body = await response.text();
       await new Promise((release) => window.__humanHeld.push(release));
       return new Response(body, { status: response.status, headers: response.headers });
@@ -246,7 +284,137 @@ const runBrokerLifecycle = async () => {
   assert.equal(downloadCount, 0);
 };
 const runRegression = async () => {
-  if (scenario === "workers") {
+  if (scenario.startsWith("federation-403-headers")) {
+    const identityRefusal = scenario.endsWith("-identity");
+    await loginHuman(); await choose("administration");
+    const workerPanel = page.locator(".human-federation-registries > section").nth(0);
+    const brokerPanel = page.locator(".human-federation-registries > section").nth(1);
+    await workerPanel.getByText("Lecture réussie", { exact: true }).waitFor();
+    await page.getByRole("group", { name: "Pages des workers" }).getByRole("button", { name: "Page suivante", exact: true }).click();
+    await workerPanel.getByText(/page 2/).waitFor();
+    await page.getByRole("group", { name: "Pages des brokers" }).getByRole("button", { name: "Page suivante", exact: true }).click();
+    await brokerPanel.getByText(/page 2/).waitFor();
+    await workerPanel.getByRole("button", { name: "Détails", exact: true }).click(); await page.getByRole("dialog").waitFor();
+    if (identityRefusal) {
+      // Hold an already received successful composition with the existing
+      // late-response fixture. The identity refusal must prevent its revival.
+      await page.evaluate(() => { window.__humanHold = true; window.__humanAdvance(31000); window.__humanPoll.forEach((poll) => poll()); });
+      await page.waitForFunction(() => window.__humanHeld.length > 0);
+      identityHeaders403 = true;
+    } else federationHeaders403 = true;
+    const refusalHeaders = page.waitForResponse((response) => response.status() === 403 && new URL(response.url()).pathname ===
+      (identityRefusal ? "/api/v1/human/identity" : "/api/v1/human/federation/workers"));
+    await page.evaluate((identityTarget) => {
+      if (identityTarget) document.dispatchEvent(new Event("visibilitychange"));
+      else { window.__humanAdvance(31000); window.__humanPoll.forEach((poll) => poll()); }
+    }, identityRefusal);
+    await refusalHeaders;
+    // The 1s oracle is only a harness ceiling, well before the 15s request
+    // deadline. The unfinished 403 body remains private to the server fixture.
+    await page.getByRole("heading", { name: identityRefusal ? "Choisir un contexte." : "Fédération interdite", exact: true }).waitFor({ timeout: 1000 });
+    assert.ok(unfinishedRefusals.length > 0 && unfinishedRefusals.every((refusal) => !refusal.released));
+    assert.equal(await page.locator("dialog, .human-broker-table, .human-federation-registries").count(), 0,
+      "headers403 retire pages, détails et positions avant toute libération du corps");
+    assert.equal(await page.getByRole("button", { name: "Se déconnecter", exact: true }).count(), 1);
+    assert.equal(await page.getByLabel("Credential personnel local").count(), 0, "Le403 ne devient pas un logout401");
+    if (identityRefusal) {
+      await page.evaluate(() => window.__humanRelease()); await settle();
+      assert.equal(await page.locator("dialog, .human-broker-table, .human-federation-registries").count(), 0,
+        "La composition200 déjà reçue puis libérée ne repeuple aucun cache ni détail interdit");
+    }
+    for (const refusal of unfinishedRefusals) {
+      refusal.released = true;
+      if (!refusal.response.destroyed) refusal.response.end(JSON.stringify({ error: { code: "permission_denied", message: "Refus permission_denied", retry_action: "review_permissions" } }));
+    }
+    await settle(); assert.equal(await page.locator("dialog, .human-broker-table, .human-federation-registries").count(), 0);
+    federationHeaders403 = false; identityHeaders403 = false;
+    if (identityRefusal) await tab("Actualiser"); else await tab("Relire mes accès");
+    await page.getByRole("button", { name: /Ouvrir administration/ }).waitFor(); await choose("administration");
+    await workerPanel.getByText("Lecture réussie", { exact: true }).waitFor();
+    const resumed = new URL(requests.filter(({ path }) => path.startsWith("/api/v1/human/federation/workers?")).at(-1).path, "http://localhost");
+    assert.equal(resumed.searchParams.has("worker_cursor"), false); assert.equal(resumed.searchParams.has("broker_cursor"), false,
+      "La reprise après403 ne réutilise aucune position du contexte refusé");
+    await tab("Se déconnecter"); assert.equal(await page.locator(".human-shell, dialog").count(), 0);
+  } else if (scenario === "federation") {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await loginHuman(); assert.equal(requests.length, 1);
+    await page.evaluate(() => { window.__humanHold = true; }); await choose("administration");
+    await page.getByRole("heading", { name: "Workers et brokers du tenant.", exact: true }).waitFor();
+    await page.waitForFunction(() => window.__humanHeld.length > 0);
+    await page.getByRole("heading", { name: "Chargement des workers…", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Chargement du registre…", exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table").count(), 0, "Une composition suspendue n’affiche aucune jambe partielle");
+    await captureBrokerState("federation-loading", [390]);
+    await page.evaluate(() => window.__humanRelease());
+    const workerPanel = page.locator(".human-federation-registries > section").nth(0);
+    const brokerPanel = page.locator(".human-federation-registries > section").nth(1);
+    await workerPanel.getByText("Lecture réussie", { exact: true }).waitFor();
+    assert.equal(await workerPanel.locator("tbody tr").count(), 1);
+    assert.equal(await brokerPanel.locator("tbody tr").count(), 3, "Les brokers sans worker restent dans leur registre");
+    assert.equal(await brokerPanel.getByText("Aucune association dans la page workers · autres pages inconnues", { exact: true }).count(), 2);
+    await brokerPanel.getByText("Heartbeat non reçu", { exact: true }).waitFor();
+    await brokerPanel.getByText("Autorisation révoquée", { exact: true }).waitFor();
+    await page.getByText("Couverture partielle", { exact: true }).waitFor();
+    assert.equal(await page.getByText(/Évaluation serveur/).count(), 2, "Les horloges de chaque source restent visibles");
+    await page.getByRole("group", { name: "Pages des workers" }).getByRole("button", { name: "Page suivante", exact: true }).click();
+    await workerPanel.getByText(/page 2/).waitFor();
+    let last = new URL(requests.at(-1).path, "http://localhost");
+    assert.equal(last.searchParams.get("worker_cursor"), "federation-worker-next"); assert.equal(last.searchParams.has("broker_cursor"), false);
+    await page.getByRole("group", { name: "Pages des brokers" }).getByRole("button", { name: "Page suivante", exact: true }).click();
+    await brokerPanel.getByText(/page 2/).waitFor(); last = new URL(requests.at(-1).path, "http://localhost");
+    assert.equal(last.searchParams.get("worker_cursor"), "federation-worker-next"); assert.equal(last.searchParams.get("broker_cursor"), "federation-broker-next");
+    await page.getByRole("group", { name: "Pages des workers" }).getByRole("button", { name: "Page précédente", exact: true }).click();
+    await workerPanel.getByText(/page 1/).waitFor(); last = new URL(requests.at(-1).path, "http://localhost");
+    assert.equal(last.searchParams.has("worker_cursor"), false); assert.equal(last.searchParams.get("broker_cursor"), "federation-broker-next");
+    await brokerPanel.getByRole("button", { name: `Ouvrir le worker ${uuid}`, exact: true }).click();
+    await page.getByRole("dialog").getByText(/Reçu durable/).waitFor(); await page.keyboard.press("Escape");
+    assert.equal(await page.evaluate(() => document.activeElement.dataset.focusKey), `federation-broker-${uuid}-worker-${uuid}`);
+    await brokerPanel.getByRole("button", { name: "Détails du broker", exact: true }).nth(1).click();
+    await page.getByRole("dialog").getByText("Heartbeat non reçu", { exact: true }).waitFor(); await page.keyboard.press("Escape");
+    brokersDown = true; await tab("Actualiser");
+    await workerPanel.getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
+    await brokerPanel.getByText("Données périmées · dernière lecture conservée", { exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table tbody tr").count(), 4, "Le refus503 conserve les deux dernières pages datées");
+    await captureBrokerState("federation-stale", [320]);
+    brokersDown = false; brokerDisplay = "empty"; await tab("Réessayer");
+    await page.getByRole("heading", { name: "Aucun worker sur cette page", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Fin de cette traversée live", exact: true }).waitFor();
+    assert.equal(await page.locator(".human-broker-table").count(), 0);
+    await captureBrokerState("federation-empty", [390]);
+    brokerDisplay = "dense"; await tab("Actualiser");
+    await workerPanel.locator("tbody tr").nth(24).waitFor(); await brokerPanel.locator("tbody tr").nth(24).waitFor();
+    assert.ok(await workerPanel.getByText("Code de sortie : 9007199254740993", { exact: true }).count());
+    await captureBrokerState("federation-dense", [1440, 390, 320]);
+    // Both bodies are received, then delayed. A new offered context cannot revive this old composition.
+    await page.evaluate(() => { window.__humanHold = true; }); await tab("Actualiser");
+    await page.waitForFunction(() => window.__humanHeld.length > 0);
+    await workerPanel.getByRole("button", { name: "Détails", exact: true }).first().click();
+    brokerCapRemoved = true; await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.getByRole("heading", { name: "Choisir un contexte.", exact: true }).waitFor();
+    await page.evaluate(() => window.__humanRelease()); await settle();
+    assert.equal(await page.locator("dialog, .human-broker-table").count(), 0, "Le changement de droit purge détails, pages et réponse tardive");
+    await choose("administration"); await page.getByRole("heading", { name: "Workers enregistrés du tenant.", exact: true }).waitFor();
+    await page.getByText("Lecture réussie", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Fédération", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Brokers", exact: true }).count(), 0);
+    assert.ok(requests.at(-1).path.startsWith("/api/v1/human/workers?"), "Le droit worker seul conserve l’ancien parcours");
+    brokerCapRemoved = false; await tab("Contextes"); await page.getByRole("button", { name: /Ouvrir administration/ }).waitFor(); await choose("administration");
+    await workerPanel.getByText("Lecture réussie", { exact: true }).waitFor();
+    await workerPanel.getByRole("button", { name: "Détails", exact: true }).first().click();
+    identityDenied = true; await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.getByRole("heading", { name: "Choisir un contexte.", exact: true }).waitFor();
+    assert.equal(await page.locator("dialog, .human-broker-table").count(), 0, "Le403 de préflight identité retire aussi les anciennes données");
+    identityDenied = false; await tab("Actualiser"); await page.getByRole("button", { name: /Ouvrir administration/ }).waitFor(); await choose("administration");
+    await workerPanel.getByText("Lecture réussie", { exact: true }).waitFor();
+    await workerPanel.getByRole("button", { name: "Détails", exact: true }).first().click();
+    brokerDenied = true; await page.evaluate(() => { window.__humanAdvance(31000); window.__humanPoll.forEach((poll) => poll()); });
+    await page.getByRole("heading", { name: "Fédération interdite", exact: true }).waitFor();
+    assert.equal(await page.locator("dialog, .human-broker-table").count(), 0, "Un403 retire immédiatement les deux jambes et le détail");
+    await captureBrokerState("federation-forbidden", [320]);
+    assert.ok(!requests.some(({ path }) => /\/human\/(resources|events|export|stream|brokers)(?:[/?]|$)/.test(path)));
+    await tab("Se déconnecter"); assert.equal(await page.locator(".human-shell, dialog").count(), 0);
+    assert.equal(await page.evaluate(() => localStorage.length + sessionStorage.length), 0);
+  } else if (scenario === "workers") {
     await loginHuman(); assert.equal(requests.length, 1);
     await page.evaluate(() => { window.__humanHold = true; }); await choose("administration");
     await page.waitForFunction(() => window.__humanHeld.length > 0);

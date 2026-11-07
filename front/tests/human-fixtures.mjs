@@ -47,6 +47,15 @@ export const workerPage = (items = [worker()], extra = {}) => ({ version: 1, con
   runtime_inventory: "unknown", registry_status: "available", items, has_more: false, next_cursor: null,
   read_receipt: { request_id: uuid, audit_event_id: secondUuid, received_at: "2026-11-01T12:00:02Z" }, ...extra });
 
+export const federationContext = () => ({ ...context("context-federation", "administration"),
+  capabilities: ["read_worker_registry", "read_broker_registry"] });
+export const federationIdentity = () => ({ ...identity(), contexts: [federationContext()] });
+export const federationPage = (extra = {}) => ({ version: 1, source: "tenant_federation_registry", consistency: "independent_snapshots",
+  coverage: "partial", runtime_inventory: "unknown",
+  workers: workerPage(undefined, { context_id: "context-federation" }),
+  brokers: brokerPage(undefined, { context_id: "context-federation", evaluated_at: "2026-11-01T12:00:03Z",
+    read_receipt: { request_id: secondUuid, audit_event_id: uuid, received_at: "2026-11-01T12:00:03Z" } }), ...extra });
+
 // A full requested page, with registry states and old-incarnation evidence kept distinct.
 export const denseBrokerItems = () => {
   const id = (number) => `10000000-0000-4000-8000-${number.toString(16).padStart(12, "0")}`;
