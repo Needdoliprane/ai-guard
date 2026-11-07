@@ -1,6 +1,8 @@
 //! Directed worker messaging contracts. A message is tenant business data, not audit content.
 use serde::{Deserialize, Serialize};
 
+pub mod client;
+
 pub const MAX_MESSAGE_BYTES: usize = 65_536;
 pub const MAX_RETAINED_BODY_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_RETAINED_MESSAGES: u64 = 1024;
