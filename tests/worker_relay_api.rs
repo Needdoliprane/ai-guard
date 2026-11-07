@@ -4,6 +4,9 @@ mod support;
 #[path = "support/relay_client_cases.rs"]
 mod client_cases;
 
+#[path = "support/control_lane_cases.rs"]
+mod control_lane_cases;
+
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{AuditCapacityV1, EventQuery, Store, WorkloadAuditPolicyV1},

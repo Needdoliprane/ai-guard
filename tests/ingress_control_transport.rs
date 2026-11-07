@@ -84,12 +84,33 @@ fn closed_route_table_rejects_other_authorities_and_path_aliases() {
         control_route(&Method::POST, "/api/v1/brokers/heartbeat"),
         Some(ControlRouteIdentity::BrokerPresence)
     );
+    for (method, path) in [
+        (Method::POST, "/api/v1/relay/messages"),
+        (Method::GET, "/api/v1/relay/messages"),
+        (
+            Method::POST,
+            "/api/v1/relay/messages/11111111-1111-4111-8111-111111111111/ack",
+        ),
+        (
+            Method::POST,
+            "/api/v1/relay/messages/00000000-0000-0000-0000-000000000000/ack",
+        ),
+    ] {
+        assert_eq!(
+            control_route(&method, path),
+            Some(ControlRouteIdentity::WorkerRelay)
+        );
+    }
     for path in [
         "/api/v1/events",
         "/api/events",
         "/api/v1/stream",
         "/auth/oidc/login",
-        "/api/v1/relay/messages",
+        "/api/relay/messages",
+        "/api/v1/relay/messages?limit=1",
+        "/api/v1/relay/messages/not-a-uuid/ack",
+        "/api/v1/relay/messages/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA/ack",
+        "/api/v1/relay/messages/11111111111141118111111111111111/ack",
         "/api/v1/brokers/kubernetes/held-creates",
         "/api/v1/human/context",
         "/api//v1/control/events",
