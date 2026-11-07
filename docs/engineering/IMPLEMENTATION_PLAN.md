@@ -1,5 +1,22 @@
 # Plan d'industrialisation
 
+## 7 novembre — relais publié, reprises et réserve d'audit en parallèle
+
+Les frames, la voie HTTP worker authentifiée, le helper Rust local et les profils
+fermés du client sont publiés avec leurs guides EN/FR et preuves de composants.
+L'interface fédérée est intégrée ; les parcours multi-hôtes et runtime restent
+à raccorder et qualifier. Ces livraisons ne ferment aucun gate global.
+
+La composition D5 conserve son worktree tant que le nouveau test Export n'atteint
+pas son oracle. Sa compatibilité V1/V2 est vérifiée séparément. Une régression
+indépendante reproduit la livraison D5 refusée au contrôle et la réserve durable
+consommable par les écritures ordinaires ; la correction avance en parallèle.
+Préserver réserves d'identité, idempotence, données existantes et attribution
+du rôle au point d'admission Rust. Après validation et revue, raccorder les
+producteurs D5 puis vérifier les scénarios de reprise réellement couverts.
+Fencing complet, approbation humaine authentifiée, relais runtime, fédération
+physique, Kubernetes complet et qualifications réelles restent obligatoires.
+
 ## 6 novembre — reprise FD intégrée, réconciliateur D5 en validation
 
 La récupération backing EMFILE/ENFILE est intégrée avec témoin postcommit,

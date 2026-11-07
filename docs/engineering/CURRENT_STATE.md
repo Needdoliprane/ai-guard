@@ -21,10 +21,14 @@ Une qualification de toute l'intégration reste distincte de ces résultats.
 Les deux parents Cancel/query passent ensemble sur le gel44. La préparation
 de composition D5 a ensuite révélé une incompatibilité du diagnostic avec le
 décodeur fermé de `bd57034` : RED55 atteint les trois états known/Pending/Final.
-Le candidat restaure V1 et ajoute un message V2 explicite, sans repli ; sa
-validation est en cours dans une QA isolée. Le test d'abandon Export reste
-à exécuter. Les événements D5 passent encore par l'ingestion ordinaire et son
-budget durable partagé : cet écart de disponibilité reste ouvert. G09 FAIL,
+Le candidat restaure V1 et ajoute un message V2 explicite, sans repli : leurs
+deux parents passent sur le gel56, avec revue source indépendante. Le test
+d'abandon Export ne dépasse pas sa préparation terminale avant le cap120s
+des gels58/59 ; aucun oracle métier n'est crédité. Les événements D5 passent
+encore par l'ingestion ordinaire et son budget durable partagé. Deux nouvelles
+régressions HTTP/SQLite sur59 atteignent leurs assertions FAIL : refus403 de
+la livraison D5 au contrôle et consommation de sa réserve par l'ordinaire au
+total21 d'une petite capacité32. Le correctif distinct est en cours. G09 FAIL,
 aucun gate global clos, aucune nouvelle qualification moteur réel.
 
 ## 7 novembre — permission préflight Kubernetes vérifiée et raccord relais approuvé

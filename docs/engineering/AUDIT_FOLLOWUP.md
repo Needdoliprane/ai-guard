@@ -70,6 +70,16 @@ Les nouveaux faits D5 restent sur `post_event`, ingestion et classe d'écriture
 ordinaires ; la réserve de capacité d'audit n'est pas livrée par ce candidat.
 Les treize constats historiques conservent leur statut et leurs exigences.
 
+La régression distincte `d5_control_audit` reproduit ensuite deux assertions
+sur le gel59 : les trois faits D5 sont absents de l'allowlist de contrôle
+(premier POST refusé403) et `Store::append` peut consommer la réserve C au
+total21 pour une capacité32/C8/I4. HTTP/SQLite et compteurs sont réels dans
+une fixture privée, sans campagne de charge ni moteur. Journal parent SHA
+`533f6935760a62bdcefd80355314d95d861ea97d286c9ce63f0e359d5a62b12e`.
+Un lot séparé traite l'admission Rust de contrôle, ses réserves et le refus
+des mêmes faits en ingestion ordinaire. Ni ce RED, ni V1/V2 PASS56 ne clôturent
+H/I/M ou D5 complet ; l'oracle fonctionnel Export reste non atteint.
+
 Point supplémentaire du 7 novembre : les tests de continuité D5 restent dans
 un worktree séparé, sans intégration du bundle sur la seule base de canaris.
 La fermeture de l'admission STOP après shutdown idle passe trois fonctions

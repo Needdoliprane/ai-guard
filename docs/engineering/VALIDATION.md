@@ -27,8 +27,25 @@ D5 reste dans un candidat séparé. RED54 est un échec de compilation du harnai
 et atteint l'incompatibilité réelle du producteur avec l'ancien décodeur :
 0 PASS,1 FAIL,12,43s après compilation. Journal privé SHA
 `98dda50f825c7a26c6e6976c62c83bf114181d1a3120354bb78e34d180445100`.
-V1 restauré/V2 explicite et nouvel oracle Export sont en validation ; aucun
-PASS de ces nouveaux parcours n'est annoncé à ce stade.
+V1 restauré et V2 explicite passent ensuite chacun un parent sur le gel56.
+Journaux respectifs SHA
+`d3a47708bd9ca745035760d495577d5c44c7ff7aa739dbed712acd279fe6c03a`
+et `d43b1689d73c474a194033238a214e34119342bc4a62d82ef0155c35749a254b`.
+La première commande56, sans cwd correct, est un échec d'argv avant compilation,
+sans oracle, conservé séparément. Le test Export56 échoue ensuite au setup Tokio.
+Le seul correctif de construction de future permet sa compilation58 ; son parent
+atteint toutefois son plafond120,03s. Les phases59 s'arrêtent après claim du
+parent, avant retour de l'observation terminale et avant entrée Export : plafond
+120,01s, sans oracle métier. Journal59 SHA
+`9fc057fba0685367adf1af398000eea948798ce5d167c364347cf0dcdcf04588`.
+Le diagnostic60 conserve les mêmes limites et ajoute des repères de fixture.
+
+Deux tests d'audit indépendants atteignent leurs assertions FAIL sur59, avec
+HTTP/Axum/SQLite et capacité explicite32/C8/I4 : premier fait D5 refusé403
+au contrôle, écriture ordinaire admise à tort dans la réserve au total21.
+Journal SHA `533f6935760a62bdcefd80355314d95d861ea97d286c9ce63f0e359d5a62b12e`.
+Ce sont des baselines reproduites, pas des tests PASS ou une qualification de
+disponibilité sous charge. Leurs correctifs ne sont pas encore intégrés.
 
 ## 7 novembre — préflight create/pods, gel40
 
