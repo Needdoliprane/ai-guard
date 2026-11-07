@@ -272,8 +272,8 @@ Sans politique explicite, chaque capacité événements et octets de payload dé
 |---|---|
 | Ensemble des reçus humains d'un tenant | Moitié de la capacité physique |
 | Reçus humains d'un principal | Un huitième de la capacité physique |
-| Réserve contrôle, protégée des lectures humaines | Un quart de la capacité physique |
-| Réserve maintenance d'identité, protégée des écritures ordinaires | Un huitième de la capacité physique |
+| Réserve contrôle, protégée de l'ingestion ordinaire et des reçus humains/workload | Un quart de la capacité physique |
+| Réserve maintenance d'identité, protégée des écritures ordinaires, contrôle, humaines et workload | Un huitième de la capacité physique |
 
 Les réserves se soustraient à l'occupation totale réelle ; les événements
 ordinaires déjà présents consomment toujours de la place. La maintenance
@@ -285,6 +285,26 @@ Les capacités automatiques trop petites pour représenter les budgets protégé
 désactivent explicitement les nouvelles lectures humaines, sans relever le
 plafond physique ni invalider le stockage existant. Les lectures exigent aussi
 un schéma5–10 validé ; les lectures brokers exigent7–10, les lectures workers exigent10 et partagent les mêmes budgets humains cumulatifs.
+
+En schéma5–10, l'ingestion ordinaire s'arrête à la capacité physique diminuée
+des deux réserves, en événements et en octets indépendamment. Les faits du
+contrôle de confiance, décisions, mutations typées du contrôle et marqueurs
+genesis hors ligne peuvent utiliser la part contrôle, en préservant la réserve
+d'identité. La maintenance d'identité peut utiliser la capacité physique restante.
+La route Rust authentifiée ou la méthode de contrôle typée choisit cette classe ;
+`kind`, provenance et autres labels du payload ne permettent pas de la choisir.
+La [route fermée des faits du contrôle](../../api.md#ingestion-et-faits-du-contrôle--ingestion-and-control-facts)
+accepte les trois genres fixes d'audit D5 uniquement par livraison runner. Leurs
+reçus descriptifs ne prouvent ni retrait ni autorisation d'exécution.
+
+Ce changement d'admission utilise la politique et l'occupation durable existantes ;
+il ne migre ni ne réinitialise la base. Un audit historique valide déjà au-dessus
+du nouveau seuil ordinaire reste lisible et ses rejeux exacts restent idempotents ;
+les nouvelles écritures ordinaires sont refusées. L'occupation existante peut
+aussi ne laisser aucune part contrôle disponible. La préserver et examiner les
+limites réelles, sans supprimer de traces ni changer de credentials. Le refus
+`429 audit_write_budget_exhausted` avec `contact_operator` est cumulatif, sans
+retry périodique.
 
 [audit-capacity.json](examples/audit-capacity.json) donne les défauts résolus pour
 `--max-events 100000`. Copier ce fichier dans le répertoire de contrôle privé

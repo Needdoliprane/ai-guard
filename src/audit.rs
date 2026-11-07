@@ -22,6 +22,43 @@ pub mod authentication;
 mod capacity;
 pub use capacity::WorkloadAuditPolicyV1;
 pub use capacity::{AuditCapacityFailureV1, AuditCapacityPolicyV1, AuditCapacityV1};
+
+pub(crate) const D5_CONTROL_EVENT_KINDS: &[&str] = &[
+    "broker.abandon-before-claim.requested",
+    "broker.retirement.pending",
+    "broker.retirement.final",
+];
+
+/// Closed delivery contract for the authenticated runner audit route. A kind
+/// alone never selects a capacity class; the trusted append method does so.
+pub(crate) fn control_delivery_kind(kind: &str) -> bool {
+    D5_CONTROL_EVENT_KINDS.contains(&kind)
+        || [
+            "command.requested",
+            "command.started",
+            "command.completed",
+            "command.failed",
+            "runtime.submitted",
+            "runtime.invocation.bound",
+            "runtime.terminal.attach.authorized",
+            "runtime.cleanup.failed",
+            "workspace.import.requested",
+            "workspace.import.created",
+            "workspace.import.started",
+            "workspace.import.completed",
+            "workspace.import.recovered",
+            "workspace.import.cleanup.failed",
+            "workspace.scan.requested",
+            "workspace.scan.created",
+            "workspace.scan.started",
+            "workspace.scan.completed",
+            "workspace.export.requested",
+            "workspace.export.completed",
+            "workspace.diff.completed",
+            "observer.coverage",
+        ]
+        .contains(&kind)
+}
 mod broker_registry;
 #[cfg(test)]
 mod capacity_tests;
@@ -942,6 +979,29 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
+        let stored =
+            self.append_with_capacity_class(&tx, event, payload, capacity::Class::OrdinaryWrite)?;
+        self.commit_checked(tx)?;
+        Ok(stored)
+    }
+    /// Trusted runner delivery only: the gateway authenticates before parsing
+    /// the body. This entry point rechecks the closed kind set at commit; no
+    /// Event field can promote ordinary ingestion to the control reserve.
+    pub(crate) fn append_control_event(&self, event: Event) -> anyhow::Result<StoredEvent> {
+        anyhow::ensure!(
+            control_delivery_kind(&event.kind),
+            "unsupported control delivery kind"
+        );
+        let (event, payload) = self.prepare_event(event)?;
+        anyhow::ensure!(
+            control_delivery_kind(&event.kind),
+            "control delivery kind changed during preparation"
+        );
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
         let stored = self.append_in_transaction(&tx, event, payload)?;
         self.commit_checked(tx)?;
         Ok(stored)
@@ -1091,11 +1151,13 @@ impl Store {
         payload: String,
         clock: &workload::AuthorizedControlTimeV1,
     ) -> anyhow::Result<StoredEvent> {
+        // Runner grant/binding methods reach this branch; worker sends/ACKs
+        // and broker heartbeats use the separate workload-class appender.
         self.append_with_authorized_capacity_class_at(
             tx,
             event,
             payload,
-            capacity::Class::OrdinaryWrite,
+            capacity::Class::ControlWrite,
             clock,
             chrono::Utc::now(),
         )
@@ -1151,7 +1213,10 @@ impl Store {
         event: Event,
         payload: String,
     ) -> anyhow::Result<StoredEvent> {
-        self.append_with_capacity_class(tx, event, payload, capacity::Class::OrdinaryWrite)
+        // All callers construct a typed control record, a decision, an offline
+        // genesis, or come from append_control_event's closed runner contract.
+        // Public ingestion deliberately uses OrdinaryWrite directly instead.
+        self.append_with_capacity_class(tx, event, payload, capacity::Class::ControlWrite)
     }
     fn append_identity_in_transaction(
         &self,

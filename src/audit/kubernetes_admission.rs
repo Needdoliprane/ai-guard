@@ -86,7 +86,7 @@ pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<
         "held Kubernetes genesis changed during preparation"
     );
     // Offline schema maintenance, not a broker mutation or emission claim.
-    // Like the earlier typed genesis migrations it consumes ordinary capacity.
+    // Like the earlier typed genesis migrations it consumes control capacity.
     store.append_in_transaction(tx, event, payload)?;
     Ok(())
 }

@@ -246,7 +246,7 @@ impl std::fmt::Display for AuditCapacityFailureV1 {
                 "cumulative human read audit budget exhausted; operator action required"
             }
             Self::OrdinaryWriteBudgetExhausted => {
-                "audit capacity reserved for identity maintenance; operator action required"
+                "audit capacity protected by control or identity reserves; operator action required"
             }
             Self::HumanReadDisabled => {
                 "human read audit disabled: insufficient capacity for protected budgets"
@@ -262,6 +262,7 @@ impl std::error::Error for AuditCapacityFailureV1 {}
 pub(super) enum Class<'a> {
     HumanRead(&'a PrincipalRefV1),
     OrdinaryWrite,
+    ControlWrite,
     IdentityMaintenance,
     Workload(WorkloadAuditPrincipalV1),
 }
@@ -416,6 +417,15 @@ impl Cache {
             }
             Class::IdentityMaintenance => Ok(()),
             Class::OrdinaryWrite => {
+                anyhow::ensure!(
+                    next.within(
+                        physical.subtract(policy.control_reserve.add(policy.identity_reserve)?)?
+                    ),
+                    AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted
+                );
+                Ok(())
+            }
+            Class::ControlWrite => {
                 anyhow::ensure!(
                     next.within(physical.subtract(policy.identity_reserve)?),
                     AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted
