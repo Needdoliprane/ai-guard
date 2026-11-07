@@ -1,5 +1,14 @@
 # Gates de qualification production
 
+Réserve d'audit du7novembre : `1bb3bba` composé dans `d550c34`,19 fonctions
+uniques et toutes cibles vérifiées, revue indépendante. [Preuves](evidence/2026-11-07/d5-control-audit-reserve/README.md).
+Clippy strict est désormais exécuté : **FAIL89 diagnostics**, sans analyse
+réussie des cibles suivantes ou suppression de lint. G12 demeure ouvert.
+Les diagnostics V1/V2 et les deux consumers D5 passent dans une composition
+séparée, mais Export n'a pas encore atteint son oracle. Owner/exec du relais
+restent des composants privés à raccorder ; aucun transport runtime qualifié.
+G09 FAIL,0/12 gates globaux clos.
+
 Export du 7 novembre : filtrage renforcé, modes observés et compatibilité fermée V1
 intégrés après RED et revue. 49 fonctions ciblées passent sur leurs gels et toutes
 cibles du gel 03 compilent ; [preuves](evidence/2026-11-07/workspace-export/README.md).

@@ -59,6 +59,15 @@ l'absence de démarrage est prouvée.
 
 ### Lots de correction et acceptation
 
+Réserve de contrôle : le composant `1bb3bba`, composé dans `d550c34`, passe19
+fonctions et toutes cibles sur ses gels61/62, avec revue. La
+[preuve dédiée](evidence/2026-11-07/d5-control-audit-reserve/README.md) conserve
+le RED59, le canari61 invalide avant budget, son oracle62 corrigé et Clippy
+FAIL89. Le raccord D5 des quatre émissions et du replay lié aux faits validés
+est vérifié en source puis par deux consumers65 ; il reste dans le bundle
+séparé. Un signal froid pré-P sans owner conserve un manque de preuve durable
+et refuse avant POST. Aucun de ces résultats ne clôture H/I/M ou D5 complet.
+
 Point du 7 novembre après composition UI/relais : le helper `000f9ec`, composé
 dans `d903b28`, possède sa [preuve de composant](evidence/2026-11-07/relay-worker-helper/README.md).
 Ses onze fonctions et toutes cibles passent sur52, avec revue indépendante.

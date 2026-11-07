@@ -1,5 +1,32 @@
 # État constaté — suivi du développement
 
+## 7 novembre — réserve d'audit intégrée, composition D5 et raccord relais en validation
+
+Le composant `1bb3bba`, composé et poussé dans `d550c34`, protège la réserve
+de contrôle contre l'ingestion ordinaire. Les plafonds événements/octets et
+les rejeux sont vérifiés par 19 fonctions uniques sur61/62 ; toutes cibles62
+compilent. Les douze ancres restent identiques après composition.
+[Preuves, guides EN/FR et limites](evidence/2026-11-07/d5-control-audit-reserve/README.md).
+**Clippy strict62 échoue avec89 diagnostics** : 61 dead_code et28 autres lints
+sur la bibliothèque. G12 reste ouvert, sans suppression ou qualification globale.
+
+La composition D5 séparée65 passe deux consumers, deux parents de diagnostic
+V1/V2 et toutes cibles. Le test Export progresse au-delà du setup terminal puis
+échoue sur l'ajout d'un helper déjà possédé : le journal exige d'abord sa
+préparation durable sans snapshot. Le harnais est corrigé suivant cet invariant,
+sans changement de production. Le test70 atteint ensuite le chemin Export,
+mais échoue avant la porte runtime d'enregistrement du helper. Ce nouvel
+échec reste en diagnostic ; l'oracle de drainage n'est pas validé.
+Le bundle D5 n'est pas intégré sur ces seuls résultats.
+
+Le propriétaire privé du relais passe douze nouveaux tests et les dix-neuf
+canaris du client sur66. Son admission de production reste fermée. Le port
+exec Docker/Podman est écrit, relu et attend sa QA logicielle ; le Core travaille
+sur l'admission durable qui doit relier ces deux parties. Sa route a été
+reproduite absente (404 au lieu de201) avant implémentation ; le candidat
+logiciel est en revue avant QA. Leurs performances,
+canaux réels et recette A1/A2/B1 restent non qualifiés. G09 FAIL, aucun gate clos.
+
 ## 7 novembre — interface fédérée et helper relais publiés ; diagnostic D5 en correction
 
 L'interface `da5363e` est composée dans `bd57034`, puis le helper Rust

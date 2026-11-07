@@ -1,5 +1,43 @@
 # Validation courante
 
+## 7 novembre — réserve publiée et compositions65/66 distinctes
+
+`1bb3bba` est composé dans `d550c34`, avec12/12 ancres vérifiées. La
+[preuve de réserve](evidence/2026-11-07/d5-control-audit-reserve/README.md)
+sépare18 PASS61, canari corrigé PASS62, toutes cibles62 RC0 et Clippy62
+FAIL89 diagnostics. Les scripts d'installation Clippy ne sont pas des PASS
+d'analyse du projet. Le worktree source du composant a été fermé normalement
+après archive, statut incluant ignorés, contrôle des consommateurs et du push.
+
+D5 composition65 : deux consumers PASS22,27s après correction de l'oracle
+`EventPostFailure::Rejected(503)`, puis deux diagnostics V1/V2 PASS23,24s et
+check toutes cibles RC0/70,92s. Journaux privés SHA respectifs
+`0d945bad10d193bf42f9581018f6df0c501d71a6b7937788dbc4ef6b39cb716c`,
+`627ba483cb9e2aca8e035d1dc085c1da1662f98e5f8b13367c672a7b59898eb7`,
+`47e30150e67cf7dfe92c98e4b5944c862f3be11283f2ea5a3fea25889f94b76d`.
+Export65 FAIL après129,42s, avant entrée Export, sur
+`journal contention requires reconciliation` ; journal SHA
+`e0beaeb3ad030475461b0190bfa8c9c9a87ba418793c901838e71edb37a1deb9`.
+Le plafond du seul processus de fixture est passé de120s à300s après constat
+de progression du setup ; aucun délai worker, Arm, helper ou retry n'a changé.
+Le conflit est recoupé avec l'invariant `checkpoint.rs` exigeant qu'un nouveau
+helper soit introduit sans ownership. Correction du harnais prête, sans PASS
+déduit ; aucune extraction ou réussite d'export annoncée. Export70 atteint
+`actual_export_entry` à88,291s, puis échoue après108,34s de test :
+`actual helper registration never reached its owned runtime gate`. Le code
+retour est101 ; son diagnostic reste ouvert, sans relance automatique.
+
+Admission relais69 : RED vérifié sur la route absente,404 contre201 attendu,
+une fonction échouée (0,20s hors compilation). Journal privé SHA
+`1dec4bba75f6439a76721a3cb8dfb834002920c6f7d0c62c58f2b14b09865032`.
+Le candidat logiciel livré ensuite reste en revue et attend ses tests ciblés.
+
+Relais owner66 :12 nouveaux parents PASS,13 canaris client et6 profils PASS,
+sur leur gel propre, après un E0716 de compilation64 corrigé par liaison de la
+frame avant le select. Ces31 fonctions ne prouvent pas gateway/SQLite pour
+les réponses de ses pairs HTTP déclarés, ni exécution moteur ou admission réelle.
+Le contrôle de production demeure fermé ; les tests n'en font pas un permis.
+
 ## 7 novembre — composants publiés et nouvelle reproduction de compatibilité
 
 L'interface `da5363e` est composée dans `bd57034` (46/46 ancres), le helper
