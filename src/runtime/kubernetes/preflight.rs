@@ -246,6 +246,11 @@ impl KubernetesRuntime {
         let requested = plan.pod(&self.binding)?;
         let target = plan.target(&self.binding)?;
         self.verify_active_authority().await?;
+        self.verify_preflight_create_permission().await?;
+        // The authorization query can outlive either namespace observation.
+        // These reads detect changes; they are not atomic with the POST or
+        // proof that create permission cannot change after its review.
+        self.verify_active_authority().await?;
         let admitted: Value = self
             .transport
             .dry_run_pod(&self.binding.namespace, &requested, &target, guard)

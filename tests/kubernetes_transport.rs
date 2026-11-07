@@ -192,6 +192,45 @@ async fn endpoint_handler(
         .headers()
         .get("authorization")
         .is_some_and(|value| value.as_bytes() == format!("Bearer {TOKEN}").as_bytes());
+    if request.method() == "POST"
+        && request.uri().path() == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+    {
+        assert!(authorized);
+        assert!(request.uri().query().is_none());
+        assert_eq!(
+            request.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(request.headers().get("impersonate-user").is_none());
+        let bytes = axum::body::to_bytes(request.into_body(), 4096)
+            .await
+            .unwrap();
+        let review: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            review,
+            json!({
+                "apiVersion":"authorization.k8s.io/v1", "kind":"SelfSubjectAccessReview",
+                "spec":{"resourceAttributes":{
+                    "namespace":"tenant-a", "group":"", "version":"v1",
+                    "resource":"pods", "verb":"create"
+                }}
+            })
+        );
+        let mut state = state.lock().unwrap();
+        state.requests += 1;
+        state.credentials_valid &= authorized;
+        return Response::builder()
+            .status(201)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "apiVersion":"authorization.k8s.io/v1", "kind":"SelfSubjectAccessReview",
+                    "spec":review["spec"], "status":{"allowed":true}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+    }
     if is_preflight {
         let body = axum::body::to_bytes(request.into_body(), 65536)
             .await
@@ -332,12 +371,12 @@ impl BeforeKubernetesPreflightGuard for PreflightCheck {
         assert_eq!(target, &self.expected);
         let state = self.state.lock().unwrap();
         assert_eq!(
-            state.requests, 2,
-            "both authority GETs must precede authorization"
+            state.requests, 5,
+            "both namespace pairs and the create review must precede authorization"
         );
         assert!(
             state.preflight_posts.is_empty(),
-            "no POST before the consumed check"
+            "no Pod POST before the consumed check"
         );
         if self.reject {
             Err(KubernetesError::PreflightAuthorizationDenied)
@@ -379,7 +418,7 @@ async fn dry_run_sends_only_the_closed_pod_profile_after_the_consumed_target_che
     );
     let state = fixture.state.lock().unwrap();
     assert!(state.credentials_valid);
-    assert_eq!(state.requests, 5);
+    assert_eq!(state.requests, 8);
     assert_eq!(state.preflight_posts.len(), 1);
     let pod = &state.preflight_posts[0];
     assert_eq!(pod["metadata"]["namespace"], "tenant-a");
@@ -505,7 +544,7 @@ async fn dry_run_namespace_recreated_during_post_is_not_reported_as_an_admission
     assert_eq!(error, KubernetesError::AuthorityChanged);
     let state = fixture.state.lock().unwrap();
     assert_eq!(state.preflight_posts.len(), 1);
-    assert_eq!(state.requests, 5);
+    assert_eq!(state.requests, 8);
 }
 
 #[tokio::test]
@@ -620,7 +659,7 @@ async fn dry_run_api_rejection_is_opaque_and_is_not_retried_or_reinterpreted_as_
         assert_eq!(error, KubernetesError::ApiRejected(status));
         let state = fixture.state.lock().unwrap();
         assert_eq!(state.preflight_posts.len(), 1);
-        assert_eq!(state.requests, 3);
+        assert_eq!(state.requests, 6);
         assert!(!format!("{error:?} {error}").contains(PRIVATE_CANARY));
     }
 }

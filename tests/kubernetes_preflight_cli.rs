@@ -342,6 +342,54 @@ async fn kube_handler(State(state): State<ApiState>, request: Request) -> Respon
         format!("Bearer {KUBE}").as_bytes()
     );
     let path = request.uri().path().to_owned();
+    if request.method() == "POST"
+        && path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+    {
+        assert!(request.uri().query().is_none());
+        assert_eq!(
+            request.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert!(request.headers().get("impersonate-user").is_none());
+        let events = state
+            .store
+            .events(&EventQuery {
+                kind: Some("runtime.kubernetes.preflight.requested".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "request audit must be durable before the authorization query"
+        );
+        assert_eq!(events[0].event.source, "trusted-control");
+        assert_eq!(events[0].event.provenance, "declared");
+        assert_eq!(events[0].event.coverage, "partial");
+        let bytes = to_bytes(request.into_body(), 4096).await.unwrap();
+        let review: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            review,
+            json!({
+                "apiVersion":"authorization.k8s.io/v1", "kind":"SelfSubjectAccessReview",
+                "spec":{"resourceAttributes":{
+                    "namespace":"tenant-a", "group":"", "version":"v1",
+                    "resource":"pods", "verb":"create"
+                }}
+            })
+        );
+        return Response::builder()
+            .status(201)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "apiVersion":"authorization.k8s.io/v1", "kind":"SelfSubjectAccessReview",
+                    "spec":review["spec"], "status":{"allowed":true}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+    }
     let body = if request.method() == "POST" {
         assert_eq!(path, "/api/v1/namespaces/tenant-a/pods");
         assert_eq!(

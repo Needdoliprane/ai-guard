@@ -260,6 +260,13 @@ du contrôle de confiance, hors des workers. Voir les contrats officiels
 d'[autorisation dry-run](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run-authorization)
 et de [correspondance des verbes](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#determine-the-request-verb).
 
+Le préflight exige aussi l'accès à la création d'une `SelfSubjectAccessReview`.
+Il demande uniquement si cette même identité Kubernetes peut `create` des
+`pods` core `v1` dans le Namespace retenu. La question utilise la même autorité
+HTTPS, AC et les mêmes credentials Kubernetes figés que le dry-run, sans
+impersonation ou périmètre libre fourni par l'appelant. La commande ne
+provisionne aucun rôle ni droit.
+
 Préparer deux **nouveaux** fichiers à partir des
 [exemples de plan](examples/preflight-plan.json) et de
 [contrôle](examples/preflight-control.json). Ce sont des modèles, pas des
@@ -339,12 +346,40 @@ Le contrôle vérifie d'abord l'identité/namespace du serveur et un reçu durab
 exact de `runtime.kubernetes.preflight.requested`. Ensuite seulement, un guard
 privé consommable lié à la cible et au reçu peut permettre le dry-run. Il
 revérifie les fichiers retenus d'autorité, de plan, de contrôle et de jeton
-runner et expire 60 secondes après l'accusé. L'adaptateur effectue les GET des
-deux ancres Namespace avant et après son unique POST :
+runner et expire 60 secondes après l'accusé. L'adaptateur commence par les GET
+des deux ancres Namespace, puis soumet la question d'autorisation distincte :
+
+```text
+POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews
+```
+
+Seul un avis `Allowed` pour create/pods sans erreur d'évaluation permet de
+poursuivre. Un refus explicite ou un avis inconnu, dont une erreur d'évaluation,
+échoue avant consommation du guard et avant tout POST Pod. L'adaptateur relit
+les deux ancres après l'avis et consomme le guard immédiatement avant son seul
+POST de dry-run Pod :
 
 ```text
 POST /api/v1/namespaces/{retained-namespace}/pods?dryRun=All&fieldValidation=Strict
 ```
+
+Les deux ancres sont encore relues après la réponse Pod. Un parcours réussi
+compte donc huit requêtes Kubernetes : deux GET initiaux, un POST d'avis,
+deux GET avant le guard, un POST Pod et deux GET finaux. Cinq requêtes précèdent
+la consommation du guard ; un POST Pod rejeté termine après six. Ces
+observations successives ne constituent pas une garantie atomique de permission
+ou de NamespaceUID. Les permissions peuvent changer après `Allowed` et les
+erreurs du vrai POST Pod restent des erreurs. Timeout par requête et expiration
+du guard restent appliqués ; huit requêtes ne signifient pas un délai total
+de huit secondes.
+
+L'audit résultat utilise `preflight_permission_denied` pour un refus explicite
+et `preflight_permission_unconfirmed` pour un avis inconnu. Le texte distant
+du motif et de l'erreur d'évaluation n'est ni conservé ni affiché. Ces contrôles
+n'établissent ni droit de nettoyage, ni absence de droits plus larges, isolation
+CNI, exclusivité des acteurs ou activation d'une charge. Le comportement de
+`doctor` limité aux GET et les douze avis demandés par
+`doctor --check-permissions` restent distincts et inchangés.
 
 Le profil Pod comporte une commande fixe `/usr/bin/id`, sans argv ni
 environnement métier fournis par l'appelant, UID/GID 1000, racine en lecture
