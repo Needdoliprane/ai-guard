@@ -348,3 +348,30 @@ export function humanWorkersUrl(cursor: string | null = null): string {
   if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
   return `/api/v1/human/workers?${query}`;
 }
+
+export const HUMAN_REGISTRY_PAGE_BYTES = 256 * 1024;
+export const HUMAN_FEDERATION_PAGE_BYTES = 2 * HUMAN_REGISTRY_PAGE_BYTES + 4096;
+export interface HumanFederationWorkerPage {
+  version: 1; source: "tenant_federation_registry"; consistency: "independent_snapshots";
+  coverage: "partial"; runtime_inventory: "unknown"; workers: HumanWorkerPage; brokers: HumanBrokerPage;
+}
+export interface HumanFederationSelection { workerCursor?: string | null; brokerCursor?: string | null }
+/** Presentation gating only. Rust remains the authorization authority for every read. */
+export function canReadHumanFederation(context: HumanContext | null): boolean {
+  return context?.mode === "administration" && context.capabilities.includes("read_worker_registry") && context.capabilities.includes("read_broker_registry");
+}
+export function parseHumanFederationWorkerPage(value: unknown): HumanFederationWorkerPage {
+  closed(value, ["version", "source", "consistency", "coverage", "runtime_inventory", "workers", "brokers"]);
+  requireContract(value.version === 1 && value.source === "tenant_federation_registry" && value.consistency === "independent_snapshots" &&
+    value.coverage === "partial" && value.runtime_inventory === "unknown");
+  // Both projections must decode before any part of the composition can be published.
+  const workers = parseHumanWorkerPage(value.workers); const brokers = parseHumanBrokerPage(value.brokers);
+  for (const page of [workers, brokers]) requireContract(new TextEncoder().encode(JSON.stringify(page)).byteLength <= HUMAN_REGISTRY_PAGE_BYTES);
+  return { version: 1, source: "tenant_federation_registry", consistency: "independent_snapshots", coverage: "partial", runtime_inventory: "unknown", workers, brokers };
+}
+export function humanFederationWorkersUrl(selection: HumanFederationSelection = {}): string {
+  const query = new URLSearchParams({ worker_limit: "25", broker_limit: "25" });
+  if (selection.workerCursor != null) { requireContract(opaque(selection.workerCursor)); query.set("worker_cursor", selection.workerCursor); }
+  if (selection.brokerCursor != null) { requireContract(opaque(selection.brokerCursor)); query.set("broker_cursor", selection.brokerCursor); }
+  return `/api/v1/human/federation/workers?${query}`;
+}

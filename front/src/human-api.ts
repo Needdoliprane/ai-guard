@@ -1,6 +1,6 @@
 import { createSseParser } from "./sse.ts";
-import { HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
-import type { HumanContext, HumanEventPage, HumanIdentity, HumanSelection, ResourceRef } from "./human-model.ts";
+import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
+import type { HumanContext, HumanEventPage, HumanIdentity, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -87,7 +87,7 @@ export class HumanApiClient {
     }
     try { return JSON.parse(text); } catch { throw new HumanContractError(); }
   }
-  async #json(response: Response, snapshot: Snapshot): Promise<{ value: unknown; bytes: number }> {
+  async #json(response: Response, snapshot: Snapshot, maxBytes = 256 * 1024): Promise<{ value: unknown; bytes: number }> {
     if (!response.body) throw new HumanContractError();
     const reader = response.body.getReader(); const decoder = new TextDecoder();
     let bytes = 0; let text = "";
@@ -96,7 +96,7 @@ export class HumanApiClient {
         const chunk = await reader.read(); this.#assert(snapshot);
         if (chunk.done) break;
         bytes += chunk.value.byteLength;
-        if (bytes > 256 * 1024) throw new Error("Réponse trop volumineuse. Réduisez la sélection ou contactez l’opérateur.");
+        if (bytes > maxBytes) throw new Error("Réponse trop volumineuse. Réduisez la sélection ou contactez l’opérateur.");
         text += decoder.decode(chunk.value, { stream: true });
       }
       text += decoder.decode();
@@ -105,7 +105,8 @@ export class HumanApiClient {
   }
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
-    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+    if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
+      !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
     if (this.#readBudgetStopped) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
@@ -128,6 +129,14 @@ export class HumanApiClient {
       void response.body?.cancel().catch(() => {}); throw error;
     }
     if (!this.#current(snapshot)) { void response.body?.cancel().catch(() => {}); throw new HumanSuperseded(); }
+    if (response.status === 403 && (path === "/api/v1/human/identity" || /^\/api\/v1\/human\/federation\/workers(?:\?|$)/.test(path))) {
+      // These reads must retire displayed data as soon as refusal headers arrive.
+      // No error body or cancellation acknowledgement may delay that refusal.
+      // Other routes keep their existing structured context and stream errors.
+      const error = new HumanApiError(403, "permission_denied",
+        "Consultation refusée par le contrôle (HTTP 403). Le motif détaillé n’a pas été lu. Relisez vos accès ou faites vérifier vos permissions.", "review_permissions");
+      void response.body?.cancel().catch(() => {}); this.#reject(error);
+    }
     if (!response.ok) {
       let value: unknown = null;
       try { value = (await this.#json(response, snapshot)).value; } catch { this.#assert(snapshot); }
@@ -212,6 +221,13 @@ export class HumanApiClient {
     const snapshot = this.#snapshot(true);
     const body = await this.#json(await this.#request(humanWorkersUrl(cursor), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
+  }
+  async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
+    const snapshot = this.#snapshot(true);
+    const body = await this.#json(await this.#request(humanFederationWorkersUrl(selection), snapshot, signal), snapshot, HUMAN_FEDERATION_PAGE_BYTES);
+    const page = parseHumanFederationWorkerPage(body.value);
+    this.#validatePage(page.workers, snapshot); this.#validatePage(page.brokers, snapshot);
+    return this.#finishRead(page, snapshot, signal);
   }
   async events(selection: HumanSelection, signal?: AbortSignal): Promise<HumanEventPage> {
     const snapshot = this.#snapshot(true);

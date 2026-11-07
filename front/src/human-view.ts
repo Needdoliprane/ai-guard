@@ -1,15 +1,17 @@
 import { button, el, icon } from "./dom.ts";
 import { formatDate } from "./model.ts";
 import { HumanApiClient, HumanApiError, HumanSuperseded } from "./human-api.ts";
-import { HumanContractError } from "./human-model.ts";
+import { HumanContractError, canReadHumanFederation } from "./human-model.ts";
 import "./human.css";
-import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
+import type { HumanBroker, HumanBrokerPage, HumanWorker, HumanWorkerPage, HumanWorkerAssociation, HumanWorkerTimeStatus, HumanFederationWorkerPage, HumanContext, HumanEvent, HumanEventPage, HumanIdentity, HumanPage, HumanResource, HumanView } from "./human-model.ts";
 
 interface ReadState<T> {
   value: T | null; loading: boolean; error: string; loadedAt: string | null; stale: boolean;
   cursor: string | null; history: (string | null)[];
 }
 interface HumanChrome { brand: () => HTMLElement; themeButton: () => HTMLButtonElement }
+type FederationLeg = "workers" | "brokers";
+interface PagePosition { cursor: string | null; history: (string | null)[] }
 const readState = <T>(): ReadState<T> => ({ value: null, loading: false, error: "", loadedAt: null, stale: false, cursor: null, history: [] });
 const modeName = (context: HumanContext) => context.mode === "administration" ? "Administration" : "Personnel";
 const kindName: Record<HumanResource["resource"]["kind"], string> = { session: "Session", sandbox: "Sandbox", agent: "Agent", project: "Projet" };
@@ -19,7 +21,7 @@ function workerTimeLabel(value: string | null, status: HumanWorkerTimeStatus) {
   if (status === "unknown") return "Inconnu · date hors format ou non interprétable";
   return value && Number.isFinite(Date.parse(value)) ? formatDate(value, true) : value ?? "Inconnu";
 }
-type DashboardMode = "contexts" | "resources" | "events" | "brokers" | "workers";
+type DashboardMode = "contexts" | "resources" | "events" | "brokers" | "workers" | "federation";
 function badge(label: string, tone = "neutral") { return el("span", `badge badge-${tone}`, label); }
 function action(label: string, key: string, call: () => void, disabled = false) {
   const node = button(label, "button button-secondary", call); node.dataset.focusKey = key; node.disabled = disabled; return node;
@@ -54,6 +56,13 @@ export class HumanDashboard {
   #workerGeneration = 0;
   #workerForbidden = false;
   #workerLastLaunch = 0;
+  #federation = readState<HumanFederationWorkerPage>();
+  #federationPositions: Record<FederationLeg, PagePosition> = { workers: { cursor: null, history: [] }, brokers: { cursor: null, history: [] } };
+  #federationAbort = new AbortController();
+  #federationGeneration = 0;
+  #federationForbidden = false;
+  #federationRefusal = "";
+  #federationLastLaunch = 0;
   #selection: { item: HumanResource; view: HumanView } | null = null;
   #mode: DashboardMode = "contexts";
   #generation = 0;
@@ -87,7 +96,7 @@ export class HumanDashboard {
   #mounted = false;
   #visibility = () => {
     if (document.visibilityState !== "visible") { this.#streamAbort.abort(); return; }
-    if (this.#closed || this.#api.readBudgetStopped || (this.#mode === "brokers" && this.#brokerForbidden || this.#mode === "workers" && this.#workerForbidden)) return;
+    if (this.#closed || this.#api.readBudgetStopped || (this.#mode === "brokers" && this.#brokerForbidden || this.#mode === "workers" && this.#workerForbidden || this.#mode === "federation" && this.#federationForbidden)) return;
     const generation = this.#generation;
     void this.#loadIdentity().then((success) => {
       if (!success || this.#closed || generation !== this.#generation || !this.#context) return;
@@ -107,7 +116,7 @@ export class HumanDashboard {
       },
       onReadBudgetExhausted: () => {
         this.#streamAbort.abort(); this.#exportAbort.abort(); clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
-        this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true;
+        this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true; this.#federation.stale = true;
         this.#streamStatus = "Lecture automatique suspendue"; this.#render();
       },
     });
@@ -138,6 +147,7 @@ export class HumanDashboard {
     this.#context = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
     this.#purgeBrokers(); this.#brokerForbidden = false; this.#brokerLastLaunch = 0;
     this.#purgeWorkers(); this.#workerForbidden = false; this.#workerLastLaunch = 0;
+    this.#purgeFederation(); this.#federationForbidden = false; this.#federationRefusal = ""; this.#federationLastLaunch = 0;
     if (this.#identity) this.#identity = { ...this.#identity, contexts: [] };
     this.#identityLoading = false;
     this.#exporting = false; this.#exportMessage = ""; this.#exportPages = 0; this.#exportBytes = 0;
@@ -159,6 +169,12 @@ export class HumanDashboard {
     this.#workerGeneration++; this.#workerAbort.abort(); this.#workerAbort = new AbortController(); this.#workers = readState();
     if (this.#mode === "workers") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
   }
+  #canFederation() { return canReadHumanFederation(this.#context); }
+  #purgeFederation() {
+    this.#federationGeneration++; this.#federationAbort.abort(); this.#federationAbort = new AbortController(); this.#federation = readState();
+    this.#federationPositions = { workers: { cursor: null, history: [] }, brokers: { cursor: null, history: [] } };
+    if (this.#mode === "federation") { this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null; }
+  }
   #stopViewReads() {
     this.#generation++; this.#selectionGeneration++; this.#scope.abort(); this.#scope = new AbortController();
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController(); this.#streamAbort.abort();
@@ -172,20 +188,26 @@ export class HumanDashboard {
     if (mode === "contexts") {
       this.#api.clearContext(); this.#purgeContext(); this.#mode = mode;
       if (!this.#api.readBudgetStopped) void this.#loadIdentity();
+    } else if (mode === "federation" && this.#canFederation()) {
+      if (this.#mode !== mode) {
+        this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode;
+      }
+      this.#streamStatus = "Fédération · snapshots indépendants"; this.#refreshActive(false);
     } else if (mode === "workers" && this.#canWorkers()) {
       if (this.#mode !== mode) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
-        this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode;
       }
       this.#streamStatus = "Registre · lectures ponctuelles"; this.#refreshActive(false);
     } else if (mode === "brokers" && this.#canBrokers()) {
       if (this.#mode !== mode) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
-        this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode;
+        this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode;
       }
       this.#streamStatus = "Registre · sans flux temps réel"; this.#refreshActive(false);
     } else if (mode === "resources" && this.#canResources()) {
-      this.#stopViewReads(); this.#purgeBrokers(); this.#purgeWorkers(); this.#mode = mode; this.#resources = readState();
+      this.#stopViewReads(); this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#resources = readState();
       this.#events = readState(); this.#selection = null;
       this.#startStream(); this.#refreshActive(false);
     } else if (mode === "events" && this.#selection && this.#canResources()) {
@@ -195,7 +217,8 @@ export class HumanDashboard {
   }
   #refreshActive(automatic: boolean) {
     if (this.#closed || this.#api.readBudgetStopped || automatic && document.visibilityState !== "visible") return;
-    if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
+    if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) void this.#loadFederation(undefined, automatic);
+    else if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) void this.#loadWorkers(undefined, undefined, automatic);
     else if (this.#mode === "brokers" && this.#canBrokers() && !this.#brokerForbidden) void this.#loadBrokers(undefined, undefined, automatic);
     else if (this.#mode === "resources" && this.#canResources()) void this.#loadResources();
     else if (this.#mode === "events" && this.#selection && this.#canResources()) void this.#loadEvents();
@@ -224,32 +247,32 @@ export class HumanDashboard {
     this.#scopeLabel!.textContent = `${this.#identity?.display_name ?? "Compte personnel"}${this.#context ? ` · ${modeName(this.#context)} · ${this.#context.tenant_id}` : ""}`;
     this.#streamLabel!.textContent = this.#context ? this.#streamStatus : "Aucun contexte sélectionné";
     this.#notice.hidden = !this.#message; this.#notice.textContent = this.#message;
-    const destinations: DashboardMode[] = ["contexts", "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : [])];
+    const destinations: DashboardMode[] = ["contexts", "resources", "events", ...(this.#canBrokers() ? ["brokers" as const] : []), ...(this.#canWorkers() ? ["workers" as const] : []), ...(this.#canFederation() ? ["federation" as const] : [])];
     const nav = destinations.map((mode) => {
-      const label = { contexts: "Contextes", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers" }[mode];
+      const label = { contexts: "Contextes", resources: "Ressources", events: "Événements", brokers: "Brokers", workers: "Workers", federation: "Fédération" }[mode];
       const node = action(label, `human-nav-${mode}`, () => this.#openView(mode),
         mode === "resources" && !this.#canResources() || mode === "events" && (!this.#selection || !this.#canResources()));
       node.className = "button human-tab"; if (mode === this.#mode) node.setAttribute("aria-current", "page"); return node;
     });
     this.#navigation.replaceChildren(el("div", "human-nav", ...nav), action("Actualiser", "human-refresh", () => {
       if (this.#mode === "contexts") void this.#loadIdentity(); else this.#refreshActive(false);
-    }, this.#identityLoading || this.#api.readBudgetStopped || (this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden) || this.#mode === "workers" && (this.#workers.loading || this.#workerForbidden))));
-    const heading = el("h1", "", { contexts: "Choisir un contexte.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant." }[this.#mode]);
+    }, this.#identityLoading || this.#api.readBudgetStopped || (this.#mode === "brokers" && (this.#brokers.loading || this.#brokerForbidden) || this.#mode === "workers" && (this.#workers.loading || this.#workerForbidden) || this.#mode === "federation" && (this.#federation.loading || this.#federationForbidden))));
+    const heading = el("h1", "", { contexts: "Choisir un contexte.", resources: "Ressources autorisées.", events: "Événements autorisés.", brokers: "Brokers enregistrés du tenant.", workers: "Workers enregistrés du tenant.", federation: "Workers et brokers du tenant." }[this.#mode]);
     heading.tabIndex = -1;
     this.#page.replaceChildren(el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
-      el("p", "page-description", this.#mode === "workers" ? "Workers de tout le tenant · autorisation read_worker_registry. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
+      el("p", "page-description", this.#mode === "federation" ? "Vue d’administration autorisée par read_worker_registry et read_broker_registry. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · autorisation read_worker_registry. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
         "Les permissions sont vérifiées par le serveur. Une ressource visible ne donne aucun droit implicite sur son contenu ou son export.")),
       ...(this.#api.readBudgetStopped ? [el("div", "control-error human-budget-stop", el("p", "", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur ; changer de vue ou de contexte ne réinitialise pas ce budget."),
         action("Relire après intervention de l’opérateur", "human-operator-retry", () => {
           this.#api.allowReadAfterOperatorAction();
           void this.#refreshAfterOperatorAction();
-        }, this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#resources.loading || this.#events.loading))] : []),
+        }, this.#identityLoading || this.#brokers.loading || this.#workers.loading || this.#federation.loading || this.#resources.loading || this.#events.loading))] : []),
       this.#context ? el("div", "info-strip human-context-summary", icon("shield"), el("div", "",
         el("strong", "", `${modeName(this.#context)} · ${this.#context.tenant_id}`),
         el("p", "", `Organisation : ${this.#context.organization_scope}`),
         el("p", "", `Contexte valable jusqu’au ${formatDate(this.#context.expires_at, true)}. Source : identité authentifiée du contrôle.`))) : "",
-      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#renderEvents());
+      this.#mode === "contexts" ? this.#renderContexts() : this.#mode === "resources" ? this.#renderResources() : this.#mode === "brokers" ? this.#renderBrokers() : this.#mode === "workers" ? this.#renderWorkers() : this.#mode === "federation" ? this.#renderFederation() : this.#renderEvents());
     if (active && focusScope) {
       const replacement = key ? [...focusScope.querySelectorAll<HTMLElement>("[data-focus-key]")]
         .find((node) => node.dataset.focusKey === key && node.isConnected && !node.matches(":disabled") &&
@@ -260,6 +283,9 @@ export class HumanDashboard {
     }
   }
   async #refreshAfterOperatorAction() {
+    if (this.#mode === "federation" && this.#canFederation() && !this.#federationForbidden) {
+      await this.#loadFederation(undefined, false, true); return;
+    }
     if (this.#mode === "workers" && this.#canWorkers() && !this.#workerForbidden) {
       await this.#loadWorkers(undefined, undefined, false, true); return;
     }
@@ -287,8 +313,13 @@ export class HumanDashboard {
       return true;
     } catch (error) {
       if (!this.#closed && generation === this.#generation && !(error instanceof HumanSuperseded)) {
-        this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true;
-        this.#message = this.#context ? `Revalidation des accès impossible. ${failure(error)}` : this.#message;
+        if (error instanceof HumanApiError && error.status === 403) {
+          this.#api.clearContext(); this.#purgeContext(); this.#mode = "contexts";
+          this.#identityError = failure(error); this.#message = "Revalidation des accès refusée. Les données du contexte ont été retirées ; relisez vos accès.";
+        } else {
+          this.#identityError = failure(error); this.#resources.stale = true; this.#events.stale = true; this.#brokers.stale = true; this.#workers.stale = true; this.#federation.stale = true;
+          this.#message = this.#context ? `Revalidation des accès impossible. ${failure(error)}` : this.#message;
+        }
       }
       return false;
     }
@@ -316,6 +347,7 @@ export class HumanDashboard {
           try {
             this.#purgeContext(); this.#context = this.#api.selectContext(context.id); this.#message = "";
             if (this.#canResources()) this.#openView("resources");
+            else if (this.#canFederation()) this.#openView("federation");
             else if (this.#canWorkers()) this.#openView("workers");
             else if (this.#canBrokers()) this.#openView("brokers");
             else { this.#mode = "contexts"; this.#message = "Ce contexte n’offre aucune vue de consultation disponible avec ses capacités. Faites vérifier vos accès."; this.#render(); }
@@ -335,15 +367,56 @@ export class HumanDashboard {
       state.value ? el("span", "muted", `Reçu du contrôle : ${formatDate(state.value.read_receipt.received_at, true)}`) : null);
     node.setAttribute("role", "status"); return node;
   }
-  #pagination<T extends { items: unknown[]; has_more: boolean; next_cursor: string | null }>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void) {
+  #pagination<T extends { items: unknown[]; has_more: boolean; next_cursor: string | null }>(state: ReadState<T>, load: (cursor: string | null, history: (string | null)[]) => void, key = "human", label?: string) {
     const blocked = state.loading || this.#api.readBudgetStopped;
-    return el("div", "table-footer control-pagination", el("span", "control-page-summary",
+    const node = el("div", "table-footer control-pagination", el("span", "control-page-summary",
       state.value ? `${state.value.items.length} résultat(s) sur cette page · page ${state.history.length + 1}${state.value.has_more || state.history.length ? " · lecture partielle" : ""}` : "Sélection autorisée inconnue"),
       el("div", "control-page-actions",
-        state.history.length || state.error ? action("Première page", "human-first", () => load(null, []), blocked) : null,
-        state.history.length ? action("Page précédente", "human-previous", () => load(state.history.at(-1) ?? null, state.history.slice(0, -1)), blocked) : null,
-        state.value?.next_cursor ? action("Page suivante", "human-next", () => load(state.value?.next_cursor ?? null, [...state.history, state.cursor]), blocked || state.history.length >= 100) :
+        state.history.length || state.error ? action("Première page", `${key}-first`, () => load(null, []), blocked) : null,
+        state.history.length ? action("Page précédente", `${key}-previous`, () => load(state.history.at(-1) ?? null, state.history.slice(0, -1)), blocked) : null,
+        state.value?.next_cursor ? action("Page suivante", `${key}-next`, () => load(state.value?.next_cursor ?? null, [...state.history, state.cursor]), blocked || state.history.length >= 100) :
           state.value ? el("span", "muted", "Fin de cette sélection à cette lecture") : null));
+    if (label) { node.setAttribute("role", "group"); node.setAttribute("aria-label", label); }
+    return node;
+  }
+  async #loadFederation(position?: { leg: FederationLeg; cursor: string | null; history: (string | null)[] }, automatic = false, operatorRetry = false) {
+    if (!this.#canFederation() || this.#mode !== "federation" || this.#closed || this.#federation.loading || this.#federationForbidden ||
+      this.#api.readBudgetStopped && !operatorRetry || automatic && (document.visibilityState !== "visible" || Date.now() - this.#federationLastLaunch < 30000)) return;
+    const state = this.#federation; const generation = this.#generation; const request = this.#federationGeneration;
+    const positions = { ...this.#federationPositions, ...(position ? { [position.leg]: { cursor: position.cursor, history: [...position.history] } } : {}) };
+    this.#federationLastLaunch = Date.now(); state.loading = true; this.#render();
+    try {
+      const page = await this.#api.federationWorkers({ workerCursor: positions.workers.cursor, brokerCursor: positions.brokers.cursor }, this.#federationAbort.signal);
+      if (this.#closed || generation !== this.#generation || request !== this.#federationGeneration || this.#mode !== "federation" || !this.#canFederation()) return;
+      this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
+      // Publish both checked legs together. Neither a failed read nor a late callback moves one position alone.
+      this.#federationPositions = positions;
+      state.value = page; state.loadedAt = new Date().toISOString(); state.error = ""; state.stale = false;
+    } catch (error) {
+      if (this.#closed || generation !== this.#generation || request !== this.#federationGeneration || error instanceof HumanSuperseded) return;
+      if (error instanceof HumanApiError && error.status === 403) {
+        this.#purgeFederation(); this.#purgeWorkers(); this.#purgeBrokers();
+        this.#federationForbidden = true; this.#federationRefusal = failure(error); this.#federation.error = this.#federationRefusal; this.#federation.stale = true;
+      } else { state.error = failure(error); state.stale = true; }
+    } finally {
+      state.loading = false;
+      if (!this.#closed && generation === this.#generation && this.#mode === "federation") this.#render();
+    }
+  }
+  #renderFederation() {
+    const state = this.#federation;
+    const workers: ReadState<HumanWorkerPage> = { ...state, ...this.#federationPositions.workers, value: state.value?.workers ?? null };
+    const brokers: ReadState<HumanBrokerPage> = { ...state, ...this.#federationPositions.brokers, value: state.value?.brokers ?? null };
+    const description = el("div", "info-strip human-federation-coverage", icon("shield"), el("div", "",
+      badge("Couverture partielle", "amber"), el("p", "", "Source tenant_federation_registry · independent_snapshots · inventaire runtime inconnu."),
+      el("p", "", "Les deux registres sont évalués séparément. Chaque pagination relit les deux pages avec leurs positions et reçus propres. Aucun total du tenant ni snapshot global n’est déduit."),
+      el("p", "", "Les brokers enregistrés restent affichés sans worker associé sur la page courante. Un heartbeat non reçu, un bail périmé ou révoqué ne prouve ni absence d’activité, ni arrêt d’un worker, ni libération de quota.")));
+    return el("div", "human-federation", description,
+      this.#federationForbidden ? el("div", "control-error", el("p", "", this.#federationRefusal), action("Relire mes accès", "human-federation-access", () => this.#openView("contexts"))) :
+        state.error ? this.#error(state.error, () => { void this.#loadFederation(); }) : null,
+      this.#federationForbidden ? empty("Fédération interdite", "Les deux pages, détails et positions de lecture ont été retirés. Relisez vos accès puis sélectionnez un contexte actuellement autorisé.") :
+        el("div", "human-federation-registries", this.#renderWorkers(workers, true), this.#renderBrokers(brokers, true)),
+      el("p", "human-broker-footnote muted", "Chaque reçu durable décrit une lecture enregistrée ; il ne prouve ni livraison ni exécution. Une erreur refuse toute la nouvelle composition. Après une erreur de connexion, la dernière lecture autorisée reste datée et périmée jusqu’à une reprise réussie."));
   }
   async #loadBrokers(cursor = this.#brokers.cursor, history = this.#brokers.history, automatic = false, operatorRetry = false) {
     if (!this.#canBrokers() || this.#mode !== "brokers" || this.#closed || this.#brokers.loading || this.#brokerForbidden ||
@@ -391,8 +464,7 @@ export class HumanDashboard {
       broker ? el("p", "muted", `${brokerStateName[broker.state]} · incarnation courante ${broker.current_incarnation_id}`) : null,
       broker ? el("p", "muted", `Runtime ${value.runtime_kind} · correspondance ${value.runtime_matches ? "oui" : "non"} · dans le grant courant ${value.in_current_grant ? "oui" : "non"}`) : null);
   }
-  #renderWorkers() {
-    const state = this.#workers;
+  #renderWorkers(state = this.#workers, federation = false) {
     const table = el("table", "human-broker-table");
     table.append(el("caption", "", "Métadonnées du registre durable · cette page n’est ni un total du tenant ni un inventaire runtime complet."),
       el("thead", "", el("tr", "", ...["Worker / session déclarée", "État du contrôle", "Dernière observation runtime", "Associations historiques", "Réservation", "Détail"].map((title) => el("th", "", title)))));
@@ -412,18 +484,20 @@ export class HumanDashboard {
     return el("section", "panel human-broker-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Registre des workers"),
       el("p", "", "Source : contrôle du tenant authentifié. Une référence de session déclarée n’attribue aucun propriétaire humain."))),
       this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_worker_broker_registry · snapshot par page, pages successives vivantes.`) : null,
-      this.#workerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-worker-access", () => this.#openView("contexts"))) :
+      federation ? null : this.#workerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-worker-access", () => this.#openView("contexts"))) :
         state.error ? this.#error(state.error, () => { void this.#loadWorkers(); }) : null,
       !state.value ? empty(state.loading ? "Chargement des workers…" : "Workers inconnus", "La lecture doit réussir avant de conclure sur l’activité.") :
         !state.value.items.length ? empty("Aucun worker sur cette page", "Le registre n’a retourné aucune ligne pour cette lecture autorisée. L’inventaire runtime reste inconnu.") : scroll,
-      this.#pagination(state, (cursor, history) => { void this.#loadWorkers(cursor, history); }),
+      this.#pagination(state, (cursor, history) => { if (federation) void this.#loadFederation({ leg: "workers", cursor, history }); else void this.#loadWorkers(cursor, history); }, federation ? "human-federation-workers" : "human", federation ? "Pages des workers" : undefined),
       el("p", "human-broker-footnote muted", "Une date connue est une valeur interprétable fournie, sans preuve de chronologie cohérente ou de fin réelle. Aucune durée n’est calculée depuis ces dates. Une date inconnue reste distincte d’une valeur non fournie."),
       el("p", "human-broker-footnote muted", "Une association historique d’autorité peut être postérieure au fait worker ; elle ne prouve pas le broker physique ayant exécuté ou inspecté la session. Le bail du broker ne prouve aucun état du worker."),
       el("p", "human-broker-footnote muted", "Actualisation au plus toutes les 30 secondes lorsque cette vue est visible. Aucun flux worker implicite ni délai garanti de notification. La vue personnelle reste un écart obligatoire tant que sa chaîne d’attribution authentifiée manque."));
   }
   #showWorker(item: HumanWorker) {
-    const page = this.#workers.value;
-    if (!this.#canWorkers() || this.#mode !== "workers" || !page?.items.some((row) => row.worker_id === item.worker_id)) return;
+    const federation = this.#mode === "federation";
+    const page = federation ? this.#federation.value?.workers : this.#workers.value;
+    if (federation ? !this.#canFederation() || this.#federationForbidden : !this.#canWorkers() || this.#mode !== "workers" || this.#workerForbidden) return;
+    if (!page?.items.some((row) => row.worker_id === item.worker_id)) return;
     this.#dialog?.close(); this.#dialog?.remove();
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const heading = el("h2", "", "Métadonnées du worker"); heading.id = "human-worker-detail-title";
@@ -449,15 +523,16 @@ export class HumanDashboard {
       el("span", "mono", authority.authority_id_redacted ? "Identifiant masqué" : authority.authority_id),
       el("span", "muted", ` · ${authority.runtime_kind}`))));
   }
-  #renderBrokers() {
-    const state = this.#brokers;
+  #renderBrokers(state = this.#brokers, federation = false) {
     const table = el("table", "human-broker-table");
     const caption = el("caption", "", "Registre central du tenant · métadonnées enregistrées");
-    const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", "Détails"].map((label) => {
+    const headers = ["Broker / incarnation", "État du bail", "Autorités déclarées", "Dernière réception observée", "Expiration", ...(federation ? ["Associations de la page workers"] : []), "Détails"].map((label) => {
       const cell = el("th", "", label); cell.scope = "col"; return cell;
     });
     table.append(caption, el("thead", "", el("tr", "", ...headers)), el("tbody", "", ...(state.value?.items ?? []).map((item, index) => {
       const heartbeat = item.last_heartbeat;
+      const associated = federation ? this.#federation.value?.workers.items.filter((worker) =>
+        worker.launch_broker.broker?.broker_id === item.broker_id || worker.observation_broker.broker?.broker_id === item.broker_id) ?? [] : [];
       return el("tr", "", el("td", "", el("p", "mono control-id", item.broker_id), el("p", "muted", "Incarnation courante"), el("p", "mono control-id", item.incarnation_id)),
         el("td", "", badge(brokerStateName[item.state], item.state === "current" ? "neutral" : "amber")),
         el("td", "", this.#brokerAuthorities(item)),
@@ -465,6 +540,9 @@ export class HumanDashboard {
           heartbeat.incarnation_id !== item.incarnation_id ? badge("Heartbeat d’une ancienne incarnation", "amber") : null) : el("p", "muted", "Aucun heartbeat reçu dans le registre")),
         el("td", "", el("p", "muted", `Autorisation : ${formatDate(item.not_after, true)}`),
           heartbeat ? el("p", "muted", `Bail déclaré : ${formatDate(heartbeat.lease_expires_at, true)}`) : null),
+        federation ? el("td", "", associated.length ? el("div", "human-federation-links", el("p", "muted", "Références historiques, sans preuve d’exécution par ce broker"),
+          ...associated.map((worker) => action(`Ouvrir le worker ${worker.worker_id}`, `federation-broker-${item.broker_id}-worker-${worker.worker_id}`, () => this.#showWorker(worker)))) :
+          el("p", "muted", "Aucune association dans la page workers · autres pages inconnues")) : null,
         el("td", "", action("Détails du broker", `broker-detail-${index}`, () => this.#showBroker(item))));
     })));
     const scroll = el("div", "human-broker-scroll", table); scroll.tabIndex = 0; scroll.setAttribute("role", "region"); scroll.setAttribute("aria-label", "Tableau des brokers enregistrés, défilement horizontal");
@@ -472,17 +550,19 @@ export class HumanDashboard {
       el("p", "", "Source : registre central du tenant. Inventaire runtime inconnu ; aucun worker ni état de fonctionnement n’est déduit du bail."),
       el("p", "", "Lecture live paginée : les lignes peuvent changer entre deux pages. Le flux des ressources ne couvre pas ce registre."))),
       this.#status(state), state.value ? el("p", "human-broker-evaluation muted", `Évaluation serveur : ${formatDate(state.value.evaluated_at, true)} · source tenant_broker_registry · cohérence live_keyset.`) : null,
-      this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :
+      federation ? null : this.#brokerForbidden ? el("div", "control-error", el("p", "", state.error), action("Relire mes accès", "human-broker-access", () => this.#openView("contexts"))) :
         state.error ? this.#error(state.error, () => { void this.#loadBrokers(); }) : null,
       !state.value ? empty(state.loading ? "Chargement du registre…" : "Registre indisponible", this.#brokerForbidden ? "L’accès a été refusé. Les données, détails et positions de lecture ont été retirés." :
         "Une lecture réussie est nécessaire pour connaître les brokers enregistrés. L’inventaire runtime reste inconnu.") :
         !state.value.items.length ? empty(state.history.length ? "Fin de cette traversée live" : "Aucun broker enregistré à cette lecture", "Cette page décrit le registre à l’heure d’évaluation. L’inventaire runtime reste inconnu.") : scroll,
-      this.#brokerForbidden ? null : this.#pagination(state, (next, previous) => { void this.#loadBrokers(next, previous); }),
+      !federation && this.#brokerForbidden ? null : this.#pagination(state, (cursor, history) => { if (federation) void this.#loadFederation({ leg: "brokers", cursor, history }); else void this.#loadBrokers(cursor, history); }, federation ? "human-federation-brokers" : "human", federation ? "Pages des brokers" : undefined),
       el("p", "human-broker-footnote muted", "Actualisation automatique au plus toutes les 30 secondes lorsque cette vue est visible. Ce rythme ne garantit aucun délai de réponse, notification ou retrait des droits."));
   }
   #showBroker(item: HumanBroker) {
-    const page = this.#brokers.value;
-    if (!page || this.#mode !== "brokers" || !this.#canBrokers() || this.#brokerForbidden) return;
+    const federation = this.#mode === "federation";
+    const page = federation ? this.#federation.value?.brokers : this.#brokers.value;
+    if (federation ? !this.#canFederation() || this.#federationForbidden : this.#mode !== "brokers" || !this.#canBrokers() || this.#brokerForbidden) return;
+    if (!page?.items.some((row) => row.broker_id === item.broker_id)) return;
     const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.#dialog?.close(); this.#dialog?.remove();
     const heading = el("h2", "", "Détails du broker"); heading.id = "human-broker-detail-title";
