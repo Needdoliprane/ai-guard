@@ -1,6 +1,9 @@
 # Capacité réservée au contrôle — proposition du lot H
 
-Statut : **PROPOSÉ, décision du mainteneur requise avant implémentation**.
+Statut : **DIRECTION ET CODE LOCAL APPROUVÉS par le mainteneur le 7 novembre 2026**.
+Réponse explicite : « Autoriser cette direction et le code local ».
+L'accord couvre code, configurations et tests locaux ; aucune action cloud.
+Implémentation et qualification restent à produire et à vérifier.
 Source examinée : `647fb1b1a8305eb0ad79bc1f0fdf83afbaea5b18`, 7 novembre 2026.
 Ce document ne livre aucun listener, réglage ou garantie de disponibilité.
 
@@ -32,8 +35,8 @@ Voir le [suivi canonique](AUDIT_FOLLOWUP.md#audit-final-run-1).
 3. Distribuer au relais des credentials ou lui faire choisir le tenant.
    Cela change son rôle de confiance et duplique l'autorisation ; non retenu.
 
-La direction 1 ajoute une frontière de transport dans les composants Rust
-existants, sans nouveau service métier. Elle doit être approuvée avant code.
+La direction 1, approuvée, ajoute une frontière de transport dans les composants
+Rust existants, sans nouveau service métier.
 La mécanique HTTP exacte et la représentation de configuration feront l'objet
 de leur contrat et revue avant intégration ; aucun nom d'option n'est livré ici.
 

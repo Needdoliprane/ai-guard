@@ -1,5 +1,14 @@
 # Décisions d'industrialisation
 
+## 7 novembre — canal de contrôle à capacité réservée approuvé
+
+Le mainteneur approuve la [direction H](INGRESS_CONTROL_CAPACITY_PROPOSAL.md),
+son code, ses configurations et ses tests locaux, sans action cloud. Le gateway
+authentifie le contrôle avant corps et capacité ; le relais garde ses destinations
+fixes et ne possède aucun credential propre. Les réseaux internes, l'ingestion
+distincte, les permissions et les plans fermés sont préservés. Ce choix ne livre
+pas encore le canal et ne ferme ni H, ni les écarts d'admission L ou de couplage K.
+
 ## 7 novembre — conserver les contrats fermés de l'export
 
 Le compteur d'omissions ne s'ajoute ni à l'ACK IPC V1 ni au fait fermé
