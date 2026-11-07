@@ -76,7 +76,7 @@ fn audit_capacity_failure(failure: &anyhow::Error) -> Option<(StatusCode, Json<V
         ),
         AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted => (
             "audit_write_budget_exhausted",
-            "The remaining audit capacity is reserved for identity maintenance. Preserve the audit and contact the operator.",
+            "The remaining audit capacity is protected by control or identity reserves. Preserve the audit and contact the operator.",
         ),
         AuditCapacityFailureV1::WorkloadAuditBudgetExhausted => (
             "audit_workload_budget_exhausted",
@@ -795,15 +795,16 @@ async fn ingest(
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-            if ["security.decision", "control", "worker", "usage.allocation"]
-                .iter()
-                .any(|namespace| {
-                    event.kind == *namespace
-                        || event
-                            .kind
-                            .strip_prefix(namespace)
-                            .is_some_and(|suffix| suffix.starts_with('.'))
-                })
+            if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
+                || ["security.decision", "control", "worker", "usage.allocation"]
+                    .iter()
+                    .any(|namespace| {
+                        event.kind == *namespace
+                            || event
+                                .kind
+                                .strip_prefix(namespace)
+                                .is_some_and(|suffix| suffix.starts_with('.'))
+                    })
             {
                 return Err(error(
                     StatusCode::FORBIDDEN,
@@ -827,41 +828,21 @@ async fn ingest_control_event(
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
-            if !CONTROL_EVENT_KINDS.contains(&event.kind.as_str()) {
+            if !crate::audit::control_delivery_kind(&event.kind) {
                 return Err(error(
                     StatusCode::FORBIDDEN,
                     "Ce fait n'est pas admis sur la route d'audit du contrôle.",
                 ));
             }
-            Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+            Ok(Json(
+                tenant
+                    .store
+                    .append_control_event(event)
+                    .map_err(unavailable)?,
+            ))
         })
         .await
 }
-
-const CONTROL_EVENT_KINDS: &[&str] = &[
-    "command.requested",
-    "command.started",
-    "command.completed",
-    "command.failed",
-    "runtime.submitted",
-    "runtime.invocation.bound",
-    "runtime.terminal.attach.authorized",
-    "runtime.cleanup.failed",
-    "workspace.import.requested",
-    "workspace.import.created",
-    "workspace.import.started",
-    "workspace.import.completed",
-    "workspace.import.recovered",
-    "workspace.import.cleanup.failed",
-    "workspace.scan.requested",
-    "workspace.scan.created",
-    "workspace.scan.started",
-    "workspace.scan.completed",
-    "workspace.export.requested",
-    "workspace.export.completed",
-    "workspace.diff.completed",
-    "observer.coverage",
-];
 
 async fn decide(
     RunnerIdentity(tenant): RunnerIdentity,

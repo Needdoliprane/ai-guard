@@ -271,8 +271,8 @@ With no explicit policy, the event and payload-byte capacities each allocate:
 |---|---|
 | All human receipts in a tenant | Half of physical capacity |
 | One principal's human receipts | One eighth of physical capacity |
-| Reserve for control, protected from human reads | One quarter of physical capacity |
-| Reserve for identity maintenance, protected from ordinary writes | One eighth of physical capacity |
+| Reserve for control, protected from ordinary ingestion, human and workload receipts | One quarter of physical capacity |
+| Reserve for identity maintenance, protected from ordinary, control, human and workload writes | One eighth of physical capacity |
 
 Reserves are subtracted from the actual total occupancy; ordinary events already
 stored still consume capacity. Identity maintenance includes revocation and other
@@ -283,6 +283,24 @@ limit. Very small automatic capacities that cannot represent protected human
 budgets disable new human reads explicitly, without raising the physical limit
 or invalidating existing storage. Ordinary human reads require validated schema5–10;
 broker registry reads require7–10, worker registry reads require10, and both consume the same cumulative human budgets.
+
+For schema5–10, ordinary ingestion stops at physical capacity minus both
+reserves, in events and bytes independently. Trusted control facts, decisions,
+typed control mutations and offline genesis records may use the control share
+but stop before the identity reserve. Identity maintenance may use the remaining
+physical capacity. The authenticated Rust route or typed control method selects
+this class; `kind`, provenance and other payload labels cannot select it.
+The [closed control-event route](../../api.md#ingestion-et-faits-du-contrôle--ingestion-and-control-facts)
+accepts the three fixed D5 audit kinds only through runner delivery. Their
+descriptive receipts do not prove retirement or authorize an execution.
+
+This admission change uses the existing policy and durable audit occupancy;
+it does not migrate or reset the database. A valid historical audit already above
+the new ordinary threshold remains readable and exact replays remain idempotent;
+new ordinary writes are refused. Existing occupancy can also leave no control
+share available. Preserve it and inspect the actual limits rather than deleting
+records or changing credentials. `429 audit_write_budget_exhausted` with
+`contact_operator` is cumulative and has no timer retry.
 
 [audit-capacity.json](examples/audit-capacity.json) gives the resolved defaults
 for `--max-events 100000`. Copy it into your existing private control directory

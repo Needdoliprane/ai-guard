@@ -663,7 +663,7 @@ async fn control_protocol_reports_authenticated_tenant_role_namespace_and_inacti
 }
 
 #[tokio::test]
-async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_capacity() {
+async fn ordinary_exhaustion_keeps_control_capacity_and_control_exhaustion_keeps_revocation() {
     use agentsandbox::{audit::AuditCapacityFailureV1, identity::*};
 
     let fixture = Fixture::with_max_events(64);
@@ -735,7 +735,7 @@ async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_
     );
     let before = fixture.a.integrity().unwrap();
     assert!(before.valid && fixture.a.healthy());
-    assert_eq!(before.event_count, 56);
+    assert_eq!(before.event_count, 40);
     let mutation = WorkerMutationV1 {
         version: 1,
         operation_id: Uuid::new_v4().to_string(),
@@ -750,6 +750,67 @@ async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_
         &format!("/api/v1/workers/{}/transitions", worker.worker_id),
         Some(&fixture.runner_a),
         &mutation,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let accepted: MutationResultV1 = response_json(response).await;
+    assert_eq!(accepted.worker.revision, worker.revision + 1);
+    assert_eq!(accepted.receipt.audit_seq, 41);
+    assert!(
+        fixture
+            .a
+            .worker_operation(&mutation.operation_id)
+            .unwrap()
+            .is_some()
+    );
+
+    // Ordinary ingestion has stopped at40. Fill only the remaining trusted
+    // control share through the real runner route; identity keeps its8 slots.
+    for _ in 41..56 {
+        let response = json_request(
+            &fixture.router,
+            Method::POST,
+            "/api/v1/control/events",
+            Some(&fixture.runner_a),
+            &agentsandbox::model::Event::new("command.completed"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let before = fixture.a.integrity().unwrap();
+    assert_eq!(before.event_count, 56);
+    let response = json_request(
+        &fixture.router,
+        Method::POST,
+        &format!("/api/v1/workers/{}/transitions", worker.worker_id),
+        Some(&fixture.runner_a),
+        &mutation,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let replay: MutationResultV1 = response_json(response).await;
+    assert_eq!(replay.receipt, accepted.receipt);
+    assert_eq!(fixture.a.integrity().unwrap().head_hash, before.head_hash);
+
+    // This transition is valid from Preparing with quota held. CreateIssued
+    // would first require import/verification receipts and yield a conflict,
+    // hiding the capacity oracle before the storage admission check.
+    assert_eq!(accepted.worker.state, WorkerStateV1::Preparing);
+    assert!(accepted.worker.quota_held);
+    let refused_mutation = WorkerMutationV1 {
+        operation_id: Uuid::new_v4().to_string(),
+        expected_revision: accepted.worker.revision,
+        transition: WorkerTransitionV1::Unknown {
+            reason: "bounded audit capacity fixture".into(),
+        },
+        ..mutation
+    };
+    let response = json_request(
+        &fixture.router,
+        Method::POST,
+        &format!("/api/v1/workers/{}/transitions", worker.worker_id),
+        Some(&fixture.runner_a),
+        &refused_mutation,
     )
     .await;
     let status = response.status();
@@ -769,7 +830,7 @@ async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_
     assert!(
         fixture
             .a
-            .worker_operation(&mutation.operation_id)
+            .worker_operation(&refused_mutation.operation_id)
             .unwrap()
             .is_none()
     );
@@ -780,7 +841,7 @@ async fn ordinary_write_budget_reports_control_refusal_and_preserves_revocation_
             .unwrap()
             .unwrap()
             .revision,
-        worker.revision
+        accepted.worker.revision
     );
     let revocation = fixture
         .a

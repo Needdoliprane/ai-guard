@@ -654,6 +654,27 @@ La route `/api/v1/control/events` exige `runner` **avant la lecture du JSON** : 
 | Scan | `workspace.scan.requested`, `workspace.scan.created`, `workspace.scan.started`, `workspace.scan.completed` |
 | Export | `workspace.export.requested`, `workspace.export.completed` |
 | Bilan / Summary | `workspace.diff.completed`, `observer.coverage` |
+| Retrait D5 / D5 retirement | `broker.abandon-before-claim.requested`, `broker.retirement.pending`, `broker.retirement.final` |
+
+Les trois faits D5 sont refusés `403` sur l'ingestion ordinaire, même pour un runner.
+Leur nom ne promeut aucun viewer/worker et leur reçu ne prouve pas le retrait.
+En schéma5–10, l'ingestion ordinaire préserve les réserves contrôle et identité ;
+les écritures de contrôle authentifiées et les mutations typées peuvent utiliser
+la part contrôle en préservant l'identité. Événements et octets persistés sont
+bornés séparément. Un rejeu exact ne consomme pas une nouvelle admission durable,
+même après réouverture ; le débit HTTP reste appliqué. Aucun reset ni migration
+de l'historique n'est implicite. Voir les [budgets EN](setup/identity/README.md#audit-budgets-and-stream-capacity)
+et [FR](setup/identity/README.fr.md#budgets-daudit-et-capacité-des-flux).
+
+The three D5 facts receive `403` on ordinary ingestion, including for a runner.
+Their names promote no viewer/worker and their receipt does not prove retirement.
+On schema5–10, ordinary ingestion preserves control and identity reserves;
+authenticated control writes and typed mutations may use the control share while
+preserving identity capacity. Persisted events and bytes have independent limits.
+Exact replay costs no new durable admission, including after reopening; HTTP rate
+admission still applies. No history reset or migration is implicit. See the
+[EN budgets](setup/identity/README.md#audit-budgets-and-stream-capacity)
+and [FR budgets](setup/identity/README.fr.md#budgets-daudit-et-capacité-des-flux).
 
 `file.*` et les déclarations fournisseurs restent dans l'ingestion. Le nouveau CLI refuse un gateway dépourvu de cette route (`404`) à sa première trace `command.requested`, avant lancement ; aucun repli silencieux vers `/events`. Les anciens clients conservent leurs alias d'ingestion. Un même ID avec le même contenu permet le rejeu ; un contenu divergent reste refusé par le Store (`503` actuel pour un conflit d'événement, distinct du `409` des demandes de décision).
 

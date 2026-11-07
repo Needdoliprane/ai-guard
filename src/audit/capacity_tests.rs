@@ -141,7 +141,7 @@ fn reads_leave_control_and_identity_reserves_and_kind_cannot_spend_identity() {
         AuditCapacityFailureV1::HumanReadBudgetExhausted,
     );
     // A public event with a privileged-looking kind still has OrdinaryWrite.
-    while store.head().unwrap() < 56 {
+    while store.head().unwrap() < 40 {
         store.append(Event::new("security.decision")).unwrap();
     }
     let mut imitation = Event::new("security.decision");
@@ -157,6 +157,22 @@ fn reads_leave_control_and_identity_reserves_and_kind_cannot_spend_identity() {
             .append(Event::new("control.identity.mutation"))
             .is_err()
     );
+    // Only the trusted append path may spend the remaining control share.
+    let control = Event::new("command.completed");
+    let first = store.append_control_event(control.clone()).unwrap();
+    while store.head().unwrap() < 56 {
+        store
+            .append_control_event(Event::new("command.completed"))
+            .unwrap();
+    }
+    assert_failure(
+        store
+            .append_control_event(Event::new("command.completed"))
+            .map(|_| ()),
+        AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted,
+    );
+    assert_eq!(store.append_control_event(control).unwrap().seq, first.seq);
+    assert_eq!(store.head().unwrap(), 56);
     let revoke = mutation(IdentityChangeV1::Account {
         expected_revision: 1,
         account: HumanAccountV1 {
@@ -259,40 +275,108 @@ fn head_and_byte_reserve_boundaries_are_checked_in_each_dimension() {
             ),
             AuditCapacityFailureV1::HumanReadBudgetExhausted,
         );
+        cache
+            .admit(
+                &prepared,
+                &policy,
+                physical,
+                total,
+                cost,
+                capacity::Class::OrdinaryWrite,
+            )
+            .unwrap();
+        assert_failure(
+            cache.admit(
+                &prepared,
+                &policy,
+                physical,
+                over,
+                cost,
+                capacity::Class::OrdinaryWrite,
+            ),
+            AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted,
+        );
     }
-    cache
-        .admit(
-            &prepared,
-            &policy,
-            physical,
-            AuditCapacityV1 {
-                events: 87,
-                bytes: 874,
-            },
-            AuditCapacityV1 {
-                events: 1,
-                bytes: 1,
-            },
-            capacity::Class::OrdinaryWrite,
-        )
+    for total in [
+        AuditCapacityV1 {
+            events: 87,
+            bytes: 0,
+        },
+        AuditCapacityV1 {
+            events: 0,
+            bytes: 874,
+        },
+    ] {
+        let cost = AuditCapacityV1 {
+            events: 1,
+            bytes: 1,
+        };
+        cache
+            .admit(
+                &prepared,
+                &policy,
+                physical,
+                total,
+                cost,
+                capacity::Class::ControlWrite,
+            )
+            .unwrap();
+        assert_failure(
+            cache.admit(
+                &prepared,
+                &policy,
+                physical,
+                total.add(cost).unwrap(),
+                cost,
+                capacity::Class::ControlWrite,
+            ),
+            AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted,
+        );
+    }
+}
+
+#[test]
+fn historical_occupancy_above_ordinary_reserve_remains_readable_and_replayable() {
+    let dir = files();
+    let path = dir.path().join("historical.sqlite");
+    let store = Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 64).unwrap();
+    store
+        .migrate_control_v3(&path.with_extension("v2"))
         .unwrap();
+    store
+        .migrate_identity_v4(&path.with_extension("v3"))
+        .unwrap();
+    // Pre-v5 appends used physical capacity. Keep that valid historical chain;
+    // the new admission rule must not reinterpret it as corruption or clear it.
+    while store.head().unwrap() < 41 {
+        store.append(Event::new("fixture.historical")).unwrap();
+    }
+    let historical = Event::new("fixture.historical");
+    let original = store.append(historical.clone()).unwrap();
+    store
+        .migrate_human_access_v5(&path.with_extension("v4"))
+        .unwrap();
+    assert_eq!(store.head().unwrap(), 43);
+    drop(store);
+    let reopened =
+        Store::open_existing_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 64).unwrap();
+    assert!(reopened.integrity().unwrap().valid && reopened.healthy());
+    assert!(!reopened.events(&EventQuery::default()).unwrap().is_empty());
+    let replay = reopened.append(historical).unwrap();
+    assert_eq!((replay.seq, replay.hash), (original.seq, original.hash));
+    assert_eq!(reopened.head().unwrap(), 43);
     assert_failure(
-        cache.admit(
-            &prepared,
-            &policy,
-            physical,
-            AuditCapacityV1 {
-                events: 88,
-                bytes: 875,
-            },
-            AuditCapacityV1 {
-                events: 1,
-                bytes: 1,
-            },
-            capacity::Class::OrdinaryWrite,
-        ),
+        reopened.append(Event::new("fixture.new")).map(|_| ()),
         AuditCapacityFailureV1::OrdinaryWriteBudgetExhausted,
     );
+    assert_eq!(
+        reopened
+            .append_control_event(Event::new("command.completed"))
+            .unwrap()
+            .seq,
+        44
+    );
+    assert!(reopened.integrity().unwrap().valid && reopened.healthy());
 }
 
 #[test]
