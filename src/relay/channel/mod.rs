@@ -5,6 +5,7 @@
 //! memory reservation and runtime authority outside these untrusted values.
 //! A validated request is not a dispatch permit or evidence of a durable audit.
 mod codec;
+pub mod helper;
 mod protocol;
 
 pub use codec::{FrameLimit, FrameReader, FrameWriter};
