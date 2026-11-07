@@ -1,5 +1,31 @@
 # Validation courante
 
+## 7 novembre — composition27 : 25 fonctions et compilation toutes cibles
+
+Le gel `control-relay-kubernetes-composition27` compose la base `8a5c421` et
+les trois sources Kubernetes du gel03, puis correspond aux 419 entrées Rust/Cargo
+du checkout `f12f266`. Le [manifeste et les preuves](evidence/2026-11-07/control-relay-kubernetes-composition/README.md)
+sont revérifiés sur le gel privé et le checkout. QA AC : client relais 13/13 en
+7,97 s, coordinateur 9/9 en 4,98 s et CLI 3/3 en 0,40 s, tous RC0 ; check toutes
+cibles RC0 en 1 min 06 s. Les quatre captures finales ont leurs empreintes dans
+le dossier. Le check signale 61 avertissements lib, 2 SSO et 2 lib-test ; aucun
+résultat Clippy n'est crédité.
+
+Les premiers 13+9 puis 13 PASS vus dans les sorties Luna n'avaient pas de journal
+parent archivé : ils ne sont ni ajoutés aux 25 fonctions uniques ni substitués
+aux captures finales. La première capture Root échoue RC1 avant tout test,
+`--manifest-path` étant placé au mauvais niveau de Cargo ; sa sortie est
+conservée. La capture02 corrige l'invocation sans changement source. Après les
+validations RC0, Root arrête explicitement la QA ; son inspect final indique
+RC137 et `OOMKilled:false`, distincts des codes des recettes.
+
+Revues indépendantes des composants et de leurs preuves traitées. Ces résultats
+ne rejouent pas les 52 fonctions de composition26 sur le gel27. Aucun worker
+moteur, Pod, cluster, fournisseur ou parcours fédéré UI/API complet qualifié ;
+handoff réel, réseau `none` et quota des issues inconnues restent ouverts.
+G09 FAIL, aucun gate global clos. Les paragraphes suivants conservent leurs
+résultats et gels historiques.
+
 ## 7 novembre — composition du client relais et nouveaux chantiers distincts
 
 Le lot relais `8c38ea5` est composé dans `914786c`. Les six empreintes de

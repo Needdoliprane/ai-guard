@@ -1,5 +1,27 @@
 # État constaté — suivi du développement
 
+## 7 novembre — client relais et reprise Kubernetes composés sur le gel27
+
+La reprise Kubernetes `81a9e7501adf921a23098741dd0518e5d5287660` est composée
+dans `f12f266`, après le client relais `914786c`. Les 419 entrées Rust/Cargo du
+gel `control-relay-kubernetes-composition27` correspondent au checkout composé.
+**25 fonctions uniques passent** sur ce gel : 13 client relais, neuf coordinateur
+Kubernetes et trois CLI. Le check toutes cibles termine RC0 en 1 min 06 s.
+[Preuves, quatre journaux et manifeste](evidence/2026-11-07/control-relay-kubernetes-composition/README.md).
+Les revues indépendantes source et preuves des deux composants sont traitées.
+Les 52 résultats de composition26 restent attachés à leur manifeste de 417
+entrées ; ils ne forment pas une suite de 77 fonctions exécutée sur le gel27.
+
+Les premières sorties Luna non archivées et l'erreur d'argv de capture sont
+explicites dans les preuves ; seuls les 25 résultats des captures finales sont
+comptés. Avertissements et Clippy restent ouverts. Le handoff du credential et
+le raccord réel du relais restent à livrer ; `network:none` reste sans route.
+La reprise Kubernetes demeure descriptive : état runtime non observé,
+activation indisponible et quota retenu si l'issue est inconnue. Aucun moteur,
+Pod, cluster, fournisseur ou parcours fédéré UI/API complet n'est qualifié.
+G09 reste FAIL et aucun gate global n'est clos. Les étapes ci-dessous conservent
+leurs gels et leurs limites historiques.
+
 ## 7 novembre — client relais intégré, reprise Kubernetes et fédération en cours
 
 Le client Rust du relais `8c38ea5`, composé dans `914786c`, ajoute les échanges
