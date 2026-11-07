@@ -3,6 +3,8 @@ use super::*;
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+pub(crate) mod relay;
+
 #[cfg(test)]
 mod launch_profile_tests {
     use super::*;
