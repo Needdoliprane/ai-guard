@@ -1,4 +1,4 @@
-# Kubernetes: authority, inspection and admission preflight
+# Kubernetes: authority, inspection, admission preflight and reconciliation
 
 [English](README.md) · [Français](README.fr.md) · [Configuration index](../README.md)
 
@@ -10,10 +10,13 @@ There is no `--runtime kubernetes` launch option or Kubernetes dotenv profile.
 
 The internal held-CREATE path connects the broker to the authenticated control
 API and retains its request, result candidate and ACK in a private journal.
-Launch permission requires an exact live201 received within the original
-claim window; replay or GET responses cannot grant it. Recovery submits the
-same result and never repeats Kubernetes CREATE. This component has no
-production activation constructor or user launch command yet. Its HTTP/SQLite
+One-shot CREATE permission requires an exact live201 received within the
+original claim window; replay or GET responses cannot grant it. Recovery submits the
+same retained result. When that result was lost before retention, recovery can
+look up the exact historical claim and durably report unknown ownership.
+`kubernetes reconcile-held-create` exposes this control reconciliation without
+contacting Kubernetes. Production activation and worker launch remain closed.
+Its HTTP/SQLite
 and local TLS-peer tests do not qualify the Docker Desktop cluster or worker
 confinement; see the [engineering contract](../../engineering/KUBERNETES_ADMISSION.md)
 and [validation record](../../engineering/VALIDATION.md).
@@ -286,7 +289,7 @@ agentsandbox broker control-info \
 ```
 
 Use its exact `control_namespace_uuid`, a runner identity and compatible
-schema 3–9 with `broker_supervision_v1`. The gateway must be an HTTPS origin
+schema 3–10 with `broker_supervision_v1`. The gateway must be an HTTPS origin
 or an explicitly selected HTTP loopback origin; this file does not add private
 CA or mTLS options to the gateway connection. `runner_token_file` is an
 absolute path to a private file containing at most 4 KiB, not a token value. The control runner
@@ -477,10 +480,88 @@ named human approval or confinement proof.
 Claim returns `201` only with a matching first-commit Store proof and a live
 emission window at response preparation. Replays and historical GETs return
 `200`/`observe_only`, never Fresh. A JSON response alone is no runtime
-permission. The broker HTTP client/live ACK channel and schema-9 Coordinator
-are still to be connected; activation, workspace transfer and Kubernetes agent
-sessions remain unavailable. These control routes and preflight do not create
-or admit a Pod in a cluster.
+permission. The broker HTTP client/live ACK channel and coordinator are connected
+in the internal held-CREATE path. Activation, workspace transfer and Kubernetes
+agent sessions remain unavailable. These control routes and preflight do not
+create or admit a Pod in a cluster.
+
+## Reconcile a retained held-CREATE journal
+
+Use `agentsandbox kubernetes reconcile-held-create` from trusted control storage
+with an existing private held-CREATE journal and a currently authorized broker
+credential. The command reads control history and confirms a retained result.
+It opens no Kubernetes connection and requires no Kubernetes credential,
+activation capability or running worker. It cannot prepare a new journal or
+create a reservation, claim or Pod.
+The control must expose the broker held-CREATE protocol on schema 9 or 10.
+
+Prepare a new private control JSON file, limited to 16 KiB. Replace every
+placeholder with the existing installation's approved values:
+
+```json
+{
+  "version": 1,
+  "gateway": "https://gateway.example.invalid",
+  "credential_id": "<current-broker-credential-uuid>",
+  "broker_token_file": "/absolute/private/control/broker-token",
+  "gateway_ca_file": "/absolute/private/control/gateway-ca.pem"
+}
+```
+
+The format is closed: unknown or duplicate typed fields are refused. There is
+no tenant, broker or incarnation field. The journal supplies scope expectations;
+the authenticated control selects the tenant and must confirm the complete
+tenant/control-namespace/broker/credential/incarnation tuple. A journal does not
+grant access. Revoked credentials, grants or a changed incarnation remain refused.
+Reuse the registered credential UUID associated with that token.
+
+Use absolute paths and the private ownership, mode and ancestor checks described
+above. Keep the control JSON, token and CA outside the journal, source and export
+trees. The broker token contains 32–4096 ASCII token characters, with one optional
+terminal LF; its file is limited to 4097 bytes. The optional gateway CA file is
+limited to 64 KiB and eight certificates. For HTTPS, omitting it uses the client's
+built-in roots; supplying it replaces those roots for this connection. HTTP is
+accepted only for an explicitly configured loopback IP origin, without a CA
+file. Redirects, ambient proxies and automatic retries remain disabled.
+
+```sh
+agentsandbox kubernetes reconcile-held-create \
+  --journal-dir /absolute/private/control/held-create-journal \
+  --control-file /absolute/private/control/reconcile-control.json
+```
+
+When the journal already contains a candidate, the command submits that exact
+result with its original operation ID and CAS values. A lost central ACK can
+therefore recover its historical receipt without another claim or Kubernetes
+CREATE. The first retained refusal remains historical and unchanged.
+
+For a reopened journal without a candidate, recovery uses only the exact
+historical claim GET. If the claim exists, it retains that history and a result
+`ownership_unknown` with reason `recovered_after_claim`, using the historical
+revision and epoch. A response lost before candidate retention cannot establish
+Pod ownership: no later lookup by Pod name or matching spec adopts an UID. A
+missing claim fails without creating one. A central cancellation can make the
+historical CAS stale; the candidate and refusal are retained without rebasing,
+an ACK or quota release. A withdrawn policy or inactive supervision alone does
+not prevent an authorized Reconcile operation. This recovery cannot activate
+admission.
+
+Exit `0` confirms the central result and the durable local ACK. The JSON report
+contains the tenant, control namespace, session/create IDs, exact receipt and
+`retained_result`; it always reports `current_runtime_state: "not_observed"` and
+`admission_available: false`. An `inspection_handle` is returned only for an
+already-retained `created_held` candidate confirmed by the control. This is a
+retained broker report, not an independent or current runtime observation, and
+the handle grants no mutation permission.
+
+An error exits `1`; invalid arguments exit `2`. An absent, busy, partial or
+inconsistent journal requires authorized operator inspection; preserve any
+existing files. After a transport,
+result-audit, ACK or output failure, central confirmation may already be durable:
+retry the same reconciliation with the same journal. Do not edit the candidate,
+CAS or first refusal to obtain an ACK. A missing historical claim or a stale
+candidate needs inspection of the exact control audit; this command supplies no
+adoption, repair, cleanup or quota-release procedure.
 
 ## Configure the Rust integration
 
@@ -539,11 +620,17 @@ cargo test --locked --test kubernetes_cli -- --test-threads=1
 cargo test --locked --test kubernetes_preflight -- --test-threads=1
 cargo test --locked --test kubernetes_preflight_cli -- --test-threads=1
 cargo test --locked --lib runtime::kubernetes::prerequisites_tests:: -- --test-threads=1
+cargo test --locked --lib runtime::kubernetes::admission::remote_coordinator_tests:: -- --test-threads=1
+cargo test --locked --lib kubernetes_cli:: -- --test-threads=1
 ```
 
-They exercise the actual Rust HTTPS transport against local TLS fixtures,
-including mutual TLS and cancellation observed by the peer. They do not
-qualify Docker Desktop or another cluster. See the
+Select targets for the changed boundary rather than rerunning the whole list.
+They exercise actual Rust HTTP/SQLite/private-journal paths and local TLS fixtures,
+including mutual TLS and cancellation observed by the peer. Held-CREATE recovery
+tests cover lost acknowledgements or an unretained response, a missing claim,
+central cancellation, withdrawn policy and inactive supervision. The TLS peer
+returns declared Pod facts and starts no worker. These tests do not qualify
+Docker Desktop or another cluster. See the
 [validation record](../../engineering/VALIDATION.md) for each run's source,
 date and scope; earlier diagnostics do not qualify the preflight.
 

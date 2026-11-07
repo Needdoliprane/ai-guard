@@ -25,6 +25,410 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 #[tokio::test]
+async fn remote_recovery_without_candidate_observes_the_exact_claim_without_activation() {
+    use crate::{audit::EventQuery, broker::held_create_client::HeldCreateClaimAttempt};
+
+    let fixture = ControlFixture::new("recovery-without-candidate");
+    let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+    let client = Arc::new(fixture.client(&server.url));
+    let reservation = client.reserve(&fixture.intent).await.unwrap();
+    let claim = fixture.claim();
+    let journal = fixture.prepared_journal(&reservation, &claim);
+    let root = fixture.directory.path().join("held-create-journal");
+    let clock: Arc<dyn HostClock> = TestClock::repeated(sample(
+        &Uuid::new_v4().to_string(),
+        HostClockMethodV1::LinuxBoottimeV1,
+        1_000,
+    ));
+    let attempt = HeldCreateClaimAttempt::begin_for_test(&journal, clock).unwrap();
+    let response = client.claim_once(attempt).await.unwrap();
+    assert_eq!(response.response().snapshot.revision, 2);
+    // A real central commit happened, but neither its ACK nor a CREATE result
+    // was retained. Recovery must not need an activation or runtime object.
+    drop(response);
+    drop(journal);
+    assert!(!root.join("emission.json").exists());
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&root).unwrap(),
+        fixture.journal_protection(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::Prepared);
+    let capacity = Arc::new(Semaphore::new(1));
+    let owned = JournalIo::new(
+        recovered.into_journal(),
+        Arc::clone(&capacity).try_acquire_owned().unwrap(),
+    );
+
+    let completion = RemoteHeldCreateCoordinator::new(client)
+        .resume_result(owned)
+        .await
+        .expect("a retained exact historical claim can be reconciled without activation");
+
+    assert!(matches!(
+        completion.outcome,
+        KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::RecoveredAfterClaim,
+            http_status: None,
+        }
+    ));
+    assert!(completion.handle.is_none());
+    let candidate: KubernetesCreateResultV1 =
+        serde_json::from_slice(&fs::read(root.join("candidate.json")).unwrap()).unwrap();
+    assert_eq!(candidate.claim_operation_id, claim.operation_id);
+    assert_eq!(candidate.expected_revision, 2);
+    assert_eq!(candidate.expected_create_epoch, 1);
+    assert!(root.join("ack.json").is_file());
+    assert_eq!(
+        fixture
+            .store()
+            .events(&EventQuery {
+                kind: Some("control.kubernetes.create.emission_possible".into()),
+                ..EventQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1,
+        "recovery must never append a second claim"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert!(fixture.store().integrity().unwrap().valid);
+    assert_eq!(capacity.available_permits(), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn remote_recovery_of_prepared_journal_never_creates_a_missing_claim() {
+    let fixture = ControlFixture::new("recovery-without-claim");
+    let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+    let client = Arc::new(fixture.client(&server.url));
+    let reservation = client.reserve(&fixture.intent).await.unwrap();
+    let claim = fixture.claim();
+    drop(fixture.prepared_journal(&reservation, &claim));
+    let root = fixture.directory.path().join("held-create-journal");
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&root).unwrap(),
+        fixture.journal_protection(),
+    )
+    .unwrap()
+    .unwrap();
+    let capacity = Arc::new(Semaphore::new(1));
+    let owned = JournalIo::new(
+        recovered.into_journal(),
+        Arc::clone(&capacity).try_acquire_owned().unwrap(),
+    );
+    let head = fixture.store().head().unwrap();
+
+    let result = RemoteHeldCreateCoordinator::new(client)
+        .resume_result(owned)
+        .await;
+
+    assert_eq!(
+        result.as_ref().err(),
+        Some(&CoordinatorError::ControlRejected)
+    );
+    assert_eq!(
+        fixture.store().head().unwrap(),
+        head,
+        "lookup cannot claim or report an absent operation"
+    );
+    assert!(!root.join("emission.json").exists());
+    assert!(!root.join("candidate.json").exists());
+    assert!(!root.join("ack.json").exists());
+    assert_eq!(
+        fixture
+            .store()
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert_eq!(capacity.available_permits(), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn remote_recovery_after_lost_create_response_never_adopts_or_repeats_the_pod() {
+    use super::permission::HeldCreateClaimOutcome;
+
+    let mut fixture = ControlFixture::new("recovery-after-create");
+    let peer = Peer::new(ResponseMode::Created).await;
+    let authority_id = fixture.intent.authority.authority_id();
+    fixture.intent.authority = authority(authority_id, &peer.endpoint, peer.trust_digest());
+    let runtime =
+        KubernetesRuntime::connect(fixture.intent.authority.clone(), peer.credentials()).unwrap();
+    runtime.doctor().await.unwrap();
+    let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+    let client = Arc::new(fixture.client(&server.url));
+    let reservation = client.reserve(&fixture.intent).await.unwrap();
+    let claim = fixture.claim();
+    let mut journal = fixture.prepared_journal(&reservation, &claim);
+    let root = fixture.directory.path().join("held-create-journal");
+    let clock: Arc<dyn HostClock> = TestClock::repeated(sample(
+        &Uuid::new_v4().to_string(),
+        HostClockMethodV1::LinuxBoottimeV1,
+        1_000,
+    ));
+    let activation =
+        HeldCreateActivation::for_test(&fixture.intent, &peer.activation_listener).unwrap();
+    let pending =
+        PendingHeldCreateClaim::begin_for_test(activation, clock, &fixture.intent).unwrap();
+    let attempt = pending.remote_attempt(&journal).unwrap();
+    let exchange = client.claim_once(attempt).await.unwrap();
+    let HeldCreateClaimOutcome::Ready { permission, .. } = pending
+        .accept_remote_exchange(exchange, &mut journal)
+        .unwrap()
+    else {
+        panic!("fixture must obtain the real one-shot claim ACK")
+    };
+    let outcome = runtime
+        .create_held(permission, &journal, &AtomicBool::new(false))
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        KubernetesCreateOutcomeV1::CreatedHeld { .. }
+    ));
+    // The response has not crossed the durable candidate boundary. Neither
+    // a later GET nor its matching name/spec may reconstruct the lost UID.
+    drop(outcome);
+    drop(journal);
+    assert_eq!(peer.post_count(), 1);
+    let reads = peer.read_request_count();
+    assert!(!root.join("candidate.json").exists());
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&root).unwrap(),
+        fixture.journal_protection(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::ObserveOnly);
+    let capacity = Arc::new(Semaphore::new(1));
+    let owned = JournalIo::new(
+        recovered.into_journal(),
+        Arc::clone(&capacity).try_acquire_owned().unwrap(),
+    );
+
+    let completion = RemoteHeldCreateCoordinator::new(client)
+        .resume_result(owned)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        completion.outcome,
+        KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::RecoveredAfterClaim,
+            http_status: None,
+        }
+    ));
+    assert!(completion.handle.is_none());
+    assert_eq!(peer.post_count(), 1, "recovery cannot emit another CREATE");
+    assert_eq!(
+        peer.read_request_count(),
+        reads,
+        "unknown ownership cannot inspect/adopt by name"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert!(fixture.store().integrity().unwrap().valid);
+    assert_eq!(capacity.available_permits(), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn remote_recovery_after_central_cancel_retains_historical_cas_and_stale_epoch_refusal() {
+    use crate::{audit::EventQuery, broker::held_create_client::HeldCreateClaimAttempt};
+
+    let fixture = ControlFixture::new("recovery-after-cancel");
+    let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+    let client = Arc::new(fixture.client(&server.url));
+    let reservation = client.reserve(&fixture.intent).await.unwrap();
+    let claim = fixture.claim();
+    let journal = fixture.prepared_journal(&reservation, &claim);
+    let attempt = HeldCreateClaimAttempt::begin(&journal).unwrap();
+    drop(client.claim_once(attempt).await.unwrap());
+    let cancelled = client
+        .cancel(&KubernetesCreateCancelV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            create_id: fixture.intent.create_id.clone(),
+            intent_hash: fixture.intent.intent_hash().unwrap(),
+            expected_revision: 2,
+            expected_create_epoch: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.snapshot.revision, 3);
+    assert_eq!(cancelled.snapshot.create_epoch, 2);
+    assert!(cancelled.snapshot.quota_held);
+    drop(journal);
+    let root = fixture.directory.path().join("held-create-journal");
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&root).unwrap(),
+        fixture.journal_protection(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::Prepared);
+    let capacity = Arc::new(Semaphore::new(1));
+    let owned = JournalIo::new(
+        recovered.into_journal(),
+        Arc::clone(&capacity).try_acquire_owned().unwrap(),
+    );
+    let head = fixture.store().head().unwrap();
+
+    let result = RemoteHeldCreateCoordinator::new(client)
+        .resume_result(owned)
+        .await;
+
+    assert_eq!(
+        result.as_ref().err(),
+        Some(&CoordinatorError::ControlRejected)
+    );
+    let candidate: KubernetesCreateResultV1 =
+        serde_json::from_slice(&fs::read(root.join("candidate.json")).unwrap()).unwrap();
+    assert_eq!(candidate.claim_operation_id, claim.operation_id);
+    assert_eq!(
+        candidate.expected_revision, 2,
+        "a stale candidate cannot be rebased on cancellation"
+    );
+    assert_eq!(candidate.expected_create_epoch, 1);
+    let refusal: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join("refusal.json")).unwrap()).unwrap();
+    assert_eq!(refusal["refusal"], "stale_epoch");
+    assert!(!root.join("ack.json").exists());
+    assert_eq!(
+        fixture.store().head().unwrap(),
+        head,
+        "a stale result appends no central event"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .events(&EventQuery {
+                kind: Some("control.kubernetes.create.emission_possible".into()),
+                ..EventQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert!(fixture.store().integrity().unwrap().valid);
+    assert_eq!(capacity.available_permits(), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn remote_recovery_without_policy_or_active_supervision_never_requires_activation() {
+    use crate::{audit::EventQuery, broker::held_create_client::HeldCreateClaimAttempt};
+
+    let mut fixture = ControlFixture::new("recovery-inactive-without-policy");
+    let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+    let client = fixture.client(&server.url);
+    assert!(client.protocol().await.unwrap().admission_policy_configured);
+    let reservation = client.reserve(&fixture.intent).await.unwrap();
+    let claim = fixture.claim();
+    let journal = fixture.prepared_journal(&reservation, &claim);
+    let attempt = HeldCreateClaimAttempt::begin(&journal).unwrap();
+    drop(client.claim_once(attempt).await.unwrap());
+    drop(journal);
+    drop(client);
+    server.stop().await;
+    fixture.recreate_store_inactive();
+    assert!(!fixture.store().supervision_state().unwrap().active);
+    let server = fixture.serve(false, QuotaPolicyV1::default()).await;
+    let client = Arc::new(fixture.client(&server.url));
+    assert!(!client.protocol().await.unwrap().admission_policy_configured);
+    let root = fixture.directory.path().join("held-create-journal");
+    let recovered = AdmissionJournal::recover(
+        Directory::open_existing(&root).unwrap(),
+        fixture.journal_protection(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(recovered.phase(), RecoveryPhase::Prepared);
+    let capacity = Arc::new(Semaphore::new(1));
+    let owned = JournalIo::new(
+        recovered.into_journal(),
+        Arc::clone(&capacity).try_acquire_owned().unwrap(),
+    );
+
+    let completion = RemoteHeldCreateCoordinator::new(client)
+        .resume_result(owned)
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        completion.outcome,
+        KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason: KubernetesCreateUnknownReasonV1::RecoveredAfterClaim,
+            http_status: None,
+        }
+    ));
+    assert!(completion.handle.is_none());
+    assert!(root.join("ack.json").is_file());
+    assert!(
+        !fixture.store().supervision_state().unwrap().active,
+        "reconciliation cannot reactivate admission"
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .events(&EventQuery {
+                kind: Some("control.kubernetes.create.emission_possible".into()),
+                ..EventQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .events(&EventQuery {
+                kind: Some("control.kubernetes.create.result".into()),
+                ..EventQuery::default()
+            })
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fixture
+            .store()
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    assert!(fixture.store().integrity().unwrap().valid);
+    assert_eq!(capacity.available_permits(), 1);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn remote_coordinator_does_not_attribute_local_screening_to_control_rejection() {
     use crate::{audit::EventQuery, broker::held_create_client::HeldCreateControlClient};
     let mut fixture = ControlFixture::new("remote-local-refusal");

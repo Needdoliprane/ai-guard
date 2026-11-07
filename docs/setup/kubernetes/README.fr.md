@@ -1,4 +1,4 @@
-# Kubernetes : autorité, inspection et préflight d'admission
+# Kubernetes : autorité, inspection, préflight d'admission et réconciliation
 
 [English](README.md) · [Français](README.fr.md) · [Index de configuration](../README.fr.md)
 
@@ -11,10 +11,13 @@ pas le lancement de workers. La qualification sur ce cluster réel reste
 
 Le chemin interne de CREATE retenu relie le broker à l'API authentifiée du
 contrôle et conserve demande, candidat résultat et ACK dans un journal privé.
-La permission exige un201 live exact reçu dans la fenêtre du claim original ;
-un replay ou GET ne peut pas la donner. La reprise soumet le même résultat
-sans répéter CREATE Kubernetes. Ce composant n'a pas encore de constructeur
-d'activation de production ni de commande utilisateur de lancement. Ses tests
+La permission d'émission CREATE exige un201 live exact reçu dans la fenêtre
+du claim original ; un replay ou GET ne peut pas la donner. La reprise soumet le même résultat
+retenu. Si celui-ci a été perdu avant rétention, elle peut relire le claim
+historique exact et enregistrer durablement une propriété inconnue.
+`kubernetes reconcile-held-create` expose cette réconciliation du contrôle sans
+joindre Kubernetes. L'activation de production et le lancement restent fermés.
+Ses tests
 HTTP/SQLite et peer TLS local ne qualifient ni le cluster Docker Desktop ni
 le confinement des workers ; voir le [contrat d'ingénierie](../../engineering/KUBERNETES_ADMISSION.md)
 et les [preuves](../../engineering/VALIDATION.md).
@@ -299,7 +302,7 @@ agentsandbox broker control-info \
 ```
 
 Utiliser son `control_namespace_uuid` exact, une identité runner et un schéma
-compatible 3–9 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
+compatible 3–10 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
 ou une origine HTTP loopback explicitement choisie ; ce fichier n'ajoute pas
 d'options AC privée ou mTLS à la connexion gateway. `runner_token_file` est
 un chemin absolu vers un fichier privé contenant au plus 4 Kio, pas la valeur du jeton. Le runner du
@@ -502,9 +505,91 @@ Claim renvoie `201` seulement avec la preuve Store du premier commit exact et
 une fenêtre d'émission encore valide à la préparation de la réponse. Replays
 et GET historiques renvoient `200`/`observe_only`, jamais Fresh. Un JSON seul
 n'est pas une permission runtime. Le client HTTP broker/canal ACK live et le
-Coordinator au schéma 9 restent à raccorder ; activation, transfert workspace
-et sessions d'agents Kubernetes restent indisponibles. Ces routes de contrôle
-et le préflight ne créent ni n'admettent de Pod dans un cluster.
+coordinateur sont raccordés au chemin interne de CREATE retenu. L'activation,
+le transfert du workspace et les sessions d'agents Kubernetes restent
+indisponibles. Ces routes de contrôle et le préflight ne créent ni n'admettent
+de Pod dans un cluster.
+
+## Réconcilier un journal privé de CREATE retenu
+
+Utiliser `agentsandbox kubernetes reconcile-held-create` depuis le stockage du
+contrôle de confiance avec un journal privé de CREATE retenu existant et un
+credential broker actuellement autorisé. La commande lit l'historique du
+contrôle et confirme un résultat retenu. Elle n'ouvre aucune connexion Kubernetes
+et ne demande ni credential Kubernetes, ni capacité d'activation, ni worker actif.
+Elle ne prépare aucun nouveau journal, réservation, claim ou Pod.
+Le contrôle doit exposer le protocole broker de CREATE retenu au schéma 9 ou 10.
+
+Préparer un nouveau fichier JSON privé de contrôle, limité à 16 Kio. Remplacer
+chaque placeholder par les valeurs approuvées de l'installation existante :
+
+```json
+{
+  "version": 1,
+  "gateway": "https://gateway.example.invalid",
+  "credential_id": "<current-broker-credential-uuid>",
+  "broker_token_file": "/absolute/private/control/broker-token",
+  "gateway_ca_file": "/absolute/private/control/gateway-ca.pem"
+}
+```
+
+Le format est fermé : champs inconnus ou doublons typés sont refusés. Aucun
+champ ne choisit tenant, broker ou incarnation. Le journal fournit des attentes
+de périmètre ; le contrôle authentifié choisit le tenant et doit confirmer le
+tuple complet tenant/namespace de contrôle/broker/credential/incarnation. Un
+journal ne donne aucun droit. Credentials ou grants révoqués et changement
+d'incarnation restent refusés.
+Reprendre l'UUID du credential enregistré associé à ce jeton.
+
+Utiliser des chemins absolus et les contrôles privés de propriété, modes et
+ancêtres décrits ci-dessus. Garder JSON de contrôle, jeton et AC hors des arbres
+du journal, des sources et des exports. Le jeton broker contient 32–4096 caractères ASCII
+de jeton, avec un LF terminal facultatif ; son fichier est limité à 4097 octets.
+L'AC gateway facultative est limitée à 64 Kio et huit certificats. En HTTPS,
+son absence conserve les racines intégrées du client ; sa présence les remplace
+pour cette connexion. HTTP n'est accepté que pour une origine IP loopback
+explicitement configurée, sans fichier d'AC. Redirections, proxies ambiants et
+retries automatiques restent désactivés.
+
+```sh
+agentsandbox kubernetes reconcile-held-create \
+  --journal-dir /absolute/private/control/held-create-journal \
+  --control-file /absolute/private/control/reconcile-control.json
+```
+
+Si le journal contient déjà un candidat, la commande soumet ce résultat exact
+avec son identifiant d'opération et ses CAS originaux. Un ACK central perdu
+peut donc retrouver son reçu historique sans nouveau claim ni CREATE Kubernetes.
+Le premier refus retenu reste historique et inchangé.
+
+Pour un journal relu sans candidat, la reprise utilise seulement le GET du
+claim historique exact. S'il existe, elle retient cet historique et un résultat
+`ownership_unknown`, motif `recovered_after_claim`, avec la révision et l'epoch
+historiques. Une réponse perdue avant rétention du candidat n'établit aucune
+propriété de Pod : aucune recherche ultérieure par nom ou spec ressemblante
+n'adopte un UID. Un claim absent fait échouer la commande sans en créer un.
+Une annulation centrale peut rendre les CAS historiques périmés ; candidat et
+refus sont conservés sans rebasage, ACK ou libération du quota. Le retrait de
+politique ou une supervision inactive n'interdisent pas seuls une opération
+Reconcile autorisée. Cette reprise n'active pas l'admission.
+
+La sortie `0` confirme le résultat central et l'ACK local durable. Le rapport
+JSON contient tenant, namespace de contrôle, identifiants de session/création,
+reçu exact et `retained_result` ; il porte toujours
+`current_runtime_state: "not_observed"` et `admission_available: false`. Un
+`inspection_handle` n'est rendu que pour un candidat `created_held` déjà retenu
+et confirmé par le contrôle. Il s'agit d'un rapport broker retenu, pas d'une
+observation runtime indépendante ou courante ; le handle n'accorde aucun droit
+de mutation.
+
+Une erreur sort en `1` ; des arguments invalides sortent en `2`. Un journal absent,
+occupé, partiel ou incohérent demande une inspection opérateur autorisée ;
+conserver tous les fichiers existants. Après une panne de transport, d'audit du résultat, d'ACK ou de sortie,
+la confirmation centrale peut déjà être durable : reprendre la même commande
+avec le même journal. Ne modifier ni candidat, ni CAS, ni premier refus pour
+obtenir un ACK. Un claim historique absent ou un candidat périmé demande
+l'examen de l'audit exact du contrôle ; cette commande ne fournit aucune
+procédure d'adoption, réparation, nettoyage ou libération de quota.
 
 ## Configurer l'intégration Rust
 
@@ -564,11 +649,17 @@ cargo test --locked --test kubernetes_cli -- --test-threads=1
 cargo test --locked --test kubernetes_preflight -- --test-threads=1
 cargo test --locked --test kubernetes_preflight_cli -- --test-threads=1
 cargo test --locked --lib runtime::kubernetes::prerequisites_tests:: -- --test-threads=1
+cargo test --locked --lib runtime::kubernetes::admission::remote_coordinator_tests:: -- --test-threads=1
+cargo test --locked --lib kubernetes_cli:: -- --test-threads=1
 ```
 
-Elles exercent le vrai transport HTTPS Rust contre des fixtures TLS locales,
-dont mTLS et annulation observée par le pair. Elles ne qualifient ni Docker
-Desktop ni un autre cluster. Consulter les
+Choisir les cibles selon la frontière modifiée, sans rejouer toute la liste.
+Elles exercent les vrais chemins HTTP/SQLite/journal privé Rust et des fixtures
+TLS locales, dont mTLS et annulation observée par le pair. Les tests de reprise
+CREATE retenu couvrent ACK perdu ou réponse non retenue, claim absent,
+annulation centrale, politique retirée et supervision inactive. Le pair TLS
+renvoie des faits Pod déclarés et ne lance aucun worker. Ces tests ne qualifient
+ni Docker Desktop ni un autre cluster. Consulter les
 [preuves datées](../../engineering/VALIDATION.md) pour les sources, dates et
 portées de chaque exécution ; les anciens diagnostics ne qualifient pas le préflight.
 

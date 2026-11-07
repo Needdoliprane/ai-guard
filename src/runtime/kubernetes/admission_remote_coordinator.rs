@@ -127,24 +127,70 @@ impl RemoteHeldCreateCoordinator {
         self.resume_result(owned).await
     }
 
+    /// Replay the exact retained result, or report an unrecoverable response
+    /// after a historical claim. Reopening never requires activation and never
+    /// grants permission to emit, inspect/adopt a Pod by name, or adjust CAS.
     pub(crate) async fn resume_result(
         &self,
         owned: JournalIo,
     ) -> Result<HeldCreateCompletion, CoordinatorError> {
         let client = Arc::clone(&self.client);
-        let (owned, candidate) = owned
+        let (owned, retained) = owned
             .dispatch(move |journal| {
                 Ok(validate_context(&client, journal).and_then(|()| {
-                    journal
-                        .candidate()
-                        .cloned()
-                        .ok_or(CoordinatorError::InvalidContext)
+                    if journal.candidate().is_none() && !journal.observation_only() {
+                        return Err(CoordinatorError::InvalidContext);
+                    }
+                    Ok((
+                        journal.candidate().cloned(),
+                        journal.claim_request().clone(),
+                    ))
                 }))
             })
             .await
             .map_err(|_| CoordinatorError::JournalUnavailable)?
             .map_err(|_| CoordinatorError::JournalUnavailable)?;
-        let candidate = candidate?;
+        let (candidate, claim) = retained?;
+        let (owned, candidate) = if let Some(candidate) = candidate {
+            (owned, candidate)
+        } else {
+            // Prepared-only recovery cannot know whether its Claim committed.
+            // Only this read is allowed: a 404 must never become a new claim.
+            let history = self
+                .client
+                .observe_claim(&claim.create_id, &claim.operation_id)
+                .await
+                .map_err(client_error)?;
+            if history.snapshot.intent != *owned.journal().intent()
+                || history.snapshot.target != *owned.journal().target()
+                || history.snapshot.claim.as_ref() != Some(&claim)
+            {
+                return Err(CoordinatorError::InvalidContext);
+            }
+            let retention = owned.dispatch(move |journal| {
+                let tenant_id = journal.tenant_id().to_owned();
+                journal.retain_observed_claim(&tenant_id, &history)?;
+                let candidate = KubernetesCreateResultV1 {
+                    version: 1,
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                    create_id: claim.create_id,
+                    intent_hash: history.snapshot.intent_hash,
+                    claim_operation_id: claim.operation_id,
+                    expected_revision: history.snapshot.revision,
+                    expected_create_epoch: history.snapshot.create_epoch,
+                    outcome: KubernetesCreateOutcomeV1::OwnershipUnknown {
+                        reason: KubernetesCreateUnknownReasonV1::RecoveredAfterClaim,
+                        http_status: None,
+                    },
+                };
+                journal.retain_candidate(&candidate, None)?;
+                Ok(candidate)
+            });
+            retention
+                .await
+                .map_err(|_| CoordinatorError::JournalUnavailable)?
+                .map_err(|_| CoordinatorError::JournalUnavailable)?
+        };
         match self.client.result(&candidate).await {
             Ok(confirmed) => {
                 let receipt = confirmed.receipt().clone();
