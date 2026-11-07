@@ -1,5 +1,28 @@
 # État constaté — suivi du développement
 
+## 7 novembre — client relais intégré, reprise Kubernetes et fédération en cours
+
+Le client Rust du relais `8c38ea5`, composé dans `914786c`, ajoute les échanges
+authentifiés send/inbox/ACK avec reprise explicite de la même opération après
+réponse perdue. Ses six entrées de manifeste et les contrats serveur sont
+identiques après composition. Sur son gel propre, 31 fonctions passent et toutes
+cibles compilent après reproduction de huit résidus de revue. Les
+[preuves et limites](evidence/2026-11-07/relay-client/README.md) et les guides
+EN/FR sont publiés. Cette égalité de contenu ne transfère pas les tests à toute
+la composition : sa nouvelle validation reste à effectuer. Le raccord réseau et
+le handoff runtime du credential worker restent ouverts ; un worker au réseau
+coupé n'acquiert pas un accès par la présence de cette bibliothèque.
+
+La reprise descriptive d'une création Kubernetes retenue passe neuf parents
+logiciels, son CLI et la compilation sur le gel02. Le module CLI complet révèle
+ensuite un oracle de schéma périmé ; sa correction seule au gel03 passe les trois
+tests du module. Preuves finales et intégration sont en préparation : aucune
+création de session, activation de Pod ni qualification de cluster n'est acquise.
+La vue fédérée additive, avec autorisations cumulées et deux instantanés explicites,
+est au stade de reproduction avant implémentation. Le drainage D5 passe cinq
+parents ciblés sur ses gels29/30 et toutes cibles ; sa revue et sa découpe
+d'intégration restent ouvertes. Aucun de ces résultats ne ferme G09 ou un gate global.
+
 ## 7 novembre — composition du contrôle, de la reprise et du SSO validée
 
 La composition26 rassemble I/L/H, le budget d'authentification M et son CLI de
@@ -11,7 +34,7 @@ Revue de la couture, guides EN/FR et preuves des composants sont traités.
 [Résultats, 417 empreintes et limites](evidence/2026-11-07/control-recovery-composition/README.md).
 Ces résultats sont logiciels : aucun gate global ni verdict production n'est acquis.
 
-Deux développements indépendants continuent : le vrai shutdown D5 a reproduit
+À cette étape, deux développements indépendants continuent : le vrai shutdown D5 a reproduit
 la perte de première finalisation d'un Full accepté ; son correctif d'ordre de
 drainage est en revue/QA. Le client relais Rust a des résidus de revue sur la
 confidentialité des IDs, le décodage fermé et l'ACK ambigu, avec régressions en

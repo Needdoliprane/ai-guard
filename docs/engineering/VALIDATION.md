@@ -1,5 +1,26 @@
 # Validation courante
 
+## 7 novembre — composition du client relais et nouveaux chantiers distincts
+
+Le lot relais `8c38ea5` est composé dans `914786c`. Les six empreintes de
+[source du client](evidence/2026-11-07/relay-client/source.sha256) correspondent
+au checkout composé ; comparaison sans différence de `api/relay`, `audit/relay`,
+`api/workload`, `audit/workload`, `api.rs` et `json.rs` avec la branche du lot.
+Ses 13 tests client, 18 tests API et le check toutes cibles PASS restent attachés
+au gel `relay-client-fix02`, pas au nouveau checkout par simple composition.
+Revue indépendante et contrôles des guides EN/FR traités ; tests composés à suivre.
+
+Sur le chantier Kubernetes distinct : gel02, neuf tests de coordinateur et un
+test CLI PASS, puis check toutes cibles RC0. Le module CLI élargi donne deux PASS
+et un FAIL sur l'ancien oracle qui traitait le schéma10 comme futur. Gel03 ne
+change que cet oracle vers11 : trois PASS, 0,41s, compilation1min51s, journal
+`f8e2cda002c610282de9c8f6c0b16d41c8732cecdf46d2f1ac220a6095bf4500`.
+Une compilation native avait été lancée par erreur puis interrompue avant tout
+test observé ; des build scripts ont pu s'exécuter. Elle n'est pas une preuve
+qualifiée et le profil isolé a été explicitement retransmis aux descendants.
+Les validations suivantes ont été exécutées dans QA AC isolée. Aucun moteur de
+worker ni cluster réel n'est qualifié par ces tests ; G09 reste FAIL.
+
 ## 7 novembre — composition26 : 52 fonctions et compilation toutes cibles
 
 Sur le gel `core-hilm-sdk-composition26`, 417 fichiers Rust/Cargo sont vérifiés
