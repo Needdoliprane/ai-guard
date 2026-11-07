@@ -276,3 +276,54 @@ pub enum BrokerReplyV1 {
         code: BrokerErrorCodeV1,
     },
 }
+
+#[cfg(test)]
+mod export_report_compatibility_tests {
+    use super::BrokerReplyV1;
+
+    // Frozen subset of the closed V1 decoder shipped at 5e52807. It must read
+    // the current producer's acknowledgement, not only a legacy input fixture.
+    #[derive(serde::Deserialize, Debug)]
+    #[serde(rename_all = "snake_case", deny_unknown_fields)]
+    enum LegacyV1Reply {
+        ExportAcknowledged {
+            operation_id: uuid::Uuid,
+            request_id: uuid::Uuid,
+            manifest_digest: String,
+            files: usize,
+        },
+    }
+
+    #[test]
+    fn new_export_reply_is_readable_by_the_legacy_v1_client() {
+        let operation_id = uuid::Uuid::from_u128(1);
+        let request_id = uuid::Uuid::from_u128(2);
+        let current = BrokerReplyV1::ExportAcknowledged {
+            operation_id,
+            request_id,
+            manifest_digest: "synthetic-manifest".into(),
+            files: 2,
+        };
+        let bytes = serde_json::to_vec(&current).unwrap();
+        let legacy: LegacyV1Reply = serde_json::from_slice(&bytes)
+            .expect("the current V1 reply must remain readable by the legacy client");
+        let LegacyV1Reply::ExportAcknowledged {
+            operation_id: observed_operation,
+            request_id: observed_request,
+            manifest_digest,
+            files,
+        } = legacy;
+        assert_eq!(observed_operation, operation_id);
+        assert_eq!(observed_request, request_id);
+        assert_eq!(manifest_digest, "synthetic-manifest");
+        assert_eq!(files, 2);
+    }
+
+    #[test]
+    fn legacy_export_reply_preserves_unknown_omissions() {
+        let legacy = r#"{"export_acknowledged":{"operation_id":"00000000-0000-4000-8000-000000000001","request_id":"00000000-0000-4000-8000-000000000002","manifest_digest":"synthetic-manifest","files":2}}"#;
+        let reply: BrokerReplyV1 = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(&reply, BrokerReplyV1::ExportAcknowledged { .. }));
+        assert_eq!(serde_json::to_string(&reply).unwrap(), legacy);
+    }
+}

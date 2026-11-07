@@ -332,6 +332,8 @@ Conserver ensemble l'UUID de commande et la destination exacte. Un export acquit
 
 Un export explicite après annulation exige son propre grant audité ultérieur et tous les prérequis d'export ; cancel ne l'autorise pas implicitement. Un grant ou ACK ne donne pas de permission pour redémarrer le worker. Liens, traversées, identité du parent modifiée, permissions dangereuses et preuves indisponibles causent un refus plutôt qu'un succès partiel caché en diff vide.
 
+La [politique d'export du workspace](../local/README.fr.md#examiner-et-exporter-les-changements) s'applique aussi ici : métadonnées bloquées omises, structure de répertoire Git refusée avant publication et fichiers réguliers publiés en `0644`. L'accusé IPC V1 conserve ses champs de requête/digest/nombre de fichiers pour rester lisible par un ancien client V1. Le compteur d'omissions est enregistré séparément dans l'événement descriptif d'audit `workspace.export.policy`, corrélé par `request_id` et `manifest_digest` ; `omitted_entries` compte les headers explicites de l'archive, répertoires inclus. Un ancien export sans cet événement conserve un compteur inconnu. Préserver la requête d'export originale si une erreur d'audit après publication laisse le résultat incertain. Des fichiers d'outils comme `.cargo/config.toml` peuvent rester présents : examiner toujours le contenu avant ouverture ou exécution.
+
 ## Diagnostiquer les erreurs et préserver les preuves de reprise
 
 La CLI affiche les réponses JSON et sort en erreur pour `error` et `rejected`. Les erreurs de transport distinguent une requête non envoyée d'un résultat inconnu ou d'une réponse indisponible. Préserver les identités opération/commande avant retry ; un exit client non nul ne prouve pas l'absence de mutation durable.

@@ -4,9 +4,9 @@
 //! Revalidation detects changed mappings/ancestry at the observation points. It
 //! does not provide an atomic snapshot against concurrent same-UID/root changes.
 
-use super::{Limits, PreparedWorkspace, collect_workspace_from_root};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use super::{Manifest, anchored_export, read_workspace_archive};
+use super::{ExportReport, Manifest, anchored_export, read_workspace_archive};
+use super::{Limits, PreparedWorkspace, collect_workspace_from_root};
 use anyhow::{Context, Result, ensure};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::io::Read;
@@ -354,6 +354,15 @@ impl AuthorizedExportParent {
         name: &OsStr,
         limits: Limits,
     ) -> Result<Manifest> {
+        Ok(self.extract_with_report(reader, name, limits)?.manifest)
+    }
+
+    pub(crate) fn extract_with_report<R: Read>(
+        &self,
+        reader: R,
+        name: &OsStr,
+        limits: Limits,
+    ) -> Result<ExportReport> {
         self.revalidate()?;
         let parent = self
             .anchor
@@ -364,12 +373,12 @@ impl AuthorizedExportParent {
         // Clone the authorized capability, never reopen its pathname to choose
         // a new creation authority after policy validation.
         let mut staging = anchored_export::Staging::new_with_ancestry(self.retained_ancestry()?)?;
-        let manifest = read_workspace_archive(reader, limits, Some(&staging))?;
+        let report = read_workspace_archive(reader, limits, Some(&staging))?;
         self.revalidate()?;
         staging
             .publish(name, self.path())
             .context("cannot publish authorized export")?;
-        Ok(manifest)
+        Ok(report)
     }
 }
 

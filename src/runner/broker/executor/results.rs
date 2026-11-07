@@ -469,26 +469,39 @@ impl Execution<'_> {
         let request_id = target.request_id();
         let destination_ref = target.destination_ref().to_owned();
         let destination_intent_hash = target.destination_intent_hash().to_owned();
-        let manifest = tokio::task::spawn_blocking(move || {
+        let report = tokio::task::spawn_blocking(move || {
             target
                 .parent()
-                .extract(bytes.as_slice(), &name, Limits::default())
+                .extract_with_report(bytes.as_slice(), &name, Limits::default())
         })
         .await??;
-        let manifest_digest = content_hash("ai-guard:workspace-manifest:v1", &manifest)?;
+        let manifest_digest = content_hash("ai-guard:workspace-manifest:v1", &report.manifest)?;
+        // Keep the closed export V1 fact and IPC acknowledgement unchanged.
+        // This separate descriptive event extends the generic audit stream;
+        // its absence in historical exports means unknown, never zero.
+        self.fact_event(
+            "workspace.export.policy",
+            &ExportPolicyFactsV1 {
+                version: 1,
+                request_id,
+                manifest_digest: manifest_digest.clone(),
+                omitted_entries: report.omitted_entries,
+            },
+        )
+        .await?;
         let result = ExportFactsV1 {
             version: 1,
             request_id,
             destination_ref,
             destination_intent_hash,
             manifest_digest: manifest_digest.clone(),
-            files: manifest.len(),
+            files: report.manifest.len(),
         };
         self.fact_event("broker.batch.export", &result).await?;
         Ok(ExportCompletion {
             request_id,
             manifest_digest,
-            files: manifest.len(),
+            files: report.manifest.len(),
         })
     }
 }
@@ -528,4 +541,45 @@ struct ExportFactsV1 {
     destination_intent_hash: String,
     manifest_digest: String,
     files: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExportPolicyFactsV1 {
+    version: u32,
+    request_id: Uuid,
+    manifest_digest: String,
+    omitted_entries: u64,
+}
+
+#[cfg(test)]
+mod export_report_compatibility_tests {
+    use super::{ExportFactsV1, ExportPolicyFactsV1};
+
+    const LEGACY: &str = r#"{"version":1,"request_id":"00000000-0000-4000-8000-000000000001","destination_ref":"synthetic-export","destination_intent_hash":"synthetic-intent","manifest_digest":"synthetic-manifest","files":2}"#;
+
+    #[test]
+    fn legacy_export_fact_keeps_unknown_omissions_and_identical_bytes() {
+        let facts: ExportFactsV1 = serde_json::from_str(LEGACY).unwrap();
+        // Rewriting a historical fact with a fabricated zero would change the
+        // retained event bytes and its hash during reconciliation.
+        assert_eq!(serde_json::to_string(&facts).unwrap(), LEGACY);
+    }
+
+    #[test]
+    fn observed_export_omissions_survive_fact_serialization() {
+        for observed in [0, 3] {
+            let legacy: ExportFactsV1 = serde_json::from_str(LEGACY).unwrap();
+            let facts = ExportPolicyFactsV1 {
+                version: 1,
+                request_id: legacy.request_id,
+                manifest_digest: legacy.manifest_digest,
+                omitted_entries: observed,
+            };
+            let bytes = serde_json::to_vec(&facts).unwrap();
+            let replay: ExportPolicyFactsV1 = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(replay.omitted_entries, observed);
+            assert_eq!(serde_json::to_vec(&replay).unwrap(), bytes);
+        }
+    }
 }
