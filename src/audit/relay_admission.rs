@@ -2,7 +2,7 @@
 //! the same checked SQLite transaction; no memory cache grants channel authority.
 use super::*;
 use crate::{
-    control::{ArmReceiptV1, ArmSubjectV1, ArmV1, RuntimeStatusV1, WorkerStateV1, WorkerV1},
+    control::{ArmSubjectV1, ArmV1, RuntimeStatusV1, WorkerStateV1, WorkerV1},
     relay::admission::*,
     workload::{WorkloadBinding, WorkloadSubjectV1},
 };
@@ -115,12 +115,6 @@ fn worker(db: &Connection, id: &str, before: Option<i64>) -> anyhow::Result<Opti
     .map(|json| serde_json::from_str(&json).map_err(Into::into))
     .transpose()
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ArmEntry {
-    request: ArmV1,
-    receipt: ArmReceiptV1,
-}
 
 /// Check stored control facts at a historical prefix or at the current snapshot.
 /// Reported runtime facts are never upgraded to independent gateway observations.
@@ -214,26 +208,23 @@ fn authority(
     capacity(rows.len() <= 64)?;
     let mut arm = None;
     for json in rows {
-        let entry: ArmEntry = serde_json::from_str(&json)?;
-        if matches!(entry.request.subject, ArmSubjectV1::Worker) {
+        let entry: ArmV1 = serde_json::from_str(&json)?;
+        if matches!(entry.subject, ArmSubjectV1::Worker) {
             conflict(arm.is_none())?;
             arm = Some(entry);
         }
     }
     let arm = arm.ok_or(RelayAdmissionFailure::Forbidden)?;
     allowed(
-        arm.receipt.control_namespace_uuid == input.control_namespace_uuid
-            && arm.request.worker_id == input.endpoint.worker_id
-            && arm.request.attempt_id == input.endpoint.attempt_id
-            && arm.request.inspection == input.inspection
-            && arm.request.authority_binding_hash == input.authority_binding_hash
-            && arm.request.configuration_fingerprint_version
-                == input.configuration_fingerprint_version
-            && arm.request.configuration_fingerprint == input.configuration_fingerprint,
+        arm.worker_id == input.endpoint.worker_id
+            && arm.attempt_id == input.endpoint.attempt_id
+            && arm.inspection == input.inspection
+            && arm.authority_binding_hash == input.authority_binding_hash
+            && arm.configuration_fingerprint_version == input.configuration_fingerprint_version
+            && arm.configuration_fingerprint == input.configuration_fingerprint,
     )?;
     let arm_utc = time(
-        arm.request
-            .clock
+        arm.clock
             .observed_utc
             .as_deref()
             .ok_or(RelayAdmissionFailure::Forbidden)?,
@@ -243,7 +234,7 @@ fn authority(
         .checked_add_signed(Duration::seconds(i64::from(worker.launch.timeout_seconds)))
         .ok_or(RelayAdmissionFailure::InvalidRequest)?;
     let arm_cap = arm_utc
-        .checked_add_signed(Duration::seconds(i64::from(arm.request.timeout_seconds)))
+        .checked_add_signed(Duration::seconds(i64::from(arm.timeout_seconds)))
         .ok_or(RelayAdmissionFailure::InvalidRequest)?;
     allowed(
         at < expiry
