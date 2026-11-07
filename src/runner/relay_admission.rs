@@ -7,6 +7,9 @@ use crate::relay::admission::*;
 use serde::Serialize;
 use std::sync::Arc;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RelayAdmissionClientError {
     InvalidRequest,
