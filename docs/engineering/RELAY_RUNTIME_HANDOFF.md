@@ -1,7 +1,9 @@
 # Raccord privé du relais aux workers — direction proposée le 7 novembre 2026
 
-**Proposition soumise au mainteneur, fondée sur le checkout `f12f266`. Aucun
-canal runtime décrit ici n'est implémenté ou qualifié.** Le choix recommandé
+**Direction et code/tests logiciels locaux approuvés le 7 novembre 2026**, sur
+la proposition publiée à `c1748a2`, fondée sur le checkout `f12f266`. Une
+campagne réelle du nouveau transport reste hors de cet accord. Aucun canal
+runtime décrit ici n'est implémenté ou qualifié. Le choix retenu
 est un helper Rust dans le worker, accessible aux applications par un socket
 Unix **interne au worker**, et relié au broker de confiance par un flux
 stdin/stdout non TTY d'un exec moteur ciblant l'instance exacte. La preuve
@@ -12,7 +14,8 @@ ne lui est remis.
 Cette proposition remplace la comparaison sans choix de ce document. Le
 nouveau socket applicatif dans le worker et la capability d'exec restreinte
 étendent la frontière de transport autorisée jusqu'ici. La décision à prendre
-avant implémentation figure en fin de document.
+et sa portée figurent en fin de document ; l'accord reçu ne constitue pas une
+preuve d'implémentation.
 
 ## Besoin et coutures constatées
 
@@ -371,9 +374,9 @@ possédées, sans relance fournisseur/E2E réflexe ni destruction de volume
 existant. Charge 100, Kubernetes et fédération multi-hôtes gardent leurs
 protocoles et autorisations propres.
 
-## Décision demandée et portée
+## Décision reçue et portée
 
-**À faire approuver avant code ou essai runtime :** direction commune
+**Approuvée le 7 novembre pour code/configuration et tests logiciels locaux :** direction commune
 Docker/Podman « helper Rust dans l'image worker, UDS uniquement dans son tmpfs
 Linux, exec stdin/stdout non TTY vers son CID exact, preuve workload retenue au
 contrôle », avec permis relais distinct, outbox de reprise versionné et
@@ -382,7 +385,7 @@ Conserver moteur dans le contrôle, `network:none`, audit obligatoire et aucune
 nouvelle permission d'exécution métier. L'accord antérieur broker/TTY ne couvre
 pas implicitement cette capability supplémentaire.
 
-L'accord demandé couvre l'implémentation Rust, ses configurations et les tests
+L'accord reçu couvre l'implémentation Rust, ses configurations et les tests
 logiciels locaux dans les harnais isolés déjà autorisés. Il ne couvre pas une
 campagne du nouveau transport sur des workers réels, un build/lancement d'image
 pour cette campagne, un fournisseur, un accès réseau externe, le cloud, une PKI
@@ -390,12 +393,13 @@ ou une installation OS. Les opérations de sandbox QA déjà autorisées conserv
 leur propre périmètre ; elles ne deviennent pas des essais du transport livré.
 Toute campagne réelle conserve ses prérequis, son périmètre et son budget explicites.
 
-Cet accord ne qualifierait ni UDS hôte/VM, Kubernetes exec/RBAC, accès
+Cet accord ne qualifie ni UDS hôte/VM, Kubernetes exec/RBAC, accès
 distant/PKI, installation OS ou fonctionnement runtime. Une impossibilité
 constatée revient en décision d'architecture, sans fallback TCP ni ouverture
 du réseau worker.
 
-Ce lot se limite à lecture source et conception documentaire ; aucune commande
+Le lot de conception publié à `c1748a2` se limitait à la lecture source et
+à la conception documentaire ; aucune commande
 Cargo, binaire projet, moteur, réseau, fournisseur ou cluster exécuté. Les
 checks statiques du document ne valent pas test du protocole. G05/G06/G08/G09/
 G11 et recette réelle restent ouverts ; aucun gate clos.

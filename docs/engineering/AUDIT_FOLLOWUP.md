@@ -59,6 +59,25 @@ l'absence de démarrage est prouvée.
 
 ### Lots de correction et acceptation
 
+Point supplémentaire du 7 novembre : les tests de continuité D5 restent dans
+un worktree séparé, sans intégration du bundle sur la seule base de canaris.
+La fermeture de l'admission STOP après shutdown idle passe trois fonctions
+ciblées sur les gels 34/35 et la compilation toutes cibles sur 35. Le
+diagnostic d'un owner encore queued après sortie du writer a été reproduit
+sur le gel36 ; sa correction passe six fonctions sur le gel37. Ces résultats
+ne prouvent ni récupération complète ni terminaison runtime.
+
+Les nouveaux tests Cancel et reprise après perte de réponse query n'ont pas
+encore établi leurs défauts métier : Cancel déborde la pile pendant la
+préparation du test aux gels37/39, avant son oracle ; le second test reste
+`NOT_RUN`. Le journal diagnostic39 est conservé avec SHA-256
+`d1ea7bb1ae422f4ccf3f14e6e5abd9fa89ab2beada9a193c77355f116776c909`.
+Corriger cette préparation puis reproduire les oracles est requis avant une
+correction métier. Les réservations sans preuve de non-démarrage du lot G,
+l'approbation humaine authentifiée, les signatures et l'attribution des
+délégations restent ouverts. Aucun nouveau constat confirmé n'est ajouté
+au décompte de l'audit primaire à partir de ces diagnostics.
+
 Mise à jour du 7 novembre après les états de démarrage ci-dessous : la
 [composition26](evidence/2026-11-07/control-recovery-composition/README.md)
 I/L/H/M + Core25 et SDK passe 52 fonctions ciblées et toutes cibles sur son

@@ -1,5 +1,23 @@
 # Décisions d'industrialisation
 
+## 7 novembre — raccord privé du relais et cache de validation approuvés
+
+Le mainteneur autorise la [direction relue du relais](RELAY_RUNTIME_HANDOFF.md)
+au commit `c1748a2` : code Rust, configurations et tests logiciels locaux.
+L'accord couvre le helper intra-worker, son socket privé, le flux exec dédié
+vers l'instance exacte et les trois routes fermées. Il ne couvre pas une
+campagne réelle du nouveau transport. Le protocole, l'accès HTTP, le journal
+et le propriétaire runtime restent des acceptations distinctes ; aucune
+qualification moteur ou disponibilité du parcours complet n'est déduite.
+
+Le même échange autorise la préparation du cache public verrouillé manquant
+pour le build frontend et le navigateur, et Clippy correspondant si absent.
+Les versions, URL et empreintes sont celles du plan privé
+`CACHE_PREPARATION.md` du 4 novembre. Vérifier les empreintes avant emploi ;
+installation et exécution restent dans une QA isolée, sans réseau, sans secret
+et sans appel modèle. Cet accord ne modifie ni dépendances ni lock et ne
+permet pas une exécution native des builds/tests sur le poste.
+
 ## 7 novembre — canal de contrôle à capacité réservée approuvé
 
 Le mainteneur approuve la [direction H](INGRESS_CONTROL_CAPACITY_PROPOSAL.md),
