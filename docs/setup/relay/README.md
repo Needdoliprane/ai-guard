@@ -1,6 +1,6 @@
 # Rust worker relay client
 
-[Français](README.fr.md) · [Workload provisioning and relay contract](../workloads/README.md) · [Validation](../../engineering/evidence/2026-11-07/relay-client/README.md)
+[Français](README.fr.md) · [Workload provisioning and relay contract](../workloads/README.md) · [Profile validation](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
 
 `agentsandbox::relay::client::WorkerRelayClient` calls the existing worker HTTP
 relay with a dedicated workload proof. This is a Rust library API, with no relay
@@ -30,12 +30,14 @@ are bounded to 2 MiB, worker receipts/errors to 16 KiB; historical control
 responses retain their 512 KiB bound. Audit, grants, expiry and revocation are
 still checked by the normal handlers.
 
-This lane does not give a network-isolated worker access. The library constructor
-above still accepts a root origin; a typed `/control` client profile and runtime
-handoff remain separate work. Do not append a free path to bypass its origin
-validation or place the workload proof inside a worker. The new
+This lane does not give a network-isolated worker access. Select the typed
+`RelayClientProfile::ControlIngress` in trusted control to reach these fixed
+routes. The origin remains a root origin: do not append `/control` yourself or
+place the workload proof inside a worker. `RelayClientProfile::RootOrigin`
+preserves direct gateway access. Neither profile connects the runtime channel,
+persists a worker/profile binding or supplies its broker owner/outbox. The
 `agentsandbox::relay::channel` module supplies bounded closed frames and channel
-state validation, not a running helper or a broker owner. See the
+state validation. See the
 [source-specific software proof](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
 ## Supply an authorized context
@@ -62,6 +64,11 @@ remote text, URL, body or credential chain. This does not protect a caller that
 prints its own inputs.
 
 `new(origin, workload_credential, expected_endpoint)` uses normal TLS roots.
+It selects `RootOrigin`, as does the existing `with_ca_file` constructor.
+Use `with_profile(origin, workload_credential, expected_endpoint, profile)`
+for explicit selection. The profile is a closed enum, with no free prefix or
+automatic fallback. When integrated into runtime control, the owner must retain
+the selected profile with the authorized binding; this library does not do so.
 The origin is limited to 2048 bytes, with no user information, non-root path,
 query, fragment, percent escape or backslash. HTTPS is supported; plain HTTP is
 accepted only on a literal loopback IP, never `localhost` or a private LAN
@@ -77,6 +84,10 @@ enabled. No CA private key, system trust installation, HTTP fallback or client
 certificate/mTLS configuration is provided. See the
 [PKI entry point](../../engineering/INFRASTRUCTURE_PKI.md) before a real remote
 operation. This lot has no new real HTTPS/private-CA client qualification.
+To combine explicit profile and private roots, use
+`with_profile_and_ca_file(origin, workload_credential, expected_endpoint, profile, ca_file)`.
+Select the approved route and trust before construction; do not retry with a
+different profile after an uncertain mutation.
 
 ## Use retained requests
 
@@ -86,7 +97,7 @@ request from its caller. It does not obtain a credential or prepare a runtime:
 ```rust
 use agentsandbox::relay::{
     RelayEndpointV1, RelayReceiptV1, RelaySendV1,
-    client::{RelayClientError, WorkerRelayClient},
+    client::{RelayClientError, RelayClientProfile, WorkerRelayClient},
 };
 
 async fn send_prepared(
@@ -95,8 +106,9 @@ async fn send_prepared(
     expected_endpoint: RelayEndpointV1,
     prepared_send: &RelaySendV1,
 ) -> Result<RelayReceiptV1, RelayClientError> {
-    let client = WorkerRelayClient::new(
+    let client = WorkerRelayClient::with_profile(
         approved_origin, workload_credential, expected_endpoint,
+        RelayClientProfile::ControlIngress,
     )?;
     client.send(prepared_send).await
 }
@@ -107,6 +119,10 @@ async fn send_prepared(
 | `send(&RelaySendV1)` | `POST /api/v1/relay/messages`; version 1, retained operation UUID, authorized grant UUID, TTL and nonempty body. Returns the correlated receipt, with 201 for a new send or 200 for an exact replay. The send operation ID also identifies its message. |
 | `inbox(after: Option<i64>, limit: u32)` | `GET /api/v1/relay/messages`; nonnegative cursor and limit 1–32. Returns one checked page; an error never becomes an empty inbox. The caller retains/advances its cursor explicitly. |
 | `ack(&RelayAckV1)` | `POST /api/v1/relay/messages/{message_id}/ack`; the retained ACK has its own operation UUID and the received message UUID. Returns a correlated 200 receipt. An ACK is acknowledgement, not execution or an observed effect. |
+
+The table shows `RootOrigin`. `ControlIngress` adds the fixed `/control` prefix
+to each of these three routes, including the inbox query and ACK. It changes no
+credential, role, endpoint, DTO, TLS policy, timeout or outcome semantics.
 
 There are no grant, revoke, prune, runner, arbitrary-URL or tenant-selector
 methods. Inbox content is business data, not an instruction to execute. The
@@ -142,7 +158,9 @@ before content is delivered. Audit failure blocks the operation. A page is not
 a complete tenant inventory or a stable snapshot across pages.
 
 The client rejects its known workload credential anywhere in the send/ACK DTO
-before transport, including IDs and the ACK path. It also checks decoded
+and in the final built URL before transport, including fixed profile paths and
+queries. A local final-URL refusal is opaque `InvalidRequest`; it does not
+establish the outcome of an earlier attempt. It also checks decoded
 structured-body strings/keys and responses. A JSON body parseable by the normal
 decoder but rejected by the strict decoder—for example duplicate keys or nesting
 past 64—is refused **even without a secret**. Ordinary non-JSON text remains
@@ -160,8 +178,10 @@ No error text includes the remote diagnostic body. The
 [workload diagnostics](../workloads/README.md#diagnose-stop-and-preserve-state)
 retain the server-side distinctions.
 
-The [dated evidence](../../engineering/evidence/2026-11-07/relay-client/README.md)
-records 13 client tests and 18 existing API tests with real HTTP/SQLite and
-synthetic supervised-worker records. Actual runtime handoff, Docker/Podman/
+The [profile evidence](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
+records six new profile tests and thirteen existing client tests passing on
+their frozen source, with real HTTP/SQLite and synthetic supervised-worker
+records. The [earlier proof](../../engineering/evidence/2026-11-07/relay-client/README.md)
+retains its own source and results. Actual runtime handoff, Docker/Podman/
 Kubernetes workers, multi-host transport, provider execution and the 100-worker
 target remain unqualified by these tests.
