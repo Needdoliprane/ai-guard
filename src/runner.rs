@@ -20,6 +20,7 @@ mod cold_audit_http;
 pub(crate) use cold_audit_http::{ColdAuditBudget, ExactStoredEventReceipt};
 pub(crate) mod kubernetes_preflight;
 mod managed;
+pub(crate) mod relay_admission;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::Args)]
 pub struct RunOptions {

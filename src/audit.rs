@@ -81,6 +81,7 @@ mod kubernetes_policy_tests;
 #[cfg(test)]
 pub(crate) mod read_test_observer;
 mod relay;
+mod relay_admission;
 mod workload;
 pub(crate) use control::expected_worker_transition;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
@@ -970,7 +971,8 @@ impl Store {
     }
     pub fn append(&self, event: Event) -> anyhow::Result<StoredEvent> {
         anyhow::ensure!(
-            !event.kind.starts_with("control."),
+            !event.kind.starts_with("control.")
+                && !crate::relay::admission::reserved_kind(&event.kind),
             "control events require typed mutation"
         );
         let (event, payload) = self.prepare_event(event)?;

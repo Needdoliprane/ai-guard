@@ -172,6 +172,9 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         | (&Method::POST, ["relay", "grants"])
         | (&Method::POST, ["relay", "grants", _, "revoke"])
         | (&Method::POST, ["relay", "messages", _, "prune"])
+        | (&Method::POST, ["relay", "channels", "admissions"])
+        | (&Method::POST, ["relay", "channels", _, "claims"])
+        | (&Method::POST, ["relay", "channels", _, "transitions"])
             if v1 =>
         {
             Some(Runner)

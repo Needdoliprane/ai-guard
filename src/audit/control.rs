@@ -551,6 +551,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     super::workload::validate(db)?;
     super::broker_registry::validate(db)?;
     super::relay::validate(db)?;
+    super::relay_admission::validate(db)?;
     super::kubernetes_admission::validate(db)?;
     Ok(())
 }

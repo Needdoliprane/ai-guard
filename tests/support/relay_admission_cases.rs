@@ -348,3 +348,84 @@ async fn relay_admission_claim_is_single_use_and_unknown_requires_exact_worker_t
     assert!(reopened.integrity().unwrap().valid);
     assert!(!reopened.supervision_state().unwrap().active);
 }
+
+#[tokio::test]
+async fn relay_admission_guards_roles_tenant_and_reserved_namespace() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 10000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 10000));
+    let worker = running_now(&a);
+    let token = "relay-admission-boundary-fixture-token-0123456789";
+    let (credential, revision) = bind(&a, &worker, token);
+    let input = request(&a, &worker, &credential, revision, token);
+    let app = gateway_router(
+        GatewayState::for_tenants(
+            vec![
+                TenantGateway {
+                    tenant_id: "tenant-a".into(),
+                    store: a.clone(),
+                    runner_token: "r".repeat(48),
+                    viewer_token: "v".repeat(48),
+                },
+                TenantGateway {
+                    tenant_id: "tenant-b".into(),
+                    store: b.clone(),
+                    runner_token: "b".repeat(48),
+                    viewer_token: "w".repeat(48),
+                },
+            ],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    let uri = "/control/api/v1/relay/channels/admissions";
+    for credential in [&"v".repeat(48), token, &"unknown".repeat(8)] {
+        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let read = polled.clone();
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            read.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::io::Error>("not valid JSON")
+        }));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {credential}"))
+                    .header("content-type", "application/json")
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            response.status(),
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+        assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+    let b_head = b.head().unwrap();
+    assert_eq!(
+        post(&app, &"b".repeat(48), uri, &input).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(b.head().unwrap(), b_head);
+    let mut invalid = input.clone();
+    invalid["tenant_id"] = json!("tenant-b");
+    assert_eq!(
+        post(&app, &"r".repeat(48), uri, &invalid).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut event = agentsandbox::model::Event::new("relay_channel.v1");
+    event.data = json!({"forged":true});
+    let event = serde_json::to_value(event).unwrap();
+    for uri in ["/api/v1/events", "/control/api/v1/control/events"] {
+        assert_eq!(
+            post(&app, &"r".repeat(48), uri, &event).await.0,
+            StatusCode::FORBIDDEN
+        );
+    }
+}

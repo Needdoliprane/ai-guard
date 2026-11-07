@@ -54,6 +54,7 @@ mod oidc;
 #[cfg(test)]
 mod read_execution_tests;
 mod relay;
+mod relay_admission;
 mod store_io;
 mod supervision;
 mod workload;
@@ -753,6 +754,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .merge(supervision::routes())
                 .merge(workload::routes())
                 .merge(relay::routes())
+                .merge(relay_admission::routes())
                 .merge(brokers::routes())
                 .merge(kubernetes::routes())
                 .merge(human::routes()),
@@ -796,6 +798,7 @@ async fn ingest(
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
             if crate::audit::D5_CONTROL_EVENT_KINDS.contains(&event.kind.as_str())
+                || crate::relay::admission::reserved_kind(&event.kind)
                 || ["security.decision", "control", "worker", "usage.allocation"]
                     .iter()
                     .any(|namespace| {
