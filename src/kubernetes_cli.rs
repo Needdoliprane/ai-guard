@@ -1,7 +1,11 @@
-//! Explicit Kubernetes diagnostics and audited admission dry-run for control.
+//! Explicit Kubernetes diagnostics, dry-run and held-CREATE reconciliation.
 //! No ambient configuration, credential discovery or workload admission.
 use crate::{
-    control_fs::PrivateFile,
+    broker::held_create_client::{HeldCreateClientScope, HeldCreateControlClient},
+    control::kubernetes_admission::{
+        KubernetesCreateOutcomeV1, KubernetesCreateReceiptV1, KubernetesCreateUnknownReasonV1,
+    },
+    control_fs::{Directory, PrivateFile},
     model::Event,
     redaction::Redactor,
     runner::{
@@ -12,6 +16,12 @@ use crate::{
         KubernetesCredentials, KubernetesDiagnosticsV1, KubernetesError,
         KubernetesPreflightObservationV1, KubernetesPreflightPlanV1, KubernetesPreflightTargetV1,
         KubernetesPrerequisitesV1, KubernetesRuntime,
+        admission::{
+            coordinator::CoordinatorError,
+            journal::{AdmissionJournal, AdmissionJournalProtection},
+            journal_io::JournalIo,
+            remote_coordinator::RemoteHeldCreateCoordinator,
+        },
     },
 };
 use clap::{ArgGroup, Args, Subcommand};
@@ -25,6 +35,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 const MAX_AUTHORITY_BYTES: u64 = 16 * 1024;
@@ -47,6 +58,8 @@ enum KubernetesCommand {
     Doctor(DoctorCommandArgs),
     /// Audit and inspect a closed Pod profile using server-side dry-run; never start work.
     Preflight(PreflightArgs),
+    /// Confirm a retained held-CREATE result using its exact control history.
+    ReconcileHeldCreate(ReconcileHeldCreateArgs),
 }
 
 #[derive(Args)]
@@ -77,6 +90,27 @@ struct KubernetesPreflightControlV1 {
     gateway: String,
     control_namespace_uuid: Uuid,
     runner_token_file: PathBuf,
+}
+
+#[derive(Args)]
+struct ReconcileHeldCreateArgs {
+    /// Absolute path to an existing private held-CREATE journal directory.
+    #[arg(long, value_name = "DIRECTORY")]
+    journal_dir: PathBuf,
+    /// Absolute path to a private broker reconciliation control JSON file.
+    #[arg(long, value_name = "FILE")]
+    control_file: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KubernetesReconciliationControlV1 {
+    version: u32,
+    gateway: String,
+    credential_id: String,
+    broker_token_file: PathBuf,
+    #[serde(default)]
+    gateway_ca_file: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -129,6 +163,11 @@ pub enum KubernetesCliError {
     PreflightFailed(KubernetesError),
     PreflightReportUnavailable,
     ProtectedPreflightInput,
+    InvalidReconciliationControl,
+    ReconciliationJournalUnavailable,
+    ReconciliationRefused,
+    ReconciliationUnavailable,
+    ReconciliationReportUnavailable,
 }
 impl std::fmt::Display for KubernetesCliError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -147,6 +186,11 @@ impl std::fmt::Display for KubernetesCliError {
             Self::PreflightFailed(error) => write!(f,"Kubernetes preflight failed: {error}; admission effect is unknown or possible and no retry was attempted"),
             Self::PreflightReportUnavailable => f.write_str("Kubernetes preflight report is unavailable after result audit; admission effect is possible, no success can be reported and no retry was attempted"),
             Self::ProtectedPreflightInput => f.write_str("Kubernetes preflight configuration contains protected credential material; remove it from authority, image or gateway fields; nothing was transmitted"),
+            Self::InvalidReconciliationControl => f.write_str("held CREATE reconciliation control or broker credential is invalid or unavailable; verify the explicit private files"),
+            Self::ReconciliationJournalUnavailable => f.write_str("held CREATE reconciliation journal is unavailable, busy or inconsistent; preserve it for operator inspection"),
+            Self::ReconciliationRefused => f.write_str("held CREATE reconciliation was refused or its historical claim was not found; inspect the exact retained request and current broker identity and grant"),
+            Self::ReconciliationUnavailable => f.write_str("held CREATE reconciliation confirmation is unavailable; preserve the journal and retry the same reconciliation"),
+            Self::ReconciliationReportUnavailable => f.write_str("held CREATE reconciliation report is unavailable; the result may already be confirmed, preserve the journal and retry the same reconciliation"),
         }
     }
 }
@@ -198,6 +242,7 @@ pub async fn execute(args: KubernetesArgs) -> Result<(), KubernetesCliError> {
     match args.command {
         KubernetesCommand::Doctor(args) => doctor(args).await,
         KubernetesCommand::Preflight(args) => preflight(args).await,
+        KubernetesCommand::ReconcileHeldCreate(args) => reconcile_held_create(args).await,
     }
 }
 
@@ -573,6 +618,149 @@ async fn preflight(args: PreflightArgs) -> Result<(), KubernetesCliError> {
         .map_err(|_| KubernetesCliError::PreflightReportUnavailable)
 }
 
+fn load_reconciliation(
+    args: ReconcileHeldCreateArgs,
+    capacity: OwnedSemaphorePermit,
+) -> Result<(JournalIo, HeldCreateControlClient, Redactor), KubernetesCliError> {
+    let source = PrivateFile::open(&args.control_file, MAX_CONTROL_BYTES)
+        .map_err(|_| KubernetesCliError::InvalidReconciliationControl)?;
+    let config: KubernetesReconciliationControlV1 = serde_json::from_slice(source.bytes())
+        .map_err(|_| KubernetesCliError::InvalidReconciliationControl)?;
+    if config.version != 1 || !config.broker_token_file.is_absolute() {
+        return Err(KubernetesCliError::InvalidReconciliationControl);
+    }
+    let token = PrivateFile::open(&config.broker_token_file, 4097)
+        .map_err(|_| KubernetesCliError::InvalidReconciliationControl)?;
+    let secret = std::str::from_utf8(token.bytes())
+        .map_err(|_| KubernetesCliError::InvalidReconciliationControl)?;
+    let secret = secret.strip_suffix('\n').unwrap_or(secret).to_owned();
+    if secret.is_empty() || secret.len() > 4096 {
+        return Err(KubernetesCliError::InvalidReconciliationControl);
+    }
+    let ca = config
+        .gateway_ca_file
+        .as_ref()
+        .map(|path| {
+            PrivateFile::open(path, MAX_CERTIFICATE_BYTES)
+                .map_err(|_| KubernetesCliError::InvalidReconciliationControl)
+        })
+        .transpose()?;
+    let mut files = vec![source, token.clone()];
+    if let Some(ca) = &ca {
+        files.push(ca.clone());
+    }
+    let root = Directory::open_existing(&args.journal_dir)
+        .map_err(|_| KubernetesCliError::ReconciliationJournalUnavailable)?;
+    let recovered = AdmissionJournal::recover(
+        root,
+        AdmissionJournalProtection::new(files, vec![secret.clone()]),
+    )
+    .map_err(|_| KubernetesCliError::ReconciliationJournalUnavailable)?
+    .ok_or(KubernetesCliError::ReconciliationJournalUnavailable)?;
+    let journal = recovered.into_journal();
+    // Disk values are expectations only. Every control request authenticates
+    // the broker and compares this complete scope with its current identity.
+    let scope = HeldCreateClientScope {
+        gateway: config.gateway,
+        tenant_id: journal.tenant_id().to_owned(),
+        control_namespace_uuid: journal.intent().control_namespace_uuid.clone(),
+        broker_id: journal.intent().broker_id.clone(),
+        credential_id: config.credential_id,
+        incarnation_id: journal.intent().incarnation_id.clone(),
+    };
+    let client = HeldCreateControlClient::new(scope, token, ca, vec![secret.clone()])
+        .map_err(|_| KubernetesCliError::InvalidReconciliationControl)?;
+    Ok((
+        JournalIo::new(journal, capacity),
+        client,
+        Redactor::new(vec![secret]),
+    ))
+}
+
+#[derive(Serialize)]
+struct HeldCreateReconciliationReportV1 {
+    version: u32,
+    tenant_id: String,
+    control_namespace_uuid: String,
+    session_id: String,
+    create_id: String,
+    admission_available: bool,
+    retained_result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unknown_reason: Option<KubernetesCreateUnknownReasonV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http_status: Option<u16>,
+    current_runtime_state: &'static str,
+    receipt: KubernetesCreateReceiptV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inspection_handle: Option<crate::runtime::kubernetes::KubernetesPodHandle>,
+}
+
+async fn reconcile_held_create(args: ReconcileHeldCreateArgs) -> Result<(), KubernetesCliError> {
+    // One journal per invocation; ownership and its admitted filesystem work
+    // survive a dropped async waiter through the blocking worker boundary.
+    let capacity = Arc::new(Semaphore::new(1))
+        .try_acquire_owned()
+        .map_err(|_| KubernetesCliError::ReconciliationJournalUnavailable)?;
+    let (owned, client, redactor) =
+        tokio::task::spawn_blocking(move || load_reconciliation(args, capacity))
+            .await
+            .map_err(|_| KubernetesCliError::ReconciliationJournalUnavailable)??;
+    let journal = owned.journal();
+    let (tenant_id, control_namespace_uuid, session_id, create_id) = (
+        journal.tenant_id().to_owned(),
+        journal.intent().control_namespace_uuid.clone(),
+        journal.intent().session_id.clone(),
+        journal.intent().create_id.clone(),
+    );
+    let completion = RemoteHeldCreateCoordinator::new(Arc::new(client))
+        .resume_result(owned)
+        .await
+        .map_err(|error| match error {
+            CoordinatorError::InvalidContext | CoordinatorError::ControlRejected => {
+                KubernetesCliError::ReconciliationRefused
+            }
+            CoordinatorError::ControlUnavailable => KubernetesCliError::ReconciliationUnavailable,
+            CoordinatorError::JournalUnavailable => {
+                KubernetesCliError::ReconciliationJournalUnavailable
+            }
+        })?;
+    let (retained_result, unknown_reason, http_status) = match completion.outcome {
+        KubernetesCreateOutcomeV1::CreatedHeld { .. } => ("created_held", None, None),
+        KubernetesCreateOutcomeV1::OwnershipUnknown {
+            reason,
+            http_status,
+        } => ("ownership_unknown", Some(reason), http_status),
+    };
+    let report = HeldCreateReconciliationReportV1 {
+        version: 1,
+        tenant_id,
+        control_namespace_uuid,
+        session_id,
+        create_id,
+        admission_available: false,
+        retained_result,
+        unknown_reason,
+        http_status,
+        current_runtime_state: "not_observed",
+        receipt: completion.receipt,
+        inspection_handle: completion.handle,
+    };
+    let value = serde_json::to_value(&report)
+        .map_err(|_| KubernetesCliError::ReconciliationReportUnavailable)?;
+    if redactor.value_unclipped(&value) != value {
+        return Err(KubernetesCliError::ReconciliationReportUnavailable);
+    }
+    let mut bytes = serde_json::to_vec(&report)
+        .map_err(|_| KubernetesCliError::ReconciliationReportUnavailable)?;
+    bytes.push(b'\n');
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&bytes)
+        .and_then(|()| stdout.flush())
+        .map_err(|_| KubernetesCliError::ReconciliationReportUnavailable)
+}
+
 #[cfg(test)]
 mod identity_scope_tests {
     use super::control_identity_matches_preflight_scope;
@@ -622,7 +810,7 @@ mod identity_scope_tests {
         let invalid = [
             (
                 "future schema",
-                protocol(10, "runner", Some(&expected_text), vec![broker_protocol]),
+                protocol(11, "runner", Some(&expected_text), vec![broker_protocol]),
             ),
             (
                 "unknown schema",
@@ -671,5 +859,83 @@ mod identity_scope_tests {
                 "accepted {label}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod held_create_recovery_tests {
+    use super::*;
+    use crate::{
+        broker::held_create_client::{HeldCreateClaimAttempt, tests::Fixture},
+        control::QuotaPolicyV1,
+    };
+    use clap::Parser;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[derive(Parser)]
+    struct CommandLine {
+        #[command(flatten)]
+        args: KubernetesArgs,
+    }
+
+    #[tokio::test]
+    async fn reconcile_held_create_cli_reopens_exact_journal_without_kubernetes_credentials() {
+        let fixture = Fixture::new("held-create-cli-recovery");
+        let server = fixture.serve(true, QuotaPolicyV1::default()).await;
+        let client = fixture.client(&server.url);
+        let reservation = client.reserve(&fixture.intent).await.unwrap();
+        let claim = fixture.claim();
+        let journal = fixture.prepared_journal(&reservation, &claim);
+        let attempt = HeldCreateClaimAttempt::begin(&journal).unwrap();
+        drop(client.claim_once(attempt).await.unwrap());
+        drop(journal);
+        let root = fixture.directory.path().join("held-create-journal");
+        let control = fixture.directory.path().join("reconcile-control.json");
+        fs::write(
+            &control,
+            serde_json::to_vec(&serde_json::json!({
+                "version": 1,
+                "gateway": server.url,
+                "credential_id": client.expected_scope().credential_id,
+                "broker_token_file": fixture.directory.path().join("broker-token"),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&control, fs::Permissions::from_mode(0o600)).unwrap();
+        let command = CommandLine::try_parse_from([
+            "test",
+            "reconcile-held-create",
+            "--journal-dir",
+            root.to_str().unwrap(),
+            "--control-file",
+            control.to_str().unwrap(),
+        ])
+        .expect("the explicit reconciliation command requires no Kubernetes connection flags");
+
+        execute(command.args).await.unwrap();
+
+        let candidate: crate::control::kubernetes_admission::KubernetesCreateResultV1 =
+            serde_json::from_slice(&fs::read(root.join("candidate.json")).unwrap()).unwrap();
+        assert_eq!(candidate.claim_operation_id, claim.operation_id);
+        assert_eq!(candidate.expected_revision, 2);
+        assert_eq!(candidate.expected_create_epoch, 1);
+        assert!(matches!(candidate.outcome,
+            crate::control::kubernetes_admission::KubernetesCreateOutcomeV1::OwnershipUnknown {
+                reason: crate::control::kubernetes_admission::KubernetesCreateUnknownReasonV1::RecoveredAfterClaim,
+                http_status: None,
+            }
+        ));
+        assert!(root.join("ack.json").is_file());
+        assert_eq!(
+            fixture
+                .store()
+                .worker_quota(&QuotaPolicyV1::default())
+                .unwrap()
+                .held_workers,
+            1
+        );
+        assert!(fixture.store().integrity().unwrap().valid);
+        server.stop().await;
     }
 }
