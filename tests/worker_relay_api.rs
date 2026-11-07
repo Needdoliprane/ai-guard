@@ -1,6 +1,9 @@
 //! Relay storage regression fixtures use real typed supervision and SQLite, without a runtime.
 mod support;
 
+#[path = "support/relay_client_cases.rs"]
+mod client_cases;
+
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{AuditCapacityV1, EventQuery, Store, WorkloadAuditPolicyV1},
