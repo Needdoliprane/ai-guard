@@ -30,6 +30,12 @@ use std::{
     time::Duration,
 };
 
+// This bounds the test's observation of the entire CLI action, which performs
+// several serial HTTP, durable SQLite and fixture-process operations. It does
+// not alter the CLI's request, runtime or worker deadlines. Functional recovery
+// assertions below must still succeed; expiration remains a test failure.
+const CLI_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 fn fixture_binary(temporary: &Path) -> PathBuf {
     let source = temporary.join("engine.rs");
     fs::write(&source, include_str!("runtime_fixtures/runner_terminal.rs")).unwrap();
@@ -55,6 +61,7 @@ fn fixture_binary(temporary: &Path) -> PathBuf {
 }
 
 struct Scenario {
+    case: &'static str,
     root: PathBuf,
     config: PathBuf,
     project: PathBuf,
@@ -70,6 +77,13 @@ impl Drop for Scenario {
 }
 impl Scenario {
     async fn new(parent: &Path, bin: &Path, case: &'static str) -> Self {
+        assert!(
+            case.len() <= 64
+                && case
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+            "fixture diagnostic labels must be bounded identifiers"
+        );
         let root = parent.join(case);
         std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
             .create(&root)
@@ -169,6 +183,7 @@ impl Scenario {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self {
+            case,
             root,
             config,
             project,
@@ -229,10 +244,44 @@ impl Scenario {
         command
     }
     async fn invoke(&self, action: &str) -> std::process::Output {
-        tokio::time::timeout(Duration::from_secs(20), self.command(action).output())
-            .await
-            .expect("CLI recovery deadline")
-            .unwrap()
+        // Only source-owned fixture labels and bounded scalar observations go
+        // to diagnostics, never paths, argv, credentials or raw fixture calls.
+        let action_label = match action {
+            "run" => "run",
+            "worker-resume" => "worker-resume",
+            "worker-status" => "worker-status",
+            "worker-stop" => "worker-stop",
+            _ => "other",
+        };
+        let started = std::time::Instant::now();
+        eprintln!(
+            "recovery_cli case={} action={action_label} phase=started limit_ms={}",
+            self.case,
+            CLI_OBSERVATION_TIMEOUT.as_millis()
+        );
+        match tokio::time::timeout(CLI_OBSERVATION_TIMEOUT, self.command(action).output()).await {
+            Ok(Ok(output)) => {
+                eprintln!(
+                    "recovery_cli case={} action={action_label} phase=finished elapsed_ms={} success={}",
+                    self.case,
+                    started.elapsed().as_millis(),
+                    output.status.success()
+                );
+                output
+            }
+            Ok(Err(error)) => panic!(
+                "recovery_cli case={} action={action_label} phase=process_error elapsed_ms={} kind={:?}",
+                self.case,
+                started.elapsed().as_millis(),
+                error.kind()
+            ),
+            Err(_) => panic!(
+                "CLI recovery observation deadline: case={} action={action_label} elapsed_ms={} limit_ms={}",
+                self.case,
+                started.elapsed().as_millis(),
+                CLI_OBSERVATION_TIMEOUT.as_millis()
+            ),
+        }
     }
     fn calls(&self) -> String {
         fs::read_to_string(self.root.join("calls")).unwrap()

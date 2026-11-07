@@ -1185,6 +1185,9 @@ pub(super) fn broker_archive(checkpoint: &ManagedCheckpoint) -> Result<fs::File>
     let sessions = Directory::root(&checkpoint.config_root)?.child("sessions")?;
     let mut archive = sessions.archive(&checkpoint.archive_name, &checkpoint.archive_digest)?;
     let manifest = workspace::scan_workspace_archive(&mut archive, Limits::default())?;
+    // Old checkpoints did not observe modes. Preserve exactly their recorded
+    // coverage while still checking all paths, content and known modes.
+    let manifest = workspace::manifest_at_recorded_coverage(&checkpoint.before, &manifest);
     anyhow::ensure!(
         manifest == checkpoint.before
             && content_hash("ai-guard:workspace-manifest:v1", &manifest)?
@@ -3011,18 +3014,23 @@ pub(super) async fn export_workspace(
     emit(&client,&plan,"workspace.export.requested",json!({"worker_id":worker.worker_id,"volume":worker.attempt.volume_name,"original_mounted":false})).await?;
     let bytes = managed_archive(&runtime, &client, &plan, &worker).await?;
     let original = plan.options.project.clone();
-    let manifest = tokio::task::spawn_blocking(move || {
-        workspace::extract_workspace(bytes.as_slice(), &output, &original, Limits::default())
+    let report = tokio::task::spawn_blocking(move || {
+        workspace::extract_workspace_with_report(
+            bytes.as_slice(),
+            &output,
+            &original,
+            Limits::default(),
+        )
     })
     .await??;
     emit(
         &client,
         &plan,
         "workspace.export.completed",
-        json!({"files":manifest.len()}),
+        json!({"files":report.manifest.len(),"omitted_entries":report.omitted_entries}),
     )
     .await?;
-    Ok(manifest.len())
+    Ok(report.manifest.len())
 }
 
 pub(super) async fn export_legacy_workspace(
@@ -3146,18 +3154,23 @@ pub(super) async fn export_legacy_workspace(
     let bytes = retained.result().stdout.bytes.clone();
     runtime.cleanup(&retained).await?;
     let original = plan.options.project.clone();
-    let manifest = tokio::task::spawn_blocking(move || {
-        workspace::extract_workspace(bytes.as_slice(), &output, &original, Limits::default())
+    let report = tokio::task::spawn_blocking(move || {
+        workspace::extract_workspace_with_report(
+            bytes.as_slice(),
+            &output,
+            &original,
+            Limits::default(),
+        )
     })
     .await??;
     emit(
         &client,
         &plan,
         "workspace.export.completed",
-        json!({"files":manifest.len(),"legacy_local_read":true}),
+        json!({"files":report.manifest.len(),"omitted_entries":report.omitted_entries,"legacy_local_read":true}),
     )
     .await?;
-    Ok(manifest.len())
+    Ok(report.manifest.len())
 }
 
 async fn recover_import(
@@ -3267,6 +3280,7 @@ async fn recover_import(
         // A terminal tar after parent death does not independently prove that
         // all archive bytes reached stdin. Compare the real volume contents.
         let actual = managed_scan(runtime, client, &plan, &worker).await?;
+        let actual = workspace::manifest_at_recorded_coverage(&checkpoint.before, &actual);
         anyhow::ensure!(
             actual == checkpoint.before,
             "recovered import does not match the immutable admitted copy manifest"

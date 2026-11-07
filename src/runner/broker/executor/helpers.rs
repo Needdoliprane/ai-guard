@@ -427,12 +427,20 @@ impl Execution<'_> {
         } = preparation.permission()
         {
             if let Ok(Some(manifest)) = &manifest {
+                let recorded = &draft
+                    .run
+                    .plan
+                    .managed
+                    .as_ref()
+                    .context("source manifest is missing")?
+                    .before;
+                let observed = workspace::manifest_at_recorded_coverage(recorded, manifest);
                 Some(ImportVerificationReportV1 {
                     import_helper_id: import_helper_id.clone(),
                     expected_manifest_digest: manifest_digest.clone(),
                     observed_manifest_digest: content_hash(
                         "ai-guard:workspace-manifest:v1",
-                        manifest,
+                        &observed,
                     )?,
                 })
             } else {

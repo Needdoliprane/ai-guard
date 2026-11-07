@@ -327,6 +327,8 @@ Keep the command UUID and exact destination together. An acknowledged export ret
 
 An explicit export after cancellation requires its own subsequent audited grant and all export prerequisites; cancel does not implicitly authorize it. A grant or ACK is not permission to restart the worker. Links, traversal, changed parent identity, unsafe permissions and unavailable evidence cause a refusal rather than partial success hidden as an empty diff.
 
+The [workspace export policy](../local/README.md#inspect-and-export-changes) also applies here: blocked metadata is omitted, Git-directory-shaped output is refused before publication, and published regular files use `0644`. The V1 IPC acknowledgement keeps its existing request/digest/file-count fields so an older V1 client can still read it. Omission counts are recorded separately in the descriptive audit event `workspace.export.policy`, correlated by `request_id` and `manifest_digest`; `omitted_entries` counts explicit archive headers, including directory entries. If an old export has no such event, its omission count is unknown. Preserve the original export request when a post-publication audit error leaves its outcome unresolved. Tool files such as `.cargo/config.toml` can remain: exported content still requires review before opening or executing it.
+
 ## Diagnose errors and preserve recovery evidence
 
 The CLI prints JSON replies and exits with an error for `error` and `rejected`. Transport errors distinguish a request not sent from an unknown outcome or unavailable reply. Preserve operation/command identities before retrying; a nonzero client exit is not proof that no durable mutation occurred.

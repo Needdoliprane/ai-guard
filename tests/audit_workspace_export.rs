@@ -124,10 +124,19 @@ fn export_filters_reserved_components_and_tool_metadata_case_insensitively() {
         "nested/.ENVRC",
         "nested/.IDEA/workspace.xml",
         "nested/.VSCODE/TASKS.JSON",
+        "nested/.vscode/settings.json",
+        "nested/.vscode/launch.json",
+        "nested/.devcontainer/devcontainer.json",
+        "nested/.direnv/activation",
+        ".pre-commit-config.yaml",
+        ".gitattributes",
+        ".gitmodules",
+        ".mise.toml",
+        ".tool-versions",
     ];
     let ordinary = [
         "README.md",
-        "nested/.vscode/settings.json",
+        "nested/.vscode-control/settings.json",
         "nested/tasks.json",
         "envrc.txt",
     ];

@@ -351,7 +351,12 @@ fn legacy_export_requires_durable_barriers_before_success() {
     )
     .expect("real legacy archive extraction succeeds after durable publication");
     let trace = scope.finish();
-    assert_eq!(manifest, scanned);
+    assert_eq!(manifest.len(), scanned.len());
+    for (path, exported) in &manifest {
+        assert_eq!(exported.sha256, scanned[path].sha256);
+        assert_eq!(exported.bytes, scanned[path].bytes);
+        assert_eq!(exported.mode, Some(0o644));
+    }
     fixture.assert_contents(&destination, &manifest);
     assert_order(&trace, &destination, &fixture.parent);
 }

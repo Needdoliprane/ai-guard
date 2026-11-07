@@ -37,8 +37,35 @@ impl Default for Limits {
 pub struct Fingerprint {
     pub sha256: String,
     pub bytes: u64,
+    /// Mode of the represented regular file, not a promise to execute it.
+    /// Absent in historical manifests whose modes were not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u32>,
 }
 pub type Manifest = BTreeMap<String, Fingerprint>;
+
+/// Observed publication result. Omission counts cover explicit archive entries
+/// (files and directories); implicit parent directories are not archive entries.
+pub struct ExportReport {
+    pub manifest: Manifest,
+    pub omitted_entries: u64,
+}
+
+/// Preserve the recorded coverage when checking a historical import. Extra
+/// observed paths and all content facts remain present, so equality/hash checks
+/// still reject them. This projection must not replace a fresh scan's facts.
+pub(crate) fn manifest_at_recorded_coverage(recorded: &Manifest, observed: &Manifest) -> Manifest {
+    observed
+        .iter()
+        .map(|(path, fingerprint)| {
+            let mut fingerprint = fingerprint.clone();
+            if recorded.get(path).is_some_and(|known| known.mode.is_none()) {
+                fingerprint.mode = None;
+            }
+            (path.clone(), fingerprint)
+        })
+        .collect()
+}
 
 /// Publication happened, but its durable result could not be confirmed. The
 /// destination is preserved and must be reconciled before another export.
@@ -112,8 +139,33 @@ fn excluded_name(name: &str) -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn export_policy_name(name: &str) -> String {
+    let mut folded = String::with_capacity(name.len());
+    for character in name.chars().flat_map(char::to_lowercase) {
+        match character {
+            // Unicode folds with an ASCII result that lowercase alone misses.
+            '\u{17f}' => folded.push('s'),
+            '\u{df}' => folded.push_str("ss"),
+            '\u{fb00}' => folded.push_str("ff"),
+            '\u{fb01}' => folded.push_str("fi"),
+            '\u{fb02}' => folded.push_str("fl"),
+            '\u{fb03}' => folded.push_str("ffi"),
+            '\u{fb04}' => folded.push_str("ffl"),
+            '\u{fb05}' | '\u{fb06}' => folded.push_str("st"),
+            // HFS+ ignores these characters in path comparisons. Only use this
+            // projection to match reserved names; ordinary Unicode is retained.
+            '\u{200c}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{206a}'..='\u{206f}'
+            | '\u{feff}' => {}
+            character => folded.push(character),
+        }
+    }
+    folded
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn excluded_export_path(path: &Path) -> bool {
-    let mut parent: Option<&str> = None;
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;
@@ -122,18 +174,94 @@ fn excluded_export_path(path: &Path) -> bool {
             // validate_relative_path rejects this before the export policy.
             return true;
         };
-        if excluded_name(name)
-            || [".husky", ".envrc", ".idea"]
-                .iter()
-                .any(|excluded| name.eq_ignore_ascii_case(excluded))
-            || (parent.is_some_and(|parent| parent.eq_ignore_ascii_case(".vscode"))
-                && name.eq_ignore_ascii_case("tasks.json"))
+        let name = export_policy_name(name);
+        if excluded_name(&name)
+            || [
+                ".husky",
+                ".envrc",
+                ".idea",
+                ".vscode",
+                ".devcontainer",
+                ".direnv",
+                ".pre-commit-config.yaml",
+                ".gitattributes",
+                ".gitmodules",
+                ".mise.toml",
+                ".tool-versions",
+            ]
+            .contains(&name.as_str())
         {
             return true;
         }
-        parent = Some(name);
     }
     false
+}
+
+/// Recognize Git directory shapes from validated archive metadata without
+/// invoking Git or reading an exported configuration. Checking after the last
+/// entry handles arbitrary tar ordering and implicit parent directories. This
+/// conservative structural policy also rejects linked-worktree gitdirs whose
+/// `commondir` would otherwise redirect discovery outside their directory.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn refuse_export_git_directories(
+    entries: &BTreeMap<PathBuf, bool>,
+    directories: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    #[derive(Default)]
+    struct Shape {
+        head: bool,
+        objects: bool,
+        refs: bool,
+        commondir: bool,
+    }
+    let parent_key = |path: &Path| {
+        path.parent()
+            .unwrap_or_else(|| Path::new(""))
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(export_policy_name(&name.to_string_lossy())),
+                _ => None,
+            })
+            .collect::<PathBuf>()
+    };
+    let mut shapes = BTreeMap::<PathBuf, Shape>::new();
+    for path in directories {
+        if excluded_export_path(path) {
+            continue;
+        }
+        let name = export_policy_name(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        );
+        match name.as_str() {
+            "objects" => shapes.entry(parent_key(path)).or_default().objects = true,
+            "refs" => shapes.entry(parent_key(path)).or_default().refs = true,
+            _ => {}
+        }
+    }
+    for (path, is_directory) in entries {
+        if *is_directory || excluded_export_path(path) {
+            continue;
+        }
+        let name = export_policy_name(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(""),
+        );
+        match name.as_str() {
+            "head" => shapes.entry(parent_key(path)).or_default().head = true,
+            "commondir" => shapes.entry(parent_key(path)).or_default().commondir = true,
+            _ => {}
+        }
+    }
+    if shapes
+        .values()
+        .any(|shape| shape.head && (shape.commondir || (shape.objects && shape.refs)))
+    {
+        bail!("export contains a worker-authored Git directory; nothing published");
+    }
+    Ok(())
 }
 
 /// Read a project without following a symlink in any path component. The open
@@ -386,6 +514,7 @@ fn collect_workspace_from_root(
                 Fingerprint {
                     sha256: hex::encode(Sha256::digest(&contents)),
                     bytes: contents.len() as u64,
+                    mode: Some(mode),
                 },
             );
         } else {
@@ -428,6 +557,16 @@ pub fn extract_workspace<R: Read>(
     original: &Path,
     limits: Limits,
 ) -> Result<Manifest> {
+    Ok(extract_workspace_with_report(reader, destination, original, limits)?.manifest)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn extract_workspace_with_report<R: Read>(
+    reader: R,
+    destination: &Path,
+    original: &Path,
+    limits: Limits,
+) -> Result<ExportReport> {
     let original = original
         .canonicalize()
         .context("original project must still be identifiable")?;
@@ -450,11 +589,11 @@ pub fn extract_workspace<R: Read>(
     // Keep the validated directory open. Every creation, cleanup and rename is
     // relative to these descriptors, never to the now-mutable parent pathname.
     let mut staging = anchored_export::Staging::new(&parent)?;
-    let manifest = read_workspace_archive(reader, limits, Some(&staging))?;
+    let report = read_workspace_archive(reader, limits, Some(&staging))?;
     staging
         .publish(name, &parent)
         .context("cannot publish verified export")?;
-    Ok(manifest)
+    Ok(report)
 }
 
 /// Inspect a bounded runtime archive without writing its contents on the host.
@@ -462,7 +601,7 @@ pub fn extract_workspace<R: Read>(
 /// depend on the continued existence of the original project directory.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn scan_workspace_archive<R: Read>(reader: R, limits: Limits) -> Result<Manifest> {
-    read_workspace_archive(reader, limits, None)
+    Ok(read_workspace_archive(reader, limits, None)?.manifest)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -470,14 +609,14 @@ fn read_workspace_archive<R: Read>(
     reader: R,
     limits: Limits,
     staging: Option<&anchored_export::Staging>,
-) -> Result<Manifest> {
+) -> Result<ExportReport> {
     let mut archive = tar::Archive::new(reader.take(limits.max_archive_bytes() as u64));
     let mut seen = BTreeMap::new();
     let mut directories = BTreeSet::new();
     let mut manifest = Manifest::new();
     let mut total = 0_u64;
     let mut entries = 0_usize;
-    let mut omitted_entries = 0_usize;
+    let mut omitted_entries = 0_u64;
     for entry in archive.entries()? {
         let mut entry = entry.context("invalid workspace archive")?;
         let path = validate_relative_path(&entry.path()?)?;
@@ -538,7 +677,9 @@ fn read_workspace_archive<R: Read>(
         // Read-only scans retain every observed file, including these names.
         let omitted = staging.is_some() && excluded_export_path(&path);
         if omitted {
-            omitted_entries += 1;
+            omitted_entries = omitted_entries
+                .checked_add(1)
+                .context("export omitted-entry count overflow")?;
         }
         if kind.is_dir() {
             if let Some(staging) = staging.filter(|_| !omitted) {
@@ -559,7 +700,7 @@ fn read_workspace_archive<R: Read>(
             .map(|staging| staging.create_file(&path))
             .transpose()?;
         // Validate the untrusted header, but never restore its executable bits.
-        entry.header().mode()?;
+        let observed_mode = entry.header().mode()? & 0o7777;
         let mut hasher = Sha256::new();
         let mut buffer = [0_u8; 16 * 1024];
         let mut written = 0_u64;
@@ -611,11 +752,17 @@ fn read_workspace_archive<R: Read>(
                 Fingerprint {
                     sha256: hex::encode(hasher.finalize()),
                     bytes: size,
+                    mode: Some(if staging.is_some() {
+                        0o644
+                    } else {
+                        observed_mode
+                    }),
                 },
             );
         }
     }
     if staging.is_some() {
+        refuse_export_git_directories(&seen, &directories)?;
         // No worker-controlled names or contents reach the diagnostic. Failure
         // to report the policy aborts before either export caller publishes.
         writeln!(
@@ -624,7 +771,10 @@ fn read_workspace_archive<R: Read>(
         )
         .context("cannot report export safety policy")?;
     }
-    Ok(manifest)
+    Ok(ExportReport {
+        manifest,
+        omitted_entries,
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -634,6 +784,16 @@ pub fn extract_workspace<R: Read>(
     _original: &Path,
     _limits: Limits,
 ) -> Result<Manifest> {
+    bail!("descriptor-anchored export currently requires Linux, macOS, or WSL")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn extract_workspace_with_report<R: Read>(
+    _reader: R,
+    _destination: &Path,
+    _original: &Path,
+    _limits: Limits,
+) -> Result<ExportReport> {
     bail!("descriptor-anchored export currently requires Linux, macOS, or WSL")
 }
 
@@ -1074,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_matches_export_and_does_not_need_or_write_the_original() {
+    fn scan_and_export_record_their_modes_without_writing_the_original() {
         // Directory headers may legitimately follow their contents.
         let bytes = archive(&[("nested/data", b'0', b"safe"), ("nested", b'5', b"")]);
         let parent = tempfile::tempdir().unwrap();
@@ -1087,7 +1247,13 @@ mod tests {
         fs::rename(&original, parent.path().join("moved")).unwrap();
         let before = fs::read_dir(parent.path()).unwrap().count();
         let scanned = scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap();
-        assert_eq!(scanned, exported);
+        assert_eq!(
+            scanned["nested/data"].sha256,
+            exported["nested/data"].sha256
+        );
+        assert_eq!(scanned["nested/data"].bytes, exported["nested/data"].bytes);
+        assert_eq!(scanned["nested/data"].mode, Some(0o755));
+        assert_eq!(exported["nested/data"].mode, Some(0o644));
         assert_eq!(
             scanned["nested/data"].sha256,
             hex::encode(Sha256::digest(b"safe"))
@@ -1304,6 +1470,144 @@ mod export_policy_regression_tests {
     use super::*;
     use std::{ffi::OsStr, os::unix::fs::PermissionsExt};
 
+    fn scan_file(path: &str, mode: u32, data: &[u8]) -> Manifest {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        builder.append_data(&mut header, path, data).unwrap();
+        let bytes = builder.into_inner().unwrap();
+        scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap()
+    }
+
+    #[test]
+    fn historical_manifest_serialization_preserves_absent_mode_and_hash() {
+        const LEGACY: &str = concat!(
+            "{\"tool\":{\"sha256\":\"",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "\",\"bytes\":4}}"
+        );
+        let recorded: Manifest = serde_json::from_str(LEGACY).unwrap();
+        assert_eq!(recorded["tool"].mode, None);
+        assert_eq!(serde_json::to_string(&recorded).unwrap(), LEGACY);
+        // Golden SHA-256 of domain + NUL + the literal legacy JSON above.
+        assert_eq!(
+            crate::control::content_hash("ai-guard:workspace-manifest:v1", &recorded).unwrap(),
+            "320af68ae02d702a0178b54d950f987332d3799d07888e840c3a68c48951f4c5"
+        );
+    }
+
+    #[test]
+    fn recorded_coverage_keeps_nonempty_legacy_imports_and_known_modes_exact() {
+        let observed = scan_file("tool", 0o755, b"data");
+        let mut legacy_value = serde_json::to_value(&observed).unwrap();
+        legacy_value["tool"].as_object_mut().unwrap().remove("mode");
+        let recorded: Manifest = serde_json::from_value(legacy_value).unwrap();
+        assert!(!recorded.is_empty());
+        assert_ne!(recorded, observed, "ordinary equality remains strict");
+        assert!(diff_manifests(&recorded, &observed).is_empty());
+        let aligned = manifest_at_recorded_coverage(&recorded, &observed);
+        assert_eq!(aligned, recorded);
+        assert_eq!(
+            crate::control::content_hash("ai-guard:workspace-manifest:v1", &aligned).unwrap(),
+            crate::control::content_hash("ai-guard:workspace-manifest:v1", &recorded).unwrap()
+        );
+        assert_eq!(observed["tool"].mode, Some(0o755));
+
+        let mut added = observed.clone();
+        added.insert("extra".into(), observed["tool"].clone());
+        assert_ne!(manifest_at_recorded_coverage(&recorded, &added), recorded);
+        assert_ne!(
+            manifest_at_recorded_coverage(&recorded, &Manifest::new()),
+            recorded
+        );
+        let changed = scan_file("tool", 0o755, b"edit");
+        assert_ne!(manifest_at_recorded_coverage(&recorded, &changed), recorded);
+        let different_mode = scan_file("tool", 0o644, b"data");
+        assert_ne!(
+            manifest_at_recorded_coverage(&observed, &different_mode),
+            observed
+        );
+        assert_ne!(
+            manifest_at_recorded_coverage(&observed, &recorded),
+            observed
+        );
+        let lost = diff_manifests(&observed, &recorded);
+        assert_eq!(lost.len(), 1, "known mode cannot silently become unknown");
+        assert_eq!(lost[0].change, "modified");
+    }
+
+    #[test]
+    fn imported_archive_scan_and_export_distinguish_recorded_modes() {
+        let original = tempfile::tempdir().unwrap();
+        let path = original.path().join("tool");
+        fs::write(&path, b"data").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
+        let prepared = prepare_workspace(original.path(), Limits::default()).unwrap();
+        assert_eq!(prepared.manifest["tool"].mode, Some(0o755));
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o4755
+        );
+        let mut archive = tar::Archive::new(prepared.archive.reopen().unwrap());
+        let mut entries = archive.entries().unwrap();
+        let entry = entries.next().unwrap().unwrap();
+        assert_eq!(entry.header().mode().unwrap(), 0o755);
+        assert!(entries.next().is_none());
+        let scanned =
+            scan_workspace_archive(prepared.archive.reopen().unwrap(), Limits::default()).unwrap();
+        assert_eq!(scanned, prepared.manifest);
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("result");
+        let exported = extract_workspace_with_report(
+            prepared.archive.reopen().unwrap(),
+            &destination,
+            original.path(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(exported.omitted_entries, 0);
+        assert_eq!(exported.manifest["tool"].mode, Some(0o644));
+        assert_eq!(exported.manifest["tool"].sha256, scanned["tool"].sha256);
+        assert_eq!(
+            fs::metadata(destination.join("tool"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn scan_records_mode_only_changes_without_restoring_worker_modes() {
+        let scan = |mode| {
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_size(4);
+            header.set_mode(mode);
+            builder
+                .append_data(&mut header, "tool", b"data".as_slice())
+                .unwrap();
+            let bytes = builder.into_inner().unwrap();
+            scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap()
+        };
+        let before = scan(0o644);
+        let after = scan(0o755);
+        let changes = diff_manifests(&before, &after);
+        assert_eq!(
+            changes.len(),
+            1,
+            "observed chmod-only change must be visible"
+        );
+        assert_eq!(changes[0].path, "tool");
+        assert_eq!(changes[0].change, "modified");
+        assert_eq!(before["tool"].sha256, after["tool"].sha256);
+        assert_eq!(before["tool"].bytes, after["tool"].bytes);
+    }
+
     #[test]
     fn authorized_export_filters_host_metadata_while_scan_keeps_observed_files() {
         let root = tempfile::tempdir().unwrap();
@@ -1344,14 +1648,22 @@ mod export_policy_regression_tests {
             std::slice::from_ref(&sources),
         )
         .unwrap();
-        let manifest = parent
-            .extract(bytes.as_slice(), OsStr::new("result"), Limits::default())
+        let report = parent
+            .extract_with_report(bytes.as_slice(), OsStr::new("result"), Limits::default())
             .unwrap();
+        assert_eq!(report.omitted_entries, 3);
+        let manifest = report.manifest;
         let destination = exports.join("result");
         assert!(!destination.join(".git").exists());
         assert!(!destination.join("nested/.envrc").exists());
         assert_eq!(manifest.len(), 1);
-        assert_eq!(manifest["nested/tool"], scanned["nested/tool"]);
+        assert_eq!(
+            manifest["nested/tool"].sha256,
+            scanned["nested/tool"].sha256
+        );
+        assert_eq!(manifest["nested/tool"].bytes, scanned["nested/tool"].bytes);
+        assert_eq!(manifest["nested/tool"].mode, Some(0o644));
+        assert_eq!(scanned["nested/tool"].mode, Some(0o755));
         assert_eq!(
             fs::read(destination.join("nested/tool")).unwrap(),
             b"ordinary source"
@@ -1365,6 +1677,72 @@ mod export_policy_regression_tests {
             0o644
         );
     }
+
+    #[test]
+    fn authorized_export_refuses_bare_git_before_publication_and_cleans_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let sources = base.join("sources");
+        let exports = base.join("exports");
+        for path in [&sources, &exports] {
+            fs::create_dir(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let parent = AuthorizedExportParent::open(
+            &exports,
+            std::slice::from_ref(&exports),
+            std::slice::from_ref(&sources),
+        )
+        .unwrap();
+        for prefix in ["", "nested/repository/"] {
+            let mut builder = tar::Builder::new(Vec::new());
+            if prefix.is_empty() {
+                for directory in ["objects", "refs"] {
+                    let mut header = tar::Header::new_gnu();
+                    header.set_entry_type(tar::EntryType::Directory);
+                    header.set_size(0);
+                    header.set_mode(0o755);
+                    builder
+                        .append_data(&mut header, directory, &[][..])
+                        .unwrap();
+                }
+            }
+            // The nested case has no directory headers. Both cases place HEAD
+            // after every other entry, so policy cannot depend on tar order.
+            for (name, data) in [
+                ("objects/aa/object", b"inert object bytes".as_slice()),
+                ("refs/heads/main", b"inert reference bytes".as_slice()),
+                ("config", b"[core]\n\tbare = true\n".as_slice()),
+                ("HEAD", b"ref: refs/heads/main\n".as_slice()),
+            ] {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                builder
+                    .append_data(&mut header, format!("{prefix}{name}"), data)
+                    .unwrap();
+            }
+            let bytes = builder.into_inner().unwrap();
+            let scanned = scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap();
+            assert_eq!(scanned.len(), 4, "valid archive reaches the export policy");
+            assert!(scanned.contains_key(&format!("{prefix}HEAD")));
+            let error = parent
+                .extract_with_report(bytes.as_slice(), OsStr::new("result"), Limits::default())
+                .err()
+                .expect("worker Git directory must be refused");
+            assert!(
+                error.to_string().contains("worker-authored Git directory"),
+                "refusal must come from export policy after valid authorization: {error:#}"
+            );
+            assert!(!exports.join("result").exists());
+            assert_eq!(
+                fs::read_dir(&exports).unwrap().count(),
+                0,
+                "refusal must not leave an orphan staging directory"
+            );
+        }
+    }
 }
 pub fn diff_manifests(before: &Manifest, after: &Manifest) -> Vec<FileChange> {
     let paths: BTreeSet<_> = before.keys().chain(after.keys()).collect();
@@ -1373,7 +1751,16 @@ pub fn diff_manifests(before: &Manifest, after: &Manifest) -> Vec<FileChange> {
         .filter_map(|path| {
             let old = before.get(path);
             let new = after.get(path);
-            if old == new {
+            let unchanged = match (old, new) {
+                (Some(old), Some(new)) => {
+                    old.sha256 == new.sha256
+                        && old.bytes == new.bytes
+                        && old.mode.is_none_or(|mode| new.mode == Some(mode))
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            if unchanged {
                 return None;
             }
             Some(FileChange {
