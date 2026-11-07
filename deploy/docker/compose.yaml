@@ -2,7 +2,7 @@ name: agentsandbox
 services:
   gateway:
     image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
-    command: ["gateway", "--listen", "0.0.0.0:8787", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json"]
+    command: ["gateway", "--listen", "0.0.0.0:8787", "--control-listen", "0.0.0.0:8788", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json"]
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]
@@ -52,7 +52,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
   ingress:
     image: ${AI_GUARD_CONTROL_IMAGE:-agentsandbox-control:local}
-    command: ["ingress", "--gateway-listen", "0.0.0.0:8787", "--dashboard-listen", "0.0.0.0:4000", "--container-listen", "--gateway-upstream", "http://gateway:8787", "--dashboard-upstream", "http://dashboard:4000"]
+    command: ["ingress", "--gateway-listen", "0.0.0.0:8787", "--dashboard-listen", "0.0.0.0:4000", "--container-listen", "--gateway-upstream", "http://gateway:8787", "--control-upstream", "http://gateway:8788", "--dashboard-upstream", "http://dashboard:4000"]
     user: "1000:1000"
     read_only: true
     cap_drop: [ALL]

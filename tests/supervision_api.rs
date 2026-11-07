@@ -1,5 +1,7 @@
 //! Real Axum/SQLite contracts for the v1 broker-supervision API.
 //! Fixtures exercise the control protocol, not a Docker/Podman runtime.
+#[path = "supervision_api/control_transport.rs"]
+mod control_transport;
 mod support;
 
 use agentsandbox::{

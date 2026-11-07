@@ -337,6 +337,19 @@ impl VerifiedWorker {
     }
 }
 impl VerifiedBroker {
+    /// Capacity is selected only from the server's already authenticated proof.
+    /// This does not turn a broker proof into runner authority or skip rechecks.
+    pub(super) fn control_capacity(
+        &self,
+    ) -> ApiResult<Arc<super::control_transport::ControlCapacity>> {
+        self.0
+            .state
+            .tenants
+            .get(self.0.source)
+            .map(|tenant| Arc::clone(&tenant.control_capacity))
+            .ok_or_else(ambiguous)
+    }
+
     pub(super) async fn blocking<T: Send + 'static>(
         self,
         operation: impl FnOnce(TenantState, BrokerIdentityV1, Redactor) -> ApiResult<T> + Send + 'static,

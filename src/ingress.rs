@@ -23,6 +23,27 @@ const MAX_BODY: usize = 262_144;
 const MAX_CONCURRENT: usize = 64;
 const MAX_UPLOADS: usize = 16;
 
+mod control;
+
+/// Gateway-root control relay; callers mount it under the explicit `/control`
+/// transport prefix. Authentication remains exclusively in the fixed gateway.
+pub fn control_relay_router(upstream: &str) -> anyhow::Result<Router> {
+    control::router(upstream)
+}
+
+/// Public ingestion and control share the published origin, never their upload
+/// or exchange budgets. An unknown control target cannot fall back to public.
+pub fn ingress_router_with_control(
+    upstream: &str,
+    control_upstream: &str,
+) -> anyhow::Result<Router> {
+    anyhow::ensure!(
+        upstream_origin(upstream)? != upstream_origin(control_upstream)?,
+        "control upstream must be a distinct dedicated origin"
+    );
+    Ok(ingress_router(upstream)?.nest("/control", control_relay_router(control_upstream)?))
+}
+
 struct ExchangeLease {
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     body_done: AtomicBool,
@@ -97,7 +118,7 @@ pub fn ingress_router(upstream: &str) -> anyhow::Result<Router> {
     router(upstream, Timeouts::default())
 }
 
-fn router(upstream: &str, timeouts: Timeouts) -> anyhow::Result<Router> {
+fn upstream_origin(upstream: &str) -> anyhow::Result<reqwest::Url> {
     let origin =
         reqwest::Url::parse(upstream).map_err(|_| anyhow::anyhow!("invalid upstream origin"))?;
     let authority_and_target = upstream
@@ -130,8 +151,12 @@ fn router(upstream: &str, timeouts: Timeouts) -> anyhow::Result<Router> {
             && origin.fragment().is_none(),
         "upstream must be an http(s) origin without credentials, path, query or fragment"
     );
+    Ok(origin)
+}
+
+fn router(upstream: &str, timeouts: Timeouts) -> anyhow::Result<Router> {
     let state = Ingress {
-        origin,
+        origin: upstream_origin(upstream)?,
         client: reqwest::Client::builder()
             .connect_timeout(timeouts.connect)
             .redirect(reqwest::redirect::Policy::none())

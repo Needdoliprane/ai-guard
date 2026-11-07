@@ -37,6 +37,10 @@ async fn ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_clien
             get(|| async { axum::Json(serde_json::json!({"status":"ok"})) }),
         )
         .route(
+            "/api/v1/control/protocol",
+            get(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        )
+        .route(
             "/stream",
             get(move || {
                 let observed = observed.clone();
@@ -54,6 +58,12 @@ async fn ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_clien
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("http://{}", listener.local_addr().unwrap());
+    let control_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control_origin = format!("http://{}", control_listener.local_addr().unwrap());
+    let control_app = app.clone();
+    let control_upstream = tokio::spawn(async move {
+        axum::serve(control_listener, control_app).await.unwrap();
+    });
     let upstream = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -66,6 +76,8 @@ async fn ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_clien
             "127.0.0.1:0",
             "--gateway-upstream",
             &origin,
+            "--control-upstream",
+            &control_origin,
             "--dashboard-upstream",
             &origin,
         ])
@@ -102,6 +114,14 @@ async fn ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_clien
             200
         );
     }
+    assert_eq!(
+        http.get(format!("http://{gateway}/control/api/v1/control/protocol"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
     let mut stream = http
         .get(format!("http://{gateway}/stream"))
         .send()
@@ -135,6 +155,7 @@ async fn ingress_binary_serves_both_listeners_and_stops_with_an_active_sse_clien
     .await
     .unwrap();
     upstream.abort();
+    control_upstream.abort();
 }
 
 #[tokio::test]
