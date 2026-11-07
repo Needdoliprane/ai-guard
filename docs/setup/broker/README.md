@@ -344,6 +344,40 @@ discovery. Its connection timeout is 3 seconds and each request is limited to
 status and replay only the same admissible operation identity. These limits do
 not provide an automatic restart, extend a worker deadline or reactivate control.
 
+The direct runner (`run` / `worker-resume`) has a separate **read-only monitor**
+after both Running and `command.started` are acknowledged. Typed connection
+interruptions, bounded transport timeouts and HTTP 429 may be retried for at
+most **60 seconds from the start of the first failing request, including its
+timeout**. The original execution deadline wins; retries and `Retry-After`
+cannot renew it. Visibility remains degraded/unknown. Authentication, identity,
+revision, malformed-response and mandatory-audit errors, including unclassified
+HTTP 503, still request an immediate targeted stop. Recovery requires the
+complete current response for the same worker/attempt and revision floors,
+followed by a durable recovery record. The start audit callback is excluded.
+Before the first GET, durable epoch creation has its own **15-second arming
+bound**, sampled before the writer starts and capped by the original execution
+deadline. Expiry requests stop, without opening another 60-second interval.
+
+This monitor's private epoch stays open until execution ends and its writes
+are confirmed; a pending closure does not hold up execution finalization. An
+interrupted write keeps its exact identity and is not assumed rolled back.
+The separate journal is bounded to 64 intervals and 128 KiB of raw file bytes
+before decoding, including whitespace; a write/capacity failure requests stop.
+Preserve it. A restart with an open, absent or unverifiable
+epoch cannot grant a fresh interval, even after a healthy last poll. For an
+already-active direct session, `worker-resume` first verifies the private
+tenant/origin, worker/attempt, lock, owned CID and unchanged runtime binding,
+then requests stop of that exact instance without waiting for gateway health.
+It performs no adoption, start or quota release. Repeat the same resume when
+the gateway is available to reconcile terminal accounting; an unconfirmed stop
+remains unknown. An explicitly requested replacement of a historical invocation
+still uses the existing authenticated adoption path for a valid candidate:
+gateway availability, the same engine and durable adoption audit remain required
+before stopping the retained CID. The local stop port cannot adopt or turn an
+identity/unsafe-file/engine conflict into permission. These rules do not relax broker RPC authentication or qualify
+the independent guardian or real runtime stop guarantees. See the
+[operator contract](../../operations.md#suivi-de-lecture-après-démarrage-acquitté).
+
 | Code or symptom | Meaning and next action |
 |---|---|
 | `unauthorized` | The presented credential was not authenticated. Check the private file reference and selected gateway/profile without exposing its contents. |

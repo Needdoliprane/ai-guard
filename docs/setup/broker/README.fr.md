@@ -350,6 +350,45 @@ engagée : examiner l'état durable et rejouer seulement la même identité
 d'opération admissible. Ces limites ne redémarrent rien automatiquement,
 ne prolongent aucune échéance worker et ne réactivent pas le contrôle.
 
+Le runner direct (`run` / `worker-resume`) possède un **moniteur de lecture**
+distinct après les accusés Running et `command.started`. Interruption de
+connexion typée, timeout de transport borné et HTTP 429 peuvent être réessayés
+pendant au plus **60 secondes depuis le début de la première requête défaillante,
+timeout inclus**. L'échéance d'exécution initiale prime ; réessais et `Retry-After`
+ne la renouvellent pas. La visibilité reste dégradée/inconnue. Erreurs
+d'authentification, d'identité, de révision, de format et d'audit obligatoire,
+y compris un HTTP 503 non classé, demandent encore l'arrêt ciblé immédiat.
+La reprise exige la réponse courante complète du même worker/tentative, sans
+recul de révision, puis son enregistrement durable. Le callback d'audit du
+démarrage est exclu.
+Avant le premier GET, la création durable de l'epoch possède sa propre **borne
+d'armement de 15 secondes**, prise avant de lancer le writer et limitée par
+l'échéance initiale. Son expiration demande l'arrêt, sans nouvelle fenêtre de
+60 secondes.
+
+L'epoch privée de ce moniteur reste ouverte jusqu'à la fin d'exécution et la
+confirmation de ses écritures ; une clôture en attente ne retient pas la
+finalisation. Une écriture interrompue conserve son identité exacte et n'est
+pas supposée annulée. Le journal séparé est borné à 64 intervalles et 128 Kio
+d'octets bruts avant décodage, espaces compris ; refus d'écriture ou de capacité
+demande l'arrêt. Le préserver. Un redémarrage
+avec epoch ouverte, absente ou invérifiable ne donne pas une nouvelle fenêtre,
+même après un dernier poll sain. Pour une session directe déjà active,
+`worker-resume` vérifie d'abord tenant/origin, worker/tentative, verrou, CID
+conservé et binding runtime inchangé dans les preuves privées, puis demande
+l'arrêt de cette seule instance sans attendre la santé du gateway. Aucun
+nouveau start, adoption ou quota libéré n'en découle. Répéter la même reprise
+une fois le gateway disponible pour réconcilier terminal et comptage ; un
+arrêt non confirmé reste inconnu. Le remplacement explicitement demandé d'une
+invocation historique conserve le parcours d'adoption authentifié existant pour
+un candidat valide : gateway disponible, même moteur et audit durable de
+l'adoption restent requis avant l'arrêt du CID conservé. Le port d'arrêt local
+ne peut ni adopter ni transformer un conflit d'identité, de fichier non sûr ou
+de moteur en permission. Ces règles ne réduisent pas l'authentification
+des RPC broker et ne qualifient ni le gardien indépendant ni les garanties
+d'arrêt d'un moteur réel. Voir le
+[contrat opérateur](../../operations.md#suivi-de-lecture-après-démarrage-acquitté).
+
 | Code ou symptôme | Sens et prochaine action |
 |---|---|
 | `unauthorized` | Le credential présenté n'est pas authentifié. Vérifier référence de fichier privé et gateway/profil choisi sans exposer le contenu. |
