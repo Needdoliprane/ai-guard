@@ -1,5 +1,32 @@
 # État constaté — suivi du développement
 
+## 7 novembre — interface fédérée et helper relais publiés ; diagnostic D5 en correction
+
+L'interface `da5363e` est composée dans `bd57034`, puis le helper Rust
+`000f9ec` dans `d903b28`. Les composants et l'intégration sont poussés ; leurs
+46 et neuf ancres respectives correspondent après composition. Leurs preuves
+restent celles des gels décrits, sans nouvelle compilation de toute la branche.
+[Interface, 59 tests Node et trois scénarios navigateur](evidence/2026-11-07/federated-worker-ui/README.md) ;
+[helper, 11 tests et compilation toutes cibles](evidence/2026-11-07/relay-worker-helper/README.md).
+Le helper possède ses IO/UDS et ferme ses admissions sur perte du contrôle.
+Owner exec, binding runtime, outbox et transport A1/A2/B1 restent à raccorder
+et qualifier ; la bibliothèque ne rend pas le réseau d'un worker accessible.
+
+Le client à profils fermés `48bc46e` est ensuite composé dans `0d8ca7c`.
+Il passe six nouveaux tests et treize compatibilités sur le gel53, plus toutes
+cibles ; ses guides EN/FR et ses sept ancres ont été relus et vérifiés après
+composition. [Preuves et limites](evidence/2026-11-07/relay-control-profile/README.md).
+Une qualification de toute l'intégration reste distincte de ces résultats.
+
+Les deux parents Cancel/query passent ensemble sur le gel44. La préparation
+de composition D5 a ensuite révélé une incompatibilité du diagnostic avec le
+décodeur fermé de `bd57034` : RED55 atteint les trois états known/Pending/Final.
+Le candidat restaure V1 et ajoute un message V2 explicite, sans repli ; sa
+validation est en cours dans une QA isolée. Le test d'abandon Export reste
+à exécuter. Les événements D5 passent encore par l'ingestion ordinaire et son
+budget durable partagé : cet écart de disponibilité reste ouvert. G09 FAIL,
+aucun gate global clos, aucune nouvelle qualification moteur réel.
+
 ## 7 novembre — permission préflight Kubernetes vérifiée et raccord relais approuvé
 
 Le composant `6c25400`, composé dans `31be78d`, exige l'avis create/pods

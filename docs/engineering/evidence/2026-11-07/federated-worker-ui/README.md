@@ -297,6 +297,14 @@ limité à3Gio/65536inodes ;1CPU,2Gio RAM sans swap additionnel,256PIDs,
 produit mesurés. L’inspection initiale constate `running`, `OOMKilled:false` ;
 elle ne constitue pas une inspection finale ou une preuve de nettoyage.
 
+Disposition finale constatée ensuite par le parent : AI est arrêtée volontairement
+à `2026-11-07T18:28:40.365Z`, code137 et OOMKilled=false, puis le conteneur exact
+est supprimé. Les quatorze PNG restaient uniquement dans son scratch et sont
+détruits avec celui-ci ; trois avaient été examinés en mémoire, sans copie sur
+l'hôte. Journaux et métadonnées parent sont conservés. Inspection finale privée
+SHA `d1ef05ec101843bde9cb4882b0dba08e9cd6ac40ceaba194ae9213c037f8793b`.
+Ce code d'arrêt ne remplace pas les codes des tests et ne les invalide pas.
+
 Le profil seccomp Playwright officiel1.64.1, SHA
 `cc3e61cabda6bbc1e53e54d27ba4d55a9d3be829b6dd1a596f4a7b31b1cc7849`,
 autorise les namespaces mais AH échoue encore sur `chroot`. AI emploie ce

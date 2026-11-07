@@ -1,5 +1,35 @@
 # Validation courante
 
+## 7 novembre — composants publiés et nouvelle reproduction de compatibilité
+
+L'interface `da5363e` est composée dans `bd57034` (46/46 ancres), le helper
+`000f9ec` dans `d903b28` (9/9). Le helper passe 11 fonctions uniques sur
+`relay-helper-register52` et `check --all-targets --locked --offline` RC0.
+Les [preuves](evidence/2026-11-07/relay-worker-helper/README.md) distinguent
+le canari47 PASS, le durcissement50 et la correction explicite du contrat
+Tokio52. Les avertissements historiques restent présents ; aucun Clippy projet.
+La [preuve UI](evidence/2026-11-07/federated-worker-ui/README.md) conserve
+les 59 résultats Node03, build42 et trois scénarios navigateur45 distincts.
+Le client `48bc46e`, composé dans `0d8ca7c`, conserve sept ancres identiques
+après composition : six nouveaux parents et treize historiques PASS53, check
+toutes cibles RC0. Ses trois reproductions locales, guides et limites figurent
+dans la [preuve des profils](evidence/2026-11-07/relay-control-profile/README.md).
+
+La QA AJ finit normalement le `2026-11-07T19:17:36.146087721Z`, RC0 et
+OOMKilled=false, puis son conteneur attribué est supprimé. Inspection finale
+privée SHA `4925e8cc3798a51e3c3a6517ed641e4c1a7aa7bb35cc918a65dbdfc95385cf25`.
+Clippy1.99.1 est préparé depuis l'archive publique autorisée, versions vérifiées
+avec rustc1.99.1 ; aucun lancement sur le projet n'est crédité. Son installation
+en scratch disparaît avec AJ, le cache public vérifié reste disponible.
+
+D5 reste dans un candidat séparé. RED54 est un échec de compilation du harnais
+(mauvaise méthode de writer), sans oracle. RED55 corrige seulement cet appel
+et atteint l'incompatibilité réelle du producteur avec l'ancien décodeur :
+0 PASS,1 FAIL,12,43s après compilation. Journal privé SHA
+`98dda50f825c7a26c6e6976c62c83bf114181d1a3120354bb78e34d180445100`.
+V1 restauré/V2 explicite et nouvel oracle Export sont en validation ; aucun
+PASS de ces nouveaux parcours n'est annoncé à ce stade.
+
 ## 7 novembre — préflight create/pods, gel40
 
 Le composant `6c25400` est publié, puis composé dans `31be78d`.

@@ -59,6 +59,17 @@ l'absence de démarrage est prouvée.
 
 ### Lots de correction et acceptation
 
+Point du 7 novembre après composition UI/relais : le helper `000f9ec`, composé
+dans `d903b28`, possède sa [preuve de composant](evidence/2026-11-07/relay-worker-helper/README.md).
+Ses onze fonctions et toutes cibles passent sur52, avec revue indépendante.
+Cela ne clôture ni le transport runtime, ni un constat de disponibilité de
+l'audit. Le candidat D5 séparé a désormais un RED55 réel de compatibilité du
+diagnostic V1 avec le décodeur de `bd57034` ; V1 restauré et diagnostic V2
+distinct sont en validation. La compilation ratée54 n'est pas une reproduction.
+Les nouveaux faits D5 restent sur `post_event`, ingestion et classe d'écriture
+ordinaires ; la réserve de capacité d'audit n'est pas livrée par ce candidat.
+Les treize constats historiques conservent leur statut et leurs exigences.
+
 Point supplémentaire du 7 novembre : les tests de continuité D5 restent dans
 un worktree séparé, sans intégration du bundle sur la seule base de canaris.
 La fermeture de l'admission STOP après shutdown idle passe trois fonctions
