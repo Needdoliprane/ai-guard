@@ -171,9 +171,9 @@ impl Fixture {
                 let observed_fault = Arc::clone(&observed_fault);
                 let observed_audit_response_gate = Arc::clone(&observed_audit_response_gate);
                 async move {
-                    let decision = request.uri().path() == "/api/decide";
+                    let decision = request.uri().path() == "/control/api/decide";
                     let worker_transition = request.method() == axum::http::Method::POST
-                        && request.uri().path().starts_with("/api/v1/workers/")
+                        && request.uri().path().starts_with("/control/api/v1/workers/")
                         && request.uri().path().ends_with("/transitions");
                     let audit_event = request.method() == axum::http::Method::POST
                         && matches!(request.uri().path(), "/api/events" | "/api/v1/events");

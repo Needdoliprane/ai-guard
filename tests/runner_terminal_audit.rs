@@ -148,9 +148,14 @@ async fn terminal_audit_precedes_cleanup_and_failures_keep_the_observed_result()
                     if request.method() != Method::POST {
                         return next.run(request).await;
                     }
-                    let control = request.uri().path().starts_with("/api/v1/workers/")
+                    let control = request.uri().path().starts_with("/control/api/v1/workers/")
                         && request.uri().path().ends_with("/transitions");
-                    let events = ["/api/events", "/api/v1/events"].contains(&request.uri().path());
+                    let events = [
+                        "/api/events",
+                        "/api/v1/events",
+                        "/control/api/v1/control/events",
+                    ]
+                    .contains(&request.uri().path());
                     if !control && !events {
                         return next.run(request).await;
                     }

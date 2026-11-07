@@ -209,7 +209,7 @@ impl Scenario {
                 let root = event_root.clone();
                 async move {
                     if request.method() == Method::GET
-                        && request.uri().path().starts_with("/api/v1/workers/")
+                        && request.uri().path().starts_with("/control/api/v1/workers/")
                         && root.join("running_ack").exists()
                         && gate.fail_monitor.load(Ordering::SeqCst)
                         && !gate.monitor_refused.swap(true, Ordering::SeqCst)
@@ -224,7 +224,7 @@ impl Scenario {
                     let (parts, body) = request.into_parts();
                     let bytes = to_bytes(body, 256 * 1024).await.unwrap();
                     let value: Value = serde_json::from_slice(&bytes).unwrap();
-                    if parts.uri.path() == "/api/v1/control/events" && gate.reject_control.load(Ordering::SeqCst) {
+                    if parts.uri.path() == "/control/api/v1/control/events" && gate.reject_control.load(Ordering::SeqCst) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
                     let file_event=event_route && value["kind"]=="file.created";
@@ -1003,7 +1003,7 @@ async fn command_started_callback_uses_one_attempt_and_stops_its_owned_instance(
     assert!(
         requests
             .iter()
-            .all(|(path, _)| path == "/api/v1/control/events")
+            .all(|(path, _)| path == "/control/api/v1/control/events")
     );
     let events = scenario.events();
     let started = events

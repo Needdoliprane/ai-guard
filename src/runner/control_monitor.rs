@@ -69,6 +69,29 @@ fn transport_failure(error: &reqwest::Error) -> RefreshFailure {
     }
     RefreshFailure::Unclassified
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransportFailureEnvelope {
+    error: crate::control_transport::ControlTransportFailureV1,
+}
+fn classified_transport_failure(status: reqwest::StatusCode, value: Value) -> RefreshFailure {
+    use crate::control_transport::ControlTransportFailureReasonV1 as Reason;
+    let Ok(envelope) = serde_json::from_value::<TransportFailureEnvelope>(value) else {
+        return RefreshFailure::InvalidResponse;
+    };
+    if !envelope.error.validate() {
+        return RefreshFailure::InvalidResponse;
+    }
+    let transient = match (status, envelope.error.reason) {
+        (reqwest::StatusCode::BAD_GATEWAY, Reason::UpstreamConnectionUnavailable)
+        | (reqwest::StatusCode::BAD_GATEWAY, Reason::UpstreamConnectionInterrupted) => {
+            Transient::ConnectionInterrupted
+        }
+        (reqwest::StatusCode::GATEWAY_TIMEOUT, Reason::UpstreamTimeout) => Transient::Timeout,
+        _ => return RefreshFailure::InvalidResponse,
+    };
+    RefreshFailure::Transient(transient, None)
+}
 async fn read_worker(
     client: &AuditClient,
     expected: &WorkerV1,
@@ -79,8 +102,7 @@ async fn read_worker(
         return Err(RefreshFailure::IdentityOrRevision);
     }
     let url = client
-        .base
-        .join(&format!("api/v1/workers/{id}"))
+        .control_url(reqwest::Method::GET, &format!("api/v1/workers/{id}"))
         .map_err(|_| RefreshFailure::IdentityOrRevision)?;
     let mut response = client
         .http
@@ -89,8 +111,11 @@ async fn read_worker(
         .send()
         .await
         .map_err(|error| transport_failure(&error))?;
-    match response.status() {
-        reqwest::StatusCode::OK => {}
+    let status = response.status();
+    match status {
+        reqwest::StatusCode::OK
+        | reqwest::StatusCode::BAD_GATEWAY
+        | reqwest::StatusCode::GATEWAY_TIMEOUT => {}
         reqwest::StatusCode::UNAUTHORIZED => return Err(RefreshFailure::Unauthorized),
         reqwest::StatusCode::FORBIDDEN => return Err(RefreshFailure::Forbidden),
         reqwest::StatusCode::TOO_MANY_REQUESTS => {
@@ -104,8 +129,8 @@ async fn read_worker(
                 .map(Duration::from_secs);
             return Err(RefreshFailure::Transient(Transient::Busy, delay));
         }
-        // No explicit temporary-unavailability DTO exists on this endpoint.
-        // In particular, an audit/storage or unclassified 503 is never retried.
+        // An audit/storage or unclassified 503 is never retried. Only H's
+        // closed, status-consistent transport DTO may qualify below.
         _ => return Err(RefreshFailure::Unclassified),
     }
     let mut bytes = Vec::new();
@@ -119,6 +144,9 @@ async fn read_worker(
         crate::json::decode_unique(&bytes, 64).map_err(|_| RefreshFailure::InvalidResponse)?;
     if client.redactor.value(&value) != value {
         return Err(RefreshFailure::InvalidResponse);
+    }
+    if status != reqwest::StatusCode::OK {
+        return Err(classified_transport_failure(status, value));
     }
     let worker: WorkerV1 =
         serde_json::from_value(value.clone()).map_err(|_| RefreshFailure::InvalidResponse)?;
@@ -2177,7 +2205,8 @@ mod tests {
     #[tokio::test]
     async fn authenticated_resume_can_adopt_valid_replacement_before_stopping_same_instance() {
         // Keep setup's HTTP/runtime state machine separate from the much larger
-        // resume state machine. Only this test's allocation layout changes.
+        // resume state machine. The resumed Run instance is declared below;
+        // trusted postprocessing may execute one separate Export helper.
         struct Fixture {
             root: tempfile::TempDir,
             base: PathBuf,
@@ -2613,36 +2642,183 @@ mod tests {
             );
         }
         assert_eq!(durable_worker.worker_id, worker.worker_id);
+        assert_eq!(durable_worker.attempt.attempt_id, worker.attempt.attempt_id);
+        assert!(durable_worker.attempt.container_id.as_deref() == Some(cid.as_str()));
         assert_eq!(
             durable_worker.attempt.start_operation_id,
             worker.attempt.start_operation_id
         );
-        assert_eq!(
-            calls_after
-                .lines()
-                .filter(|line| line.starts_with("start ") || line.starts_with("create "))
-                .count(),
-            0
-        );
-        let bound = saved
-            .managed
-            .unwrap()
-            .binding
-            .unwrap()
-            .invocation_fingerprint();
-        let kills = calls_after
-            .lines()
-            .filter(|line| *line == format!("kill {cid}"))
-            .count();
+        assert_eq!(durable_worker.state, WorkerStateV1::Terminal);
+        assert!(!durable_worker.quota_held);
+        assert_eq!(durable_worker.cleanup_removed, Some(true));
+        assert!(durable_worker.cleanup_error.is_none());
+        assert!(!instance.exists());
+
+        // Parse every create/start record, including malformed whitespace or
+        // purposes. Only the single postprocessing Export pair is admissible.
+        let mut export_created = None;
+        let mut export_started = None;
+        let mut exact_kills = 0;
+        for line in calls_after.lines() {
+            if !matches!(
+                line.split_whitespace().next(),
+                Some("create" | "start" | "kill")
+            ) {
+                continue;
+            }
+            let mut fields = line.split(' ');
+            match (fields.next(), fields.next(), fields.next(), fields.next()) {
+                (Some(operation @ ("create" | "start")), Some(id), Some("export"), None) => {
+                    assert!(
+                        id.len() == 64
+                            && id.bytes().all(|byte| {
+                                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                            })
+                            && id != cid.as_str(),
+                        "malformed or reused fixture Export identity"
+                    );
+                    let previous = if operation == "create" {
+                        assert_eq!(exact_kills, 1, "Export created before the exact Run stop");
+                        export_created.replace(id)
+                    } else {
+                        assert!(
+                            export_created == Some(id),
+                            "Export started before its creation"
+                        );
+                        export_started.replace(id)
+                    };
+                    assert!(previous.is_none(), "duplicate fixture Export invocation");
+                }
+                (Some("kill"), Some(id), None, None) => {
+                    assert!(
+                        id == cid.as_str(),
+                        "a different fixture instance was killed"
+                    );
+                    exact_kills += 1;
+                }
+                _ => panic!("unexpected fixture create/start/kill record"),
+            }
+        }
+        let export_id = export_created.expect("trusted recovery did not create its Export helper");
         assert!(
-            resumed.as_ref().is_ok_and(|reply| reply.is_ok())
-                && adoption_events.len() == 1
-                && bound.as_deref() == Some(candidate_fingerprint.as_str())
-                && kills == 1,
-            "healthy explicit adoption was blocked before its audited stop: completed={}, adoption_events={}, binding_updated={}, exact_kills={kills}",
-            resumed.as_ref().is_ok_and(|reply| reply.is_ok()),
-            adoption_events.len(),
-            bound.as_deref() == Some(candidate_fingerprint.as_str())
+            export_started == Some(export_id),
+            "Export helper was not started exactly once"
+        );
+        assert_eq!(exact_kills, 1);
+        assert!(!base.join("containers").join(export_id).exists());
+
+        let single_event = |kind: &str| {
+            let events = store
+                .events(&crate::audit::EventQuery {
+                    kind: Some(kind.into()),
+                    limit: Some(2),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(events.len(), 1, "{kind} must be audited exactly once");
+            let event = events.into_iter().next().unwrap();
+            assert!(
+                event.event.session_id.as_deref() == Some(worker.launch.session_id.as_str()),
+                "{kind} was not attributed to the original session"
+            );
+            event
+        };
+        let scan_requested = single_event("workspace.scan.requested");
+        let scan_created = single_event("workspace.scan.created");
+        let scan_started = single_event("workspace.scan.started");
+        let scan_completed = single_event("workspace.scan.completed");
+        let diff_completed = single_event("workspace.diff.completed");
+        assert!(
+            scan_requested.seq < scan_created.seq
+                && scan_created.seq < scan_started.seq
+                && scan_started.seq < scan_completed.seq
+                && scan_completed.seq < diff_completed.seq,
+            "trusted recovery audit sequence is not ordered"
+        );
+        assert!(scan_created.event.data["container_id"].as_str() == Some(export_id));
+        assert!(
+            scan_created.event.data["operation_id"]
+                .as_str()
+                .and_then(|operation| Uuid::parse_str(operation).ok())
+                .is_some_and(|operation| !operation.is_nil()),
+            "trusted recovery helper operation is not a valid UUID"
+        );
+        assert!(diff_completed.event.data["changed_files"].as_u64() == Some(0));
+        assert!(
+            diff_completed.event.data["observation_phase"].as_str()
+                == Some("post_completion_recovery")
+        );
+        let postprocessing = load_postprocessing(&state, &client)
+            .unwrap()
+            .expect("terminal recovery did not retain its postprocessing journal");
+        let payload = &postprocessing.payload;
+        assert_eq!(
+            payload.declared.state,
+            DeclaredCollectionV1::UnavailableAfterInterruption
+        );
+        assert!(
+            payload.declared.error.as_deref()
+                == Some("legacy declared capture is unavailable; delivery counts remain unknown")
+        );
+        assert!(
+            [
+                payload.declared.normalized_events,
+                payload.declared.acknowledged_events,
+                payload.declared.dropped_events,
+                payload.declared.unknown_delivery_events,
+                payload.declared.not_attempted_events,
+            ]
+            .iter()
+            .all(Option::is_none),
+            "unavailable declared capture acquired delivery counts"
+        );
+        let diff = payload
+            .diff
+            .as_ref()
+            .expect("retained trusted diff is missing");
+        assert!(diff.completed_acknowledged);
+        assert_eq!(diff.changed_files, 0);
+        assert!(diff.files.is_empty());
+        assert_eq!(diff.acknowledged_files, 0);
+        assert!(diff.completed["id"].as_str() == Some(diff_completed.event.id.as_str()));
+        assert!(payload.diff_error.is_none());
+        assert!(payload.coverage_acknowledged);
+        assert!(payload.coverage_error.is_none());
+        assert!(!payload.needs_recovery());
+        let coverage = payload
+            .coverage
+            .as_ref()
+            .expect("retained coverage is missing");
+        let coverage_event = single_event("observer.coverage");
+        assert!(coverage["id"].as_str() == Some(coverage_event.event.id.as_str()));
+        assert!(coverage["coverage"].as_str() == Some("partial"));
+        assert!(coverage["data"]["trusted_diff"].as_str() == Some("complete"));
+        assert!(coverage["data"]["postprocessing_complete"].as_bool() == Some(false));
+        assert!(
+            coverage["data"]["declared_collection"]["state"].as_str()
+                == Some("unavailable_after_interruption")
+        );
+
+        let checkpoint = saved.managed.as_ref().unwrap();
+        let binding = checkpoint.binding.as_ref().unwrap();
+        assert!(
+            checkpoint.result.is_none(),
+            "recovery fabricated a RunSummary"
+        );
+        assert!(binding == candidate_runtime.binding());
+        assert!(
+            binding.invocation_fingerprint().as_deref() == Some(candidate_fingerprint.as_str())
+        );
+        assert_eq!(adoption_events.len(), 1);
+        assert!(adoption_events[0].seq < scan_requested.seq);
+        assert!(
+            adoption_events[0].event.data["invocation_fingerprint"].as_str()
+                == Some(candidate_fingerprint.as_str())
+        );
+        assert!(
+            matches!(resumed.as_ref(), Ok(Err(error)) if error.to_string()
+                == "postprocessing recovery incomplete: legacy declared capture is unavailable; delivery counts remain unknown"),
+            "authenticated recovery did not report its exact unavailable-capture refusal"
         );
     }
     type Reply = (u16, Option<&'static str>, Vec<u8>);
@@ -2657,40 +2833,49 @@ mod tests {
         use axum::{
             Router,
             body::Body,
-            extract::State,
+            extract::{Request, State},
             http::{HeaderMap, Response},
+            middleware::{self, Next},
             routing::get,
         };
         let queue = Arc::new(Mutex::new(VecDeque::from(replies)));
         let requests = Arc::new(AtomicUsize::new(0));
         let count = requests.clone();
-        let app = Router::new()
-            .route(
-                "/api/v1/workers/{worker}",
-                get(
-                    move |State(queue): State<Arc<Mutex<VecDeque<Reply>>>>, headers: HeaderMap| {
-                        let count = count.clone();
-                        async move {
-                            assert_eq!(
-                                headers.get("authorization").unwrap(),
-                                "Bearer synthetic-monitor-token"
-                            );
-                            count.fetch_add(1, Ordering::SeqCst);
-                            let (status, retry, body) = queue
-                                .lock()
-                                .unwrap()
-                                .pop_front()
-                                .expect("unexpected extra HTTP read");
-                            let mut builder = Response::builder().status(status);
-                            if let Some(value) = retry {
-                                builder = builder.header("Retry-After", value);
+        let app =
+            Router::new()
+                .route(
+                    "/control/api/v1/workers/{worker}",
+                    get(
+                        move |State(queue): State<Arc<Mutex<VecDeque<Reply>>>>,
+                              headers: HeaderMap| {
+                            async move {
+                                assert_eq!(
+                                    headers.get("authorization").unwrap(),
+                                    "Bearer synthetic-monitor-token"
+                                );
+                                let (status, retry, body) = queue
+                                    .lock()
+                                    .unwrap()
+                                    .pop_front()
+                                    .expect("unexpected extra HTTP read");
+                                let mut builder = Response::builder().status(status);
+                                if let Some(value) = retry {
+                                    builder = builder.header("Retry-After", value);
+                                }
+                                builder.body(Body::from(body)).unwrap()
                             }
-                            builder.body(Body::from(body)).unwrap()
-                        }
-                    },
-                ),
-            )
-            .with_state(queue);
+                        },
+                    ),
+                )
+                .with_state(queue)
+                .layer(middleware::from_fn(move |request: Request, next: Next| {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        assert!(request.uri().path().starts_with("/control/api/v1/workers/"));
+                        next.run(request).await
+                    }
+                }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = AuditClient::new(
             &format!("http://{}", listener.local_addr().unwrap()),
@@ -2728,6 +2913,117 @@ mod tests {
             assert_eq!(read_worker(&client, &worker()).await.unwrap_err(), expected);
         }
         assert_eq!(requests.load(Ordering::SeqCst), 5);
+        shutdown.send(()).unwrap();
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn private_worker_http_accepts_only_closed_status_consistent_transport_failures() {
+        // Break caught: treating a status, malformed envelope or unknown field
+        // as permission to keep running, instead of requiring H's exact DTO.
+        let envelope = json!({"error":{
+            "version":1,
+            "code":"control_transport_failure",
+            "phase":"exchange",
+            "outcome":"unknown",
+            "retry_action":"reconcile_same_operation",
+            "reason":"upstream_connection_unavailable"
+        }});
+        let mut cases = Vec::new();
+        for (status, reason, expected) in [
+            (
+                502,
+                "upstream_connection_unavailable",
+                Transient::ConnectionInterrupted,
+            ),
+            (
+                502,
+                "upstream_connection_interrupted",
+                Transient::ConnectionInterrupted,
+            ),
+            (504, "upstream_timeout", Transient::Timeout),
+        ] {
+            let mut value = envelope.clone();
+            value["error"]["reason"] = json!(reason);
+            cases.push((
+                status,
+                value.to_string().into_bytes(),
+                RefreshFailure::Transient(expected, None),
+            ));
+        }
+        for (field, invalid) in [
+            ("version", json!(2)),
+            ("code", json!("control_transport_protocol_failure")),
+            ("phase", json!("response")),
+            ("outcome", json!("not_dispatched")),
+            ("retry_action", json!("contact_operator")),
+            ("reason", json!("unknown_reason")),
+            ("extra", json!(true)),
+        ] {
+            let mut value = envelope.clone();
+            value["error"][field] = invalid;
+            cases.push((
+                502,
+                value.to_string().into_bytes(),
+                RefreshFailure::InvalidResponse,
+            ));
+        }
+        let mut extra_envelope = envelope.clone();
+        extra_envelope["extra"] = json!(true);
+        cases.push((
+            502,
+            extra_envelope.to_string().into_bytes(),
+            RefreshFailure::InvalidResponse,
+        ));
+        let mut missing = envelope.clone();
+        missing["error"].as_object_mut().unwrap().remove("version");
+        cases.push((
+            502,
+            missing.to_string().into_bytes(),
+            RefreshFailure::InvalidResponse,
+        ));
+        for (status, reason) in [
+            (502, "upstream_timeout"),
+            (504, "upstream_connection_unavailable"),
+            (504, "upstream_connection_interrupted"),
+        ] {
+            let mut value = envelope.clone();
+            value["error"]["reason"] = json!(reason);
+            cases.push((
+                status,
+                value.to_string().into_bytes(),
+                RefreshFailure::InvalidResponse,
+            ));
+        }
+        let dto = envelope.to_string();
+        for body in [
+            dto.replacen("\"version\":1", "\"version\":1,\"version\":1", 1),
+            format!(
+                "{{\"error\":{},\"error\":{}}}",
+                envelope["error"], envelope["error"]
+            ),
+            format!("{dto}{{}}"),
+            "{}".into(),
+            "{\"error\":{\"code\":\"control_transport_protocol_failure\"}}".into(),
+        ] {
+            cases.push((502, body.into_bytes(), RefreshFailure::InvalidResponse));
+        }
+        // Even a valid DTO under another status is not a transport failure.
+        cases.push((503, dto.as_bytes().to_vec(), RefreshFailure::Unclassified));
+        cases.push((200, dto.into_bytes(), RefreshFailure::InvalidResponse));
+        let expected: Vec<_> = cases.iter().map(|(_, _, failure)| *failure).collect();
+        let replies = cases
+            .into_iter()
+            .map(|(status, body, _)| (status, None, body))
+            .collect();
+        let (client, shutdown, task, requests) = peer(replies).await;
+        for (index, failure) in expected.iter().enumerate() {
+            assert_eq!(
+                read_worker(&client, &worker()).await.unwrap_err(),
+                *failure,
+                "case {index}"
+            );
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), expected.len());
         shutdown.send(()).unwrap();
         task.await.unwrap();
     }

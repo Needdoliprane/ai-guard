@@ -54,7 +54,7 @@ impl AuthenticatedBatchContext {
         config: Directory,
         runtime: Runtime,
     ) -> Result<Self> {
-        let identity = client.supervision_identity().await?;
+        let identity = client.control_supervision_identity().await?;
         ensure!(
             identity.active
                 && [3, 4, 5, 6, 7, 8, 9, 10].contains(&identity.schema_version)
@@ -162,15 +162,16 @@ impl VerifiedProfile {
             .map_err(|_| Code::Unauthorized)?;
         let client =
             AuditClient::new(&profile.gateway, credential).map_err(|_| Code::Unauthorized)?;
-        let protocol = client
-            .supervision_identity()
-            .await
-            .map_err(|error| match error {
-                ControlIdentityError::Unauthorized => Code::Unauthorized,
-                ControlIdentityError::Forbidden => Code::Forbidden,
-                ControlIdentityError::Unavailable => Code::Unavailable,
-                ControlIdentityError::InvalidResponse => Code::IncompatibleControl,
-            })?;
+        let protocol =
+            client
+                .control_supervision_identity()
+                .await
+                .map_err(|error| match error {
+                    ControlIdentityError::Unauthorized => Code::Unauthorized,
+                    ControlIdentityError::Forbidden => Code::Forbidden,
+                    ControlIdentityError::Unavailable => Code::Unavailable,
+                    ControlIdentityError::InvalidResponse => Code::IncompatibleControl,
+                })?;
         if protocol.role != "runner"
             || protocol.tenant_id != profile.tenant_id
             || protocol.control_namespace_uuid.as_deref()

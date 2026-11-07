@@ -1,5 +1,127 @@
 # Validation courante
 
+## 7 novembre — composition26 : 52 fonctions et compilation toutes cibles
+
+Sur le gel `core-hilm-sdk-composition26`, 417 fichiers Rust/Cargo sont vérifiés
+avant les tests et dans la composition finale. PASS : moniteur23, transportAPI4,
+budgets d'ingestion3, supervision2, migrationCLI5, preuves/budgetSSO14 et rejeu
+exact d'audit fichiers1. Toutes cibles RC0 sur QA AB en 1 min 22 s ; journal
+`f051ea3326a2a640d97e597ca1288999d92ff7be765ef4914cdd59aaf73a7e4e`.
+Les tests AA n'ont pas été répétés lorsque sa borne laissait le check NOT_RUN.
+Les [preuves composées](evidence/2026-11-07/control-recovery-composition/README.md)
+conservent noms, commandes équivalentes, hashes des huit sorties et contrôles QA.
+Revue source indépendante de main, managed et monitor acceptée sans perte des
+oracles Core25 ni extension d'autorité du SDK. Avertissements119lib/2SSO/3lib-test ;
+Clippy et G09 restent ouverts. Aucun moteur worker ou fournisseur réel exécuté.
+
+Le chantier D5 indépendant reproduit ensuite son propre RED de shutdown : une
+fonction, 12,73 s, `drained=false final=false local_retained=true`, journal
+`ac8bf845cd40c9d06f49d9ad03421c805a5bad622f3e598e872318960da2080e`.
+Le premier essai échouait avant l'oracle faute de l'opt-in de fixture
+`AI_GUARD_TEST_D5_IPC_ROOT=/scratch/tmp` ; c'est un setup NOT_RUN, pas un RED produit.
+Le correctif n'est pas crédité PASS avant exécution et revue.
+
+## 7 novembre — reprise Core21 et budget SSO composé03
+
+Le parent d'arrêt local passe avec Core18 : une fonction, 8,10 s après
+compilation de 1 min 53 s ; journal
+`a119c9e8d962e6092d414a2242678c5b4205373dd0eda38c676c38c9b75a8468`.
+La composition H/I/L/J19 déborde ensuite dans le parent d'adoption, avant son
+oracle : `2af3f1bb692a823fb8a56e75b9ce9937b938c698bfe495f414fbae25cc28e70e`.
+Le diagnostic20 observe un grand frame de poll puis une marge de pile décroissante
+au décodage ; ce n'est pas une mesure du seul type de future. Aucune pile plus
+grande, nouveau thread ou tâche détachée n'est ajouté au correctif21.
+
+Core21 conserve le moniteur et extrait des phases directement attendues. Sa
+revue statique accepte l'ordre, les gardes, STOP, identité, credentials et délais.
+Le parent d'adoption atteint une assertion fonctionnelle, puis échoue avec un
+compteur create/start de 2 au lieu de 0 : 15,97 s, compilation de 1 min 58 s,
+RC101, journal `400c1bfb9f01c08b673ee8822196c02b9038a25caee67429101f5fa87543565c`.
+Le diagnostic22 conserve l'assertion et observe exactement une paire create/start
+Export, avec les quatre événements de scan et le diff chacun une fois : RC101,
+16,63 s après compilation de 1 min 54 s,
+`728628603ac3f4abe9704da8ff12c7aaf56080aee07f871c429a3a71145cf19e`.
+Core24 conserve l'application21 et adapte le seul harnais : aucun lancement run/
+import, helper Export unique audité, après le kill exact du worker, mêmes identité,
+adoption, quota, nettoyage et ACK. Le contrôle d'ordre manquant découvert en revue
+est ajouté avant la QA, qui est lancée. Les 22 moniteurs restent NOT_RUN à cette
+étape ; aucun PASS de reprise n'est anticipé et le correctif n'est pas intégré.
+
+M composé03 passe 14/14 régressions en 1,84 s après compilation de 1 min 48 s,
+119 avertissements lib ; journal
+`3bfa04c7d5a9fa8c780e241089b053447fc0e27befc71f8c3d300936e147f73d`.
+Gateway SHA `a8203e81dd200fc9666dc746eb0ba2434ae17775ee9c17ed4b343347b74dc8cb`,
+test SHA `4bd446abc2300b210be3b71ef73d7caac772e4ff6af8f7875c1d9cdecbfc83ec`.
+Le gel02 avait deux FAIL : livraison Web401 au lieu de429 et course froide
+refusée avant vérification de la preuve. Le gel03 corrige le mapping fermé et
+isole causalement la découverte froide, puis conserve la course stricte à clés
+prêtes : une réservation/refus, trois conflits, deux seules écritures nouvelles.
+Les suites complémentaires passent : gateway flow9/9 en 34,10 s,
+`2ea657f15b50f1ca540911b80cf6a19884dca101c9396819fee10ec56f46a7bb` ;
+reprise privée B1/1 en 0,24 s, compilation de 57,05 s,
+`71e588e70bd9cce7f3418018dfa4a28ee001a4028e7c36bc3352e7fab90568c7` ;
+toutes cibles RC0 en 1 min 04 s,
+`9fb1c7d20aa8b45451ab8ca355121b28d45c0fc477e5404fc91fafb38af913be`.
+
+Sur composé02 : migration CLI5 PASS, capacité d'authentification7 PASS, audit24
+PASS et toutes cibles RC0. Les suites inchangées ne sont pas
+relancées par réflexe. Les preuves restent attachées aux gels correspondants.
+M et son CLI sont publiés `fa877ba`, composés dans `238fddd` après revue source,
+preuves et guides. Douze empreintes du manifeste source M restent identiques
+dans la composition ; `main.rs` diffère seulement par le raccord listener H déjà
+présent dans `b48c095`. Sa compilation composée reste à vérifier, aucun PASS du
+gel M ne lui est transféré. Le SDK H a deux revues source acceptées et passe
+22 fonctions ciblées sur le gel v2 : clients4, événements5, décodeur de suivi3,
+présence2, diagnostic public5, garde STOP1, rejeu fichiers1 et callback1. Toutes
+cibles RC0 en 1 min 05 s,
+`31999142c17b1fb7626b54a911d0fcfb8a539eed020a504ce9ee1d6d10a3edb6`.
+Le premier filtre STOP sélectionne zéro test et reste NOT_RUN ; le suffixe exact
+du nom sélectionne ensuite une fonction PASS. Le gel SDK comprend l'overlay
+Core18 ; ces résultats ne qualifient ni son adoption ni Core24 ou la composition.
+QA réseau absent, sources readonly et échéance sur horloge hôte ; aucun moteur
+worker, fournisseur, navigateur ou cluster réel n'est qualifié par ces tests.
+
+## 7 novembre — premiers résultats de composition et gel des reprises
+
+La composition locale `a329153` conserve les sources validées I/L et le lot J.
+Son gel `core-ilj-composition12` échoue avant l'oracle du premier test
+`active_resume_stops_exact_locally_bound_instance_while_gateway_stays_unavailable` :
+SIGABRT, débordement de pile après compilation de 2 min 23 s, sans OOM constaté.
+SHA256 du journal parent `core-ilj12-monitor-x.log` :
+`60cb3d9b89f4c19ddc419bcc9e084385bbcc7ed1753921d6c488a86d5d752c5d`.
+Les autres sélections et la compilation toutes cibles de cette composition restent
+NOT_RUN. La revue statique de la fusion n'a trouvé aucun blocker ; elle ne vaut
+pas résultat d'exécution. Le diagnostic 13 mesure les types des futures sans les
+construire ; aucune augmentation de pile n'est appliquée.
+
+H04 échoue dans ses deux préparations HTTP : 409 au lieu de 201, puis 403 au lieu
+de 200 ; durée 0,65 s après compilation de 2 min 20 s. SHA256 du journal
+`h-fix04-supervision-x.log` :
+`2c1138d5ef504abae701a0c0131dce327d8d4cc77f726c1c8c69b244f00317d9`.
+H05 conserve le code applicatif et corrige les fixtures, sans relâcher les refus.
+Il passe depuis 2 fonctions de supervision, 9 de transport, 2 du CLI ingress et
+1 option main, puis compile toutes cibles en 1 min 03 s. Le premier filtre main
+sélectionne zéro test et n'est pas compté ; le nom complet est ensuite exécuté.
+Les 4 unités API avaient passé sur H03, avec code applicatif inchangé.
+
+Les premières compilations du diagnostic 13 et de D5 B27 sont interrompues par
+SIGKILL, avec hausse de deux du compteur `oom_kill` du cgroup partagé ; leurs
+tests sont NOT_RUN. Les mêmes sources et environnements, échelonnés après H05,
+permettent ensuite la mesure de type du diagnostic 13 et les quatre parents D5.
+D5 B27 passe 4 fonctions en 55,31 s puis compile toutes cibles en 1 min 11 s ;
+warnings 120 lib/2 SSO-test/5 lib-test, dont 1 doublon. SHA du journal des tests :
+`82a316eae55750b51534d750c64694ace5eb0648464f9d54a818cf2d899ea955` ;
+SHA du check : `212c86684a8667f3ba09b0daa919ea013fe31a27f3b08ec1448872c723caf1b2`.
+Le diagnostic 13 mesure la future publique de reprise à 69 200 octets ; il ne
+démontre donc pas une mégafuture ni une correction du débordement. Le diagnostic
+14 localise construction et phases du vrai parent avant de choisir un correctif.
+Aucun résultat non obtenu n'est compté PASS.
+
+QA X s'est arrêtée à son échéance, sans OOM. QA Y conserve réseau absent,
+sources/toolchain readonly, UID 1000, capacités nulles et limites de ressources ;
+son échéance stricte est le 7 novembre à 11:03:43 UTC. Aucun fournisseur, moteur
+worker ou navigateur n'est exécuté par ces sélections logicielles.
+
 ## 7 novembre — export, modes et compatibilité V1
 
 Source `b896c7c`, composition `df8b9ab` : 49 fonctions uniques passent sur leurs

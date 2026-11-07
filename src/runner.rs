@@ -190,17 +190,55 @@ fn redacted_error(redactor: &Redactor, error: &anyhow::Error) -> String {
 }
 
 impl AuditClient {
-    /// Authenticate this exact client against the existing versioned protocol
-    /// route. Failure classes are retained without exposing response bodies or
-    /// credential-bearing transport/parser errors.
+    /// Select the trusted transport before building a URL. The closed route
+    /// table is checked without URL decoding or normalization; a matching path
+    /// still grants no identity or authority at the gateway.
+    fn control_url(&self, method: reqwest::Method, path: &str) -> Result<reqwest::Url> {
+        let path = if path.starts_with('/') {
+            path.to_owned()
+        } else {
+            format!("/{path}")
+        };
+        anyhow::ensure!(
+            crate::control_transport::control_route(&method, &path)
+                == Some(crate::control_transport::ControlRouteIdentity::Runner),
+            "operation is outside the trusted runner control transport"
+        );
+        self.base
+            .join(&format!("control{path}"))
+            .context("invalid control transport origin")
+    }
+
+    /// Read the existing public protocol diagnostic with its existing reader
+    /// permissions. This does not select reserved runner transport capacity.
     pub async fn supervision_identity(
         &self,
     ) -> std::result::Result<crate::control::ControlProtocolV1, ControlIdentityError> {
-        use ControlIdentityError as Error;
         let url = self
             .base
             .join("api/v1/control/protocol")
-            .map_err(|_| Error::InvalidResponse)?;
+            .map_err(|_| ControlIdentityError::InvalidResponse)?;
+        self.protocol_identity_at(url).await
+    }
+
+    /// Authenticate a trusted runner consumer on the explicit control
+    /// transport. A refusal never falls back to the public diagnostic.
+    pub async fn control_supervision_identity(
+        &self,
+    ) -> std::result::Result<crate::control::ControlProtocolV1, ControlIdentityError> {
+        let url = self
+            .control_url(reqwest::Method::GET, "api/v1/control/protocol")
+            .map_err(|_| ControlIdentityError::InvalidResponse)?;
+        self.protocol_identity_at(url).await
+    }
+
+    /// Both explicit callers retain the same bounded parser and opaque error
+    /// classes; neither response data nor an error selects another transport.
+    async fn protocol_identity_at(
+        &self,
+        url: reqwest::Url,
+    ) -> std::result::Result<crate::control::ControlProtocolV1, ControlIdentityError> {
+        use ControlIdentityError as Error;
         let mut response = self
             .http
             .get(url)
@@ -327,8 +365,10 @@ impl AuditClient {
             "supervised reservation exceeds its input bound"
         );
         let url = self
-            .base
-            .join("api/v1/workers/supervised-reservations")
+            .control_url(
+                reqwest::Method::POST,
+                "api/v1/workers/supervised-reservations",
+            )
             .map_err(|_| anyhow::anyhow!("invalid supervised reservation origin"))?;
         let mut response = self
             .http
@@ -476,14 +516,18 @@ impl AuditClient {
         .await
     }
     pub async fn post_event(&self, event: Value) -> Result<i64> {
-        self.post_event_to("api/events", event, EventPostPolicy::RetryRateWindow)
-            .await
+        self.post_event_to(
+            self.base.join("api/events")?,
+            event,
+            EventPostPolicy::RetryRateWindow,
+        )
+        .await
     }
     /// Explicit trusted producer API. Neither Event kind, source nor provenance
     /// can select this route from the ordinary worker-derived ingestion path.
     pub(crate) async fn post_control_event(&self, event: Value) -> Result<i64> {
         self.post_event_to(
-            "api/v1/control/events",
+            self.control_url(reqwest::Method::POST, "api/v1/control/events")?,
             event,
             EventPostPolicy::RetryRateWindow,
         )
@@ -493,7 +537,7 @@ impl AuditClient {
     /// keeps the existing fifteen-second request bound without a rate window.
     pub(crate) async fn post_control_event_once(&self, event: Value) -> Result<i64> {
         self.post_event_to(
-            "api/v1/control/events",
+            self.control_url(reqwest::Method::POST, "api/v1/control/events")?,
             event,
             EventPostPolicy::SingleAttempt,
         )
@@ -501,7 +545,7 @@ impl AuditClient {
     }
     async fn post_event_to(
         &self,
-        path: &str,
+        url: reqwest::Url,
         event: Value,
         policy: EventPostPolicy,
     ) -> Result<i64> {
@@ -512,7 +556,6 @@ impl AuditClient {
         if body.len() > 120 * 1024 {
             bail!("event exceeds the safe audit payload limit");
         }
-        let url = self.base.join(path)?;
         let (attempts, budget) = match policy {
             EventPostPolicy::SingleAttempt => (1, EVENT_POST_REQUEST_TIMEOUT),
             EventPostPolicy::RetryRateWindow => (EVENT_POST_ATTEMPTS, EVENT_POST_BUDGET),
@@ -590,7 +633,7 @@ impl AuditClient {
         let answer = self
             .response(
                 self.http
-                    .post(self.base.join("api/decide")?)
+                    .post(self.control_url(reqwest::Method::POST, "api/decide")?)
                     .bearer_auth(&self.token)
                     .json(request),
             )
@@ -2141,7 +2184,7 @@ mod event_transport_tests {
             assert_eq!(
                 seen[0].0,
                 if control {
-                    "/api/v1/control/events"
+                    "/control/api/v1/control/events"
                 } else {
                     "/api/events"
                 }
@@ -2220,9 +2263,29 @@ mod event_transport_tests {
         );
         let seen = gateway.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].0, "/api/v1/control/events");
+        assert_eq!(seen[0].0, "/control/api/v1/control/events");
+    }
+
+    #[tokio::test]
+    async fn mandatory_start_callback_is_one_control_attempt_without_public_fallback() {
+        let gateway = TestGateway::new(Fault::TypedAlways).await;
+        let error = gateway
+            .client
+            .post_control_event_once(json!(Event::new("command.started")))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<EventPostFailure>(),
+            Some(&EventPostFailure::Rejected(StatusCode::TOO_MANY_REQUESTS))
+        );
+        let seen = gateway.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "/control/api/v1/control/events");
     }
 }
+
+#[cfg(all(test, unix))]
+mod control_transport_tests;
 
 #[cfg(test)]
 mod tests {

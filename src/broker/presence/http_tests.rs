@@ -49,6 +49,8 @@ struct Probe {
     post_times: Mutex<Vec<Instant>>,
     identity_refusal: Mutex<Option<(u16, &'static str)>>,
     identity_requests: Mutex<usize>,
+    transport_paths: Mutex<Vec<String>>,
+    transport_refusal: Mutex<Option<u16>>,
 }
 
 fn consume_fault(remaining: &Mutex<usize>) -> bool {
@@ -72,7 +74,18 @@ fn record_paths(state: &std::path::Path, leaf: &str) -> Vec<PathBuf> {
 }
 
 async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> Response<Body> {
-    if request.uri().path() == "/api/v1/brokers/identity" {
+    let path = request.uri().path();
+    probe.transport_paths.lock().unwrap().push(path.into());
+    if path.starts_with("/control/")
+        && let Some(status) = *probe.transport_refusal.lock().unwrap()
+    {
+        return Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+    }
+    if path == "/control/api/v1/brokers/identity" {
         *probe.identity_requests.lock().unwrap() += 1;
         let response = next.run(request).await;
         let refusal = *probe.identity_refusal.lock().unwrap();
@@ -92,7 +105,7 @@ async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> 
         }
         return response;
     }
-    if request.uri().path() != "/api/v1/brokers/heartbeat" {
+    if request.uri().path() != "/control/api/v1/brokers/heartbeat" {
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
@@ -252,6 +265,8 @@ impl LiveFixture {
             post_times: Mutex::new(Vec::new()),
             identity_refusal: Mutex::new(None),
             identity_requests: Mutex::new(0),
+            transport_paths: Mutex::new(Vec::new()),
+            transport_refusal: Mutex::new(None),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut scope = filesystem.scope();
@@ -687,6 +702,73 @@ fn prepare_local_pending(fixture: &LiveFixture) {
             },
         )
         .unwrap();
+}
+
+#[tokio::test]
+async fn presence_uses_only_its_three_control_routes_with_the_same_durable_pending() {
+    // Break caught: a presence method silently returns to public admission or
+    // acquires a runner route while reconciling a retained heartbeat.
+    let fixture = LiveFixture::new().await;
+    prepare_local_pending(&fixture);
+    let pending_path = record_paths(&fixture.filesystem.state, "pending.json")
+        .pop()
+        .unwrap();
+    let retained = fs::read(&pending_path).unwrap();
+    let prepared = fixture.prepared();
+    let client = super::http::Client::new(&prepared).unwrap();
+    let identity = client.identity(&prepared).await.unwrap();
+    let view = client.view(&prepared).await.unwrap();
+    let pending: super::storage::Pending = serde_json::from_slice(&retained).unwrap();
+    assert_eq!(identity, pending.identity);
+    assert_eq!(view.broker, pending.prior.broker);
+    let before = fixture.store.head().unwrap();
+    let first = client.post(&prepared, &pending).await.unwrap();
+    let replay = client.post(&prepared, &pending).await.unwrap();
+    assert_eq!(first.receipt, replay.receipt);
+    assert_eq!(fixture.store.head().unwrap(), before + 1);
+    assert_eq!(fs::read(&pending_path).unwrap(), retained);
+    assert_eq!(
+        *fixture.probe.transport_paths.lock().unwrap(),
+        vec![
+            "/control/api/v1/brokers/identity",
+            "/control/api/v1/brokers/self",
+            "/control/api/v1/brokers/heartbeat",
+            "/control/api/v1/brokers/heartbeat",
+        ]
+    );
+    let requests = fixture.probe.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|request| request == &pending.heartbeat));
+}
+
+#[tokio::test]
+async fn presence_control_refusals_do_not_fall_back_or_change_the_pending() {
+    for status in [404, 503, 307] {
+        let fixture = LiveFixture::new().await;
+        prepare_local_pending(&fixture);
+        let pending_path = record_paths(&fixture.filesystem.state, "pending.json")
+            .pop()
+            .unwrap();
+        let retained = fs::read(&pending_path).unwrap();
+        let pending: super::storage::Pending = serde_json::from_slice(&retained).unwrap();
+        let prepared = fixture.prepared();
+        let client = super::http::Client::new(&prepared).unwrap();
+        *fixture.probe.transport_refusal.lock().unwrap() = Some(status);
+        let before = fixture.store.head().unwrap();
+        assert!(client.identity(&prepared).await.is_err());
+        assert!(client.view(&prepared).await.is_err());
+        assert!(client.post(&prepared, &pending).await.is_err());
+        assert_eq!(fixture.store.head().unwrap(), before);
+        assert_eq!(fs::read(&pending_path).unwrap(), retained);
+        assert_eq!(
+            *fixture.probe.transport_paths.lock().unwrap(),
+            vec![
+                "/control/api/v1/brokers/identity",
+                "/control/api/v1/brokers/self",
+                "/control/api/v1/brokers/heartbeat",
+            ]
+        );
+    }
 }
 
 #[tokio::test]

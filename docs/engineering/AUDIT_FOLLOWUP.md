@@ -59,6 +59,15 @@ l'absence de démarrage est prouvée.
 
 ### Lots de correction et acceptation
 
+Mise à jour du 7 novembre après les états de démarrage ci-dessous : la
+[composition26](evidence/2026-11-07/control-recovery-composition/README.md)
+I/L/H/M + Core25 et SDK passe 52 fonctions ciblées et toutes cibles sur son
+propre gel vérifié, après revue source. Core25 est aussi publié séparément dans
+`a9c8de3`. Cette validation ne clôture pas H/K/L/M dans leur entier, D5, les
+exigences encore absentes ni le verdict de l'audit primaire. Les travaux de
+shutdown D5 et du nouveau client relais restent séparés, avec leur propre
+reproduction, revue et qualification à obtenir.
+
 Les lots G à M de `PROMPT-CORRECTIFS-SUITE.md` remplacent les anciennes listes
 incomplètes comme point de départ, sans invalider leurs preuves datées. Chaque
 lot exige reproduction avant correction, régression conservée, tests ciblés par
@@ -82,7 +91,24 @@ réintégrer une seconde fois. Leur fichier `api_cases.rs` conserve l'empreinte
 Ces dix tests Store et deux tests API ne prouvent pas la disponibilité HTTP ni
 l'absence d'arrêt d'un worker sous pression FD.
 
-Point de développement actualisé le 7 novembre après intégration J : le lot I
+Point courant du 7 novembre, après les états de démarrage du tableau : I
+`2b0327b`, L `f5e3ad2` et serveur H `8683805` sont publiés et composés localement
+jusqu'à `b48c095`, sans qualification transférée de leurs gels. La reprise
+composée révèle un débordement de pile ; Core21 atteint une assertion
+fonctionnelle. Le diagnostic22 observe son helper Export et le harnais24 impose
+la séquence STOP puis scan audité avant un nouvel essai. Le SDK H a reçu deux
+revues source, passe 22 fonctions ciblées et toutes cibles sur son propre gel ;
+l'intégration et l'outbox mixte restent ouvertes. M `fa877ba`, composé localement
+dans `238fddd`, traite réservation/déduplication des preuves initiales vérifiées,
+budget durable par sujet et migration explicite V1→V2 avec sauvegarde. Ses
+[preuves](evidence/2026-11-07/authentication-proof-budget/README.md) attribuent
+14+9+1 PASS et toutes cibles au gel03, les autres suites inchangées au gel02.
+Ce sous-lot ne ferme ni réserve globale, ni rétention/archivage, ni lot M complet.
+Un worktree K distinct démarre la reproduction du couplage restant, avec des
+barrières de test plutôt qu'un seuil de latence matériel. Le rapport primaire et
+ses treize constats ne sont pas requalifiés par ces seuls développements.
+
+Point de développement historique du 7 novembre après intégration J : le lot I
 reste non intégré. Les trois premiers résidus de revue du gel I
 portent sur une entrée de chemin valide dépassant le plafond de rétention de
 12 KiB et faisant refuser le batch, une interruption avant création du journal
@@ -106,21 +132,41 @@ tous les oracles fonctionnels et les délais du produit. Une expiration reste un
 Le run 04 a depuis terminé les trois scénarios et observe une reprise à 22,879 s ;
 ce PASS est intégré avec ses limites, sans réécrire le résultat 03.
 
+### 7 novembre — validation séparée et composition non qualifiée
+
+Les lots I (`2b0327b`) et L moniteur (`f5e3ad2`) ont leurs preuves logicielles
+propres et sont composés localement dans `a329153`. Les notes de préparation
+précédentes restent historiques : leurs résidus ont depuis leurs reproductions,
+corrections et revues sur ces sources. La première exécution de composition
+déborde toutefois la pile avant ses assertions ; elle n'est pas publiée et les
+autres sélections restent NOT_RUN. Un correctif ne sera pas remplacé par une
+augmentation silencieuse de la pile. Voir la [validation courante](VALIDATION.md).
+
+H05 ne modifie que les fixtures après les deux échecs HTTP H04, en conservant
+l'autorisation avant corps et les reçus durables comme oracles. Les coutures
+clientes du transport et sa qualification runtime restent ouvertes. D5 poursuit
+la confirmation du même Final après perte d'ACK, avec reproduction et revue
+indépendante ; sa validation est distincte du fencing complet. M ouvre en parallèle
+la reproduction du rejeu OIDC vérifié mais refusé dans un checkout propre ; cela
+ne ferme ni la réserve d'audit du contrôle, ni son archivage.
+
 ### Décision et qualifications encore ouvertes
 
 Le mainteneur a explicitement approuvé le 6 novembre la
 [fenêtre transitoire du moniteur](GATEWAY_TRANSIENT_FAILURE_PROPOSAL.md),
 bornée à 60 secondes dès le début du premier refresh défaillant, après démarrage
-acquitté. Implémentation, tests et documentation du comportement livré restent
-ouverts. Échéance initiale, STOP et erreurs d'identité/audit restent prioritaires ;
+acquitté. Le logiciel et ses guides ont depuis leur validation sur la source L
+`f5e3ad2` ; la composition et les qualifications réelles restent ouvertes.
+Échéance initiale, STOP et erreurs d'identité/audit restent prioritaires ;
 le callback de démarrage est exclu. Les autres lots avancent indépendamment.
 Ne pas étendre cette fenêtre aux lancements, claims ou audits obligatoires.
 
-La première implémentation du moniteur reste non intégrée : la revue a détecté
-un journal de fin d'exécution pouvant retenir la finalisation et un arrêt de
-reprise encore précédé de requêtes au gateway indisponible. Les régressions de
-ces deux cas sont en préparation. La cohérence des états de réponse fait l'objet
-d'une vérification du contrat, sans être annoncée comme un nouveau défaut établi.
+La revue de la première implémentation avait détecté un journal de fin d'exécution
+pouvant retenir la finalisation et un arrêt de reprise encore précédé de requêtes
+au gateway indisponible. Ces cas ont depuis leurs régressions dans le lot L ;
+sa validation propre de 22 fonctions ne résout pas le débordement de pile de la
+composition décrit ci-dessus. Les contrats et preuves de ces étapes restent
+distincts des constats du rapport externe.
 
 `NOT_RUN` dans l'audit : moteurs réels Docker/Podman, confinement, réseaux,
 `--env-file`, disque plein et matrices Linux/macOS. Les deux risques dépendant du

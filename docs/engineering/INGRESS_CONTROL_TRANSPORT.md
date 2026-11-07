@@ -1,21 +1,29 @@
-# Transport HTTP de contrôle — raccord serveur du lot H
+# Transport HTTP de contrôle — raccord du lot H
 
-Statut au 7 novembre 2026 : **serveur et relais Rust implémentés dans le lot H,
-avec validations logicielles ciblées ; raccord des consommateurs et composition
-encore ouverts**. Ce document décrit le code du worktree H fondé sur
-`982d215`, pas une qualification de release. Les gels, résultats et limites
+Statut au 7 novembre 2026 : **22 fonctions ciblées PASS et compilation toutes
+cibles RC0 pour le SDK v2**, avec avertissements conservés. Les
+[preuves du gel consommateur](evidence/2026-11-07/control-clients/README.md)
+distinguent ce résultat logiciel des validations antérieures du serveur/relais.
+La [composition26](evidence/2026-11-07/control-recovery-composition/README.md)
+ajoute sa propre validation : 52 fonctions logicielles et toutes cibles passent
+avec Core25 et le budget SSO M. Les résultats du gel SDK fondé sur `b48c095`
+avec Core18 et ceux de l'ancien gel serveur restent attribués à leurs sources.
+Ce n'est pas une qualification de release. Les gels, résultats et limites
 de QA restent attribués dans [VALIDATION.md](VALIDATION.md) et le
 [suivi de l'audit](AUDIT_FOLLOWUP.md#audit-final-run-1).
 
 Sources du raccord : [admission gateway](../../src/api/control_transport.rs),
-[relais](../../src/ingress/control.rs) et [options CLI](../../src/main.rs).
+[relais](../../src/ingress/control.rs), [client runner](../../src/runner.rs),
+[client managé](../../src/runner/managed.rs), [présence broker](../../src/broker/presence/http.rs)
+et [options CLI](../../src/main.rs).
 
 La [direction approuvée](INGRESS_CONTROL_CAPACITY_PROPOSAL.md) réserve la
-capacité des opérations de contrôle après authentification. Les SDK, le runner
-et les clients broker ne sont pas encore raccordés dans ce lot serveur. Leurs
-appels actuels ne bénéficient donc pas automatiquement de cette séparation.
-L'ingestion du lot I et les coutures I/L doivent être composées et vérifiées
-avant de conclure sur le parcours complet H. Aucun gate global n'est fermé ici.
+capacité des opérations de contrôle après authentification. Le handler
+`/api/v1/control/events` du lot I est présent dans cette base, contrairement au
+seul gel serveur fondé sur `982d215`. Le raccord explicite des consommateurs
+décrit ci-dessous et ses coutures I/L ont les validations ciblées du gel SDK v2 ;
+leur composition a sa validation ciblée distincte dans le gel26.
+Aucun résultat serveur antérieur ne qualifie ces nouveaux appels ou un gate global.
 
 La reproduction initiale H01 employait un témoin **PASS = défaut présent** :
 un Bearer factice et un compteur amont établissaient le refus du POST avant le
@@ -70,7 +78,7 @@ les handlers gardent la validation de leur contrat après authentification.
 | Runner | POST | `/api/v1/workload-bindings`, `/api/v1/workload-bindings/{id}/revoke`, `/api/v1/brokers/grants`, `/api/v1/brokers/{id}/revoke`, `/api/v1/relay/grants`, `/api/v1/relay/grants/{id}/revoke`, `/api/v1/relay/messages/{id}/prune` |
 | BrokerPresence | GET | `/api/v1/brokers/identity`, `/api/v1/brokers/self` |
 | BrokerPresence | POST | `/api/v1/brokers/heartbeat` |
-| Runner, couture I à composer | POST | `/api/v1/control/events` : classé par la table de transport ; son handler du lot I n'est pas présent dans la base H examinée |
+| Runner | POST | `/api/v1/control/events` : handler I présent dans la base `b48c095` |
 
 Les deux premières lignes conservent aussi leurs alias historiques `/api/…`.
 Les autres lignes sont uniquement versionnées `/api/v1/…`. La table commune
@@ -140,33 +148,61 @@ sans nouveau port hôte. Les réseaux internes, projections de secrets existante
 du gateway et absence de secret propre au relais sont conservés.
 
 Ne pas ajouter `/control` à `--gateway` ou à l'origine du registre broker : ces
-champs restent des origines sans chemin. Le consommateur doit choisir le chemin
-de contrôle explicitement une fois raccordé. Les plans fermés 1/2/3, origine,
+champs restent des origines sans chemin. Le consommateur choisit le chemin
+de contrôle explicitement. Les plans fermés 1/2/3, origine,
 tenant, autorité, bindings et claims consommés ne sont ni réécrits ni étendus.
 Cette configuration n'active pas une supervision inactive et ne migre aucune base.
 
-### Couture cliente à réaliser et vérifier
+### Choix explicite du consommateur
 
-Le contrat retenu pour les consommateurs prévoit `control_url(Method, path)`,
-vérifiant la table fermée avant construction d'URL. Identité de supervision,
-admission, décision, envoi unitaire d'événement de contrôle et lectures/écritures
-typées managées devront choisir `/control` explicitement. `post_event` et le
-`get_json` générique d'ingestion/consultation publique, par exemple
-`api/integrity`, restent publics. Cette séparation n'est pas encore raccordée
-dans le checkout H décrit ici.
+`AuditClient::control_url(Method, path)` exige la classe Runner de la table
+fermée avant de construire l'URL sous `/control`. `control_supervision_identity`,
+`admit_supervised`, `decide`, `get_typed`, `post_control`, `check_identity` et
+`post_control_event` choisissent ce canal. Le callback de démarrage utilise
+toujours `post_control_event_once`, une seule tentative. `post_event` et le
+`get_json` générique, par exemple `api/integrity`, restent publics. Le contenu
+d'un événement ne choisit pas une autre méthode de transport.
 
-Les trois routes fixes de présence devront aussi choisir ce transport en
-conservant le même Pending et son identité pendant la réconciliation, sans
-nouvel ID ni fallback. L'outbox mixte ne peut pas être envoyée intégralement au
-contrôle selon ses seules assertions `Event.kind`/`source` ; sa provenance
-persistante reste à traiter.
+`supervision_identity` conserve le diagnostic public authentifié à
+`/api/v1/control/protocol`, utilisé par `broker control-info` avec ses
+permissions de lecture existantes. Les deux appels du service broker et le
+préflight Kubernetes choisissent explicitement `control_supervision_identity`
+à `/control/api/v1/control/protocol`. Le succès viewer du diagnostic n'accorde
+aucun accès au canal Runner. Les méthodes partagent le décodeur borné, sans
+fallback de l'une vers l'autre après un refus. Le préflight ne déplace pas les
+routes métier Kubernetes vers ce canal.
 
-Seuls les GET de suivi admissibles après ACK pourront reconnaître le DTO de
-transport fermé, avec enveloppe unique, version, métadonnées, raison et
-cohérence HTTP502/504 validées. Un 503 d'audit, une réponse de protocole ou une
-erreur de décodage ne deviennent pas transitoires par leur seul statut. La
-fenêtre du moniteur reste celle approuvée au lot L ; elle ne s'applique pas au
-callback de démarrage ni aux mutations, starts, claims ou audits obligatoires.
+Le client de présence valide séparément la classe BrokerPresence pour ses
+trois routes fixes, puis ajoute `/control` : identité, lecture de soi et
+heartbeat. Le même Pending, ses octets et son identité sont conservés pendant
+la réconciliation ; il n'acquiert aucun droit Runner. L'outbox broker mixte
+reste sur son chemin existant : sa provenance persistante est encore OPEN.
+Ni l'historique ni `Event.kind`/`source` ne permettent de promouvoir ses
+enregistrements vers le canal de contrôle.
+
+La lecture de worker du moniteur utilise ce canal. Pour ses GET admissibles
+après ACK, le décodeur exige une enveloppe JSON unique et fermée, la version1
+et les champs fixes validés. Seules les associations HTTP502 avec
+`upstream_connection_unavailable`/`upstream_connection_interrupted`, ou HTTP504
+avec `upstream_timeout`, qualifient une panne transitoire. Champs supplémentaires,
+doublons, statut incohérent, DTO inconnu, erreur de protocole et JSON malformé
+restent des erreurs. Un 503 d'audit ou de stockage n'est pas réessayé.
+La fenêtre, le STOP et l'échéance du lot L sont conservés ; ce décodage n'étend
+aucun réessai aux mutations, starts, claims ou audits obligatoires.
+
+### Compatibilité des consommateurs
+
+| Assemblage | Comportement à conserver |
+|---|---|
+| Client H et gateway avec contrôle H et handler I | Les méthodes explicites utilisent `/control` et conservent les validations d'identité/protocole existantes. Le gel SDK v2 passe ses 22 fonctions ciblées et la composition26 ses 52 fonctions logicielles, sans qualifier un runtime. |
+| Client H et ancien gateway sans route de contrôle | Refus HTTP ou réponse de contrôle indisponible/incompatible ; aucun essai sur la route publique en compensation. Mettre à jour CLI, gateway et ingress ensemble. |
+| Ancien client et gateway H | Ses appels historiques publics restent publics ; le serveur ne les transforme pas automatiquement en opérations sur le budget réservé. |
+| Viewer avec `broker control-info` | Le diagnostic utilise explicitement l'API publique authentifiée existante et conserve son périmètre autorisé. La route `/control/api/v1/control/protocol` reste réservée au Runner. |
+
+Cette matrice décrit les refus du code, pas une négociation automatique de
+versions ni une matrice de déploiements qualifiée. Garder les origines et
+références privées existantes ; changer de chemin dans un plan pour contourner
+un refus n'est pas une migration prise en charge.
 
 ## Refus et résultat inconnu
 
@@ -202,6 +238,12 @@ du moniteur et sa fenêtre approuvée relèvent du [lot L](GATEWAY_TRANSIENT_FAI
 avec leurs conditions propres ; H n'en élargit pas la portée.
 
 ## Qualifications encore ouvertes
+
+Le gel historique Core18 conserve son échec d'adoption par SIGABRT ; le gel SDK
+v2 ne le qualifiait pas. Le [correctif Core25](evidence/2026-11-07/recovery-stack/README.md)
+passe ensuite son parent strict et son module, puis la composition26 vérifie sa
+couture avec le SDK et M. Revues source et preuves sont acceptées. Ces résultats
+restent logiciels et ne transforment pas L ou H dans leur entier en réussite.
 
 Les vérifications HTTP/SQLite locales ne prouvent ni admission TCP sous toute
 pression, ni disponibilité globale en pénurie de descripteurs, ni absence de

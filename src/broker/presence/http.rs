@@ -56,18 +56,23 @@ impl Client {
         path: &str,
         request: Option<Vec<u8>>,
     ) -> Result<T> {
-        let mut url = self.origin.clone();
-        url.set_path(path);
+        let method = if request.is_some() {
+            reqwest::Method::POST
+        } else {
+            reqwest::Method::GET
+        };
+        if crate::control_transport::control_route(&method, path)
+            != Some(crate::control_transport::ControlRouteIdentity::BrokerPresence)
+        {
+            return Err(PresenceError::Protocol);
+        }
+        let url = self
+            .origin
+            .join(&format!("control{path}"))
+            .map_err(|_| PresenceError::InvalidConfig)?;
         let mut builder = self
             .http
-            .request(
-                if request.is_some() {
-                    reqwest::Method::POST
-                } else {
-                    reqwest::Method::GET
-                },
-                url,
-            )
+            .request(method, url)
             .header(header::AUTHORIZATION, self.authorization.clone())
             .header(header::ACCEPT, "application/json")
             .header(header::CACHE_CONTROL, "no-store");

@@ -459,7 +459,7 @@ async fn preflight(args: PreflightArgs) -> Result<(), KubernetesCliError> {
             .map_err(|_| KubernetesCliError::InvalidControl)?;
     }
     let identity = audit
-        .supervision_identity()
+        .control_supervision_identity()
         .await
         .map_err(KubernetesCliError::ControlIdentity)?;
     if !control_identity_matches_preflight_scope(&identity, control.control_namespace_uuid) {

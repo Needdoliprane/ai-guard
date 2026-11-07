@@ -1,5 +1,68 @@
 # État constaté — suivi du développement
 
+## 7 novembre — composition du contrôle, de la reprise et du SSO validée
+
+La composition26 rassemble I/L/H, le budget d'authentification M et son CLI de
+migration, le correctif de pile Core25 et les clients explicites du transport
+de contrôle. **52 fonctions ciblées passent**, puis toutes cibles compilent sur
+le même gel Rust/Cargo vérifié. Les sept sélections ont tourné dans QA AA ; le
+check restant a tourné dans QA AB sur une cible neuve, sans répéter les tests.
+Revue de la couture, guides EN/FR et preuves des composants sont traités.
+[Résultats, 417 empreintes et limites](evidence/2026-11-07/control-recovery-composition/README.md).
+Ces résultats sont logiciels : aucun gate global ni verdict production n'est acquis.
+
+Deux développements indépendants continuent : le vrai shutdown D5 a reproduit
+la perte de première finalisation d'un Full accepté ; son correctif d'ordre de
+drainage est en revue/QA. Le client relais Rust a des résidus de revue sur la
+confidentialité des IDs, le décodage fermé et l'ACK ambigu, avec régressions en
+préparation de reproduction. Ces sources distinctes ne sont pas dans le gel26.
+Fencing complet, raccord runtime du relais, fédération, Kubernetes, sorties
+réseau, réserves/rétention d'audit et qualifications réelles restent ouverts.
+
+Les points ci-dessous conservent les étapes intermédiaires et leurs limites.
+
+## 7 novembre — contrôle H/I/L composé, reprise et SSO en validation
+
+Les sources I `2b0327b`, L `f5e3ad2` et serveur H `8683805` sont publiées
+séparément et composées localement dans `b48c095`. Leurs preuves propres ne
+qualifient pas cette composition. Le premier gel déborde la pile ; l'extraction
+Core18 permet le parent d'arrêt local, puis le parent d'adoption déborde encore.
+Le diagnostic mesure un grand frame de poll sur une pile de 2 Mio, sans relever
+sa limite. Core21 sépare des phases directement attendues et atteint maintenant
+une assertion fonctionnelle du parent d'adoption : deux créations/démarrages
+comptés au lieu de zéro. Le diagnostic22 observe une seule paire create/start
+du helper Export, avec ses quatre faits de scan et le diff audités. Le harnais24
+distingue désormais ce helper d'un worker métier et impose l'arrêt exact avant
+sa création ; sa revue source est acceptée et sa QA est lancée. Core21 reste
+non intégré ; la composition n'est pas publiée.
+
+Les deux échecs HTTP du serveur H gel 04 ont conduit
+à corriger uniquement les fixtures du gel 05 : identité d'intention distincte et
+origin de supervision actif avant création des workers. Aucun refus serveur n'est
+assoupli. H05 passe depuis 14 fonctions et la compilation toutes cibles, dans son
+seul périmètre serveur. Le SDK H choisit explicitement le canal de contrôle,
+conserve le diagnostic public viewer et a reçu deux revues source indépendantes.
+Ses 22 fonctions ciblées et toutes cibles passent sur son gel v2 ; la composition
+reste ouverte, comme la provenance de l'outbox mixte. La reprise D5
+après publication d'un Final dont l'ACK est perdu passe ses quatre parents ciblés
+et toutes cibles, avec reproduction et revue statique indépendante ; elle reste
+non intégrée et ne qualifie pas la perte du propriétaire ou le fencing complet.
+Le sous-lot M `fa877ba` est publié et composé localement dans `238fddd` après
+reproduction et revues indépendantes. Composé03 passe 14 régressions de preuve/
+budget durable, 9 parcours gateway, la reprise de B pendant saturation de A et
+toutes cibles. Le CLI de migration explicite V1→V2 a passé ses cinq parents sur
+composé02, avec sauvegarde V1 vérifiée et sans réseau. Guides EN/FR et
+[preuves](evidence/2026-11-07/authentication-proof-budget/README.md) sont synchronisés.
+Le `main.rs` composé contient aussi le listener H : sa différence est conservée
+et ne reçoit pas automatiquement les PASS de la branche M. La capacité globale
+réservée au contrôle, l'archivage et la rétention du ledger restent ouverts.
+
+Les tests sont bornés dans une QA isolée. Deux compilations initiales ont subi
+une pénurie mémoire agrégée, sans exécuter les tests ; elles sont conservées comme
+échecs d'environnement. Les développements restent parallèles, les compilations
+les plus lourdes sont échelonnées après cette mesure. Aucun de ces travaux ne
+qualifie un worker sur moteur réel. G09 reste FAIL et aucun gate global n'est clos.
+
 ## 7 novembre — export filtré et modes observés, lot J
 
 `b896c7c` est composé dans `df8b9ab`. Les structures Git racine/imbriquées et

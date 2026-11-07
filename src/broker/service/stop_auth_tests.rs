@@ -104,7 +104,7 @@ impl Gateway {
                 let observed_identity = Arc::clone(&observed_identity);
                 async move {
                     observed.fetch_add(1, Ordering::SeqCst);
-                    if request.uri().path() == "/api/v1/control/protocol" {
+                    if request.uri().path() == "/control/api/v1/control/protocol" {
                         observed_identity.fetch_add(1, Ordering::SeqCst);
                     }
                     next.run(request).await
@@ -187,7 +187,7 @@ impl Gateway {
                 let observed_identity = Arc::clone(&observed_identity);
                 async move {
                     observed.fetch_add(1, Ordering::SeqCst);
-                    if request.uri().path() == "/api/v1/control/protocol" {
+                    if request.uri().path() == "/control/api/v1/control/protocol" {
                         observed_identity.fetch_add(1, Ordering::SeqCst);
                     }
                     next.run(request).await
@@ -243,7 +243,7 @@ async fn human_broker_schema7_keeps_stop_identity_and_inactive_admission_guards(
         let registry = &fixture.service.registry;
         let identity = AuditClient::new(&gateway.url, A_RUNNER)
             .unwrap()
-            .supervision_identity()
+            .control_supervision_identity()
             .await
             .unwrap();
         assert_eq!(identity.schema_version, 7);
