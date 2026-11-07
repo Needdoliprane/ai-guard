@@ -4,6 +4,9 @@ mod support;
 #[path = "support/relay_client_cases.rs"]
 mod client_cases;
 
+#[path = "support/relay_client_profile_cases.rs"]
+mod client_profile_cases;
+
 #[path = "support/control_lane_cases.rs"]
 mod control_lane_cases;
 

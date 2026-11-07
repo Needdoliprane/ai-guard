@@ -1,6 +1,6 @@
 # Client Rust du relais worker
 
-[English](README.md) · [Provisionnement workload et contrat du relais](../workloads/README.fr.md) · [Validation](../../engineering/evidence/2026-11-07/relay-client/README.md)
+[English](README.md) · [Provisionnement workload et contrat du relais](../workloads/README.fr.md) · [Validation des profils](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
 
 `agentsandbox::relay::client::WorkerRelayClient` appelle les routes HTTP worker
 existantes avec une preuve workload dédiée. Il s'agit d'une API de bibliothèque
@@ -32,12 +32,13 @@ réussie est bornée à 2 Mio, les reçus/erreurs worker à 16 Kio ; les répons
 historiques du contrôle gardent 512 Kio. Audit, grants, expiration et révocation
 restent vérifiés par les handlers habituels.
 
-Cette voie ne raccorde pas le réseau coupé d'un worker. Le constructeur de
-bibliothèque décrit ci-dessus attend toujours une origine racine ; le profil
-typé `/control` et le handoff runtime sont des travaux séparés. Ne pas contourner
-sa validation d'origine par un chemin libre ou placer la preuve dans un worker.
-Le module `agentsandbox::relay::channel` fournit frames fermées bornées et
-validation d'état, pas un helper ni un propriétaire broker en fonctionnement.
+Cette voie ne raccorde pas le réseau coupé d'un worker. Choisir le profil typé
+`RelayClientProfile::ControlIngress` dans le contrôle pour atteindre ces routes
+fixes. L'origine reste une origine racine : ne pas ajouter `/control` soi-même
+ou placer la preuve dans un worker. `RelayClientProfile::RootOrigin` conserve
+l'accès direct au gateway. Aucun profil ne raccorde le canal runtime, ne conserve
+le binding worker/profil ou ne fournit son owner broker/outbox. Le module
+`agentsandbox::relay::channel` fournit frames fermées bornées et validation d'état.
 [Preuve logicielle attachée aux sources](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
 ## Fournir un contexte autorisé
@@ -66,7 +67,12 @@ conservent ni texte distant, URL, corps ou chaîne d'erreur contenant la preuve.
 Cela ne protège pas un appelant qui imprime ses propres entrées.
 
 `new(origin, workload_credential, expected_endpoint)` emploie les racines TLS
-normales. L'origine est limitée à 2048 octets, sans information utilisateur,
+normales et choisit `RootOrigin`, comme le constructeur historique `with_ca_file`.
+Utiliser `with_profile(origin, workload_credential, expected_endpoint, profile)`
+pour une sélection explicite. Le profil est un enum fermé, sans préfixe libre
+ni repli automatique. Lors du raccord runtime, l'owner devra conserver ce choix
+avec le binding autorisé ; la bibliothèque ne le fait pas.
+L'origine est limitée à 2048 octets, sans information utilisateur,
 chemin autre que la racine, query, fragment, échappement `%` ou antislash.
 HTTPS est accepté ; HTTP clair est limité à une IP loopback littérale, jamais
 `localhost` ni une adresse LAN privée. L'origine ne doit pas contenir le
@@ -83,6 +89,10 @@ d'AC, installation de confiance système, repli HTTP ni configuration de
 certificat client/mTLS. Lire le [point d'entrée PKI](../../engineering/INFRASTRUCTURE_PKI.md)
 avant une opération distante réelle. Ce lot ne qualifie pas un nouvel essai
 réel HTTPS/AC privée avec ce client.
+Pour associer profil explicite et racines privées, utiliser
+`with_profile_and_ca_file(origin, workload_credential, expected_endpoint, profile, ca_file)`.
+Choisir route et confiance approuvées avant construction ; ne pas changer de
+profil pour reprendre une mutation dont le résultat est incertain.
 
 ## Employer des requêtes conservées
 
@@ -92,7 +102,7 @@ depuis son appelant. Il n'obtient pas de credential et ne prépare aucun runtime
 ```rust
 use agentsandbox::relay::{
     RelayEndpointV1, RelayReceiptV1, RelaySendV1,
-    client::{RelayClientError, WorkerRelayClient},
+    client::{RelayClientError, RelayClientProfile, WorkerRelayClient},
 };
 
 async fn send_prepared(
@@ -101,8 +111,9 @@ async fn send_prepared(
     expected_endpoint: RelayEndpointV1,
     prepared_send: &RelaySendV1,
 ) -> Result<RelayReceiptV1, RelayClientError> {
-    let client = WorkerRelayClient::new(
+    let client = WorkerRelayClient::with_profile(
         approved_origin, workload_credential, expected_endpoint,
+        RelayClientProfile::ControlIngress,
     )?;
     client.send(prepared_send).await
 }
@@ -113,6 +124,10 @@ async fn send_prepared(
 | `send(&RelaySendV1)` | `POST /api/v1/relay/messages` ; version 1, UUID d'opération conservé, UUID de grant autorisé, TTL et corps non vide. Renvoie le reçu corrélé : 201 pour un nouvel envoi ou 200 au rejeu exact. L'ID de l'opération send identifie aussi son message. |
 | `inbox(after: Option<i64>, limit: u32)` | `GET /api/v1/relay/messages` ; curseur non négatif et limite 1–32. Renvoie une seule page vérifiée ; une erreur ne devient jamais une inbox vide. L'appelant conserve et avance explicitement son curseur. |
 | `ack(&RelayAckV1)` | `POST /api/v1/relay/messages/{message_id}/ack` ; l'ACK conservé possède son propre UUID d'opération et l'UUID du message reçu. Renvoie un reçu 200 corrélé. L'ACK atteste un acquittement, pas une exécution ou un effet observé. |
+
+Le tableau décrit `RootOrigin`. `ControlIngress` ajoute le préfixe fixe
+`/control` aux trois routes, query d'inbox et ACK compris. Cela ne change ni
+credential, rôle, endpoint, DTO, TLS, délai ou sémantique de résultat.
 
 Aucune méthode ne gère grant, révocation, purge, rôle runner, URL arbitraire ou
 sélecteur de tenant. Le contenu de l'inbox est une donnée métier, pas une
@@ -150,8 +165,10 @@ auditées avant livraison du contenu. Une panne d'audit bloque l'opération.
 Une page ne constitue ni inventaire complet du tenant ni snapshot stable entre
 plusieurs pages.
 
-Le client refuse son credential workload connu dans tout le DTO send/ACK avant
-transport, y compris les IDs et le chemin ACK. Il contrôle aussi chaînes/clés
+Le client refuse son credential workload connu dans tout le DTO send/ACK et
+l'URL finale construite avant transport, chemins fixes du profil et query compris.
+Ce dernier refus local est un `InvalidRequest` opaque ; il ne résout pas le
+résultat d'une tentative antérieure. Il contrôle aussi chaînes/clés
 du corps structuré décodé et les réponses. Un corps JSON que le décodeur normal
 peut lire mais que le décodeur strict refuse — doublons de clés ou profondeur
 supérieure à 64, par exemple — est refusé **même sans secret**. Le texte ordinaire
@@ -170,8 +187,10 @@ laissent le résultat d'une mutation incertain. Aucun texte d'erreur ne reprend
 le diagnostic distant. Les [diagnostics workload](../workloads/README.fr.md#diagnostiquer-arrêter-et-préserver-létat)
 conservent les distinctions côté serveur.
 
-Les [preuves datées](../../engineering/evidence/2026-11-07/relay-client/README.md)
-consignent 13 tests client et 18 tests API existants sur HTTP/SQLite réels avec
-des enregistrements synthétiques de workers supervisés. Handoff runtime réel,
+Les [preuves des profils](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
+consignent six nouveaux tests de profil et treize tests client existants passant
+sur leur source figée, avec HTTP/SQLite réels et enregistrements synthétiques de
+workers supervisés. La [preuve antérieure](../../engineering/evidence/2026-11-07/relay-client/README.md)
+conserve sa propre source et ses résultats. Handoff runtime réel,
 workers Docker/Podman/Kubernetes, transport multi-hôtes, exécution fournisseur et
 cible 100 workers ne sont pas qualifiés par ces tests.

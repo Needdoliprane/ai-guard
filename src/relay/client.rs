@@ -53,6 +53,26 @@ impl std::fmt::Display for RelayClientError {
 impl std::error::Error for RelayClientError {}
 type Result<T> = std::result::Result<T, RelayClientError>;
 
+/// Closed HTTP destinations for trusted control. Each profile accepts only a
+/// root origin; the caller cannot supply a path, prefix, query or header.
+/// Selecting a profile does not authorize a runtime transport or persist its
+/// binding to a worker. The workload proof remains owned by trusted control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RelayClientProfile {
+    /// Gateway-root access, preserving the original public client behavior.
+    RootOrigin,
+    /// The existing ingress publishes only the closed worker routes at `/control`.
+    ControlIngress,
+}
+impl RelayClientProfile {
+    fn messages_path(self) -> &'static str {
+        match self {
+            Self::RootOrigin => "/api/v1/relay/messages",
+            Self::ControlIngress => "/control/api/v1/relay/messages",
+        }
+    }
+}
+
 /// Only send, inbox and recipient ACK are exposed. The server authenticates the
 /// workload proof on every request; the expected endpoint is a response check,
 /// not a source or tenant selector. There is deliberately no Debug implementation.
@@ -62,13 +82,30 @@ pub struct WorkerRelayClient {
     authorization: header::HeaderValue,
     credential: String,
     endpoint: RelayEndpointV1,
+    profile: RelayClientProfile,
 }
 impl WorkerRelayClient {
     /// Plain HTTP is accepted only for a literal loopback IP. The caller supplies
     /// the exclusive worker proof through its private workload handoff, never a
     /// runner/SSO token or a complete environment file.
     pub fn new(origin: &str, workload_credential: &str, endpoint: RelayEndpointV1) -> Result<Self> {
-        Self::build(origin, workload_credential, endpoint, None)
+        Self::with_profile(
+            origin,
+            workload_credential,
+            endpoint,
+            RelayClientProfile::RootOrigin,
+        )
+    }
+
+    /// Select only a fixed gateway-root or ingress destination. `origin` must
+    /// remain a root origin for either profile; it never contains `/control`.
+    pub fn with_profile(
+        origin: &str,
+        workload_credential: &str,
+        endpoint: RelayEndpointV1,
+        profile: RelayClientProfile,
+    ) -> Result<Self> {
+        Self::build(origin, workload_credential, endpoint, profile, None)
     }
 
     /// Explicit public CA roots replace built-in roots for this immutable client.
@@ -80,13 +117,38 @@ impl WorkerRelayClient {
         endpoint: RelayEndpointV1,
         ca_file: &Path,
     ) -> Result<Self> {
-        Self::build(origin, workload_credential, endpoint, Some(ca_file))
+        Self::with_profile_and_ca_file(
+            origin,
+            workload_credential,
+            endpoint,
+            RelayClientProfile::RootOrigin,
+            ca_file,
+        )
+    }
+
+    /// Select a fixed destination with the same immutable public-CA snapshot as
+    /// `with_ca_file`; no profile changes TLS, credential or response validation.
+    pub fn with_profile_and_ca_file(
+        origin: &str,
+        workload_credential: &str,
+        endpoint: RelayEndpointV1,
+        profile: RelayClientProfile,
+        ca_file: &Path,
+    ) -> Result<Self> {
+        Self::build(
+            origin,
+            workload_credential,
+            endpoint,
+            profile,
+            Some(ca_file),
+        )
     }
 
     fn build(
         origin: &str,
         workload_credential: &str,
         endpoint: RelayEndpointV1,
+        profile: RelayClientProfile,
         ca_file: Option<&Path>,
     ) -> Result<Self> {
         let origin = checked_origin(origin)?;
@@ -131,6 +193,7 @@ impl WorkerRelayClient {
             authorization,
             credential: workload_credential.to_owned(),
             endpoint,
+            profile,
         })
     }
 
@@ -144,16 +207,27 @@ impl WorkerRelayClient {
             .header(header::CACHE_CONTROL, "no-store")
     }
 
+    async fn dispatch(&self, request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        let request = request.build().map_err(|_| RelayClientError::Transport)?;
+        // Inspect the final target, including any canonical inbox query. A
+        // credential absent from each DTO may still span a fixed path and UUID.
+        if request.url().as_str().contains(&self.credential) {
+            return Err(RelayClientError::InvalidRequest);
+        }
+        self.http
+            .execute(request)
+            .await
+            .map_err(|_| RelayClientError::Transport)
+    }
+
     pub async fn send(&self, input: &RelaySendV1) -> Result<RelayReceiptV1> {
         validation::validate_send(input, Some(&self.credential))?;
         let bytes = self.request_bytes(input)?;
-        let response = self
-            .request(Method::POST, "/api/v1/relay/messages")
+        let request = self
+            .request(Method::POST, self.profile.messages_path())
             .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|_| RelayClientError::Transport)?;
+            .body(bytes);
+        let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_RECEIPT_BYTES).await?;
         require_success(status)?;
         let receipt: RelayReceiptV1 = self.decode(&bytes)?;
@@ -172,15 +246,12 @@ impl WorkerRelayClient {
     pub async fn inbox(&self, after: Option<i64>, limit: u32) -> Result<RelayInboxV1> {
         validation::validate_inbox_request(after, limit)?;
         let mut request = self
-            .request(Method::GET, "/api/v1/relay/messages")
+            .request(Method::GET, self.profile.messages_path())
             .query(&[("limit", limit.to_string())]);
         if let Some(after) = after {
             request = request.query(&[("after", after.to_string())]);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| RelayClientError::Transport)?;
+        let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_INBOX_BYTES).await?;
         require_success(status)?;
         if status != StatusCode::OK {
@@ -197,16 +268,14 @@ impl WorkerRelayClient {
         // This check precedes formatting message_id into the path: a workload
         // proof can itself be a canonical UUID accepted by the wire contract.
         let bytes = self.request_bytes(input)?;
-        let response = self
+        let request = self
             .request(
                 Method::POST,
-                &format!("/api/v1/relay/messages/{}/ack", input.message_id),
+                &format!("{}/{}/ack", self.profile.messages_path(), input.message_id),
             )
             .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes)
-            .send()
-            .await
-            .map_err(|_| RelayClientError::Transport)?;
+            .body(bytes);
+        let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_RECEIPT_BYTES).await?;
         require_success(status)?;
         if status != StatusCode::OK {
@@ -234,16 +303,32 @@ fn checked_origin(value: &str) -> Result<reqwest::Url> {
     {
         return Err(RelayClientError::InvalidConfiguration);
     }
+    // Check the raw scheme and authority before URL normalization can insert
+    // slashes or discard empty userinfo. Only explicit root origins are accepted.
+    let (scheme, authority_and_target) = value
+        .split_once("://")
+        .ok_or(RelayClientError::InvalidConfiguration)?;
+    let authority = authority_and_target
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || authority.is_empty()
+        || authority.contains('@')
+    {
+        return Err(RelayClientError::InvalidConfiguration);
+    }
     let origin = reqwest::Url::parse(value).map_err(|_| RelayClientError::InvalidConfiguration)?;
     let local = origin.host_str().is_some_and(|host| {
         host.trim_matches(['[', ']'])
             .parse::<IpAddr>()
             .is_ok_and(|ip| ip.is_loopback())
     });
-    // Check the supplied origin too: URL parsing must not normalize an arbitrary
-    // path such as /a/.. into the accepted root destination.
-    let authority = value.split_once("://").map(|(_, tail)| tail).unwrap_or("");
-    let supplied_path = authority.find('/').map(|at| &authority[at..]).unwrap_or("");
+    // An arbitrary path such as /a/.. must not normalize to an accepted root.
+    let supplied_path = authority_and_target
+        .find('/')
+        .map(|at| &authority_and_target[at..])
+        .unwrap_or("");
     if origin.host_str().is_none()
         || !origin.username().is_empty()
         || origin.password().is_some()
