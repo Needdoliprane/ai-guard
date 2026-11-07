@@ -47,11 +47,83 @@ impl ControlTransportFailureV1 {
 pub enum ControlRouteIdentity {
     Runner,
     BrokerPresence,
+    WorkerRelay,
+}
+
+/// The only query accepted by the control transport. Values are parsed without
+/// URL decoding; forwarding reconstructs this object rather than its input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ControlQuery {
+    None,
+    Inbox {
+        after: Option<i64>,
+        limit: Option<u32>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidControlQuery;
+
+impl ControlQuery {
+    pub fn encoded(self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Inbox { after, limit } => match (after, limit) {
+                (None, None) => None,
+                (Some(after), None) => Some(format!("after={after}")),
+                (None, Some(limit)) => Some(format!("limit={limit}")),
+                (Some(after), Some(limit)) => Some(format!("after={after}&limit={limit}")),
+            },
+        }
+    }
+}
+
+/// Canonical unsigned decimal syntax, bounded by the destination numeric type.
+fn decimal(value: &str) -> Option<u64> {
+    if value.is_empty()
+        || value.len() > 1 && value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    value.parse().ok()
+}
+
+pub fn control_query(
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+) -> Result<ControlQuery, InvalidControlQuery> {
+    if *method != Method::GET || path != "/api/v1/relay/messages" {
+        return query.map_or(Ok(ControlQuery::None), |_| Err(InvalidControlQuery));
+    }
+    let mut after = None;
+    let mut limit = None;
+    if let Some(query) = query {
+        for field in query.split('&') {
+            let (key, value) = field.split_once('=').ok_or(InvalidControlQuery)?;
+            let value = decimal(value).ok_or(InvalidControlQuery)?;
+            match key {
+                "after" if after.is_none() => {
+                    after = Some(i64::try_from(value).map_err(|_| InvalidControlQuery)?);
+                }
+                "limit" if limit.is_none() && (1..=32).contains(&value) => {
+                    limit = Some(value as u32);
+                }
+                _ => return Err(InvalidControlQuery),
+            }
+        }
+    }
+    Ok(ControlQuery::Inbox { after, limit })
+}
+
+fn canonical_uuid(value: &str) -> bool {
+    crate::control::uuid(value).is_ok()
 }
 
 /// Classify a gateway-root path after the relay removes exactly `/control`.
-/// No decoding/normalization is performed. Dynamic IDs remain the handler's
-/// responsibility, after authentication; no UUID assumption is made here.
+/// No decoding/normalization is performed. Historical dynamic IDs remain the
+/// handler's responsibility; the new worker ACK path requires a canonical UUID.
 pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity> {
     if !path.starts_with('/')
         || !path.is_ascii()
@@ -75,7 +147,7 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
     {
         return None;
     }
-    use ControlRouteIdentity::{BrokerPresence, Runner};
+    use ControlRouteIdentity::{BrokerPresence, Runner, WorkerRelay};
     match (method, segments.as_slice()) {
         (&Method::GET, ["identity"])
         | (&Method::GET, ["workers", _])
@@ -110,6 +182,10 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
             if v1 =>
         {
             Some(BrokerPresence)
+        }
+        (&Method::POST | &Method::GET, ["relay", "messages"]) if v1 => Some(WorkerRelay),
+        (&Method::POST, ["relay", "messages", id, "ack"]) if v1 && canonical_uuid(id) => {
+            Some(WorkerRelay)
         }
         _ => None,
     }

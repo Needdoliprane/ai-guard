@@ -11,9 +11,34 @@ provisionnement automatique de credential. La
 Ce client ne raccorde pas un worker dont le réseau runtime est `none`.
 La bibliothèque ne fournit ni handoff runtime, ni canal runtime privé, ni
 permission réseau supplémentaire. Conserver les workers hors du réseau de
-contrôle. La [proposition de raccord](../../engineering/RELAY_RUNTIME_HANDOFF.md)
-attend revue et implémentation. Les tests logiciels ne constituent pas la
-recette réelle A1/A2/B1.
+contrôle. La [direction du raccord](../../engineering/RELAY_RUNTIME_HANDOFF.md)
+est approuvée pour code et tests logiciels locaux. Protocole de frames et voie
+HTTP fermée sont livrés séparément ; ces tests ne constituent pas la recette
+réelle A1/A2/B1.
+
+## Accès de contrôle publié et limité
+
+L'ingress accepte seulement les trois formes worker sous `/control` :
+`POST /control/api/v1/relay/messages`, `GET /control/api/v1/relay/messages`
+et `POST /control/api/v1/relay/messages/{message_id}/ack`. Le gateway vérifie
+la preuve workload avant lecture du corps et réservation de l'un des huit
+échanges worker du tenant authentifié. Les capacités runner et présence broker
+restent séparées. Une preuve worker ne donne jamais accès aux routes runner.
+
+Seule l'inbox admet une query : `after` non négatif et `limit` de 1 à 32,
+décimaux canoniques uniques. Leur omission conserve les valeurs du handler.
+Aucune autre query, alias de chemin ou destination libre n'est admis. Une inbox
+réussie est bornée à 2 Mio, les reçus/erreurs worker à 16 Kio ; les réponses
+historiques du contrôle gardent 512 Kio. Audit, grants, expiration et révocation
+restent vérifiés par les handlers habituels.
+
+Cette voie ne raccorde pas le réseau coupé d'un worker. Le constructeur de
+bibliothèque décrit ci-dessus attend toujours une origine racine ; le profil
+typé `/control` et le handoff runtime sont des travaux séparés. Ne pas contourner
+sa validation d'origine par un chemin libre ou placer la preuve dans un worker.
+Le module `agentsandbox::relay::channel` fournit frames fermées bornées et
+validation d'état, pas un helper ni un propriétaire broker en fonctionnement.
+[Preuve logicielle attachée aux sources](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
 ## Fournir un contexte autorisé
 

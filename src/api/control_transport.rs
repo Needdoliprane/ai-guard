@@ -1,12 +1,13 @@
 //! Authentication precedes both reserved operation admission and body polling.
 //! Existing handlers authenticate/revalidate again at their normal boundaries.
 use super::*;
-use crate::control_transport::{ControlRouteIdentity, control_route};
+use crate::control_transport::{ControlRouteIdentity, control_query, control_route};
 use axum::{body::HttpBody, extract::FromRequestParts};
 use tokio::sync::Semaphore;
 
 const RUNNER_OPERATIONS: usize = 16;
 const BROKER_PRESENCE: usize = 4;
+const WORKER_RELAY_OPERATIONS: usize = 8;
 const MAX_BODY: usize = 262_144;
 const UPLOAD_TOTAL: Duration = Duration::from_secs(5);
 const UPLOAD_IDLE: Duration = Duration::from_secs(2);
@@ -14,12 +15,14 @@ const UPLOAD_IDLE: Duration = Duration::from_secs(2);
 pub(super) struct ControlCapacity {
     runner: Arc<Semaphore>,
     presence: Arc<Semaphore>,
+    worker_relay: Arc<Semaphore>,
 }
 impl ControlCapacity {
     pub(super) fn new() -> Self {
         Self {
             runner: Arc::new(Semaphore::new(RUNNER_OPERATIONS)),
             presence: Arc::new(Semaphore::new(BROKER_PRESENCE)),
+            worker_relay: Arc::new(Semaphore::new(WORKER_RELAY_OPERATIONS)),
         }
     }
 }
@@ -93,7 +96,12 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     if request.uri().to_string().len() > 4096
         || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
-        || request.uri().query().is_some()
+        || control_query(
+            request.method(),
+            request.uri().path(),
+            request.uri().query(),
+        )
+        .is_err()
     {
         return refused(
             StatusCode::BAD_REQUEST,
@@ -124,6 +132,17 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
                 };
             match broker.control_capacity() {
                 Ok(capacity) => capacity.presence.clone(),
+                Err(rejection) => return rejection.into_response(),
+            }
+        }
+        ControlRouteIdentity::WorkerRelay => {
+            let worker =
+                match workload::VerifiedWorker::from_request_parts(&mut parts, &state).await {
+                    Ok(worker) => worker,
+                    Err(rejection) => return rejection.into_response(),
+                };
+            match worker.control_capacity() {
+                Ok(capacity) => capacity.worker_relay.clone(),
                 Err(rejection) => return rejection.into_response(),
             }
         }

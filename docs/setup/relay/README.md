@@ -10,8 +10,33 @@ The [source](../../../src/relay/client.rs) defines the accepted inputs.
 The client does not connect a worker whose runtime network is `none`.
 No runtime handoff, private runtime channel or additional network permission is
 provided by this library. Keep workers off the control network. The
-[runtime handoff proposal](../../engineering/RELAY_RUNTIME_HANDOFF.md) is pending
-review and implementation. The software tests are not the real A1/A2/B1 recipe.
+[runtime handoff direction](../../engineering/RELAY_RUNTIME_HANDOFF.md) is approved
+for code and local software tests. The frame protocol and restricted HTTP lane
+below are delivered separately; the software tests are not the real A1/A2/B1 recipe.
+
+## Restricted published control access
+
+The ingress accepts only the three worker relay forms under `/control`:
+`POST /control/api/v1/relay/messages`, `GET /control/api/v1/relay/messages`,
+and `POST /control/api/v1/relay/messages/{message_id}/ack`. The gateway verifies
+the worker workload proof before reading the body or reserving one of eight
+worker exchanges per authenticated tenant. Runner and broker-presence capacity
+remain separate. A worker proof never grants runner routes.
+
+Only inbox accepts query parameters: unique canonical nonnegative `after` and
+`limit` from 1 to 32. Omission preserves the handler defaults; no other query,
+path alias or free forwarding target is accepted. Successful inbox responses
+are bounded to 2 MiB, worker receipts/errors to 16 KiB; historical control
+responses retain their 512 KiB bound. Audit, grants, expiry and revocation are
+still checked by the normal handlers.
+
+This lane does not give a network-isolated worker access. The library constructor
+above still accepts a root origin; a typed `/control` client profile and runtime
+handoff remain separate work. Do not append a free path to bypass its origin
+validation or place the workload proof inside a worker. The new
+`agentsandbox::relay::channel` module supplies bounded closed frames and channel
+state validation, not a running helper or a broker owner. See the
+[source-specific software proof](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
 ## Supply an authorized context
 

@@ -4,7 +4,8 @@ use super::{
     BodyFailure, MAX_BODY, MAX_URI, Timeouts, end_to_end_headers, failure, upstream_origin,
 };
 use crate::control_transport::{
-    ControlTransportFailureReasonV1, ControlTransportFailureV1, control_route,
+    ControlRouteIdentity, ControlTransportFailureReasonV1, ControlTransportFailureV1,
+    control_query, control_route,
 };
 use axum::{
     Router,
@@ -81,6 +82,8 @@ fn classified_transport(error: &reqwest::Error) -> Option<ControlTransportFailur
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_RESPONSE: usize = 512 * 1024;
+const MAX_WORKER_INBOX_RESPONSE: usize = 2 * 1024 * 1024;
+const MAX_WORKER_RECEIPT_RESPONSE: usize = 16 * 1024;
 const ACTIVE: u8 = 0;
 const COMPLETE: u8 = 1;
 const TIMEOUT: u8 = 2;
@@ -202,15 +205,20 @@ async fn forward(State(state): State<ControlRelay>, request: Request) -> Respons
     if request.uri().to_string().len() > MAX_URI {
         return failure(StatusCode::URI_TOO_LONG, "URI trop longue.");
     }
-    if request.uri().scheme().is_some()
-        || request.uri().authority().is_some()
-        || request.uri().query().is_some()
-    {
+    if request.uri().scheme().is_some() || request.uri().authority().is_some() {
         return failure(StatusCode::BAD_REQUEST, "Cible de contrôle invalide.");
     }
-    if control_route(request.method(), request.uri().path()).is_none() {
+    let query = match control_query(
+        request.method(),
+        request.uri().path(),
+        request.uri().query(),
+    ) {
+        Ok(query) => query,
+        Err(_) => return failure(StatusCode::BAD_REQUEST, "Cible de contrôle invalide."),
+    };
+    let Some(identity) = control_route(request.method(), request.uri().path()) else {
         return failure(StatusCode::NOT_FOUND, "Route de contrôle inconnue.");
-    }
+    };
     if !bounded_headers(request.headers()) {
         return failure(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
@@ -264,7 +272,10 @@ async fn forward(State(state): State<ControlRelay>, request: Request) -> Respons
     }
     let mut destination = state.origin.clone();
     destination.set_path(request.uri().path());
+    destination.set_query(query.encoded().as_deref());
     let method = request.method().clone();
+    let worker_inbox =
+        identity == ControlRouteIdentity::WorkerRelay && method == axum::http::Method::GET;
     let body = request.into_body();
     let progress = Arc::new(AtomicU8::new(ACTIVE));
     let body = if body.is_end_stream() {
@@ -301,6 +312,13 @@ async fn forward(State(state): State<ControlRelay>, request: Request) -> Respons
         }
     };
     let status = upstream.status();
+    let response_limit = if identity != ControlRouteIdentity::WorkerRelay {
+        MAX_RESPONSE
+    } else if status.is_success() && worker_inbox {
+        MAX_WORKER_INBOX_RESPONSE
+    } else {
+        MAX_WORKER_RECEIPT_RESPONSE
+    };
     // An identity refusal is allowed before body EOF. Other responses must not
     // turn a failed bounded upload into an apparent successful operation.
     if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
@@ -328,7 +346,7 @@ async fn forward(State(state): State<ControlRelay>, request: Request) -> Respons
                 Some(reason) => transport_failure(reason),
                 None => protocol_failure("upstream_response_incomplete"),
             })?;
-            if chunk.len() > MAX_RESPONSE - bytes.len() {
+            if chunk.len() > response_limit - bytes.len() {
                 return Err(protocol_failure("upstream_response_too_large"));
             }
             bytes.extend_from_slice(&chunk);

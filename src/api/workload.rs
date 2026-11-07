@@ -322,6 +322,19 @@ impl FromRequestParts<GatewayState> for VerifiedBroker {
     }
 }
 impl VerifiedWorker {
+    /// Select capacity from the authenticated source; a route or worker ID
+    /// never chooses a tenant or replaces the handler's later revalidation.
+    pub(super) fn control_capacity(
+        &self,
+    ) -> ApiResult<Arc<super::control_transport::ControlCapacity>> {
+        self.0
+            .state
+            .tenants
+            .get(self.0.source)
+            .map(|tenant| Arc::clone(&tenant.control_capacity))
+            .ok_or_else(ambiguous)
+    }
+
     pub(super) async fn blocking<T: Send + 'static>(
         self,
         operation: impl FnOnce(TenantState, WorkerRelayIdentity, Redactor) -> ApiResult<T>
