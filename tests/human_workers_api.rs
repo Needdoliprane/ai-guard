@@ -1,5 +1,7 @@
 //! Human worker registry boundary on the real HTTP router and private tenant SQLite.
 //! No runtime or model is started; these tests never publish fixture activity to a product stack.
+#[path = "human_workers_api/federation.rs"]
+mod federation;
 mod support;
 
 use agentsandbox::{

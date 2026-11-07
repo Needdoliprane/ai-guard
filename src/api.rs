@@ -1762,6 +1762,7 @@ fn human_dashboard_path(path: &str) -> bool {
         "/api/human/identity",
         "/api/human/brokers",
         "/api/human/workers",
+        "/api/human/federation/workers",
         "/api/human/resources",
         "/api/human/events",
         "/api/human/export",
