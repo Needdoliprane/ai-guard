@@ -4,7 +4,7 @@ FROM rust-toolchain AS provider-build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
-RUN cargo build --release --locked --bin ai-guard-provider
+RUN cargo build --release --locked --bin ai-guard-provider --bin ai-guard-relay
 
 FROM node:24-bookworm-slim
 ARG CODEX_VERSION=""
@@ -22,6 +22,9 @@ COPY --from=rust-toolchain /usr/local/rustup/ /usr/local/rustup/
 # is a native Rust binary; its source and credential configuration stay outside
 # the worker image, and credentials arrive only through the private handoff.
 COPY --from=provider-build /build/target/release/ai-guard-provider /usr/local/bin/ai-guard-provider
+# The relay helper is immutable product code on the readonly image root. It
+# receives no workload proof, provider credential or control-network access.
+COPY --from=provider-build --chown=0:0 --chmod=0555 /build/target/release/ai-guard-relay /usr/local/bin/ai-guard-relay
 # Optional providers are absent unless an exact operator-chosen version is set.
 # No credentials, provider configuration, or mutable "latest" version is baked in.
 RUN if [ -n "$CODEX_VERSION" ]; then \
