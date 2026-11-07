@@ -2,7 +2,7 @@
 # Start the separate deploy/local-ai/compose.tls-volumes.yaml project first.
 services:
   gateway:
-    command: ["gateway", "--listen", "0.0.0.0:8787", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json", "--jev-backend", "local-openai", "--jev-local-url", "https://${AI_GUARD_LOCAL_AI_TLS_SERVER_NAME:?Use volumes.env}:8443/v1/chat/completions", "--jev-local-model", "${AI_GUARD_LOCAL_AI_MODEL:-qwen2.5-0.5b-q4km}", "--jev-ca-file", "/run/ai-guard-trust/root-ca.pem"]
+    command: ["gateway", "--listen", "0.0.0.0:8787", "--control-listen", "0.0.0.0:8788", "--container-listen", "--data", "/data/audit.sqlite", "--runner-token-file", "/run/secrets/runner", "--viewer-token-file", "/run/secrets/viewer", "--policy", "/app/policies/default.json", "--jev-backend", "local-openai", "--jev-local-url", "https://${AI_GUARD_LOCAL_AI_TLS_SERVER_NAME:?Use volumes.env}:8443/v1/chat/completions", "--jev-local-model", "${AI_GUARD_LOCAL_AI_MODEL:-qwen2.5-0.5b-q4km}", "--jev-ca-file", "/run/ai-guard-trust/root-ca.pem"]
     image: ${AI_GUARD_CONTROL_IMAGE:?Use the inspected image ID from volumes.env}
     volumes:
       - type: volume

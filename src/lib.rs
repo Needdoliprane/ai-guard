@@ -5,6 +5,7 @@ pub mod broker;
 pub mod broker_registry;
 pub mod control;
 pub mod control_fs;
+pub mod control_transport;
 pub mod declared_agents;
 pub mod identity;
 pub mod identity_cli;

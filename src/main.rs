@@ -101,6 +101,9 @@ enum Command {
 struct GatewayArgs {
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
+    /// Private gateway-root control listener; /control also remains on --listen.
+    #[arg(long)]
+    control_listen: Option<SocketAddr>,
     #[arg(long)]
     container_listen: bool,
     /// Versioned registry of tenant database and credential file references.
@@ -295,6 +298,9 @@ struct IngressArgs {
     container_listen: bool,
     #[arg(long, default_value = "http://gateway:8787")]
     gateway_upstream: String,
+    /// Fixed dedicated gateway control origin, required; never falls back.
+    #[arg(long)]
+    control_upstream: String,
     #[arg(long, default_value = "http://dashboard:4000")]
     dashboard_upstream: String,
 }
@@ -456,6 +462,13 @@ async fn main() -> Result<()> {
         Command::Gateway(args) => {
             let args = *args;
             validate_bind(args.listen, args.container_listen)?;
+            if let Some(control) = args.control_listen {
+                validate_bind(control, args.container_listen)?;
+                anyhow::ensure!(
+                    control != args.listen,
+                    "control listener must differ from public listener"
+                );
+            }
             let backend_environment = if args.jev_backend.is_none() {
                 match std::env::var("JEV_BACKEND") {
                     Ok(value) => Some(value),
@@ -696,9 +709,17 @@ async fn main() -> Result<()> {
             if let Some(oidc) = oidc {
                 state = state.with_oidc(oidc)?;
             }
+            let control_router = args
+                .control_listen
+                .map(|_| api::gateway_control_router(state.clone()));
             let router = api::gateway_router(state);
-            let shutdown = shutdown_signal()?;
+            let shutdown = shutdown_signal()?.shared();
             let listener = tokio::net::TcpListener::bind(args.listen).await?;
+            // Bind every configured surface before serving any request.
+            let control_listener = match args.control_listen {
+                Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+                None => None,
+            };
             eprintln!(
                 "Gateway {} — {} tenant(s), audit vérifié, {} événements",
                 listener.local_addr()?,
@@ -708,7 +729,16 @@ async fn main() -> Result<()> {
             for diagnostic in capacity_diagnostics {
                 eprintln!("{diagnostic}");
             }
-            serve_http(listener, router, shutdown).await?;
+            let control_shutdown = shutdown.clone();
+            tokio::try_join!(serve_http(listener, router, shutdown), async move {
+                match (control_listener, control_router) {
+                    (Some(listener), Some(router)) => {
+                        serve_http(listener, router, control_shutdown).await
+                    }
+                    (None, None) => Ok(()),
+                    _ => anyhow::bail!("control listener configuration is incomplete"),
+                }
+            })?;
         }
         Command::MigrateControl {
             data,
@@ -784,7 +814,10 @@ async fn main() -> Result<()> {
         Command::Ingress(args) => {
             validate_bind(args.gateway_listen, args.container_listen)?;
             validate_bind(args.dashboard_listen, args.container_listen)?;
-            let gateway = agentsandbox::ingress::ingress_router(&args.gateway_upstream)?;
+            let gateway = agentsandbox::ingress::ingress_router_with_control(
+                &args.gateway_upstream,
+                &args.control_upstream,
+            )?;
             let dashboard = agentsandbox::ingress::ingress_router(&args.dashboard_upstream)?;
             let shutdown = shutdown_signal()?.shared();
             let gateway_listener = tokio::net::TcpListener::bind(args.gateway_listen).await?;
@@ -1150,13 +1183,16 @@ mod tests {
     }
 
     #[test]
-    fn ingress_accepts_two_fixed_upstreams() {
+    fn ingress_requires_an_explicit_control_upstream() {
+        assert!(Cli::try_parse_from(["agentsandbox", "ingress"]).is_err());
         assert!(
             Cli::try_parse_from([
                 "agentsandbox",
                 "ingress",
                 "--gateway-upstream",
                 "http://gateway:8787",
+                "--control-upstream",
+                "http://gateway:8788",
                 "--dashboard-upstream",
                 "http://dashboard:4000"
             ])

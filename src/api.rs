@@ -41,6 +41,7 @@ use std::{
 mod audit_capacity_tests;
 mod auth;
 mod brokers;
+mod control_transport;
 #[cfg(test)]
 mod held_policy_tests;
 mod human;
@@ -167,6 +168,7 @@ struct TenantState {
     io: Arc<store_io::Gate>,
     shared_io: Arc<store_io::Gate>,
     control_proof: Option<Arc<ControlProof>>,
+    control_capacity: Arc<control_transport::ControlCapacity>,
 }
 struct ControlProof {
     state: GatewayState,
@@ -189,6 +191,7 @@ impl TenantState {
             io: Arc::new(store_io::Gate::new(false)),
             shared_io,
             control_proof: None,
+            control_capacity: Arc::new(control_transport::ControlCapacity::new()),
         }
     }
 }
@@ -655,7 +658,18 @@ async fn security_headers_inner(
     response
 }
 
+/// Public routes plus an explicit control transport on the same origin. Both
+/// this nest and the dedicated listener share tenant-owned admission capacity.
 pub fn gateway_router(state: GatewayState) -> Router {
+    gateway_base_router(state.clone()).nest("/control", gateway_control_router(state))
+}
+
+/// Private gateway-root control API, for the fixed internal relay destination.
+pub fn gateway_control_router(state: GatewayState) -> Router {
+    control_transport::router(state)
+}
+
+fn gateway_base_router(state: GatewayState) -> Router {
     let routes = Router::new()
         .route("/events", get(list_events).post(ingest))
         .route("/decide", post(decide))

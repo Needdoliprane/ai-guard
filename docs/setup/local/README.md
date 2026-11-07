@@ -58,7 +58,7 @@ The [local example](../../../.env.exemple.local) controls Compose interpolation.
 
 Open that new file in your editor. Keep `AGENTSANDBOX_CONFIG_DIR` identical to the directory passed to `init`. `COMPOSE_PROJECT_NAME` identifies this stack and its named audit volume. `AI_GUARD_CONTROL_IMAGE` selects the control image; the build above creates `agentsandbox-control:local`. A different image name requires an image you have built or obtained through your own trusted distribution.
 
-`AI_GUARD_GATEWAY_PORT` and `AI_GUARD_DASHBOARD_PORT` change the host ports, still bound to `127.0.0.1`. Container ports remain `8787` and `4000`. If you change host ports, update `AIGUARD_GATEWAY` and `AIGUARD_DASHBOARD` in your shell too. The Rust CLI does not read this dotenv file. Never `source` it; pass it explicitly to Compose. Shell environment values can override Compose interpolation, so check for an inherited setting when a value appears wrong.
+`AI_GUARD_GATEWAY_PORT` and `AI_GUARD_DASHBOARD_PORT` change the host ports, still bound to `127.0.0.1`. Published container ports remain `8787` and `4000`; control port `8788` stays internal as described below. If you change host ports, update `AIGUARD_GATEWAY` and `AIGUARD_DASHBOARD` in your shell too. The Rust CLI does not read this dotenv file. Never `source` it; pass it explicitly to Compose. Shell environment values can override Compose interpolation, so check for an inherited setting when a value appears wrong.
 
 Start Docker services:
 
@@ -80,9 +80,17 @@ Use the same engine account, context/endpoint, env file and Compose file through
 
 ### HTTP ingress limits
 
-The Rust ingress has independent budgets for **16 request bodies being read** and **64 upstream exchanges**. Each body is limited to **256 KiB**, **5 seconds in total** and **2 seconds without a new chunk**, starting when body reading begins. The complete body is read and its upload permit released before an exchange is acquired. A body known to be empty from its stream state bypasses the upload budget; the HTTP method or declared `Content-Length` does not decide this. Routes, fixed destinations and upstream authentication/authorization stay the same. These bounds are fixed in the binary; the dotenv file and CLI expose no setting for them.
+The public Rust ingress has independent budgets for **16 request bodies being read** and **64 upstream exchanges**. Each body is limited to **256 KiB**, **5 seconds in total** and **2 seconds without a new chunk**, starting when body reading begins. The complete body is read and its upload permit released before an exchange is acquired. A body known to be empty from its stream state bypasses the upload budget; the HTTP method or declared `Content-Length` does not decide this. Public routes retain their fixed destinations and upstream authentication/authorization. These bounds are fixed in the binary; the dotenv file and CLI expose no setting for them.
 
 A full upload budget can return **429** for a request with a body, while bodyless control reads can still use the separate exchange budget. Complete requests and SSE streams can still fill that exchange budget. This separation does not provide general flood protection or qualify runtime isolation. The runner still requests a targeted worker stop on a gateway tracking error, subject to engine availability; no 60-second retry window is enabled. Preserve the recorded session and reconcile it after an interruption rather than launching another instance to hide an unknown result.
+
+### Explicit control transport: server component
+
+The updated Compose files configure `gateway --control-listen 0.0.0.0:8788` and `ingress --control-upstream http://gateway:8788`. The gateway flag is optional; the ingress flag is required and has no public-upstream fallback. Port 8788 stays on the existing internal network, with no new host port or credential owned by the relay. The base Docker/Podman files, their SSO profiles and both Docker local-model TLS overrides retain this connection. Preserve the existing data, credentials and host loopback bindings when adapting a deployment.
+
+An explicitly selected `/control/` request uses the dedicated destination and bypasses the public 16/64 pools. The gateway authenticates the existing identity before reading the body or reserving one of the tenant's **16 runner** or **4 broker-presence** operation slots. The [concrete server contract](../../engineering/INGRESS_CONTROL_TRANSPORT.md) lists the closed routes, body/response bounds and errors. Keep `AIGUARD_GATEWAY`, `--gateway` and broker registry values as origins without a path; do not append `/control` or point workstation clients at the container-only port 8788.
+
+This is the server connection. SDK, runner and broker consumers still need their explicit transport selection composed and verified; the commands below do not establish that migration. Declared capture remains public, and a mixed broker outbox cannot choose authority from event kind/source. `control_operation_capacity_exhausted` is distinct from public-pool 429 and audit quotas. A closed `control_transport_failure` response reports an **unknown** result, not rollback. Preserve the operation identity and reconcile its existing receipt. Neither this transport nor an arbitrary 502/503 authorizes automatic retries of a mutation, start, claim or mandatory audit.
 
 ## Open the control view
 
