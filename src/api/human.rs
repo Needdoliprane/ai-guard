@@ -695,6 +695,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/human/identity", get(identity))
         .route("/human/brokers", get(brokers::brokers))
         .route("/human/workers", get(workers::workers))
+        .route(
+            "/human/federation/workers",
+            get(workers::federation_workers),
+        )
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
         .route("/human/events/{id}", get(event))
