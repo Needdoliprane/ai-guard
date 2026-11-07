@@ -3729,6 +3729,39 @@ pub(super) async fn resume_worker(
     {
         return Ok(status);
     }
+    boxed_resume_phase(|| {
+        resume_authenticated(
+            session,
+            config,
+            gateway,
+            wait_seconds,
+            program,
+            adopt,
+            interactive,
+        )
+    })
+    .await
+}
+
+// Construct each recovery phase outside its caller's poll frame. In debug
+// builds the combined poll frame otherwise leaves too little stack for the
+// private checkpoint decoder, even though the future itself is much smaller.
+#[inline(never)]
+fn boxed_resume_phase<F: std::future::Future + Send>(
+    construct: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<F>> {
+    Box::pin(construct())
+}
+
+async fn resume_authenticated(
+    session: Uuid,
+    config: &Path,
+    gateway: &str,
+    wait_seconds: u64,
+    program: Option<&Path>,
+    adopt: bool,
+    interactive: bool,
+) -> Result<Value> {
     let (state, client, guard) = locked_session(session, config, gateway).await?;
     let plan = state.snapshot()?;
     anyhow::ensure!(
@@ -3761,30 +3794,64 @@ pub(super) async fn resume_worker(
         );
     }
     if worker.state == WorkerStateV1::Terminal && worker.cleanup_removed == Some(true) {
-        post_saved_terminal(&client, &state).await?;
-        let journal = load_postprocessing(&state, &client)?;
-        if journal.is_some()
-            || state.checkpoint()?.result.as_ref().is_none_or(|result| {
-                result.changed_files.is_none() || result.postprocessing_error.is_some()
-            })
-        {
-            if journal
-                .as_ref()
-                .is_none_or(|journal| journal.payload.diff.is_none())
-            {
-                let runtime = bound_runtime(&state, &client, program, adopt).await?;
-                runtime.doctor(plan.options.allow_rootful_runtime).await?;
-                recover_postprocessing(Some(&runtime), &client, &state).await?;
-            } else {
-                recover_postprocessing(None, &client, &state).await?;
-            }
-        }
-        return action_status(
-            &state,
-            None,
-            "Terminal allocation and cleanup are durable. Retained postprocessing facts were reconciled; no worker command was started again.",
-        );
+        return boxed_resume_phase(|| resume_terminal(&state, &client, &plan, program, adopt))
+            .await;
     }
+    boxed_resume_phase(|| {
+        resume_runtime(
+            &state,
+            &client,
+            &guard,
+            &worker,
+            wait_seconds,
+            program,
+            adopt,
+        )
+    })
+    .await
+}
+
+async fn resume_terminal(
+    state: &PlanState,
+    client: &AuditClient,
+    plan: &RunPlan,
+    program: Option<&Path>,
+    adopt: bool,
+) -> Result<Value> {
+    post_saved_terminal(client, state).await?;
+    let journal = load_postprocessing(state, client)?;
+    if journal.is_some()
+        || state.checkpoint()?.result.as_ref().is_none_or(|result| {
+            result.changed_files.is_none() || result.postprocessing_error.is_some()
+        })
+    {
+        if journal
+            .as_ref()
+            .is_none_or(|journal| journal.payload.diff.is_none())
+        {
+            let runtime = bound_runtime(state, client, program, adopt).await?;
+            runtime.doctor(plan.options.allow_rootful_runtime).await?;
+            recover_postprocessing(Some(&runtime), client, state).await?;
+        } else {
+            recover_postprocessing(None, client, state).await?;
+        }
+    }
+    action_status(
+        state,
+        None,
+        "Terminal allocation and cleanup are durable. Retained postprocessing facts were reconciled; no worker command was started again.",
+    )
+}
+
+async fn resume_runtime(
+    state: &PlanState,
+    client: &AuditClient,
+    guard: &AttemptGuard,
+    worker: &WorkerV1,
+    wait_seconds: u64,
+    program: Option<&Path>,
+    adopt: bool,
+) -> Result<Value> {
     // A fresh start may use only the exact credential bytes admitted earlier.
     // Prepare them before any recovery helper and retain their handles through
     // create. Consumed starts and terminal reconciliation need no provider key.
@@ -3793,24 +3860,23 @@ pub(super) async fn resume_worker(
     } else {
         None
     };
-    let runtime = bound_runtime(&state, &client, program, adopt).await?;
+    let runtime = bound_runtime(state, client, program, adopt).await?;
     runtime
         .doctor(state.snapshot()?.options.allow_rootful_runtime)
         .await?;
     if worker.state == WorkerStateV1::Reserved {
-        mutate(&client, &state, WorkerTransitionV1::Prepare).await?;
-        import_workspace(&runtime, &client, &state, &guard).await?;
-        mutate(&client, &state, WorkerTransitionV1::CreateIssued).await?;
-        let result = launch_worker(
-            &runtime,
-            &client,
-            &state,
-            &guard,
-            credentials.as_ref(),
-            None,
-        )
-        .await?;
-        return Ok(serde_json::to_value(result)?);
+        return boxed_resume_phase(|| {
+            resume_preparation(
+                &runtime,
+                client,
+                state,
+                guard,
+                worker,
+                credentials.as_ref(),
+                wait_seconds,
+            )
+        })
+        .await;
     }
     if matches!(
         worker.state,
@@ -3822,68 +3888,111 @@ pub(super) async fn resume_worker(
         && worker.quota_held
         && !worker.allocation_inconsistent
     {
-        if worker
-            .unknown_reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("stop requested"))
-        {
-            return action_status(
-                &state,
-                None,
-                "A stop was requested during preparation. Its reservation remains held until safe operator reconciliation.",
-            );
-        }
-        let checkpoint = state.checkpoint()?;
-        let ready = if checkpoint.import.is_some() {
-            recover_import(&runtime, &client, &state, &guard, wait_seconds).await?
-        } else {
-            if worker.state == WorkerStateV1::InDoubt {
-                // The helper checkpoint is persisted before helper creation.
-                // Its absence therefore proves no import emission by this
-                // attempt. Validate the immutable input and retain the OS
-                // guard before recovering preparation; existing volume
-                // ownership is still inspected by import_workspace.
-                let _archive = state
-                    .directory
-                    .archive(&checkpoint.archive_name, &checkpoint.archive_digest)?;
-                guard.ensure_current()?;
-                mutate(&client, &state, WorkerTransitionV1::Prepare).await?;
-            }
-            import_workspace(&runtime, &client, &state, &guard).await?;
-            true
-        };
-        if ready {
-            if state.worker()?.state == WorkerStateV1::InDoubt {
-                mutate(&client, &state, WorkerTransitionV1::Prepare).await?;
-            }
-            mutate(&client, &state, WorkerTransitionV1::CreateIssued).await?;
-            let result = launch_worker(
+        return boxed_resume_phase(|| {
+            resume_preparation(
                 &runtime,
-                &client,
-                &state,
-                &guard,
+                client,
+                state,
+                guard,
+                worker,
                 credentials.as_ref(),
-                None,
+                wait_seconds,
             )
-            .await?;
-            return Ok(serde_json::to_value(result)?);
-        }
-        mark_unknown(
-            &client,
-            &state,
-            "broker interrupted during import; no complete helper/copy proof is available",
-        )
+        })
         .await;
+    }
+    boxed_resume_phase(|| {
+        resume_owned(
+            &runtime,
+            client,
+            state,
+            guard,
+            credentials.as_ref(),
+            wait_seconds,
+        )
+    })
+    .await
+}
+
+async fn resume_preparation(
+    runtime: &ManagedRuntime,
+    client: &AuditClient,
+    state: &PlanState,
+    guard: &AttemptGuard,
+    worker: &WorkerV1,
+    credentials: Option<&CredentialFile>,
+    wait_seconds: u64,
+) -> Result<Value> {
+    if worker.state == WorkerStateV1::Reserved {
+        mutate(client, state, WorkerTransitionV1::Prepare).await?;
+        import_workspace(runtime, client, state, guard).await?;
+        mutate(client, state, WorkerTransitionV1::CreateIssued).await?;
+        let result = launch_worker(runtime, client, state, guard, credentials, None).await?;
+        return Ok(serde_json::to_value(result)?);
+    }
+    if worker
+        .unknown_reason
+        .as_deref()
+        .is_some_and(|reason| reason.starts_with("stop requested"))
+    {
         return action_status(
-            &state,
+            state,
             None,
-            "Import emission or contents remain uncertain. Helper, volume and reservation were retained; no import was repeated.",
+            "A stop was requested during preparation. Its reservation remains held until safe operator reconciliation.",
         );
     }
-    let Some(owned) = recover_owned(&runtime, &state).await? else {
-        mark_unknown(&client,&state,"owned runtime instance was not found in a successful targeted inventory; terminal state remains unknown").await;
+    let checkpoint = state.checkpoint()?;
+    let ready = if checkpoint.import.is_some() {
+        recover_import(runtime, client, state, guard, wait_seconds).await?
+    } else {
+        if worker.state == WorkerStateV1::InDoubt {
+            // The helper checkpoint is persisted before helper creation.
+            // Its absence therefore proves no import emission by this
+            // attempt. Validate the immutable input and retain the OS
+            // guard before recovering preparation; existing volume
+            // ownership is still inspected by import_workspace.
+            let _archive = state
+                .directory
+                .archive(&checkpoint.archive_name, &checkpoint.archive_digest)?;
+            guard.ensure_current()?;
+            mutate(client, state, WorkerTransitionV1::Prepare).await?;
+        }
+        import_workspace(runtime, client, state, guard).await?;
+        true
+    };
+    if ready {
+        if state.worker()?.state == WorkerStateV1::InDoubt {
+            mutate(client, state, WorkerTransitionV1::Prepare).await?;
+        }
+        mutate(client, state, WorkerTransitionV1::CreateIssued).await?;
+        let result = launch_worker(runtime, client, state, guard, credentials, None).await?;
+        return Ok(serde_json::to_value(result)?);
+    }
+    mark_unknown(
+        client,
+        state,
+        "broker interrupted during import; no complete helper/copy proof is available",
+    )
+    .await;
+    action_status(
+        state,
+        None,
+        "Import emission or contents remain uncertain. Helper, volume and reservation were retained; no import was repeated.",
+    )
+}
+
+async fn resume_owned(
+    runtime: &ManagedRuntime,
+    client: &AuditClient,
+    state: &PlanState,
+    guard: &AttemptGuard,
+    credentials: Option<&CredentialFile>,
+    wait_seconds: u64,
+) -> Result<Value> {
+    let Some(owned) = recover_owned(runtime, state).await? else {
+        mark_unknown(client,state,"owned runtime instance was not found in a successful targeted inventory; terminal state remains unknown").await;
         return action_status(
-            &state,
+            state,
             None,
             "No owned instance was observed. This does not prove termination or authorize another start; quota remains held.",
         );
@@ -3897,7 +4006,7 @@ pub(super) async fn resume_worker(
         // reopened monitor cannot reconstruct the original monotonic lifetime.
         let (stop, epoch) = tokio::join!(
             runtime.stop_snapshot_owned(&owned),
-            control_monitor::require_stop_on_active_resume(&state),
+            control_monitor::require_stop_on_active_resume(state),
         );
         match stop {
             Ok(stopped) => observed = stopped,
@@ -3906,9 +4015,9 @@ pub(super) async fn resume_worker(
                     Err(error) => redacted_error(&client.redactor, &error),
                     Ok(()) => "active resume cannot verify the original execution lifetime".into(),
                 };
-                mark_unknown(&client, &state, &reason).await;
+                mark_unknown(client, state, &reason).await;
                 return action_status(
-                    &state,
+                    state,
                     Some(&observed),
                     "The original control monitor lifetime cannot be verified after interruption. A targeted stop was requested but is unconfirmed; no fresh window, start or quota release was granted.",
                 );
@@ -3930,17 +4039,32 @@ pub(super) async fn resume_worker(
         && observed.process.started_at.is_none()
         && observed.process.running == Some(false)
     {
-        let result = launch_worker(
-            &runtime,
-            &client,
-            &state,
-            &guard,
-            credentials.as_ref(),
-            Some(owned),
-        )
-        .await?;
+        let result = launch_worker(runtime, client, state, guard, credentials, Some(owned)).await?;
         return Ok(serde_json::to_value(result)?);
     }
+    boxed_resume_phase(|| {
+        observe_resumed(
+            runtime,
+            client,
+            state,
+            guard,
+            &owned,
+            observed,
+            wait_seconds,
+        )
+    })
+    .await
+}
+
+async fn observe_resumed(
+    runtime: &ManagedRuntime,
+    client: &AuditClient,
+    state: &PlanState,
+    guard: &AttemptGuard,
+    owned: &OwnedContainerSnapshot,
+    mut observed: ContainerObservation,
+    wait_seconds: u64,
+) -> Result<Value> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(wait_seconds);
     let mut recorded_running = false;
     loop {
@@ -3950,34 +4074,34 @@ pub(super) async fn resume_worker(
             .is_ok()
             && state.worker()?.attempt.start_operation_id.is_some()
         {
-            return finalize_recovered(&runtime, &client, &state, &owned, &observed).await;
+            return finalize_recovered(runtime, client, state, owned, &observed).await;
         }
         if observed.process.running == Some(true) {
             observed.validate_identity_allocation(&owned.observation)?;
             if !recorded_running {
-                record_observation(&client, &state, &observed).await?;
+                record_observation(client, state, &observed).await?;
                 recorded_running = true;
             }
             if state.worker()?.state == WorkerStateV1::Stopping {
-                runtime.stop_snapshot_owned(&owned).await?;
+                runtime.stop_snapshot_owned(owned).await?;
             }
         } else {
-            mark_unknown(&client,&state,"runtime process is not proven terminal or has no durable start claim; pending effects remain unknown").await;
+            mark_unknown(client,state,"runtime process is not proven terminal or has no durable start claim; pending effects remain unknown").await;
             return action_status(
-                &state,
+                state,
                 Some(&observed),
                 "No terminal proof is available. Prior start emission may be unresolved; no second start or quota release was performed.",
             );
         }
         if tokio::time::Instant::now() >= deadline {
             return action_status(
-                &state,
+                state,
                 Some(&observed),
                 "Worker is still observed running. This resume command's observation window ended; attach output from the interrupted broker is unknown.",
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
-        refresh(&client, &state).await?;
+        refresh(client, state).await?;
         observed = runtime.observe(&owned.handle).await?;
     }
 }
