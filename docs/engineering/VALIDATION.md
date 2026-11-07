@@ -1,5 +1,25 @@
 # Validation courante
 
+## 7 novembre — préflight create/pods, gel40
+
+Le composant `6c25400` est publié, puis composé dans `31be78d`.
+Le manifeste vérifie 11/11 ancres après composition. Sur le gel40 isolé AE,
+Luna constate trois parents préflight, treize transport et neuf CLI PASS,
+plus `cargo check --all-targets --locked --offline` RC0. RED38 atteint trois
+oracles FAIL avant correction ; les cinq scénarios ne sont pas cinq fonctions
+supplémentaires. Avertissements : 61 lib, deux intégration et deux lib-test
+sur le check ; aucun Clippy crédité.
+[Commandes, empreintes, revue et limites](evidence/2026-11-07/kubernetes-preflight-permission/README.md).
+
+La QA AE s'arrête par son garde à `2026-11-07T17:22:37.824200917Z`, RC0,
+`OOMKilled=false`, puis son conteneur attribué est supprimé après conservation
+des journaux. Inspection finale privée SHA-256
+`cc1b6149f31279b5e530bec6efd7ddd5adbf013b323fe07799a0d66e09aaeaf9`.
+Le test Cancel diagnostic39 se termine RC101 par débordement de pile avant
+oracle ; reprise query NOT_RUN. Aucune preuve runtime/cluster n'est produite
+par ces vérifications. Le nouveau checkout composé entier n'est pas présenté
+comme recompilé sur la seule base des validations des composants.
+
 ## 7 novembre — composant API fédérée et campagnes distinctes frontend/D5
 
 Le composant `f6d2f0a`, composé dans `2e6c509`, passe 17 intégrations et deux

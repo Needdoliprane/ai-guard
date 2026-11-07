@@ -1,5 +1,25 @@
 # État constaté — suivi du développement
 
+## 7 novembre — permission préflight Kubernetes vérifiée et raccord relais approuvé
+
+Le composant `6c25400`, composé dans `31be78d`, exige l'avis create/pods
+pour l'identité Kubernetes retenue avant consommation du guard et dry-run.
+Les refus et inconnues restent fermés ; les ancres Namespace sont relues après
+l'avis. **25 fonctions uniques passent et toutes cibles compilent** sur le
+gel40 après les trois reproductions RED38. Les onze ancres sont identiques
+après composition. [Preuves et guides EN/FR](evidence/2026-11-07/kubernetes-preflight-permission/README.md).
+Cette SSAR ne rend pas le POST atomique, ne démontre pas un bypass RBAC antérieur
+et ne qualifie ni activation, réseau, nettoyage ou cluster réel.
+
+Le mainteneur a autorisé le code et les tests logiciels locaux du
+[raccord privé du relais](RELAY_RUNTIME_HANDOFF.md), ainsi que le cache public
+verrouillé manquant pour le build/frontend/navigateur et Clippy. Les tâches
+protocole et préparation du cache avancent séparément de la reprise D5.
+Les builds/tests restent isolés et sans réseau ; aucune campagne réelle du
+nouveau transport ne découle de l'accord. La préparation du test de reprise
+D5 déborde encore sa pile avant l'oracle au gel39 ; la correction du harnais
+est en cours, pas une correction métier déclarée réussie.
+
 ## 7 novembre — API fédérée vérifiée, interface et reprises encore en qualification
 
 L'API humaine additive workers/brokers `f6d2f0a` est publiée et composée dans
@@ -14,9 +34,9 @@ L'interface distincte passe 59 fonctions Node uniques et TypeScript sur son gel0
 dont les trois cas RAW relus depuis les vraies réponses des parents API Rust.
 Son refus403 ne dépend plus du corps pour identité et fédération ; les autres
 routes gardent leur traitement historique et leur écart de purge rapide.
-Build Vite et navigateur restent NOT_RUN faute des artefacts Linux concernés.
-La direction du transport privé du relais est proposée, relue et soumise au
-mainteneur ; sa documentation ne livre pas un canal aux workers.
+Build Vite et navigateur restent NOT_RUN en attendant la préparation autorisée
+des artefacts Linux concernés. La direction du transport privé du relais est
+désormais approuvée ; sa documentation ne livre pas un canal aux workers.
 
 Dans le bundle D5 non intégré, trois canaris distincts et toutes cibles passent
 sur les gels34/35 après reproduction du défaut d'admission STOP après fermeture
