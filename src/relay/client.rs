@@ -4,18 +4,14 @@
 //! Callers retain their exact send/ACK requests before submission. A failed or
 //! lost response may follow a durable mutation: retries are explicit and reuse
 //! the same operation ID and content. No method generates an operation ID.
+use super::validation::{self, MAX_RECEIPT_BYTES, validate_receipt};
 use super::{
-    MAX_INBOX_BYTES, MAX_MESSAGE_BYTES, MAX_MESSAGE_TTL_SECONDS, RelayAckV1, RelayEndpointV1,
-    RelayInboxV1, RelayReceiptV1, RelaySendV1, channel_valid,
+    MAX_INBOX_BYTES, RelayAckV1, RelayEndpointV1, RelayInboxV1, RelayReceiptV1, RelaySendV1,
 };
 use futures_util::StreamExt;
 use reqwest::{Method, StatusCode, header};
 use serde::{Serialize, de::DeserializeOwned};
-use sha2::{Digest, Sha256};
 use std::{net::IpAddr, path::Path, time::Duration};
-
-const MAX_RECEIPT_BYTES: usize = 16_384;
-const MAX_REQUEST_BYTES: usize = 262_144;
 
 /// Closed errors never retain a URL, credential, body or remote error chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,28 +145,7 @@ impl WorkerRelayClient {
     }
 
     pub async fn send(&self, input: &RelaySendV1) -> Result<RelayReceiptV1> {
-        if input.version != 1
-            || !uuid(&input.operation_id)
-            || !uuid(&input.grant_id)
-            || input.ttl_seconds == 0
-            || input.ttl_seconds > MAX_MESSAGE_TTL_SECONDS
-            || input.body.is_empty()
-            || input.body.len() > MAX_MESSAGE_BYTES
-        {
-            return Err(RelayClientError::InvalidRequest);
-        }
-        // Inspect all decoded structured-body literals before a map can erase a
-        // duplicate field containing an escaped credential. Ordinary text stays
-        // ordinary text; a parseable but ambiguous JSON body is refused closed.
-        match crate::json::decode_unique(input.body.as_bytes(), 64) {
-            Ok(value) if contains_credential(&value, &self.credential) => {
-                return Err(RelayClientError::InvalidRequest);
-            }
-            Err(_) if serde_json::from_str::<serde_json::Value>(&input.body).is_ok() => {
-                return Err(RelayClientError::InvalidRequest);
-            }
-            _ => {}
-        }
+        validation::validate_send(input, Some(&self.credential))?;
         let bytes = self.request_bytes(input)?;
         let response = self
             .request(Method::POST, "/api/v1/relay/messages")
@@ -195,9 +170,7 @@ impl WorkerRelayClient {
     /// Return one bounded page; an error never becomes an empty inbox. The caller
     /// decides whether to advance its retained cursor and whether to acknowledge.
     pub async fn inbox(&self, after: Option<i64>, limit: u32) -> Result<RelayInboxV1> {
-        if after.is_some_and(|value| value < 0) || !(1..=32).contains(&limit) {
-            return Err(RelayClientError::InvalidRequest);
-        }
+        validation::validate_inbox_request(after, limit)?;
         let mut request = self
             .request(Method::GET, "/api/v1/relay/messages")
             .query(&[("limit", limit.to_string())]);
@@ -214,15 +187,13 @@ impl WorkerRelayClient {
             return Err(RelayClientError::Protocol);
         }
         let inbox: RelayInboxV1 = self.decode(&bytes)?;
-        self.validate_inbox(&inbox, after, limit)?;
+        validation::validate_inbox(&inbox, &self.endpoint, after, limit)?;
         Ok(inbox)
     }
 
     /// An ACK records recipient acknowledgement only, never execution or an effect.
     pub async fn ack(&self, input: &RelayAckV1) -> Result<RelayReceiptV1> {
-        if input.version != 1 || !uuid(&input.operation_id) || !uuid(&input.message_id) {
-            return Err(RelayClientError::InvalidRequest);
-        }
+        validation::validate_ack(input)?;
         // This check precedes formatting message_id into the path: a workload
         // proof can itself be a canonical UUID accepted by the wire contract.
         let bytes = self.request_bytes(input)?;
@@ -247,73 +218,11 @@ impl WorkerRelayClient {
     }
 
     fn request_bytes<T: Serialize>(&self, input: &T) -> Result<Vec<u8>> {
-        let value = serde_json::to_value(input).map_err(|_| RelayClientError::InvalidRequest)?;
-        if contains_credential(&value, &self.credential) {
-            return Err(RelayClientError::InvalidRequest);
-        }
-        let bytes = serde_json::to_vec(&value).map_err(|_| RelayClientError::InvalidRequest)?;
-        if bytes.len() > MAX_REQUEST_BYTES {
-            return Err(RelayClientError::InvalidRequest);
-        }
-        Ok(bytes)
+        validation::request_bytes(input, Some(&self.credential))
     }
 
     fn decode<T: DeserializeOwned + Serialize>(&self, bytes: &[u8]) -> Result<T> {
-        let value =
-            crate::json::decode_unique(bytes, 64).map_err(|_| RelayClientError::Protocol)?;
-        if contains_credential(&value, &self.credential) {
-            return Err(RelayClientError::Protocol);
-        }
-        let decoded: T =
-            serde_json::from_value(value.clone()).map_err(|_| RelayClientError::Protocol)?;
-        // Option fields normally accept an absent key. The closed wire shape
-        // requires every serialized field, including an explicit null cursor.
-        if serde_json::to_value(&decoded).map_err(|_| RelayClientError::Protocol)? != value {
-            return Err(RelayClientError::Protocol);
-        }
-        Ok(decoded)
-    }
-
-    fn validate_inbox(&self, inbox: &RelayInboxV1, after: Option<i64>, limit: u32) -> Result<()> {
-        if inbox.version != 1 || inbox.items.len() > limit as usize {
-            return Err(RelayClientError::Protocol);
-        }
-        let mut previous = after.unwrap_or(0);
-        let mut message_ids = std::collections::HashSet::new();
-        for item in &inbox.items {
-            let meta = &item.metadata;
-            let times =
-                chrono::DateTime::parse_from_rfc3339(&meta.created_at).and_then(|created| {
-                    chrono::DateTime::parse_from_rfc3339(&meta.expires_at)
-                        .map(|expires| expires > created)
-                });
-            if item.sequence <= previous
-                || meta.version != 1
-                || !uuid(&meta.message_id)
-                || !uuid(&meta.grant_id)
-                || !message_ids.insert(meta.message_id.as_str())
-                || meta.source.validate().is_err()
-                || meta.destination != self.endpoint
-                || !channel_valid(&meta.channel)
-                || meta.acknowledged
-                || meta.body_pruned
-                || item.body.is_empty()
-                || item.body.len() > MAX_MESSAGE_BYTES
-                || meta.body_bytes != item.body.len() as u64
-                || meta.body_sha256 != hex::encode(Sha256::digest(item.body.as_bytes()))
-                || !times.is_ok_and(|ordered| ordered)
-            {
-                return Err(RelayClientError::Protocol);
-            }
-            previous = item.sequence;
-        }
-        if inbox
-            .next_after
-            .is_some_and(|cursor| inbox.items.is_empty() || cursor != previous)
-        {
-            return Err(RelayClientError::Protocol);
-        }
-        Ok(())
+        validation::decode(bytes, Some(&self.credential))
     }
 }
 
@@ -347,39 +256,6 @@ fn checked_origin(value: &str) -> Result<reqwest::Url> {
         return Err(RelayClientError::InvalidConfiguration);
     }
     Ok(origin)
-}
-
-fn uuid(value: &str) -> bool {
-    crate::control::uuid(value).is_ok()
-}
-fn hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
-}
-fn validate_receipt(receipt: &RelayReceiptV1, operation: &str, resource: &str) -> Result<()> {
-    if receipt.version != 1
-        || receipt.operation_id != operation
-        || receipt.resource_id != resource
-        || receipt.audit_seq <= 0
-        || !hash(&receipt.audit_hash)
-    {
-        return Err(RelayClientError::Protocol);
-    }
-    Ok(())
-}
-fn contains_credential(value: &serde_json::Value, credential: &str) -> bool {
-    match value {
-        serde_json::Value::String(text) => text.contains(credential),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .any(|value| contains_credential(value, credential)),
-        serde_json::Value::Object(values) => values
-            .iter()
-            .any(|(key, value)| key.contains(credential) || contains_credential(value, credential)),
-        _ => false,
-    }
 }
 
 async fn response_bytes(
