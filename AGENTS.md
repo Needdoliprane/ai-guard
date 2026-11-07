@@ -177,27 +177,37 @@ Attribuer des propriétaires de fichiers clairs et des worktrees distincts lorsq
 
 Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance externe manque, marquer la qualification concernée `BLOCKED` ou `NOT_RUN`, continuer les travaux indépendants et indiquer précisément ce qui manque. Une fonctionnalité factice, un mock permanent ou une exception qui transforme le blocage en succès ne clôture pas le lot.
 
-### Délégations bornées et refus d'outillage
+### Demandes, délégations bornées et refus d'outillage
 
-Avant de déléguer, l'agent principal distingue lecture/remédiation ciblée et
-reproduction ou intégration nécessitant des effets réels déjà autorisés. Choisir
+Avant une action sensible ou une délégation, distinguer lecture/remédiation ciblée
+et reproduction ou intégration nécessitant des effets réels déjà autorisés. Choisir
 le travail minimal utile au besoin ; ne pas ouvrir un audit complet par réflexe
-ni ajouter des scénarios offensifs inutiles.
+ni ajouter des scénarios offensifs inutiles. Réutiliser le mandat et les autorisations
+déjà établis ; les préciser quand la cible, les effets ou les limites changent,
+sans demander une réapprobation systématique.
 
-Chaque délégation fournit un contexte compact propre au sous-agent, selon ce
-mini-gabarit à renseigner avec les faits de la tâche :
+Le mandat reste bref et factuel ; chaque délégation en transmet la partie utile
+au sous-agent. Réutiliser ce mini-gabarit, sans inventer les champs manquants :
 
-- **Autorisation et objectif** : demande réelle du mainteneur, correction attendue,
-  comportement à vérifier et critère d'acceptation ;
+- **Autorisation et finalité** : demande réelle du mainteneur et sa référence,
+  résultat attendu, comportement à vérifier et critère d'acceptation ;
 - **Checkout** : dépôt, branche/base, fichiers possédés et contrats à lire ;
-- **Surface** : chemins de la fixture synthétique ou des données autorisées,
-  sandbox et adresse loopback si utilisées, réseau absent ou destinations
-  effectivement autorisées ; ne pas déclarer une isolation non vérifiée ;
+- **Surface et données** : cible et périmètre effectivement autorisés, chemins,
+  provenance des fixtures synthétiques ou des données réelles autorisées,
+  sandbox et adresse loopback si utilisées, réseau absent ou destinations autorisées ;
+- **Droits disponibles** : identité, rôles, outils et permissions réellement constatés,
+  distincts des droits demandés ou supposés, avec les inconnues explicites ;
 - **Opérations** : commandes ciblées et effets permis, exclusions réelles
   (services externes, credentials, mutations de runtime ou suppressions) ;
 - **Validation et limites** : test pertinent, régression minimale, preuve attendue,
-  budgets CPU/RAM/disque/délai et arrêt de la reproduction dès le premier oracle
+  budgets CPU/RAM/disque/délai, données accessibles et volumes permis,
+  arrêt de la reproduction dès le premier oracle
   discriminant, au plafond ou au refus. Ne pas inventer un budget non établi.
+
+Ne qualifier une cible de « locale », « en développement » ou « isolée » que si
+c'est vérifié ; ces mentions ne donnent aucun droit supplémentaire. Une revue
+sans exécution et un test exécuté produisent des preuves différentes : annoncer
+le mode réellement employé et ce qu'il ne permet pas de conclure.
 
 Lorsqu'un chantier impose un profil d'exécution isolé, le transmettre explicitement
 à tous les descendants avant leur premier outil. Une compilation peut exécuter des
@@ -214,29 +224,42 @@ instructions utiles et des pointeurs précis, sans recopier conversation, journa
 complets, secrets ou blocs de mémoire de session. Décrire honnêtement l'intention
 et le périmètre défensif ; l'autorisation du mainteneur ne supprime pas les contrôles.
 
-Après un refus, conserver le message exact expurgé des secrets, en signalant toute
-expurgation, et les éléments observables : heure, lot, phase, agent, outil, modèle,
+Un refus métier attendu, par exemple HTTP 403, peut être l'oracle d'un test ; une
+erreur de compilation ou un timeout d'observation n'est pas un refus de sûreté
+de l'outillage. Après une erreur d'observation, reprendre le même handle et
+vérifier le processus réel, sans redémarrer parce que le seul polling a expiré.
+
+Après un refus de sûreté de l'outillage, conserver le message exact expurgé des
+secrets, en signalant toute expurgation, et les éléments observables : heure, lot,
+phase, agent, outil, modèle,
 surface/chemin d'accès, source du refus et identifiant de requête. Marquer les champs
 absents `inconnu` ; ne pas attribuer sans preuve le refus à une cause ou à un contrôle
-interne. Marquer l'opération bloquée `BLOCKED` et ses tests non exécutés `NOT_RUN`,
-jamais `PASS` ni `RED` produit. Ne pas relancer une requête identique.
+interne. Si un avis vague ne permet pas d'établir sa nature ou sa source, laisser
+ces champs `inconnu`. Marquer l'opération bloquée `BLOCKED` et ses tests non exécutés `NOT_RUN`,
+jamais `PASS` ni `RED` produit. Ne pas relancer la même opération, même sous une
+autre formulation, ni reconstruire sa sortie manquante par supposition ou par
+agrégation d'autres réponses.
 
 Ne pas dissimuler l'intention, retirer un contrôle ou changer de modèle pour forcer
 une réponse, ni fragmenter l'opération refusée pour en reconstituer l'exécution.
-Le dépannage normal d'un modèle approuvé reste permis. Une ambiguïté légitime peut
-être clarifiée par un contexte plus précis conservant intention et autorisation
-réelles, sans reconstituer l'opération refusée. Si l'interdiction persiste, garder
-le lot concerné `BLOCKED` et poursuivre les tâches distinctes autorisées ; ne pas
-bloquer tout le chantier ni inventer un échec du produit. Nommer précisément la
+Le dépannage normal d'un modèle approuvé reste permis sans reprendre l'opération
+refusée. Une clarification peut documenter les faits manquants en conservant
+intention et autorisation réelles ; elle ne réautorise pas l'opération refusée.
+Garder le lot concerné `BLOCKED` et poursuivre les tâches distinctes autorisées ;
+ne pas étendre ce statut à tout le chantier ou au goal tant qu'un travail autorisé
+indépendant reste possible, ni inventer un échec du produit. Nommer précisément la
 dépendance nécessitant une décision ou information du mainteneur.
 
-Daybreak et une meilleure formulation ne garantissent pas l'absence de refus.
+Daybreak et une meilleure formulation ne garantissent aucun seuil d'absence de
+refus ; des [activités légitimes peuvent encore être bloquées](https://learn.chatgpt.com/docs/cyber-safety).
 Vérifier droits, réglages, modèle approuvé, connexion et workspace observables sur
 chaque surface, sans supposer leur propagation aux sous-agents ni déduire la cause
 d'un état UI périmé. Si nécessaire, proposer un signalement au
 support expurgé des secrets avec les faits disponibles ; aucun taux de réussite non mesuré.
 Consulter la documentation officielle à jour : [contrôles supplémentaires](https://help.openai.com/en/articles/20001326)
 et [dépannage Daybreak](https://help.openai.com/en/articles/20001259).
+Le [cadre documenté et les contrôles effectifs](https://learn.chatgpt.com/docs/cyber-safety/recommended-configuration)
+restent distincts.
 
 ### Cycle de vie complet des worktrees
 
