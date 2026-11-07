@@ -41,6 +41,31 @@ le binding worker/profil ou ne fournit son owner broker/outbox. Le module
 `agentsandbox::relay::channel` fournit frames fermées bornées et validation d'état.
 [Preuve logicielle attachée aux sources](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
+## Admission par le contrôle de confiance
+
+L'[API d'admission](../../api.md#admission-du-canal-runtime--runtime-channel-admission)
+réservée au runner réserve un canal, consomme un claim exec distinct et unique,
+puis conserve ses faits de cycle. Les [DTO fermés](../../../src/relay/admission.rs)
+lient worker, tentative, génération, binding workload, Arm initiale et expiration.
+Le runner authentifié sélectionne le tenant. Les credentials worker, présence
+broker et humains ne donnent aucun accès à ces routes ; la preuve workload reste
+dans le contrôle de confiance.
+
+Une réservation ne permet aucun exec. Seule une réponse ClaimExec fraîche et
+validée peut produire la capability du SDK interne ; un rejeu ne la recrée pas.
+Expiration ou révocation refusent une nouvelle autorité, en conservant le cleanup
+sûr. Un canal claimé inconnu reste retenu jusqu'à preuve terminale suffisante ;
+EOF local et fin du CLI ne libèrent pas le quota worker. Le journal borne
+actuellement l'admission à 100 endpoints actifs et 4096 faits par tenant ; son
+épuisement refuse l'admission sans purge automatique des preuves. Rétention et
+compaction restent à développer ; conserver les preuves et respecter les limites du
+[contrat d'admission](../../engineering/RELAY_ADMISSION.md).
+
+Le raccord broker/runtime est une étape d'intégration distincte. Aucun nouveau
+CLI relais ou canal exec automatiquement activé n'est fourni. La
+[validation attachée aux sources](../../engineering/evidence/2026-11-07/relay-admission/README.md)
+distingue ce qui a été exercé des écarts encore ouverts.
+
 ## Fournir un contexte autorisé
 
 L'appelant fournit une origine gateway approuvée, la preuve workload exclusive

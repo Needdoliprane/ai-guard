@@ -55,6 +55,33 @@ The HTTP backend alone does not connect a `network:none` worker, deliver remote
 federation or qualify a unified cloud dashboard. Those paths require their own
 transport, authorization and runtime evidence.
 
+### Admission du canal runtime / Runtime channel admission
+
+Ces routes V1 sont réservées au runner authentifié du contrôle. Le tenant vient
+de son identité ; aucun champ du corps ne choisit un tenant. Le transport
+`/control` les classe dans la voie runner, sans les ajouter aux trois routes worker.
+
+| Méthode / Method | Route | Entrée / Input | Effet durable / Durable effect |
+|---|---|---|---|
+| POST | `/api/v1/relay/channels/admissions` | `RelayChannelAdmissionV1` | Réserve sans permis exec / Reserves without an exec permit |
+| POST | `/api/v1/relay/channels/{channel_id}/claims` | `RelayChannelClaimV1` | Claim exec unique / One-shot exec claim |
+| POST | `/api/v1/relay/channels/{channel_id}/transitions` | `RelayChannelTransitionV1` | Transition de cycle / Lifecycle transition |
+
+Admission et claim frais répondent 201 ; leurs rejeux identiques répondent 200.
+Une transition répond 200. Les réponses sont des `RelayChannelResultV1` fermés.
+Le binding courant, l'instance worker, son Arm et l'audit durable sont recoupés
+avant acceptation. Une réservation ou un reçu rejoué ne donne aucun nouveau
+permis moteur. Une erreur de persistance refuse l'acceptation.
+
+Fresh admission and claim return 201; identical replays return 200, as do lifecycle
+transitions. A reservation does not authorize exec, and replay never issues
+another fresh capability. Runner authentication precedes body parsing. The
+current workload binding, worker incarnation, original Arm and mandatory audit
+must agree. These control APIs alone do not connect a worker to the relay.
+See the [typed contract](engineering/RELAY_ADMISSION.md),
+[English guide](setup/relay/README.md#trusted-control-admission) and
+[French guide](setup/relay/README.fr.md#admission-par-le-contrôle-de-confiance).
+
 ### Projection workers et brokers / Worker and broker projection
 
 `GET /api/v1/federation/workers` est une lecture technique gateway pour viewer

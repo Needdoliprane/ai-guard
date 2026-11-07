@@ -1,5 +1,28 @@
 # État constaté — suivi du développement
 
+## 8 novembre — admission du relais intégrée, raccord broker en cours
+
+Le candidat `1943057`, composé dans `60f719b`, ajoute réservation durable,
+claim exec distinct et unique, transitions et SDK interne. Les trois parents
+HTTP/SQLite passent sur le gel71, ainsi que la compilation toutes cibles.
+Les quinze ancres sélectionnées restent identiques après composition.
+[Preuves et limites](evidence/2026-11-07/relay-admission/README.md).
+Le tenant vient du runner authentifié ; une réservation ou un rejeu ne produit
+aucun nouveau permis. Le raccord aux factories runtime/propriétaire reste ouvert.
+
+Le port runtime corrigé passe sept parents sur73 ; le helper enfant ignoré ne
+compte pas comme PASS. L'échec67 provenait du FD stdin resté ouvert après le
+shutdown logique Tokio ; le correctif ferme le FD sans changer les délais.
+Export72 expose désormais son erreur originale : son moteur synthétique ne
+déclare pas rootless, ce que le produit refuse correctement. La fixture74 est
+corrigée ; son oracle reste à exécuter. Le bundle D5 demeure séparé.
+
+Deux développements indépendants sont engagés : tests SDK sur gateway/SQLite
+réels et raccord au callback broker, avec échéance Arm originale, verrou retenu
+et propriétaire IO commun au tenant. Les validations complémentaires sont
+temporairement arrêtées sur un cache public incomplet ; elles ne constituent
+ni FAIL produit ni qualification moteur. Aucun gate global fermé ; G09 FAIL.
+
 ## 7 novembre — réserve d'audit intégrée, composition D5 et raccord relais en validation
 
 Le composant `1bb3bba`, composé et poussé dans `d550c34`, protège la réserve

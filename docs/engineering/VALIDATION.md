@@ -1,5 +1,33 @@
 # Validation courante
 
+## 8 novembre — admission71 composée et port runtime73 corrigé
+
+Source `1943057` composée dans `60f719b` : quinze ancres du
+[manifeste d'admission](evidence/2026-11-07/relay-admission/source.sha256)
+vérifiées, trois parents PASS et check toutes cibles PASS sur71. La
+[preuve](evidence/2026-11-07/relay-admission/README.md) conserve le RED69,
+les commandes, empreintes et limites. Aucun résultat SDK composé, panne d'audit
+ciblée ou ancien lecteur n'est déduit de ces trois parents.
+
+Runtime73 : sept parents PASS, zéro échec, un enfant ignoré ; RC0,
+27,05s de test et141,78s au total. Journal parent SHA
+`bc1222115f0a9089c941d64e3619c9e084f9064e8f9df5358506c073a7c3e4e4`.
+Le correctif ferme le descripteur stdin détenu et préserve stdout ; fermeture
+répétée, écritures/flush refusés et drainage sont vérifiés. Revue indépendante
+du delta acceptée ; aucune exécution moteur n'est créditée.
+
+Export72 : RC101,107,50s de test ; l'instrumentation révèle le refus rootless
+original à94,107s, avant le timeout secondaire du watcher à107,463s. Journal
+SHA `5eee41b70e17ab81c446b56de4eaa6f79a323a24975acf1fabb8f2dab1e57114`.
+Fixture74 : seule la réponse info synthétique ajoute `name=rootless` ; le
+produit conserve `allow_rootful_runtime=false`. Son nouveau test reste NOT_RUN.
+
+Les checks runtime/owner suivants dans AN échouent avant compilation sur
+cache absent (`anyhow`). AO constate ensuite l'absence de l'archive Linux
+`linux-raw-sys 0.12.1` pendant son préflight offline ; les sélections dépendantes
+ne sont pas exécutées. Cette dépendance de harnais n'est pas un défaut produit.
+Le cache public est préparé séparément, sans credential ni réseau dans la QA.
+
 ## 7 novembre — réserve publiée et compositions65/66 distinctes
 
 `1bb3bba` est composé dans `d550c34`, avec12/12 ancres vérifiées. La

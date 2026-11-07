@@ -40,6 +40,30 @@ persists a worker/profile binding or supplies its broker owner/outbox. The
 state validation. See the
 [source-specific software proof](../../engineering/evidence/2026-11-07/relay-transport-contracts/README.md).
 
+## Trusted control admission
+
+The runner-only [admission API](../../api.md#admission-du-canal-runtime--runtime-channel-admission) reserves
+a channel, consumes a separate one-shot exec claim and records lifecycle facts.
+The [closed DTOs](../../../src/relay/admission.rs) bind the expected worker,
+attempt, generation, workload binding, original Arm and expiry. The authenticated
+runner selects the tenant. Worker, broker-presence and human credentials do not
+grant these routes; the workload proof remains in trusted control.
+
+A reservation does not permit exec. Only a fresh, validated ClaimExec response
+can issue the internal SDK capability; a replay cannot mint another one.
+Expiry or revocation refuses new authority while safe cleanup remains available.
+An unknown claimed channel stays retained until sufficient terminal evidence;
+local EOF or CLI exit does not release worker quota. The journal currently
+bounds admission to 100 active endpoints and 4096 facts per tenant; exhaustion
+refuses admission and never purges evidence automatically. Retention and
+compaction remain open engineering work; preserve evidence and follow the limits in the
+[admission contract](../../engineering/RELAY_ADMISSION.md).
+
+The broker/runtime connection is a separate integration step. There is no new
+relay CLI or automatically enabled exec channel. See the
+[source-specific validation](../../engineering/evidence/2026-11-07/relay-admission/README.md)
+for what has been exercised and what remains open.
+
 ## Supply an authorized context
 
 The caller supplies one approved gateway origin, the exclusive worker workload
