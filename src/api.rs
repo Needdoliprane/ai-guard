@@ -161,6 +161,7 @@ struct TenantState {
     streams: Arc<tokio::sync::Semaphore>,
     human_streams: Arc<human_streams::Admission>,
     rate: Arc<Mutex<(Instant, u32)>>,
+    ingestion_rate: Arc<Mutex<(Instant, u32)>>,
     worker_quota: QuotaPolicyV1,
     held_create_policy:
         Option<Arc<crate::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>>,
@@ -184,6 +185,7 @@ impl TenantState {
             )),
             human_streams: Arc::new(human_streams::Admission::new()),
             rate: Arc::new(Mutex::new((Instant::now(), 0))),
+            ingestion_rate: Arc::new(Mutex::new((Instant::now(), 0))),
             worker_quota: QuotaPolicyV1::default(),
             held_create_policy: None,
             io: Arc::new(store_io::Gate::new(false)),
@@ -570,17 +572,24 @@ impl TenantState {
         .await
     }
     fn write_quota(&self) -> ApiResult<()> {
-        let mut state = self
-            .rate
+        Self::take_write_slot(&self.rate)
+    }
+    fn ingestion_quota(&self) -> ApiResult<()> {
+        Self::take_write_slot(&self.ingestion_rate)
+    }
+    fn take_write_slot(rate: &Mutex<(Instant, u32)>) -> ApiResult<()> {
+        let mut state = rate
             .lock()
             .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "Limiteur indisponible."))?;
         if state.0.elapsed() >= Duration::from_secs(1) {
             *state = (Instant::now(), 0);
         }
         if state.1 >= 200 {
-            return Err(error(
+            return Err((
                 StatusCode::TOO_MANY_REQUESTS,
-                "Maximum 200 écritures par seconde.",
+                Json(
+                    json!({"error":{"code":"write_rate_limited","message":"Maximum 200 écritures par seconde."}}),
+                ),
             ));
         }
         state.1 += 1;
@@ -607,7 +616,53 @@ async fn gateway_security_headers(
                 && request.uri().path() == "/auth/oidc/status"
                 && oidc::public_status_origin(request.headers(), &oidc.config.web_origin)
     });
-    security_headers_inner(request, next, trusted_origin, callback).await
+    let response = security_headers_inner(request, next, trusted_origin, callback).await;
+    write_rate_retry_header(response).await
+}
+
+/// Keep the existing API error tuple compatible across handlers. Only the
+/// gateway's bounded, typed rate error carries a retry hint; quota and durable
+/// audit-capacity refusals retain their distinct bodies and no Retry-After.
+async fn write_rate_retry_header(response: Response) -> Response {
+    if response.status() != StatusCode::TOO_MANY_REQUESTS
+        || response.headers().get(header::CONTENT_TYPE)
+            != Some(&HeaderValue::from_static("application/json"))
+    {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut chunks = Vec::new();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let inspect = match &chunk {
+            Ok(chunk) => bytes.len().saturating_add(chunk.len()) <= 4096,
+            Err(_) => false,
+        } && chunks.len() < 16;
+        if inspect && let Ok(chunk) = &chunk {
+            bytes.extend_from_slice(chunk);
+        }
+        chunks.push(chunk);
+        if !inspect {
+            // A body that cannot be inspected safely is still returned intact,
+            // including its original chunks/error and every remaining chunk.
+            return Response::from_parts(
+                parts,
+                Body::from_stream(futures_util::stream::iter(chunks).chain(stream)),
+            );
+        }
+    }
+    let rate_limited = serde_json::from_slice::<Value>(&bytes).is_ok_and(|body| {
+        body.pointer("/error/code").and_then(Value::as_str) == Some("write_rate_limited")
+    });
+    let mut response =
+        Response::from_parts(parts, Body::from_stream(futures_util::stream::iter(chunks)));
+    if rate_limited {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    response
 }
 async fn security_headers_inner(
     request: Request,
@@ -680,6 +735,7 @@ pub fn gateway_router(state: GatewayState) -> Router {
             "/api/v1",
             routes
                 .clone()
+                .route("/control/events", post(ingest_control_event))
                 .merge(supervision::routes())
                 .merge(workload::routes())
                 .merge(relay::routes())
@@ -721,7 +777,7 @@ async fn ingest(
 ) -> ApiResult<Json<StoredEvent>> {
     tenant
         .blocking(false, move |tenant| {
-            tenant.write_quota()?;
+            tenant.ingestion_quota()?;
             event
                 .validate()
                 .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
@@ -744,6 +800,54 @@ async fn ingest(
         })
         .await
 }
+
+/// The route is the source of delivery authority. Worker-controlled Event
+/// fields never promote an ordinary ingestion request to the control budget.
+async fn ingest_control_event(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Json(event): Json<Event>,
+) -> ApiResult<Json<StoredEvent>> {
+    tenant
+        .blocking(false, move |tenant| {
+            tenant.write_quota()?;
+            event
+                .validate()
+                .map_err(|_| error(StatusCode::BAD_REQUEST, "Événement invalide."))?;
+            if !CONTROL_EVENT_KINDS.contains(&event.kind.as_str()) {
+                return Err(error(
+                    StatusCode::FORBIDDEN,
+                    "Ce fait n'est pas admis sur la route d'audit du contrôle.",
+                ));
+            }
+            Ok(Json(tenant.store.append(event).map_err(unavailable)?))
+        })
+        .await
+}
+
+const CONTROL_EVENT_KINDS: &[&str] = &[
+    "command.requested",
+    "command.started",
+    "command.completed",
+    "command.failed",
+    "runtime.submitted",
+    "runtime.invocation.bound",
+    "runtime.terminal.attach.authorized",
+    "runtime.cleanup.failed",
+    "workspace.import.requested",
+    "workspace.import.created",
+    "workspace.import.started",
+    "workspace.import.completed",
+    "workspace.import.recovered",
+    "workspace.import.cleanup.failed",
+    "workspace.scan.requested",
+    "workspace.scan.created",
+    "workspace.scan.started",
+    "workspace.scan.completed",
+    "workspace.export.requested",
+    "workspace.export.completed",
+    "workspace.diff.completed",
+    "observer.coverage",
+];
 
 async fn decide(
     RunnerIdentity(tenant): RunnerIdentity,
@@ -1866,4 +1970,260 @@ async fn verify_dashboard_viewer(s: &DashboardState, token: &str) -> ApiResult<(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ingestion_window_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tower::ServiceExt;
+
+    fn request(path: &str, body: Value) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", "Bearer synthetic-runner")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    // The RED used this same real route/SQLite schedule and received429 on
+    // /decide. Only the clock/count are seeded, independent of host throughput.
+    #[tokio::test]
+    async fn exhausted_ingestion_does_not_spend_the_control_decision_window() {
+        for ingest_path in ["/api/events", "/api/v1/events"] {
+            let directory = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let store = Arc::new(
+                Store::open(
+                    &directory.path().join("audit.sqlite"),
+                    Redactor::new(vec![]),
+                    1000,
+                )
+                .unwrap(),
+            );
+            let state = GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "local".into(),
+                    store: store.clone(),
+                    runner_token: "synthetic-runner".into(),
+                    viewer_token: "synthetic-viewer".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap();
+            // Hold a single window without relying on machine throughput. The
+            // future Instant is confined to this unit test and never persisted.
+            *state.tenants[0].ingestion_rate.lock().unwrap() =
+                (Instant::now() + Duration::from_secs(60), 199);
+            let router = gateway_router(state);
+            let mut event = Event::new("command.started");
+            // Worker-controlled fields impersonate a trusted producer. Their
+            // route still selects ingestion and cannot spend control capacity.
+            event.source = "runner".into();
+            let identity = event.id.clone();
+            let ingested = router
+                .clone()
+                .oneshot(request(ingest_path, json!(event)))
+                .await
+                .unwrap();
+            assert_eq!(ingested.status(), StatusCode::OK);
+            assert!(
+                store
+                    .events(&EventQuery::default())
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.event.id == identity)
+            );
+            let decision_id = uuid::Uuid::new_v4();
+            let refused = router
+                .clone()
+                .oneshot(request(ingest_path, json!(Event::new("command.started"))))
+                .await
+                .unwrap();
+            assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(refused.headers()[header::RETRY_AFTER], "1");
+            let body = axum::body::to_bytes(refused.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+                "write_rate_limited"
+            );
+            let control = router
+                .clone()
+                .oneshot(request(
+                    "/api/v1/control/events",
+                    json!(Event::new("command.started")),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(control.status(), StatusCode::OK);
+            let decision = router
+                .oneshot(request(
+                    "/api/v1/decide",
+                    json!({"request_id":decision_id,"profile":"strict","command":{"argv":["id"],"cwd":"/workspace"}}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                decision.status(),
+                StatusCode::OK,
+                "worker-driven ingestion refused the independent control route"
+            );
+            assert!(
+                store
+                    .events(&EventQuery::default())
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.event.kind == "security.decision"
+                        && row.event.data["request_id"] == decision_id.to_string())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn control_route_is_runner_only_closed_and_tenant_scoped() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let a = Arc::new(
+            Store::open_for_tenant(
+                &directory.path().join("a.sqlite"),
+                "a",
+                Redactor::new(vec![]),
+                1000,
+            )
+            .unwrap(),
+        );
+        let b = Arc::new(
+            Store::open_for_tenant(
+                &directory.path().join("b.sqlite"),
+                "b",
+                Redactor::new(vec![]),
+                1000,
+            )
+            .unwrap(),
+        );
+        let state = GatewayState::for_tenants(
+            vec![
+                TenantGateway {
+                    tenant_id: "a".into(),
+                    store: a.clone(),
+                    runner_token: "synthetic-runner".into(),
+                    viewer_token: "synthetic-viewer".into(),
+                },
+                TenantGateway {
+                    tenant_id: "b".into(),
+                    store: b.clone(),
+                    runner_token: "other-runner".into(),
+                    viewer_token: "other-viewer".into(),
+                },
+            ],
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        let router = gateway_router(state);
+        for (token, status) in [
+            ("synthetic-viewer", StatusCode::FORBIDDEN),
+            ("unrecognized-worker-token", StatusCode::UNAUTHORIZED),
+        ] {
+            let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = polled.clone();
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/control/events")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from_stream(futures_util::stream::once(async move {
+                    observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok::<_, std::io::Error>("invalid JSON body")
+                })))
+                .unwrap();
+            assert_eq!(
+                router.clone().oneshot(request).await.unwrap().status(),
+                status
+            );
+            assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        for kind in [
+            "file.created",
+            "control.fake",
+            "worker.fake",
+            "security.decision",
+            "usage.allocation",
+            "command.started.unapproved",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(request("/api/v1/control/events", json!(Event::new(kind))))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{kind}");
+        }
+        let mut event = Event::new("command.started");
+        // Session metadata cannot select tenant B's database.
+        event.session_id = Some("tenant-b-session".into());
+        let identity = event.id.clone();
+        let response = router
+            .clone()
+            .oneshot(request("/api/v1/control/events", json!(event)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            a.events(&EventQuery::default())
+                .unwrap()
+                .iter()
+                .any(|row| row.event.id == identity)
+        );
+        assert!(
+            !b.events(&EventQuery::default())
+                .unwrap()
+                .iter()
+                .any(|row| row.event.id == identity)
+        );
+        let response = router
+            .oneshot(request(
+                "/api/control/events",
+                json!(Event::new("command.started")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retry_hint_never_relabels_quota_or_durable_audit_refusals() {
+        for body in [
+            json!({"refusal":"quota"}),
+            json!({"error":{"code":"audit_write_budget_exhausted","retry_action":"contact_operator"}}),
+            json!({"error":"x".repeat(8192)}),
+        ] {
+            let expected = serde_json::to_vec(&body).unwrap();
+            let mut response = (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
+            response
+                .headers_mut()
+                .insert("x-test-preserved", HeaderValue::from_static("yes"));
+            let response = write_rate_retry_header(response).await;
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers()["x-test-preserved"], "yes");
+            assert!(response.headers().get(header::RETRY_AFTER).is_none());
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 16384)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                expected
+            );
+        }
+    }
 }

@@ -181,6 +181,11 @@ Une réservation d'arrêt ou une annulation acceptée ne confirme ni effet runti
 
 ### Transmettre l'audit terminal retenu
 
+Ce chemin d'outbox V4 est distinct du journal fichiers/capture des commandes
+directes `run`/`worker-resume`, décrit dans le [guide de reprise locale](../local/README.fr.md#réconcilier-le-worker-enregistré).
+La nouvelle route des faits du contrôle ne migre pas ces enregistrements broker
+et ne prouve pas que ce service réalise le scan et la reprise du diff du CLI direct.
+
 Le service restreint retente aussi les événements V4 existants
 `observer.coverage` et `broker.batch.result` d'un worker dont le terminal est
 prouvé. Configurer `runner_token_file` du profil avec son credential runner de

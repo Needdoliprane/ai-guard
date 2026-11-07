@@ -36,6 +36,487 @@ pub(super) struct ManagedCheckpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_event: Option<Value>,
 }
+
+const MAX_FILE_EVENTS: usize = 200;
+const MAX_RETAINED_FILE_EVENT_BYTES: usize = 120 * 1024;
+const MAX_POSTPROCESSING_BYTES: usize = 3 * 1024 * 1024;
+// Reserve growth for coverage, delivery diagnostics and summary projection.
+// File selection measures the complete journal, rather than path byte lengths.
+const POSTPROCESSING_GROWTH_RESERVE: usize = 128 * 1024;
+const MAX_SUMMARY_DIAGNOSTIC_BYTES: usize = 8192 + 32;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum DeclaredCollectionV1 {
+    Pending,
+    Complete,
+    Partial,
+    UnavailableAfterInterruption,
+    UnavailableForTty,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredDeliveryV1 {
+    state: DeclaredCollectionV1,
+    normalized_events: Option<usize>,
+    acknowledged_events: Option<usize>,
+    dropped_events: Option<usize>,
+    unknown_delivery_events: Option<usize>,
+    not_attempted_events: Option<usize>,
+    stdout_truncated: Option<bool>,
+    unterminated_final_line_omitted: Option<bool>,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedDiffV1 {
+    observation_id: Uuid,
+    before_digest: String,
+    after_digest: String,
+    changed_files: usize,
+    files: Vec<Value>,
+    acknowledged_files: usize,
+    completed: Value,
+    completed_acknowledged: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostprocessingV1 {
+    version: u32,
+    declared: DeclaredDeliveryV1,
+    diff: Option<PreparedDiffV1>,
+    diff_error: Option<String>,
+    coverage_revision: u32,
+    coverage: Option<Value>,
+    coverage_acknowledged: bool,
+    coverage_error: Option<String>,
+    previous_delivery_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    summary_projection: Option<SummaryProjectionV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SummaryProjectionV1 {
+    version: u32,
+    previous_digest: String,
+    intended: Option<String>,
+    external: Option<String>,
+    acknowledged: bool,
+}
+
+/// Separate from strict RunPlan1/2/3. This journal records delivery, never a
+/// runtime start right or a terminal fact. The caller holds the attempt lock.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PostprocessingJournalV1 {
+    version: u32,
+    tenant_id: String,
+    gateway_origin: String,
+    session_id: Uuid,
+    admission_operation_id: Uuid,
+    worker_id: String,
+    attempt_id: String,
+    spec_hash: String,
+    before_manifest_digest: String,
+    output_event_digest: Option<String>,
+    payload: PostprocessingV1,
+    payload_digest: String,
+}
+
+fn postprocessing_name(state: &PlanState) -> Result<String> {
+    Ok(format!(
+        "{}.postprocessing-v1.json",
+        state.snapshot()?.session
+    ))
+}
+fn validate_postprocessing_journal(
+    journal: &PostprocessingJournalV1,
+    plan: &RunPlan,
+    client: &AuditClient,
+) -> Result<()> {
+    let checkpoint = managed(plan)?;
+    let worker = checkpoint
+        .worker
+        .as_ref()
+        .context("postprocessing journal lacks its admitted worker")?;
+    anyhow::ensure!(
+        journal.version == 1
+            && journal.tenant_id == checkpoint.tenant_id
+            && journal.gateway_origin == checkpoint.gateway_origin
+            && journal.session_id == plan.session
+            && journal.admission_operation_id == plan.operation_id
+            && journal.worker_id == worker.worker_id
+            && journal.attempt_id == worker.attempt.attempt_id
+            && journal.spec_hash == worker.spec_hash
+            && journal.before_manifest_digest
+                == content_hash("ai-guard:workspace-manifest:v1", &checkpoint.before)?
+            && journal.payload_digest
+                == content_hash("ai-guard:postprocessing-payload:v1", &journal.payload)?,
+        "postprocessing journal identity or checksum conflicts with the original plan"
+    );
+    if let Some(value) = &checkpoint.output_event {
+        anyhow::ensure!(
+            journal.output_event_digest.as_deref()
+                == Some(content_hash("ai-guard:postprocessing-output:v1", value)?.as_str()),
+            "postprocessing journal output differs from the immutable terminal event"
+        );
+    }
+    if let Some(digest) = &journal.output_event_digest {
+        hash(digest)?;
+    }
+    journal.payload.validate(plan, client)?;
+    anyhow::ensure!(
+        serde_json::to_vec(journal)?.len() <= MAX_POSTPROCESSING_BYTES,
+        "postprocessing journal exceeds its bound"
+    );
+    Ok(())
+}
+fn load_postprocessing(
+    state: &PlanState,
+    client: &AuditClient,
+) -> Result<Option<PostprocessingJournalV1>> {
+    let journal: Option<PostprocessingJournalV1> = state
+        .directory
+        .read_bounded(&postprocessing_name(state)?, MAX_POSTPROCESSING_BYTES)?;
+    if let Some(journal) = &journal {
+        validate_postprocessing_journal(journal, &state.snapshot()?, client)?;
+    }
+    Ok(journal)
+}
+fn create_postprocessing(
+    state: &PlanState,
+    client: &AuditClient,
+    payload: PostprocessingV1,
+    output: Option<&Value>,
+) -> Result<()> {
+    anyhow::ensure!(
+        load_postprocessing(state, client)?.is_none(),
+        "postprocessing journal already exists; resume its exact facts"
+    );
+    let plan = state.snapshot()?;
+    let checkpoint = managed(&plan)?;
+    let worker = checkpoint
+        .worker
+        .as_ref()
+        .context("postprocessing journal requires worker admission")?;
+    let journal = PostprocessingJournalV1 {
+        version: 1,
+        tenant_id: checkpoint.tenant_id.clone(),
+        gateway_origin: checkpoint.gateway_origin.clone(),
+        session_id: plan.session,
+        admission_operation_id: plan.operation_id,
+        worker_id: worker.worker_id.clone(),
+        attempt_id: worker.attempt.attempt_id.clone(),
+        spec_hash: worker.spec_hash.clone(),
+        before_manifest_digest: content_hash("ai-guard:workspace-manifest:v1", &checkpoint.before)?,
+        output_event_digest: output
+            .map(|value| content_hash("ai-guard:postprocessing-output:v1", value))
+            .transpose()?,
+        payload_digest: content_hash("ai-guard:postprocessing-payload:v1", &payload)?,
+        payload,
+    };
+    validate_postprocessing_journal(&journal, &plan, client)?;
+    state
+        .directory
+        .write(&postprocessing_name(state)?, &journal)
+}
+fn update_postprocessing(
+    state: &PlanState,
+    client: &AuditClient,
+    change: impl FnOnce(&mut PostprocessingV1) -> Result<()>,
+) -> Result<()> {
+    let mut journal =
+        load_postprocessing(state, client)?.context("postprocessing journal missing")?;
+    change(&mut journal.payload)?;
+    journal.payload_digest = content_hash("ai-guard:postprocessing-payload:v1", &journal.payload)?;
+    validate_postprocessing_journal(&journal, &state.snapshot()?, client)?;
+    state
+        .directory
+        .write(&postprocessing_name(state)?, &journal)
+}
+
+impl PostprocessingV1 {
+    fn pending(
+        interactive: bool,
+        capture: Option<&crate::adapters::NormalizedCapture>,
+        truncated: Option<bool>,
+    ) -> Self {
+        Self {
+            version: 1,
+            declared: DeclaredDeliveryV1 {
+                state: if interactive {
+                    DeclaredCollectionV1::UnavailableForTty
+                } else {
+                    DeclaredCollectionV1::Pending
+                },
+                normalized_events: capture.map(|capture| capture.events.len()),
+                acknowledged_events: None,
+                dropped_events: None,
+                unknown_delivery_events: None,
+                not_attempted_events: None,
+                stdout_truncated: truncated,
+                unterminated_final_line_omitted: capture
+                    .map(|capture| capture.unterminated_final_line_omitted),
+                error: None,
+            },
+            diff: None,
+            diff_error: None,
+            coverage_revision: 0,
+            coverage: None,
+            coverage_acknowledged: false,
+            coverage_error: None,
+            previous_delivery_error: None,
+            summary_projection: None,
+        }
+    }
+    fn needs_recovery(&self) -> bool {
+        self.diff
+            .as_ref()
+            .is_none_or(|diff| !diff.completed_acknowledged)
+            || self.declared.state == DeclaredCollectionV1::Pending
+            || !self.coverage_acknowledged
+    }
+    fn validate(&self, plan: &RunPlan, client: &AuditClient) -> Result<()> {
+        anyhow::ensure!(
+            self.version == 1 && serde_json::to_vec(self)?.len() <= MAX_POSTPROCESSING_BYTES,
+            "postprocessing checkpoint version or size is invalid"
+        );
+        let declared = &self.declared;
+        for count in [
+            declared.normalized_events,
+            declared.acknowledged_events,
+            declared.dropped_events,
+            declared.unknown_delivery_events,
+            declared.not_attempted_events,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            anyhow::ensure!(
+                count <= crate::adapters::MAX_EVENTS_PER_CAPTURE,
+                "declared event count exceeds the capture bound"
+            );
+        }
+        if let (Some(total), Some(ack), Some(dropped), Some(unknown)) = (
+            declared.normalized_events,
+            declared.acknowledged_events,
+            declared.dropped_events,
+            declared.unknown_delivery_events,
+        ) {
+            anyhow::ensure!(
+                ack.checked_add(dropped)
+                    .and_then(|count| count.checked_add(unknown))
+                    == Some(total),
+                "declared event delivery counts conflict"
+            );
+        }
+        if declared.state == DeclaredCollectionV1::Complete {
+            anyhow::ensure!(
+                declared.normalized_events == declared.acknowledged_events
+                    && declared.dropped_events == Some(0)
+                    && declared.unknown_delivery_events == Some(0)
+                    && declared.not_attempted_events == Some(0)
+                    && declared.error.is_none(),
+                "complete declared capture conflicts with its counters"
+            );
+        }
+        let counters_unknown = [
+            declared.acknowledged_events,
+            declared.dropped_events,
+            declared.unknown_delivery_events,
+            declared.not_attempted_events,
+        ]
+        .iter()
+        .all(Option::is_none);
+        match declared.state {
+            DeclaredCollectionV1::Pending => anyhow::ensure!(
+                counters_unknown && declared.error.is_none(),
+                "pending capture contains final delivery counters"
+            ),
+            DeclaredCollectionV1::UnavailableAfterInterruption => anyhow::ensure!(
+                counters_unknown && declared.error.is_some(),
+                "interrupted capture must retain unknown delivery counts"
+            ),
+            DeclaredCollectionV1::UnavailableForTty => anyhow::ensure!(
+                counters_unknown
+                    && declared.normalized_events.is_none()
+                    && declared.error.is_none(),
+                "TTY capture must remain unavailable"
+            ),
+            DeclaredCollectionV1::Partial => anyhow::ensure!(
+                declared.normalized_events.is_some()
+                    && declared.acknowledged_events.is_some()
+                    && declared.dropped_events.is_some()
+                    && declared
+                        .unknown_delivery_events
+                        .is_some_and(|count| count <= 1)
+                    && declared
+                        .not_attempted_events
+                        .zip(declared.dropped_events)
+                        .is_some_and(|(unattempted, dropped)| unattempted <= dropped)
+                    && declared.error.is_some(),
+                "partial capture counters or failure are incomplete"
+            ),
+            DeclaredCollectionV1::Complete => {}
+        }
+        if let Some(diff) = &self.diff {
+            anyhow::ensure!(
+                !diff.observation_id.is_nil()
+                    && diff.before_digest
+                        == content_hash("ai-guard:workspace-manifest:v1", &managed(plan)?.before)?
+                    && diff.files.len() <= diff.changed_files.min(MAX_FILE_EVENTS)
+                    && diff.acknowledged_files <= diff.files.len()
+                    && (!diff.completed_acknowledged
+                        || diff.acknowledged_files == diff.files.len())
+                    && diff.changed_files <= Limits::default().max_files.saturating_mul(2),
+                "prepared diff conflicts with its manifest, count or acknowledgements"
+            );
+            hash(&diff.after_digest)?;
+            let mut ids = std::collections::HashSet::new();
+            let mut displays = std::collections::BTreeMap::<String, (usize, bool)>::new();
+            for value in &diff.files {
+                let event =
+                    validate_retained_event(plan, client, value, MAX_RETAINED_FILE_EVENT_BYTES)?;
+                anyhow::ensure!(
+                    ["file.created", "file.modified", "file.deleted"]
+                        .contains(&event.kind.as_str())
+                        && event.data["observation_id"] == diff.observation_id.to_string()
+                        && event.data["path"].is_string()
+                        && ids.insert(event.id),
+                    "prepared file event kind or identity conflicts"
+                );
+                let path = event.data["path"]
+                    .as_str()
+                    .context("prepared display path missing")?;
+                let display = displays.entry(path.to_owned()).or_default();
+                display.0 += 1;
+                display.1 |= event.data["path_redacted"] == true;
+                let fields = [
+                    event.data.get("change_id"),
+                    event.data.get("path_redacted"),
+                    event.data.get("path_display_ambiguous"),
+                ];
+                anyhow::ensure!(
+                    fields.iter().all(Option::is_none)
+                        || (event.data["change_id"] == value["id"]
+                            && event.data["path_redacted"].is_boolean()
+                            && event.data["path_display_ambiguous"].is_boolean()),
+                    "prepared opaque change identity or display metadata is invalid"
+                );
+            }
+            for value in &diff.files {
+                let display = displays
+                    .get(
+                        value["data"]["path"]
+                            .as_str()
+                            .context("prepared display path missing")?,
+                    )
+                    .context("prepared display group missing")?;
+                let repeated = display.0 > 1;
+                anyhow::ensure!(
+                    !repeated || display.1,
+                    "repeated display path has no redacted source"
+                );
+                let marker = value["data"].get("path_display_ambiguous");
+                anyhow::ensure!(
+                    marker.map_or(!repeated, |marker| marker.as_bool() == Some(repeated)),
+                    "prepared display path ambiguity is not declared"
+                );
+            }
+            let completed = validate_retained_event(plan, client, &diff.completed, 16 * 1024)?;
+            anyhow::ensure!(
+                completed.kind == "workspace.diff.completed"
+                    && ids.insert(completed.id)
+                    && completed.data["changed_files"] == diff.changed_files
+                    && completed.data["emitted_changes"] == diff.files.len()
+                    && completed.data["observation_id"] == diff.observation_id.to_string()
+                    && completed.data["before_manifest_digest"] == diff.before_digest
+                    && completed.data["after_manifest_digest"] == diff.after_digest
+                    && completed.data["truncated"] == (diff.changed_files > diff.files.len())
+                    && completed
+                        .data
+                        .get("omitted_changes")
+                        .is_none_or(|omitted| *omitted == diff.changed_files - diff.files.len()),
+                "prepared diff completion conflicts with its file batch"
+            );
+        }
+        anyhow::ensure!(
+            !self.coverage_acknowledged || self.coverage.is_some(),
+            "coverage acknowledgement lacks its exact event"
+        );
+        if let Some(value) = &self.coverage {
+            let event = validate_retained_event(plan, client, value, 16 * 1024)?;
+            anyhow::ensure!(
+                event.kind == "observer.coverage"
+                    && self.coverage_revision > 0
+                    && event.data["revision"] == self.coverage_revision,
+                "retained coverage revision conflicts"
+            );
+        }
+        for error in [
+            &declared.error,
+            &self.diff_error,
+            &self.coverage_error,
+            &self.previous_delivery_error,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            anyhow::ensure!(
+                error.len() <= 8192 && client.redactor.text(error) == *error,
+                "postprocessing diagnostic is invalid"
+            );
+        }
+        if let Some(projection) = &self.summary_projection {
+            anyhow::ensure!(
+                projection.version == 1,
+                "summary projection version is invalid"
+            );
+            hash(&projection.previous_digest)?;
+            for diagnostic in [&projection.intended, &projection.external]
+                .into_iter()
+                .flatten()
+            {
+                anyhow::ensure!(
+                    diagnostic.len() <= MAX_SUMMARY_DIAGNOSTIC_BYTES
+                        && client.redactor.text(diagnostic) == *diagnostic,
+                    "summary projection diagnostic exceeds its bound or contains sensitive data"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_retained_event(
+    plan: &RunPlan,
+    client: &AuditClient,
+    value: &Value,
+    maximum: usize,
+) -> Result<crate::model::Event> {
+    anyhow::ensure!(
+        serde_json::to_vec(value)?.len() <= maximum && client.redactor.value(value) == *value,
+        "retained event exceeds its bound or contains sensitive data"
+    );
+    let event: crate::model::Event = serde_json::from_value(value.clone())?;
+    event.validate()?;
+    anyhow::ensure!(
+        event.source == "runner"
+            && event.provenance == "observed"
+            && event.session_id == plan.request.session_id
+            && event.project_id == plan.request.project_id
+            && event.sandbox_id == plan.request.sandbox_id
+            && event.agent_id == plan.request.agent_id
+            && event.correlation_id == plan.request.correlation_id
+            && event.trace_id == plan.request.trace_id,
+        "retained event differs from its session identity"
+    );
+    Ok(event)
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct HelperCheckpoint {
@@ -91,6 +572,13 @@ mod private_state {
             Ok(Self { file, trusted })
         }
         pub(super) fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
+            self.read_bounded(name, 32 * 1024 * 1024)
+        }
+        pub(super) fn read_bounded<T: serde::de::DeserializeOwned>(
+            &self,
+            name: &str,
+            maximum: usize,
+        ) -> Result<Option<T>> {
             self.trusted.revalidate()?;
             let name = checked_name(name)?;
             let fd = unsafe {
@@ -110,10 +598,21 @@ mod private_state {
             let file = unsafe { fs::File::from_raw_fd(fd) };
             check_private_file(&file)?;
             anyhow::ensure!(
-                file.metadata()?.len() <= 32 * 1024 * 1024,
+                file.metadata()?.len() <= maximum as u64,
                 "broker checkpoint exceeds its bound"
             );
-            Ok(Some(serde_json::from_reader(file)?))
+            let read_limit = maximum
+                .checked_add(1)
+                .context("checkpoint read bound overflow")?;
+            // from_reader(File) performs unbuffered byte reads. Use a fresh,
+            // bounded buffer on this same verified FD before deserializing.
+            let mut bytes = Vec::with_capacity(read_limit);
+            std::io::copy(&mut file.take(u64::try_from(read_limit)?), &mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= maximum,
+                "broker checkpoint exceeds its bound"
+            );
+            Ok(Some(serde_json::from_slice(&bytes)?))
         }
         pub(super) fn write(&self, name: &str, value: &impl Serialize) -> Result<()> {
             self.trusted.revalidate()?;
@@ -363,6 +862,16 @@ use private_state::{AttemptGuard, Directory};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn postprocessing_payload_without_projection_keeps_its_legacy_bytes() {
+        let legacy = r#"{"version":1,"declared":{"state":"pending","normalized_events":null,"acknowledged_events":null,"dropped_events":null,"unknown_delivery_events":null,"not_attempted_events":null,"stdout_truncated":null,"unterminated_final_line_omitted":null,"error":null},"diff":null,"diff_error":null,"coverage_revision":0,"coverage":null,"coverage_acknowledged":false,"coverage_error":null,"previous_delivery_error":null}"#;
+        let pending = PostprocessingV1::pending(false, None, None);
+        assert_eq!(serde_json::to_vec(&pending).unwrap(), legacy.as_bytes());
+        let decoded: PostprocessingV1 = serde_json::from_str(legacy).unwrap();
+        assert!(decoded.summary_projection.is_none());
+        assert_eq!(serde_json::to_vec(&decoded).unwrap(), legacy.as_bytes());
+    }
 
     #[test]
     fn launch_seed_is_distinct_for_scope_parent_intent_ref_and_invocation() {
@@ -911,7 +1420,7 @@ async fn reopen_authority(
             "authority seed differs during invocation adoption"
         );
     }
-    client.post_event(pending).await?;
+    client.post_control_event(pending).await?;
     if let Some(seed) = &mut seed {
         seed.binding = Some(runtime.binding().clone());
         seed.invocation = runtime.binding().invocation.clone();
@@ -1541,7 +2050,7 @@ async fn post_saved_terminal(client: &AuditClient, state: &PlanState) -> Result<
     if !checkpoint.output_acknowledged
         && let Some(event) = checkpoint.output_event
     {
-        client.post_event(event).await?;
+        client.post_control_event(event).await?;
         state.update(|plan| {
             plan.managed
                 .as_mut()
@@ -1592,7 +2101,7 @@ pub(super) async fn execute_plan(
         requested["data"]["provider_resolution"] = serde_json::to_value(resolution)?;
     }
     requested["command"] = serde_json::to_value(&plan.request.command)?;
-    client.post_event(requested).await?;
+    client.post_control_event(requested).await?;
     let (receipt, decision) = authorize_plan(&mut plan, &client, supplied.as_deref()).await?;
     let tenant = check_identity(&client, None).await?;
     let (authority_file, seed, image_id) = prepare_authority(&plan, &approved).await?;
@@ -1824,7 +2333,7 @@ async fn launch_worker(
     );
     submitted["command"] = serde_json::to_value(&plan.request.command)?;
     submitted["decision"] = decision;
-    client.post_event(submitted).await?;
+    client.post_control_event(submitted).await?;
     if plan.options.interactive {
         // Acknowledged before the durable start claim, no keypresses or screen contents.
         emit(client, &plan, "runtime.terminal.attach.authorized", json!({"execution_mode":plan.request.execution_mode,"security_preset":worker.launch.security_preset,"worker_id":worker.worker_id,"attempt_id":worker.attempt.attempt_id,"reattach":false})).await?;
@@ -1897,7 +2406,7 @@ async fn launch_worker(
                 json!({"runtime_started_at":observed.process.started_at,"runtime_state":observed.process.status,"running":observed.process.running}),
             );
             event["command"] = serde_json::to_value(&plan.request.command)?;
-            client.post_event(event).await?;
+            client.post_control_event_once(event).await?;
             Ok(())
         }
     };
@@ -2180,6 +2689,519 @@ async fn managed_scan(
     })
     .await?
 }
+
+fn postprocessing_diagnostic(client: &AuditClient, error: &anyhow::Error) -> String {
+    crate::redaction::clip(&redacted_error(&client.redactor, error), 8160)
+}
+fn manifest_mode_coverage(manifest: &Manifest) -> Result<&'static str> {
+    if manifest.is_empty() {
+        return Ok("not_applicable");
+    }
+    let mut known = 0;
+    for fingerprint in manifest.values() {
+        if serde_json::to_value(fingerprint)?
+            .get("mode")
+            .is_some_and(|mode| !mode.is_null())
+        {
+            known += 1;
+        }
+    }
+    Ok(if known == manifest.len() {
+        "complete"
+    } else if known == 0 {
+        "unknown"
+    } else {
+        "partial"
+    })
+}
+async fn publish_trusted_diff(
+    runtime: Option<&ManagedRuntime>,
+    client: &AuditClient,
+    state: &PlanState,
+    recovered: bool,
+) -> Result<()> {
+    if load_postprocessing(state, client)?
+        .context("postprocessing journal missing")?
+        .payload
+        .diff
+        .is_none()
+    {
+        let plan = state.snapshot()?;
+        let before = state.checkpoint()?.before;
+        let after = managed_scan(
+            runtime.context("trusted diff recovery requires its bound runtime")?,
+            client,
+            &plan,
+            &state.worker()?,
+        )
+        .await?;
+        let changes = workspace::diff_manifests(&before, &after);
+        let count = changes.len();
+        let observation = Uuid::new_v4();
+        let phase = if recovered {
+            "post_completion_recovery"
+        } else {
+            "after_completion"
+        };
+        let before_digest = content_hash("ai-guard:workspace-manifest:v1", &before)?;
+        let after_digest = content_hash("ai-guard:workspace-manifest:v1", &after)?;
+        let completed=client.redactor.value(&event(&plan,"workspace.diff.completed",json!({"observation_id":observation,"observation_phase":phase,"changed_files":count,"emitted_changes":0,"omitted_changes":count,"truncated":count>0,"omission_reasons":[],"limits":{"maximum_events":MAX_FILE_EVENTS,"maximum_event_bytes":MAX_RETAINED_FILE_EVENT_BYTES,"maximum_journal_bytes":MAX_POSTPROCESSING_BYTES,"reserved_growth_bytes":POSTPROCESSING_GROWTH_RESERVE},"before_manifest_digest":before_digest,"after_manifest_digest":after_digest,"comparison_coverage":{"content":"observed","baseline_modes":manifest_mode_coverage(&before)?,"observed_modes":manifest_mode_coverage(&after)?}})));
+        let mut prepared = PreparedDiffV1 {
+            observation_id: observation,
+            before_digest,
+            after_digest,
+            changed_files: count,
+            files: Vec::new(),
+            acknowledged_files: 0,
+            completed,
+            completed_acknowledged: false,
+        };
+        let mut omission_reasons = Vec::new();
+        if count > MAX_FILE_EVENTS {
+            omission_reasons.push("event_count_limit");
+        }
+        let mut candidate =
+            load_postprocessing(state, client)?.context("postprocessing journal missing")?;
+        for change in changes.into_iter().take(MAX_FILE_EVENTS) {
+            let mut data = serde_json::to_value(&change)?;
+            data["observation_id"] = json!(observation);
+            data["observation_phase"] = json!(phase);
+            data["path_redacted"] = json!(client.redactor.text(&change.path) != change.path);
+            data["path_display_ambiguous"] = json!(false);
+            let mut file =
+                client
+                    .redactor
+                    .value(&event(&plan, &format!("file.{}", change.change), data));
+            let change_id = file["id"].clone();
+            file["data"]["change_id"] = change_id;
+            if serde_json::to_vec(&file)?.len() > MAX_RETAINED_FILE_EVENT_BYTES {
+                omission_reasons.push("event_payload_limit");
+                break;
+            }
+            prepared.files.push(file);
+            update_diff_omissions(&mut prepared, &omission_reasons);
+            candidate.payload.diff = Some(prepared.clone());
+            if serde_json::to_vec(&candidate)?.len()
+                > MAX_POSTPROCESSING_BYTES - POSTPROCESSING_GROWTH_RESERVE
+            {
+                prepared.files.pop();
+                omission_reasons.push("journal_byte_budget");
+                break;
+            }
+        }
+        update_diff_omissions(&mut prepared, &omission_reasons);
+        mark_path_display_ambiguity(&mut prepared.files)?;
+        prepared.completed["timestamp"] =
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        // The bounded exact batch is synced before its first HTTP publication.
+        update_postprocessing(state, client, |payload| {
+            payload.diff = Some(prepared);
+            Ok(())
+        })?;
+    }
+    loop {
+        let journal =
+            load_postprocessing(state, client)?.context("postprocessing journal missing")?;
+        let diff = journal.payload.diff.context("prepared file diff missing")?;
+        if let Some(event) = diff.files.get(diff.acknowledged_files) {
+            client.post_event(event.clone()).await?;
+            update_postprocessing(state, client, |payload| {
+                payload
+                    .diff
+                    .as_mut()
+                    .context("prepared diff missing")?
+                    .acknowledged_files += 1;
+                Ok(())
+            })?;
+        } else {
+            if !diff.completed_acknowledged {
+                client.post_control_event(diff.completed).await?;
+                update_postprocessing(state, client, |payload| {
+                    payload
+                        .diff
+                        .as_mut()
+                        .context("prepared diff missing")?
+                        .completed_acknowledged = true;
+                    Ok(())
+                })?;
+            }
+            return Ok(());
+        }
+    }
+}
+
+fn update_diff_omissions(diff: &mut PreparedDiffV1, reasons: &[&str]) {
+    diff.completed["data"]["emitted_changes"] = json!(diff.files.len());
+    diff.completed["data"]["omitted_changes"] = json!(diff.changed_files - diff.files.len());
+    diff.completed["data"]["truncated"] = json!(diff.changed_files > diff.files.len());
+    diff.completed["data"]["omission_reasons"] = json!(reasons);
+}
+
+fn mark_path_display_ambiguity(files: &mut [Value]) -> Result<()> {
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    for file in files.iter() {
+        let path = file["data"]["path"]
+            .as_str()
+            .context("prepared display path missing")?;
+        *counts.entry(path.to_owned()).or_default() += 1;
+    }
+    for file in files.iter_mut() {
+        let path = file["data"]["path"]
+            .as_str()
+            .context("prepared display path missing")?;
+        let ambiguous = counts.get(path).is_some_and(|count| *count > 1);
+        file["data"]["path_display_ambiguous"] = json!(ambiguous);
+    }
+    Ok(())
+}
+
+async fn deliver_saved_coverage(client: &AuditClient, state: &PlanState) -> Result<()> {
+    let payload = load_postprocessing(state, client)?
+        .context("postprocessing journal missing")?
+        .payload;
+    if !payload.coverage_acknowledged
+        && let Some(event) = payload.coverage
+    {
+        match client.post_control_event(event).await {
+            Ok(_) => update_postprocessing(state, client, |payload| {
+                payload.coverage_acknowledged = true;
+                payload.coverage_error = None;
+                Ok(())
+            })?,
+            Err(error) => {
+                let diagnostic = postprocessing_diagnostic(client, &error);
+                update_postprocessing(state, client, |payload| {
+                    payload.coverage_error = Some(diagnostic.clone());
+                    payload.previous_delivery_error = Some(diagnostic);
+                    Ok(())
+                })?;
+                return Err(error);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn publish_postprocessing_coverage(client: &AuditClient, state: &PlanState) -> Result<()> {
+    // Never replace an unacknowledged coverage Event with newer content under
+    // its identity. Deliver that exact historical state before a new revision.
+    deliver_saved_coverage(client, state).await?;
+    let plan = state.snapshot()?;
+    let payload = load_postprocessing(state, client)?
+        .context("postprocessing journal missing")?
+        .payload;
+    let complete = payload
+        .diff
+        .as_ref()
+        .is_some_and(|diff| diff.completed_acknowledged)
+        && [
+            DeclaredCollectionV1::Complete,
+            DeclaredCollectionV1::UnavailableForTty,
+        ]
+        .contains(&payload.declared.state)
+        && payload.diff_error.is_none()
+        && payload.declared.error.is_none();
+    let mut declared = payload.declared.clone();
+    declared.error = declared
+        .error
+        .map(|error| crate::redaction::clip(&error, 1000));
+    let mut data = json!({"revision":payload.coverage_revision,"provider":plan.options.provider,"collection":"lifecycle_and_workspace_diff","declared_collection":declared,"normalized_events":payload.declared.normalized_events,"posted_events":payload.declared.acknowledged_events,"dropped_events":payload.declared.dropped_events,"maximum_events":crate::adapters::MAX_EVENTS_PER_CAPTURE,"stdout_truncated":payload.declared.stdout_truncated,"unterminated_final_line_omitted":payload.declared.unterminated_final_line_omitted,"unknown_or_oversized_lines":"ignored","nested_authorization":false,"raw_output_capture":plan.options.capture_output,"postprocessing_complete":complete,"trusted_diff":if payload.diff.as_ref().is_some_and(|diff|diff.completed_acknowledged){"complete"}else{"pending"},"workspace_error":payload.diff_error.as_ref().map(|error|crate::redaction::clip(error,1000)),"previous_coverage_delivery_error":payload.previous_delivery_error.as_ref().map(|error|crate::redaction::clip(error,1000)),"baseline_mode_coverage":manifest_mode_coverage(&state.checkpoint()?.before)?});
+    let diff_truncated = payload
+        .diff
+        .as_ref()
+        .is_some_and(|diff| diff.changed_files > diff.files.len());
+    data["trusted_diff_events_truncated"] = payload
+        .diff
+        .as_ref()
+        .map(|_| json!(diff_truncated))
+        .unwrap_or(Value::Null);
+    let (phase, prepared, acknowledged) = match payload.diff.as_ref() {
+        None => ("not_prepared", None, None),
+        Some(diff) => (
+            if diff.completed_acknowledged {
+                "complete"
+            } else if diff.acknowledged_files < diff.files.len() {
+                "files_pending"
+            } else {
+                "summary_pending"
+            },
+            Some(diff.files.len()),
+            Some(diff.acknowledged_files),
+        ),
+    };
+    data["file_delivery"] = json!({"version":1,"phase":phase,"prepared_changes":prepared,"acknowledged_changes":acknowledged});
+    data["trusted_diff_changed_files"] = payload
+        .diff
+        .as_ref()
+        .map(|diff| json!(diff.changed_files))
+        .unwrap_or(Value::Null);
+    if payload
+        .coverage
+        .as_ref()
+        .is_some_and(|event| event["data"] == data)
+    {
+        return Ok(());
+    }
+    let revision = payload
+        .coverage_revision
+        .checked_add(1)
+        .context("coverage revision overflow")?;
+    data["revision"] = json!(revision);
+    let mut coverage = event(&plan, "observer.coverage", data);
+    coverage["coverage"] = json!(if complete
+        && !diff_truncated
+        && !payload.declared.stdout_truncated.unwrap_or(false)
+        && payload.declared.normalized_events != Some(crate::adapters::MAX_EVENTS_PER_CAPTURE)
+    {
+        "generic"
+    } else {
+        "partial"
+    });
+    let coverage = client.redactor.value(&coverage);
+    update_postprocessing(state, client, |payload| {
+        payload.coverage_revision = revision;
+        payload.coverage = Some(coverage);
+        payload.coverage_acknowledged = false;
+        Ok(())
+    })?;
+    deliver_saved_coverage(client, state).await
+}
+
+fn sync_postprocessing_summary(client: &AuditClient, state: &PlanState) -> Result<()> {
+    let payload = load_postprocessing(state, client)?
+        .context("postprocessing journal missing")?
+        .payload;
+    let count = payload
+        .diff
+        .as_ref()
+        .filter(|diff| diff.completed_acknowledged)
+        .map(|diff| diff.changed_files);
+    let mut errors = Vec::new();
+    for error in [
+        &payload.diff_error,
+        &payload.declared.error,
+        &payload.coverage_error,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        errors.push(error.clone());
+    }
+    if count.is_none() && payload.diff_error.is_none() {
+        errors.push("trusted workspace diff remains unacknowledged".into());
+    }
+    if !payload.coverage_acknowledged && payload.coverage_error.is_none() {
+        errors.push("postprocessing coverage remains unacknowledged".into());
+    }
+    let owned_diagnostic =
+        (!errors.is_empty()).then(|| crate::redaction::clip(&errors.join("; "), 8160));
+    let Some(mut summary) = state.checkpoint()?.result else {
+        if let Some(error) = owned_diagnostic {
+            bail!("postprocessing recovery incomplete: {error}");
+        }
+        return Ok(());
+    };
+    // Resolve a cut around the previous two-file projection before deciding
+    // ownership. A different current value belongs to another producer and is
+    // retained opaquely; its text never determines a failure category.
+    let mut projection = payload.summary_projection;
+    if let Some(previous) = &mut projection {
+        if !previous.acknowledged
+            && (summary.postprocessing_error == previous.intended
+                || content_hash("ai-guard:summary-error:v1", &summary.postprocessing_error)?
+                    == previous.previous_digest)
+        {
+            if summary.postprocessing_error != previous.intended {
+                state.update(|plan| {
+                    let result = plan
+                        .managed
+                        .as_mut()
+                        .context("missing checkpoint")?
+                        .result
+                        .as_mut()
+                        .context("summary disappeared")?;
+                    result.postprocessing_error = previous.intended.clone();
+                    Ok(())
+                })?;
+                summary.postprocessing_error = previous.intended.clone();
+            }
+            previous.acknowledged = true;
+            update_postprocessing(state, client, |payload| {
+                payload.summary_projection = projection.clone();
+                Ok(())
+            })?;
+        }
+    }
+    let external = match &projection {
+        Some(previous)
+            if previous.acknowledged && summary.postprocessing_error == previous.intended =>
+        {
+            previous.external.clone()
+        }
+        _ => summary
+            .postprocessing_error
+            .as_ref()
+            .map(|error| crate::redaction::clip(&client.redactor.text(error), 8192)),
+    };
+    let diagnostic = match (&external, &owned_diagnostic) {
+        (None, None) => None,
+        (Some(error), None) | (None, Some(error)) => Some(error.clone()),
+        (Some(external), Some(owned)) if external == owned => Some(external.clone()),
+        (Some(external), Some(owned)) => Some(crate::redaction::clip(
+            &format!("{external}; {owned}"),
+            8192,
+        )),
+    };
+    if summary.changed_files == count
+        && summary.postprocessing_error == diagnostic
+        && projection.as_ref().is_some_and(|previous| {
+            previous.acknowledged
+                && previous.intended == diagnostic
+                && previous.external == external
+        })
+    {
+        return Ok(());
+    }
+    // Record the exact intended projection before changing only existing plan
+    // fields. A crash never grants ownership over a different external value.
+    let intent = SummaryProjectionV1 {
+        version: 1,
+        previous_digest: content_hash("ai-guard:summary-error:v1", &summary.postprocessing_error)?,
+        intended: diagnostic.clone(),
+        external,
+        acknowledged: false,
+    };
+    update_postprocessing(state, client, |payload| {
+        payload.summary_projection = Some(intent);
+        Ok(())
+    })?;
+    state.update(|plan| {
+        if let Some(summary) = plan
+            .managed
+            .as_mut()
+            .context("missing checkpoint")?
+            .result
+            .as_mut()
+        {
+            summary.changed_files = count;
+            summary.postprocessing_error = diagnostic.clone();
+        }
+        Ok(())
+    })?;
+    update_postprocessing(state, client, |payload| {
+        payload
+            .summary_projection
+            .as_mut()
+            .context("summary projection missing")?
+            .acknowledged = true;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+async fn complete_postprocessing(
+    runtime: Option<&ManagedRuntime>,
+    client: &AuditClient,
+    state: &PlanState,
+    capture: Option<crate::adapters::NormalizedCapture>,
+    recovered: bool,
+) -> Result<()> {
+    // A previous coverage refusal never prevents a new trusted observation.
+    let _coverage_result = deliver_saved_coverage(client, state).await;
+    let diff_result = publish_trusted_diff(runtime, client, state, recovered).await;
+    update_postprocessing(state, client, |payload| {
+        payload.diff_error = diff_result
+            .as_ref()
+            .err()
+            .map(|error| postprocessing_diagnostic(client, error));
+        Ok(())
+    })?;
+    if let Some(capture) = capture {
+        let normalized = capture.events.len();
+        let mut acknowledged = 0;
+        let mut failure = None;
+        let mut unknown = 0;
+        for event in capture.events {
+            match client.post_event(event).await {
+                Ok(_) => acknowledged += 1,
+                Err(error) => {
+                    unknown = usize::from(
+                        !matches!(error.downcast_ref::<EventPostFailure>(), Some(EventPostFailure::Rejected(status)) if status.is_client_error())
+                            && !matches!(
+                                error.downcast_ref::<EventPostFailure>(),
+                                Some(EventPostFailure::RateLimitRetryExhausted)
+                            ),
+                    );
+                    failure = Some(postprocessing_diagnostic(client, &error));
+                    break;
+                }
+            }
+        }
+        update_postprocessing(state, client, |payload| {
+            let declared = &mut payload.declared;
+            declared.state = if failure.is_some() {
+                DeclaredCollectionV1::Partial
+            } else {
+                DeclaredCollectionV1::Complete
+            };
+            declared.acknowledged_events = Some(acknowledged);
+            declared.dropped_events = Some(normalized - acknowledged - unknown);
+            declared.unknown_delivery_events = Some(unknown);
+            declared.not_attempted_events = Some(if failure.is_some() {
+                normalized - acknowledged - 1
+            } else {
+                0
+            });
+            declared.error = failure;
+            Ok(())
+        })?;
+    } else {
+        update_postprocessing(state, client, |payload| {
+            if payload.declared.state == DeclaredCollectionV1::Pending {
+                payload.declared.state = DeclaredCollectionV1::UnavailableAfterInterruption;
+                payload.declared.error=Some("declared capture was not retained; its delivery counts remain unknown after interruption".into());
+            }
+            Ok(())
+        })?;
+    }
+    if let Err(error) = publish_postprocessing_coverage(client, state).await {
+        let diagnostic = postprocessing_diagnostic(client, &error);
+        update_postprocessing(state, client, |payload| {
+            payload.coverage_error = Some(diagnostic.clone());
+            payload.previous_delivery_error = Some(diagnostic);
+            Ok(())
+        })?;
+    }
+    sync_postprocessing_summary(client, state)
+}
+
+async fn recover_postprocessing(
+    runtime: Option<&ManagedRuntime>,
+    client: &AuditClient,
+    state: &PlanState,
+) -> Result<()> {
+    if load_postprocessing(state, client)?.is_none() {
+        let plan = state.snapshot()?;
+        let checkpoint = managed(&plan)?;
+        let mut payload = PostprocessingV1::pending(plan.options.interactive, None, None);
+        if !plan.options.interactive {
+            payload.declared.state = DeclaredCollectionV1::UnavailableAfterInterruption;
+            payload.declared.error = Some(
+                "legacy declared capture is unavailable; delivery counts remain unknown".into(),
+            );
+        }
+        create_postprocessing(state, client, payload, checkpoint.output_event.as_ref())?;
+    }
+    if load_postprocessing(state, client)?
+        .context("postprocessing journal missing")?
+        .payload
+        .needs_recovery()
+    {
+        complete_postprocessing(runtime, client, state, None, true).await
+    } else {
+        sync_postprocessing_summary(client, state)
+    }
+}
 async fn cleanup_committed(
     runtime: &ManagedRuntime,
     client: &AuditClient,
@@ -2292,6 +3314,25 @@ async fn finish_execution(
     }
     completed["command"] = serde_json::to_value(&plan.request.command)?;
     completed["result"] = result;
+    let capture = if plan.options.interactive {
+        None
+    } else {
+        let context = crate::adapters::AdapterContext {
+            session_id: plan.session.to_string(),
+            project_id: plan.request.project_id.clone().unwrap_or_default(),
+            sandbox_id: plan.request.sandbox_id.clone().unwrap_or_default(),
+            agent_id: plan.request.agent_id.clone().unwrap_or_default(),
+            correlation_id: plan.request.correlation_id.clone().unwrap_or_default(),
+            trace_id: plan.request.trace_id.clone().unwrap_or_default(),
+        };
+        Some(crate::adapters::parse_redacted_capture(
+            &plan.options.provider,
+            &execution.stdout.bytes,
+            execution.stdout.truncated,
+            &context,
+            &client.redactor,
+        ))
+    };
     let initial_summary = RunSummary {
         session_id: plan.session,
         volume: worker.attempt.volume_name.clone(),
@@ -2308,9 +3349,23 @@ async fn finish_execution(
         postprocessing_error: None,
         transport_stop_reason: execution.transport_stop_reason.clone(),
     };
+    let completed = client.redactor.value(&completed);
+    // Two files, deliberately ordered rather than claimed atomic: Pending is
+    // synced first. A crash before the following plan write requires runtime
+    // reconciliation and never turns this delivery journal into terminal proof.
+    create_postprocessing(
+        state,
+        client,
+        PostprocessingV1::pending(
+            plan.options.interactive,
+            capture.as_ref(),
+            (!plan.options.interactive).then_some(execution.stdout.truncated),
+        ),
+        Some(&completed),
+    )?;
     state.update(|plan| {
         let checkpoint = plan.managed.as_mut().context("missing checkpoint")?;
-        checkpoint.output_event = Some(client.redactor.value(&completed));
+        checkpoint.output_event = Some(completed);
         checkpoint.result = Some(initial_summary.clone());
         Ok(())
     })?;
@@ -2334,45 +3389,15 @@ async fn finish_execution(
         })?;
         return Ok(summary);
     }
-    let postprocessing=async {
-        if plan.options.interactive {
-            let mut coverage = event(&plan,"observer.coverage",json!({"provider":plan.options.provider,"collection":"lifecycle_and_workspace_diff","provider_events":"unavailable_for_tty","nested_authorization":false,"raw_output_capture":false,"separate_stdout_stderr":"unavailable_for_tty"}));
-            coverage["coverage"] = json!("generic");
-            client.post_event(coverage).await?;
-        } else {
-        let context=crate::adapters::AdapterContext{session_id:plan.session.to_string(),project_id:plan.request.project_id.clone().unwrap_or_default(),sandbox_id:plan.request.sandbox_id.clone().unwrap_or_default(),agent_id:plan.request.agent_id.clone().unwrap_or_default(),correlation_id:plan.request.correlation_id.clone().unwrap_or_default(),trace_id:plan.request.trace_id.clone().unwrap_or_default()};
-        let capture = crate::adapters::parse_redacted_capture(
-            &plan.options.provider,
-            &execution.stdout.bytes,
-            execution.stdout.truncated,
-            &context,
-            &client.redactor,
-        );
-        let normalized = capture.events.len();
-        for event in capture.events {
-            client.post_event(event).await?;
-        }
-        emit(client,&plan,"observer.coverage",json!({"provider":plan.options.provider,"collection":"after_completion","normalized_events":normalized,"maximum_events":crate::adapters::MAX_EVENTS_PER_CAPTURE,"stdout_truncated":execution.stdout.truncated,"unterminated_final_line_omitted":capture.unterminated_final_line_omitted,"unknown_or_oversized_lines":"ignored","nested_authorization":false,"raw_output_capture":plan.options.capture_output})).await?;
-        }
-        let after=managed_scan(runtime,client,&plan,&state.worker()?).await?;let changes=workspace::diff_manifests(&state.checkpoint()?.before,&after);let count=changes.len();
-        for change in changes.into_iter().take(200){emit(client,&plan,&format!("file.{}",change.change),serde_json::to_value(change)?).await?;}
-        emit(client,&plan,"workspace.diff.completed",json!({"changed_files":count,"emitted_changes":count.min(200),"truncated":count>200})).await?;
-        Ok::<usize,anyhow::Error>(count)
-    }.await;
-    match postprocessing {
-        Ok(count) => summary.changed_files = Some(count),
-        Err(error) => {
-            summary.postprocessing_error = Some(crate::redaction::clip(
-                &redacted_error(&client.redactor, &error),
-                8192,
-            ))
-        }
-    }
     state.update(|plan| {
         plan.managed.as_mut().context("missing checkpoint")?.result = Some(summary.clone());
         Ok(())
     })?;
-    Ok(summary)
+    complete_postprocessing(Some(runtime), client, state, capture, false).await?;
+    state
+        .checkpoint()?
+        .result
+        .context("postprocessing result missing")
 }
 
 fn validate_checkpoint(plan: &RunPlan, client: &AuditClient) -> Result<()> {
@@ -2613,12 +3638,15 @@ fn action_status(
     )
 }
 pub(super) async fn worker_status(session: Uuid, config: &Path, gateway: &str) -> Result<Value> {
-    let (state, _client) = load_session(session, config, gateway).await?;
-    action_status(
+    let (state, client) = load_session(session, config, gateway).await?;
+    let mut status = action_status(
         &state,
         None,
         "Registry state read from the authenticated tenant; runtime facts carry their original observation time.",
-    )
+    )?;
+    status["postprocessing"] =
+        serde_json::to_value(load_postprocessing(&state, &client)?.map(|journal| journal.payload))?;
+    Ok(status)
 }
 async fn finalize_recovered(
     runtime: &ManagedRuntime,
@@ -2652,6 +3680,17 @@ async fn finalize_recovered(
             }
             Ok(())
         })?;
+    }
+    if load_postprocessing(state, client)?.is_some()
+        || state.checkpoint()?.result.as_ref().is_none_or(|result| {
+            result.changed_files.is_none() || result.postprocessing_error.is_some()
+        })
+    {
+        anyhow::ensure!(
+            state.worker()?.cleanup_removed == Some(true),
+            "postprocessing recovery requires durable cleanup"
+        );
+        recover_postprocessing(Some(runtime), client, state).await?;
     }
     action_status(
         state,
@@ -2705,10 +3744,27 @@ pub(super) async fn resume_worker(
     }
     if worker.state == WorkerStateV1::Terminal && worker.cleanup_removed == Some(true) {
         post_saved_terminal(&client, &state).await?;
+        let journal = load_postprocessing(&state, &client)?;
+        if journal.is_some()
+            || state.checkpoint()?.result.as_ref().is_none_or(|result| {
+                result.changed_files.is_none() || result.postprocessing_error.is_some()
+            })
+        {
+            if journal
+                .as_ref()
+                .is_none_or(|journal| journal.payload.diff.is_none())
+            {
+                let runtime = bound_runtime(&state, &client, program, adopt).await?;
+                runtime.doctor(plan.options.allow_rootful_runtime).await?;
+                recover_postprocessing(Some(&runtime), &client, &state).await?;
+            } else {
+                recover_postprocessing(None, &client, &state).await?;
+            }
+        }
         return action_status(
             &state,
             None,
-            "Terminal allocation and cleanup are already durable; no runtime action was repeated.",
+            "Terminal allocation and cleanup are durable. Retained postprocessing facts were reconciled; no worker command was started again.",
         );
     }
     // A fresh start may use only the exact credential bytes admitted earlier.

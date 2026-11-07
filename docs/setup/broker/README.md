@@ -181,6 +181,11 @@ An accepted stop reservation or cancellation confirms neither a runtime effect n
 
 ### Deliver retained terminal audit events
 
+This V4 outbox path is distinct from the direct `run`/`worker-resume` file and
+capture journal described in the [local recovery guide](../local/README.md#reconcile-the-recorded-worker).
+The new control-event route does not migrate these broker records or establish
+that this service has performed the direct CLI's file scan and diff recovery.
+
 The restricted service also retries the existing V4 `observer.coverage` and
 `broker.batch.result` events of a proved terminal worker. Configure the profile's
 `runner_token_file` with its trusted runner credential. Each attempt authenticates
