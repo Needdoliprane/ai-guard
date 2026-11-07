@@ -1,0 +1,34 @@
+# Admission durable du canal relais — proposition du 7 novembre 2026
+
+Cette couture précise la direction approuvée dans [RELAY_RUNTIME_HANDOFF.md](RELAY_RUNTIME_HANDOFF.md). Les URI, DTO et wrappers ci-dessous sont **nouveaux et proposés** ; ils ne décrivent pas une API déjà disponible. Aucun moteur, modèle, worker réel ou infrastructure distante n'est qualifié par ce lot logiciel.
+
+## Appuis constatés à `d550c34`
+
+- `WorkloadBinding` est privé au contrôle (`src/workload.rs`) ; son ID, sa révision, son sujet, son digest et son échéance sont conservés dans SQLite. `Store::checked_worker_relay_endpoint` exige supervision active, endpoint canonique de génération 1, worker Running avec quota tenue, identité de conteneur et binding actif.
+- `WorkerV1` conserve `observed_started_at`, `last_observation` et l'inspection créée. Ces faits sont déclarés par le broker puis reçus par le contrôle ; ils ne constituent pas une observation indépendante du gateway.
+- Le vrai SDK de contrôle est `runner::AuditClient`, notamment `control_supervision_identity`. `RunnerIdentity` authentifie et sélectionne le tenant avant le corps. `RoleLease` reste un verrou local privé possédé par le service broker, et ne peut être établi par un DTO HTTP.
+- `Store::append` refuse déjà `control.*`. Le nouveau journal doit rester dans ce namespace réservé et disposer de son validateur dédié ; l'ingestion libre et `/control/events` ne doivent pas pouvoir écrire ces admissions.
+
+## Couture proposée
+
+Nouvelles routes runner-only V1 : `POST /api/v1/relay/channels/admissions` pour accepter un UUID/epoch et `POST /api/v1/relay/channels/{channel_id}/transitions` pour ses faits de lifecycle. Elles sont publiées par le transport `/control` existant, dans sa lane runner ; elles ne sont jamais ajoutées aux trois routes worker. Aucune URI, credential brut, chemin hôte, tenant ou identité humaine n'entre dans le corps.
+
+L'admission fermée contient l'UUID d'opération/canal, l'epoch attendue, le namespace attendu, endpoint, credential ID/révision/digest, session, révision worker attendue, inspection/StartedAt reçus du broker, empreinte d'autorité et empreinte/version de configuration, expiry demandée. Le Store recoupe ces valeurs, dans la même transaction que l'audit, avec son binding courant et son worker Running courant ; il exige une observation Running, `running:true`, `restart_count:0`, même StartedAt valide, même inspection et même session. Les empreintes doivent aussi correspondre à l'ArmV1 worker persistée. L'expiry ne dépasse ni binding, ni StartedAt observé + timeout autorisé, ni l'ancre UTC de l'Arm + son timeout ; absence de cette ancre refuse l'admission. Cette borne UTC ne remplace pas l'échéance monotone retenue, que le broker doit encore vérifier avant exec et chaque dispatch. La provenance est explicitement `broker_reported_runtime`; aucune indépendance supplémentaire n'est attribuée.
+
+Un reçu fermé lie le hash SHA-256 de l'entrée, tenant authentifié, namespace, UUID/epoch, worker/attempt/génération, credential ID/révision, expiry, état, séquence/hash d'audit. Le SDK privé ne construit son wrapper opaque consommable qu'à partir d'une réponse HTTP fraîche bornée, validée et corrélée à la requête et à `control_supervision_identity`. Un reçu rejoué, y compris après réponse perdue, ne remint jamais cette capability ; la vérification courante est un résultat distinct. Le DTO seul ne fournit aucune conversion vers le wrapper. Celui-ci est une preuve d'acceptation durable, pas un permis moteur : la dernière observation locale, l'échéance monotone et le `RoleLease` retenus restent nécessaires pour produire le nouveau permis exec distinct du start dans la couture runtime.
+
+## Persistance et états
+
+Choix proposé : journal versionné `control.relay_channel.v1` dans la table `events` existante, avec projection reconstruite sous transaction SQLite contrôlée. Pas de nouvelle base/service/table, pas de migration ni occupation du schéma 11. Le namespace distinct évite que le parseur historique `control.relay.*` interprète ces faits comme messages/grants.
+
+Les bornes proposées sont 100 endpoints historiques et 4096 faits de canal par tenant ; la reconstruction lit au plus 4097 faits, puis refuse explicitement. Elles bornent le coût du nouveau parcours et ne sont pas une mesure de performance. L'historique est autorité ; aucun cache mémoire ne décide. Au plafond, préserver les faits et refuser ; aucune purge/réinitialisation automatique. Une évolution de rétention doit conserver tombstones, epochs et conflits.
+
+Pour chaque endpoint, une seule admission non terminale, y compris après changement de credential ID. L'epoch commence à 1 et croît strictement après `closed` ou `known_refused_before_spawn`. Même UUID d'opération avec contenu identique rend le reçu historique ; contenu différent, collision entre admission/transition ou UUID/canal réemployé divergent donnent conflit. Un reçu historique ne réactive pas un canal et ne produit pas un nouveau permis.
+
+Graphe : `accepted_before_exec` → `known_refused_before_spawn` / `ready` / `closing` / `unknown`; `ready` → `closing` / `unknown`; `closing` → `closed` / `unknown`. `closed` et `known_refused_before_spawn` sont terminaux. `unknown` n'est pas réouvert ni converti en refus/fermeture par une simple déclaration. `closed` atteste uniquement le fait explicite de jonction complète reçu du propriétaire ; le SDK propriétaire doit retenir le `RoleLease` et les tâches jusqu'à cette jonction. Après reopen SQLite en maintenance, aucune supervision ou admission n'est réactivée. Expiry/révocation/changement du binding ou du worker refusent les contrôles d'admission courante sans effacer le dernier état durable ni déduire un rollback.
+
+## Fichiers et validation prévus
+
+Propriété core : nouveaux `src/relay/admission.rs`, `src/audit/relay_admission.rs`, `src/api/relay_admission.rs`, `src/runner/relay_admission.rs` et tests dédiés. Coutures partagées demandées : déclarations dans `relay.rs`, `audit.rs`, `api.rs`, `runner.rs`; merge route V1 dans `api.rs`; deux formes runner fermées dans `control_transport.rs`; skip du nouveau namespace et appel du validateur dans `audit/control.rs`. Aucun changement runtime, D5, frontend ou factory des deux autres worktrees dans ce lot.
+
+La validation ciblée prévue utilise vrais router/Axum et SQLite privées A/B : rôle/tenant avant corps, binding ID/révision/digest, worker/StartedAt/session, expiry/révocation, UUID/collision/idempotence, epoch unique, graphes refusés et reopen inactif, panne d'audit avant acceptation. L'exécution est confiée à la QA Luna du parent, dans son profil isolé ; aucun Cargo natif, moteur ou fournisseur n'est exécuté ici. La revue indépendante de l'intégration owner/port et les preuves runtime restent nécessaires avant ouverture de leurs factories de production.
