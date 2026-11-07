@@ -17,8 +17,19 @@ verrouillé manquant pour le build/frontend/navigateur et Clippy. Les tâches
 protocole et préparation du cache avancent séparément de la reprise D5.
 Les builds/tests restent isolés et sans réseau ; aucune campagne réelle du
 nouveau transport ne découle de l'accord. La préparation du test de reprise
-D5 déborde encore sa pile avant l'oracle au gel39 ; la correction du harnais
-est en cours, pas une correction métier déclarée réussie.
+D5 débordait sa pile avant l'oracle au gel39. Le correctif du harnais permet
+la reproduction métier au gel41, puis le Cancel corrigé passe au gel42.
+La reprise query a son RED42 puis son parent GREEN44, avec revue source indépendante.
+Ces corrections D5 restent séparées de l'intégration publiée.
+
+Le build TypeScript/Vite du front passe sur le gel navigateur42. Les essais
+navigateur AG/AH s'arrêtent avant tout oracle UI ; le profil AI corrige les
+namespaces puis chroot en conservant caps0, NNP, réseau coupé et sandbox Chromium.
+Après correction de l'horloge du seul harnais, trois scénarios passent au gel45 :
+fédération,403 sans corps terminé et403 identité avec réponse200 retardée.
+Les 59 résultats Node restent attachés au gel03. Le relais passe 50 fonctions
+sur son gel43, puis toutes cibles compilent. Ses deux composants et leurs guides
+sont relus indépendamment ; helper/runtime/outbox restent séparés.
 
 ## 7 novembre — API fédérée vérifiée, interface et reprises encore en qualification
 
@@ -34,8 +45,8 @@ L'interface distincte passe 59 fonctions Node uniques et TypeScript sur son gel0
 dont les trois cas RAW relus depuis les vraies réponses des parents API Rust.
 Son refus403 ne dépend plus du corps pour identité et fédération ; les autres
 routes gardent leur traitement historique et leur écart de purge rapide.
-Build Vite et navigateur restent NOT_RUN en attendant la préparation autorisée
-des artefacts Linux concernés. La direction du transport privé du relais est
+Build Vite passe ensuite sur le gel navigateur42 ; ses essais de lancement
+navigateur restent sans oracle UI. La direction du transport privé du relais est
 désormais approuvée ; sa documentation ne livre pas un canal aux workers.
 
 Dans le bundle D5 non intégré, trois canaris distincts et toutes cibles passent

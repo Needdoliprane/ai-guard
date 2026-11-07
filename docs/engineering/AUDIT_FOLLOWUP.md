@@ -67,13 +67,28 @@ diagnostic d'un owner encore queued après sortie du writer a été reproduit
 sur le gel36 ; sa correction passe six fonctions sur le gel37. Ces résultats
 ne prouvent ni récupération complète ni terminaison runtime.
 
-Les nouveaux tests Cancel et reprise après perte de réponse query n'ont pas
-encore établi leurs défauts métier : Cancel déborde la pile pendant la
-préparation du test aux gels37/39, avant son oracle ; le second test reste
-`NOT_RUN`. Le journal diagnostic39 est conservé avec SHA-256
+Les nouveaux tests Cancel et reprise après perte de réponse query ont ensuite
+atteint leurs oracles. Les gels37/39 débordaient la pile pendant la préparation ;
+une frontière de construction non inline dans le seul test permet au gel41 de
+reproduire l'absence de Cancel durable et de STOP exact après shutdown retenu.
+Le correctif ciblé passe ce parent au gel42, après revue source indépendante,
+sans intégration du bundle D5. Le test de reprise query atteint à son tour son
+oracle FAIL sur 42 ; le correctif44 passe son parent après revue indépendante,
+sans prétendre qualifier tout le bundle. Un nouvel appel à la
+continuation peut venir du pump existant, sans retry immédiat dans l'appel ayant
+échoué. Le journal diagnostic39 reste conservé avec SHA-256
 `d1ea7bb1ae422f4ccf3f14e6e5abd9fa89ab2beada9a193c77355f116776c909`.
-Corriger cette préparation puis reproduire les oracles est requis avant une
-correction métier. Les réservations sans preuve de non-démarrage du lot G,
+Les journaux RED41 et GREEN42 portent respectivement SHA-256
+`9fcc17d0d4aab0b7b70393f567ed1d54826482478623cb08d76ae28ba283c827`
+et `9ea177608a7b496b0863da10854a4ecc6cf965758eae1280006a3c6e460a12bc`.
+Le premier conserve aussi une erreur d'argv Cargo préalable, sans test exécuté.
+Le RED startup42 porte
+`aca50d242bc291d208eab7cc8bc4698fbde856fd698ae62aaa25cae32426355a`.
+Le GREEN startup44 porte
+`05085c327f634a55a631ccacefe372f2b32aee73a8e0f1e8f55972b9db3350a6`.
+Ces parents couvrent dispatch, identité HTTP et IPC enforcer ; ils ne qualifient
+pas la boucle complète de supervision du service ni un moteur réel.
+Les réservations sans preuve de non-démarrage du lot G,
 l'approbation humaine authentifiée, les signatures et l'attribution des
 délégations restent ouverts. Aucun nouveau constat confirmé n'est ajouté
 au décompte de l'audit primaire à partir de ces diagnostics.
