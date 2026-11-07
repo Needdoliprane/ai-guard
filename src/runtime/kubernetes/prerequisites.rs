@@ -259,6 +259,26 @@ impl KubernetesRuntime {
         Ok((diagnostics, prerequisites))
     }
 
+    /// Current create/pods opinion only. This is not an activation capability,
+    /// a check of other rights, or a guarantee about a later authorization.
+    pub(super) async fn verify_preflight_create_permission(&self) -> KubernetesResult<()> {
+        let action = KubernetesPermissionActionV1::CreatePods;
+        let response = self
+            .transport
+            .self_subject_access_review(self.binding.namespace(), action)
+            .await?;
+        let review = parse_review(action, self.binding.namespace(), response)?;
+        match review.decision {
+            KubernetesPermissionDecisionV1::Allowed => Ok(()),
+            KubernetesPermissionDecisionV1::Denied => {
+                Err(KubernetesError::PreflightPermissionDenied)
+            }
+            KubernetesPermissionDecisionV1::Unknown => {
+                Err(KubernetesError::PreflightPermissionUnconfirmed)
+            }
+        }
+    }
+
     pub(super) async fn verify_active_authority(&self) -> KubernetesResult<Namespace> {
         let (cluster, namespace) = self.inspect_authority_namespaces().await?;
         if namespace_state(&cluster) != KubernetesNamespaceStateV1::Active

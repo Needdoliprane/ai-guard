@@ -26,6 +26,7 @@ const TOKEN: &str = "public-kubernetes-prerequisite-fixture-token-000000000000";
 #[derive(Clone)]
 enum ReviewMode {
     Standard,
+    Denied,
     NoOpinion,
     EvaluationError,
     Contradictory,
@@ -208,6 +209,7 @@ async fn respond(State(state): State<PeerState>, request: Request<Body>) -> Resp
                 return response(201, value);
             }
             match mode {
+                ReviewMode::Denied => value["status"] = json!({"allowed":false,"denied":true}),
                 ReviewMode::NoOpinion => value["status"] = json!({"allowed":false}),
                 ReviewMode::EvaluationError => {
                     value["status"] = json!({"allowed":true,"evaluationError":CANARY})
@@ -248,6 +250,160 @@ impl BeforeKubernetesPreflightGuard for Guard {
     ) -> KubernetesResult<()> {
         Ok(())
     }
+}
+
+struct CountedGuard(Arc<AtomicUsize>);
+impl BeforeKubernetesPreflightGuard for CountedGuard {
+    fn check_before_dry_run(
+        self: Box<Self>,
+        _target: &KubernetesPreflightTargetV1,
+    ) -> KubernetesResult<()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn permission_preflight_plan(runtime: &KubernetesRuntime) -> KubernetesPreflightPlanV1 {
+    KubernetesPreflightPlanV1::new(
+        runtime.binding(),
+        Uuid::from_u128(2),
+        Uuid::from_u128(3),
+        &format!("fixture.invalid/worker@sha256:{}", "a".repeat(64)),
+        KubernetesPreflightResourcesV1 {
+            cpu_millis: 1000,
+            memory_mib: 1024,
+            workspace_mib: 128,
+            temporary_mib: 64,
+            deadline_seconds: 30,
+        },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn preflight_unconfirmed_create_permission_never_consumes_guard_or_posts_pod() {
+    let material = TlsMaterial::create().await;
+    let mut observations = Vec::new();
+    for (name, mode) in [
+        ("denied", ReviewMode::Denied),
+        ("no opinion", ReviewMode::NoOpinion),
+        ("evaluation error", ReviewMode::EvaluationError),
+    ] {
+        let peer = Peer::new(&material, json!({"phase":"Active"})).await;
+        peer.state.inner.lock().unwrap().mode = mode;
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let result = peer
+            .runtime
+            .preflight(
+                &permission_preflight_plan(&peer.runtime),
+                Box::new(CountedGuard(Arc::clone(&guard_calls))),
+            )
+            .await;
+        let requests = &peer.state.inner.lock().unwrap().requests;
+        let reviews = requests
+            .iter()
+            .filter(|(method, path, _)| {
+                method == "POST" && path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+            })
+            .count();
+        observations.push((
+            name,
+            result.is_err(),
+            reviews,
+            guard_calls.load(Ordering::SeqCst),
+            peer.state.posts.load(Ordering::SeqCst),
+        ));
+    }
+    assert_eq!(
+        observations,
+        vec![
+            ("denied", true, 1, 0, 0),
+            ("no opinion", true, 1, 0, 0),
+            ("evaluation error", true, 1, 0, 0),
+        ],
+        "only an observed Allowed create/pods review may reach the guard and Pod POST"
+    );
+}
+
+#[tokio::test]
+async fn preflight_allowed_create_permission_is_exact_and_precedes_the_guarded_dry_run() {
+    let material = TlsMaterial::create().await;
+    let peer = Peer::new(&material, json!({"phase":"Active"})).await;
+    let guard_calls = Arc::new(AtomicUsize::new(0));
+    let observation = peer
+        .runtime
+        .preflight(
+            &permission_preflight_plan(&peer.runtime),
+            Box::new(CountedGuard(Arc::clone(&guard_calls))),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        observation.target.authority_fingerprint,
+        peer.runtime.binding().fingerprint()
+    );
+    assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(peer.state.posts.load(Ordering::SeqCst), 1);
+    let requests = &peer.state.inner.lock().unwrap().requests;
+    let reviews: Vec<_> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, (method, path, _))| {
+            method == "POST" && path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+        })
+        .collect();
+    assert_eq!(
+        reviews.len(),
+        1,
+        "preflight asks only for its create/pods operation"
+    );
+    assert_eq!(
+        reviews[0].1.2,
+        Some(json!({
+            "apiVersion":"authorization.k8s.io/v1",
+            "kind":"SelfSubjectAccessReview",
+            "spec":{"resourceAttributes":{
+                "namespace":"tenant-a", "group":"", "version":"v1",
+                "resource":"pods", "verb":"create"
+            }}
+        }))
+    );
+    let pod_post = requests
+        .iter()
+        .position(|(method, path, _)| {
+            method == "POST" && path == "/api/v1/namespaces/tenant-a/pods"
+        })
+        .unwrap();
+    assert!(reviews[0].0 < pod_post);
+    assert!(peer.runtime.binding().require_workload_admission().is_err());
+}
+
+#[tokio::test]
+async fn preflight_rechecks_namespace_uid_after_create_permission_review_before_pod_post() {
+    let material = TlsMaterial::create().await;
+    let peer = Peer::new(&material, json!({"phase":"Active"})).await;
+    peer.state.inner.lock().unwrap().mode = ReviewMode::ChangedNamespace;
+    let guard_calls = Arc::new(AtomicUsize::new(0));
+    let result = peer
+        .runtime
+        .preflight(
+            &permission_preflight_plan(&peer.runtime),
+            Box::new(CountedGuard(Arc::clone(&guard_calls))),
+        )
+        .await;
+    assert_eq!(result.err(), Some(KubernetesError::AuthorityChanged));
+    assert_eq!(guard_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(peer.state.posts.load(Ordering::SeqCst), 0);
+    let requests = &peer.state.inner.lock().unwrap().requests;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|(method, path, _)| {
+                method == "POST" && path == "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+            })
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

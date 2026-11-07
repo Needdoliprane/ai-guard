@@ -444,6 +444,8 @@ fn runtime_failure(error: KubernetesError) -> (&'static str, Option<u16>) {
             PodChanged => "pod_changed",
             InvalidPreflightPlan => "invalid_preflight_plan",
             PreflightAuthorizationDenied => "preflight_authorization_denied",
+            PreflightPermissionDenied => "preflight_permission_denied",
+            PreflightPermissionUnconfirmed => "preflight_permission_unconfirmed",
             PreflightProfileChanged => "preflight_profile_changed",
             WorkloadAdmissionUnavailable => "workload_admission_unavailable",
             HeldCreateAuthorizationDenied => "held_create_authorization_denied",

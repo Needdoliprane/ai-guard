@@ -249,6 +249,12 @@ is **not a dry-run-only credential**. Keep it in trusted control storage and
 out of workers. See the official [dry-run authorization contract](https://kubernetes.io/docs/reference/using-api/api-concepts/#dry-run-authorization)
 and [request-verb mapping](https://kubernetes.io/docs/reference/access-authn-authz/authorization/#determine-the-request-verb).
 
+Preflight also requires access to create a `SelfSubjectAccessReview`. It asks
+only whether this same Kubernetes identity may `create` core `v1` `pods` in
+the retained Namespace. The query uses the same pinned HTTPS authority, CA
+and Kubernetes credentials as the dry-run, without impersonation or free
+caller-supplied scope. No role or permission is provisioned by this command.
+
 Prepare two **new** files using the
 [plan example](examples/preflight-plan.json) and
 [control example](examples/preflight-control.json). These are templates, not
@@ -326,12 +332,38 @@ The control first verifies the server identity/namespace and an exact durable
 receipt for `runtime.kubernetes.preflight.requested`. Only then can a private,
 consumed guard bound to the target and receipt permit the dry-run. It rechecks
 the retained authority, plan, control and runner-token files and expires 60
-seconds after acknowledgement. The adapter GETs both Namespace anchors before
-and after its only POST:
+seconds after acknowledgement. The adapter first GETs both Namespace anchors,
+then sends the separate authorization query:
+
+```text
+POST /apis/authorization.k8s.io/v1/selfsubjectaccessreviews
+```
+
+Only an `Allowed` create/pods opinion without an evaluation error can proceed.
+An explicit denial or an unknown opinion, including an evaluation error,
+fails before guard consumption and before any Pod POST. The adapter rereads
+both Namespace anchors after the review and consumes the guard immediately
+before its single Pod dry-run POST:
 
 ```text
 POST /api/v1/namespaces/{retained-namespace}/pods?dryRun=All&fieldValidation=Strict
 ```
+
+Both anchors are read again after the Pod response. A normal successful path
+therefore has eight Kubernetes requests: two initial GETs, one review POST,
+two GETs before the guard, one Pod POST and two final GETs. Five requests
+precede guard consumption; a rejected Pod POST ends after six. These are
+sequential observations, not an atomic permission or NamespaceUID guarantee.
+Permissions can change after `Allowed`, and errors from the actual Pod POST
+remain errors. The existing per-request timeout and guard expiry still apply;
+eight requests is not an eight-second total deadline.
+
+The result audit uses `preflight_permission_denied` for an explicit denial and
+`preflight_permission_unconfirmed` for an unknown opinion. Remote reason and
+evaluation-error text are not retained or printed. These checks establish no
+cleanup permission, absence of broader rights, CNI isolation, actor exclusivity
+or workload activation. The GET-only `doctor` and the twelve reviews requested
+by `doctor --check-permissions` keep their separate behavior.
 
 The Pod profile has one fixed `/usr/bin/id` command, no caller-supplied business
 argv or environment, UID/GID 1000, read-only root, dropped capabilities, no
