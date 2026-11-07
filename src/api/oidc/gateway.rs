@@ -309,6 +309,68 @@ fn reserve(registry: &mut Registry, new_session: bool) -> ApiResult<()> {
     rate.1 += 1;
     Ok(())
 }
+
+fn membership_recovery_eligible(
+    state: &GatewayState,
+    oidc: &OidcGateway,
+    access: &VerifiedAccess,
+    principal: &PrincipalRefV1,
+) -> ApiResult<bool> {
+    let ceiling = oidc
+        .config
+        .mapping
+        .capabilities(access.claims())
+        .map_err(|_| credential_invalid())?;
+    let mut unavailable = false;
+    let mut admission_failure = None;
+    for tenant in state.tenants.iter() {
+        // Internal authorization preflight only, with no human read payload
+        // returned or persisted. The normal atomic, audited human_profile runs
+        // again after the new proof is durably reserved; this is not authority.
+        let eligible = state
+            .io_scope
+            .with_store(tenant, store_io::Lane::Read, true, |store| {
+                let Some(account) = store
+                    .human_account(principal)?
+                    .filter(|account| account.active)
+                else {
+                    return Ok(false);
+                };
+                let members = store.identity_memberships(&account.principal)?;
+                anyhow::ensure!(members.len() <= 256, "human membership capacity exceeded");
+                Ok::<_, anyhow::Error>(members.iter().any(|member| {
+                    member.active && member.capabilities.intersection(&ceiling).next().is_some()
+                }))
+            });
+        match eligible {
+            Ok(Ok(true)) => return Ok(true),
+            Ok(Ok(false)) => {}
+            Err(error) => {
+                unavailable = true;
+                admission_failure = Some(error);
+            }
+            Ok(Err(_)) => unavailable = true,
+        }
+    }
+    // No tenant is selected yet. A refused neighboring read cannot erase a
+    // current allowed membership elsewhere; without one, retain the refusal.
+    if let Some(error) = admission_failure {
+        return Err(error);
+    }
+    if unavailable {
+        return Err(audit_unavailable());
+    }
+    Ok(false)
+}
+
+fn subject_capacity() -> (StatusCode, Json<Value>) {
+    human::failure(
+        StatusCode::TOO_MANY_REQUESTS,
+        "authentication_subject_capacity_exhausted",
+        "This verified identity's durable authentication budget is exhausted.",
+        "contact_operator",
+    )
+}
 fn fail_initial(
     oidc: &OidcGateway,
     record: AuthenticationRecordV1,
@@ -369,14 +431,45 @@ fn install(
             return Err(conflict());
         }
     }
+    let principal = PrincipalRefV1::HumanOidc {
+        issuer: access.issuer().into(),
+        subject: access.subject().into(),
+    };
+    let access_fingerprint = Fingerprint::access_token(raw);
     // VerifiedAccess is produced only by the configured provider's verifier.
     // Reserve durable audit capacity now, before membership reads (which can
     // themselves produce business audit) or any session admission/mutation.
     // Anonymous nonce creation and rejected provider input never reach here.
-    let receipt = oidc
-        .audit
-        .append_typed(record.clone())
-        .map_err(audit_failure)?;
+    let pending = match oidc.audit.begin_verified_initial(
+        record.clone(),
+        principal.clone(),
+        access_fingerprint,
+    ) {
+        Ok(pending) => pending,
+        Err(error)
+            if error
+                .downcast_ref::<crate::audit::authentication::AuthenticationAuditFailureV1>()
+                == Some(
+                    &crate::audit::authentication::AuthenticationAuditFailureV1::SubjectCapacity,
+                ) =>
+        {
+            if !membership_recovery_eligible(state, oidc, &access, &principal)? {
+                return Err(subject_capacity());
+            }
+            oidc.audit
+                .begin_verified_initial_after_membership(
+                    record.clone(),
+                    principal.clone(),
+                    access_fingerprint,
+                )
+                .map_err(audit_failure)?
+        }
+        Err(error) => return Err(audit_failure(error)),
+    };
+    if !pending.inserted {
+        return Err(conflict());
+    }
+    let receipt = pending.receipt;
     if state.credential_index.lookup(raw).is_some()
         || human::reject_control_collision(state, raw, None).is_err()
     {
@@ -388,31 +481,10 @@ fn install(
             None,
         ));
     }
-    let principal = PrincipalRefV1::HumanOidc {
-        issuer: access.issuer().into(),
-        subject: access.subject().into(),
-    };
     let ceiling = match membership(state, oidc, &access) {
         Ok(value) => value,
         Err(error) => return Err(fail_initial(oidc, record, receipt, error, Some(principal))),
     };
-    let access_fingerprint = Fingerprint::access_token(raw);
-    if oidc
-        .audit
-        .fingerprint_seen(&access_fingerprint)
-        .map_err(audit_failure)?
-    {
-        oidc.audit
-            .append_typed(result(
-                record,
-                receipt,
-                Outcome::Rejected,
-                Reason::Revoked,
-                None,
-            ))
-            .map_err(audit_failure)?;
-        return Err(conflict());
-    }
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
     if let Some((key, transaction)) = browser_transaction
         && registry.exchanging.get(&key).is_none_or(|entry| {
@@ -900,6 +972,9 @@ fn safe_code(code: &str) -> Option<&'static str> {
         "permission_denied" => Some("permission_denied"),
         "session_conflict" => Some("session_conflict"),
         "capacity_exhausted" => Some("capacity_exhausted"),
+        "authentication_subject_capacity_exhausted" => {
+            Some("authentication_subject_capacity_exhausted")
+        }
         "credential_invalid" => Some("credential_invalid"),
         _ => None,
     }
@@ -935,12 +1010,18 @@ pub(super) async fn tokens(
                             StatusCode::FORBIDDEN
                         } else if code == "audit_unavailable" {
                             StatusCode::SERVICE_UNAVAILABLE
+                        } else if code == "authentication_subject_capacity_exhausted" {
+                            StatusCode::TOO_MANY_REQUESTS
                         } else {
                             StatusCode::UNAUTHORIZED
                         },
                         code,
                         "The correlated login did not establish an authorized session.",
-                        "authenticate",
+                        if code == "authentication_subject_capacity_exhausted" {
+                            "contact_operator"
+                        } else {
+                            "authenticate"
+                        },
                     )
                     .into_response(),
                 }

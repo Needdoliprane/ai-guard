@@ -58,16 +58,18 @@ struct AuthenticationAuditFile {
     installation_id: uuid::Uuid,
     policy: agentsandbox::audit::authentication::AuthenticationAuditPolicyV1,
 }
-/// A separate explicit operator file. Existing tenant registry format stays closed.
-pub fn load_oidc(
-    path: &Path,
-    initialize_new: bool,
-    redactor: agentsandbox::redaction::Redactor,
-) -> Result<agentsandbox::api::OidcGateway> {
-    use agentsandbox::{
-        audit::authentication::AuthenticationAudit,
-        control_fs::{PrivateFile, absolute_path},
-    };
+
+struct PreparedOidcFile {
+    held: agentsandbox::control_fs::PrivateFile,
+    file: OidcFile,
+    audit_path: PathBuf,
+    ca_bundle_pem: Option<String>,
+}
+
+/// Closed, private configuration and local references only. Provider validation
+/// constructs an offline transport; it never discovers or contacts the IdP.
+fn prepare_oidc_file(path: &Path) -> Result<PreparedOidcFile> {
+    use agentsandbox::control_fs::{PrivateFile, absolute_path};
     let path = absolute_path(path)?;
     let held = PrivateFile::open(&path, 1_048_576)?;
     let file: OidcFile =
@@ -85,18 +87,42 @@ pub fn load_oidc(
     };
     let ca_bundle_pem = file
         .ca_bundle_file
+        .as_ref()
         .map(|path| -> Result<String> {
-            let ca = PrivateFile::open(&resolve(path)?, 262_144)?;
-            String::from_utf8(ca.bytes().to_vec()).context("Invalid public OIDC CA bundle")
+            let ca = PrivateFile::open(&resolve(path.clone())?, 262_144)?;
+            let pem =
+                String::from_utf8(ca.bytes().to_vec()).context("Invalid public OIDC CA bundle")?;
+            agentsandbox::oidc::OidcProvider::new_with_ca(
+                file.gateway.provider.clone(),
+                pem.as_bytes(),
+            )?;
+            ca.revalidate()?;
+            Ok(pem)
         })
         .transpose()?;
-    if let Some(pem) = &ca_bundle_pem {
-        agentsandbox::oidc::OidcProvider::new_with_ca(
-            file.gateway.provider.clone(),
-            pem.as_bytes(),
-        )?;
-    }
-    let audit_path = resolve(file.authentication_audit.path)?;
+    let audit_path = resolve(file.authentication_audit.path.clone())?;
+    held.revalidate()?;
+    Ok(PreparedOidcFile {
+        held,
+        file,
+        audit_path,
+        ca_bundle_pem,
+    })
+}
+
+/// A separate explicit operator file. Existing tenant registry format stays closed.
+pub fn load_oidc(
+    path: &Path,
+    initialize_new: bool,
+    redactor: agentsandbox::redaction::Redactor,
+) -> Result<agentsandbox::api::OidcGateway> {
+    use agentsandbox::audit::authentication::AuthenticationAudit;
+    let PreparedOidcFile {
+        held,
+        file,
+        audit_path,
+        ca_bundle_pem,
+    } = prepare_oidc_file(path)?;
     let audit = if initialize_new {
         AuthenticationAudit::init_new(
             &audit_path,
@@ -112,8 +138,50 @@ pub fn load_oidc(
             redactor,
         )?
     };
+    anyhow::ensure!(
+        audit.format_version()? == 2,
+        "Authentication audit migration required: stop the control plane, then run migrate-authentication with a new private backup; do not initialize a replacement audit"
+    );
     held.revalidate()?;
     agentsandbox::api::OidcGateway::new(file.gateway, std::sync::Arc::new(audit), ca_bundle_pem)
+}
+
+/// Explicit operator maintenance. No OIDC gateway, discovery, token or provider
+/// request is created. Opening the existing ledger cannot upgrade its format.
+pub fn migrate_authentication(
+    path: &Path,
+    backup: &Path,
+    redactor: agentsandbox::redaction::Redactor,
+) -> Result<agentsandbox::audit::authentication::AuthenticationVerificationV1> {
+    use agentsandbox::audit::authentication::AuthenticationAudit;
+    // Discard parser/filesystem chains: operator-controlled inputs may include
+    // sensitive values in unknown fields, malformed types or path references.
+    let prepared = prepare_oidc_file(path).map_err(|_| {
+        anyhow::anyhow!(
+            "Authentication migration configuration invalid or unavailable; check closed version1 fields, private ownership/permissions and local audit/CA references"
+        )
+    })?;
+    let audit = AuthenticationAudit::open_existing(
+        &prepared.audit_path,
+        prepared.file.authentication_audit.installation_id,
+        prepared.file.authentication_audit.policy,
+        redactor,
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Existing authentication audit cannot be verified; preserve it and check installation identity, unchanged policy, private storage and integrity"
+        )
+    })?;
+    prepared.held.revalidate().map_err(|_| {
+        anyhow::anyhow!(
+            "Authentication configuration changed during preparation; preserve the audit and retry with a stable private configuration"
+        )
+    })?;
+    audit.migrate_verified_initial_v2(backup).map_err(|_| {
+        anyhow::anyhow!(
+            "Authentication migration refused; requires verified V1 and a new private backup destination; preserve the audit and any backup, check permissions and stopped controls before retrying"
+        )
+    })
 }
 
 pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {

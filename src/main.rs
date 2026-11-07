@@ -86,6 +86,18 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
+    /// Migrate the existing offline SSO audit V1 to V2 with a verified new V1 backup.
+    MigrateAuthentication {
+        /// Existing private gateway OIDC configuration; no provider contact.
+        #[arg(long)]
+        oidc_config: PathBuf,
+        /// New private backup path; existing destinations are never overwritten.
+        #[arg(long)]
+        backup: PathBuf,
+        /// Operator attestation: all audit consumers are stopped; not runtime fencing.
+        #[arg(long, required = true)]
+        confirm_control_stopped: bool,
+    },
     /// Sonde de santé sans secret, utilisable par le runtime.
     Healthcheck {
         #[arg(long, required = true)]
@@ -781,6 +793,32 @@ async fn main() -> Result<()> {
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::MigrateAuthentication {
+            oidc_config,
+            backup,
+            confirm_control_stopped,
+        } => {
+            anyhow::ensure!(
+                confirm_control_stopped,
+                "Stop every authentication audit consumer before migration; --confirm-control-stopped is an operator attestation, not runtime fencing"
+            );
+            let report = gateway_config::migrate_authentication(
+                &oidc_config,
+                &backup,
+                Redactor::new(vec![]),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": 1,
+                    "migration": "verified_initial_v2",
+                    "namespace_id": report.namespace_id,
+                    "records": report.records,
+                    "serialized_bytes": report.serialized_bytes,
+                    "head": report.head,
+                }))?
+            );
         }
         Command::Dashboard(args) => {
             validate_bind(args.listen, args.container_listen)?;
