@@ -1,5 +1,32 @@
 # Validation courante
 
+## 7 novembre — composant API fédérée et campagnes distinctes frontend/D5
+
+Le composant `f6d2f0a`, composé dans `2e6c509`, passe 17 intégrations et deux
+unités sur `federation-fix03`, puis toutes cibles. Les onze empreintes du
+[manifeste et des guides](evidence/2026-11-07/federated-worker-view/README.md)
+correspondent après composition. Les refus cumulés de droits, révocation après
+les deux reçus, domaines de curseurs et contrats historiques sont couverts.
+Une composition plus large n'hérite pas de ces PASS par la seule égalité des ancres.
+
+Sur le frontend séparé : le gel03 passe 56 fonctions Node avec trois cas RAW
+initialement ignorés, puis ces trois cas passent sur les réponses JSON émises
+dans la même QA par les parents Rust existants. Total : 59 fonctions frontend
+uniques ; les deux tests de headers403 sont déjà inclus. TypeScript5.9.3 noEmit
+termine RC0 avec l'outillage local figé. Vite et navigateur restent NOT_RUN.
+La preuve et le raccord UI demeurent dans leur worktree avant intégration.
+
+D5 séparé : RED32 établit l'admission STOP après fermeture idle ; le gel33 révèle
+un oracle unwrap incompatible avec le refus typé attendu. Le gel34 passe les
+deux tests corrigés et distincts idle/ledger, puis un canari historique échoue
+en setup sur /tmp readonly. Sa seule racine de fixture corrigée au gel35 permet
+un PASS de compatibilité et toutes cibles RC0. Les deux PASS34 n'ont pas été
+relancés ni déclarés comme de nouvelles exécutions35. Le registre Writer a ensuite
+son propre RED36 et six fonctions PASS sur le composite37. Le test Service Cancel
+sur ce composite abort avec un débordement de pile avant son oracle ; Startup
+reste NOT_RUN. Bundle non intégré, diagnostic et autres régressions encore
+ouverts ; aucun runtime qualifié.
+
 ## 7 novembre — composition27 : 25 fonctions et compilation toutes cibles
 
 Le gel `control-relay-kubernetes-composition27` compose la base `8a5c421` et

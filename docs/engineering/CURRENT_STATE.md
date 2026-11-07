@@ -1,5 +1,33 @@
 # État constaté — suivi du développement
 
+## 7 novembre — API fédérée vérifiée, interface et reprises encore en qualification
+
+L'API humaine additive workers/brokers `f6d2f0a` est publiée et composée dans
+`2e6c509`. Ses 19 fonctions ciblées et toutes cibles passent sur son gel03 ;
+les onze ancres de code et documentation restent identiques dans la composition.
+Administration et les deux capacités sont exigées avant lecture et publication,
+avec deux pages, horloges et reçus indépendants, sans inventaire complet annoncé.
+[Preuves et limites](evidence/2026-11-07/federated-worker-view/README.md).
+Ce résultat de composant ne constitue pas un nouveau check de toute l'intégration.
+
+L'interface distincte passe 59 fonctions Node uniques et TypeScript sur son gel03,
+dont les trois cas RAW relus depuis les vraies réponses des parents API Rust.
+Son refus403 ne dépend plus du corps pour identité et fédération ; les autres
+routes gardent leur traitement historique et leur écart de purge rapide.
+Build Vite et navigateur restent NOT_RUN faute des artefacts Linux concernés.
+La direction du transport privé du relais est proposée, relue et soumise au
+mainteneur ; sa documentation ne livre pas un canal aux workers.
+
+Dans le bundle D5 non intégré, trois canaris distincts et toutes cibles passent
+sur les gels34/35 après reproduction du défaut d'admission STOP après fermeture
+idle. Le refus après fermeture et la récupération STOP après panne réelle du
+ledger sont distingués. Le diagnostic d'un owner Queued après perte du writer
+a depuis son RED et un correctif vérifié par six tests sur le gel37. Deux parcours
+de service restent à reproduire : le premier abort sur débordement de pile avant
+son oracle, le second est NOT_RUN ; le diagnostic de pile est en cours.
+Ni ce bundle, ni la fédération multi-hôtes, ni un moteur réel ne sont qualifiés.
+G09 reste FAIL ; aucun gate global n'est clos.
+
 ## 7 novembre — client relais et reprise Kubernetes composés sur le gel27
 
 La reprise Kubernetes `81a9e7501adf921a23098741dd0518e5d5287660` est composée
