@@ -1,11 +1,14 @@
 # Gateway transient failures during an active worker
 
-Status: **PROPOSED — maintainer decision required; no implementation authorized**.
+Status: **APPROVED FOR IMPLEMENTATION — maintainer decision, 6 November 2026**.
+The maintainer explicitly accepted the reviewed 60-second bounded window below.
+No implementation or runtime qualification is implied by this approval.
 Source examined: `0a41aac192f4139073a43830dbb71df01cb87abf`, 3 November 2026.
 This proposal accompanies audit correction C; it is not part of that correction.
 Clarified on 6 November after the final run-1 comparison against `5e52807`
-and an independent contract review. The following remains a proposed behavior,
-not an implemented retry policy or a closure of corrective lot L.
+and an independent contract review, then approved by the maintainer. The
+following is an implementation contract, not a delivered retry policy or a
+closure of corrective lot L.
 
 ## Existing behavior
 

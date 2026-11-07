@@ -8,6 +8,9 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 
+#[path = "control_monitor.rs"]
+mod control_monitor;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ManagedCheckpoint {
@@ -91,6 +94,13 @@ mod private_state {
             Ok(Self { file, trusted })
         }
         pub(super) fn read<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<Option<T>> {
+            self.read_bounded(name, 32 * 1024 * 1024)
+        }
+        pub(super) fn read_bounded<T: serde::de::DeserializeOwned>(
+            &self,
+            name: &str,
+            maximum: usize,
+        ) -> Result<Option<T>> {
             self.trusted.revalidate()?;
             let name = checked_name(name)?;
             let fd = unsafe {
@@ -110,7 +120,7 @@ mod private_state {
             let file = unsafe { fs::File::from_raw_fd(fd) };
             check_private_file(&file)?;
             anyhow::ensure!(
-                file.metadata()?.len() <= 32 * 1024 * 1024,
+                file.metadata()?.len() <= maximum as u64,
                 "broker checkpoint exceeds its bound"
             );
             Ok(Some(serde_json::from_reader(file)?))
@@ -1882,9 +1892,11 @@ async fn launch_worker(
             )
         }
     };
+    let (start_acknowledged, started) = tokio::sync::watch::channel(false);
     let on_started = |observed: ContainerObservation| {
         let state = state.clone();
         let client = client.clone();
+        let start_acknowledged = start_acknowledged.clone();
         async move {
             record_observation(&client, &state, &observed).await?;
             let plan = state.snapshot()?;
@@ -1895,10 +1907,19 @@ async fn launch_worker(
             );
             event["command"] = serde_json::to_value(&plan.request.command)?;
             client.post_event(event).await?;
+            // Tolerance begins only after both Running and command.started
+            // have been acknowledged. The callback itself has no retry here.
+            if state.worker()?.state == WorkerStateV1::Running {
+                let _ = start_acknowledged.send(true);
+            }
             Ok(())
         }
     };
-    let (done, mut completed) = tokio::sync::watch::channel(false);
+    let (done, completed) = tokio::sync::watch::channel(false);
+    // This earlier bound is deliberately conservative: it cannot extend the
+    // runtime's own lifetime while preparation/start observation is pending.
+    let execution_deadline =
+        tokio::time::Instant::now() + Duration::from_secs(plan.options.timeout);
     let execute = async {
         let result = if let Some(recovered) = &recovered {
             runtime
@@ -1927,23 +1948,15 @@ async fn launch_worker(
         let _ = done.send(true);
         result
     };
-    let monitor = async {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        loop {
-            tokio::select! {
-                changed=completed.changed()=>{if changed.is_err() || *completed.borrow(){return Ok::<(),anyhow::Error>(());}},
-                _=interval.tick()=>{
-                    match refresh(client,state).await {
-                        Ok(worker) if worker.state==WorkerStateV1::Stopping=>{
-                            if let Some(owned)=state.checkpoint()?.owned{runtime.stop_snapshot_owned(&owned).await?;}
-                        },
-                        Ok(_)=>{},
-                        Err(error)=>{if let Some(owned)=state.checkpoint()?.owned{let _=runtime.stop_snapshot_owned(&owned).await;}return Err(error);}
-                    }
-                }
-            }
-        }
-    };
+    let monitor = control_monitor::run(
+        runtime,
+        client,
+        state,
+        guard,
+        completed,
+        started,
+        execution_deadline,
+    );
     let (execution, monitor) = tokio::join!(execute, monitor);
     let retained = match execution {
         Ok(retained) => retained,
@@ -2669,6 +2682,18 @@ pub(super) async fn resume_worker(
         wait_seconds <= 86400,
         "resume observation timeout exceeds 24 hours"
     );
+    if let Some(status) = control_monitor::stop_interrupted_before_gateway(
+        session,
+        config,
+        gateway,
+        program,
+        adopt,
+        interactive,
+    )
+    .await?
+    {
+        return Ok(status);
+    }
     let (state, client, guard) = locked_session(session, config, gateway).await?;
     let plan = state.snapshot()?;
     anyhow::ensure!(
@@ -2812,6 +2837,32 @@ pub(super) async fn resume_worker(
         );
     };
     let mut observed = runtime.observe(&owned.handle).await?;
+    if observed.process.running == Some(true)
+        && state.worker()?.attempt.start_operation_id.is_some()
+    {
+        guard.ensure_current()?;
+        // Start the exact owned stop without waiting for a journal read. A
+        // reopened monitor cannot reconstruct the original monotonic lifetime.
+        let (stop, epoch) = tokio::join!(
+            runtime.stop_snapshot_owned(&owned),
+            control_monitor::require_stop_on_active_resume(&state),
+        );
+        match stop {
+            Ok(stopped) => observed = stopped,
+            Err(_) => {
+                let reason = match epoch {
+                    Err(error) => redacted_error(&client.redactor, &error),
+                    Ok(()) => "active resume cannot verify the original execution lifetime".into(),
+                };
+                mark_unknown(&client, &state, &reason).await;
+                return action_status(
+                    &state,
+                    Some(&observed),
+                    "The original control monitor lifetime cannot be verified after interruption. A targeted stop was requested but is unconfirmed; no fresh window, start or quota release was granted.",
+                );
+            }
+        }
+    }
     let worker = state.worker()?;
     let claim_uncertain = state
         .checkpoint()?
