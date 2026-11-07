@@ -10,6 +10,9 @@ mod client_profile_cases;
 #[path = "support/control_lane_cases.rs"]
 mod control_lane_cases;
 
+#[path = "support/relay_admission_cases.rs"]
+mod relay_admission_cases;
+
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::{AuditCapacityV1, EventQuery, Store, WorkloadAuditPolicyV1},
