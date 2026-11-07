@@ -211,9 +211,7 @@ impl WorkerRelayClient {
         let request = request.build().map_err(|_| RelayClientError::Transport)?;
         // Inspect the final target, including any canonical inbox query. A
         // credential absent from each DTO may still span a fixed path and UUID.
-        if request.url().as_str().contains(&self.credential) {
-            return Err(RelayClientError::InvalidRequest);
-        }
+        self.check_target(&request)?;
         self.http
             .execute(request)
             .await
@@ -221,12 +219,8 @@ impl WorkerRelayClient {
     }
 
     pub async fn send(&self, input: &RelaySendV1) -> Result<RelayReceiptV1> {
-        validation::validate_send(input, Some(&self.credential))?;
-        let bytes = self.request_bytes(input)?;
-        let request = self
-            .request(Method::POST, self.profile.messages_path())
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes);
+        let bytes = self.validated_send_bytes(input)?;
+        let request = self.send_request(bytes);
         let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_RECEIPT_BYTES).await?;
         require_success(status)?;
@@ -264,17 +258,8 @@ impl WorkerRelayClient {
 
     /// An ACK records recipient acknowledgement only, never execution or an effect.
     pub async fn ack(&self, input: &RelayAckV1) -> Result<RelayReceiptV1> {
-        validation::validate_ack(input)?;
-        // This check precedes formatting message_id into the path: a workload
-        // proof can itself be a canonical UUID accepted by the wire contract.
-        let bytes = self.request_bytes(input)?;
-        let request = self
-            .request(
-                Method::POST,
-                &format!("{}/{}/ack", self.profile.messages_path(), input.message_id),
-            )
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(bytes);
+        let bytes = self.validated_ack_bytes(input)?;
+        let request = self.ack_request(input, bytes);
         let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_RECEIPT_BYTES).await?;
         require_success(status)?;
@@ -284,6 +269,55 @@ impl WorkerRelayClient {
         let receipt: RelayReceiptV1 = self.decode(&bytes)?;
         validate_receipt(&receipt, &input.operation_id, &input.message_id)?;
         Ok(receipt)
+    }
+
+    /// Pure preflight for the private control outbox. This performs no IO and
+    /// returns only the exact validated DTO bytes, never a proof or header.
+    pub(in crate::relay) fn validated_send_bytes(&self, input: &RelaySendV1) -> Result<Vec<u8>> {
+        validation::validate_send(input, Some(&self.credential))?;
+        let bytes = self.request_bytes(input)?;
+        let target = self
+            .send_request(Vec::new())
+            .build()
+            .map_err(|_| RelayClientError::InvalidRequest)?;
+        self.check_target(&target)?;
+        Ok(bytes)
+    }
+
+    /// The final ACK target is checked before persistence as well as dispatch:
+    /// a proof can span the fixed path and a valid message UUID.
+    pub(in crate::relay) fn validated_ack_bytes(&self, input: &RelayAckV1) -> Result<Vec<u8>> {
+        validation::validate_ack(input)?;
+        let bytes = self.request_bytes(input)?;
+        let target = self
+            .ack_request(input, Vec::new())
+            .build()
+            .map_err(|_| RelayClientError::InvalidRequest)?;
+        self.check_target(&target)?;
+        Ok(bytes)
+    }
+
+    fn send_request(&self, bytes: Vec<u8>) -> reqwest::RequestBuilder {
+        self.request(Method::POST, self.profile.messages_path())
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(bytes)
+    }
+
+    fn ack_request(&self, input: &RelayAckV1, bytes: Vec<u8>) -> reqwest::RequestBuilder {
+        self.request(
+            Method::POST,
+            &format!("{}/{}/ack", self.profile.messages_path(), input.message_id),
+        )
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(bytes)
+    }
+
+    fn check_target(&self, request: &reqwest::Request) -> Result<()> {
+        if request.url().as_str().contains(&self.credential) {
+            Err(RelayClientError::InvalidRequest)
+        } else {
+            Ok(())
+        }
     }
 
     fn request_bytes<T: Serialize>(&self, input: &T) -> Result<Vec<u8>> {

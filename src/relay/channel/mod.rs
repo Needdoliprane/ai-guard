@@ -5,6 +5,16 @@
 //! memory reservation and runtime authority outside these untrusted values.
 //! A validated request is not a dispatch permit or evidence of a durable audit.
 mod codec;
+// No production admission factory exists until the retained runtime permit,
+// RoleLease and mandatory audit reservation are connected and reviewed.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "private control owner awaits concrete runtime admission"
+    )
+)]
+mod control;
 pub mod helper;
 mod protocol;
 
