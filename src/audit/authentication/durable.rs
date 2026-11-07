@@ -226,6 +226,21 @@ impl DurableAuthenticationAudit {
         })
     }
 
+    pub fn begin_verified_initial(
+        &self,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+        membership_recovery: bool,
+    ) -> Result<AuthenticationMutationV1> {
+        self.append_entry(format::Entry::VerifiedInitial {
+            record,
+            principal,
+            access_fingerprint,
+            membership_recovery,
+        })
+    }
+
     fn append_entry(&self, entry: format::Entry) -> Result<AuthenticationMutationV1> {
         self.healthy()?;
         // Never persist or alter an identity containing a redaction collision.
@@ -260,6 +275,22 @@ impl DurableAuthenticationAudit {
         replay.validate_transition(record)?;
         if matches!(&entry, format::Entry::Authentication { .. }) {
             replay.validate_generic_lane(record)?;
+        }
+        if let format::Entry::VerifiedInitial {
+            principal,
+            access_fingerprint,
+            membership_recovery,
+            ..
+        } = &entry
+        {
+            replay.validate_initial(
+                record,
+                principal,
+                *access_fingerprint,
+                *membership_recovery,
+                &payload,
+                &self.policy,
+            )?;
         }
         if let format::Entry::Session { mutation } = &entry {
             replay.validate_mutation(mutation, &self.policy)?;
@@ -335,6 +366,16 @@ impl DurableAuthenticationAudit {
         self.read_projection(|replay| Ok(replay.verified.clone()))
     }
 
+    pub fn format_version(&self) -> Result<u32> {
+        self.read_projection(|replay| {
+            Ok(if replay.version == format::VERSION {
+                2
+            } else {
+                1
+            })
+        })
+    }
+
     pub fn session_current(
         &self,
         session_id: Uuid,
@@ -364,6 +405,19 @@ impl DurableAuthenticationAudit {
         let source = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
         let expected = self.inspect(&source, floor)?.verified;
         *floor = expected.head.clone();
+        let restored = self.backup_snapshot(&source, path, &expected)?;
+        self.backing.verify(&source)?;
+        source.commit()?;
+        self.verify_backing(db)?;
+        Ok(restored)
+    }
+
+    fn backup_snapshot(
+        &self,
+        source: &Connection,
+        path: &Path,
+        expected: &AuthenticationVerificationV1,
+    ) -> Result<AuthenticationVerificationV1> {
         let (backing, guard) = StoreStorage::create_new(path)?;
         durable_parent(&backing)?;
         ensure!(
@@ -373,11 +427,11 @@ impl DurableAuthenticationAudit {
         let mut destination = connection(&backing, false)?;
         durability(&destination)?;
         {
-            let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
+            let backup = rusqlite::backup::Backup::new(source, &mut destination)?;
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 backing.verify_names()?;
-                self.backing.verify(&source)?;
+                self.backing.verify(source)?;
                 if backup.step(256)? == rusqlite::backup::StepResult::Done {
                     break;
                 }
@@ -398,7 +452,7 @@ impl DurableAuthenticationAudit {
         )?
         .verified;
         ensure!(
-            restored == expected,
+            restored == *expected,
             AuthenticationAuditFailureV1::Integrity
         );
         let quick: String = destination.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
@@ -407,10 +461,51 @@ impl DurableAuthenticationAudit {
         destination.close().map_err(|(_, error)| error)?;
         // This is a new, now closed inode protected by the retained guard.
         backing.sync_closed(&guard)?;
-        self.backing.verify(&source)?;
-        source.commit()?;
-        self.verify_backing(db)?;
         Ok(restored)
+    }
+
+    pub fn migrate_verified_initial_v2(
+        &self,
+        backup: &Path,
+    ) -> Result<AuthenticationVerificationV1> {
+        self.healthy()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?;
+        let LiveState { db, floor } = &mut *state;
+        // No writer can advance the head between this backup and the format
+        // transition. Migration consumes no ledger entry or quota capacity.
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let replay = self.inspect(&tx, floor)?;
+        *floor = replay.verified.head.clone();
+        ensure!(
+            replay.version == format::LEGACY_VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        let expected = replay.verified;
+        // SQLite Backup cannot read through its own write transaction. Keep
+        // the IMMEDIATE writer fence, but copy the same committed WAL snapshot
+        // through a separate read-only SQLite-managed connection.
+        let mut probe = connection(&self.backing, true)?;
+        {
+            let source = probe.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            ensure!(
+                self.inspect(&source, floor)?.verified == expected,
+                AuthenticationAuditFailureV1::Integrity
+            );
+            self.backup_snapshot(&source, backup, &expected)?;
+            source.commit()?;
+        }
+        probe.close().map_err(|(_, error)| error)?;
+        tx.pragma_update(None, "user_version", format::VERSION)?;
+        ensure!(
+            self.inspect(&tx, floor)?.verified == expected,
+            AuthenticationAuditFailureV1::Integrity
+        );
+        tx.commit()?;
+        self.verify_backing(db)?;
+        Ok(expected)
     }
 
     pub fn storage_identity(&self) -> Result<AuthenticationStorageIdentityV1> {

@@ -259,6 +259,7 @@ pub enum AuthenticationAuditFailureV1 {
     Conflict,
     PhaseOrder,
     Capacity,
+    SubjectCapacity,
 }
 impl std::fmt::Display for AuthenticationAuditFailureV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -269,6 +270,9 @@ impl std::fmt::Display for AuthenticationAuditFailureV1 {
             Self::Conflict => "authentication operation phase conflicts with durable content",
             Self::PhaseOrder => "authentication phase lacks its exact durable intention",
             Self::Capacity => "authentication audit capacity exhausted",
+            Self::SubjectCapacity => {
+                "verified subject authentication budget exhausted; operator recovery required"
+            }
         })
     }
 }
@@ -279,6 +283,45 @@ pub struct AuthenticationAudit {
 }
 
 impl AuthenticationAudit {
+    /// V2: atomically consume a verified initial access proof and reserve its
+    /// subject budget with the mandatory intention. Neither a proof replay nor
+    /// a gateway restart grants a second attempt. This is not membership or
+    /// execution authority; current permissions must still be checked.
+    pub fn begin_verified_initial(
+        &self,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.inner
+            .begin_verified_initial(record, principal, access_fingerprint, false)
+    }
+
+    /// Only the trusted gateway may recover an exhausted subject after a fresh
+    /// Rust membership preflight. This records that observation, not authority:
+    /// the regular audited membership lookup and session CAS remain mandatory.
+    pub(crate) fn begin_verified_initial_after_membership(
+        &self,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.inner
+            .begin_verified_initial(record, principal, access_fingerprint, true)
+    }
+
+    /// Explicit offline V1 -> V2 format migration. Creates and verifies an
+    /// exclusively new V1 backup while holding the source write transaction,
+    /// then changes only user_version. Existing payloads, hashes, namespace,
+    /// quota and policy are preserved. Reopening never performs this migration.
+    /// Stop gateway/brokers first; the SQLite lock is not runtime fencing.
+    pub fn migrate_verified_initial_v2(
+        &self,
+        backup: &Path,
+    ) -> anyhow::Result<AuthenticationVerificationV1> {
+        self.inner.migrate_verified_initial_v2(backup)
+    }
+
     /// Consume the exact prior intention and record generation one atomically.
     /// WebPkce uses Login; NativeCli uses SessionAdmission. This observation
     /// does not grant membership, an API credential or execution authority.
@@ -404,6 +447,12 @@ impl AuthenticationAudit {
 
     pub fn verify(&self) -> anyhow::Result<AuthenticationVerificationV1> {
         self.inner.verify()
+    }
+
+    /// Validates the complete chain and returns the closed format generation.
+    /// V1 can be inspected/backed up/migrated, but cannot reserve a V2 proof.
+    pub fn format_version(&self) -> anyhow::Result<u32> {
+        self.inner.format_version()
     }
 
     pub fn backup_new(&self, path: &Path) -> anyhow::Result<AuthenticationVerificationV1> {

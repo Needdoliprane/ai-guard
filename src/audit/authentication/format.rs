@@ -5,7 +5,8 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const VERSION: i64 = 1_000_001;
+pub(super) const LEGACY_VERSION: i64 = 1_000_001;
+pub(super) const VERSION: i64 = 1_000_002;
 pub(super) const APPLICATION_ID: i64 = 0x4149_4741; // AIGA
 const PURPOSE: &str = "authentication_audit_v1";
 const MAX_PAYLOAD_BYTES: usize = 32_768;
@@ -38,6 +39,14 @@ pub(super) enum Entry {
     },
     Authentication {
         record: AuthenticationRecordV1,
+    },
+    /// V2 only. The verifier's identity and consumed proof are committed with
+    /// the initial intention, before any membership lookup or session install.
+    VerifiedInitial {
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+        membership_recovery: bool,
     },
     Session {
         mutation: Box<SessionMutation>,
@@ -85,7 +94,7 @@ impl SessionMutation {
 impl Entry {
     pub fn record(&self) -> Option<&AuthenticationRecordV1> {
         match self {
-            Self::Authentication { record } => Some(record),
+            Self::Authentication { record } | Self::VerifiedInitial { record, .. } => Some(record),
             Self::Session { mutation } => Some(mutation.record()),
             Self::Genesis { .. } => None,
         }
@@ -93,12 +102,24 @@ impl Entry {
 }
 
 pub(super) struct Replay {
+    pub version: i64,
     pub verified: AuthenticationVerificationV1,
     phases: BTreeMap<(Uuid, u8), (String, AuthenticationReceiptV1)>,
     intentions: BTreeMap<Uuid, (AuthenticationRecordV1, AuthenticationReceiptV1)>,
     receipts: BTreeMap<u64, AuthenticationReceiptV1>,
     sessions: BTreeMap<Uuid, AuthenticationSessionCurrentV1>,
     fingerprints: BTreeSet<AuthenticationTokenFingerprintV1>,
+    initial_proofs: BTreeMap<Uuid, InitialProof>,
+    // Rebuilt from validated initial entries in this replay, never persisted
+    // separately or accepted as an independent authority.
+    initial_fingerprints: BTreeSet<AuthenticationTokenFingerprintV1>,
+    subject_usage: BTreeMap<PrincipalRefV1, (u64, u64)>,
+}
+
+struct InitialProof {
+    principal: PrincipalRefV1,
+    fingerprint: AuthenticationTokenFingerprintV1,
+    reserved_bytes: u64,
 }
 
 pub(super) fn validate_policy(
@@ -324,13 +345,18 @@ pub(super) fn digest(seq: u64, received: &str, previous: &str, payload: &str) ->
     hex::encode(hash.finalize())
 }
 
-pub(super) fn validate_schema(db: &Connection) -> Result<()> {
+pub(super) fn schema_version(db: &Connection) -> Result<i64> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let application: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
     ensure!(
-        version == VERSION && application == APPLICATION_ID,
+        matches!(version, LEGACY_VERSION | VERSION) && application == APPLICATION_ID,
         AuthenticationAuditFailureV1::Format
     );
+    Ok(version)
+}
+
+pub(super) fn validate_schema(db: &Connection) -> Result<()> {
+    schema_version(db)?;
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
     let objects = statement
         .query_map([], |row| {
@@ -424,13 +450,151 @@ impl Replay {
     }
 
     pub fn fingerprint_seen(&self, fingerprint: &AuthenticationTokenFingerprintV1) -> bool {
-        self.fingerprints.contains(fingerprint)
+        self.fingerprints.contains(fingerprint) || self.initial_fingerprints.contains(fingerprint)
+    }
+
+    pub fn validate_initial(
+        &self,
+        record: &AuthenticationRecordV1,
+        principal: &PrincipalRefV1,
+        fingerprint: AuthenticationTokenFingerprintV1,
+        membership_recovery: bool,
+        payload: &str,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<u64> {
+        ensure!(
+            self.version == VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        ensure!(
+            record.phase == AuthenticationPhaseV1::Intention
+                && matches!(
+                    record.action,
+                    AuthenticationActionV1::Login | AuthenticationActionV1::SessionAdmission
+                )
+                && record.session_id.is_some()
+                && matches!(principal, PrincipalRefV1::HumanOidc { issuer, .. } if issuer == &record.issuer)
+                && fingerprint.domain == FingerprintDomainV1::Access,
+            AuthenticationAuditFailureV1::InvalidInput
+        );
+        principal
+            .validate()
+            .map_err(|_| AuthenticationAuditFailureV1::InvalidInput)?;
+        ensure!(
+            !self.fingerprint_seen(&fingerprint),
+            AuthenticationAuditFailureV1::Conflict
+        );
+        // Count a pending attempt until a durably admitted session proves its
+        // success. A crash, failed lookup or rejected result cannot release it.
+        // The result allowance includes the largest initial rejection shape;
+        // its decimal sequence is sized at the policy's maximum, not today's.
+        let mut terminal = record.clone();
+        terminal.phase = AuthenticationPhaseV1::Result {
+            outcome: AuthenticationOutcomeV1::Rejected,
+            reason: AuthenticationReasonV1::NoMembership,
+        };
+        terminal.principal = Some(principal.clone());
+        terminal.causal = Some(AuthenticationReceiptV1 {
+            namespace_id: self.verified.namespace_id,
+            sequence: policy.max_records,
+            hash: ZERO_HASH.into(),
+        });
+        let reserved_bytes = (payload.len() as u64)
+            .checked_add(
+                checked_json(
+                    &Entry::Authentication { record: terminal },
+                    &Redactor::new(vec![]),
+                )?
+                .len() as u64,
+            )
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        let used = self
+            .subject_usage
+            .get(principal)
+            .copied()
+            .unwrap_or_default();
+        // Lifetime of this ledger, all client IDs and session kinds combined.
+        // An unapproved subject gets at most 64 failed/pending attempts and
+        // 1/8 of logical capacity (one auditable attempt on a smaller policy).
+        // No expiry or operator archive is implied by this finite budget.
+        // A fresh trusted membership preflight can recover an exhausted user;
+        // that observation is explicit and never replaces normal authorization.
+        let attempts = ((policy.max_records.saturating_sub(1)) / 16).clamp(1, 64);
+        let bytes = (policy.max_serialized_bytes / 8).max(reserved_bytes);
+        ensure!(
+            membership_recovery
+                || (used.0 < attempts
+                    && used
+                        .1
+                        .checked_add(reserved_bytes)
+                        .is_some_and(|next| next <= bytes)),
+            AuthenticationAuditFailureV1::SubjectCapacity
+        );
+        Ok(reserved_bytes)
+    }
+
+    fn accept_initial(
+        &mut self,
+        entry: Entry,
+        payload: String,
+        receipt: AuthenticationReceiptV1,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        let Entry::VerifiedInitial {
+            record,
+            principal,
+            access_fingerprint: fingerprint,
+            membership_recovery,
+        } = entry
+        else {
+            return Err(AuthenticationAuditFailureV1::InvalidInput.into());
+        };
+        let reserved_bytes = self.validate_initial(
+            &record,
+            &principal,
+            fingerprint,
+            membership_recovery,
+            &payload,
+            policy,
+        )?;
+        let used = self.subject_usage.entry(principal.clone()).or_default();
+        used.0 = used
+            .0
+            .checked_add(1)
+            .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+        used.1 = used
+            .1
+            .checked_add(reserved_bytes)
+            .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+        self.initial_proofs.insert(
+            record.operation_id,
+            InitialProof {
+                principal,
+                fingerprint,
+                reserved_bytes,
+            },
+        );
+        self.initial_fingerprints.insert(fingerprint);
+        self.accept(record, payload, receipt)
     }
 
     /// A tracked lifecycle phase must update its session in the same entry.
     /// Otherwise a plain record would consume the unique phase while leaving
     /// an Active/Pending projection that can no longer complete its transition.
     pub fn validate_generic_lane(&self, record: &AuthenticationRecordV1) -> Result<()> {
+        // A verified initial success must atomically install its binding.
+        if self.initial_proofs.contains_key(&record.operation_id) {
+            ensure!(
+                !matches!(
+                    record.phase,
+                    AuthenticationPhaseV1::Result {
+                        outcome: AuthenticationOutcomeV1::Succeeded,
+                        ..
+                    }
+                ),
+                AuthenticationAuditFailureV1::PhaseOrder
+            );
+        }
         let tracked = record
             .session_id
             .is_some_and(|id| self.sessions.contains_key(&id));
@@ -533,6 +697,20 @@ impl Replay {
                         && !self.fingerprints.contains(&binding.access_fingerprint),
                     AuthenticationAuditFailureV1::PhaseOrder
                 );
+                if let Some(proof) = self.initial_proofs.get(&record.operation_id) {
+                    ensure!(
+                        proof.principal == binding.principal
+                            && proof.fingerprint == binding.access_fingerprint,
+                        AuthenticationAuditFailureV1::PhaseOrder
+                    );
+                } else {
+                    ensure!(
+                        !self
+                            .initial_fingerprints
+                            .contains(&binding.access_fingerprint),
+                        AuthenticationAuditFailureV1::PhaseOrder
+                    );
+                }
             }
             SessionMutation::RefreshPending {
                 record,
@@ -572,7 +750,7 @@ impl Replay {
                         && binding.client_id == old.client_id
                         && binding.kind == old.kind
                         && old.generation.checked_add(1) == Some(binding.generation)
-                        && !self.fingerprints.contains(&binding.access_fingerprint),
+                        && !self.fingerprint_seen(&binding.access_fingerprint),
                     AuthenticationAuditFailureV1::PhaseOrder
                 );
             }
@@ -612,6 +790,22 @@ impl Replay {
         // cannot partially authorize a binding or fingerprint.
         match &mutation {
             SessionMutation::Admit { binding, .. } | SessionMutation::Rotate { binding, .. } => {
+                if let SessionMutation::Admit { record, .. } = &mutation
+                    && let Some(proof) = self.initial_proofs.get(&record.operation_id)
+                {
+                    let used = self
+                        .subject_usage
+                        .get_mut(&proof.principal)
+                        .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+                    used.0 = used
+                        .0
+                        .checked_sub(1)
+                        .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+                    used.1 = used
+                        .1
+                        .checked_sub(proof.reserved_bytes)
+                        .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+                }
                 self.fingerprints.insert(binding.access_fingerprint);
                 if let Some(fingerprint) = binding.refresh_fingerprint {
                     self.fingerprints.insert(fingerprint);
@@ -710,6 +904,15 @@ impl Replay {
                             .is_none_or(|principal| record.principal.as_ref() == Some(principal)),
                     AuthenticationAuditFailureV1::PhaseOrder
                 );
+                if let Some(proof) = self.initial_proofs.get(&record.operation_id) {
+                    ensure!(
+                        record
+                            .principal
+                            .as_ref()
+                            .is_none_or(|principal| *principal == proof.principal),
+                        AuthenticationAuditFailureV1::PhaseOrder
+                    );
+                }
             }
         }
         Ok(())
@@ -728,6 +931,41 @@ impl Replay {
             AuthenticationAuditFailureV1::Integrity
         );
         self.validate_transition(&record)?;
+        // V1 denied results have verified subjects but no retained proof.
+        // Preserve every byte while charging those historical denials against
+        // their subject after migration; never invent fingerprints for them.
+        if matches!(
+            record.phase,
+            AuthenticationPhaseV1::Result {
+                outcome: AuthenticationOutcomeV1::Rejected,
+                reason: AuthenticationReasonV1::NoMembership,
+            }
+        ) && matches!(
+            record.action,
+            AuthenticationActionV1::Login | AuthenticationActionV1::SessionAdmission
+        ) && !self.initial_proofs.contains_key(&record.operation_id)
+        {
+            let principal = record
+                .principal
+                .clone()
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+            let initial = self
+                .phases
+                .get(&(record.operation_id, 0))
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+            let bytes = (initial.0.len() as u64)
+                .checked_add(payload.len() as u64)
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+            let used = self.subject_usage.entry(principal).or_default();
+            used.0 = used
+                .0
+                .checked_add(1)
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+            used.1 = used
+                .1
+                .checked_add(bytes)
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+        }
         self.phases.insert(
             (record.operation_id, phase_key(record.phase).1),
             (payload, receipt.clone()),
@@ -772,6 +1010,7 @@ pub(super) fn replay(
         AuthenticationAuditFailureV1::Format
     );
     let mut replay = Replay {
+        version: schema_version(db)?,
         verified: AuthenticationVerificationV1 {
             namespace_id,
             records: 0,
@@ -787,6 +1026,9 @@ pub(super) fn replay(
         receipts: BTreeMap::new(),
         sessions: BTreeMap::new(),
         fingerprints: BTreeSet::new(),
+        initial_proofs: BTreeMap::new(),
+        initial_fingerprints: BTreeSet::new(),
+        subject_usage: BTreeMap::new(),
     };
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,length(CAST(payload AS BLOB)),payload,operation_id,phase,length(CAST(received_at AS BLOB)),length(CAST(prev_hash AS BLOB)),length(CAST(hash AS BLOB)),length(CAST(operation_id AS BLOB)),length(CAST(phase AS BLOB)) FROM authentication_entries ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -888,6 +1130,21 @@ pub(super) fn replay(
                 validate_record(&record, policy)?;
                 replay.validate_generic_lane(&record)?;
                 replay.accept(record, payload, receipt.clone())?;
+            }
+            entry @ Entry::VerifiedInitial { .. } => {
+                let record = entry
+                    .record()
+                    .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+                ensure!(
+                    seq > 1
+                        && replay.version == VERSION
+                        && projected_operation.as_deref()
+                            == Some(record.operation_id.to_string().as_str())
+                        && projected_phase.as_deref() == Some(phase_key(record.phase).0),
+                    AuthenticationAuditFailureV1::Integrity
+                );
+                validate_record(record, policy)?;
+                replay.accept_initial(entry, payload, receipt.clone(), policy)?;
             }
             Entry::Session { mutation } => {
                 let record = mutation.record();
