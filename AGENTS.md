@@ -179,13 +179,25 @@ Mettre à jour les preuves et les écarts après chaque lot. Si une dépendance 
 
 ### Délégations bornées et refus d'outillage
 
-Chaque délégation fournit un contexte compact propre au sous-agent, avec :
+Avant de déléguer, l'agent principal distingue lecture/remédiation ciblée et
+reproduction ou intégration nécessitant des effets réels déjà autorisés. Choisir
+le travail minimal utile au besoin ; ne pas ouvrir un audit complet par réflexe
+ni ajouter des scénarios offensifs inutiles.
 
-- l'objectif concret et la demande du mainteneur qui autorise le travail ;
-- le dépôt, le checkout/base, les fichiers possédés et les contrats à lire ;
-- les surfaces réellement locales ou externes, et les actions permises/interdites ;
-- les tests pertinents, la régression minimale, les données synthétiques éventuelles ;
-- les ressources et budgets autorisés, la preuve attendue et le critère d'arrêt.
+Chaque délégation fournit un contexte compact propre au sous-agent, selon ce
+mini-gabarit à renseigner avec les faits de la tâche :
+
+- **Autorisation et objectif** : demande réelle du mainteneur, correction attendue,
+  comportement à vérifier et critère d'acceptation ;
+- **Checkout** : dépôt, branche/base, fichiers possédés et contrats à lire ;
+- **Surface** : chemins de la fixture synthétique ou des données autorisées,
+  sandbox et adresse loopback si utilisées, réseau absent ou destinations
+  effectivement autorisées ; ne pas déclarer une isolation non vérifiée ;
+- **Opérations** : commandes ciblées et effets permis, exclusions réelles
+  (services externes, credentials, mutations de runtime ou suppressions) ;
+- **Validation et limites** : test pertinent, régression minimale, preuve attendue,
+  budgets CPU/RAM/disque/délai et arrêt de la reproduction dès le premier oracle
+  discriminant, au plafond ou au refus. Ne pas inventer un budget non établi.
 
 Une référence dans le code à un service externe n'autorise pas à agir sur ce service.
 Nommer explicitement tout besoin d'accès, de donnée réelle ou d'action externe non
@@ -194,21 +206,26 @@ instructions utiles et des pointeurs précis, sans recopier conversation, journa
 complets, secrets ou blocs de mémoire de session. Décrire honnêtement l'intention
 et le périmètre défensif ; l'autorisation du mainteneur ne supprime pas les contrôles.
 
-Après un refus, conserver le message exact non secret, en signalant toute expurgation,
-et les éléments observables : heure, lot, agent, source du refus, modèle, surface et
-identifiant de requête. Ne pas inventer les champs absents ni attribuer sans preuve
-le refus à une cause. Marquer l'opération bloquée `BLOCKED` et ses tests non exécutés
-`NOT_RUN`, jamais `PASS`. Ne pas répéter une requête identique en boucle.
+Après un refus, conserver le message exact expurgé des secrets, en signalant toute
+expurgation, et les éléments observables : heure, lot, phase, agent, outil, modèle,
+surface/chemin d'accès, source du refus et identifiant de requête. Marquer les champs
+absents `inconnu` ; ne pas attribuer sans preuve le refus à une cause ou à un contrôle
+interne. Marquer l'opération bloquée `BLOCKED` et ses tests non exécutés `NOT_RUN`,
+jamais `PASS` ni `RED` produit. Ne pas relancer une requête identique.
 
 Ne pas dissimuler l'intention, retirer un contrôle ou changer de modèle pour forcer
 une réponse, ni fragmenter l'opération refusée pour en reconstituer l'exécution.
-Le dépannage normal d'un modèle approuvé reste permis ; une clarification conserve
-l'intention et l'autorisation réelles. Continuer les tâches distinctes autorisées ;
-nommer précisément la dépendance nécessitant une décision ou information du mainteneur.
+Le dépannage normal d'un modèle approuvé reste permis. Une ambiguïté légitime peut
+être clarifiée par un contexte plus précis conservant intention et autorisation
+réelles, sans reconstituer l'opération refusée. Si l'interdiction persiste, garder
+le lot concerné `BLOCKED` et poursuivre les tâches distinctes autorisées ; ne pas
+bloquer tout le chantier ni inventer un échec du produit. Nommer précisément la
+dépendance nécessitant une décision ou information du mainteneur.
 
-Daybreak ne garantit pas l'absence de refus. Vérifier droits, réglages et modèle
-approuvé observables sur chaque surface, sans supposer leur propagation aux sous-agents
-ni déduire la cause d'un état UI périmé. Si nécessaire, proposer un signalement au
+Daybreak et une meilleure formulation ne garantissent pas l'absence de refus.
+Vérifier droits, réglages, modèle approuvé, connexion et workspace observables sur
+chaque surface, sans supposer leur propagation aux sous-agents ni déduire la cause
+d'un état UI périmé. Si nécessaire, proposer un signalement au
 support expurgé des secrets avec les faits disponibles ; aucun taux de réussite non mesuré.
 Consulter la documentation officielle à jour : [contrôles supplémentaires](https://help.openai.com/en/articles/20001326)
 et [dépannage Daybreak](https://help.openai.com/en/articles/20001259).
