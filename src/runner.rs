@@ -92,6 +92,40 @@ pub struct AuditClient {
     http: reqwest::Client,
     redactor: Redactor,
 }
+
+// Preserve the existing fifteen-second request timeout. At most three requests
+// plus two one-second rate backoffs fit inside this overall bound.
+const EVENT_POST_BUDGET: Duration = Duration::from_secs(47);
+const EVENT_POST_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const EVENT_POST_ATTEMPTS: usize = 3;
+const EVENT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EventPostPolicy {
+    SingleAttempt,
+    RetryRateWindow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventPostFailure {
+    Unavailable,
+    Rejected(reqwest::StatusCode),
+    InvalidResponse,
+    RateLimitRetryExhausted,
+}
+impl std::fmt::Display for EventPostFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("gateway event delivery unavailable or timed out"),
+            Self::Rejected(status) => write!(f, "gateway rejected the event (HTTP {status})"),
+            Self::InvalidResponse => f.write_str("gateway returned an invalid event receipt"),
+            Self::RateLimitRetryExhausted => {
+                f.write_str("gateway event write rate limit persisted (HTTP 429 Too Many Requests)")
+            }
+        }
+    }
+}
+impl std::error::Error for EventPostFailure {}
 pub enum Authorization {
     Allowed(Value),
     Review {
@@ -442,24 +476,114 @@ impl AuditClient {
         .await
     }
     pub async fn post_event(&self, event: Value) -> Result<i64> {
+        self.post_event_to("api/events", event, EventPostPolicy::RetryRateWindow)
+            .await
+    }
+    /// Explicit trusted producer API. Neither Event kind, source nor provenance
+    /// can select this route from the ordinary worker-derived ingestion path.
+    pub(crate) async fn post_control_event(&self, event: Value) -> Result<i64> {
+        self.post_event_to(
+            "api/v1/control/events",
+            event,
+            EventPostPolicy::RetryRateWindow,
+        )
+        .await
+    }
+    /// The mandatory start callback must fail on its first refused audit. This
+    /// keeps the existing fifteen-second request bound without a rate window.
+    pub(crate) async fn post_control_event_once(&self, event: Value) -> Result<i64> {
+        self.post_event_to(
+            "api/v1/control/events",
+            event,
+            EventPostPolicy::SingleAttempt,
+        )
+        .await
+    }
+    async fn post_event_to(
+        &self,
+        path: &str,
+        event: Value,
+        policy: EventPostPolicy,
+    ) -> Result<i64> {
         let event = self.redactor.value(&event);
-        if serde_json::to_vec(&event)?.len() > 120 * 1024 {
+        // Freeze the entire body once, including UUID and timestamp. A rate
+        // refusal occurs before append; retries must retain this exact input.
+        let body = serde_json::to_vec(&event)?;
+        if body.len() > 120 * 1024 {
             bail!("event exceeds the safe audit payload limit");
         }
-        let answer = self
-            .response(
-                self.http
-                    .post(self.base.join("api/events")?)
-                    .bearer_auth(&self.token)
-                    .json(&event),
-            )
-            .await?;
-        let seq = answer
-            .get("seq")
-            .and_then(Value::as_i64)
-            .filter(|seq| *seq > 0)
-            .context("gateway did not acknowledge durable event storage")?;
-        Ok(seq)
+        let url = self.base.join(path)?;
+        let (attempts, budget) = match policy {
+            EventPostPolicy::SingleAttempt => (1, EVENT_POST_REQUEST_TIMEOUT),
+            EventPostPolicy::RetryRateWindow => (EVENT_POST_ATTEMPTS, EVENT_POST_BUDGET),
+        };
+        let deadline = tokio::time::Instant::now() + budget;
+        for attempt in 0..attempts {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(EventPostFailure::Unavailable.into());
+            }
+            let mut response = self
+                .http
+                .post(url.clone())
+                .bearer_auth(&self.token)
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.clone())
+                .timeout(remaining.min(EVENT_POST_REQUEST_TIMEOUT))
+                .send()
+                .await
+                .map_err(|_| EventPostFailure::Unavailable)?;
+            let status = response.status();
+            if !status.is_success() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+                // In particular, an old gateway's 404 is never followed by an
+                // ingestion fallback. Auth, quota and audit errors are terminal.
+                return Err(EventPostFailure::Rejected(status).into());
+            }
+            let mut retry_headers = response
+                .headers()
+                .get_all(reqwest::header::RETRY_AFTER)
+                .iter();
+            let retry_after_one_second = retry_headers.next().is_some_and(|value| value == "1")
+                && retry_headers.next().is_none();
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response
+                .chunk()
+                .await
+                .map_err(|_| EventPostFailure::Unavailable)?
+            {
+                if bytes.len().saturating_add(chunk.len()) > 512 * 1024 {
+                    return Err(EventPostFailure::InvalidResponse.into());
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            let answer: Value =
+                serde_json::from_slice(&bytes).map_err(|_| EventPostFailure::InvalidResponse)?;
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                if policy == EventPostPolicy::SingleAttempt {
+                    return Err(EventPostFailure::Rejected(status).into());
+                }
+                let retryable = retry_after_one_second
+                    && answer.pointer("/error/code").and_then(Value::as_str)
+                        == Some("write_rate_limited");
+                if !retryable {
+                    return Err(EventPostFailure::Rejected(status).into());
+                }
+                if attempt + 1 == attempts
+                    || deadline.saturating_duration_since(tokio::time::Instant::now())
+                        <= EVENT_RETRY_DELAY
+                {
+                    return Err(EventPostFailure::RateLimitRetryExhausted.into());
+                }
+                tokio::time::sleep(EVENT_RETRY_DELAY).await;
+                continue;
+            }
+            return answer
+                .get("seq")
+                .and_then(Value::as_i64)
+                .filter(|seq| *seq > 0)
+                .ok_or_else(|| EventPostFailure::InvalidResponse.into());
+        }
+        Err(EventPostFailure::RateLimitRetryExhausted.into())
     }
     async fn decide(&self, request: &DecisionRequest) -> Result<Value> {
         self.validate_identity_payload(request)?;
@@ -1469,7 +1593,7 @@ fn event(plan: &RunPlan, kind: &str, data: Value) -> Value {
         "command":null,"decision":null,"result":null,"data":data})
 }
 async fn emit(client: &AuditClient, plan: &RunPlan, kind: &str, data: Value) -> Result<()> {
-    client.post_event(event(plan, kind, data)).await?;
+    client.post_control_event(event(plan, kind, data)).await?;
     Ok(())
 }
 
@@ -1889,6 +2013,215 @@ pub async fn stop_worker_with_program(
         adopt_runtime_program,
     )
     .await
+}
+
+#[cfg(all(test, unix))]
+mod event_transport_tests {
+    use super::*;
+    use crate::{
+        api::{GatewayState, TenantGateway, gateway_router},
+        audit::{EventQuery, Store},
+        model::Event,
+        policy::Policy,
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        extract::Request,
+        http::StatusCode,
+        middleware::{self, Next},
+        response::IntoResponse,
+    };
+    use std::{
+        os::unix::fs::PermissionsExt,
+        sync::{Arc, Mutex},
+    };
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        TypedOnce,
+        TypedAlways,
+        Plain,
+        Capacity,
+        Unauthorized,
+        Forbidden,
+        Unavailable,
+        DuplicateHeader,
+        MissingHeader,
+        FalseCode,
+        OldGateway,
+    }
+
+    struct TestGateway {
+        _directory: tempfile::TempDir,
+        store: Arc<Store>,
+        seen: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+        client: AuditClient,
+        server: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for TestGateway {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+    impl TestGateway {
+        async fn new(fault: Fault) -> Self {
+            let directory = tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .unwrap();
+            let store = Arc::new(
+                Store::open(
+                    &directory.path().join("audit.sqlite"),
+                    Redactor::new(vec![]),
+                    1000,
+                )
+                .unwrap(),
+            );
+            let state = GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "local".into(),
+                    store: store.clone(),
+                    runner_token: "fixture-runner".into(),
+                    viewer_token: "fixture-viewer".into(),
+                }],
+                Policy::default(),
+                None,
+                Redactor::new(vec![]),
+            )
+            .unwrap();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let recorded = seen.clone();
+            let app=gateway_router(state).layer(middleware::from_fn(move|request:Request,next:Next|{
+                let seen=recorded.clone();
+                async move {
+                    let (parts,body)=request.into_parts();
+                    let bytes=to_bytes(body,128*1024).await.unwrap();
+                    let count={let mut items=seen.lock().unwrap();items.push((parts.uri.path().into(),bytes.to_vec()));items.len()};
+                    if matches!(fault,Fault::TypedOnce)&&count>1 {return next.run(Request::from_parts(parts,Body::from(bytes))).await;}
+                    let status=match fault {Fault::Unauthorized=>StatusCode::UNAUTHORIZED,Fault::Forbidden=>StatusCode::FORBIDDEN,Fault::Unavailable=>StatusCode::SERVICE_UNAVAILABLE,Fault::OldGateway=>StatusCode::NOT_FOUND,_=>StatusCode::TOO_MANY_REQUESTS};
+                    let body=match fault {Fault::Plain=>json!({"error":"untyped refusal"}),Fault::Capacity=>json!({"error":{"code":"audit_write_budget_exhausted","retry_action":"contact_operator"}}),Fault::FalseCode=>json!({"error":{"code":"different_rate_limit"}}),_=>json!({"error":{"code":"write_rate_limited"}})};
+                    let mut response=(status,axum::Json(body)).into_response();
+                    if !matches!(fault,Fault::MissingHeader){response.headers_mut().insert(reqwest::header::RETRY_AFTER,axum::http::HeaderValue::from_static("1"));}
+                    if matches!(fault,Fault::DuplicateHeader){response.headers_mut().append(reqwest::header::RETRY_AFTER,axum::http::HeaderValue::from_static("1"));}
+                    response
+                }
+            }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = AuditClient::new(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                "fixture-runner",
+            )
+            .unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            Self {
+                _directory: directory,
+                store,
+                seen,
+                client,
+                server,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_rate_retry_preserves_exact_bytes_identity_and_single_storage() {
+        for control in [false, true] {
+            let gateway = TestGateway::new(Fault::TypedOnce).await;
+            let event = serde_json::to_value(Event::new("command.requested")).unwrap();
+            let identity = event["id"].clone();
+            let seq = if control {
+                gateway.client.post_control_event(event).await
+            } else {
+                gateway.client.post_event(event).await
+            }
+            .unwrap();
+            let seen = gateway.seen.lock().unwrap();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[0].1, seen[1].1);
+            assert_eq!(
+                seen[0].0,
+                if control {
+                    "/api/v1/control/events"
+                } else {
+                    "/api/events"
+                }
+            );
+            assert_eq!(seen[0].0, seen[1].0);
+            let rows = gateway.store.events(&EventQuery::default()).unwrap();
+            let matching = rows
+                .iter()
+                .filter(|row| row.event.id == identity.as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(matching.len(), 1);
+            assert_eq!(matching[0].seq, seq);
+        }
+    }
+
+    #[tokio::test]
+    async fn other_refusals_and_ambiguous_rate_headers_are_never_retried() {
+        for fault in [
+            Fault::Plain,
+            Fault::Capacity,
+            Fault::Unauthorized,
+            Fault::Forbidden,
+            Fault::Unavailable,
+            Fault::DuplicateHeader,
+            Fault::MissingHeader,
+            Fault::FalseCode,
+        ] {
+            let gateway = TestGateway::new(fault).await;
+            assert!(
+                gateway
+                    .client
+                    .post_event(json!(Event::new("command.requested")))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(gateway.seen.lock().unwrap().len(), 1);
+            assert!(
+                !gateway
+                    .store
+                    .events(&EventQuery::default())
+                    .unwrap()
+                    .iter()
+                    .any(|row| row.event.kind == "command.requested")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persistent_typed_rate_refusal_stops_after_three_identical_requests() {
+        let gateway = TestGateway::new(Fault::TypedAlways).await;
+        let result = gateway
+            .client
+            .post_event(json!(Event::new("command.requested")))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            result.downcast_ref::<EventPostFailure>(),
+            Some(&EventPostFailure::RateLimitRetryExhausted)
+        );
+        let seen = gateway.seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert!(seen.windows(2).all(|pair| pair[0].1 == pair[1].1));
+    }
+
+    #[tokio::test]
+    async fn old_gateway_control_route_failure_has_no_ingestion_fallback() {
+        let gateway = TestGateway::new(Fault::OldGateway).await;
+        let error = gateway
+            .client
+            .post_control_event(json!(Event::new("command.requested")))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<EventPostFailure>(),
+            Some(&EventPostFailure::Rejected(StatusCode::NOT_FOUND))
+        );
+        let seen = gateway.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "/api/v1/control/events");
+    }
 }
 
 #[cfg(test)]

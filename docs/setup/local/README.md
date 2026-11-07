@@ -179,6 +179,12 @@ The normal recovery commands use the session's recorded engine authority:
 
 Resume reconciles an interrupted session; it does not grant a second use of a consumed start claim. Interactive admission and terminal attachment have their own continuity requirements. When a retained authority needs an explicit executable, use the approved `--runtime-program` path; `--adopt-runtime-program` is a deliberate legacy-authority binding, not a generic retry switch.
 
+For direct `run`/`worker-resume`, trusted file scanning precedes worker-declared telemetry. Inspect `workspace.diff.completed` and `observer.coverage`: the file prefix is bounded by 200 events and the 3 MiB private journal, so omitted changes remain explicit. Equal masked display paths keep distinct opaque change IDs and are marked ambiguous within that prefix. Coverage distinguishes prepared file events from durable acknowledgements; it does not promise exhaustive provider activity.
+
+Keep `sessions/<session>.postprocessing-v1.json` inside the original private `<config-dir>`, together with its plan and worker volume. Resume replays retained events with their original IDs and content. If no batch was prepared, a terminal session with unknown `changed_files` can be scanned again through its recorded runtime authority; that is a new recovery observation, not reconstructed historical output. Missing declared capture stays unknown, even if file recovery succeeds. The CLI remains unsuccessful for unresolved postprocessing or an external execution diagnostic; repeated resume does not turn missing capture into empty activity. Preserve the journal on an audit or storage failure; do not edit or remove it to force success.
+
+The new CLI requires the runner-only `POST /api/v1/control/events` route before launching a session. Update CLI and gateway together if this route is unavailable. Event ingestion and control each have a separate one-second, 200-write window per tenant; this does not reserve durable audit capacity. Replayable event writes retry only a typed write-rate refusal, while the mandatory start-audit callback remains one attempt per POST. See the [API contract](../../api.md#ingestion-et-faits-du-contrôle--ingestion-and-control-facts) for the exact limits. These direct-CLI journals do not migrate the permanent broker's V4 outbox or change strict plan formats 1/2/3. Their presence is not a runtime, crash-recovery or production qualification result.
+
 ## Stop, preserve data and restart
 
 Request a stop for each active worker before stopping its control stack:

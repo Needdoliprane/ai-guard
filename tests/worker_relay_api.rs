@@ -574,6 +574,49 @@ async fn call(
 }
 
 #[tokio::test]
+async fn bound_worker_relay_credential_cannot_publish_control_events_before_body() {
+    let directory = support::private_tempdir();
+    let a = Arc::new(fresh(directory.path(), "tenant-a", 2000));
+    let b = Arc::new(fresh(directory.path(), "tenant-b", 2000));
+    let worker = running_worker(&a);
+    let token = "7".repeat(48);
+    bind(&a, &worker, &token);
+    let app = router(a.clone(), b.clone());
+    assert_eq!(
+        call(
+            &app,
+            "GET",
+            "/api/v1/relay/messages?limit=32",
+            &token,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let before = (a.head().unwrap(), b.head().unwrap());
+    let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = polled.clone();
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/control/events")
+        .header("authorization", format!("Bearer {token}"))
+        .header("x-tenant-id", "tenant-b")
+        .header("content-type", "application/json")
+        .body(Body::from_stream(futures_util::stream::once(async move {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, std::io::Error>("unread invalid body")
+        })))
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(!polled.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!((a.head().unwrap(), b.head().unwrap()), before);
+}
+
+#[tokio::test]
 async fn human_identity_refuses_live_and_historical_workload_collision_in_either_tenant() {
     // This deliberately authorized Store provisioning represents operator
     // misconfiguration, not a CLI default or a reproduced worker exploit.

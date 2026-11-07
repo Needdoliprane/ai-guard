@@ -1,6 +1,6 @@
 # Contrat API locale — v0.1.0
 
-Les routes historiques du tableau ci-dessous sont également exposées sous le préfixe versionné `/api/v1` ; `/api` reste leur alias compatible. Les nouvelles [routes de supervision](#supervision-centrale--protocole-v1) existent uniquement sous `/api/v1`. `GET /api/v1/identity` (ou `/api/identity`) renvoie `{tenant_id,role}` depuis le jeton authentifié. Le gateway peut charger plusieurs identités et bases avec `--tenants-file` ; le [contrat multi-client](engineering/CLOUD_TENANCY.md) documente la configuration, la liaison durable et les limites. Les identifiants envoyés dans les requêtes ne choisissent jamais le tenant.
+Les routes historiques du tableau ci-dessous sont également exposées sous le préfixe versionné `/api/v1` ; `/api` reste leur alias compatible. Les nouvelles [routes de supervision](#supervision-centrale--protocole-v1) et la [route des faits du contrôle](#ingestion-et-faits-du-contrôle--ingestion-and-control-facts) existent uniquement sous `/api/v1`. `GET /api/v1/identity` (ou `/api/identity`) renvoie `{tenant_id,role}` depuis le jeton authentifié. Le gateway peut charger plusieurs identités et bases avec `--tenants-file` ; le [contrat multi-client](engineering/CLOUD_TENANCY.md) documente la configuration, la liaison durable et les limites. Les identifiants envoyés dans les requêtes ne choisissent jamais le tenant.
 
 Gateway par défaut : `http://127.0.0.1:8787`. Le dashboard utilise les mêmes routes de lecture sous `http://127.0.0.1:4000`. La gateway et le dashboard ne fournissent aucune route d'exécution de commande HTTP : seul le CLI de confiance pilote Docker/Podman.
 
@@ -18,6 +18,7 @@ Gateway et proxy dashboard refusent les champs Authorization multiples, y compri
 |---|---|---|
 | `GET /healthz` | Aucune | État du composant ; le gateway refuse aussi les configurations invalides et les échecs d'audit déjà constatés |
 | `POST /api/events` | Runner | Événement normalisé, expurgé puis stocké ; séquence et hashes |
+| `POST /api/v1/control/events` | Runner | Fait du contrôle de la liste fermée ci-dessous ; même reçu, budget distinct de l'ingestion ; aucun alias `/api` |
 | `POST /api/decide` | Runner | Décision tracée, hash de demande et `audit_seq` |
 | `GET /api/events` | Viewer ou runner | Historique paginé et `next_cursor` |
 | `GET /api/stream` | Viewer ou runner | SSE `event: audit`, `id: <seq>`, JSON d'événement |
@@ -634,6 +635,59 @@ Le schéma d'ingestion est dans `schemas/event.schema.json`. Les champs optionne
 `command.requested`, `security.decision`, `runtime.submitted`, `command.started`, `command.completed` et `command.failed` désignent des étapes différentes. Un `tool.result` de provider n'est pas une observation indépendante du noyau ; sa provenance reste `declared`.
 
 `result` peut contenir `exit_code`, `duration_ms`, `timed_out`, `oom_killed`, tailles et indicateurs de troncature. `stdout` et `stderr` n'apparaissent que si la capture a été demandée. Les fichiers portent des empreintes avant/après, jamais une attribution automatique à un sous-agent.
+
+### Ingestion et faits du contrôle / Ingestion and control facts
+
+`POST /api/events` et `/api/v1/events` partagent un budget d'ingestion de **200 écritures par fenêtre d'une seconde et par tenant**. `POST /api/v1/control/events`, décisions et mutations du contrôle utilisent un autre budget de **200 écritures par seconde et par tenant**. La route choisit le budget ; des valeurs `kind`, `source` ou `provenance` imitant le contrôle dans `/events` ne changent pas cette affectation. Ces budgets de débit ne réservent ni espace d'audit durable ni disponibilité sous charge.
+
+`POST /api/events` and `/api/v1/events` share an ingestion budget of **200 writes per one-second window per tenant**. `POST /api/v1/control/events`, decisions and control mutations use a separate **200-write window per tenant**. The route selects the budget; worker-controlled `kind`, `source` or `provenance` values in `/events` cannot promote a request to the control budget. These rate budgets reserve neither durable audit space nor availability under load.
+
+La route `/api/v1/control/events` exige `runner` **avant la lecture du JSON** : viewer → `403`, credential absent/invalide ou workload worker → `401`. Le tenant vient de cette identité, jamais des métadonnées de session. Le corps suit le même schéma `Event` et le succès renvoie le même `StoredEvent` que l'ingestion. Le `kind` doit appartenir exactement à la liste suivante ; tout autre genre donne `403`. Cette écriture descriptive n'accorde aucun droit de lancement et ne remplace pas les mutations typées de décision/worker/usage.
+
+`/api/v1/control/events` requires `runner` **before parsing JSON**: viewers receive `403`; absent, invalid or worker-workload credentials receive `401`. The authenticated identity selects the tenant. It accepts the same `Event` schema and returns the same `StoredEvent` receipt as ingestion. Only the exact kinds below are accepted; other kinds receive `403`. This descriptive write grants no launch authority and does not replace typed decision, worker or usage mutations.
+
+| Groupe / Group | Genres admis / Accepted kinds |
+|---|---|
+| Commande / Command | `command.requested`, `command.started`, `command.completed`, `command.failed` |
+| Runtime | `runtime.submitted`, `runtime.invocation.bound`, `runtime.terminal.attach.authorized`, `runtime.cleanup.failed` |
+| Import | `workspace.import.requested`, `workspace.import.created`, `workspace.import.started`, `workspace.import.completed`, `workspace.import.recovered`, `workspace.import.cleanup.failed` |
+| Scan | `workspace.scan.requested`, `workspace.scan.created`, `workspace.scan.started`, `workspace.scan.completed` |
+| Export | `workspace.export.requested`, `workspace.export.completed` |
+| Bilan / Summary | `workspace.diff.completed`, `observer.coverage` |
+
+`file.*` et les déclarations fournisseurs restent dans l'ingestion. Le nouveau CLI refuse un gateway dépourvu de cette route (`404`) à sa première trace `command.requested`, avant lancement ; aucun repli silencieux vers `/events`. Les anciens clients conservent leurs alias d'ingestion. Un même ID avec le même contenu permet le rejeu ; un contenu divergent reste refusé par le Store (`503` actuel pour un conflit d'événement, distinct du `409` des demandes de décision).
+
+`file.*` and provider declarations remain on ingestion. A new CLI refuses an older gateway missing this route (`404`) at its first `command.requested`, before launch, without falling back to `/events`. Existing ingestion aliases remain available to older clients. Exact event replays retain their ID and content; divergent content is refused by the Store (currently `503` for event conflicts, distinct from decision-request `409` responses).
+
+Un refus de **débit d'écriture** porte uniquement cette preuve de reprise : HTTP `429`, `error.code: "write_rate_limited"` et un unique `Retry-After: 1`. Le texte de `message` n'est pas un discriminant. Les écritures d'événements rejouables du CLI conservent exactement leurs octets, ID et timestamp : au plus trois tentatives, 15 s par requête, deux pauses d'une seconde, borne totale de 47 s. L'accusé obligatoire `command.started` utilise **une seule tentative de 15 s**, sans attendre une fenêtre supplémentaire ; son refus reste un échec du callback de démarrage. Les transitions workers ne reçoivent pas ce retry d'événements.
+
+A **write-rate** refusal is retryable only with HTTP `429`, `error.code: "write_rate_limited"` and exactly one `Retry-After: 1` header. Diagnostic text is not a discriminator. Replayable CLI event writes retain their exact bytes, ID and timestamp: at most three attempts, 15 seconds per request and two one-second pauses, within 47 seconds overall. The mandatory `command.started` acknowledgement uses **one 15-second attempt** without a rate retry window; refusal still fails the start callback. Worker transitions do not acquire this event retry policy.
+
+Un `429` générique, un refus de quota, `capacity_exhausted` ou `audit_write_budget_exhausted` ne satisfait pas ce contrat de retry. Les erreurs d'authentification, de transport ou d'audit ne sont pas réessayées par ce mécanisme. Les réserves cumulatives et l'intégrité de l'audit restent indépendantes ; conserver les données lorsqu'elles refusent une écriture.
+
+Generic `429`, quota, `capacity_exhausted` and `audit_write_budget_exhausted` responses do not meet this retry contract. Authentication, transport and audit errors are not retried by this mechanism. Cumulative audit capacity and integrity remain separate constraints; preserve the data when they refuse a write.
+
+### Couverture des fichiers et de la capture / File and capture coverage
+
+Pour le parcours direct `run`/`worker-resume`, le scan fiable et le préfixe de `file.*` précèdent les déclarations du worker. `workspace.diff.completed` donne `changed_files`, `emitted_changes`, `omitted_changes`, `truncated` et `omission_reasons`. Le préfixe est limité à 200 événements et au journal privé de 3 Mio, avec 128 Kio réservés à sa croissance ; des noms fortement échappés peuvent donc réduire ce préfixe avant 200. Le client borne chaque événement à 120 Kio, en dessous du plafond HTTP de 256 Kio. Le bilan ne transforme jamais les changements omis en zéro changement.
+
+For direct `run`/`worker-resume`, trusted scanning and the retained `file.*` prefix precede worker declarations. `workspace.diff.completed` reports `changed_files`, `emitted_changes`, `omitted_changes`, `truncated` and `omission_reasons`. The prefix is bounded by 200 events and the 3 MiB private journal, with 128 KiB reserved for later journal growth; escaped names can shorten it before 200. The client limits each event to 120 KiB, below the 256 KiB HTTP limit. Omitted changes never become zero changes.
+
+Chaque nouveau `file.*` porte `data.change_id`, l'UUID opaque de son événement, ainsi que `path_redacted` et `path_display_ambiguous`. Deux chemins masqués peuvent partager le même affichage sans fusionner leurs changements. L'ambiguïté est calculée sur le préfixe retenu ; elle ne décrit pas les fichiers omis. Aucun nom brut ou hash de nom n'est ajouté pour résoudre cette collision. Les anciens batches à chemins affichés uniques restent lisibles sans ces champs.
+
+New `file.*` events carry `data.change_id`, their opaque event UUID, plus `path_redacted` and `path_display_ambiguous`. Equal masked display paths do not merge distinct changes. Ambiguity is calculated within the retained prefix, not over omitted files. No raw name or name hash is added to resolve it. Older batches with unique display paths remain readable without these fields.
+
+`observer.coverage.data.postprocessing_complete` décrit la livraison des données **retenues et bornées**, pas une couverture exhaustive. `trusted_diff: "complete"` signifie que le bilan du diff est acquitté. `file_delivery` version1 distingue `prepared_changes` du curseur durable `acknowledged_changes` ; les deux restent `null` sans batch préparé. Ses phases sont `not_prepared`, `files_pending`, `summary_pending` et `complete`. Un événement peut être dans SQLite après perte de réponse sans compter comme ACK reçu. `trusted_diff_changed_files` et `trusted_diff_events_truncated` donnent le total connu et sa portée, ou restent `null`. Une livraison bornée peut finir avec `coverage: "partial"`, par exemple si des fichiers ou du stdout sont tronqués.
+
+`observer.coverage.data.postprocessing_complete` describes delivery of the **retained, bounded data**, not exhaustive coverage. `trusted_diff: "complete"` means the diff summary was acknowledged. Version1 `file_delivery` separates `prepared_changes` from the durable `acknowledged_changes` cursor; both remain `null` before preparation. Its phases are `not_prepared`, `files_pending`, `summary_pending` and `complete`. SQLite may contain an event after a lost response without a received acknowledgement. `trusted_diff_changed_files` and `trusted_diff_events_truncated` expose the known total and scope, or stay `null`. Bounded delivery may finish with `coverage: "partial"`, including when file events or stdout were truncated.
+
+Les nouvelles couvertures n'émettent plus `trusted_diff_emitted_changes`. Sa présence dans une ancienne couverture ne prouve pas un compteur d'ACK. Un événement ancien ou déjà retenu est rejoué à l'identique ; une nouvelle révision porte le nouveau bilan, sans réécrire l'ancien.
+
+New coverage events no longer emit `trusted_diff_emitted_changes`. Its presence in older coverage is not proof of an acknowledgement count. Historical or already retained events replay unchanged; a new revision carries the updated summary.
+
+La collecte déclarée distingue ACK connus, événements omis, livraison inconnue et événements non tentés. Après interruption sans capture retenue, son état est `unavailable_after_interruption` et les compteurs non établis restent `null` ; la collecte fournisseur en TTY reste `unavailable_for_tty`. Un échec de post-traitement conserve `postprocessing_error` et un code CLI en erreur. Une couverture refusée reste à rejouer localement : si l'audit central est indisponible, aucun marqueur central n'est garanti. Voir la [reprise EN](setup/local/README.md#reconcile-the-recorded-worker)/[FR](setup/local/README.fr.md#réconcilier-le-worker-enregistré). Les événements historiques et les formats stricts des plans 1/2/3 ne sont pas réécrits.
+
+Declared collection distinguishes known acknowledgements, omitted events, unknown delivery and unattempted events. After interruption without retained capture, its state is `unavailable_after_interruption` and unestablished counters stay `null`; TTY collection remains `unavailable_for_tty`. Postprocessing failure retains `postprocessing_error` and a failing CLI status. A refused coverage event stays locally pending; an unavailable central audit cannot guarantee a central marker. See the linked recovery guides. Historical events and strict plan formats 1/2/3 are not rewritten.
 
 ## Recherche, filtres, reprise
 
