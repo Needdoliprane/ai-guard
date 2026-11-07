@@ -199,6 +199,14 @@ mini-gabarit à renseigner avec les faits de la tâche :
   budgets CPU/RAM/disque/délai et arrêt de la reproduction dès le premier oracle
   discriminant, au plafond ou au refus. Ne pas inventer un budget non établi.
 
+Lorsqu'un chantier impose un profil d'exécution isolé, le transmettre explicitement
+à tous les descendants avant leur premier outil. Une compilation peut exécuter des
+build scripts : elle relève du même profil que les tests. Le sous-agent d'exécution
+attend le gel de source, sa cible de compilation propre et le feu vert du coordinateur ;
+un exemple Cargo dans un README ne lui donne pas un repli natif. Une commande ou un
+harnais manquant se clarifie auprès du coordinateur, sans créer une autre sandbox ni
+élargir les permissions. Conserver les travaux indépendants pendant cette clarification.
+
 Une référence dans le code à un service externe n'autorise pas à agir sur ce service.
 Nommer explicitement tout besoin d'accès, de donnée réelle ou d'action externe non
 déjà autorisé ; poursuivre les travaux qui n'en dépendent pas. Transmettre les
