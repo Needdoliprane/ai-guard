@@ -1,5 +1,31 @@
 # Décisions d'industrialisation
 
+## 8 novembre — propriété des connexions pour le lifecycle Gateway S2
+
+Direction technique retenue par l'orchestrateur dans la frontière R3 déjà
+autorisée : un helper Rust de bibliothèque possède les deux listeners et
+leurs tâches de connexion, au lieu d'abandonner une future de serveur dont
+les connexions resteraient hors de sa possession. Le handle de retrait est
+acquis immédiatement après construction du GatewayState, avant les builders
+fallibles, le signal et les binds. Retrait avant propagation d'erreur ou
+annulation ; arrêt gracieux HTTP de cinq secondes conservé, puis abort/join
+des connexions possédées et attente des vrais usages en cours jusqu'au commit.
+Cette attente des usages ne devient pas une promesse d'arrêt total en cinq secondes.
+
+Le helper expose directement `hyper-util =0.1.21`, déjà verrouillé et utilisé
+par Axum, avec les features minimales `http1/server/service/tokio`. Aucun
+nouveau service, moteur HTTP alternatif, version ou checksum n'est demandé.
+Cette dépendance sert la possession et le test de fermeture des connexions,
+notamment SSE. La résolution offline, les protocoles effectifs et les preuves
+de fermeture/drainage restent à vérifier dans la composition réelle.
+
+Les erreurs de pair restent locales à leur connexion ; les pannes internes
+ne sont pas effacées pendant le drainage. La revue du candidat a relevé un
+JoinError perdu après signal : le gel reste à corriger et tester. La fermeture
+de source, ce choix et les tests préparés ne qualifient ni TLS, ni upgrades,
+ni un lifecycle livré. Auth, Core, configuration et Main restent des tranches
+à composer, vérifier et revoir ensemble avant intégration.
+
 ## 8 novembre — réservation Kubernetes V2 et migration 11 attribuées
 
 Dans la direction des sessions V2 déjà autorisée par le mainteneur, Root valide
