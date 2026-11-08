@@ -9,6 +9,16 @@ suppression de données. L'activation reste fermée jusqu'aux preuves d'identit�
 de stockage, de confinement et d'audit ; l'accord ne qualifie aucune session.
 Le profil V1 et ses garanties restent distincts. [Décision et périmètre](DECISIONS.md#8-novembre--sessions-kubernetes-v2-autorisées-en-code-local).
 
+Le composant de profil V2 `c4d0cd6`, composé dans `9af5e99`, valide maintenant
+ces métadonnées et engagements : image, identifiants, fournisseur résolu,
+ressources, demande réseau fermée, invocation et manifeste. Le profil reste
+limité à64Kio ; le manifeste complet est validé séparément puis engagé par
+hash/compte/volumes, sans liste tronquée. La sérialisation ne contient pas
+l'argv ni les valeurs de credentials. Les onze fonctions k2 et le check
+toutes cibles ont leur [preuve propre](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).
+Ce composant ne rend aucun PodSpec, ne lit aucun credential et ne produit
+aucune permission d'exécution. Le reste de cette direction demeure à livrer.
+
 Le profil retenu V1, ses hashes, ses journaux et son programme `/usr/bin/id`
 restent lisibles sans conversion. Une vraie session demande un profil V2 :
 image immuable, commande/arguments séparés, ressources, identité de session,

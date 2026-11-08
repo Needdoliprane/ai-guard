@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Profil descriptif Kubernetes V2 du8novembre : `c4d0cd6` composé dans `9af5e99`,
+onze fonctions et check toutes cibles PASS sur k2, revue traitée.
+[Preuves et portée](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).
+Activation, bootstrap, identité/stockage réels, lifecycle et Clippy k2 restent
+ouverts ; aucun gate global fermé, G09 FAIL. Le RED préclaim98 a aussi révélé
+une libération de lease avant la fin de l'audit : correctif et GREEN requis.
+
 Réserve d'audit du7novembre : `1bb3bba` composé dans `d550c34`,19 fonctions
 uniques et toutes cibles vérifiées, revue indépendante. [Preuves](evidence/2026-11-07/d5-control-audit-reserve/README.md).
 Clippy strict est désormais exécuté : **FAIL89 diagnostics**, sans analyse

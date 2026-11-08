@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 8 novembre — profil V2 vérifié ; composition et propriétaires d'audit prioritaires
+
+Le contrat descriptif Kubernetes V2 est intégré après revue, onze fonctions et
+check toutes cibles sur k2 ; [périmètre](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).
+Le raccord de session, l'identité du canal, le stockage et le lifecycle complet
+restent obligatoires ; aucun champ de profil n'active un runtime.
+
+Le RED préclaim98 impose maintenant un propriétaire joint pour les signaux
+d'audit, indépendant de la disparition du demandeur et retenu avant libération
+du verrou. Le correctif est développé dans le candidat D5+relais, qui conserve
+les phases helpers D5 validées et les phases relais95. La prochaine validation
+porte sur cette composition, ses refus/abandons et sa compatibilité, puis sur
+un parcours Full3+relais distinct du parent handoff historique. Les qualifications
+réelles ne sont pas remplacées par ces parents logiciels.
+
 ## 8 novembre — sessions Kubernetes V2 : accord local reçu, implémentation ouverte
 
 Le mainteneur autorise le code Rust et les tests locaux de la

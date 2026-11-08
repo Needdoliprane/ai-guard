@@ -1,5 +1,27 @@
 # État constaté — suivi du développement
 
+## 8 novembre — profil Kubernetes V2 intégré ; défaut d'arrêt reproduit
+
+Le composant `c4d0cd6`, composé dans `9af5e99`, ajoute le profil descriptif V2
+fermé : bindings canoniques, métadonnées fournisseur, engagements privés de
+l'invocation/du manifeste et bornes explicites. La revue est traitée ; onze
+fonctions et le check toutes cibles passent sur k2. Implémentation et tests
+correspondent exactement après composition ; la seule déclaration de module
+est ensuite triée par rustfmt. [Preuves et limites](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).
+Aucune API, permission, session ou activation Kubernetes n'est livrée par ces
+types ; identité du bootstrap, stockage et lifecycle complet restent ouverts.
+
+La fixture préclaim98 corrige ses entrées avant acceptation et atteint enfin
+l'oracle : le shutdown rend la main et libère le verrou physique avant la fin
+du producteur d'audit, puis un ACK est constaté après libération. Le défaut
+est désormais reproduit. Le correctif c2 compile toutes cibles et passe le
+parent98 : lease retenue et aucun ACK après libération. La composition reste
+séparée ; ses régressions renforcées et autres parcours sont en validation.
+Le relais97 échoue encore par stack overflow après correction du TMPDIR de
+son harnais. Une composition dédiée réunit les phases helpers D5 et les phases
+relais95 ; sa revue source est favorable, les autres parcours composés restent
+à vérifier avant intégration du bundle.
+
 ## 8 novembre — Kubernetes V2 autorisé ; relais95 toujours FAIL
 
 Le mainteneur autorise code Rust et tests locaux des sessions Kubernetes V2,

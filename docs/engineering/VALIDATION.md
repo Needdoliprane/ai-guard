@@ -1,5 +1,41 @@
 # Validation courante
 
+## 8 novembre — QA AW : contrat Kubernetes k2 PASS et RED d'arrêt préclaim
+
+Kubernetes k2 passe le check toutes cibles, neuf fonctions du module, le golden
+V1 exact et le canari de sérialisation historique du manifeste : onze fonctions
+uniques. La revue a corrigé les oracles avant exécution. Les trois fichiers
+restent identiques dans le composant `c4d0cd6` et Root `9af5e99` ; `2176765`
+formate ensuite uniquement l'ordre de la déclaration de module. Le check
+rustfmt natif final passe, sans nouvelle exécution comportementale pour ce tri.
+[Commandes, empreintes et limites de preuve](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).
+
+Le parent préclaim98, une exécution après préparation valide, échoue RC101
+en9,28s sur le véritable oracle de rétention. Marqueurs : `returned_early=true`,
+`role_lease_held=false`, `signal_job_capture=true`, `ack_after_role_release=true`,
+`posts=1`, `commits_without_role_lease=1`. Les deux routes HTTP atteignent200.
+Log SHA `18cfe9cb3e7b6dd4a16330d17ff279d735a2a731202859964b218ece2eb88cec`.
+Les échecs482/96 restent des préconditions invalides et ne deviennent pas des RED.
+
+Le correctif propriétaire c2 passe ensuite le check toutes cibles, RC0, puis
+ce parent98 exact : RC0,1 PASS en10,18s, `returned_early=false`,
+`role_lease_held=true`, `ack_after_role_release=false`,
+`commits_without_role_lease=0`. Log SHA
+`cc8e71feb3b6b131ff3a80a0273e44301ac8c066ed09bac602dc9dbc3073bd33`.
+Le premier check a perdu sa capture sur un `tee` hôte absent : son statut est
+inconnu et reste consigné. Une validation distincte, après confirmation du
+processus terminal et correction de capture, fournit le RC0. L'appel test
+avec séparateur CLI invalide n'a exécuté aucun test ; il reste un défaut de
+harnais. C3 ajoute des régressions de saturation/erreur/panique et renforce98 ;
+ces preuves et celles des autres parcours composés restent séparées.
+
+AV a exécuté97 avant son cutoff : parent RC101,25,73s ; son stderr confirme
+un stack overflow. Log forensic SHA
+`70ad1ca1d7f0465b161dfcbee1b7f0ca1d0c446fd77ddaf90f0c9d66f0bfd970`.
+Tous les targets étaient terminaux avant l'arrêt contrôlé AV à16:22:36UTC,
+exit137/OOMfalse ; inspect final conservé, conteneur retiré sans volumes.
+La nouvelle QA AW et ses résultats n'impliquent aucune qualification moteur.
+
 ## 8 novembre — QA AV : sept tests94b et parent Export PASS
 
 Le gel94b corrige uniquement le prédicat WorkerClaim : il ne s'applique qu'à
