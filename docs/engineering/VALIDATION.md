@@ -1,5 +1,21 @@
 # Validation courante
 
+## 8 novembre — compatibilité bornée des consommateurs du schéma 11
+
+Le gel s11c1 passe six fonctions de validateurs purs, après RED sur sa source
+tests-only : quatre refus attendus de 11, puis un positif de portée refusé et
+son négatif préservé. Les deux sélections GREEN retournent RC0, 4/4 et 2/2.
+Les builds prennent 1m56s puis 2m00s ; les suites elles-mêmes durent moins
+d'une seconde. La cible RED effective était `source-red/target` après omission
+de la variable dédiée ; GREEN utilisait sa cible explicite distincte. Aucune
+cible n'a été partagée. [Gels, commandes et résultats](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#bounded-schema11-consumers).
+
+Revue indépendante GO_SOURCE, formatage ciblé et diff-check RC0. Le composant
+`a0f75f3` et Root `e2dcf81` ont les mêmes sources applicatives/tests/frontend et
+Cargo ; aucune relance Root ni qualification Store11/runtime n'est déduite.
+Deux avertissements Kubernetes préexistants restent présents. Le check toutes
+cibles de la future composition Core11 est NOT_RUN, aucun gate n'est fermé.
+
 ## 8 novembre — QA AW : contrat Kubernetes k2 PASS et RED d'arrêt préclaim
 
 Kubernetes k2 passe le check toutes cibles, neuf fonctions du module, le golden

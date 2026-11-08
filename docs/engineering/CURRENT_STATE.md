@@ -1,5 +1,19 @@
 # État constaté — suivi du développement
 
+## 8 novembre — consommateurs du schéma 11 intégrés, six validateurs vérifiés
+
+Le composant `a0f75f3`, composé dans `e2dcf81`, étend seize gardes explicites
+dans onze fichiers. Les versions de protocole, rôles, namespaces, activations
+et marqueurs historiques restent identiques ; les versions futures sont refusées.
+Après reproduction des refus de 11 sur la source tests-only, six fonctions
+ciblées passent sur s11c1 en QA Linux isolée. Revue indépendante, formatage et
+comparaison des sources composées passent ; deux warnings préexistants demeurent.
+[Commandes, empreintes et limites](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#bounded-schema11-consumers).
+Cela ne livre ni Store11, ni session exécutable, ni récupération HTTP. Le
+stockage candidat est retourné en correction après un manque de validation du
+quota historique worker relevé en revue ; son test reste à exécuter. Aucun
+gate global n'est fermé et le check toutes cibles composé reste à faire.
+
 ## 8 novembre — baseline de migration 11 reproduite, implémentation autorisée
 
 Sur le gel tests-only r1, la compilation passe puis le test atteint le refus

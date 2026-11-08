@@ -67,3 +67,60 @@ Linux cache archive was repaired from an already supplied public input before
 Cargo; that setup incident is separate from this test outcome. Root read the
 log/status and authorized the implementation after this RED. Store/API,
 recovery, migrations and runtime qualification remain open; no gate is closed.
+
+## Bounded schema11 consumers
+
+Component `a0f75f3fbbf8f663ccb01d0d7be3764dc0baf204` is composed in
+`e2dcf81d360d1f0b3f17d0faf55f63f099b67ab4`. Sixteen explicit guard changes
+and one diagnostic update in eleven files accept11 while retaining closed
+upper bounds, protocol versions, roles, namespace/activation checks and version10
+markers. No Store migration, session authority or Kubernetes execution is added.
+
+The base is `4919abb4791bb5f75f792bfaa50ed3c3295c436a`. Candidate s11c1 has
+2,301 files and manifest SHA-256
+`113f03ebdfa6ea1b7568a1a1ab0525385041c384f9562b3c7e31573f58ca966a`;
+the tests-only manifest is
+`e3b8a0cdf319ba1458fc68edd570b25036b047b7accae543863f3f6be2df01d2`.
+Independent review checked all paths, guard meanings, negative controls and
+unchanged historical formats before execution.
+
+Luna executed only these filters on each immutable source:
+
+```text
+cargo test --locked --offline --lib schema11_compatibility_tests -- --test-threads=1 --nocapture
+cargo test --locked --offline --lib kubernetes_cli::identity_scope_tests:: -- --test-threads=1 --nocapture
+```
+
+| Source | First filter | Second filter |
+|---|---|---|
+| Tests-only RED | RC101, four selected/four failures at the expected11 acceptance guards | RC101, one pass/one failure rejecting supported11 |
+| Candidate GREEN | RC0, four passes | RC0, two passes |
+
+These are **six unique GREEN tests**, not twelve. The negative scope test
+already passed before the change. Build durations are1m56s and2m00s; test
+durations are below one second. Two existing Kubernetes dead-code warnings
+remain; Clippy is not qualified by this run.
+
+The fresh QA R2 uses the same pinned image/toolchain and confinement described
+above, with actual kernel controls and read-only bounded shm/mqueue verified,
+empty execution environments and private caches. Its input trees and targets
+are distinct. RED used its default private `source-red/target` because
+`CARGO_TARGET_DIR` was omitted; GREEN used the explicit dedicated target. The
+actual ELF paths were checked; no target was shared. An initial setup-only
+container lacking shm/mqueue bounds was closed without any cache/Cargo command.
+No host project execution, model, real worker, cluster or existing database
+was used. Root read the logs and verified component/integration source equality;
+these are frozen-source results, not a separate Root rerun.
+
+| Capture | SHA-256 |
+|---|---|
+| RED first filter | `f1ab2107e04df4af08a8ac0d12edca1771db45ebb14f7ea196307f0b5138b41a` |
+| RED second filter | `bc83518bb1057fefe2619627104ffd0fada39b8103a91a1f4849a783007f125b` |
+| GREEN first filter | `6cd2c896ee109fd5057d9fee26fff5ce95cab758bdf7a3c3b215c28e6a206cde` |
+| GREEN second filter | `2604027387d8c9ffed480d1d79b745899c47118129831f22b8b68af3e11df74d` |
+| Commands/status | `af38deca495abde83153196dd80613e78dccfdca70e1182f50e67ba3d90dc0a5` |
+
+Compatibility with a genuine migrated Store11, authenticated consumers and the
+Core11 all-target build remains NOT_RUN here. S1 storage source was returned
+for a historical worker-quota replay correction before its execution. Neither
+these pure tests nor the descriptive schema range closes a production gate.

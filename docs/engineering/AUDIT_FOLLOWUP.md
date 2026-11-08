@@ -19,6 +19,15 @@ Si ces pièces ne sont pas accessibles, signaler cette limite avant de prétendr
 avoir vérifié un constat. Ne pas reconstruire une conclusion depuis le seul
 résumé du chat.
 
+Suivi du 8 novembre : les [consommateurs du schéma 11](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#bounded-schema11-consumers)
+sont intégrés après revue et six tests purs GREEN. Ils ne ferment aucun constat
+run-1. La revue indépendante du stockage candidat a refusé S1 : le writer compte
+V2 au quota courant, mais le replay des admissions worker ne valide pas encore
+ce quota à leur préfixe historique. Aucune admission normale hors quota n'est
+revendiquée. Régression ciblée en préparation ; stockage, récupération et
+qualification demeurent ouverts. Le contrôle de l'import du test a précédé
+son exécution, sans transformer une erreur de compilation en RED produit.
+
 ### Provenance et seuil de preuve
 
 L'audit porte sur `main@c4c4d2a`, avec une extension limitée au diff de
