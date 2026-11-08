@@ -1,5 +1,29 @@
 # Validation courante
 
+## 8 novembre — QA AU : publication helper refusée ; pile relais toujours ouverte
+
+Le parent Export92 original a été exécuté une fois, RC101, un échec en221,56s.
+Le signal est audité avant le refus de publication Full3 ; aucun overflow ou
+timeout parent n'est consigné. Les métadonnées JSON retenues et le prédicat
+`ensure_unclaimed` identifient le conflit du claim parent avec l'Arm helper.
+Le gel test-only94a reproduit ensuite `Err(Conflict)` au lieu de `Ok(())`
+pour le helper Export (RC101). Les deux canaris négatifs Worker et Helper
+passent, RC0 chacun, sur la même source/cible. Aucun correctif GREEN crédité.
+
+Relais93 : `cargo check --all-targets --locked --offline` et la compilation
+`--test broker_relay_handoff --no-run` passent. La seule invocation de la
+suite retourne RC101, un PASS et cinq FAIL en78,76s. Le canari de flags
+contradictoires est le seul PASS ; les cinq stderr broker montrent encore un
+débordement de pile. Ni la construction en tas ni la compilation ne valident
+les parcours. [Commandes, SHA et limites](evidence/2026-11-08/d5-poll-stack/README.md).
+
+Le gel de composition D5 conserve les douze ancres K et les contrats Root ;
+ses contrôles statiques ne valent pas compilation/test de composition. Une
+régression distincte d'arrêt préclaim est écrite sans correctif : verrou
+physique, Unix/HTTP/SQLite réels et nettoyage avant assertions. Son exécution
+reste NOT_RUN. Aucun appel modèle, worker Docker/Podman ou cluster utilisé ;
+les gates et les treize constats historiques ne sont pas requalifiés.
+
 ## 8 novembre — QA AT : D5 compile et progresse, parcours relais encore FAIL
 
 Baseline77 et candidat91 compilent avec `--lib --no-run`. Deux séries de douze

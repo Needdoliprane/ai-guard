@@ -1,5 +1,29 @@
 # Plan d'industrialisation
 
+## 8 novembre — préparer la composition D5 sans retour arrière des contrats Root
+
+Le diagnostic statique des cadres est acquis ; le parent92 échoue sur le
+claim parent/helper et les cinq parcours93 débordent encore la pile. Les
+régressions et corrections restent à vérifier. Une composition D5 dédiée est
+préparée depuis `dfa3961`, sans fusion dans la branche produit avant ses tests
+et revue. Les preuves de composants ne sont pas une preuve de cette composition.
+
+Conserver les versions Root de `audit.rs`, `api.rs`, `relay/client.rs`,
+`relay/channel/mod.rs`, `tests/worker_relay_api.rs` et Cargo. La source D5
+contient un état antérieur : la copier supprimerait l'index positif K,
+l'admission du relais et des refus réservés. Réserve d'audit, trois faits D5,
+capacity et supervision sont déjà intégrés ; ne pas les réintroduire comme
+nouveaux composants. La couture réelle de `runtime/managed.rs` doit combiner
+l'issue préclaim abandonnée avec le module runtime relais Root.
+
+Les ajouts journal/enforcer/retirement/service/executor restent un ensemble à
+relire. `Status`/`PageV1` et `RecoveryStatusV1` gardent leurs DTO fermés ;
+`RecoveryStatusV2` et le futur `RelayStatus` sont des variantes distinctes.
+Après composition : oracle Export, neuf régressions K, producteurs/consumers
+de contrôle et rejeux, compatibilité IPC, puis cycle Pending/Q/Final et drainage
+des propriétaires. Les qualifications réelles, signatures, contrôle réseau et
+approbation humaine authentifiée restent ouverts.
+
 ## 8 novembre — métadonnées K intégrées ; reprise D5 et parcours relais prioritaires
 
 La correction des lectures voisines et de leur index positif est intégrée,

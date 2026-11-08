@@ -1,5 +1,30 @@
 # État constaté — suivi du développement
 
+## 8 novembre — Export atteint le journal ; relais encore en débordement de pile
+
+Le parent Export92 a été exécuté une fois en QA isolée : **FAIL, RC101,
+221,56s**. Le signal d'abandon est audité, puis la publication Full3 échoue.
+Le journal retenu contient déjà le claim du worker parent et l'Arm du helper
+Export, sans claim de ce helper. Le prédicat `ensure_unclaimed` refuse aussi
+ce claim parent pour une Arm helper du même attempt. La régression ciblée94a
+le reproduit (RC101) ; ses deux canaris de refus Worker/Helper passent. Le
+correctif94b reste à valider. Aucun succès
+d'export, drainage ou reprise complète n'est crédité.
+
+Le relais93 compile toutes cibles et son test d'intégration compile. Sa seule
+invocation fonctionnelle passe le canari d'arguments et échoue sur les cinq
+parcours broker : leurs stderr montrent encore un débordement de pile avant
+progression du premier checkpoint. La mise en tas proposée ne corrige donc
+pas encore le défaut observé. [Résultats et provenance](evidence/2026-11-08/d5-poll-stack/README.md).
+
+Une composition D5 depuis `dfa3961` conserve l'index K, l'API et les contrats
+relais courants ; elle n'est ni validée ni intégrée. Sa revue a produit un
+test distinct de rétention du verrou physique pendant l'audit préclaim à
+l'arrêt. Cette hypothèse reste statique tant que son test n'a pas été exécuté.
+Trois tâches indépendantes ont été déléguées, avec relais Luna pour les
+exécutions ciblées. Qualifications runtime, fédération physique, Kubernetes
+complet et autres exigences obligatoires restent ouvertes ; aucun gate clos.
+
 ## 8 novembre — cadres D5 réduits ; deux diagnostics fonctionnels encore ouverts
 
 Les vrais prologues77 puis91 sont identifiés sur les ELF conservés en QA. Le
