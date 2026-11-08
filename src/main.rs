@@ -77,8 +77,8 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workloads), 7 (human broker registry reads), 8 (held Kubernetes creates), 9 (held-create policy marker), 10 (human worker registry reads).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=10))]
+        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workloads), 7 (human broker registry reads), 8 (held Kubernetes creates), 9 (held-create policy marker), 10 (human worker registry reads), 11 (effect-free Kubernetes session reservations).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=11))]
         target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -790,6 +790,7 @@ async fn main() -> Result<()> {
                 8 => store.migrate_kubernetes_create_v8(&backup)?,
                 9 => store.migrate_kubernetes_policy_v9(&backup)?,
                 10 => store.migrate_human_workers_v10(&backup)?,
+                11 => store.migrate_kubernetes_session_reservations_v11(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1003,6 +1004,43 @@ mod workload_config_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_cli_accepts_11_and_preserves_default_and_upper_bound() {
+        let base = [
+            "agentsandbox",
+            "migrate-control",
+            "--data",
+            "fixture.sqlite",
+            "--tenant-id",
+            "tenant-a",
+            "--backup",
+            "fixture-backup.sqlite",
+            "--confirm-control-stopped",
+        ];
+        let parsed = Cli::try_parse_from(base).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Command::MigrateControl {
+                target_version: 2,
+                ..
+            }
+        ));
+        let parsed = Cli::try_parse_from(base.into_iter().chain(["--target-version", "11"]))
+            .expect("schema11 must be an explicit supported migration target");
+        assert!(matches!(
+            parsed.command,
+            Command::MigrateControl {
+                target_version: 11,
+                ..
+            }
+        ));
+        for unknown in ["1", "12", "4294967295"] {
+            assert!(
+                Cli::try_parse_from(base.into_iter().chain(["--target-version", unknown])).is_err()
+            );
+        }
+    }
 
     #[test]
     fn gateway_audit_capacity_file_conflicts_with_tenant_registry() {
