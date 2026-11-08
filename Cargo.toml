@@ -10,6 +10,7 @@ default-run = "agentsandbox"
 
 [dependencies]
 anyhow = "1"
+arc-swap = { version = "=1.9.4", default-features = false }
 async-stream = "0.3"
 base64 = "=0.22.1"
 axum = { version = "0.8.9", features = ["json", "query", "tokio", "http1"] }

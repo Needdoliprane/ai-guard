@@ -136,7 +136,7 @@ pub(super) async fn human_get(
 }
 
 #[tokio::test]
-async fn tenant_discovery_admission_rejects_before_opening_local_authentication_transactions() {
+async fn source_read_admission_rejects_before_opening_local_authentication_transactions() {
     let (_directory, state, token) = local_identity_state();
     let observations = observe(&state.tenants[1].store);
     let router = gateway_router(state.clone());
@@ -148,22 +148,22 @@ async fn tenant_discovery_admission_rejects_before_opening_local_authentication_
         .count();
     assert!(baseline_transactions > 0);
 
-    let mut discovery_slots = Vec::new();
+    let mut source_slots = Vec::new();
     loop {
-        match state.tenants[1].io.admit(store_io::Lane::Discovery, false) {
-            Ok(permit) => discovery_slots.push(permit),
+        match state.tenants[1].io.admit(store_io::Lane::Read, false) {
+            Ok(permit) => source_slots.push(permit),
             Err((status, _)) => {
                 assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
                 break;
             }
         }
     }
-    assert!(!discovery_slots.is_empty());
-    // Metadata discovery has its own tenant lane; ordinary Read capacity is
-    // still available and must not be the cause of the HTTP refusal.
-    let _available_read_slot = state.tenants[1]
+    assert!(!source_slots.is_empty());
+    // Metadata discovery is nonblocking and consumes no tenant lane. The
+    // independently selected source still needs its own checked-read permit.
+    let _available_discovery_slot = state.tenants[1]
         .io
-        .admit(store_io::Lane::Read, false)
+        .admit(store_io::Lane::Discovery, false)
         .unwrap();
     let (status, _) = human_get(&router, &token, "/api/v1/human/identity", None).await;
     let transactions = observations
@@ -172,7 +172,7 @@ async fn tenant_discovery_admission_rejects_before_opening_local_authentication_
         .count();
     assert_eq!(
         transactions, 0,
-        "source B opened Store transactions despite saturated tenant discovery; status={status}"
+        "source B opened Store transactions despite saturated source reads; status={status}"
     );
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
 }

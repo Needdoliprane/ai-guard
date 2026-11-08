@@ -17,7 +17,7 @@ impl StorageHook {
         Ok(())
     }
 
-    fn set(&self, hook: impl FnMut() -> anyhow::Result<()> + Send + 'static) {
+    pub(super) fn set(&self, hook: impl FnMut() -> anyhow::Result<()> + Send + 'static) {
         *self.0.lock().unwrap() = Some(Box::new(hook));
     }
 }

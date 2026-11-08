@@ -127,6 +127,15 @@ pub(super) fn validate_read(record: &HumanReadAuditV1) -> anyhow::Result<()> {
 }
 
 impl Store {
+    pub(crate) fn try_local_credential_binding(
+        &self,
+        digest: &[u8; 32],
+    ) -> MetadataLookup<LocalCredentialV1> {
+        self.with_known_binding(
+            self.try_read_metadata(|db| local_credential_binding(db, digest)),
+            |bindings| bindings.local.get(&hex::encode(digest)).cloned(),
+        )
+    }
     /// Presence includes revoked/expired bindings so they cannot shadow another
     /// credential class. No bearer or digest is returned to HTTP readers.
     pub(crate) fn local_credential_binding(
@@ -138,16 +147,7 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        let binding = if [4, 5, 6, 7, 8, 9, 10].contains(&version) {
-            identity::json_row(
-                &tx,
-                "SELECT payload_json FROM identity_credentials WHERE digest=?1",
-                &hex::encode(digest),
-            )?
-        } else {
-            None
-        };
+        let binding = local_credential_binding(&tx, digest)?;
         self.commit_checked(tx)?;
         Ok(binding)
     }
@@ -546,6 +546,22 @@ impl Store {
             audit_event_id: stored.event.id,
             received_at: stored.received_at,
         })
+    }
+}
+
+fn local_credential_binding(
+    db: &Connection,
+    digest: &[u8; 32],
+) -> anyhow::Result<Option<LocalCredentialV1>> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if [4, 5, 6, 7, 8, 9, 10].contains(&version) {
+        identity::json_row(
+            db,
+            "SELECT payload_json FROM identity_credentials WHERE digest=?1",
+            &hex::encode(digest),
+        )
+    } else {
+        Ok(None)
     }
 }
 
