@@ -12,6 +12,7 @@ pub(crate) mod admission;
 mod observation;
 mod preflight;
 mod prerequisites;
+pub mod session_profile;
 #[cfg(test)]
 #[path = "kubernetes/prerequisites_tests.rs"]
 mod prerequisites_tests;
