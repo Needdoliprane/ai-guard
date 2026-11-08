@@ -59,6 +59,38 @@ l'absence de démarrage est prouvée.
 
 ### Lots de correction et acceptation
 
+#### 8 novembre — priorités résiduelles, après les corrections intégrées
+
+Ce point complète le tableau historique plus bas ; ses anciens états de
+démarrage ne sont pas le bilan courant. Les treize constats du rapport externe
+ne sont pas requalifiés automatiquement par nos correctifs. Leur clôture exige
+encore les preuves résiduelles et les qualifications indiquées.
+
+| Lot | État courant et prochaine preuve requise |
+|---|---|
+| G / D5 — quotas et reprise | Bundle séparé, deux consumers et diagnostics V1/V2 validés sur65 ; oracle Export toujours ouvert après correction de son moteur synthétique. Démontrer ensuite sortie auditée des réservations jamais démarrées et absence de second démarrage. |
+| H — ingress de contrôle | Voie de contrôle authentifiée et SDK intégrés, composition26 vérifiée avec I/L/M ; confrontation finale aux pools anonymes et recette runtime restent nécessaires. |
+| I — audit fiable des fichiers | Correctifs intégrés dans la composition26 ; conserver scan, couverture et reprise sous refus/capture saturée. La recette réelle et le résidu de l'outbox mixte restent ouverts. |
+| J — export non fiable | Correctif intégré,49 fonctions ciblées et compilation toutes cibles sur leurs gels ; voir preuve dédiée. Qualification APFS et runtime non déduite. |
+| K — disponibilité entre tenants | Relecture résiduelle prioritaire. Les lookups voisins passent encore par `with_store`, puis mutex Store et transaction vérifiée ; une lane distincte borne l'admission sans prouver une lecture non bloquante. Rejouer les barrières de mutex/SQLite et vérifier les budgets voisins après composition. Aucun nouveau constat confirmé sans cette reproduction. |
+| L — descripteurs et moniteur | Store et fenêtre de réessai du moniteur corrigés et testés logiciellement ; démontrer disponibilité TCP, reprise et échéance initiale sur moteur réel sous pression FD. |
+| M — capacité d'audit | Déduplication/budget SSO et réserve de contrôle intégrés,19 fonctions de réserve validées sur61/62. Rétention/archivage, saturation durable et relecture de tous les producteurs restent ouverts. |
+
+La relecture K du8novembre porte sur `api/human.rs::credential_binding`,
+`api/workload.rs::reject_control_collision`, `api/store_io.rs::Scope::with_store`,
+`audit/human.rs::local_credential_binding` et
+`audit/workload.rs::workload_digest_binding` du code d'intégration courant.
+Elle établit le chemin de code, pas une mesure de latence. Les tests devront
+utiliser des barrières déterministes ; la pression du Mac/VM ne fournit aucun
+verdict de disponibilité et ne justifie pas de supprimer l'oracle.
+
+Approbation humaine authentifiée, signatures des checkpoints/enregistrements,
+attribution de délégation, contrôle effectif des sorties réseau et limites
+bytes/inodes restent également des obligations. Ils ne sont pas fermés par
+les composants du relais. Le raccord broker et ses tests avancent dans des
+fichiers distincts du contrôle API ; cette indépendance permet de poursuivre
+les corrections d'audit sans attendre la fin de tout le relais.
+
 Réserve de contrôle : le composant `1bb3bba`, composé dans `d550c34`, passe19
 fonctions et toutes cibles sur ses gels61/62, avec revue. La
 [preuve dédiée](evidence/2026-11-07/d5-control-audit-reserve/README.md) conserve

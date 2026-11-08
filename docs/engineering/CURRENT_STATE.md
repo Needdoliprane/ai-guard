@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 8 novembre — composition logicielle du relais validée ; audit K et D5 prioritaires
+
+Le gel76 de `f5c3f87` compile toutes cibles et passe 25 fonctions ciblées :
+12 propriétaire,7 runtime,3 SDK et3 API. Les quatre composants sont réunis
+sur la même source ; l'enfant ignoré ne compte pas comme PASS.
+[Preuves de composition et limites](evidence/2026-11-08/relay-software-composition/README.md).
+Le SDK est aussi validé séparément sur gateway/SQLite réels, perte de réponse
+après commit et contention avant commit ;
+[preuve dédiée](evidence/2026-11-08/relay-admission-sdk/README.md).
+Les factories de production restent fermées dans ce gel : le raccord au broker
+est un développement distinct, avec l'Arm originale et le verrou retenu.
+
+Export77 franchit les prérequis corrigés de sa fixture, puis échoue par
+débordement de pile. Son oracle reste ouvert, sans augmentation de la pile
+ou des délais. La relecture résiduelle K a également lancé deux régressions
+déterministes avant correction des lectures de métadonnées voisines. Les
+[lots d'audit restants](AUDIT_FOLLOWUP.md#audit-final-run-1) restent prioritaires ;
+aucun verdict externe ou gate global n'est réécrit. G09 FAIL et G12 ouvert.
+
 ## 8 novembre — admission du relais intégrée, raccord broker en cours
 
 Le candidat `1943057`, composé dans `60f719b`, ajoute réservation durable,

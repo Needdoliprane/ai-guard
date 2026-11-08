@@ -1,5 +1,22 @@
 # Validation courante
 
+## 8 novembre — Root76 : compilation commune et 25 fonctions ciblées
+
+`f5c3f87` réunit admission, SDK, propriétaire et port runtime : toutes cibles
+RC0, puis12/7/3/3 fonctions PASS sur le même gel76. Les
+[cinq journaux et leur portée](evidence/2026-11-08/relay-software-composition/README.md)
+restent séparés des preuves antérieures des composants. Ce n'est ni une suite
+complète, ni un Clippy strict, ni une qualification moteur.
+
+Export77, autre source : RC101 après96,70s de test ; entrée Export à87,533s,
+puis débordement de pile dans un thread `tokio-rt-worker`. Journal SHA
+`1dba9a3b304c29b5ff99cb61cbe632d1faa36c0a500a983df407fc837c0f2a59`.
+L'instrumentation suivante est limitée aux tests pour situer construction/poll
+des futures ; un PASS instrumenté ne prouvera pas la correction de la pile.
+Les deux régressions K sont écrites et confiées à une QA distincte, sans
+modification métier avant leur reproduction. Aucun nouveau FAIL de sécurité
+formel n'est déduit du seul diagnostic de développement.
+
 ## 8 novembre — admission71 composée et port runtime73 corrigé
 
 Source `1943057` composée dans `60f719b` : quinze ancres du
