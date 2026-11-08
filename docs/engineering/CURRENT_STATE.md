@@ -16,6 +16,22 @@ sont synchronisés. [Preuves et portée](evidence/2026-11-08/broker-private-ca/R
 Deux processus brokers, fédération physique, cycle PKI et runtimes restent à
 qualifier ; aucun gate global n'est clos par ce lot.
 
+## 8 novembre — Full3 progresse, mais échoue aussi sur observation de 60 secondes
+
+Le diagnostic F4 conserve les assertions et borne sa sortie ; son canari passe,
+puis le positif Full3 expire en 26,22 s. Les consultations IPC séquentielles
+consomment environ 23,68 s de sa fenêtre de 25 s, pendant que le helper progresse.
+Après revue, F5 porte uniquement l'observation du harnais Full3 à 60 s : les
+Arms, délais produit, assertions et polling restent inchangés.
+
+F5 échoue encore en 61,24 s. Les handlers gateway des deux observations et
+nettoyages helpers répondent avec succès, et la dernière projection du broker
+porte head17, Preparing, aucun RPC pending ni erreur. Cela ne prouve pas les
+ACK locaux de chaque opération ni la cause du délai. Aucun oracle Running,
+redémarrage ou relais n'est atteint. [Résultats F4/F5](evidence/2026-11-08/d5-poll-stack/README.md#full3-f4f5-bounded-diagnostic-and-longer-harness-observation).
+Le bundle D5/relais reste séparé et doit conserver le nouveau raccord TLS lors
+de sa future composition ; les gates et qualifications réelles restent ouverts.
+
 ## 8 novembre — C4 progresse jusqu'à l'observation du helper ; handoff toujours en échec
 
 Le gel C4 passe le check toutes cibles et la compilation du parent. Son unique

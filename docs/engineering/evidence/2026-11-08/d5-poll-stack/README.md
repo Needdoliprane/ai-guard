@@ -350,6 +350,67 @@ parent was run, and no retry or deadline increase is credited. The engine
 witness remains synthetic; no Docker/Podman worker, cluster or global gate
 is qualified.
 
+## Full3 f4/f5: bounded diagnostic and longer harness observation
+
+F4 changes two test-support files after F2, without changing application,
+Cargo, assertions, polling or product deadlines. Independent review confirms
+its fixed categories, 100 aggregate keys, 64 retained transitions and one
+diagnostic emission of at most 16,384 bytes after prerequisite failure.
+Gateway timings end at handler responses; witness timings describe synthetic
+runtime handlers, and JobStatus is a broker projection. Local helper ACKs
+remain explicitly UNKNOWN.
+
+The complete F4 input manifest is
+`bbf536e86559ec57217ce9b7a4128d855a753ccfe51b68c0377099a5da98e4a6`.
+Its shared strict-parser canary returns one PASS, RC0, 0.01 s after 2m07s
+compilation. The single original positive parent then returns one FAIL,
+RC101, 26.22 s. Its two sequential IPC categories account for about 23.68 s
+of the 25-second observation. The witness reaches its first Import start,
+input completion and terminal mutation at about 25.085 s from trace setup.
+These are progress observations, not a causal diagnosis or capacity result.
+
+F5 therefore changes only the Full3 harness observation from 25 to 60 seconds,
+after independent review. Arms, requested worker lifetime, assertions, polling
+and application code remain unchanged. The historical handoff harness retains
+25 seconds; the Legacy role inside the Full3 harness uses its new 60 seconds.
+The complete F5 input manifest is
+`f5bd629738b1e52a268a38b2bbdec34f4a4137f5ae5f8d1bbd214766caec191e`.
+
+Both inputs are copied and fully manifest-verified, with separate Cargo targets
+in the same isolated offline QA described in the [TLS proof](../broker-private-ca/README.md).
+Each positive parent is invoked once:
+
+```text
+cargo test --test broker_relay_full3 --locked --offline software_full3_restores_original_assignments_before_late_issue_two_endpoints_relay -- --exact --nocapture --test-threads=1
+```
+
+F5 still returns **one FAIL, RC101, 61.24 s**. Its trace records two successful
+Import start/input/terminal witness handlers and two successful gateway helper
+observation/cleanup handlers. The last JobStatus projection is Preparing,
+head revision17, pending RPC count0, no failure/error, executor running.
+The last RelayStatus call is cancelled by the harness deadline. This neither
+proves that call caused the failure nor proves any specific durable local ACK.
+Running, broker restart and relay exchange oracles are not reached.
+
+The F4 diagnostic block through the Error line is 7,444 bytes, with 19 metric
+rows and 64 retained transitions. F5 is 7,908 bytes with 22 metric rows and
+64 retained/526 evicted transitions. The earlier report of 4,348 bytes and
+zero aggregates counted only a filtered subset and was corrected against
+the raw F4 log. No raw log was changed. No further parent or retry is credited.
+
+| Capture | SHA-256 |
+|---|---|
+| F4 canary log | `a75230fbf463c38b6cdf5612bd313dcc4c44b2394c1180cea9629b0ad33d117d` |
+| F4 parent log | `66498951f3861c2121b128dafde0c589689d1ca3d8ddbec6ece4d59fcfd1cfac` |
+| F4 parent status | `e9b6bcc18fd7dd34f2613ba838716da9a5d9e6d6562e4a84fcb20bad1015383f` |
+| F5 parent log | `5b747b8c0055772c3b58788ea4499dc93f994639eec240c70e4098e42f3083af` |
+| F5 parent status | `5b85031a432a9a75d0c3f4c199e39c58403fc5bb8430220ca3e9faebf42c67a7` |
+
+Both postflights show no OOM. No model, real worker engine, physical federation,
+Kubernetes session, performance threshold or global gate is qualified.
+Future D5 composition must preserve the separately delivered explicit gateway
+trust; these older C4 application sources do not contain that later change.
+
 Baseline77 private provenance-note SHA-256:
 `82486255cd72570ea5c96a75aa4d75b51e28ce94e78276c85a4182f47c8f9127`.
 The source snapshots and bounded text captures remain in private engineering
