@@ -1,5 +1,18 @@
 # Validation courante
 
+## 8 novembre, 23:32 UTC — RED lifecycle après correction des fixtures
+
+Le gel `92850e5a…`, 2 324 fichiers, ne diffère du premier essai que par
+les deux fixtures de répertoires privés. Revue indépendante Root et
+formatage ciblé passent. Une seule nouvelle invocation du même parent
+dans une nouvelle QA isolée sélectionne une fonction : RC101, zéro PASS,
+une FAIL, 710 filtrées, test 5,05 s. Cette fois, les vérifications TCP/SSE,
+retrait d'identité, Usage, commit/réouverture et nettoyage atteignent leurs
+oracles ; seule l'assertion finale sur le résultat Err échoue. **RED attendu**,
+distinct du SETUP_FAIL précédent. [Commande et empreintes](evidence/2026-11-08/gateway-session-recovery/README.md#fixture-corrected-attempt-expected-red).
+La correction applicative, le GREEN et le check toutes cibles S2 restent
+NOT_RUN ; aucun délai ou oracle n'a été assoupli pour reproduire le défaut.
+
 ## 8 novembre, 23:20 UTC — première exécution du candidat S2
 
 Le gel `6b3c5f7d…`, 2 324 fichiers, est exécuté une fois dans une QA

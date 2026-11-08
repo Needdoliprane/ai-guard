@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 8 novembre, 23:32 UTC — défaut de drainage S2 reproduit
+
+Après correction des seules fixtures en 0700, le même parent atteint toutes
+ses préconditions réelles : fermeture des deux listeners et des connexions,
+retrait d'identité, attente du Usage détenu par le travail bloquant, commit,
+réouverture et fin du propriétaire de nettoyage. Il échoue ensuite uniquement
+sur l'assertion finale : une panique interne pendant le drainage devient un
+succès. **RED confirmé**, une fonction, RC101, 5,05 s pour le test.
+[Gels et limites](evidence/2026-11-08/gateway-session-recovery/README.md#fixture-corrected-attempt-expected-red).
+Le correctif applicatif et son GREEN restent à livrer ; la grâce produit
+de cinq secondes et les protections du Store restent inchangées.
+
+La revue D5 broker/relais refuse aussi l'intégration en raison de la perte
+du snapshot TLS du profil dans le client worker. Correction et régression
+avancent séparément. [Résultats des revues](evidence/2026-11-09/d5-composition-review/README.md).
+
 ## 8 novembre, 23:20 UTC — S2 compilé, scénario de cycle de vie non concluant
 
 La composition privée S2 (stockage, authentification, configuration et

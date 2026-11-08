@@ -53,6 +53,40 @@ the container no longer existed. Bounded text/JSON evidence remains
 private outside the checkout. The disposable scratch and build output
 were not retained or distributed.
 
+## Fixture-corrected attempt: expected RED
+
+Root independently reviewed a two-file fixture correction: new temporary
+directories use `Builder.permissions(0700)`. Application code, assertions
+and the 15-second harness / five-second product grace remain unchanged.
+
+| Item | Observed identity |
+|---|---|
+| Corrected source manifest, 2 324 files | `92850e5adb1c7a77f1e2f78b0ead222d89dc1224ea45adf3c80a92dad7255709` |
+| Lifecycle test source | `2571a4f0a84a97a0509e5b7909965778b355c11a6424b23747f6483fac726167` |
+| Cargo.lock | unchanged `3f34d8504293aa18ca1060b1c9d184904d3ce00fcc9c76c6f711f2603b1be4da` |
+| Selected / passed / failed / filtered | 1 / 0 / 1 / 710 |
+| Cargo return code / test time | 101 / 5.05 seconds |
+
+The same exact command above ran once in a new QA with the same isolation
+and resource limits. Its own working directory, complete manifest, test,
+lock, toolchain and unique Cargo target were recorded before execution.
+It passes the fixture and reaches the intended final assertion:
+
+> lifecycle B1: an internal connection panic during graceful drain must not become Ok
+
+The test uses two real loopback acceptors, accepted TCP and SSE streams,
+the real Auth bridge and retirement epoch, and a real blocking Store Usage.
+Both listeners close before the intentional handler panic is released.
+The remaining SSE survives the initial grace, then closes; HTTP tasks end
+while the Usage still blocks completion. The Store head stays unchanged
+until release, then commits, reopens and releases the last cleanup owner.
+Only after those assertions does the incorrect `Ok` fail the final oracle.
+
+This is the expected application **RED**, distinct from the earlier
+fixture **SETUP_FAIL**. The application correction, GREEN, other S2 tests
+and all-target check remain **NOT_RUN**. No original audit finding or
+runtime qualification is closed by reproducing this candidate defect.
+
 ## Routing boundary still open
 
 Source inspection of this same composition finds the POST session

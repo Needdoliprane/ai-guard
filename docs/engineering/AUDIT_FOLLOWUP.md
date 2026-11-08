@@ -19,6 +19,18 @@ Si ces pièces ne sont pas accessibles, signaler cette limite avant de prétendr
 avoir vérifié un constat. Ne pas reconstruire une conclusion depuis le seul
 résumé du chat.
 
+Suivi du 9 novembre : la composition privée broker/relais sur `4a0d4c6`
+fait l'objet de revues distinctes service/relais, journal/writer/ledger et
+coutures de retrait. **NO-GO_SOURCE** : le client worker du relais perd le
+snapshot de confiance TLS du profil ; un parcours avec AC privée échoue
+ensuite à la connexion. Certaines erreurs d'horloge/annulation sont aussi
+présentées comme une expiration. Ces constats de lecture ne sont pas des
+vulnérabilités runtime reproduites et ne modifient pas le décompte run-1.
+La conservation d'une continuation de retrait avant soumission au gardien
+reste une piste à discriminer. [Gels, revues et acceptation](evidence/2026-11-09/d5-composition-review/README.md).
+Les corrections, leurs reproductions ciblées et le résultat Full3 demeurent
+ouverts ; aucune ancienne preuve n'est transférée à cette composition.
+
 Suivi du 8 novembre : les [consommateurs du schéma 11](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#bounded-schema11-consumers)
 sont intégrés après revue et six tests purs GREEN. Ils ne ferment aucun constat
 run-1. La revue indépendante du stockage candidat a refusé S1 : le writer compte
