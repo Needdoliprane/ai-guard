@@ -1,5 +1,22 @@
 # Validation courante
 
+## 8 novembre — QA AT : D5 compile et progresse, parcours relais encore FAIL
+
+Baseline77 et candidat91 compilent avec `--lib --no-run`. Deux séries de douze
+prologues ont été lues par outils natifs bornés, sans promotion des ELF sur
+l'hôte. Le parent91 original termine FAIL171,22s : pas d'overflow consigné,
+mais oracle non atteint sur un watcher expiré avant le gate. Le candidat92
+de harnais est NOT_RUN ; [preuves et empreintes](evidence/2026-11-08/d5-poll-stack/README.md).
+
+Check89 FAIL sur appels privés du codec ;90 corrige le test et passe toutes
+cibles, puis le canari argv exact (1PASS). La suite90 termine1PASS et5FAIL
+en78,78s ; le canari répété n'est pas un second test unique. Les cinq stderr
+broker révèlent un stack overflow ; les fixtures n'ont que l'acceptation/révision0
+et aucune progression acquittée, pas une preuve d'absence de requête Core.
+Journal suite SHA `88df974eb52f19805ac841c10657730bc11aa4d4735f4e2625a274e966f9b94e` ;
+canari SHA `6597f9d21113d4e77708f9884f34598bc888b4a8438b0ceb4b0e231d708a8cb6`.
+Aucun nouveau test après le cutoff10:30:08 ; diagnostics natifs seulement.
+
 ## 8 novembre — métadonnées K intégrées, 36 fonctions vérifiées sur88
 
 `1b9a420`, composé dans `d7cce54`, conserve les douze ancres de source88 ;

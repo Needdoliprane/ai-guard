@@ -1,5 +1,23 @@
 # État constaté — suivi du développement
 
+## 8 novembre — cadres D5 réduits ; deux diagnostics fonctionnels encore ouverts
+
+Les vrais prologues77 puis91 sont identifiés sur les ELF conservés en QA. Le
+candidat91 sépare préparation, transport et complétion du helper sans nouvelle
+task ni changement d'Arm/audit. Il compile ; la chaîne transport sélectionnée
+passe statiquement d'environ3,20Mo à1,42Mo, sans mesure du maximum réel.
+Le parent Export original ne signale plus d'overflow mais échoue sur le contrôle
+de démarrage : le watcher expire avant l'arrivée réelle au gate. Le correctif
+de synchronisation92 conserve le budget global300s existant ; il reste NOT_RUN.
+[Sources, mesures et limites](evidence/2026-11-08/d5-poll-stack/README.md).
+
+Le gel90 des tests relais compile et son canari de flags contradictoires passe.
+Ses cinq parcours broker échouent : les stderr montrent un débordement de pile
+commun après acceptation, avant progression du premier checkpoint. Les erreurs
+de délai/réponse seules ne sont pas des verdicts de latence ou de permissions.
+Le correctif de construction des futures reste à vérifier. Aucun de ces résultats
+ne qualifie un moteur, n'intègre le bundle D5 ou ne ferme un gate global.
+
 ## 8 novembre — lectures de métadonnées voisines corrigées et intégrées
 
 Le composant `1b9a420`, composé dans `d7cce54`, traite les lectures de collision
