@@ -1,5 +1,23 @@
 # Validation courante
 
+## 8 novembre, 23:20 UTC — première exécution du candidat S2
+
+Le gel `6b3c5f7d…`, 2 324 fichiers, est exécuté une fois dans une QA
+Linux ARM64 isolée, hors réseau, avec cible Cargo propre et lock inchangé.
+La compilation atteint le test lib : une fonction sélectionnée, zéro PASS,
+une FAIL, 710 filtrées, RC101. La fonction échoue immédiatement dans la
+préparation du Store : le répertoire temporaire n'est pas privé en 0700.
+Les phases lifecycle n'ont pas commencé. Classement **SETUP_FAIL** ; la
+reproduction du défaut de drainage et les autres tests S2 restent **NOT_RUN**.
+[Commande, empreintes et bornes](evidence/2026-11-08/gateway-session-recovery/README.md).
+
+Le watcher du coordinateur ferme la QA à 23:14:32 UTC ; son handle termine
+RC0 et une inspection ultérieure confirme son absence. Les résultats bornés
+sont conservés hors du checkout ; aucun binaire, base, credential ou cache
+compilé n'est distribué. Il n'y a ni relance automatique, ni test natif,
+ni appel fournisseur, worker ou cluster. Le check toutes cibles S2 reste
+NOT_RUN : la compilation d'une cible lib-test ne lui est pas substituée.
+
 ## 8 novembre — S1/CLI11 : GREEN ciblé et compilation finale
 
 Sur le gel B1 corrigé, les cinq commandes sélectionnent 1+1+5+1+1 fonctions,

@@ -1,5 +1,26 @@
 # État constaté — suivi du développement
 
+## 8 novembre, 23:20 UTC — S2 compilé, scénario de cycle de vie non concluant
+
+La composition privée S2 (stockage, authentification, configuration et
+propriétaire HTTP) compile pour le test lib sélectionné. Son unique essai
+échoue dans la fixture : le parent SQLite temporaire ne respecte pas le
+mode privé 0700. Aucun oracle TCP, SSE, retrait d'identité ou drainage n'est
+atteint ; ce résultat n'est ni un GREEN, ni le RED du défaut recherché.
+[Source, commande et limites](evidence/2026-11-08/gateway-session-recovery/README.md).
+La correction des fixtures reste séparée de celle du code applicatif.
+
+La lecture du contrat révèle aussi que la route S2 existe dans le routeur
+gateway partagé, mais manque à l'allowlist du canal de contrôle réservé.
+Le parcours Compose par ce canal est donc refusé avant le handler ; le
+trajet public ne prouve pas l'authentification avant lecture du corps.
+Le raccord et ses régressions restent ouverts. S2 n'est pas intégré.
+
+Le lot broker/relais est composé séparément sur `4a0d4c6`, en préservant
+S1, CLI11 et TLS. Sa revue et ses essais restent à réaliser ; l'échec Full3
+antérieur n'est pas résolu par cette composition. G09 FAIL, aucun gate
+global fermé et aucune qualification des moteurs réels dans ces travaux.
+
 ## 8 novembre — stockage S1 et migration CLI11 intégrés
 
 Le checkpoint Core `1d6ce59`, composé dans `4a35142`, puis le raccord CLI

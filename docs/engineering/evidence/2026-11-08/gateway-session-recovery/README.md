@@ -1,0 +1,71 @@
+# Gateway session recovery — software validation in progress
+
+This record concerns an unintegrated S2 candidate, based on the integrated
+S1/CLI11 sources. It does not qualify Kubernetes execution, a real worker,
+provider, physical crash recovery or the complete product.
+
+## First lifecycle attempt: setup failure
+
+The immutable composition includes Core S2 r1, Auth r2, configuration r1,
+Main lifecycle r2 and the independently reviewed late-panic test r2.
+The application drain defect is deliberately unchanged for reproduction.
+
+| Item | Observed identity |
+|---|---|
+| Source manifest, 2 324 files | `6b3c5f7d253ea93d4402b84490cc946da63b101fb5f5c6e23f394b371d529a30` |
+| Cargo.lock | `3f34d8504293aa18ca1060b1c9d184904d3ce00fcc9c76c6f711f2603b1be4da` |
+| Lifecycle test source | `97a936335e626e2c7ba6651357ddd63937a0b7f74eb1900c95fa5c9b4209c4bf` |
+| Rust/Cargo | 1.99.1 |
+| Selected / passed / failed / filtered | 1 / 0 / 1 / 710 |
+| Cargo return code | 101 |
+
+One command was run, from the verified private source working directory,
+with an explicit, unique `CARGO_TARGET_DIR`, jobs=1, incremental=0 and
+debug information disabled. No dependency download or lock edit occurred.
+
+```sh
+cargo test --locked --offline --lib gateway_server::tests::panic_during_grace_returns_error_only_after_connections_and_real_usage_drain -- --exact --test-threads=1 --nocapture
+```
+
+Compilation and test selection succeeded. The test then failed at
+`gateway_server_tests.rs:27` while opening its fixture Store:
+
+> private control directory requires effective-UID ownership and mode 0700; use a new private destination, existing paths are never repaired
+
+This is **SETUP_FAIL**, before listener, SSE, authentication retirement,
+Usage, commit, reopen or cleanup assertions. It is **not** the intended
+application RED. No other S2 test or all-target check was executed.
+The existing private-directory check remains required; the test fixture
+must create the correct directory, without repairing an existing path or
+weakening application checks.
+
+The QA used a pinned local image, UID/GID 1000, network none, an empty
+allowlisted execution environment, read-only root/toolchain/source inputs,
+all capabilities dropped, no-new-privileges and seccomp. Limits were
+4 CPUs, 8 GiB RAM with no swap, 256 PIDs, a 4 GiB scratch tmpfs with
+65 536 inodes, bounded shared-memory mounts, file-size and descriptor
+limits, and a 600-second command timeout. No host project execution,
+engine socket, credential, model call, worker or cluster was admitted.
+
+The parent watchdog stopped and removed this QA at 23:14:32 UTC on
+8 November. Its handle returned RC0; the parent separately confirmed
+the container no longer existed. Bounded text/JSON evidence remains
+private outside the checkout. The disposable scratch and build output
+were not retained or distributed.
+
+## Routing boundary still open
+
+Source inspection of this same composition finds the POST session
+control-recovery route in `gateway_base_router`, but absent from
+`control_transport::control_route`. The gateway control gate and ingress
+control relay therefore reject that path. Standard Compose configurations
+point the control relay at the separate gateway control listener.
+
+The public ingress path reads the body before gateway authentication;
+a direct-router test cannot establish authentication before body reading
+for that published path. A minimal classification change and targeted
+control-entry regression are required. The dashboard remains read-only
+for API proxying and does not gain runner mutations.
+
+These are implementation and validation gaps. Neither source review,
+successful compilation nor a corrected fixture closes a production gate.
