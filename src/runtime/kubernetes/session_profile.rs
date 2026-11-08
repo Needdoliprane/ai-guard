@@ -386,6 +386,51 @@ impl fmt::Debug for KubernetesSessionProfileV2 {
     }
 }
 impl KubernetesSessionProfileV2 {
+    /// Read-only metadata for the trusted reservation ledger. These values do
+    /// not authenticate the installation, broker, bootstrap or mounted files.
+    pub(crate) fn retained_ids(&self) -> SessionProfileResult<KubernetesSessionIdsV2> {
+        self.0.binding.validate()?;
+        let parse = |value: &str| {
+            Uuid::parse_str(value).map_err(|_| KubernetesSessionProfileError::InvalidProfile)
+        };
+        Ok(KubernetesSessionIdsV2 {
+            installation_id: parse(&self.0.binding.installation_id)?,
+            control_namespace_uuid: parse(&self.0.binding.control_namespace_uuid)?,
+            broker_id: parse(&self.0.binding.broker_id)?,
+            incarnation_id: parse(&self.0.binding.incarnation_id)?,
+            session_id: parse(&self.0.binding.session_id)?,
+            attempt_id: parse(&self.0.binding.attempt_id)?,
+        })
+    }
+
+    pub(crate) fn retained_image(&self) -> &str {
+        &self.0.image
+    }
+    pub(crate) fn retained_resources(&self) -> KubernetesSessionResourcesV2 {
+        self.0.resources
+    }
+    pub(crate) fn retained_provider(&self) -> SessionProfileResult<ProviderResolutionV1> {
+        self.0.provider.resolution()
+    }
+
+    /// Persistence parser only. The retained binding is validated data and is
+    /// rechecked against authenticated/historical authority by the Store.
+    pub(crate) fn retained_from_json(
+        bytes: &[u8],
+        authority: &KubernetesAuthorityV1,
+    ) -> SessionProfileResult<Self> {
+        if bytes.len() > MAX_PROFILE_BYTES {
+            return Err(KubernetesSessionProfileError::InputTooLarge);
+        }
+        let value = crate::json::decode_unique(bytes, MAX_DEPTH)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        let wire: ProfileWire = serde_json::from_value(value)
+            .map_err(|_| KubernetesSessionProfileError::InvalidProfile)?;
+        wire.validate()?;
+        let binding = KubernetesSessionBindingV2(wire.binding);
+        Self::from_json(bytes, authority, &binding)
+    }
+
     pub fn build(
         authority: &KubernetesAuthorityV1,
         binding: &KubernetesSessionBindingV2,

@@ -101,7 +101,7 @@ pub(super) fn genesis(db: &Connection) -> anyhow::Result<(StoredEvent, u64)> {
     Ok((stored, marker.authorization_revision))
 }
 pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
-    if version == 10 {
+    if matches!(version, 10 | 11) {
         genesis(db)?;
     } else {
         let forbidden: bool = db.query_row(
@@ -200,7 +200,7 @@ impl Store {
         {
             return Err(IdentityFailureV1::PermissionDenied.into());
         }
-        if version != 10 {
+        if !matches!(version, 10 | 11) {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
         let redactor = self.redactor.union(transient);

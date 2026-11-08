@@ -228,7 +228,10 @@ pub(super) fn workload_identity(event: &Event) -> anyhow::Result<Option<Workload
     if let Some(identity) = relay::workload_audit_identity(event)? {
         return Ok(Some(identity));
     }
-    super::kubernetes_admission::workload_audit_identity(event)
+    if let Some(identity) = super::kubernetes_admission::workload_audit_identity(event)? {
+        return Ok(Some(identity));
+    }
+    super::kubernetes_session::workload_audit_identity(event)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +348,7 @@ impl Cache {
                 && !kind.starts_with("control.broker_registry.")
                 && !kind.starts_with("control.relay.")
                 && !kind.starts_with("control.kubernetes.create.")
+                && !kind.starts_with("control.kubernetes.session.")
             {
                 continue;
             }

@@ -1,0 +1,236 @@
+//! Real fresh SQLite v10 with a retained V1 reservation. No runtime or network.
+//! The first RED must reach the existing migration target dispatch, after the
+//! baseline and newly created backup have independently been verified.
+use super::*;
+use crate::control::{ControlFailure, QuotaPolicyV1};
+
+type AuditRow = (i64, String, String, String, String);
+
+#[derive(Debug, PartialEq, Eq)]
+struct Snapshot {
+    schema: i64,
+    namespace: String,
+    active: bool,
+    held_workers: u32,
+    held_cpu_millis: u64,
+    held_memory_bytes: u64,
+    events: Vec<AuditRow>,
+}
+
+fn snapshot(store: &Store) -> Snapshot {
+    let quota = store.worker_quota(&QuotaPolicyV1::default()).unwrap();
+    let supervision = store.supervision_state().unwrap();
+    let db = store.db.lock().unwrap();
+    let schema = db
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    let namespace = db
+        .query_row(
+            "SELECT namespace_uuid FROM control_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut statement = db
+        .prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events ORDER BY seq")
+        .unwrap();
+    let events = statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<AuditRow>>>()
+        .unwrap();
+    Snapshot {
+        schema,
+        namespace,
+        active: supervision.active,
+        held_workers: quota.held_workers,
+        held_cpu_millis: quota.held_cpu_millis,
+        held_memory_bytes: quota.held_memory_bytes,
+        events,
+    }
+}
+
+#[test]
+fn migration_10_to_11_preserves_a_held_v1_reservation_and_inactive_reopen() {
+    let fixture = kubernetes_admission_state_tests::Fixture::new();
+    let source_path = fixture._directory.path().join("tenant.sqlite");
+    let authorization = fixture
+        .store
+        .authorize_held_create_for_test(
+            &fixture.identity,
+            &fixture.intent,
+            &QuotaPolicyV1::default(),
+            "2100-01-01T00:00:00.000Z",
+        )
+        .unwrap();
+    let (_, retained, replayed) = fixture
+        .store
+        .reserve_kubernetes_create(&fixture.identity, &authorization, &fixture.intent)
+        .unwrap();
+    assert!(!replayed);
+    assert!(retained.quota_held);
+    assert!(
+        retained.claim.is_none(),
+        "fixture must never issue a CREATE claim"
+    );
+    fixture
+        .store
+        .migrate_kubernetes_policy_v9(&source_path.with_extension("before9"))
+        .unwrap();
+    fixture
+        .store
+        .migrate_human_workers_v10(&source_path.with_extension("before10"))
+        .unwrap();
+    let prepared = snapshot(&fixture.store);
+    assert_eq!(prepared.schema, 10);
+    assert_eq!(prepared.held_workers, 1);
+    assert_eq!(prepared.held_cpu_millis, 500);
+    assert_eq!(prepared.held_memory_bytes, 134_217_728);
+    assert!(!prepared.namespace.is_empty());
+    assert!(fixture.store.integrity().unwrap().valid);
+    assert_eq!(
+        prepared
+            .events
+            .iter()
+            .filter(|row| {
+                let event: Event = serde_json::from_str(&row.4).unwrap();
+                event.kind == "control.identity.workers_access.genesis"
+                    && event.data["version"] == 10
+            })
+            .count(),
+        1
+    );
+
+    drop(fixture.store);
+    let store =
+        Store::open_existing_for_tenant(&source_path, "tenant-a", Redactor::new(vec![]), 10_000)
+            .unwrap();
+    let before = snapshot(&store);
+    assert!(!before.active, "reopen must not reactivate supervision");
+    assert_eq!(before.namespace, prepared.namespace);
+    assert_eq!(before.events, prepared.events);
+    assert_eq!(before.held_workers, 1);
+    assert_eq!(before.held_cpu_millis, 500);
+    assert_eq!(before.held_memory_bytes, 134_217_728);
+    let backup_path = fixture._directory.path().join("before-session-v11.sqlite");
+    assert!(!backup_path.exists());
+
+    // Existing API and production dispatch only: no new migration stub is
+    // introduced to make this test compile or manufacture the expected RED.
+    let result = store.migrate_control_version(&backup_path, 10, 11);
+
+    // The target must have reached the real backup path. A fixture/backup
+    // failure before these checks is not the missing-migration RED oracle.
+    let backup =
+        Store::open_existing_for_tenant(&backup_path, "tenant-a", Redactor::new(vec![]), 10_000)
+            .unwrap();
+    assert!(backup.integrity().unwrap().valid);
+    assert_eq!(
+        snapshot(&backup),
+        before,
+        "v10 backup must preserve the exact baseline"
+    );
+    drop(backup);
+    if let Err(error) = &result {
+        assert_eq!(
+            error.downcast_ref::<ControlFailure>(),
+            Some(&ControlFailure::InvalidRequest)
+        );
+        assert_eq!(
+            snapshot(&store),
+            before,
+            "unsupported migration must leave source unchanged"
+        );
+        assert!(store.integrity().unwrap().valid);
+        eprintln!(
+            "schema11_red_preconditions_verified schema=10 quota=1 cpu_millis=500 memory_bytes=134217728 backup=exact source=unchanged"
+        );
+    }
+    let report = result.unwrap_or_else(|error| {
+        panic!("schema11_missing_migration: existing Store migration10->11 must succeed after verified v10 baseline and backup: {error}")
+    });
+
+    assert_eq!((report.from_version, report.to_version), (10, 11));
+    assert_eq!(
+        report.backup_path,
+        backup_path.to_string_lossy().into_owned()
+    );
+    let after = snapshot(&store);
+    assert_eq!(after.schema, 11);
+    assert_eq!(after.namespace, before.namespace);
+    assert!(
+        !after.active,
+        "migration must not activate an inactive origin"
+    );
+    assert_eq!(
+        (
+            after.held_workers,
+            after.held_cpu_millis,
+            after.held_memory_bytes
+        ),
+        (1, 500, 134_217_728)
+    );
+    assert_eq!(after.events.len(), before.events.len() + 1);
+    assert_eq!(
+        &after.events[..before.events.len()],
+        before.events.as_slice()
+    );
+    let marker = after.events.last().unwrap();
+    let prior = before.events.last().unwrap();
+    assert_eq!(marker.0, prior.0 + 1);
+    assert_eq!(report.genesis_seq, marker.0);
+    assert_eq!(report.genesis_hash, marker.3);
+    let event: Event = serde_json::from_str(&marker.4).unwrap();
+    assert_eq!(event.kind, "control.kubernetes.session.reservation.genesis");
+    assert_eq!(event.source, "gateway");
+    assert_eq!(event.provenance, "observed");
+    assert_eq!(event.coverage, "observed");
+    assert_eq!(
+        event.data,
+        serde_json::json!({
+            "version": 2,
+            "protocol": "kubernetes_session_reservation_v2",
+            "tenant_id": "tenant-a",
+            "control_namespace_uuid": before.namespace,
+            "from_schema": 10,
+            "previous_seq": prior.0,
+            "previous_hash": prior.3,
+        })
+    );
+    {
+        let db = store.db.lock().unwrap();
+        let meta: (i64, String) = db.query_row(
+            "SELECT genesis_seq,genesis_hash FROM kubernetes_session_reservation_meta WHERE singleton=1",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(meta, (marker.0, marker.3.clone()));
+        let reservations: i64 = db
+            .query_row(
+                "SELECT count(*) FROM kubernetes_session_reservations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(reservations, 0);
+        let held_index: i64 = db.query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE type='index' AND name='kubernetes_session_reservations_held' AND tbl_name='kubernetes_session_reservations'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(held_index, 1);
+    }
+    assert!(store.integrity().unwrap().valid);
+    drop(store);
+    let reopened =
+        Store::open_existing_for_tenant(&source_path, "tenant-a", Redactor::new(vec![]), 10_000)
+            .unwrap();
+    assert_eq!(snapshot(&reopened), after);
+    assert!(reopened.integrity().unwrap().valid);
+}

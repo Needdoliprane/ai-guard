@@ -96,7 +96,7 @@ impl Store {
         let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let registry_available = match schema {
             2..=5 => false,
-            6..=10 => true,
+            6..=11 => true,
             _ => return Err(crate::control::ControlFailure::MigrationRequired.into()),
         };
         let evaluated_at = format_time(Utc::now());

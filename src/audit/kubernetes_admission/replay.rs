@@ -1,7 +1,7 @@
 //! Projection verification and historical decisions; no repair or capabilities.
 use super::*;
 use crate::broker_registry::{format_time, parse_time};
-use crate::control::{QuotaPolicyV1, QuotaUsageV1};
+use crate::control::QuotaUsageV1;
 use authorization::permission;
 use model::{Change, Record, conflict};
 use rusqlite::types::Value as SqlValue;
@@ -279,53 +279,34 @@ pub(super) fn ensure_quota(
     }
 }
 
-fn historical_usage(
-    db: &Connection,
-    before_seq: i64,
-    policy: &QuotaPolicyV1,
-    creates: &BTreeMap<String, (KubernetesCreateSnapshotV1, i64)>,
-) -> anyhow::Result<QuotaUsageV1> {
-    let mut usage = QuotaUsageV1 {
-        policy: policy.clone(),
-        held_workers: 0,
-        held_cpu_millis: 0,
-        held_memory_bytes: 0,
-    };
-    let mut add = |cpu: u64, memory: u64| -> anyhow::Result<()> {
-        usage.held_workers = usage
-            .held_workers
-            .checked_add(1)
-            .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
-        usage.held_cpu_millis = usage
-            .held_cpu_millis
-            .checked_add(cpu)
-            .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
-        usage.held_memory_bytes = usage
-            .held_memory_bytes
-            .checked_add(memory)
-            .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
-        Ok(())
-    };
-    let mut statement = db.prepare("SELECT worker_id FROM workers ORDER BY worker_id")?;
-    for id in statement.query_map([], |row| row.get::<_, String>(0))? {
-        if let Some(worker) = control::worker_at(db, &id?, before_seq)? {
-            if worker.quota_held {
-                add(
-                    u64::from(worker.launch.cpu_millis),
-                    worker.launch.memory_bytes,
-                )?;
-            }
-        }
+/// Read only the already typed historical post-states. This helper deliberately
+/// does not call a quota validator, so mixed V1/V2 replay cannot recurse.
+pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<(u64, u64, u64)> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 8 {
+        return Ok((0, 0, 0));
     }
-    for (snapshot, _) in creates.values() {
+    let mut creates = BTreeMap::new();
+    let mut query = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind GLOB 'control.kubernetes.create.*' AND kind NOT IN ('control.kubernetes.create.genesis','control.kubernetes.create.policy.genesis') AND seq<?1 ORDER BY seq")?;
+    for item in query.query_map([before], row_event)? {
+        let record = record(&item?)?;
+        creates.insert(record.intent.create_id.clone(), record.snapshot);
+    }
+    let (mut count, mut cpu, mut memory) = (0u64, 0u64, 0u64);
+    for snapshot in creates.values() {
         if snapshot.quota_held {
-            add(
-                u64::from(snapshot.intent.resources.cpu_millis),
-                memory_bytes(&snapshot.intent)?,
-            )?;
+            count = count
+                .checked_add(1)
+                .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
+            cpu = cpu
+                .checked_add(u64::from(snapshot.intent.resources.cpu_millis))
+                .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
+            memory = memory
+                .checked_add(memory_bytes(&snapshot.intent)?)
+                .ok_or(KubernetesCreateFailureV1::QuotaExceeded)?;
         }
     }
-    Ok(usage)
+    Ok((count, cpu, memory))
 }
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
@@ -338,7 +319,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(events.is_empty())?;
         return Ok(());
     }
-    conflict([8, 9, 10].contains(&version))?;
+    conflict([8, 9, 10, 11].contains(&version))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],
@@ -369,7 +350,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::POLICY_GENESIS_KIND {
-            conflict([9, 10].contains(&version) && !policy_seen)?;
+            conflict([9, 10, 11].contains(&version) && !policy_seen)?;
             let (genesis_seq, genesis_hash) = create_genesis
                 .as_ref()
                 .ok_or(KubernetesCreateFailureV1::Conflict)?;
@@ -399,7 +380,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             }
         }
         if record.change.requires_active() {
-            let usage = historical_usage(db, stored.seq, record.authorization.quota(), &creates)?;
+            let usage = control::quota_usage_before(db, stored.seq, record.authorization.quota())?;
             ensure_quota(
                 &usage,
                 &record.intent,
@@ -421,7 +402,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(expected == record.snapshot)?;
         creates.insert(record.intent.create_id.clone(), (expected, stored.seq));
     }
-    conflict(create_genesis.is_some() && policy_seen == ([9, 10].contains(&version)))?;
+    conflict(create_genesis.is_some() && policy_seen == ([9, 10, 11].contains(&version)))?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement
         .query_map([], read_row)?

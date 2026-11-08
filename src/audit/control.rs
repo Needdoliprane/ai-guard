@@ -4,6 +4,10 @@ use crate::control::*;
 #[path = "supervision.rs"]
 pub(super) mod supervision;
 
+#[cfg(test)]
+#[path = "control_session_quota_tests.rs"]
+mod kubernetes_session_quota_tests;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 7] = [
     (
         "table",
@@ -240,7 +244,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        [2, 3, 4, 5, 6, 7, 8, 9, 10].contains(&version),
+        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version),
         "unsupported control schema"
     );
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
@@ -289,9 +293,13 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .query_map([genesis_seq], row_event)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
+        if stored.event.kind.starts_with("control.kubernetes.session.") {
+            anyhow::ensure!(version == 11, "Kubernetes session event requires schema11");
+            continue;
+        }
         if stored.event.kind.starts_with("control.kubernetes.create.") {
             anyhow::ensure!(
-                [8, 9, 10].contains(&version),
+                [8, 9, 10, 11].contains(&version),
                 "held Kubernetes event requires schema8 or schema9"
             );
             continue;
@@ -301,14 +309,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             || stored.event.kind.starts_with("control.relay.")
         {
             anyhow::ensure!(
-                [6, 7, 8, 9, 10].contains(&version),
+                [6, 7, 8, 9, 10, 11].contains(&version),
                 "workload control event requires schema6"
             );
             continue;
         }
         if stored.event.kind.starts_with("control.identity.") {
             anyhow::ensure!(
-                [4, 5, 6, 7, 8, 9, 10].contains(&version),
+                [4, 5, 6, 7, 8, 9, 10, 11].contains(&version),
                 "identity event requires schema4 or5"
             );
             continue;
@@ -553,6 +561,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     super::relay::validate(db)?;
     super::relay_admission::validate(db)?;
     super::kubernetes_admission::validate(db)?;
+    super::kubernetes_session::validate(db)?;
     Ok(())
 }
 
@@ -564,7 +573,15 @@ pub(in crate::audit) fn worker_at(
     uuid(worker_id)?;
     invalid(before_seq > 0)?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    invalid([6, 7, 8, 9, 10].contains(&version))?;
+    invalid([6, 7, 8, 9, 10, 11].contains(&version))?;
+    worker_snapshot_before(db, worker_id, before_seq)
+}
+
+fn worker_snapshot_before(
+    db: &Connection,
+    worker_id: &str,
+    before_seq: i64,
+) -> anyhow::Result<Option<WorkerV1>> {
     // The partial compound index excludes helper/Arm/export records, which
     // cannot alter WorkerV1. This seeks one snapshot without scanning them.
     let query = format!(
@@ -591,7 +608,7 @@ pub(in crate::audit) fn worker_at(
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
+    if [2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -651,7 +668,9 @@ fn admission_result(stored: &StoredEvent, record: &ControlRecord) -> AdmissionRe
 }
 pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let query = if [8, 9, 10].contains(&version) {
+    let query = if version == 11 {
+        "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_session_reservations WHERE quota_held=1)"
+    } else if [8, 9, 10].contains(&version) {
         "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1)"
     } else {
         "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM workers WHERE quota_held=1"
@@ -664,6 +683,68 @@ pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Re
         held_cpu_millis: u64::try_from(cpu)?,
         held_memory_bytes: u64::try_from(ram)?,
     })
+}
+
+/// Pure historical projection: each source reconstructs retained states before
+/// the operation. None calls its complete quota validator, so worker/CREATE/V2
+/// validators may all use this helper without recursing into one another.
+pub(super) fn quota_usage_before(
+    db: &Connection,
+    before_seq: i64,
+    policy: &QuotaPolicyV1,
+) -> anyhow::Result<QuotaUsageV1> {
+    policy.validate()?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    invalid([2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version))?;
+    let (head, _) = audit_head(db)?;
+    invalid(before_seq > 0 && head.checked_add(1).is_some_and(|end| before_seq <= end))?;
+    let mut usage = QuotaUsageV1 {
+        policy: policy.clone(),
+        held_workers: 0,
+        held_cpu_millis: 0,
+        held_memory_bytes: 0,
+    };
+    let mut add = |count: u64, cpu: u64, memory: u64| -> anyhow::Result<()> {
+        usage.held_workers = usage
+            .held_workers
+            .checked_add(u32::try_from(count)?)
+            .context("historical shared worker quota count overflow")?;
+        usage.held_cpu_millis = usage
+            .held_cpu_millis
+            .checked_add(cpu)
+            .context("historical shared worker quota CPU overflow")?;
+        usage.held_memory_bytes = usage
+            .held_memory_bytes
+            .checked_add(memory)
+            .context("historical shared worker quota memory overflow")?;
+        Ok(())
+    };
+    let mut workers = db.prepare(
+        "SELECT DISTINCT worker_id FROM worker_mutations WHERE worker_id IS NOT NULL AND event_seq<?1 ORDER BY worker_id",
+    )?;
+    for id in workers.query_map([before_seq], |row| row.get::<_, String>(0))? {
+        let id = id?;
+        uuid(&id)?;
+        // The private reader also handles legacy schemas2–5. The existing
+        // worker_at API retains its exact schema6+ contract and index query.
+        if let Some(worker) = worker_snapshot_before(db, &id, before_seq)? {
+            worker.launch.validate()?;
+            if worker.quota_held {
+                add(
+                    1,
+                    u64::from(worker.launch.cpu_millis),
+                    worker.launch.memory_bytes,
+                )?;
+            }
+        }
+    }
+    let (count, cpu, memory) = super::kubernetes_admission::held_usage_before(db, before_seq)?;
+    add(count, cpu, memory)?;
+    // This source contributes zero before schema11/its genesis, independently
+    // of a reservation's final closed projection.
+    let (count, cpu, memory) = super::kubernetes_session::held_usage_before(db, before_seq)?;
+    add(count, cpu, memory)?;
+    Ok(usage)
 }
 fn execute_row(tx: &Connection, sql: &str, row: Vec<rusqlite::types::Value>) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -796,9 +877,17 @@ impl Store {
         )?;
         conflict(!existing)?;
         let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if [8, 9, 10].contains(&schema) {
+        if [8, 9, 10, 11].contains(&schema) {
             let reserved: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?1)",
+                [&admission.launch.session_id],
+                |row| row.get(0),
+            )?;
+            conflict(!reserved)?;
+        }
+        if schema == 11 {
+            let reserved: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE session_id=?1)",
                 [&admission.launch.session_id],
                 |row| row.get(0),
             )?;
@@ -828,6 +917,12 @@ impl Store {
             )?;
             let worker_id = uuid::Uuid::new_v4().to_string();
             let attempt_id = uuid::Uuid::new_v4().to_string();
+            if schema == 11 {
+                let duplicate: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE worker_id=?1 OR attempt_id=?2)",
+                    params![worker_id, attempt_id], |row| row.get(0))?;
+                conflict(!duplicate)?;
+            }
             let physical = format!(
                 "aig-{}-{}",
                 namespace.replace('-', ""),
@@ -1258,6 +1353,7 @@ impl Store {
             8 => super::kubernetes_admission::initialize(self, &tx)?,
             9 => super::kubernetes_admission::initialize_policy(self, &tx)?,
             10 => self.initialize_human_workers(&tx)?,
+            11 => super::kubernetes_session::initialize(self, &tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1281,6 +1377,7 @@ impl Store {
                 8 => "SELECT seq,hash FROM events WHERE kind='control.kubernetes.create.genesis'",
                 9 => "SELECT seq,hash FROM events WHERE kind='control.kubernetes.create.policy.genesis'",
                 10 => "SELECT seq,hash FROM events WHERE kind='control.identity.workers_access.genesis'",
+                11 => "SELECT genesis_seq,genesis_hash FROM kubernetes_session_reservation_meta WHERE singleton=1",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1340,7 +1437,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if [3, 4, 5, 6, 7, 8, 9, 10].contains(&version) {
+        if [3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,
@@ -1667,6 +1764,31 @@ fn validate_admission_input(
             && linked.hash == source.hash
             && admission.input_hash()? == record.input_hash,
         "admission input differs from its linked decision or journal"
+    );
+    let policy = record
+        .admission_policy
+        .as_ref()
+        .and_then(|policy| policy.get("quota"))
+        .context("historical worker admission quota policy is missing")?;
+    let quota: QuotaPolicyV1 = serde_json::from_value(policy.clone())
+        .context("historical worker admission quota policy is invalid")?;
+    quota.validate()?;
+    let usage = quota_usage_before(db, admission_seq, &quota)?;
+    anyhow::ensure!(
+        usage
+            .held_workers
+            .checked_add(1)
+            .is_some_and(|count| count <= quota.max_active_workers)
+            && usage
+                .held_cpu_millis
+                .checked_add(u64::from(worker.launch.cpu_millis))
+                .is_some_and(|cpu| cpu <= u64::from(quota.max_cpu_millis))
+            && usage
+                .held_memory_bytes
+                .checked_add(worker.launch.memory_bytes)
+                .is_some_and(|memory| memory <= quota.max_memory_bytes)
+            && worker.launch.timeout_seconds <= quota.max_timeout_seconds,
+        "worker admission exceeds historical shared tenant quota"
     );
     Ok(())
 }

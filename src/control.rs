@@ -8,6 +8,7 @@ pub mod kubernetes_admission;
 #[cfg(test)]
 #[path = "control/kubernetes_admission_tests.rs"]
 mod kubernetes_admission_tests;
+pub mod kubernetes_session;
 mod supervision;
 pub use supervision::{
     ArmReceiptV1, ArmResultV1, ArmSubjectV1, ArmV1, ArmedStartClaimV1, BindLegacyIntentV1,

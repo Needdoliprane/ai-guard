@@ -441,7 +441,7 @@ impl Store {
 
 fn require_v2_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if [9, 10].contains(&version) {
+    if [9, 10, 11].contains(&version) {
         Ok(())
     } else {
         Err(KubernetesCreateFailureV1::MigrationRequired.into())

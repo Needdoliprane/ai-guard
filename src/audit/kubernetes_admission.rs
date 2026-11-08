@@ -25,7 +25,10 @@ fn require_capability_schema(
     evidence: &authorization::AuthorizationEvidence,
 ) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if matches!((version, *evidence.version()), (8, 1) | (9, 2) | (10, 2)) {
+    if matches!(
+        (version, *evidence.version()),
+        (8, 1) | (9, 2) | (10, 2) | (11, 2)
+    ) {
         Ok(())
     } else {
         Err(KubernetesCreateFailureV1::MigrationRequired.into())
@@ -93,6 +96,10 @@ pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     replay::validate(db).map_err(|_| KubernetesCreateFailureV1::Unavailable.into())
+}
+
+pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<(u64, u64, u64)> {
+    replay::held_usage_before(db, before)
 }
 
 pub(super) fn initialize_policy(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {

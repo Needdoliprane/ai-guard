@@ -94,7 +94,7 @@ impl Store {
             .map_err(|_| KubernetesCreateFailureV1::Unavailable)?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if ![9, 10].contains(&version) {
+        if ![9, 10, 11].contains(&version) {
             return Err(KubernetesCreateFailureV1::MigrationRequired.into());
         }
         let clock = workload::capture_control_time(&tx)?;
@@ -372,6 +372,12 @@ impl Store {
                 "SELECT EXISTS(SELECT 1 FROM workers WHERE session_id=?1) OR EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?1)",
                 [&intent.session_id], |row| row.get(0))?;
             conflict(!duplicate)?;
+            let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if schema == 11 {
+                let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE session_id=?1)",
+                    [&intent.session_id], |row| row.get(0))?;
+                conflict(!duplicate)?;
+            }
         }
         if change.requires_active() {
             let usage = super::super::control::quota_usage(&tx, authorization.evidence.quota())?;
