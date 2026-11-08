@@ -126,7 +126,37 @@ Ce qui suit est un **template complet du registre wire version2** pour une nouve
 
 Tous les objets registre/profil/profil de démarrage refusent les champs inconnus. Registry2 exige `prearmed_start_profile` dans **chaque** profil. Sa forme fermée contient exactement `version: 1` et `mode: "docker_minimal"` ou `mode: "legacy"`. Choix absent, version/mode/champ inconnu et `docker_minimal` avec Podman sont des erreurs, jamais des demandes de repli.
 
-Registry1 conserve son schéma fermé initial et le comportement Legacy ; ne pas lui ajouter le nouveau champ. Registry2 peut sélectionner Legacy explicitement avec le **fragment suivant à l'intérieur d'un profil**, qui n'est pas un registre complet :
+Pour un gateway utilisant une AC privée, les profils Registry2 acceptent la
+référence absolue facultative `gateway_ca_bundle_file` de l'[exemple opérateur
+consommé par les tests](examples/gateway-trust.json). Fournir uniquement des
+certificats publics PEM : au plus 64 Kio et 1–8 certificats ; clés privées, autres
+sections PEM, fichier malformé ou absent sont refusés. Un bundle explicite exige
+un gateway HTTPS et remplace les racines intégrées pour le client d'audit de ce
+profil. Les validations de chaîne et de nom serveur restent actives, sans proxy,
+redirection, repli HTTP ou acceptation universelle. Champ absent ou `null`
+conserve la confiance HTTPS intégrée et le comportement HTTP loopback existants.
+Registry1 n'accepte pas ce champ.
+
+Le broker charge le bundle avant d'ouvrir l'IPC et conserve un snapshot immuable
+de confiance dans le registre. Le même client d'audit l'utilise pour vérifier
+l'identité runner puis pour les requêtes/événements suivants. Remplacer le
+fichier source ne recharge aucun registre ou client actif ; une nouvelle
+lecture du registre valide à nouveau ce fichier et refuse le matériel invalide.
+Relire les changements de confiance avant de redémarrer le service. La référence
+ne contient aucune valeur de credential et n'accorde aucun droit tenant,
+worker, exécution ou registre brokers.
+
+Ce réglage est indépendant de `ca_bundle_file` de la présence : aucune des deux
+configurations n'hérite de la confiance de l'autre. Si les deux demandent des
+racines privées, les déclarer explicitement avec le bundle relu pour chacune.
+Les tests TLS locaux ne qualifient ni PKI entreprise, ni rotation/révocation de
+certificats, ni fédération physique multi-hôtes ; provenance et fraîcheur des
+brokers/workers conservent leurs limites existantes.
+
+Registry1 conserve son schéma fermé initial et le comportement Legacy ; il
+n'accepte ni `prearmed_start_profile` ni `gateway_ca_bundle_file`. Registry2 peut
+sélectionner Legacy explicitement avec le **fragment suivant à l'intérieur d'un
+profil**, qui n'est pas un registre complet :
 
 ```json
 "prearmed_start_profile": { "version": 1, "mode": "legacy" }

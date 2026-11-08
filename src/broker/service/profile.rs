@@ -37,6 +37,7 @@ pub(super) struct Registry {
     pub(super) data: RegistryWireV1,
     start_profiles: BTreeMap<String, PrearmedStartProfile>,
     presence_profiles: BTreeMap<String, PathBuf>,
+    gateway_trust: BTreeMap<String, crate::tls::ClientTrust>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -99,6 +100,8 @@ struct ControlProfileV2 {
     prearmed_start_profile: StartProfileWireV1,
     #[serde(default)]
     presence_file: Option<PathBuf>,
+    #[serde(default)]
+    gateway_ca_bundle_file: Option<PathBuf>,
 }
 impl ControlProfileV2 {
     fn resolve(self) -> Result<(ControlProfileV1, PrearmedStartProfile, Option<PathBuf>)> {
@@ -168,6 +171,7 @@ impl Registry {
             .map_err(|_| anyhow!("invalid private broker configuration"))?;
         let mut start_profiles = BTreeMap::new();
         let mut presence_profiles = BTreeMap::new();
+        let mut gateway_ca_paths = BTreeMap::new();
         let mut data: RegistryWireV1 = match version.version {
             1 => serde_json::from_slice(source.bytes())
                 .map_err(|_| anyhow!("invalid private broker configuration"))?,
@@ -176,6 +180,9 @@ impl Registry {
                     .map_err(|_| anyhow!("invalid private broker configuration"))?;
                 let mut profiles = Vec::with_capacity(wire.profiles.len());
                 for profile in wire.profiles {
+                    if let Some(path) = &profile.gateway_ca_bundle_file {
+                        gateway_ca_paths.insert(profile.id.clone(), normalized(path)?);
+                    }
                     let (profile, selection, presence) = profile.resolve()?;
                     ensure!(
                         start_profiles
@@ -227,6 +234,20 @@ impl Registry {
                 "duplicate broker profile identity"
             );
         }
+        // Capture explicit public roots before the listener is opened. Every
+        // caller later reads this immutable memory, never a changed CA path.
+        let mut gateway_trust = BTreeMap::new();
+        for profile in &data.profiles {
+            if let Some(path) = gateway_ca_paths.get(&profile.id) {
+                ensure!(
+                    reqwest::Url::parse(&profile.gateway)?.scheme() == "https",
+                    "explicit broker gateway CA requires HTTPS"
+                );
+                let trust = crate::tls::ClientTrust::from_ca_file(path)
+                    .map_err(|_| anyhow!("broker gateway CA is invalid or unavailable"))?;
+                gateway_trust.insert(profile.id.clone(), trust);
+            }
+        }
         source
             .revalidate()
             .map_err(|_| anyhow!("private broker configuration changed"))?;
@@ -236,6 +257,7 @@ impl Registry {
             data,
             start_profiles,
             presence_profiles,
+            gateway_trust,
         })
     }
 
@@ -251,6 +273,9 @@ impl Registry {
     }
     pub(super) fn presence_path(&self, id: &str) -> Option<&Path> {
         self.presence_profiles.get(id).map(PathBuf::as_path)
+    }
+    pub(super) fn gateway_trust(&self, id: &str) -> crate::tls::ClientTrust {
+        self.gateway_trust.get(id).cloned().unwrap_or_default()
     }
 }
 

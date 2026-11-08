@@ -283,6 +283,16 @@ impl AuditClient {
         Ok(())
     }
     pub fn new(base: &str, token: &str) -> Result<Self> {
+        Self::with_gateway_trust(base, token, &crate::tls::ClientTrust::default())
+    }
+
+    /// Explicit immutable roots from trusted operator configuration. This
+    /// changes only TLS trust for this exact origin, never runner authority.
+    pub(crate) fn with_gateway_trust(
+        base: &str,
+        token: &str,
+        trust: &crate::tls::ClientTrust,
+    ) -> Result<Self> {
         let base = reqwest::Url::parse(base)?;
         let loopback = base.host_str().is_some_and(|host| {
             host == "localhost"
@@ -305,16 +315,20 @@ impl AuditClient {
         if token.is_empty() || token.chars().any(char::is_whitespace) {
             bail!("invalid runner token");
         }
+        anyhow::ensure!(
+            trust.digest().is_none() || base.scheme() == "https",
+            "explicit gateway CA requires HTTPS"
+        );
+        let builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .connect_timeout(Duration::from_secs(3))
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .no_proxy();
         Ok(Self {
             base,
             token: token.into(),
-            http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(15))
-                .connect_timeout(Duration::from_secs(3))
-                .redirect(reqwest::redirect::Policy::none())
-                .retry(reqwest::retry::never())
-                .no_proxy()
-                .build()?,
+            http: trust.apply_to_client(builder)?.build()?,
             redactor: Redactor::new(vec![token.into()]),
         })
     }
