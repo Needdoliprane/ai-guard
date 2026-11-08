@@ -205,6 +205,67 @@ its HTTP barrier; that precondition failure is not an ownership RED. Its
 test-only diagnostic96, relay95 and the broader recovery/engine qualifications
 retain their separate statuses. No global gate or external finding is closed.
 
+## Composed c3: ownership regressions pass, Import transport still overflows
+
+The immutable c3 full-source manifest is
+`c34c6ad753e00a93cbfe260b93e3876d428dda0130bc9908619f4a64529d710e`;
+the independently generated QA input manifest is
+`ef6fddd089486dbfe3318b6054b614882d74ddb5221beee7d01b1a7c61278eee`.
+The bundle remains unintegrated. Owner-task changes passed source review
+before execution; c3 then adds three discriminant tests and strengthens98.
+
+| Selection | Observed result | Log SHA-256 |
+|---|---|---|
+| `broker::service::server::full_signal_owner_tests::` | RC0,3 PASS,0.01s | `c6931a47f29d1b4feef2eba431b0094caf3548da7c372c35e64ce1587958310e` |
+| exact preclaim-shutdown98 parent | RC0,1 PASS,10.26s | `129d82af0d65b0d9a9d9bc40aa12471ba0aa11b8576731740502b196e79e0b84` |
+| exact original Export parent | RC0,1 PASS,198.96s | `826ff3bbc691499d69f3ca25d9f18b26689c764653dddb3e0cac7f88e044d4e1` |
+| exact `software_broker_missing_receipt_expires_under_original_arm_without_exec` | RC101,1 FAIL,25.81s | `1fd8de924cc66c6ee161cb3e48ebf1ace79dcd4e0839314fea8dd393fbfb9ade` |
+
+The three new tests cover independent signal admission while the run pool is
+full and joining the signal despite a failed or panicked run.98 observes
+destruction of the actual IPC waiter and now requires successful shutdown
+after signal completion, as well as the physical lease and audit conditions.
+It reports `shutdown_result_ok=true`, `response_waiter_cancelled=true`,
+`role_lease_held=true`, no ACK after release and zero commits without the lease.
+The STOP-after-confirmation versus earlier-interruption distinction still
+has no separate live parent in this selection.
+
+The failing legacy parent's216-byte broker stderr contains two retirement
+audit-pending notices followed by a Tokio worker stack overflow. Native
+whitelisted journal inspection shows revision8/V3, Worker Preparing with quota
+held, one Import helper with ownership recorded and only Decision, Admission
+and Prepare acknowledged. No Arm or claim is present. This establishes the
+Import callback as the next path to investigate; it does not establish entry
+into `execute_worker`. No raw journal/database was promoted onto the host.
+
+The actual c3 CLI ELF remained in QA:175,739,160 bytes, SHA-256
+`ed0768630d930d2a1ec1935a7550fc00dbcfbdf4e7bbc767abd677a9f7ddf60b`.
+Twenty-six exact prologues were inspected natively,384 bytes each, with
+40-second per-operation bounds and233,230 bytes total retained text. The
+selected Import transport chain reserves1,949,904 bytes statically, excluding
+the already completed helper preparation. `Execution::run` reserves345,072
+and `execute_active`596,672 bytes. Helpers, runtime, callback and Arm are
+included only where selected on the source-inferred path. Tokio, wrappers
+and other callees remain outside that sum. This is neither a captured fault
+PC/backtrace nor a measured stack maximum or product capacity threshold.
+The diagnostic report SHA-256 is
+`1416114e3bd1bb6682066ff8d8c99789868704160825fd716763071be5fa7a6f`.
+
+C4 therefore separates the two shared caller phases while preserving every
+load/reload, generation check, owner, helper and worker body. Its source
+review is favorable; smaller frames and successful compilation alone cannot
+credit the original handoff oracle. The legacy parent also cannot qualify
+the distinct Full3 assignment-restoration path. No global gate is closed.
+
+The complete c3 source and bounded diagnostic texts are retained outside
+temporary directories. The source tar has SHA-256
+`6c146ba770b59428a0828c5c75beee917ec881d90d251814a677c0d21dd68711`;
+its57-entry retention manifest has SHA-256
+`625f32cf88dc9acd46e7417b799c8006a84d62eefe37f595f4c3523d8def36ec`.
+QA AX was stopped and removed after targets completed and native metadata
+was retained. No executable/database was exported; ephemeral fixture state
+is no longer available after QA closure. Runtime qualification remains open.
+
 Baseline77 private provenance-note SHA-256:
 `82486255cd72570ea5c96a75aa4d75b51e28ce94e78276c85a4182f47c8f9127`.
 The source snapshots and bounded text captures remain in private engineering

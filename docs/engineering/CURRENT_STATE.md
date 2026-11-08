@@ -1,5 +1,20 @@
 # État constaté — suivi du développement
 
+## 8 novembre — cinq régressions composées passent ; pile d'import encore ouverte
+
+Le gel c3 passe les trois tests des pools run/signal,98 renforcé (receiver
+réellement annulé, shutdown réussi et lease tenue jusqu'à la fin de l'audit)
+et Export : cinq fonctions uniques. Son handoff legacy échoue encore sur un
+stack overflow. Le journal le situe au helper Import déjà créé, avant Arm ;
+le chemin worker ne peut pas être déduit de sa seule grande frame statique.
+[Résultats et diagnostic CLI](evidence/2026-11-08/d5-poll-stack/README.md).
+
+C4 extrait les phases appelantes `run`/`execute_active` sans changer helpers,
+worker, délais ou permissions. Sa revue source est favorable ; compilation,
+mesures CLI et parents restent des preuves distinctes. Le bundle D5/relais
+n'est pas intégré dans Root. Un parent Full3+relais distinct est aussi en
+préparation, car le handoff historique utilise encore l'enforcer legacy.
+
 ## 8 novembre — profil Kubernetes V2 intégré ; défaut d'arrêt reproduit
 
 Le composant `c4d0cd6`, composé dans `9af5e99`, ajoute le profil descriptif V2
