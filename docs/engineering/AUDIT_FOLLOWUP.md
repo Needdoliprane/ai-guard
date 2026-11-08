@@ -72,14 +72,14 @@ encore les preuves résiduelles et les qualifications indiquées.
 | H — ingress de contrôle | Voie de contrôle authentifiée et SDK intégrés, composition26 vérifiée avec I/L/M ; confrontation finale aux pools anonymes et recette runtime restent nécessaires. |
 | I — audit fiable des fichiers | Correctifs intégrés dans la composition26 ; conserver scan, couverture et reprise sous refus/capture saturée. La recette réelle et le résidu de l'outbox mixte restent ouverts. |
 | J — export non fiable | Correctif intégré,49 fonctions ciblées et compilation toutes cibles sur leurs gels ; voir preuve dédiée. Qualification APFS et runtime non déduite. |
-| K — disponibilité entre tenants | Candidat non intégré : RED80 mutex/SQLite et RED82 cache positif reproduits ; sept régressions passent sur85, un résidu après `integrity()` est reproduit. Le gel87 corrige ce chemin et ajoute le checked read abandonné. Validation, compatibilités et revue finale restent requises. [Preuve résiduelle](evidence/2026-11-08/audit-k-residual/README.md). |
+| K — disponibilité entre tenants | Composant métadonnées `1b9a420` intégré dans `d7cce54` : RED80/82/85/87, puis36 fonctions et toutes cibles PASS88, revue indépendante traitée. Lecture voisine non bloquante et index positif cohérent sont vérifiés dans ce périmètre ; charge, mémoire et disponibilité complète restent ouverts. [Preuve du composant](evidence/2026-11-08/tenant-metadata-isolation/README.md). Aucun verdict global K réécrit. |
 | L — descripteurs et moniteur | Store et fenêtre de réessai du moniteur corrigés et testés logiciellement ; démontrer disponibilité TCP, reprise et échéance initiale sur moteur réel sous pression FD. |
 | M — capacité d'audit | Déduplication/budget SSO et réserve de contrôle intégrés,19 fonctions de réserve validées sur61/62. Rétention/archivage, saturation durable et relecture de tous les producteurs restent ouverts. |
 
-La relecture K du8novembre porte sur `api/human.rs::credential_binding`,
+La relecture K précédant ce composant portait sur `api/human.rs::credential_binding`,
 `api/workload.rs::reject_control_collision`, `api/store_io.rs::Scope::with_store`,
 `audit/human.rs::local_credential_binding` et
-`audit/workload.rs::workload_digest_binding` du code d'intégration courant.
+`audit/workload.rs::workload_digest_binding` de la source `bc29d0c`.
 Le RED80 utilise ensuite les connexions réellement retenues par le gateway et
 des barrières déterministes ; la première fixture78 visait une autre connexion
 après ajout du redactor et ne démontrait donc pas son oracle mutex. Le candidat

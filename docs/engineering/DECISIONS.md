@@ -1,5 +1,22 @@
 # Décisions d'industrialisation
 
+## 8 novembre — index positif indépendant des verrous d'un tenant voisin
+
+Choix d'implémentation du correctif K dans les frontières existantes : les
+lookups voisins utilisent un snapshot déjà vérifié sans attendre une transaction
+d'écriture, un mutex DB ou une lease. L'indisponibilité reste distincte de
+l'absence. Un index positif partagé par origine conserve les collisions connues ;
+il n'établit ni absence ni authentification et ne donne aucun droit d'exécution.
+
+La dépendance Rust `arc-swap=1.9.4`, sans features par défaut, remplace le mutex
+de ce cache pour permettre sa lecture même sous lease retenue. Elle est épinglée
+avec checksum officiel et utilise `rustversion` déjà verrouillé ; aucun nouveau
+service, stockage, schéma ou credential n'est introduit. Les données existantes
+vérifiées sont publiées avant leurs marqueurs, les mutations uniquement après
+COMMIT. Reprise, `integrity()` et abandon de transaction ont leurs régressions.
+[Justification, revue, preuves et limites mémoire](evidence/2026-11-08/tenant-metadata-isolation/README.md).
+Ce choix ne qualifie ni charge100, rétention, disponibilité physique ou release.
+
 ## 7 novembre — raccord privé du relais et cache de validation approuvés
 
 Le mainteneur autorise la [direction relue du relais](RELAY_RUNTIME_HANDOFF.md)

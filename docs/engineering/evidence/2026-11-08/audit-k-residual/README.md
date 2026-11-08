@@ -1,6 +1,8 @@
 # Audit K — residual reproduction, 8 November 2026
 
-Status: **FAIL; candidate not integrated**. This is development evidence for
+Status at checkpoint82: **FAIL; candidate not integrated**. The later
+[integrated component and its36 passing functions](../tenant-metadata-isolation/README.md)
+provide the current bounded result. This is development evidence for
 the residual work tracked in [AUDIT_FOLLOWUP](../../../AUDIT_FOLLOWUP.md#audit-final-run-1),
 not a new external audit or a change to its thirteen findings.
 
@@ -78,8 +80,9 @@ advances its validation markers without refreshing the positive cache.
 
 The next frozen candidate87 corrects that path and adds a distinct regression
 for dropping a checked read after validation of an external commit. Its test
-and compatibility results are not implied by85. The candidate remains unmerged;
-this follow-up does not close audit K or any production gate.
+and compatibility results are not implied by85. At checkpoint85 the candidate
+remained unmerged; the later component proof records integration. This follow-up
+does not close audit K or any production gate.
 
 ## Retention and limits at checkpoint82
 

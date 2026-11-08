@@ -1,5 +1,22 @@
 # Plan d'industrialisation
 
+## 8 novembre — métadonnées K intégrées ; reprise D5 et parcours relais prioritaires
+
+La correction des lectures voisines et de leur index positif est intégrée,
+avec36 fonctions ciblées et compilation toutes cibles sur88, après reproduction
+et revue. [Preuve et limites](evidence/2026-11-08/tenant-metadata-isolation/README.md).
+La qualification globale de disponibilité et les autres résidus de l'audit
+restent ouverts ; ce composant ne ferme aucun gate de production.
+
+Deux périmètres indépendants doivent maintenant avancer : diagnostic statique
+des vrais constructeurs/polls D5 pour résoudre le débordement de pile Export,
+et QA des nouveaux parents service/Core/helper du raccord relais. Le gel86 du
+relais compile ; ses tests et moteurs restent non qualifiés. Préserver la
+compatibilité IPC fermée et les preuves acquises, puis composer ces composants
+seulement après leurs oracles et revues. Fédération réelle, Kubernetes complet,
+approbation humaine authentifiée, réseau, rétention et qualifications réelles
+ne sont pas reportés ni supprimés par ces priorités.
+
 ## 7 novembre — relais publié, reprises et réserve d'audit en parallèle
 
 Les frames, la voie HTTP worker authentifiée, le helper Rust local et les profils

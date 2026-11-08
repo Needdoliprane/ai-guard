@@ -1,5 +1,24 @@
 # Validation courante
 
+## 8 novembre — métadonnées K intégrées, 36 fonctions vérifiées sur88
+
+`1b9a420`, composé dans `d7cce54`, conserve les douze ancres de source88 ;
+`git diff` entre composant et composition est vide hors `docs/`. Les neuf
+régressions finales, dix-sept canaris API/intégration et dix canaris de reprise
+Store passent, ainsi que `cargo check --all-targets --locked --offline`.
+Les RED87 et85 portent sur deux chemins distincts : transaction abandonnée et
+`integrity()`. [Table des commandes, SHA et résultats](evidence/2026-11-08/tenant-metadata-isolation/README.md).
+Ces résultats restent attachés au gel88 ; aucune nouvelle campagne Root n'est
+annoncée. Clippy88 et les qualifications runtime restent NOT_RUN.
+
+La QA AS a été retirée après conservation de42 fichiers vérifiés : sources,
+manifestes, journaux et métadonnées. Les sorties finales K88 sont datées au plus
+tard09:00:56UTC, avant le cutoff09:05. La fin du conteneur est constatée plus
+tard,09:31:29UTC, exit137/OOM=false, après un saut d'horloge inexpliqué ; aucune
+garantie de durée écoulée n'est tirée de la fenêtre configurée. Les artefacts
+exécutables et bases de QA ne sont pas promus sur l'hôte. D5 statique n'a pas
+été relancé dans ce créneau.
+
 ## 8 novembre — K85 : sept PASS et un RED ; relais86 : check toutes cibles PASS
 
 Après correction du seul setup TMPDIR absent, les huit parents K85 terminent

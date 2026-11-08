@@ -1,5 +1,26 @@
 # État constaté — suivi du développement
 
+## 8 novembre — lectures de métadonnées voisines corrigées et intégrées
+
+Le composant `1b9a420`, composé dans `d7cce54`, traite les lectures de collision
+du lot K sans attendre le mutex/la lease d'un autre tenant ni lui consommer son
+budget de lecture. Les présences historiques restent connues après commit,
+reprise, contrôle d'intégrité et abandon d'une transaction vérifiée ; elles
+n'authentifient jamais un credential. Les douze ancres du gel88 correspondent
+après composition, et aucun fichier hors documentation ne diffère du composant.
+**36 fonctions ciblées et toutes cibles passent sur88**, après les reproductions
+et la revue indépendante. [Preuves, commandes et limites](evidence/2026-11-08/tenant-metadata-isolation/README.md).
+Clippy88, charge, coût mémoire et disponibilité de bout en bout restent ouverts ;
+aucune nouvelle exécution Root, moteur ou clôture globale K n'est déduite.
+
+Le raccord broker–relais86 compile toutes cibles. Ses quatre parents fonctionnels
+sont écrits dans trois fichiers distincts et attendent encore leur gel/QA ; le
+moteur de test reste un témoin synthétique, pas une qualification Docker/Podman.
+La prochaine priorité reste D5 : vrais prologues à extraire pour le débordement
+de pile avant l'oracle Export, puis qualifications de reprise. Le transport
+réel, la fédération multi-hôtes, Kubernetes complet et les autres gates restent
+obligatoires. Aucun gate global fermé ; G09 FAIL.
+
 ## 8 novembre — sept régressions K passent ; raccord relais compilé, tests fonctionnels ouverts
 
 Le gel85 K passe sept fonctions et reproduit encore un refus de collision
