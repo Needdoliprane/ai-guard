@@ -25,8 +25,11 @@ run-1. La revue indépendante du stockage candidat a refusé S1 : le writer comp
 V2 au quota courant, mais le replay des admissions worker ne valide pas encore
 ce quota à leur préfixe historique. Aucune admission normale hors quota n'est
 revendiquée. Le canari [B1 reproduit ce manque](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#historical-worker-quota-baseline-b1)
-sur Store11 après Close/reopen ; son correctif est relu, GREEN encore NOT_RUN
-à ce checkpoint. Stockage, récupération et qualification demeurent ouverts.
+sur Store11 après Close/reopen ; son correctif est relu puis passe ses tests
+ciblés. Le [stockage S1 et le raccord CLI11 sont intégrés](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#s1-storage-and-cli11-integration),
+avec compilation finale et avertissements conservés. La récupération S2 et
+la qualification d'ensemble restent ouvertes ; aucun constat run-1 n'est
+clôturé par cette correction d'un nouveau candidat.
 Le contrôle de l'import du test a précédé
 son exécution, sans transformer une erreur de compilation en RED produit.
 

@@ -1,5 +1,23 @@
 # Validation courante
 
+## 8 novembre — S1/CLI11 : GREEN ciblé et compilation finale
+
+Sur le gel B1 corrigé, les cinq commandes sélectionnent 1+1+5+1+1 fonctions,
+toutes PASS : quota historique, migration 11, réservations/replay/reprise,
+migration V1 et canari worker historique. Sur le gel formaté avec CLI11,
+trois parents passent : parsing CLI, migration au nouveau hash et quota B1.
+Ces exécutions recouvrent deux fonctions ; elles ne sont pas douze tests uniques.
+Le check toutes cibles du gel final retourne RC0 en 1m08s, diagnostics conservés.
+[Commandes, sources et empreintes](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#s1-storage-and-cli11-integration).
+
+Le premier check a seulement échoué avant compilation, depuis le mauvais cwd.
+Après correction autorisée, le même processus consigne cwd, Cargo.toml, lock,
+manifeste complet et cible explicite avant le check réel. Le RC101 initial
+reste SETUP_FAIL, sans crédit ou défaut produit. Les 82 warnings lib, cinq
+lib-test et deux SSO demeurent ; aucun lint n'a été désactivé pour ce résultat.
+Source finale `7b02983…`, Core `4a35142`, CLI `13f9d96` : égalité src/tests/Cargo
+vérifiée, sans prétendre une relance depuis Root. S2 et runtimes restent NOT_RUN.
+
 ## 8 novembre — compatibilité bornée des consommateurs du schéma 11
 
 Le gel s11c1 passe six fonctions de validateurs purs, après RED sur sa source

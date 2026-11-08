@@ -1,5 +1,22 @@
 # État constaté — suivi du développement
 
+## 8 novembre — stockage S1 et migration CLI11 intégrés
+
+Le checkpoint Core `1d6ce59`, composé dans `4a35142`, puis le raccord CLI
+`13f9d96` livrent le stockage des réservations Kubernetes avant effet, la
+migration explicite 10→11 avec sauvegarde et le replay de quota commun
+workers/CREATE V1/réservations V2. L'audit, la capacité et les reçus exacts
+sont conservés après réouverture. Le défaut B1 est reproduit puis corrigé.
+
+Neuf fonctions Store ciblées passent avant formatage. Le gel formaté exact
+passe ensuite les parents migration, quota B1 et CLI11, plus le check toutes
+cibles RC0. Sources Rust/tests/Cargo composées comparées au gel exécuté et
+revues indépendantes traitées. [Preuves et limites](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#s1-storage-and-cli11-integration).
+Les avertissements restent ouverts : 82 lib, cinq lib-test et deux dans une
+cible SSO ; aucun Clippy vert ni gate global fermé. La récupération HTTP par
+Runner, sa configuration, le lifecycle Main/TLS, le transport et les moteurs
+réels restent à composer et qualifier. Ce stockage n'active aucune exécution.
+
 ## 8 novembre — B1 historique reproduit ; mesure broker terminée
 
 Le canari B1 sur vrai Store11 atteint son oracle après réserve V2, admission

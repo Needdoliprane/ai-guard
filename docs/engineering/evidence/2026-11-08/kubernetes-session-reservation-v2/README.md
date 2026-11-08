@@ -1,7 +1,9 @@
 # Session reservation V2: migration baseline
 
-Date: 8 November 2026. Status: feature-absence RED observed; migration 11 and
-the reservation/recovery behavior are not yet implemented or qualified.
+Date: 8 November 2026. The initial sections retain the feature-absence RED.
+S1 storage and explicit CLI11 migration are subsequently integrated with the
+proofs below. S2 HTTP recovery, runtime execution and production qualification
+remain open.
 
 ## Source and execution
 
@@ -164,3 +166,62 @@ and has an independent GO_SOURCE review. Its GREEN composition has manifest
 the test is unchanged. GREEN remains NOT_RUN at this checkpoint. This is a
 candidate storage validation gap, separate from the external run-1 findings;
 no production, complete migration or runtime qualification is inferred.
+
+## S1 storage and CLI11 integration
+
+The B1 correction composition `45c4c05…` passes all five targeted commands:
+the B1 parent, the migration11 parent, the five `audit::kubernetes_session::tests`
+cases, the existing schema9 migration parent and
+`worker_registry::quota_replay_conflict_and_exact_receipt_survive_restart`.
+That is **nine unique functions**, all RC0, with no ignored case. The B1
+canary retains its relaxed positive control and rejects all four tightened
+historical quota clones after Close/reopen.
+
+After reproducible rustfmt normalization, the final2,313-file composition has
+manifest `7b02983f3448a0d21aab059e6fd523d2ca9df02c51d88f4244b40269e3e1d69d`.
+Its B1 test is byte-identical. The migration test's new hash is
+`1d121c819ae7ae001273da8303f410655eb5b4d6f7c03d32090330140cb3eaf3`;
+its previous result is not transferred to this hash. Independent final review
+has SHA `6487292af386fbca5780e6005404e4ff84ea793c097d837967aea28179b10b64`.
+
+Luna executes these exact selections on the final source, each RC0/one pass:
+
+```text
+cargo test --locked --offline --bin agentsandbox tests::migration_cli_accepts_11_and_preserves_default_and_upper_bound -- --exact --test-threads=1 --nocapture
+cargo test --locked --offline --lib audit::kubernetes_session_migration_tests::migration_10_to_11_preserves_a_held_v1_reservation_and_inactive_reopen -- --exact --test-threads=1 --nocapture
+cargo test --locked --offline --lib audit::control::kubernetes_session_quota_tests::worker_admission_replay_counts_v2_at_its_prefix_after_close_and_reopen -- --exact --test-threads=1 --nocapture
+cargo check --locked --offline --all-targets
+```
+
+The CLI parent proves default2, explicit11 and refusal1/12/u32::MAX. Before
+the change it failed with `11 is not in 2..=10`. The new branch calls the real
+public Store10→11 migration, retaining offline attestation, existing regular
+database, exact source version and fresh backup requirements. Parser and
+Store tests are distinct; no separate real CLI-process migration is claimed.
+
+The final all-target check returns RC0 in1m08s. An initial check ran from
+`/scratch` and failed before compilation; it remains a separate SETUP_FAIL.
+The corrected invocation uses explicit Docker workdir and records that cwd,
+Cargo.toml, lock SHA `9542b23f442f0b4216b2ca4937399a20bf85c57a4e8d9e4d3a09972670c31807`,
+all2,313 source hashes and the dedicated target before Cargo. Warnings remain:
+82 lib, five lib-test and two in `human_sso_gateway_trust`. No Clippy PASS.
+
+| Final capture | SHA-256 |
+|---|---|
+| CLI parent | `80640f6b4394167d85b6eb3bed0a078ce83acbb9889279e19f48aefcd96f0700` |
+| Formatted migration parent | `fa6d65dbdca2639b2a6e10e2517d4927b7fc6e6f1dd588e202b9b2ac1fd43073` |
+| Formatted B1 parent | `4a0cbd2d5d71b9b82ad20308884d1930905d9fe774e8cd16dea8dddb891a9669` |
+| Actual all-target check | `bac5c3483f98c0579a1550c3e180af0e1d57edc1bcf0d63b4aa5634fab27923b` |
+| Final command/status | `814796fb78552e8eea4c199e13438ed4c5fac22783677aeb751e855438deda6d` |
+
+Core checkpoint `1d6ce592f5f3b7237312aefc97022f0d0d12bc9f` is composed as
+`4a351424a7e39adc0af891f90f39ea2a519ca51e`; CLI is
+`13f9d96f176c807e949e7468ec19fc9c9cc469e8`. Root compared src/tests/Cargo
+against the executed composition. Native formatting/diff checks pass; these
+are frozen-source results, not a new Root rerun.
+
+The storage compartment supports typed reserve/close, broker successor recovery,
+quota/capacity and exact receipts before effects. It does not provide Runner
+HTTP recovery, Main/TLS retirement, configuration consumption, transport, actual
+pods or admission/start. Auth/config candidates and Core S2 remain separate;
+runtime, physical restore, dense-history capacity and production gates stay open.
