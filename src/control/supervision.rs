@@ -291,12 +291,12 @@ impl HostClockSampleV1 {
 impl SupervisionStateV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         invalid(
-            self.version == 1 && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].contains(&self.schema_version),
+            self.version == 1 && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&self.schema_version),
         )?;
         if let Some(namespace) = &self.control_namespace_uuid {
             uuid(namespace)?;
         }
-        if [3, 4, 5, 6, 7, 8, 9, 10].contains(&self.schema_version) {
+        if [3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&self.schema_version) {
             invalid(
                 self.control_namespace_uuid.is_some()
                     && self.protocols == [SupervisionProtocolV1::BrokerSupervisionV1],
@@ -796,5 +796,87 @@ impl HelperExecutionPolicyV1 {
                 && inspection.security_preset == self.security_preset
                 && inspection.restart_policy == self.restart_policy,
         )
+    }
+}
+
+#[cfg(test)]
+mod schema11_compatibility_tests {
+    use super::*;
+
+    fn supervised(schema_version: u32) -> SupervisionStateV1 {
+        SupervisionStateV1 {
+            version: 1,
+            schema_version,
+            control_namespace_uuid: Some(Uuid::from_u128(1).to_string()),
+            protocols: vec![SupervisionProtocolV1::BrokerSupervisionV1],
+            active: false,
+        }
+    }
+
+    #[test]
+    fn schema11_retains_supervision_v1_and_the_closed_schema_range() {
+        for schema_version in 3..=11 {
+            let state = supervised(schema_version);
+            assert!(state.validate().is_ok(), "schema {schema_version}");
+        }
+        for schema_version in [1, 2] {
+            let mut state = supervised(schema_version);
+            state.control_namespace_uuid = None;
+            state.protocols.clear();
+            assert!(state.validate().is_ok());
+            state.active = true;
+            assert!(state.validate().is_err());
+        }
+        for schema_version in [0, 12, u32::MAX] {
+            let mut state = supervised(schema_version);
+            assert!(state.validate().is_err());
+            // Unknown schemas cannot enter through the legacy inactive shape.
+            state.control_namespace_uuid = None;
+            state.protocols.clear();
+            assert!(state.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn schema11_keeps_control_wire_roles_namespace_and_fields_closed() {
+        let state = supervised(11);
+        let valid = ControlProtocolV1 {
+            version: state.version,
+            schema_version: state.schema_version,
+            control_namespace_uuid: state.control_namespace_uuid,
+            tenant_id: "tenant-a".into(),
+            role: "runner".into(),
+            protocols: state.protocols,
+            active: false,
+        };
+        assert!(valid.validate().is_ok());
+        let mut viewer = valid.clone();
+        viewer.role = "viewer".into();
+        assert!(viewer.validate().is_ok());
+
+        let mut invalid = valid.clone();
+        invalid.version = 2;
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid.clone();
+        invalid.role = "worker".into();
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid.clone();
+        invalid.tenant_id.clear();
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid.clone();
+        invalid.control_namespace_uuid = None;
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid.clone();
+        invalid.protocols.clear();
+        assert!(invalid.validate().is_err());
+        let mut invalid = valid.clone();
+        invalid
+            .protocols
+            .push(SupervisionProtocolV1::BrokerSupervisionV1);
+        assert!(invalid.validate().is_err());
+
+        let mut wire = serde_json::to_value(&valid).unwrap();
+        wire["session_authority"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ControlProtocolV1>(wire).is_err());
     }
 }

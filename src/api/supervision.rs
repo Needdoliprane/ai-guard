@@ -101,7 +101,7 @@ async fn reserve(
                 tenant.store.supervision_state().map_err(control_error)
             })
             .await?;
-        if ![3, 4, 5, 6, 7, 8, 9, 10].contains(&state.schema_version) {
+        if ![3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&state.schema_version) {
             return Err(control_error(ControlFailure::MigrationRequired.into()));
         }
         if !state.active {
