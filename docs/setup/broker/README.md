@@ -126,7 +126,34 @@ The following is a **complete Registry wire version2 template** for a new Docker
 
 All registry/profile/start-profile objects reject unknown fields. Registry2 requires `prearmed_start_profile` in **every** profile. Its closed form has exactly `version: 1` and `mode: "docker_minimal"` or `mode: "legacy"`. Missing selection, unknown version/mode/field and `docker_minimal` with Podman are errors, never requests for a fallback.
 
-Registry1 retains its original closed schema and Legacy behavior; do not add the new field to it. Registry2 can select Legacy explicitly with the following **fragment inside one profile**, not a complete registry:
+For a gateway using a private CA, Registry2 profiles accept the optional absolute
+`gateway_ca_bundle_file` reference shown in the [consumed operator example](examples/gateway-trust.json).
+Use a public PEM certificate bundle only: at most 64 KiB and 1–8 certificates;
+private keys, unrelated PEM sections, malformed or missing files are refused.
+An explicit bundle requires an HTTPS gateway and replaces the built-in roots
+for that profile's audit client. Certificate-chain and server-name validation
+remain active. There is no proxy, redirect, HTTP downgrade or trust-all fallback.
+Without this field, or with `null`, the existing built-in HTTPS trust and HTTP
+loopback behavior remain unchanged. Registry1 does not accept this field.
+
+The broker loads the bundle before opening IPC and retains an immutable trust
+snapshot in the registry. The same audit client uses it to verify the runner
+identity and to send subsequent requests/events. Replacing the source file does
+not reload an active registry or client; a fresh registry load validates the
+file again and refuses invalid material. Review trust changes before restarting
+the service. The reference contains no credential value and grants no tenant,
+worker, execution or broker-registry permission.
+
+This setting is independent of presence `ca_bundle_file`: neither configuration
+inherits trust from the other. If both need private roots, declare both
+explicitly, using the reviewed bundle for each. The local TLS tests do not
+qualify enterprise PKI, certificate rotation/revocation or physical multi-host
+federation; broker/worker provenance and freshness keep their existing limits.
+
+Registry1 retains its original closed schema and Legacy behavior; it accepts
+neither `prearmed_start_profile` nor `gateway_ca_bundle_file`. Registry2 can
+select Legacy explicitly with the following **fragment inside one profile**,
+not a complete registry:
 
 ```json
 "prearmed_start_profile": { "version": 1, "mode": "legacy" }

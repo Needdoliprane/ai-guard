@@ -1,5 +1,8 @@
 //! Trusted service integration. IPC authentication is distinct from Unix UID.
 mod client;
+#[cfg(all(test, unix))]
+#[path = "gateway_trust_tests.rs"]
+mod gateway_trust_tests;
 mod jobs;
 mod profile;
 pub mod protocol;
@@ -160,8 +163,12 @@ impl VerifiedProfile {
         let profile = registry
             .profile(profile_id)
             .map_err(|_| Code::Unauthorized)?;
-        let client =
-            AuditClient::new(&profile.gateway, credential).map_err(|_| Code::Unauthorized)?;
+        let client = AuditClient::with_gateway_trust(
+            &profile.gateway,
+            credential,
+            &registry.gateway_trust(profile_id),
+        )
+        .map_err(|_| Code::Unauthorized)?;
         let protocol =
             client
                 .control_supervision_identity()

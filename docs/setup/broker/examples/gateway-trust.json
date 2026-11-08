@@ -1,0 +1,33 @@
+{
+  "version": 2,
+  "installation_id": "10000000-0000-4000-8000-000000000001",
+  "root": "/absolute/private/ai-guard/broker-state",
+  "max_enforcer_slots": 8,
+  "profiles": [
+    {
+      "id": "strict-docker",
+      "gateway": "https://gateway.example.invalid",
+      "gateway_ca_bundle_file": "/absolute/private/ai-guard/trust/gateway-ca.pem",
+      "tenant_id": "tenant-example",
+      "control_namespace_uuid": "20000000-0000-4000-8000-000000000001",
+      "config_dir": "/absolute/private/ai-guard/config",
+      "runner_token_file": "/absolute/private/ai-guard/credentials/runner",
+      "runtime": "docker",
+      "runtime_program": "/absolute/approved/docker",
+      "runtime_endpoint": "unix:///absolute/engine/docker.sock",
+      "image": "local/worker:prepared",
+      "policy_profile": "strict",
+      "network": "none",
+      "allow_rootful_runtime": false,
+      "max_timeout_seconds": 30,
+      "allow_capture_output": false,
+      "managed_clients": false,
+      "providers_file": null,
+      "manual_credential_file": null,
+      "source_roots": ["/absolute/data/projects"],
+      "export_roots": ["/absolute/data/exports"],
+      "prearmed_start_profile": { "version": 1, "mode": "legacy" }
+    }
+  ],
+  "additional_control_secret_files": []
+}
