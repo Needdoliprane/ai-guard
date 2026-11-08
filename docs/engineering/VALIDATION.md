@@ -1,5 +1,22 @@
 # Validation courante
 
+## 8 novembre — QA AV : sept tests94b et parent Export PASS
+
+Le gel94b corrige uniquement le prédicat WorkerClaim : il ne s'applique qu'à
+une Arm Worker du même attempt. Les vérifications du HelperClaim propre et
+les autres validations ne changent pas. La revue indépendante est traitée.
+La commande de module a réellement sélectionné sept fonctions, toutes PASS,
+RC0 en0,06s après2m13s de compilation ; les trois oracles attendus et quatre
+canaris de codec/binding sont inclus. Le parent Export original, exécuté une
+fois sur la même source/cible, passe RC0 en200,21s.
+[Commandes, SHA et périmètre](evidence/2026-11-08/d5-poll-stack/README.md).
+
+La QA AV a aussi conservé deux RC101 de setup cache avant compilation, puis
+la compilation réussie du test482. Celui-ci échoue avant l'oracle propriétaire
+sur signal absent de la barrière HTTP ; ce n'est pas un RED de drainage.
+Le gel diagnostic96 ajuste la fixture uniquement. Aucun runtime réel, appel
+modèle, qualification globale ou PASS de composition Root n'est déduit.
+
 ## 8 novembre — QA AU : publication helper refusée ; pile relais toujours ouverte
 
 Le parent Export92 original a été exécuté une fois, RC101, un échec en221,56s.

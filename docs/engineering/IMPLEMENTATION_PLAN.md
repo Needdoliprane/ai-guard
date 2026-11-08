@@ -2,9 +2,9 @@
 
 ## 8 novembre — préparer la composition D5 sans retour arrière des contrats Root
 
-Le diagnostic statique des cadres est acquis ; le parent92 échoue sur le
-claim parent/helper et les cinq parcours93 débordent encore la pile. Les
-régressions et corrections restent à vérifier. Une composition D5 dédiée est
+Le diagnostic statique des cadres est acquis. Après les échecs92/94a, le
+correctif94b passe sept fonctions et le parent Export original. Le relais93
+débordait encore la pile ; son découpage95 reste à vérifier. Une composition D5 dédiée est
 préparée depuis `dfa3961`, sans fusion dans la branche produit avant ses tests
 et revue. Les preuves de composants ne sont pas une preuve de cette composition.
 

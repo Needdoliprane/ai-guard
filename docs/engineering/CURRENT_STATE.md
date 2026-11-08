@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 8 novembre — claim helper corrigé sur94b, parent Export vérifié
+
+Le correctif94b ne confond plus le claim du worker parent avec celui d'une Arm
+helper. Après RED94a et revue indépendante, les sept fonctions sélectionnées du
+module passent ; le parent Export original passe aussi, une fois, en200,21s.
+Les refus Worker et Helper propres restent vérifiés. [Commandes et empreintes](evidence/2026-11-08/d5-poll-stack/README.md).
+Ce résultat appartient au gel94b : le fichier est composé dans le candidat D5,
+mais le bundle n'est pas encore intégré à la branche produit. Aucun autre
+scénario de reprise, runtime réel ou gate global n'est crédité.
+
+Le test d'arrêt préclaim compile sur482 mais échoue avant son oracle : son
+signal n'atteint pas la barrière HTTP. Ce résultat ne démontre pas le défaut de
+propriété supposé ; le correctif produit reste suspendu à sa reproduction.
+Un ajustement de fixture/diagnostic96 est préparé sans modifier les délais.
+Le découpage relais95 est relu ; compilation et comportement restent à établir.
+
 ## 8 novembre — Export atteint le journal ; relais encore en débordement de pile
 
 Le parent Export92 a été exécuté une fois en QA isolée : **FAIL, RC101,

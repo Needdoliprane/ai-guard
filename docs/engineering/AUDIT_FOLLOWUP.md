@@ -68,7 +68,7 @@ encore les preuves résiduelles et les qualifications indiquées.
 
 | Lot | État courant et prochaine preuve requise |
 |---|---|
-| G / D5 — quotas et reprise | Bundle séparé, deux consumers et diagnostics V1/V2 validés sur65. Export92 échoue après signal audité sur publication Full3 : le claim du parent est refusé pour son HelperArm. RED ciblé94a reproduit, deux canaris de refus PASS ; correctif et oracle Export ouverts, ainsi que rétention des tâches à l'arrêt. Démontrer ensuite sortie auditée des réservations jamais démarrées et absence de second démarrage. [Diagnostic courant](evidence/2026-11-08/d5-poll-stack/README.md). |
+| G / D5 — quotas et reprise | Bundle séparé. Après RED94a, le correctif94b passe sept fonctions et le parent Export original (une exécution,200,21s). Le fichier est composé dans le candidat, sans intégration produit ni transfert des preuves. La rétention à l'arrêt reste à démontrer :482 échoue avant l'oracle, diagnostic96 préparé. Démontrer ensuite composition complète, sortie auditée des réservations jamais démarrées et absence de second démarrage. [Diagnostic courant](evidence/2026-11-08/d5-poll-stack/README.md). |
 | H — ingress de contrôle | Voie de contrôle authentifiée et SDK intégrés, composition26 vérifiée avec I/L/M ; confrontation finale aux pools anonymes et recette runtime restent nécessaires. |
 | I — audit fiable des fichiers | Correctifs intégrés dans la composition26 ; conserver scan, couverture et reprise sous refus/capture saturée. La recette réelle et le résidu de l'outbox mixte restent ouverts. |
 | J — export non fiable | Correctif intégré,49 fonctions ciblées et compilation toutes cibles sur leurs gels ; voir preuve dédiée. Qualification APFS et runtime non déduite. |

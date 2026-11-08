@@ -1,6 +1,7 @@
 # D5 polling stack — baseline77 static evidence
 
-Status: diagnostic evidence, **no fix or passing Export oracle credited**.
+Status: diagnostic evidence and scoped94b regression results; complete D5
+integration and runtime qualification remain open.
 The baseline77 parent previously aborted after entering Export. The separate
 instrumented79 source aborted earlier and is not used to explain these frames.
 
@@ -174,6 +175,35 @@ The retained native93 forensic manifest has SHA-256
 `e1bc620ced0041a5d0c9b9cafff57b0c75c7989b1254a9e09cbc20b230e55823`;
 it covers the five stderr, revision markers and bounded prologue captures.
 No rerun, model call, real worker engine or global qualification is credited.
+
+## Candidate94b: discriminant fix and original Export parent
+
+Source-manifest SHA-256:
+`33f6beabf546217ae3454f33dedca691bb6fc9bb0708359335a0c0391d3aa960`.
+Only the WorkerClaim predicate changes after94a: it additionally requires an
+Arm Worker. The HelperClaim branch and binding/identity validations remain
+unchanged. Independent source review covers its publication, retirement and
+V5 callers, including the receipt hash committing the complete Arm.
+
+```text
+cargo test --offline --locked --lib broker::retirement_checkpoint::tests:: -- --nocapture --test-threads=1
+cargo test --locked --offline --lib runner::broker::executor::journal::tests::export_retirement_tests::export_helper_abandonment_propagates_without_extraction_or_export_success -- --exact --nocapture --test-threads=1
+```
+
+The module invocation actually selects **seven functions, all PASS, RC0,
+0.06s after2m13s compilation**. It includes the three required claim-subject
+regressions and four codec/binding canaries. Log SHA-256:
+`bf43437d626e7377f3e769f3714a107d7e7c692630e35d959a258983e37f8671`.
+The original Export parent then passes once, **one PASS, RC0,200.21s**,
+on the same source/target. Log SHA-256:
+`e15b9481fdb1867409114b3687d272f0f93a49e587c0fd3a9a532558c58d6481`.
+
+These results belong to94b, not92 or the Root composition. Its single changed
+file is composed in the D5 candidate, but the bundle remains unintegrated.
+The separate preclaim-shutdown test482 compiles, then fails before reaching
+its HTTP barrier; that precondition failure is not an ownership RED. Its
+test-only diagnostic96, relay95 and the broader recovery/engine qualifications
+retain their separate statuses. No global gate or external finding is closed.
 
 Baseline77 private provenance-note SHA-256:
 `82486255cd72570ea5c96a75aa4d75b51e28ce94e78276c85a4182f47c8f9127`.
