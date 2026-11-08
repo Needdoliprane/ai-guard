@@ -266,6 +266,90 @@ QA AX was stopped and removed after targets completed and native metadata
 was retained. No executable/database was exported; ephemeral fixture state
 is no longer available after QA closure. Runtime qualification remains open.
 
+## Composed c4: helper observed, legacy handoff still fails
+
+The complete immutable C4 QA input manifest has SHA-256
+`b75c67ec39252291ee7c72f6eba1c7ed7ec524b0d6b455bdedecd53fcb929a31`.
+Its executor source has SHA-256
+`a4f73a0ab77a6f46793998544ee1736b1cf8a399cde1f868c2f01657b06a7b06`.
+The source review covers the extracted caller phases; helper and worker
+bodies, generation checks, audit order, deadlines and permissions remain
+unchanged. This bundle remains separate from the integration branch.
+
+```text
+cargo check --all-targets --locked --offline
+cargo test --test broker_relay_handoff --no-run --locked --offline
+cargo test --test broker_relay_handoff --locked --offline software_broker_missing_receipt_expires_under_original_arm_without_exec -- --exact --nocapture --test-threads=1
+```
+
+The first two commands return RC0. Their log SHA-256 values are respectively
+`fd0d619347439e5be78d73a1ebf6948208fe3420bcfd2b7e71f8d0af186601df`
+and `f8f7a270c705c3a482dc180d5d55a77e59f77668a4ddc41c57d446eb1f111618`.
+The unchanged parent is executed once: **one FAIL, RC101, 25.84 s**. Its log
+has SHA-256
+`dc832be1bcf75b293e9c815712b66cd31a420a6d7c1643e11b0e015effae8b62`;
+its status capture has SHA-256
+`ab66827896aa2bbe1dfd65c4c2c2e30346b13e9caa0e12eb7e77e76289df67b2`.
+
+The 224-byte broker stderr contains four retirement-audit-pending notices and
+no stack-overflow text. Its SHA-256 is
+`7d4985b19b6dbeeb4702af324d95007aa2e484f3ce7e340d81d580d0656a2130`.
+Whitelisted Core/SQLite facts show worker Preparing at revision 2 with quota
+held, a 120-second helper Arm, a helper claim with its Arm receipt and a terminal
+helper observation (exit 0, not running, no OOM). The durable acknowledgement
+of that observation in the local broker draft remains unknown. No HelperCleanup,
+relay or terminal-worker transition is recorded. The observation has no import
+verification, which is a separate later operation. These facts show progress
+beyond c3's pre-Arm point. The pending-retirement notices alone do not establish
+why the parent expires.
+
+The actual C4 CLI in isolated QA is 175,753,152 bytes, SHA-256
+`5cfec2bdf4e107303eb027ab1f87cfd82dacd8cf75cffe9a958c7a8158525240`.
+Sixteen bounded prologue captures (54,425 bytes) on this CLI are retained as text, SHA-256
+`27781360160af7468a8a0e90e2c109b7440508cf4c2dc63fdfff9135c00b2ca4`.
+The individual poll frames reserve 19,648 bytes for `BatchExecutor::run`,
+26,880 for `Execution::open` and 592 for `execute_active`. The extracted
+cancelled, runtime, import, worker and terminal phase poll frames respectively
+reserve 198,576, 69,088, 272,800, 1,968 and 139,776 bytes. Their constructors
+respectively reserve 55,184, 23,440, 61,104, 80 and 34,928 bytes. The constructors
+of `run`, `open` and `execute_active` reserve no frame. These are individual
+static reservations, not a sum of simultaneously active frames or a captured
+fault stack. This is not a measured stack maximum, successful handoff or runtime proof.
+An earlier metadata capture selected the wrong ELF and created an oversized
+temporary symbol listing; it was discarded and is not used as evidence.
+
+A distinct test-only Full3 overlay keeps the original guardian alive and
+restarts only the broker. Its complete QA input manifest has SHA-256
+`72570a3843a35a11c99cfb7a83deedf4f176208185e2817015af7e84d67564bb`.
+It changes four test files and no application or Cargo source. Verification of
+every manifest entry returns RC0 on the copied QA source, using its own target.
+Its `broker_relay_full3 --no-run` invocation returns RC0 after 2m12s, log SHA-256
+`2994d9ae9ba6f522abad434472c5dd9dcc0c74ef210e767b4ce594cbaa7721ea`.
+
+```text
+cargo test --test broker_relay_handoff --locked --offline software_runtime_witness_refuses_contradictory_create_flags_before_mutation -- --exact --nocapture --test-threads=1
+cargo test --test broker_relay_full3 --locked --offline software_full3_restores_original_assignments_before_late_issue_two_endpoints_relay -- --exact --nocapture --test-threads=1
+```
+
+The canary returns **one PASS, RC0, 5.34 s**, log SHA-256
+`d7739a7654a64547324fd2e122c4ac56d056b94f69672c64ceb3617ec5282fce`.
+The single positive parent returns **one FAIL, RC101, 26.39 s**, log SHA-256
+`2da688ab59c9533909850fa86e0acfca9c64c2ff1bf651de2e315f9952d87b02`
+and status SHA-256
+`90936e778edc3e8870e115b8447ebd35fa9b6ac39c9c70c4f34d375251729ed0`.
+It expires before Running/Awaiting, before the broker-restart and relay
+oracles. Core/SQLite shows two tenant-A workers Preparing at revision 2, quota
+held, two helper Arms and claims, no helper observation or relay effect.
+Tenant B has no worker. Broker stderr contains six pending-retirement notices
+and no overflow text; the guardian stderr is empty. The whitelisted summary
+has SHA-256
+`9d16d2d8f1a167a5de49b6531224e6b15e1781747b53f231c49641d521788449`.
+Local-draft ACKs and the exact timeout cause remain unknown. The harness
+expiration alone does not establish a product latency defect. Neither negative
+parent was run, and no retry or deadline increase is credited. The engine
+witness remains synthetic; no Docker/Podman worker, cluster or global gate
+is qualified.
+
 Baseline77 private provenance-note SHA-256:
 `82486255cd72570ea5c96a75aa4d75b51e28ce94e78276c85a4182f47c8f9127`.
 The source snapshots and bounded text captures remain in private engineering

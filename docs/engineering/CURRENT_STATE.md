@@ -1,5 +1,30 @@
 # État constaté — suivi du développement
 
+## 8 novembre — C4 progresse jusqu'à l'observation du helper ; handoff toujours en échec
+
+Le gel C4 passe le check toutes cibles et la compilation du parent. Son unique
+exécution du handoff legacy échoue encore sur délai, en 25,84 s (RC101). Cette
+fois, le stderr ne contient pas de débordement de pile ; les faits Core/SQLite
+montrent une Arm helper de 120 s, son claim et son observation terminale, sans
+HelperCleanup. L'ACK durable de cette observation dans le draft local reste
+inconnu. Ni ces progrès ni les quatre avis de retraite en attente ne prouvent la cause du délai, la
+correction complète de la pile ou le démarrage du worker.
+[Sources et résultats C4](evidence/2026-11-08/d5-poll-stack/README.md#composed-c4-helper-observed-legacy-handoff-still-fails).
+
+En parallèle avancent le diagnostic du handoff, les parents Full3 avec le
+gardien d'origine conservé, et le raccord explicite de l'AC
+privée au client métier du broker. Ce dernier écart est établi par lecture :
+la présence accepte déjà une AC, tandis que le client métier utilise encore
+les racines par défaut. Sa reproduction TLS reste à exécuter. La composition
+D5/relais reste séparée ; aucun runtime réel ou gate global n'est crédité.
+
+Le parent Full3 distinct compile, puis son canari passe. Sa seule exécution
+positive expire en 26,39 s avant Running/Awaiting : deux workers restent
+Preparing après les claims des helpers. Aucun redémarrage, échange ni oracle
+de reprise n'est atteint. Une expiration du harnais ne démontre pas à elle
+seule un défaut de latence du produit ; les prochaines traces bornées doivent
+situer la frontière, sans modifier délais ou assertions.
+
 ## 8 novembre — cinq régressions composées passent ; pile d'import encore ouverte
 
 Le gel c3 passe les trois tests des pools run/signal,98 renforcé (receiver
