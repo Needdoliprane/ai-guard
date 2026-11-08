@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 8 novembre — sessions Kubernetes V2 : accord local reçu, implémentation ouverte
+
+Le mainteneur autorise le code Rust et les tests locaux de la
+[direction V2 relue](KUBERNETES_ADMISSION.md), avec activation fermée et sans
+effet sur le cluster. La première tranche possède de nouveaux modules de profil
+session/validation et leurs tests ; elle conserve V1 et les API existantes.
+Contrats transverses, migration, canal bootstrap, stockage et lifecycle complet
+sont coordonnés séparément. Une tranche de types ne livre pas le parcours complet.
+
+Les travaux d'audit D5, les validations ciblées avec Luna et le diagnostic du
+relais avancent en parallèle dans des périmètres distincts. Le test préclaim96
+doit atteindre son oracle avant correction produit ; aucune attente Kubernetes
+ne bloque ces correctifs. Les preuves runtime, d'identité du canal, de stockage
+et de confinement restent nécessaires avant activation et qualification.
+
 ## 8 novembre — préparer la composition D5 sans retour arrière des contrats Root
 
 Le diagnostic statique des cadres est acquis. Après les échecs92/94a, le

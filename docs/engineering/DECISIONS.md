@@ -1,5 +1,20 @@
 # Décisions d'industrialisation
 
+## 8 novembre — sessions Kubernetes V2 autorisées en code local
+
+Le mainteneur approuve explicitement la [proposition du6novembre](KUBERNETES_ADMISSION.md)
+relue au commit `f53b2f5` : code Rust et tests locaux des sessions V2, du canal
+bootstrap, du stockage et du cycle de vie. L'accord conserve l'activation fermée
+tant que les preuves d'identité, de stockage et d'isolation manquent. Aucun
+lancement sur le cluster, suppression de données ou action cloud/PKI n'est inclus.
+
+V1 reste lisible avec ses hashes et capacités fermés. V2 n'hérite d'aucun droit
+d'exécution V1. Identité réelle du bootstrap, propriété/exclusivité/quiescence
+du stockage, protection des sorties avant persistance runtime et échéance
+durable restent des obligations à résoudre et qualifier ; un jeton lié au Pod,
+un UID déclaré, un GET ou un DELETE réussi ne sont pas présentés comme ces preuves.
+Les tranches de code et leurs tests ne constituent pas une session disponible.
+
 ## 8 novembre — index positif indépendant des verrous d'un tenant voisin
 
 Choix d'implémentation du correctif K dans les frontières existantes : les

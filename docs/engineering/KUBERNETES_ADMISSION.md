@@ -2,9 +2,12 @@
 
 ## Proposition du 6 novembre — sessions exécutables et canal worker
 
-**Décision du mainteneur attendue avant cette extension.** La direction du
-4 novembre ci-dessous ne couvre pas ce nouveau profil. Cette proposition ne
-change aucun code, constructeur d'activation ou état du cluster.
+**Direction et code Rust/tests locaux approuvés par le mainteneur le8novembre.**
+Cet accord étend celui du4novembre au profil V2, au canal bootstrap, au stockage
+et au cycle de vie ci-dessous. Il ne couvre aucun lancement sur le cluster ni
+suppression de données. L'activation reste fermée jusqu'aux preuves d'identité,
+de stockage, de confinement et d'audit ; l'accord ne qualifie aucune session.
+Le profil V1 et ses garanties restent distincts. [Décision et périmètre](DECISIONS.md#8-novembre--sessions-kubernetes-v2-autorisées-en-code-local).
 
 Le profil retenu V1, ses hashes, ses journaux et son programme `/usr/bin/id`
 restent lisibles sans conversion. Une vraie session demande un profil V2 :

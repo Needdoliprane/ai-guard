@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 8 novembre — Kubernetes V2 autorisé ; relais95 toujours FAIL
+
+Le mainteneur autorise code Rust et tests locaux des sessions Kubernetes V2,
+canal bootstrap, stockage et cycle de vie ; [accord et limites](DECISIONS.md#8-novembre--sessions-kubernetes-v2-autorisées-en-code-local).
+Un worktree dédié démarre le contrat et le profil de session. L'activation
+reste fermée ; aucune session V2 ou action cluster n'est déduite de l'accord.
+
+Relais95 passe le check toutes cibles, puis son unique parent missing-receipt
+échoue sur délai en25,79s. Les stderr broker/enforcer retenus sont vides :
+aucun overflow textuel n'est observé, mais la cause du délai n'est pas établie.
+Le diagnostic reprend sans rerun, hausse de délai ou annonce de correction.
+
 ## 8 novembre — claim helper corrigé sur94b, parent Export vérifié
 
 Le correctif94b ne confond plus le claim du worker parent avec celui d'une Arm
