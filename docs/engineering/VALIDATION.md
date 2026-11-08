@@ -1,5 +1,22 @@
 # Validation courante
 
+## 8 novembre — K85 : sept PASS et un RED ; relais86 : check toutes cibles PASS
+
+Après correction du seul setup TMPDIR absent, les huit parents K85 terminent
+RC101 : sept PASS, un FAIL fonctionnel (collision après `integrity()`,200 contre
+503 exigé). Source et lock inchangés entre le setup invalide et sa relance
+justifiée ; [empreintes et portée](evidence/2026-11-08/audit-k-residual/README.md).
+Le fetch Linux offline passe ; la résolution du lock ajoute uniquement
+`arc-swap1.9.4` et son lien depuis le package racine.
+
+Le gel broker–relais84 échoue à compiler (champ d'observation absent et callback
+FnOnce au lieu de FnMut), sans exécution de test. Après correction, le gel86
+passe `cargo check --all-targets --locked --offline`, RC0,84s, sans test.
+Journal SHA `93c824d2be1ffa146d8f6037f5706264a71eca4f2c74399b3d3d98b0acc7b46a` ;
+manifeste complet86 SHA `92713c636ed0c5a86ea0257bea8848baf3b5fbc9ad650e6b463142fee318a25b`.
+OOM0 dans les postflights ; ces checks ne sont ni un Clippy ni une qualification
+du transport. Les journaux et sources sont conservés hors des worktrees.
+
 ## 8 novembre — K82 : deux blocages de revue reproduits avant correction
 
 Le parent `audit::collision_isolation_tests` du gel82 termine RC101 : deux PASS,

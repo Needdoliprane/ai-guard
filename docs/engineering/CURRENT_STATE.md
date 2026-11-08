@@ -1,5 +1,19 @@
 # État constaté — suivi du développement
 
+## 8 novembre — sept régressions K passent ; raccord relais compilé, tests fonctionnels ouverts
+
+Le gel85 K passe sept fonctions et reproduit encore un refus de collision
+manquant après `integrity()` : réponse200 au lieu du503 exigé. Les deux défauts
+de revue précédents passent leurs régressions. Le gel87 corrige ce chemin et
+ajoute le cas distinct d'un checked read abandonné ; ses résultats restent à
+établir. [Preuve K et erreurs de harnais conservées](evidence/2026-11-08/audit-k-residual/README.md).
+
+Le raccord broker–relais86 compile toutes cibles après correction de deux
+erreurs de typage révélées par84. Aucun de ses tests n'est crédité : ses parents
+service/Core/helper et l'oracle IPC restent à terminer. D5, fédération physique,
+Kubernetes complet et qualifications réelles restent ouverts. Aucun gate global
+fermé ; l'estimation fonctionnelle ne constitue pas une qualification.
+
 ## 8 novembre — deux défauts du candidat K reproduits ; trois travaux indépendants actifs
 
 Le gel82 du candidat K passe deux fonctions et en échoue cinq. Deux échecs

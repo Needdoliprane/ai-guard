@@ -51,7 +51,37 @@ parent log SHA-256
 `14fcdcd9a602fe19b48627ead881e578cee2ed696c4f2bcd888750b32fc889d1`.
 Only that integer-conversion error changed before reproduction82.
 
-## Retention and limits
+## Follow-up85 — seven regressions pass, one residual reproduced
+
+The next candidate separates the positive cache from the lease with pinned
+`arc-swap =1.9.4`, publishes after a successful SQLite commit before the fallible
+pathname check, and reconstructs it during verified recovery. Offline Cargo
+resolution added only that package and its root dependency; the existing
+`rustversion` lock remained unchanged. Resolved lock SHA-256:
+`9542b23f442f0b4216b2ca4937399a20bf85c57a4e8d9e4d3a09972670c31807`.
+
+Frozen source85 manifest SHA-256:
+`fb3eb3a244c92d10a4c47228874899e00b7879ccab91cdd7b7b61728255b6fc1`.
+The same targeted Cargo command now selects eight tests. Its first execution
+reached no functional oracle: all eight failed because the QA's configured
+`/scratch/tmp` did not exist. That setup-invalid log is retained separately,
+SHA-256 `4b2cd38cee6af49b7968f1ebb8882682ad0fe49de39e76b5f25e6451f11216e2`.
+
+After creating the private temporary directory, one justified rerun of the
+unchanged source and lock finished RC101: **seven PASS, one FAIL**, 0.27 s test
+phase. Parent log SHA-256:
+`b53beecb460217e326efa807201e1a654233c88b82f9199244cfac1dc1303013`.
+Both prior collision regressions pass. The remaining regression receives 200
+instead of required 503 after an independently opened Store commits a typed
+binding and the gateway Store validates it through `integrity()`. That path
+advances its validation markers without refreshing the positive cache.
+
+The next frozen candidate87 corrects that path and adds a distinct regression
+for dropping a checked read after validation of an external commit. Its test
+and compatibility results are not implied by85. The candidate remains unmerged;
+this follow-up does not close audit K or any production gate.
+
+## Retention and limits at checkpoint82
 
 Both frozen sources, manifests, parent logs and QA metadata are retained in
 the private engineering checkpoint `audit-k-d5-checkpoint-20261108-0815`, with
