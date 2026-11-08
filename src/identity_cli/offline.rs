@@ -94,8 +94,8 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
     );
     let state = store.supervision_state()?;
     ensure!(
-        matches!(state.schema_version, 4..=10) && !state.active,
-        "offline identity maintenance requires an existing validated schema4, schema5, schema6, schema7, schema8, schema9 or schema10 database and inactive supervision; migrate explicitly with controls stopped"
+        matches!(state.schema_version, 4..=11) && !state.active,
+        "offline identity maintenance requires an existing validated schema4, schema5, schema6, schema7, schema8, schema9, schema10 or schema11 database and inactive supervision; migrate explicitly with controls stopped"
     );
     let namespace = state
         .control_namespace_uuid
@@ -230,7 +230,7 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .capabilities
             .iter()
             .any(|cap| matches!(cap, super::Capability::ReadWorkerRegistry))
-            || control.store.supervision_state()?.schema_version == 10,
+            || matches!(control.store.supervision_state()?.schema_version, 10 | 11),
         "read-worker-registry requires explicit migration9→10 before preparing a local identity"
     );
     ensure!(
@@ -240,7 +240,7 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .any(|cap| matches!(cap, super::Capability::ReadBrokerRegistry))
             || matches!(
                 control.store.supervision_state()?.schema_version,
-                7 | 8 | 9 | 10
+                7 | 8 | 9 | 10 | 11
             ),
         "read-broker-registry requires explicit migration6→7 before preparing a local identity"
     );

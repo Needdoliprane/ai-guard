@@ -229,7 +229,7 @@ impl<'a> HeldCreateCoordinator<'a> {
             return Err(CoordinatorError::InvalidContext);
         }
         let control = self.store.supervision_state().map_err(control_error)?;
-        if !matches!(control.schema_version, 8 | 9 | 10)
+        if !matches!(control.schema_version, 8 | 9 | 10 | 11)
             || control.control_namespace_uuid.as_deref()
                 != Some(journal.intent().control_namespace_uuid.as_str())
         {

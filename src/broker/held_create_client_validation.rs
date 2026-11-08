@@ -42,9 +42,9 @@ pub(super) fn protocol(
 ) -> ClientResult<()> {
     require(
         identity.version == 1
-            && [9, 10].contains(&identity.schema_version)
+            && [9, 10, 11].contains(&identity.schema_version)
             && protocol.version == 1
-            && [9, 10].contains(&protocol.schema_version)
+            && [9, 10, 11].contains(&protocol.schema_version)
             && identity.schema_version == protocol.schema_version
             && revision(identity.binding_revision)
             && revision(identity.grant_revision),
@@ -392,4 +392,127 @@ pub(super) fn fresh(
         && start <= now
         && now < end
         && elapsed(clock, before).is_some_and(|elapsed| elapsed < budget)
+}
+
+#[cfg(test)]
+mod schema11_compatibility_tests {
+    use super::*;
+
+    // Descriptive DTOs for the pure validator, never an authenticated proof,
+    // live HTTP response, Store or permission to create a workload.
+    fn negotiation(
+        schema_version: u32,
+    ) -> (
+        HeldCreateClientScope,
+        BrokerIdentityViewV1,
+        KubernetesHeldCreateProtocolV1,
+    ) {
+        let scope = HeldCreateClientScope {
+            gateway: "https://control.invalid".into(),
+            tenant_id: "tenant-a".into(),
+            control_namespace_uuid: uuid::Uuid::from_u128(1).to_string(),
+            broker_id: uuid::Uuid::from_u128(2).to_string(),
+            credential_id: uuid::Uuid::from_u128(3).to_string(),
+            incarnation_id: uuid::Uuid::from_u128(4).to_string(),
+        };
+        let identity = BrokerIdentityViewV1 {
+            version: 1,
+            tenant_id: scope.tenant_id.clone(),
+            control_namespace_uuid: scope.control_namespace_uuid.clone(),
+            schema_version,
+            broker_id: scope.broker_id.clone(),
+            incarnation_id: scope.incarnation_id.clone(),
+            credential_id: scope.credential_id.clone(),
+            binding_revision: 1,
+            grant_revision: 2,
+        };
+        let protocol = KubernetesHeldCreateProtocolV1 {
+            version: 1,
+            schema_version,
+            tenant_id: identity.tenant_id.clone(),
+            control_namespace_uuid: identity.control_namespace_uuid.clone(),
+            broker_id: identity.broker_id.clone(),
+            incarnation_id: identity.incarnation_id.clone(),
+            binding_revision: identity.binding_revision,
+            grant_revision: identity.grant_revision,
+            admission_policy_configured: false,
+            operations: vec![
+                KubernetesHeldCreateOperationV1::Reserve,
+                KubernetesHeldCreateOperationV1::Claim,
+                KubernetesHeldCreateOperationV1::ObserveClaim,
+                KubernetesHeldCreateOperationV1::Result,
+                KubernetesHeldCreateOperationV1::Cancel,
+            ],
+        };
+        (scope, identity, protocol)
+    }
+
+    #[test]
+    fn schema11_accepts_only_matching_supported_held_create_v1_negotiation() {
+        for schema_version in [9, 10, 11] {
+            let (scope, identity, view) = negotiation(schema_version);
+            assert_eq!(protocol(&scope, &identity, &view), Ok(()));
+        }
+        for schema_version in [0, 8, 12, u32::MAX] {
+            let (scope, identity, view) = negotiation(schema_version);
+            assert_eq!(
+                protocol(&scope, &identity, &view),
+                Err(HeldCreateClientError::Protocol)
+            );
+        }
+        let (scope, identity, mut view) = negotiation(11);
+        view.schema_version = 10;
+        assert_eq!(
+            protocol(&scope, &identity, &view),
+            Err(HeldCreateClientError::Protocol)
+        );
+    }
+
+    #[test]
+    fn schema11_preserves_held_create_wire_scope_revision_and_operations() {
+        let (scope, identity, view) = negotiation(11);
+        assert_eq!(protocol(&scope, &identity, &view), Ok(()));
+        let mut invalid = identity.clone();
+        invalid.version = 2;
+        assert_eq!(
+            protocol(&scope, &invalid, &view),
+            Err(HeldCreateClientError::Protocol)
+        );
+        let mut invalid = view.clone();
+        invalid.version = 2;
+        assert_eq!(
+            protocol(&scope, &identity, &invalid),
+            Err(HeldCreateClientError::Protocol)
+        );
+        let mut invalid = identity.clone();
+        invalid.binding_revision = 0;
+        assert_eq!(
+            protocol(&scope, &invalid, &view),
+            Err(HeldCreateClientError::Protocol)
+        );
+        let mut invalid = identity.clone();
+        invalid.grant_revision = i64::MAX as u64 + 1;
+        assert_eq!(
+            protocol(&scope, &invalid, &view),
+            Err(HeldCreateClientError::Protocol)
+        );
+        let mut invalid = identity.clone();
+        invalid.tenant_id = "tenant-b".into();
+        assert_eq!(
+            protocol(&scope, &invalid, &view),
+            Err(HeldCreateClientError::InvalidContext)
+        );
+        let mut invalid = view.clone();
+        invalid.control_namespace_uuid = uuid::Uuid::from_u128(5).to_string();
+        assert_eq!(
+            protocol(&scope, &identity, &invalid),
+            Err(HeldCreateClientError::Protocol)
+        );
+        let mut invalid = view.clone();
+        invalid.operations.pop();
+        assert_eq!(
+            protocol(&scope, &identity, &invalid),
+            Err(HeldCreateClientError::Protocol)
+        );
+    }
 }
