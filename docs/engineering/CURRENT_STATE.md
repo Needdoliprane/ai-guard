@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 8 novembre — baseline de migration 11 reproduite, implémentation autorisée
+
+Sur le gel tests-only r1, la compilation passe puis le test atteint le refus
+attendu de migration 10→11 : RC101, après vérification d'une vraie réservation
+V1, du reopen inactif, de la sauvegarde et du snapshot source inchangé. C'est
+une fonctionnalité absente, pas un défaut de compilation ou une vulnérabilité.
+[Patch de reproduction, commande et résultats](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md).
+
+Après revue du contrat r3 et attribution de 11, l'implémentation commence dans
+son worktree dédié. Les assertions GREEN, l'API de récupération, le replay,
+les quotas/capacité mixtes et la migration complète restent à vérifier. Aucune
+session exécutable ni qualification de restauration/runtime n'est déduite.
+
 ## 8 novembre — AC privée du client broker intégrée et vérifiée
 
 Le composant `b6ce729`, composé dans `3027bbe`, ajoute la référence explicite
