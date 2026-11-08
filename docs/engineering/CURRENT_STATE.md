@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 8 novembre — AC privée du client broker intégrée et vérifiée
+
+Le composant `b6ce729`, composé dans `3027bbe`, ajoute la référence explicite
+`gateway_ca_bundle_file` aux seuls profils Registry2. La confiance est capturée
+avant IPC, puis conservée par le même client de l'authentification aux écritures.
+Registry1, les racines par défaut et les protections de transport sont conservés.
+
+Après reproduction du champ absent, le parent TLS réel passe sur t3 : identité,
+écriture SQLite retrouvée par kind/séquence/UUID, six configurations refusées,
+snapshot et nom de serveur. Le check toutes cibles retourne RC0 ; deux warnings
+Kubernetes préexistants restent présents. La revue indépendante est traitée,
+les sept fichiers composés correspondent exactement au gel et les guides EN/FR
+sont synchronisés. [Preuves et portée](evidence/2026-11-08/broker-private-ca/README.md).
+Deux processus brokers, fédération physique, cycle PKI et runtimes restent à
+qualifier ; aucun gate global n'est clos par ce lot.
+
 ## 8 novembre — C4 progresse jusqu'à l'observation du helper ; handoff toujours en échec
 
 Le gel C4 passe le check toutes cibles et la compilation du parent. Son unique
