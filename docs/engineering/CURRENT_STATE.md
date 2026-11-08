@@ -1,5 +1,19 @@
 # État constaté — suivi du développement
 
+## 8 novembre — B1 historique reproduit ; mesure broker terminée
+
+Le canari B1 sur vrai Store11 atteint son oracle après réserve V2, admission
+worker, fermeture et réouverture : quatre quotas historiques trop bas sont
+acceptés par le replay. Le correctif à trois fichiers est relu, mais son GREEN
+reste à exécuter. [Source et résultat](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#historical-worker-quota-baseline-b1).
+
+La sonde C8 passe une fois avec douze échantillons complets et couverture
+positive, sans troncature. Elle observe une croissance du coût de lecture sur
+de petits checkpoints ; elle n'établit pas la cause du délai Full3 et ne
+qualifie aucune performance ou durabilité physique. [Mesures et limites](evidence/2026-11-08/d5-poll-stack/README.md#c8-stable-journal-read-measurement).
+En parallèle : Auth/API de récupération, configuration et guides EN/FR ; ces
+tranches restent non intégrées et leurs tests restent NOT_RUN.
+
 ## 8 novembre — consommateurs du schéma 11 intégrés, six validateurs vérifiés
 
 Le composant `a0f75f3`, composé dans `e2dcf81`, étend seize gardes explicites

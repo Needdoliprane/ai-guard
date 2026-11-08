@@ -416,3 +416,52 @@ Baseline77 private provenance-note SHA-256:
 The source snapshots and bounded text captures remain in private engineering
 evidence. No model, Docker/Podman worker or Kubernetes operation is qualified
 by this diagnostic. D5 integration and the global gates remain open.
+
+## C8 stable journal read measurement
+
+After independent review rejected the C7 collector's outer-directory selector,
+C8 binds the actual Journal directory exactly and requires positive caller,
+actor, usage, inventory, accepted-load and revision hooks. Only test
+instrumentation in three files differs from C6; production source projections
+remain unchanged. C7 was never executed. The C8 manifest has2,350 entries:
+`830a2cb6638bcd6bd68adf479a3b93b6607e802586c8881818c5ec85a0e22ab7`.
+Its final blank line is not a source entry. Independent source review has SHA
+`004e23e1271b9951c624541f7e74c0a6ba6c09dd2f340b5a85198b6ed935cb6b`.
+
+Luna ran the existing ignored software probe once in the bounded offline
+Linux ARM64/Rust1.99.1 QA, with a separate explicit target:
+
+```text
+cargo test --locked --offline --lib broker::journal::tests::measure_durable_journal_cost_without_runtime -- --exact --ignored --nocapture --test-threads=1
+```
+
+Cargo returns RC0: one selected test passes in0.86s. All12 samples have six
+matched-hook families, zero outstanding/conflicted/missed hooks and unchanged
+head/identity. Diagnostic rows total13,040 bytes, with no truncation; every row
+retains `performance_qualified=false`. The fixture has one sequential Writer,
+small V3 checkpoints, no bindings and no worker/runtime.
+
+| Head | Verified revisions/read | Verified revision bytes/read | Caller range across four samples |
+|---|---:|---:|---:|
+|0|1|708|4.099–5.310ms|
+|8|9|8,492|13.009–15.647ms|
+|17|18|17,264|23.496–30.258ms|
+
+Each sample observes two usage calls. These are single-run observations on a
+tmpfs fixture, without a latency threshold, percentile, physical-durability
+or capacity claim. The fixture differs from the Full3 workload; its small
+read costs do not establish the cause of F5's IPC delays. No optimization,
+Full3 rerun or successful drainage oracle is inferred.
+
+The initial awk output filter failed. The already completed invocation's
+output was subsequently extracted and parsed as12 JSON records, without
+rerunning the probe; its RC and test summary remain separately preserved.
+
+| Capture | SHA-256 |
+|---|---|
+| Complete diagnostic rows | `6ac681722aeee18ec6cdebecf668fdba0c14a7d88031ffddc921e8bf01cd2250` |
+| Command/status | `3fa3690036c85e7459557e2435ebcd0a0ff7ebd2605cc49aa3c6535d64b9127c` |
+
+The QA owner was stopped after all target processes ended, at21:07:05UTC,
+with no OOM, then removed without volumes; its watcher finished RC0. Bounded
+text evidence is retained privately. D5/fencing and real engines remain open.

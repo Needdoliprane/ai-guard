@@ -24,8 +24,10 @@ sont intégrés après revue et six tests purs GREEN. Ils ne ferment aucun const
 run-1. La revue indépendante du stockage candidat a refusé S1 : le writer compte
 V2 au quota courant, mais le replay des admissions worker ne valide pas encore
 ce quota à leur préfixe historique. Aucune admission normale hors quota n'est
-revendiquée. Régression ciblée en préparation ; stockage, récupération et
-qualification demeurent ouverts. Le contrôle de l'import du test a précédé
+revendiquée. Le canari [B1 reproduit ce manque](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#historical-worker-quota-baseline-b1)
+sur Store11 après Close/reopen ; son correctif est relu, GREEN encore NOT_RUN
+à ce checkpoint. Stockage, récupération et qualification demeurent ouverts.
+Le contrôle de l'import du test a précédé
 son exécution, sans transformer une erreur de compilation en RED produit.
 
 ### Provenance et seuil de preuve

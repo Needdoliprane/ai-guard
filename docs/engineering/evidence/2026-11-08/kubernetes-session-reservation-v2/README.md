@@ -124,3 +124,43 @@ Compatibility with a genuine migrated Store11, authenticated consumers and the
 Core11 all-target build remains NOT_RUN here. S1 storage source was returned
 for a historical worker-quota replay correction before its execution. Neither
 these pure tests nor the descriptive schema range closes a production gate.
+
+## Historical worker quota baseline B1
+
+Independent review of the unmerged S1 storage candidate found that worker
+replay validated its durable decision/input but did not check the retained
+quota at the admission prefix. Current normal writers already counted V2;
+no ordinary writer exceeding its quota was demonstrated by that review.
+
+The compiled B1 tests-only r2 composition includes S1, the reviewed consumers
+and the public-import correction caught before QA. Its2,313-file manifest is
+`327438cab459b586469b6fa19547e804cfd9b38ecb3941777d02b032f929960b`.
+The actual test file has SHA
+`34e052eab81cab47b08dc0068f28f5836000d55aebe6a85412761660e72e28b8`.
+One invocation, in the same isolated QA as the consumers/C8, uses a distinct
+explicit target:
+
+```text
+cargo test --locked --offline --lib audit::control::kubernetes_session_quota_tests::worker_admission_replay_counts_v2_at_its_prefix_after_close_and_reopen -- --exact --test-threads=1 --nocapture
+```
+
+**Observed RED: RC101, one selected test fails in0.31s** at the named
+`schema11_worker_historical_quota_missing` oracle. Prior assertions establish
+a real Store11, authenticated broker binding/grant, V2 reserve500mCPU/128MiB,
+worker admission2000mCPU/1024MiB under quota2/2500mCPU/1152MiB/90s, followed by
+V2Close, inactive reopen and unchanged audit. The real worker record validates,
+and its relaxed quota clone still validates. Four memory-only clones tightening
+count, CPU, RAM or duration are incorrectly accepted at that original prefix.
+No database row, credential, receipt or audit hash is rewritten for this test.
+
+| Capture | SHA-256 |
+|---|---|
+| Bounded test evidence | `461cc599595ec2900dec473bb12cdbcdf8ae588dd2f0f3df43aa45f0b599c159` |
+| Command/status | `73144bc5dbefa54a97dcbab0894dccaaf003eee575793b21fa63268fd692fc61` |
+
+The three-file correction uses a shared historical workers/V1/V2 quota helper
+and has an independent GO_SOURCE review. Its GREEN composition has manifest
+`45c4c05b20d14e57c0b4385deaf0c04213edbdd403fc8bd6018e3e194a0f4b41`;
+the test is unchanged. GREEN remains NOT_RUN at this checkpoint. This is a
+candidate storage validation gap, separate from the external run-1 findings;
+no production, complete migration or runtime qualification is inferred.
