@@ -168,29 +168,29 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
     let mut human = false;
     let mut unavailable_source = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let lookup = state
-            .io_scope
-            .with_store(tenant, store_io::Lane::Read, true, |store| {
-                Ok::<_, anyhow::Error>((
-                    store.workload_digest_binding(&digest)?,
-                    store.local_credential_binding(&digest)?.is_some(),
-                ))
-            });
-        match lookup {
-            Ok(Ok((owner, local))) => {
-                human |= local;
-                if owner.is_some() {
-                    sources.push(index);
-                }
-            }
-            Ok(Err(error)) => {
+        match tenant
+            .store
+            .try_workload_digest_binding(&digest)
+            .into_result()
+        {
+            Ok(Some(_)) => sources.push(index),
+            Ok(None) => (),
+            Err(error) => {
                 if unavailable_source.is_none() {
                     unavailable_source = Some(unavailable(error));
                 }
             }
+        }
+        match tenant
+            .store
+            .try_local_credential_binding(&digest)
+            .into_result()
+        {
+            Ok(Some(_)) => human = true,
+            Ok(None) => (),
             Err(error) => {
                 if unavailable_source.is_none() {
-                    unavailable_source = Some(error);
+                    unavailable_source = Some(unavailable(error));
                 }
             }
         }
@@ -206,6 +206,19 @@ fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, Authenti
     };
     // Policy B: a readable, independently authenticated source wins over an
     // unavailable neighbor. No unavailable source is ever treated as absent.
+    let local_collision = state
+        .io_scope
+        .with_store(
+            &state.tenants[source],
+            store_io::Lane::Read,
+            true,
+            |store| store.local_credential_binding(&digest),
+        )?
+        .map_err(authentication_failure)?
+        .is_some();
+    if local_collision {
+        return Err(ambiguous());
+    }
     let identity = state
         .io_scope
         .with_store(
@@ -385,22 +398,24 @@ pub(super) fn reject_control_collision(
 ) -> ApiResult<()> {
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let lane = own
-            .filter(|(source, _)| *source == index)
-            .map_or(store_io::Lane::Read, |(_, lane)| lane);
-        let lookup =
+        let lookup = if let Some((_, lane)) = own.filter(|(source, _)| *source == index) {
             state
                 .io_scope
                 .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
                     store.workload_digest_binding(&digest)
-                });
+                })?
+        } else {
+            tenant
+                .store
+                .try_workload_digest_binding(&digest)
+                .into_result()
+        };
         match lookup {
-            Ok(Ok(Some(_))) => return Err(ambiguous()),
-            Ok(Ok(None)) => (),
-            Ok(Err(error)) if own.is_some_and(|(source, _)| source == index) => {
+            Ok(Some(_)) => return Err(ambiguous()),
+            Ok(None) => (),
+            Err(error) if own.is_some_and(|(source, _)| source == index) => {
                 return Err(unavailable(error));
             }
-            Err(error) if own.is_some_and(|(source, _)| source == index) => return Err(error),
             _ => (),
         }
     }
@@ -428,24 +443,26 @@ pub(super) fn reject_human_collision(
         return Err(unavailable_identity());
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let lane = if own_source == Some(index) {
-            store_io::Lane::Read
-        } else {
-            store_io::Lane::Discovery
-        };
-        let lookup =
+        let lookup = if own_source == Some(index) {
             state
                 .io_scope
-                .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
+                .with_store(tenant, store_io::Lane::Read, true, |store| {
                     store.workload_digest_binding(digest)
-                });
+                })
+                .map_err(|_| unavailable_identity())?
+        } else {
+            tenant
+                .store
+                .try_workload_digest_binding(digest)
+                .into_result()
+        };
         match lookup {
-            Ok(Ok(Some(_))) => return Err(unavailable_identity()),
-            Ok(Ok(None)) => (),
-            Ok(Err(_)) | Err(_) if own_source == Some(index) => return Err(unavailable_identity()),
+            Ok(Some(_)) => return Err(unavailable_identity()),
+            Ok(None) => (),
+            Err(_) if own_source == Some(index) => return Err(unavailable_identity()),
             // Policy B only: the caller has freshly verified its independent
             // human source. Unknown neighbors stay unavailable, not absent.
-            Ok(Err(_)) | Err(_) => (),
+            Err(_) => (),
         }
     }
     Ok(())
@@ -496,20 +513,34 @@ async fn issue(
                 return Err(failure(WorkloadFailureV1::Conflict.into()));
             }
             for (index, candidate) in state.tenants.iter().enumerate() {
-                let lane = if index == source {
-                    store_io::Lane::Control
+                let (owner, human) = if index == source {
+                    state.io_scope.with_store(
+                        candidate,
+                        store_io::Lane::Control,
+                        false,
+                        |store| {
+                            Ok::<_, anyhow::Error>((
+                                store.workload_digest_binding(&digest)?,
+                                store.local_credential_binding(&digest)?.is_some(),
+                            ))
+                        },
+                    )?
                 } else {
-                    store_io::Lane::Read
-                };
-                let (owner, human) = state
-                    .io_scope
-                    .with_store(candidate, lane, lane == store_io::Lane::Read, |store| {
-                        Ok::<_, anyhow::Error>((
-                            store.workload_digest_binding(&digest)?,
-                            store.local_credential_binding(&digest)?.is_some(),
+                    (|| -> anyhow::Result<_> {
+                        Ok((
+                            candidate
+                                .store
+                                .try_workload_digest_binding(&digest)
+                                .into_result()?,
+                            candidate
+                                .store
+                                .try_local_credential_binding(&digest)
+                                .into_result()?
+                                .is_some(),
                         ))
-                    })?
-                    .map_err(unavailable)?;
+                    })()
+                }
+                .map_err(unavailable)?;
                 if human
                     || owner.is_some_and(|owner| {
                         index != source
@@ -571,7 +602,7 @@ mod tests {
             Ok::<_, std::io::Error>(axum::body::Bytes::from(payload))
         }))
     }
-    async fn rejected_before_body_and_control_admitted(app: &Router) {
+    async fn rejected_before_body_and_control_admitted(app: &Router, expected: StatusCode) {
         let polled = Arc::new(AtomicBool::new(false));
         let request = axum::http::Request::builder()
             .method("POST")
@@ -582,7 +613,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             app.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::TOO_MANY_REQUESTS
+            expected
         );
         assert!(!polled.load(Ordering::SeqCst));
 
@@ -616,7 +647,7 @@ mod tests {
         assert!(polled.load(Ordering::SeqCst));
     }
     #[tokio::test]
-    async fn workload_auth_uses_bounded_read_slots_and_does_not_spend_runner_reserve() {
+    async fn workload_discovery_uses_shared_capacity_without_spending_a_tenant_reserve() {
         let directory = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()
@@ -651,12 +682,61 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        rejected_before_body_and_control_admitted(&app).await;
+        // This token is unknown and has no source tenant. Metadata discovery
+        // neither consumes nor depends on this unrelated tenant's read slots.
+        rejected_before_body_and_control_admitted(&app, StatusCode::UNAUTHORIZED).await;
         drop(source);
         let shared: Vec<_> = (0..32)
             .map(|_| state.io.admit(store_io::Lane::Read, false).unwrap())
             .collect();
-        rejected_before_body_and_control_admitted(&app).await;
+        rejected_before_body_and_control_admitted(&app, StatusCode::TOO_MANY_REQUESTS).await;
         drop(shared);
+    }
+
+    #[test]
+    fn repeated_neighbor_guards_do_not_consume_neighbor_read_frequency() {
+        let directory = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let tenants = [('a', 'v', "tenant-a"), ('b', 'w', "tenant-b")]
+            .map(|(runner, viewer, id)| TenantGateway {
+                tenant_id: id.into(),
+                store: Arc::new(
+                    Store::open_for_tenant(
+                        &directory.path().join(format!("{id}.sqlite")),
+                        id,
+                        Redactor::new(vec![]),
+                        1000,
+                    )
+                    .unwrap(),
+                ),
+                runner_token: runner.to_string().repeat(48),
+                viewer_token: viewer.to_string().repeat(48),
+            })
+            .to_vec();
+        let state =
+            GatewayState::for_tenants(tenants, Policy::default(), None, Redactor::new(vec![]))
+                .unwrap();
+        for _ in 0..201 {
+            reject_control_collision(&state, &"b".repeat(48), Some((1, store_io::Lane::Control)))
+                .unwrap();
+            assert!(matches!(
+                resolve_sync(&state, &"x".repeat(48)),
+                Err((StatusCode::UNAUTHORIZED, _))
+            ));
+        }
+        assert!(
+            state.tenants[0]
+                .io
+                .admit(store_io::Lane::Read, true)
+                .is_ok()
+        );
+        assert!(
+            state.tenants[1]
+                .io
+                .admit(store_io::Lane::Read, true)
+                .is_ok()
+        );
     }
 }

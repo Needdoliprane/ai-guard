@@ -550,6 +550,30 @@ fn replay(db: &Connection, change: &Change) -> anyhow::Result<Option<WorkloadBin
     Ok(Some(receipt(&stored, id, revision, true)))
 }
 
+fn workload_digest_binding(
+    db: &Connection,
+    digest: &[u8; 32],
+) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version < 6 {
+        return Ok(None);
+    }
+    require_schema(db)?;
+    let owner = db.query_row("SELECT d.credential_id,b.payload_json FROM workload_digests d JOIN workload_bindings b ON b.credential_id=d.credential_id WHERE d.sha256_digest=?1", [hex::encode(digest)], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?;
+    owner
+        .map(
+            |(credential_id, json)| -> anyhow::Result<WorkloadDigestOwnerV1> {
+                let binding: WorkloadBinding = serde_json::from_str(&json)?;
+                workload_authorized(credential_id == binding.credential_id)?;
+                Ok(WorkloadDigestOwnerV1 {
+                    credential_id,
+                    subject: binding.subject,
+                })
+            },
+        )
+        .transpose()
+}
+
 impl Store {
     /// Resolve immutable historical ownership, including rotated and revoked
     /// digests. An absent owner is returned only from a healthy checked read.
@@ -562,27 +586,18 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version < 6 {
-            self.commit_checked(tx)?;
-            return Ok(None);
-        }
-        require_schema(&tx)?;
-        let owner = tx.query_row("SELECT d.credential_id,b.payload_json FROM workload_digests d JOIN workload_bindings b ON b.credential_id=d.credential_id WHERE d.sha256_digest=?1", [hex::encode(digest)], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?;
-        let owner = owner
-            .map(
-                |(credential_id, json)| -> anyhow::Result<WorkloadDigestOwnerV1> {
-                    let binding: WorkloadBinding = serde_json::from_str(&json)?;
-                    workload_authorized(credential_id == binding.credential_id)?;
-                    Ok(WorkloadDigestOwnerV1 {
-                        credential_id,
-                        subject: binding.subject,
-                    })
-                },
-            )
-            .transpose()?;
+        let owner = workload_digest_binding(&tx, digest)?;
         self.commit_checked(tx)?;
         Ok(owner)
+    }
+    pub(crate) fn try_workload_digest_binding(
+        &self,
+        digest: &[u8; 32],
+    ) -> MetadataLookup<WorkloadDigestOwnerV1> {
+        self.with_known_binding(
+            self.try_read_metadata(|db| workload_digest_binding(db, digest)),
+            |bindings| bindings.workload.get(&hex::encode(digest)).cloned(),
+        )
     }
     pub fn issue_workload_binding(
         &self,
@@ -610,7 +625,7 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let mut tx = self.begin_checked(&mut db)?;
         require_schema(&tx)?;
         let clock = capture_control_time(&tx)?;
         if let Some(receipt) = replay(&tx, &change)? {
@@ -660,6 +675,7 @@ impl Store {
             }
         }
         tx.execute("INSERT INTO workload_operations(operation_id,input_hash,event_seq,credential_id,revision) VALUES(?1,?2,?3,?4,?5)",params![record.change.operation_id(),record.input_hash,stored.seq,binding.credential_id,i64::try_from(binding.revision)?])?;
+        tx.positive_bindings = Some(metadata::PositiveBindings::load(&tx)?);
         self.commit_authorized(tx, &clock)?;
         Ok(receipt(
             &stored,

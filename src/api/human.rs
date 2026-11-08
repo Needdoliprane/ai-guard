@@ -246,7 +246,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
     let mut matches = Vec::new();
     let mut unavailable = None;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        match credential_binding(state, tenant, &digest, store_io::Lane::Discovery) {
+        match credential_binding(state, tenant, &digest, None) {
             Ok(Some(_)) => matches.push(index),
             Ok(None) => {}
             Err(error) => {
@@ -331,8 +331,15 @@ fn credential_binding(
     state: &GatewayState,
     tenant: &TenantState,
     digest: &[u8; 32],
-    lane: store_io::Lane,
+    own_lane: Option<store_io::Lane>,
 ) -> Result<Option<LocalCredentialV1>, MetadataUnavailable> {
+    let Some(lane) = own_lane else {
+        return tenant
+            .store
+            .try_local_credential_binding(digest)
+            .into_result()
+            .map_err(MetadataUnavailable::Storage);
+    };
     state
         .io_scope
         .with_store(tenant, lane, lane == store_io::Lane::Read, |store| {
@@ -350,7 +357,7 @@ pub(super) fn reject_control_collision(
     for (index, tenant) in state.tenants.iter().enumerate() {
         let lane = own
             .filter(|(source, _)| *source == index)
-            .map_or(store_io::Lane::Discovery, |(_, lane)| lane);
+            .map(|(_, lane)| lane);
         match credential_binding(state, tenant, &digest, lane) {
             Ok(Some(_)) => {
                 return Err(error(
@@ -390,11 +397,7 @@ fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> 
     };
     let mut count = 0usize;
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let lane = if index == source {
-            store_io::Lane::Read
-        } else {
-            store_io::Lane::Discovery
-        };
+        let lane = (index == source).then_some(store_io::Lane::Read);
         match credential_binding(state, tenant, &proof.digest, lane) {
             Ok(binding) => count += usize::from(binding.is_some()),
             Err(error) if index == source => return Err(error.into_api()),

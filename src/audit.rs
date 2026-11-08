@@ -62,16 +62,20 @@ pub(crate) fn control_delivery_kind(kind: &str) -> bool {
 mod broker_registry;
 #[cfg(test)]
 mod capacity_tests;
+#[cfg(test)]
+mod collision_isolation_tests;
 mod control;
 mod human;
 mod human_brokers;
 mod human_workers;
 mod identity;
 mod kubernetes_admission;
+mod metadata;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
     KubernetesCreateAuthorization,
 };
+pub(crate) use metadata::MetadataLookup;
 #[cfg(test)]
 pub(crate) mod kubernetes_admission_state_tests;
 #[cfg(test)]
@@ -138,6 +142,7 @@ pub struct Store {
 struct SupervisionOrigin {
     state: Mutex<SupervisionLease>,
     capacity: Mutex<capacity::Cache>,
+    positive_bindings: arc_swap::ArcSwap<metadata::PositiveBindings>,
     invalidated: AtomicBool,
     suspended: AtomicBool,
 }
@@ -159,6 +164,7 @@ struct CheckedTransaction<'a> {
     transaction: Transaction<'a>,
     lease: MutexGuard<'a, SupervisionLease>,
     activate_supervision: bool,
+    positive_bindings: Option<metadata::PositiveBindings>,
 }
 impl<'a> std::ops::Deref for CheckedTransaction<'a> {
     type Target = Transaction<'a>;
@@ -722,6 +728,11 @@ impl Store {
         } else {
             None
         };
+        let positive_bindings = if initial_valid {
+            metadata::PositiveBindings::load(&tx)?
+        } else {
+            metadata::PositiveBindings::default()
+        };
         tx.commit()?;
         backing.verify(&db)?;
         if let Some(prefix) = capacity_prefix {
@@ -730,6 +741,7 @@ impl Store {
         let validated_total_changes = db.total_changes();
         let supervision_lease = Arc::new(SupervisionOrigin {
             capacity: Mutex::new(capacity),
+            positive_bindings: arc_swap::ArcSwap::from_pointee(positive_bindings),
             state: Mutex::new(SupervisionLease {
                 backing: backing.identity_key(),
                 namespace,
@@ -844,7 +856,7 @@ impl Store {
             .store(true, Ordering::Release);
     }
     fn storage_failure(&self, lease: &mut SupervisionLease, error: &anyhow::Error) {
-        if storage::descriptor_shortage(error) {
+        if storage::descriptor_shortage(error) || metadata::preparation_unavailable(error) {
             // Do not invalidate or recreate the live execution capability. It
             // remains closed until its exact backing and witness are validated.
             self.supervision_lease
@@ -904,11 +916,15 @@ impl Store {
             .lock()
             .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
         let prefix = capacity.prepare(&tx)?;
+        let positive_bindings = Arc::new(metadata::PositiveBindings::load(&tx)?);
         self.backing.verify(&tx)?;
         // All fallible validation is complete on one stable snapshot. The
         // permanent latches are never reset, and activation comes exclusively
         // from a known committed transaction retained by this live origin.
         capacity.publish(prefix);
+        self.supervision_lease
+            .positive_bindings
+            .store(positive_bindings);
         lease.floor = head;
         if std::mem::take(&mut lease.pending_activation) {
             lease.active = true;
@@ -1068,12 +1084,21 @@ impl Store {
             self.storage_failure(&mut lease, &error);
             return Err(error);
         }
+        if changed {
+            // This snapshot contains only previously committed data: no
+            // caller has received the transaction or attempted a mutation.
+            // Publish before its validation marker even if the caller later
+            // returns a business error and rolls this transaction back.
+            let bindings = Arc::new(metadata::PositiveBindings::load(&tx)?);
+            self.supervision_lease.positive_bindings.store(bindings);
+        }
         self.validated_data_version
             .store(current_version, Ordering::Release);
         Ok(CheckedTransaction {
             transaction: tx,
             lease,
             activate_supervision: false,
+            positive_bindings: None,
         })
     }
     fn commit_checked(&self, tx: CheckedTransaction<'_>) -> anyhow::Result<()> {
@@ -1081,6 +1106,7 @@ impl Store {
             transaction,
             mut lease,
             activate_supervision,
+            positive_bindings,
         } = tx;
         let result = (|| {
             anyhow::ensure!(
@@ -1112,7 +1138,14 @@ impl Store {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
             let capacity_prefix = capacity.prepare(&transaction)?;
+            let positive_bindings = positive_bindings.map(Arc::new);
             transaction.commit()?;
+            // Publish committed positive ownership before any fallible
+            // filesystem observation. This is not an authority/ACK: a failed
+            // observation still suspends the source until full recovery.
+            if let Some(bindings) = positive_bindings {
+                self.supervision_lease.positive_bindings.store(bindings);
+            }
             // A known committed mutation must advance the rollback witness
             // even if its pathname check cannot run. The shared guard still
             // closes all authority; activation and counters remain unpublished.
@@ -1626,6 +1659,11 @@ impl Store {
                     integrity.error = Some(error.to_string());
                 }
             }
+            let positive_bindings = if integrity.valid && changed {
+                Some(Arc::new(metadata::PositiveBindings::load(&tx)?))
+            } else {
+                None
+            };
             self.backing.verify(&tx)?;
             if integrity.valid {
                 let head = audit_head(&tx)?;
@@ -1633,6 +1671,9 @@ impl Store {
                     head.0 >= lease.floor.0,
                     "audit head regressed during integrity check"
                 );
+                if let Some(bindings) = positive_bindings {
+                    self.supervision_lease.positive_bindings.store(bindings);
+                }
                 lease.floor = head;
                 // A commit racing the establishment of this read snapshot
                 // must not be acknowledged as a validated newer snapshot.

@@ -953,9 +953,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let mut tx = self.begin_checked(&mut db)?;
         require_identity(&tx)?;
         let result = self.persist_identity_mutation(&tx, mutation)?;
+        if matches!(&mutation.change, IdentityChangeV1::Credential { .. }) {
+            tx.positive_bindings = Some(metadata::PositiveBindings::load(&tx)?);
+        }
         self.commit_checked(tx)?;
         Ok(result)
     }
@@ -971,7 +974,7 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let mut tx = self.begin_checked(&mut db)?;
         require_identity(&tx)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Validate the complete atomic preparation before any replay lookup or
@@ -996,6 +999,7 @@ impl Store {
             .iter()
             .map(|mutation| self.persist_identity_mutation(&tx, mutation))
             .collect::<anyhow::Result<Vec<_>>>()?;
+        tx.positive_bindings = Some(metadata::PositiveBindings::load(&tx)?);
         self.commit_checked(tx)?;
         Ok(receipts)
     }
