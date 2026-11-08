@@ -1,5 +1,47 @@
 # Décisions d'industrialisation
 
+## 8 novembre — réservation Kubernetes V2 et migration 11 attribuées
+
+Dans la direction des sessions V2 déjà autorisée par le mainteneur, Root valide
+le contrat de réservation r3 après trois revues et traitement des défauts de
+capacité, de récupération après décommission et de taille d'événement. Le choix
+reste dans le gateway Rust, le rôle de contrôle Runner existant et les bases
+SQLite séparées. Aucun nouveau service, rôle humain/worker ou transport n'est
+créé. [Périmètre et invariants](KUBERNETES_ADMISSION.md#8-novembre--réservation-v2-et-récupération-avant-effet).
+
+**La migration 10→11 est attribuée au lot de réservation des sessions Kubernetes
+V2, sous coordination Root.** Le schéma 10 reste celui des permissions workers ;
+ses marqueurs ne sont pas renommés. Aucun autre agent actif ne possède 11.
+Les consommateurs, l'audit workload, son cache et les quotas historiques V1/V2
+font partie du même lot. Ne pas réutiliser ce numéro pour le futur cutover du
+transport exclusif.
+
+Root accepte la route versionnée proposée
+`POST /api/v1/kubernetes/session-reservations/{id}/control-recovery`, la politique
+serveur par tenant `session_control_recovery_policy` et la couture opaque
+d'authentification du contrat. La preuve vient de l'authentification Runner
+réelle, réauthentifiée après queue ; ni TenantState, booléen, tenant libre, DTO
+ou record relu ne la reconstruisent. Elle transmet au Store une autorité mémoire
+bornée, liée au Store/namespace/requête et à son lease. Aucun header ou credential
+n'est persisté. Retraite HTTP/TLS/erreurs et drainage sont obligatoires avant
+activation de ce chemin.
+
+L'acteur de récupération est `control_shared_runner`, distinct du créateur
+broker historique, sans identité humaine déduite. Le budget workload reste
+attribué au broker historique et au tenant. Une clôture ne porte que sur une
+réservation dont aucun droit d'effet n'a jamais été émis. Aucun broker, grant,
+worker ou autorité runtime n'est réactivé. Aucun repli de budget, d'audit ou de
+confiance ; la saturation reste fail-closed et la capacité/rétention ouverte.
+
+Le contrat privé r3 est conservé avec SHA-256
+`7af2a8f7fa72ebcb4dea392fdf9b4a81bd4507546248235d06236e57e68472b8`
+et sa revue indépendante. Les types, schémas et guides EN/FR distribués devront
+rendre le contrat lisible sans ces pièces privées. Ce GO porte sur le code et
+les tests locaux à préparer : route, schéma 11 et preuve ne sont pas encore
+livrés. Migrations uniquement sur bases de test neuves, après gel et QA isolée.
+Aucune migration de données existantes, action cluster, cloud ou PKI n'est
+autorisée par cette décision ; aucun gate global n'est clos.
+
 ## 8 novembre — sessions Kubernetes V2 autorisées en code local
 
 Le mainteneur approuve explicitement la [proposition du6novembre](KUBERNETES_ADMISSION.md)

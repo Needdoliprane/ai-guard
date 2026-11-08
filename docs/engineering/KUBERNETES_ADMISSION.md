@@ -1,5 +1,59 @@
 # Admission Kubernetes — proposition de création retenue avant exécution
 
+## 8 novembre — réservation V2 et récupération avant effet
+
+**Direction d'implémentation acceptée par Root après revue indépendante r3 ;
+code, migration et tests encore NOT_RUN.** Cette étape prépare la réservation,
+sa lecture et sa clôture durable. Elle ne rend pas une session exécutable et
+ne réduit aucune exigence du canal, du stockage ou de l'exécution ci-dessous.
+[Attribution 10→11 et frontières acceptées](DECISIONS.md#8-novembre--réservation-kubernetes-v2-et-migration-11-attribuées).
+
+- L'identité authentifiée sélectionne le Store du tenant. Le profil descriptif
+  V2 existant est retenu sous forme canonique et bornée ; aucun tenant, quota,
+  rôle ou droit issu du corps client. Les capacités mémoire sont opaques et
+  aucune relecture de record ne leur redonne fraîcheur ou pouvoir.
+- Reserve, quota et audit sont atomiques. Identique signifie replay historique
+  sans nouveau débit ; divergence signifie conflit. L'état courant se lit
+  séparément du snapshot du reçu. Le quota est partagé avec worker et CREATE V1,
+  y compris dans les historiques et après reopen. Les hashes/capacités V1 restent
+  fermés ; aucune conversion V1→V2 implicite.
+- Le schéma 11 ajoute les données de réservation. Une migration de test conserve
+  backup et historique 10, publie son genesis et permet restauration contrôlée.
+  Les versions reconnues par tous les consommateurs et le comptage workload
+  font partie du lot ; les anciens binaires refusent 11.
+- La clôture effect-free exige historique exact, CAS et fence NeverIssued.
+  Aucune capacité CREATE, claim, release, attach, worker ou transport n'en sort.
+  Toute future transition d'effet doit consommer ce même fence avant publication.
+  Un état/claim d'effet inconnu interdit cette récupération.
+- Un successeur broker réellement autorisé peut récupérer ses anciennes
+  réservations. Après décommission complète, le contrôle dispose du chemin
+  Runner-only proposé `POST /api/v1/kubernetes/session-reservations/{id}/control-recovery`.
+  Le corps version2 fermé choisit uniquement ObserveReserved, CloseBeforeEffect
+  ou LookupCloseReceipt ; il ne choisit ni tenant, politique ou broker à débiter.
+  Aucun alias historique ou accès humain/worker implicite.
+- Ce nouveau chemin dérive une preuve d'une vraie authentification Runner,
+  recontrôlée après queue et avant verrou Store. Elle lie Store exact, namespace,
+  contexte et lease de requête, origine historique, cible, horloge et TTL ≤60 s.
+  Le contexte refuse les nouveaux leases à la retraite ; son drainage et les
+  fermetures HTTP/TLS/erreur sont testés avant activation. Un nouveau serveur
+  n'hérite pas des preuves précédentes. Aucun hotreload de secret n'est annoncé.
+- La politique serveur `session_control_recovery_policy` est explicitement
+  configurée par tenant via le tenants-file ; absente, elle refuse ce chemin.
+  Elle n'est jamais fournie par le client. L'acteur `control_shared_runner`
+  conserve sa provenance observée, sans nom d'opérateur humain inventé ; le
+  créateur broker historique reste distinct. La clôture utilise son budget
+  workload broker/tenant, sans repli sur un budget de maintenance.
+- Les politiques sont bornées à 16 Kio canoniques et le vrai Event complet à
+  128 Kio avant autorisation puis append. Une saturation d'audit refuse la
+  mutation et conserve le quota ; aucune exception non auditée. La gestion
+  qualifiée de capacité/rétention reste obligatoire avant production.
+
+Le lot inclut tests Store SQLite réels, refus d'auth HTTP avant corps, replay,
+pertes de réponse, rotations/retraite, décommission sans autorité, audit/quotas
+mixtes et compatibilité V1. Les nouvelles configurations doivent être consommées
+et documentées en EN/FR. Migrations de données utilisateur, moteurs et cluster
+restent hors de cette autorisation de code/test local ; aucun gate clos.
+
 ## Proposition du 6 novembre — sessions exécutables et canal worker
 
 **Direction et code Rust/tests locaux approuvés par le mainteneur le8novembre.**
