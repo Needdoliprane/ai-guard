@@ -1,5 +1,23 @@
 # Validation courante
 
+## 8 novembre — K82 : deux blocages de revue reproduits avant correction
+
+Le parent `audit::collision_isolation_tests` du gel82 termine RC101 : deux PASS,
+cinq FAIL en0,19s hors compilation. Deux FAIL donnent200 au lieu du503 exigé
+pour les collisions historiques sous lease et après commit/faute/reprise/rejeu.
+Trois autres FAIL attendent401 pour un credential inconnu alors que503 est un
+refus fermé admis quand un voisin est indisponible ; cette correction de harnais
+ne relâche ni le succès200 du tenant B ni les refus503 des collisions.
+[Preuve et commande](evidence/2026-11-08/audit-k-residual/README.md).
+K81 avait échoué à compiler ; aucun oracle fonctionnel n'en est déduit.
+
+Le gel D5 baseline77 compile avec `cargo test --locked --offline --lib --no-run`
+dans une cible séparée, RC0. L'ELF AArch64 reste dans la QA ; seules les sorties
+texte de `nm`/`objdump` sont conservées. Leurs listes tronquées et prologues de
+wrappers ne suffisent pas à attribuer le débordement de pile. Aucun parent D5
+exécuté dans cette QA, aucun correctif de pile crédité. La QA est arrêtée puis
+retirée après conservation de quinze fichiers vérifiés, sans OOM constaté.
+
 ## 8 novembre — Root76 : compilation commune et 25 fonctions ciblées
 
 `f5c3f87` réunit admission, SDK, propriétaire et port runtime : toutes cibles

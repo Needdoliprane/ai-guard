@@ -1,5 +1,30 @@
 # État constaté — suivi du développement
 
+## 8 novembre — deux défauts du candidat K reproduits ; trois travaux indépendants actifs
+
+Le gel82 du candidat K passe deux fonctions et en échoue cinq. Deux échecs
+reproduisent les blocages de revue : collision historique acceptée sous verrou
+de lease et perte du cache positif après commit suivi d'une faute injectée,
+reprise et rejeu. Les trois autres concernent une assertion de harnais trop
+stricte pour un credential inconnu ; les refus de collision et les succès du
+tenant authentifié conservent leurs oracles distincts.
+[Résultats, provenance et limites](evidence/2026-11-08/audit-k-residual/README.md).
+Le correctif K n'est ni intégré ni annoncé terminé.
+
+Trois périmètres avancent séparément : correction K dans audit/API ; diagnostic
+du débordement de pile D5 ; raccord broker–relais. La revue source de ce dernier
+a trouvé une double initialisation IO, un scan de bindings accepté avant sa
+fin et des noms de journal sans filtrage littéral. Le candidat reste à corriger
+et compiler ; ses parents service/Core/helper restent à écrire et exécuter.
+La compilation statique du gel77 aide au diagnostic D5 mais ne valide pas son
+oracle Export. Aucun nouveau gate global fermé.
+
+Restent aussi la fédération multi-hôtes effective, le cycle Kubernetes complet,
+l'approbation humaine authentifiée, les signatures et l'attribution des
+délégations, le contrôle réseau, la rétention et les limites de stockage. Les
+qualifications Docker/Podman/Kubernetes, panne/reprise, restauration et capacité
+100 sont des obligations distinctes des tests logiciels de ces trois travaux.
+
 ## 8 novembre — composition logicielle du relais validée ; audit K et D5 prioritaires
 
 Le gel76 de `f5c3f87` compile toutes cibles et passe 25 fonctions ciblées :
