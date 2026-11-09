@@ -226,6 +226,19 @@ c'est vérifié ; ces mentions ne donnent aucun droit supplémentaire. Une revue
 sans exécution et un test exécuté produisent des preuves différentes : annoncer
 le mode réellement employé et ce qu'il ne permet pas de conclure.
 
+Pour les commandes, fixer le répertoire, les chemins et les ressources exacts
+avant toute mutation. Séparer l'inventaire en lecture seule, la modification et
+sa vérification ; une sortie précédente ou un ancien nom ne prouve pas que la
+ressource courante est la bonne. Préférer les arguments structurés et les chemins
+littéraux ; ne pas injecter de texte non fiable dans un shell, `eval` ou une
+substitution de commande. Éviter les commandes longues qui mélangent plusieurs
+effets et les sélections larges lorsqu'une cible précise suffit. Ne jamais
+afficher l'environnement complet, les credentials ou les arguments susceptibles
+de contenir un secret. Borner les sorties et les délais, conserver le code de
+sortie de l'opération utile et vérifier sa terminaison réelle avant une autre
+mutation de la même ressource. Ces précautions réduisent les erreurs évitables ;
+elles ne garantissent pas l'absence de refus d'outillage.
+
 Lorsqu'un chantier impose un profil d'exécution isolé, le transmettre explicitement
 à tous les descendants avant leur premier outil. Une compilation peut exécuter des
 build scripts : elle relève du même profil que les tests. Le sous-agent d'exécution

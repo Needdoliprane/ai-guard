@@ -1,5 +1,21 @@
 # Validation courante
 
+## 10 novembre — commandes bornées et continuité des travaux
+
+**PASS documentaire** : ajout relu indépendamment dans `AGENTS.md` : cible et
+répertoire précis, inventaire avant mutation, vérification séparée, arguments
+sans interpolation non fiable, sorties/délais bornés et terminaison réelle.
+La règle ne donne pas de nouvelle autorisation et ne promet pas d'éviter un
+refus Daybreak. `git diff --check` sur les documents concernés : RC0.
+Revue privée `command-scope-20261110/REVIEW.md`, SHA-256
+`d89eb5c0779bee804472db1a616fec81567661131f344aab55e244ef04d5929d`.
+Aucun test produit nécessaire pour cet ajout documentaire.
+
+Les deux worktrees NV-03 ont été fermés par `git worktree remove` normal après
+inventaires propres, comparaison des fichiers intégrés et vérification distante
+de `7672078`. Commits de conservation, sources et preuves restent disponibles
+hors de ces worktrees ; aucune donnée persistante ou ressource étrangère effacée.
+
 ## 10 novembre — NV-03 stockage puis refus avant effet fournisseur
 
 **PASS logiciel** : trois assertions RED stockage puis trois RED addon (router

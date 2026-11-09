@@ -1,5 +1,25 @@
 # Plan d'industrialisation
 
+## 10 novembre — trois lots proposés à Claude, intégration coordonnée
+
+Le prompt `/goal` transmis au mainteneur répartit trois développements sur la
+base distante `7672078831c74047b98ce85babf91adb625e2b29`, dans des worktrees
+distincts. **Leur démarrage par Claude n'a pas été observé** : ils restent des
+affectations proposées, sans code ni preuve reçus à cette date.
+
+| Branche proposée | Livrable attendu |
+|---|---|
+| `claude/audit-signatures-20261110` | Checkpoints d'audit signés, vérification indépendante et commandes opérateur Rust ; continuité et limites de confiance explicites |
+| `claude/unified-control-ui-20261110` | Parcours de supervision unifiée utilisateur/administration, données réelles, permissions serveur et états partiels explicites |
+| `claude/relay-fairness-20261110` | Équité durable du relais, limites par émetteur et rétention ; refus inter-tenant et reprise idempotente préservés |
+
+Root conserve l'intégration de bout en bout et la clôture des worktrees après
+revue, validations et publication. Les coutures communes demandent un patch
+additif isolé et une coordination préalable. Ces lots ne donnent pas la propriété
+des travaux broker/runtime/operations/authentification déjà en cours et ne les
+remplacent pas. Aucun changement sur la branche d'intégration n'est annoncé reçu
+ou fusionné avant vérification du code, des preuves et de sa référence exacte.
+
 ## 10 novembre — réaffectation des propriétaires après validation OIDC
 
 La réserve terminale NV-03 et son refus avant appel à l'issuer contrôlé passent
