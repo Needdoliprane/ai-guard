@@ -445,6 +445,74 @@ pub(super) fn timestamp() -> String {
 }
 
 impl Replay {
+    /// Admission-only accounting, rebuilt from the validated durable session
+    /// states. Historical underfunded Pending entries remain readable; they
+    /// never justify admitting another operation into their terminal budget.
+    pub fn check_terminal_capacity(
+        &self,
+        entry: &Entry,
+        records: u64,
+        bytes: u64,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        let pending = u64::try_from(
+            self.sessions
+                .values()
+                .filter(|current| {
+                    matches!(
+                        current.state,
+                        AuthenticationSessionStateV1::RefreshPending { .. }
+                    )
+                })
+                .count(),
+        )
+        .map_err(|_| AuthenticationAuditFailureV1::Capacity)?;
+        // append_entry has already validated the exact CAS, phase and causal
+        // receipt. Only an actual transition out of this Pending consumes its
+        // single allowance; exact replays return before this admission check.
+        let remaining = match entry {
+            Entry::Session { mutation } => match mutation.as_ref() {
+                SessionMutation::RefreshPending { .. } => pending
+                    .checked_add(1)
+                    .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+                SessionMutation::Rotate { record, .. } | SessionMutation::Close { record, .. }
+                    if record
+                        .session_id
+                        .and_then(|id| self.sessions.get(&id))
+                        .is_some_and(|current| {
+                            matches!(
+                                current.state,
+                                AuthenticationSessionStateV1::RefreshPending { .. }
+                            )
+                        }) =>
+                {
+                    pending
+                        .checked_sub(1)
+                        .ok_or(AuthenticationAuditFailureV1::Integrity)?
+                }
+                _ => pending,
+            },
+            _ => pending,
+        };
+        // checked_json applies this absolute bound to every terminal payload,
+        // including its session mutation/binding wrapper, not just the record.
+        let terminal_bytes = remaining
+            .checked_mul(MAX_PAYLOAD_BYTES as u64)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        let committed_and_reserved_records = records
+            .checked_add(remaining)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        let committed_and_reserved_bytes = bytes
+            .checked_add(terminal_bytes)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        ensure!(
+            committed_and_reserved_records <= policy.max_records
+                && committed_and_reserved_bytes <= policy.max_serialized_bytes,
+            AuthenticationAuditFailureV1::Capacity
+        );
+        Ok(())
+    }
+
     pub fn session_current(&self, session_id: Uuid) -> Option<AuthenticationSessionCurrentV1> {
         self.sessions.get(&session_id).cloned()
     }

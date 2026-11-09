@@ -47,6 +47,22 @@ impl Fixture {
         issuer: ControlledIssuer,
         ca_bundle_pem: Option<String>,
     ) -> Self {
+        Self::with_issuer_and_audit_limits(files, issuer, ca_bundle_pem, 10000, 4 * 1024 * 1024)
+            .await
+    }
+    async fn with_audit_limits(max_records: u64, max_serialized_bytes: u64) -> Self {
+        let files = support::private_tempdir();
+        let issuer = ControlledIssuer::new().await;
+        Self::with_issuer_and_audit_limits(files, issuer, None, max_records, max_serialized_bytes)
+            .await
+    }
+    async fn with_issuer_and_audit_limits(
+        files: tempfile::TempDir,
+        issuer: ControlledIssuer,
+        ca_bundle_pem: Option<String>,
+        max_records: u64,
+        max_serialized_bytes: u64,
+    ) -> Self {
         let path = files.path().join("tenant.sqlite");
         let store =
             Store::open_for_tenant(&path, "tenant-a", Redactor::new(vec![]), 10000).unwrap();
@@ -65,8 +81,8 @@ impl Fixture {
                 &files.path().join("authentication.sqlite"),
                 Uuid::new_v4(),
                 AuthenticationAuditPolicyV1 {
-                    max_records: 10000,
-                    max_serialized_bytes: 4 * 1024 * 1024,
+                    max_records,
+                    max_serialized_bytes,
                     approved_clients: ["web-public", "cli-public"]
                         .map(|client_id| ApprovedAuthenticationClientV1 {
                             issuer: issuer.issuer.clone(),
@@ -1098,6 +1114,72 @@ async fn native_rotation_crossing_ticket_deadline_during_jwks_verification_close
 
 async fn web_delivery(f: &Fixture, subject: &str, salt: &str) -> (Value, String) {
     web_delivery_roles(f, subject, salt, &[]).await
+}
+
+#[tokio::test]
+async fn web_refresh_refuses_terminal_capacity_before_contacting_the_token_endpoint() {
+    use agentsandbox::audit::authentication::AuthenticationSessionStateV1;
+    let f = Fixture::with_audit_limits(4, 131_072).await;
+    f.member("capacity-member");
+    let (delivery, nonce) = web_delivery(&f, "capacity-member", "capacity-old").await;
+    let id = Uuid::parse_str(delivery["authentication_id"].as_str().unwrap()).unwrap();
+    let before = f.audit.verify().unwrap();
+    assert_eq!(
+        before.records, 3,
+        "real Web login must establish the three-record seed"
+    );
+    let binding = f.audit.session_current(id).unwrap().unwrap();
+    assert_eq!(binding.state, AuthenticationSessionStateV1::Active);
+    assert_eq!(binding.binding.generation, 1);
+    let token_requests = f
+        .issuer
+        .requests()
+        .iter()
+        .filter(|(path, _)| path.ends_with("/token"))
+        .count();
+    assert_eq!(
+        token_requests, 1,
+        "setup must perform the real code exchange"
+    );
+    // If the gate is missing, this synthetic provider is ready to return a
+    // legitimate refreshed response. No provider barrier or error creates 503.
+    f.issuer
+        .login_response(&nonce, "capacity-member", "capacity-next");
+    let (status, response) = json_response(
+        f.router.clone(),
+        post(
+            "/auth/oidc/refresh",
+            json!({"version":1,"authentication_id":id,"generation":1,
+                "refresh_token":delivery["refresh_token"]}),
+            Some(delivery["access_token"].as_str().unwrap()),
+            None,
+            Some(ORIGIN),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response["error"]["code"], "audit_unavailable");
+    assert_eq!(
+        f.issuer
+            .requests()
+            .iter()
+            .filter(|(path, _)| path.ends_with("/token"))
+            .count(),
+        token_requests,
+        "terminal capacity refusal must occur before any provider refresh exchange"
+    );
+    assert_eq!(
+        f.audit.verify().unwrap(),
+        before,
+        "refusal must not consume the last record as RefreshPending"
+    );
+    assert_eq!(
+        f.audit.session_current(id).unwrap().unwrap(),
+        binding,
+        "the durable generation must remain Active rather than Pending"
+    );
+    // This asserts durable audit truth only. It does not promise that the old
+    // bearer remains admitted by every volatile gateway/authentication path.
 }
 async fn web_delivery_roles(
     f: &Fixture,

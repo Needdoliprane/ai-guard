@@ -315,10 +315,10 @@ impl DurableAuthenticationAudit {
             .serialized_bytes
             .checked_add(payload.len() as u64)
             .ok_or(AuthenticationAuditFailureV1::Capacity)?;
-        ensure!(
-            records <= self.policy.max_records && bytes <= self.policy.max_serialized_bytes,
-            AuthenticationAuditFailureV1::Capacity
-        );
+        // This same Immediate transaction owns both the Pending transition and
+        // the terminal allowance derived from it. No other corrected writer
+        // can spend its record/bytes between provider admission and completion.
+        replay.check_terminal_capacity(&entry, records, bytes, &self.policy)?;
         let received = format::timestamp();
         let hash = format::digest(records, &received, &replay.verified.head.hash, &payload);
         let changed = tx.execute("INSERT INTO authentication_entries(seq,received_at,prev_hash,hash,payload,operation_id,phase) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![records as i64, received, replay.verified.head.hash, hash, payload, record.operation_id.to_string(), format::phase_key(record.phase).0])?;

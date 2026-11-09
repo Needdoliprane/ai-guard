@@ -1,5 +1,22 @@
 # Validation courante
 
+## 10 novembre — NV-03 stockage puis refus avant effet fournisseur
+
+**PASS logiciel** : trois assertions RED stockage puis trois RED addon (router
+et issuer contrôlé, deux handles records/octets) atteignent leurs oracles.
+Neuf fonctions uniques passent sur les deux gels corrigés `cc4115c0…` et
+`51c842c3…`, dont les régressions existantes de Pending/Close/annulation ;
+check toutes cibles RC0 en 37,27 s puis 23,95 s. Les trois fichiers produit
+sont identiques entre ces deux gels. Revue source indépendante et invariants
+CAS/replay/budget traités. Guides SSO EN/FR synchronisés.
+[Preuves exactes](evidence/2026-11-10/authentication-terminal-reserve/README.md).
+
+La QA dédiée a été réellement arrêtée, watcher terminal, PID0 sans OOM,
+conteneur retiré après conservation des sources/manifests/raws hors worktree.
+**NOT_RUN** : ancien Pending sous-financé sous politique identique, writers
+mixtes, simultanéité multi-processus, panne physique, vrai IdP, moteurs et
+Clippy épinglé absent. Aucun résultat n'est transféré au produit complet.
+
 ## 9 novembre — conservation privée des audits et filtre de workspace
 
 **PASS** : deux runs disponibles copiés dans `.claude/audit/`, ignoré par Git,

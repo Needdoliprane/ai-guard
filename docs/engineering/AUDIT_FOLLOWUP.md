@@ -70,6 +70,17 @@ plausible ; aucune sévérité ou conclusion production n'est ajoutée.
 
 ### Lots de suivi sans collision avec les développements actifs
 
+**NV-03, suivi du 10 novembre : correction logicielle vérifiée, qualification
+résiduelle ouverte.** Trois oracles stockage puis un oracle router/issuer et
+deux multi-handles reproduisent l'absence de réserve sur le code d'origine.
+Le correctif réserve records/octets avant effet ; neuf fonctions uniques et
+les checks toutes cibles passent sur leurs deux gels. Le refus HTTP arrive
+avant un nouvel échange `/token` avec l'issuer contrôlé, en conservant la tête
+durable initiale. Formats, politique et historique ne sont pas réécrits.
+Les anciens Pending sous-financés, les writers mixtes, les pannes physiques,
+le multi-processus et le vrai fournisseur restent non qualifiés ; NV-02/04/10
+ne sont pas clôturés. [Sources, commandes, revues, oracles et limites](evidence/2026-11-10/authentication-terminal-reserve/README.md).
+
 Tous les NV restent **OPEN / validation comportementale NOT_RUN** à réception.
 Les priorités sont celles de validation du rapport, pas des sévérités.
 Root coordonne les dépendances et attribue des propriétaires exclusifs avant

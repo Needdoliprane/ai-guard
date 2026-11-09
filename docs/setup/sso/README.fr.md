@@ -329,6 +329,27 @@ Read admet quatre leases Store simultanés par tenant pour les profils/pages et 
 
 Le gateway réserve avant mutation une capacité bornée de complétion/nettoyage du refresh, y compris pour les tâches qui attendront un worker bloquant. La complétion normale réutilise cette réserve. Si le traitement du refresh par le gateway est annulé, la génération pending/rotating reste refusée pendant le nettoyage différé. Celui-ci vérifie session, génération, opération et reçu d'audit exacts pour qu'une tâche retardée ne ferme pas une rotation plus récente. Un arrêt du runtime peut empêcher une tâche en queue de s'exécuter : l'annulation ne garantit pas de résultat terminal durable et ne déclenche aucun accès SQLite synchrone de secours. L'autorité pending reste inutilisable. Après redémarrage, les admissions vivantes sont perdues : reconnectez-vous avec un nouveau token sans réutiliser une ancienne génération pending. Ces mécanismes ne purgent ni ne réparent un audit plein.
 
+### Capacité d'audit terminal du refresh
+
+Avant qu'un refresh suivi puisse contacter le fournisseur d'identité, sa
+transition Pending durable doit conserver la place d'un record terminal et
+de 32 768 octets de payload sérialisé au maximum. L'admission tient compte des
+réserves de chaque session Pending : `503 audit_unavailable` peut donc survenir
+avant que les compteurs de records/octets physiques atteignent leurs plafonds.
+Les autres écritures ne peuvent pas dépenser cette réserve. Une rotation ou
+fermeture validée consomme sa propre réserve une seule fois ; un replay exact
+ne donne ni nouvel échange ni libération de la réserve d'une autre session.
+
+La réouverture reconstruit ces réserves depuis l'historique validé sans modifier
+format d'audit, genesis, politique immuable ou records existants. Mettez tous les
+writers à jour avant de compter sur cette règle ; le mélange d'anciens et de
+nouveaux writers n'est pas pris en charge pour cette garantie. Un Pending
+historique déjà sans place terminale ne se répare ni par réouverture ni par
+hausse d'une valeur de configuration. Conservez le ledger original et traitez
+ce cas comme un incident nécessitant un plan de reprise explicite. Cette
+réservation ne renouvelle pas le quota global cumulatif, ne fournit pas de
+rétention/migration de politique et n'isole pas cette capacité globale par tenant.
+
 ### Connexion en attente et audit durable
 
 Une connexion Web initiale ou une connexion CLI native réserve un état borné et expirable en mémoire du gateway. Son cookie, sa transaction PKCE ou son intention native corrèle une tentative ; il ne constitue pas une identité authentifiée. Démarrage, annulation, refus ou expiration d’une tentative avant preuve vérifiée par access token n’ajoutent aucun enregistrement à l’audit d’authentification durable. Un redémarrage du gateway perd les tentatives en attente : recommencez la connexion au lieu de rejouer l’ancien callback ou l’ancienne intention.

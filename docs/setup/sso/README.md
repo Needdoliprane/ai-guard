@@ -329,6 +329,25 @@ Read admits four concurrent Store leases per tenant for profiles/pages and a kno
 
 The gateway reserves bounded refresh completion/cleanup capacity before mutation, including tasks that may later queue for a blocking worker. Normal completion reuses that reservation. If gateway refresh processing is cancelled, the pending/rotating generation remains refused during deferred cleanup. Cleanup checks the exact session, generation, operation and audit receipt so a delayed job cannot close a newer rotation. Runtime shutdown may prevent a queued job from running; cancellation does not guarantee a durable terminal record and has no synchronous SQLite fallback. Pending authority must remain unusable. After restart, live admissions are lost: sign in with a new token instead of reusing an old pending generation. These mechanisms do not purge or repair a full audit.
 
+### Refresh terminal audit capacity
+
+Before a tracked refresh may contact the identity provider, its durable Pending
+transition must leave room for one terminal record and up to 32,768 serialized
+payload bytes. Admission includes the allowances of every Pending session, so
+`503 audit_unavailable` may occur before the physical record/byte counters reach
+their configured limits. Other appends cannot spend that allowance. A validated
+rotation or close consumes its own allowance once; exact replay does not grant
+another exchange or release another session's allowance.
+
+Reopening reconstructs the allowances from validated history without changing
+the audit format, genesis, immutable policy or existing records. Update all
+writers before relying on this rule; mixed old/new writers are not supported
+for this guarantee. Historical Pending entries that already lack terminal space
+are not repaired by reopening or increasing a configuration value. Keep the
+original ledger and treat that case as an incident requiring an explicit
+recovery plan. This reservation does not replenish the cumulative global quota,
+provide retention/policy migration, or isolate that global capacity by tenant.
+
 ### Pending login and durable audit
 
 An initial Web login or native CLI login reserves bounded, expiring state in gateway memory. Its cookie, PKCE transaction or native intent correlates an attempt; it does not establish an authenticated user. Starting, cancelling, rejecting or expiring an attempt before verified access-token proof does not append to the durable authentication audit. A gateway restart loses pending attempts: begin a new login rather than replaying the old callback or intent.

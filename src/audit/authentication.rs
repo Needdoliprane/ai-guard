@@ -336,8 +336,10 @@ impl AuthenticationAudit {
             .receipt)
     }
 
-    /// Commit the intention and Active -> Pending CAS together. Only
-    /// `inserted=true` permits the caller to begin one provider exchange.
+    /// Commit the intention, Active -> Pending CAS and an allowance for one
+    /// terminal record/up to 32_768 payload bytes together. Every new write
+    /// preserves outstanding allowances reconstructed from durable Pending.
+    /// Only `inserted=true` permits the caller to begin one provider exchange.
     pub fn refresh_pending(
         &self,
         record: AuthenticationRecordV1,

@@ -1,5 +1,28 @@
 # État constaté — suivi du développement
 
+## 10 novembre — réserve terminale OIDC et corrections parallèles
+
+NV-03 reçoit un correctif logiciel vérifié : réserve transactionnelle d'un
+record et de 32 768 octets par refresh Pending, sans migration d'historique ou
+de politique. Les trois oracles stockage puis trois oracles router/issuer et
+multi-handles reproduisent le défaut avant correction ; neuf fonctions uniques
+passent après correction, avec deux checks toutes cibles RC0 sur leurs gels.
+Le refus arrive avant un nouvel échange avec l'issuer contrôlé, sans consommer
+le dernier record comme Pending. Les guides SSO EN/FR décrivent ce comportement.
+[Sources, commandes et limites](evidence/2026-11-10/authentication-terminal-reserve/README.md).
+
+Cette preuve ne qualifie ni ancien Pending sous-financé, ni writers mixtes,
+multi-processus, vrai fournisseur ou disponibilité globale NV-02/04/10. La QA
+est fermée, ses sources et logs conservés hors worktree. Clippy reste `NOT_RUN`
+(composant absent), avertissements ouverts. G09 FAIL, zéro gate global fermé.
+
+Trois sous-agents sont affectés : cœur Rust à la réconciliation productive du
+r3 broker dans un worktree dédié, runtime à NV-06 et son vrai propriétaire de
+CLI indépendant du runtime appelant, Luna aux validations ciblées. Root garde
+intégration et contrats transverses. Le bootstrap Kubernetes journalisé est
+gelé et relu sur cinq fichiers ; ses six parents restent `NOT_RUN`. La fédération
+et les autres constats n'acquièrent aucune qualification par ces avancées.
+
 ## 9 novembre — historique des audits conservé et suites parallèles attribuées
 
 Le [registre des audits](AUDIT_FOLLOWUP.md#registre-des-audits), lié depuis

@@ -1,5 +1,23 @@
 # Plan d'industrialisation
 
+## 10 novembre — réaffectation des propriétaires après validation OIDC
+
+La réserve terminale NV-03 et son refus avant appel à l'issuer contrôlé passent
+[neuf fonctions ciblées et les checks](evidence/2026-11-10/authentication-terminal-reserve/README.md).
+Les garanties anciennes/historiques et la disponibilité globale restent ouvertes.
+
+| Propriétaire | Chantier et prochaine acceptation |
+|---|---|
+| `d5_composition_review` | Broker : réconciliation d'un exact Submitted keeper jusqu'à F/retrait/release ; ensuite permis de reprise Unsubmitted explicitement audité, sans nouveau start/claim/délai |
+| `import_verification_diagnosis` | NV-06 r2 : propriétaire du vrai CLI et snapshot conservés à travers annulation/shutdown, wait et collecte réellement terminés ; r1 reste gelé |
+| Luna | RED/GREEN isolés, broker r3 puis bootstrap Kubernetes ; aucune exécution sans gel/admission et cible exclusive |
+| Root | Intégration, contrats Core/API, preuves, documentation EN/FR et publication ; fédération et autres lots explicitement suivis |
+
+Le bootstrap Kubernetes a son code et sa revue source limitée, pas de test ou
+consumer service qualifié. Les autres NV restent regroupés en file, pas déclarés
+actifs par leur simple inscription au plan. Trois places de sous-agents imposent
+des réaffectations ; aucune compilation n'empêche une implémentation indépendante.
+
 ## 9 novembre — suivi du nouvel audit sans arrêter les développements
 
 Le [registre multi-worktrees](AUDIT_FOLLOWUP.md#audit-multiworktree-20261108)
