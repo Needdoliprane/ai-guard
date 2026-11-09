@@ -1,5 +1,36 @@
 # État constaté — suivi du développement
 
+## 9 novembre — Full3 reste en échec, frontière mieux observée
+
+Après correction de la seule fixture du canari de journal, ce canari passe
+sur un gel distinct. L'unique observation Full3 échoue encore après 61,28 s.
+Le ticket après nettoyage réussi valide la dernière frame V5 confirmée par
+IPC : les quatre ACK locaux de l'import sont présents, sans helper de
+vérification d'import dans ce snapshot. La cause reste inconnue ; l'ACK
+publié ne prouve pas que la continuation appelante a repris. Les délais
+produit n'ont pas changé et aucun retry n'a été lancé.
+[Preuves et inconnues](evidence/2026-11-09/d5-composition-review/README.md#f1-confirmed-checkpoint-observation).
+
+La QA est fermée et ses 27 pièces bornées conservées, sans volume supprimé.
+Le candidat D5 reste non intégré ; le diagnostic de la transition suivante,
+la continuation de retrait et la qualification réelle restent ouverts.
+G09 FAIL, aucun gate global fermé.
+
+## 9 novembre — correctifs C1/C2 vérifiés sur le candidat D5
+
+Trois reproductions atteignent leurs assertions attendues : perte du snapshot
+TLS dans le client worker, confusion Clock/Expired et annulation/expiration.
+Sur la composition corrigée, le parent TLS et les six cas des deux composants
+passent ; le check toutes cibles rend RC0. Le parcours TLS va jusqu'à Inbox,
+ACK et rejeu exact avec la CA conservée après remplacement de son pathname.
+[Sources, résultats et limites](evidence/2026-11-09/d5-composition-review/README.md#targeted-c1c2-execution).
+
+Ces sept fonctions vérifient un candidat privé non intégré. Les avertissements,
+Clippy, le profil release, Full3 et la continuation de retrait restent ouverts.
+Aucun moteur réel ni fencing physique n'est qualifié ; G09 FAIL, aucun gate
+global fermé. L'observation suivante a utilisé la sonde Full3 déjà présente,
+sans augmenter le délai produit ni ajouter une seconde instrumentation.
+
 ## 9 novembre — composition D5 après S2 et fermeture des worktrees du lot
 
 Le candidat broker/relais est recomposé sur l'intégration S2 `a9f28eb`.

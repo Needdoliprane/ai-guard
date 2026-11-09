@@ -1,5 +1,33 @@
 # Validation courante
 
+## 9 novembre — C1/C2 du candidat D5 et prérequis de la sonde Full3
+
+Sur `7c1981ad…`, trois commandes unitaires sélectionnent chacune un parent
+et échouent à l'assertion attendue : Send du binding TLS, Clock/Expired et
+annulation/expiration. Sur le gel corrigé `9f16fb33…`, le même parent TLS et
+les six cas des deux waiters passent, puis `cargo check --frozen --offline
+--all-targets` termine RC0 en 42,32 s. Les sept résultats, avertissements,
+revues et erreurs de préparation sont conservés dans les
+[preuves D5](evidence/2026-11-09/d5-composition-review/README.md#targeted-c1c2-execution).
+
+Le canari préalable de la sonde Full3 sélectionne ensuite une fonction et
+échoue RC101 sur un conflit d'identité/révision. Sa fixture crée deux namespaces
+indépendants, contrairement au contrat inchangé du Journal ; la correction
+tests-only réutilise le namespace réel et ajoute des contextes d'erreur fixes.
+Le gel distinct `3fb5cf3f…` ne change que ce fichier de support et passe le
+canari V1–V4, une fonction, RC0. Aucun ancien résultat n'est renommé comme
+une exécution sur ce nouveau gel. Le profil utilisé est DEV/test, sans preuve
+release, performance ou qualification des moteurs réels. Full3 et les gates
+globaux restent ouverts jusqu'à leurs propres observations.
+
+L'observation Full3 sur `3fb5cf3f…` est ensuite exécutée une seule fois :
+une fonction, RC101, 61,28 s, `deadline has elapsed`. Le ticket confirme
+nettoyage/join réussi et la frame V5 révision 17 ; les ACK locaux d'import
+sont connus, la vérification n'est pas préparée dans cette frame. Cause,
+chaîne complète, bindings et Arm worker restent inconnus. La QA est réellement
+fermée avant sa borne absolue, ses 27 preuves texte/JSON sont vérifiées.
+[Détails, écart de lancement et limites](evidence/2026-11-09/d5-composition-review/README.md#f1-confirmed-checkpoint-observation).
+
 ## 9 novembre — cinquante parents S2 et compilation toutes cibles
 
 Le gel `d7cd2349…` passe huit parents lifecycle et quatre de transport.

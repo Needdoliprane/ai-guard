@@ -27,17 +27,26 @@ aucun constat run-1 sur les anciens workers, pièges de quota, approbation
 humaine, audit signé ou reprise runtime ; leurs critères restent distincts.
 La qualification des moteurs et la composition D5 restent obligatoires.
 
-Suivi du 9 novembre : la composition privée broker/relais sur `4a0d4c6`
+Revue initiale du 9 novembre : la composition privée broker/relais sur `4a0d4c6`
 fait l'objet de revues distinctes service/relais, journal/writer/ledger et
-coutures de retrait. **NO-GO_SOURCE** : le client worker du relais perd le
+coutures de retrait. Verdict initial **NO-GO_SOURCE** : le client worker du relais perd le
 snapshot de confiance TLS du profil ; un parcours avec AC privée échoue
 ensuite à la connexion. Certaines erreurs d'horloge/annulation sont aussi
 présentées comme une expiration. Ces constats de lecture ne sont pas des
 vulnérabilités runtime reproduites et ne modifient pas le décompte run-1.
 La conservation d'une continuation de retrait avant soumission au gardien
 reste une piste à discriminer. [Gels, revues et acceptation](evidence/2026-11-09/d5-composition-review/README.md).
-Les corrections, leurs reproductions ciblées et le résultat Full3 demeurent
-ouverts ; aucune ancienne preuve n'est transférée à cette composition.
+
+La composition suivante sur S2 `a9f28eb` conserve ces frontières et corrige
+les deux défauts ciblés C1/C2 : trois reproductions atteignent leur oracle,
+puis sept fonctions passent sur le gel corrigé, avec check toutes cibles RC0
+et revues indépendantes. Ce candidat reste privé et non intégré ; Full3,
+la continuation de retrait et les moteurs réels restent à vérifier.
+[Résultats et limites](evidence/2026-11-09/d5-composition-review/README.md#targeted-c1c2-execution).
+Ces preuves logicielles ne clôturent aucun des treize constats run-1 ni les
+exigences absentes par assimilation ; les critères du rapport restent suivis.
+La continuation de retrait, le résultat Full3 et la qualification d'ensemble
+demeurent ouverts ; aucune ancienne preuve n'est transférée à cette composition.
 
 Suivi du 8 novembre : les [consommateurs du schéma 11](evidence/2026-11-08/kubernetes-session-reservation-v2/README.md#bounded-schema11-consumers)
 sont intégrés après revue et six tests purs GREEN. Ils ne ferment aucun constat

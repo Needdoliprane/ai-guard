@@ -1,5 +1,28 @@
 # Plan d'industrialisation
 
+## 9 novembre — trois propriétaires de développement en parallèle
+
+Le mainteneur demande que les gros chantiers avancent en code, au-delà des
+activités de test, revue et documentation. Trois worktrees dédiés sont ouverts
+sur `348ace9`, sans modifier le checkout principal :
+
+| Chantier | Propriétaire | Livrable et frontière |
+|---|---|---|
+| Reprise/fencing et relais Full3 | `import_verification_diagnosis` | Correctif et régressions à partir du FAIL observé ; broker/exécuteur/journal, sans modifier présence ni Kubernetes |
+| Sessions et bootstrap Kubernetes | `d5_composition_review` | Tranche exécutable V2 dans l'adaptateur, raccordant réservation et cycle de vie approuvés ; activation fermée avant preuves |
+| Fédération multi-hôtes | `s2_status_documentation` | Raccord de connexion/publication/reprise manquant, à partir de la présence et du registre existants ; vue tenant et fraîcheur conservées |
+
+Les noms des agents proviennent de leurs tâches précédentes ; leurs nouveaux
+mandats sont des mandats d'implémentation. Root conserve les contrats partagés,
+l'intégration et les décisions de frontière. Aucun développement ne doit
+attendre Full3 lorsqu'il travaille dans un périmètre indépendant. Une
+dépendance réelle est nommée précisément et les autres tâches continuent.
+
+Les correctifs C1/C2 sont vérifiés sur leur gel, mais D5 reste non intégré et
+Full3 reste FAIL. Les nouveaux worktrees ne transfèrent pas les anciennes
+preuves : gels, cibles propres, tests ciblés Luna en QA admise puis revue
+indépendante restent requis. Les qualifications réelles sont distinctes.
+
 ## 9 novembre — S2 vérifié ; composer les corrections relais sur la nouvelle base
 
 La récupération centrale avant effet, son authentification et ses trois

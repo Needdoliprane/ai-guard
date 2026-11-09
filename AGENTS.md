@@ -165,6 +165,13 @@ Préférence de test du mainteneur (30 octobre 2026) : utiliser **Luna pour les 
 
 **Parallélisme obligatoire lorsque des tâches indépendantes peuvent avancer utilement.** Rechercher ces occasions à chaque lot et les déléguer sans attendre une nouvelle demande du mainteneur : implémentation, infrastructure, documentation, tests et revue peuvent avancer en parallèle lorsque leurs dépendances le permettent. Une compilation ou un test en cours ne justifie pas de laisser un chantier indépendant à l'arrêt.
 
+Retour du mainteneur du 9 novembre : cette délégation doit faire avancer les
+**gros chantiers d'implémentation**, pas se limiter aux tests, revues et notes.
+Attribuer aux chantiers indépendants ouverts un propriétaire de développement,
+un périmètre et un livrable de code vérifiable ; nommer toute dépendance qui
+empêche réellement de coder, puis poursuivre les autres chantiers. Réaffecter
+les agents disponibles sans attendre une nouvelle relance du mainteneur.
+
 Cette règle inclut les compilations et validations indépendantes : ne pas imposer
 une file globale uniquement pour ménager le poste de développement. Attribuer des
 cibles et données distinctes, borner les ressources et mesurer la pression réelle.
