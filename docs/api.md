@@ -264,6 +264,282 @@ session Kubernetes, ni permission d'activation. Broker HTTP/live ACK,
 schema-9 Coordinator, activation and real runtime qualification remain open.
 Voir les guides [EN](setup/kubernetes/README.md) / [FR](setup/kubernetes/README.fr.md).
 
+## Récupération contrôle des réservations Kubernetes V2 / Kubernetes session control recovery V2
+
+La route fixe est **`POST /api/v1/kubernetes/session-reservations/{id}/control-recovery`**,
+sans alias `/api`. Elle exige le Bearer **runner technique partagé** du contrôle,
+pas une identité humaine/OIDC, viewer, broker ou worker. Dans le handler,
+l'authentification précède validation du Path et lecture du corps ; elle choisit
+le tenant et le Store exact, puis est revérifiée après admission Store et avant
+chaque usage.
+Aucun header, query, label ou corps ne choisit tenant, rôle, politique ou sujet
+à facturer. Le contrôle requiert le schéma 11, l'historique Reserve validé et
+la permission actuelle pour son broker créateur historique, même après
+décommission de toutes ses autorités. Ce chemin ne réactive aucun grant.
+
+The fixed route above has **no `/api` alias**. Its credential is the control's
+**shared technical runner**, never a human/OIDC, viewer, broker or worker
+identity. Within the handler, authentication precedes Path validation and body
+consumption, selects the tenant and exact Store, and is repeated after Store
+admission and before each use. No caller input chooses tenant, role, policy or
+charged principal.
+Schema 11, validated original Reserve history and current policy permission for
+its historical creator broker are required; an active successor broker is not.
+This path does not reactivate a grant.
+
+### Corps fermé et résultats / Closed body and results
+
+`{id}` est un UUID non nul canonique en minuscules. Un seul
+`Content-Type: application/json` est requis (paramètres MIME admis), sans query.
+Le corps UTF-8 fait au plus 81920 octets (80 Kio), profondeur 64, sans membre
+dupliqué à aucune profondeur, champ inconnu ou contenu après le JSON.
+La lecture directe du handler est bornée à 5 secondes sans slot Store retenu
+pendant l'upload. Tous les champs `version` valent 2. Les hashes sont 64 hex
+minuscules ; `operation_id` est un UUID canonique non nul distinct de `{id}`.
+Ces trois exemples publics de forme ne sont pas des opérations à exécuter :
+reprendre le vrai hash de réservation et conserver les IDs/opérations exacts.
+
+`{id}` is a canonical lowercase non-nil UUID. Require one JSON Content-Type
+header (MIME parameters allowed), no query, at most 81920 UTF-8 body bytes,
+depth 64, no duplicate members, unknown fields or trailing JSON content. Direct
+handler body reading has a five-second bound without holding Store slots.
+Every `version` is 2; hashes are 64 lowercase hexadecimal characters. A canonical
+non-nil `operation_id` must differ from `{id}`. The shared public shape examples
+below are not runnable operations: use the retained reservation hash and exact
+operation identities.
+
+```json
+{
+  "action": "observe_reserved",
+  "version": 2,
+  "reservation_input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
+```
+
+```json
+{
+  "action": "close_before_effect",
+  "version": 2,
+  "close": {
+    "version": 2,
+    "operation_id": "22222222-2222-4222-8222-222222222222",
+    "reservation_id": "11111111-1111-4111-8111-111111111111",
+    "reservation_input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected_revision": 1,
+    "reason": "operator_cancelled"
+  }
+}
+```
+
+```json
+{
+  "action": "lookup_close_receipt",
+  "version": 2,
+  "reservation_input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "close_input_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "operation_id": "22222222-2222-4222-8222-222222222222"
+}
+```
+
+Pour Close, `close.reservation_id` correspond exactement au Path,
+`expected_revision` vaut exactement 1 et `reason` vaut
+`operator_cancelled|preparation_abandoned`. Les actions sont distinctes :
+Observe vise seulement Reserved/révision 1/quota tenu avec
+`effect_fence:{state:"never_issued",revision:0}` et aucune identité legacy liée.
+Close peut alors engager ClosedBeforeEffect/révision 2/quota libéré une fois.
+Lookup exige le Close exact déjà retenu. Observe n'autorise pas Close et ne
+relit pas une réservation fermée. Aucun de ces JSON ou reçus ne donne Reserve,
+CREATE, start, credential workload, workspace, transport ou effet Kubernetes.
+
+Close requires the exact Path reservation ID, `expected_revision:1`, and one
+of the two reasons above. Observe requires Reserved/revision 1/held quota,
+NeverIssued revision 0 and no linked legacy identity. Close then commits
+ClosedBeforeEffect/revision 2 and releases allocation once. Lookup requires the
+exact retained Close. Observe grants no Close and cannot observe closed state.
+These requests/receipts grant no Reserve, CREATE, start, workload credential,
+workspace, transport or Kubernetes effect.
+
+| Action | HTTP 200 et objet exact / HTTP 200 exact shape |
+|---|---|
+| `observe_reserved` | `KubernetesSessionReservationCurrentV2` = `{version,snapshot,last_event_seq,last_event_hash}` |
+| `close_before_effect` | `KubernetesSessionReservationMutationResponseV2` = `{version,receipt,snapshot,replayed}` ; `false` au premier Close, `true` au replay exact / first Close, exact replay |
+| `lookup_close_receipt` | Même mutation, `replayed:true` / Same mutation shape, always replayed |
+
+Le reçu contient `{version,operation,operation_id,input_hash,control_namespace_uuid,audit_seq,audit_hash}`,
+avec `operation:"close_before_effect"` et `input_hash:K` pour Close. Le snapshot
+porte `{version,intent,input_hash,session_hash,attempt_hash,profile_hash,state}` ;
+`state` contient `{state,revision,quota_held,effect_fence,last_close}`. Les types
+réels sont dans [kubernetes_session.rs](../src/control/kubernetes_session.rs).
+Une réponse exacte dépassant 131072 octets (128 Kio) ou nécessitant un masquage
+est refusée sans troncature, avec le code partagé réel `held_create_unavailable`.
+Une entrée nécessitant masquage est refusée. Aucun secret/digest runner n'est
+ajouté aux réponses, engagements ou traces descriptives.
+
+The receipt and snapshot contain exactly the fields above. Close receipts use
+`operation:"close_before_effect"` and `input_hash:K`. Exact responses exceeding
+131072 bytes or requiring redaction fail without truncation under the shared
+serializer's actual `held_create_unavailable` code. Input requiring redaction
+is refused. No runner secret/digest is added to responses, commitments or
+descriptive evidence.
+
+### Reprise, politiques et engagements / Retry, policies and commitments
+
+Après perte de réponse, réauthentifier et soumettre le même Close ou son Lookup
+exact R/K/operation_id. Le contrôle revalide les permissions actuelles et rend
+le reçu/snapshot historiques, sans append, seconde libération ou nouveau débit.
+Un UUID réutilisé avec contenu divergent est un conflit ; ne modifier ni CAS,
+motif, ID ou hash pour forcer le replay. Le reçu n'a pas de champ `actor` :
+`audit_seq/audit_hash` désignent l'événement original, qui conserve acteur et
+créateur sans réattribution au runner de la reprise. L'acteur contrôle
+`control_shared_runner` est une origine technique observée, pas une personne ;
+le créateur reste le broker historique. Close consomme son budget workload
+broker+tenant cumulé ; audit indisponible ou saturé bloque Close.
+
+After a lost response, authenticate anew and submit the same Close or exact
+R/K/operation_id Lookup. Current permissions still apply. Replay returns the
+historical receipt/snapshot with no append, second allocation release or new
+charge. A reused operation UUID with divergent content conflicts; do not edit
+CAS, reason, IDs or hashes to force replay. The receipt has no `actor` field:
+its audit sequence/hash refer to the original event, preserving its actor and
+creator rather than assigning them to the retry's runner. `control_shared_runner`
+is observed technical authentication, not a named human; the creator remains
+the historical broker. Close consumes that broker's cumulative tenant/workload
+budget and cannot bypass unavailable/full mandatory audit.
+
+Les trois politiques serveur sont indépendantes, immuables au démarrage et
+chargées depuis l'entrée tenant de confiance `--tenants-file`, jamais depuis
+ce corps :
+`session_reservation_policy` (approbations exactes des huit champs),
+`session_recovery_policy` (broker courant de même ID historique) et
+`session_control_recovery_policy` (runner partagé et broker historique autorisé).
+Absente/null, chaque politique est désactivée ; une liste vide ne donne rien.
+Version 2, TTL 1–60 secondes, au plus 64 entrées distinctes et 16384 octets canoniques
+s'appliquent à chacune. Voir les détails/exemples/migration hors ligne dans les
+guides [EN](setup/kubernetes/README.md#configure-session-reservation-v2-policies)
+/ [FR](setup/kubernetes/README.fr.md#configurer-les-politiques-de-réservation-de-session-v2).
+Une capacité est bornée par le TTL policy et les échéances UTC/monotone de
+l'authentification (au plus 60 secondes), recontrôlées à l'usage. Ni fichier modifié
+sur disque ni ancien reçu ne révoque ou ne renouvelle un contexte vivant.
+
+The three independent startup-immutable server policies above come from trusted
+tenant configuration, never this body. Missing/null disables each; empty lists
+grant nothing. Each uses version 2, a 1–60 second TTL, at most 64 distinct entries
+and 16384 canonical bytes. Reservation, broker recovery and shared-runner recovery
+remain distinct permissions. The linked guides specify their fields and offline
+migration. Capabilities obey policy TTL and both UTC/monotonic authentication
+deadlines (at most 60 seconds), checked again at use. Editing files or replaying
+old receipts neither revokes nor renews a live authentication context.
+
+`C(x)` est le JSON UTF-8 compact canonique : clés d'objets triées récursivement,
+ordre des tableaux conservé, sans flottants. `H` est SHA-256 hex minuscule et
+`\0` ci-dessous désigne **un octet NUL**, pas deux caractères. `S/A/P` viennent
+du snapshot/intent validé (session, tentative, profil) ; `F` est l'empreinte
+d'autorité. `C(x)` is compact canonical UTF-8 JSON with recursively sorted object
+keys, retained array order and no floating numbers; `H` is lowercase SHA-256.
+`\0` denotes one NUL byte. `S/A/P` are validated session/attempt/profile hashes;
+`F` is the authority fingerprint. Exact request-relevant preimages:
+
+```text
+R = H(b"ai-guard:kubernetes-session-reservation:v2\0" ||
+      C([2,reservation_id,worker_id,1,S,A,F,P]))
+K = H(b"ai-guard:kubernetes-session-reservation-close:v2\0" ||
+      C([2,operation_id,reservation_id,R,1,reason]))
+Qctrl = H(b"ai-guard:kubernetes-session-control-recovery-policy:v2\0" || C(policy_canonicalized))
+```
+
+Les preuves mémoire ne sont ni reçues ni reconstruites depuis ces hashes.
+L'engagement interne BeforeEffect lie acteur/namespace/créateur, Reserve
+historique, R/S/A/P, head, état Reserved1/NeverIssued0, action/cible,
+snapshot/hash de politique et dates. L'engagement ReceiptLookup distinct lie
+acteur/namespace/créateur, R/K, séquence/hash du Close, head, hash de politique
+et dates ; un lookup n'est pas une autorisation Close. Les domaines exacts sont
+`ai-guard:kubernetes-session-control-recover-before-effect:v2\0` et
+`ai-guard:kubernetes-session-control-recovery-receipt:v2\0` ; préimages ordonnées
+dans [control_recovery.rs](../src/audit/kubernetes_session/control_recovery.rs).
+Ces engagements décrivent l'audit ; le replay ne recrée aucune autorité passée.
+
+Hashes cannot construct/restore memory authority. BeforeEffect commits actor,
+namespace, creator, historical Reserve, R/S/A/P, head, Reserved1/NeverIssued0,
+action/target, policy snapshot/hash and dates. The separate ReceiptLookup
+commitment binds actor, namespace, creator, R/K, Close sequence/hash, head,
+policy hash and dates. Their distinct domains and ordered source preimages
+are linked above; lookup is no Close authorization. Replay validates historical
+evidence without recreating past authority.
+
+### Erreurs et accès publiés / Errors and published access
+
+| HTTP | Code ou forme réelle / Actual code or shape |
+|---|---|
+| `400` | `invalid_session_control_recovery_request` : Path/body/JSON/version/hash/UUID/borne/délai/query invalides / invalid protected input, bounds or body deadline |
+| `401` | Bearer absent/invalide/ambigu, humain/broker/worker ; garde héritée `{error:message}` / inherited control guard |
+| `403` | `session_control_recovery_forbidden`, ou garde runner/époque héritée `{error:message}` / current policy/scope refusal or inherited runner/epoch guard |
+| `404` | `session_control_recovery_not_found` dans le seul tenant authentifié / only in the authenticated tenant |
+| `409` | `session_control_recovery_conflict` : contenu/état exact divergent / conflicting retained content/state |
+| `429` | `session_control_recovery_quota_exceeded`, `audit_workload_budget_exhausted`, autres budgets I/O/audit existants / existing I/O/audit budget codes |
+| `503` | Audit/Store/schéma/identité indisponible via garde opaque héritée ; encodage exact : `held_create_unavailable` / inherited opaque unavailability; exact serializer code |
+
+Les erreurs typées ont `{error:{code,message}}` ; les gardes héritées peuvent
+avoir `{error:message}` et les budgets un `retry_action`. Aucun détail brut
+d'audit ou secret ne sort. Un commit peut précéder une perte HTTP ou un refus
+d'encodage : aucune erreur de réponse ne prouve rollback. Typed errors use the
+code/message envelope; inherited guards may use an opaque string and budget
+errors may add `retry_action`. HTTP loss/encoding refusal can follow a commit;
+preserve the exact operation for authenticated reconciliation.
+
+**Accès par le transport contrôle** : sur l'origine gateway publiée par les
+profils Compose Docker/Podman standard et SSO, utiliser
+`POST /control/api/v1/kubernetes/session-reservations/{id}/control-recovery`.
+Le relais retire le préfixe de transport `/control` et cible le listener
+contrôle fixe du gateway. La liste fermée de
+[control_transport.rs](../src/control_transport.rs) classe cette seule forme
+POST v1 avec UUID canonique dans la voie Runner ; le classifieur ne prouve
+aucune identité. Le vrai gateway refuse anonyme/worker avec 401 et viewer
+avec 403 avant lecture du corps. Le listener contrôle dédié reçoit le chemin
+`/api/v1/...` ; `gateway_router` propose aussi le préfixe `/control`.
+Un runner authentifié atteint les trois DTOs fermés et reçoit 403
+`session_control_recovery_forbidden` si la politique manque. L'UUID nil reste
+classable syntaxiquement mais donne 400 dans le handler de session.
+
+Le chemin ordinaire `/api/v1/...` reste exposé par `gateway_router` : l'ingress
+public lit alors le corps avant l'authentification gateway et applique ses
+budgets publics. Il ne donne pas la réserve de la voie contrôle et ne garantit
+pas son ordre authentification/corps. Le raccord logiciel ne qualifie pas
+un déploiement Compose ou un cluster réel.
+Le dashboard ne relaie que des GET métier et n'ouvre pas cette mutation runner.
+Les profils standard utilisent `--data` sans ces politiques ; les profils SSO
+utilisent leur registre tenant. Aucun profil livré ne les active par défaut :
+la configuration explicite et la migration11 restent des prérequis séparés.
+
+**Control transport access**: on the published gateway origin of standard/SSO
+Docker and Podman Compose profiles, use the exact prefixed POST above. The relay
+removes `/control` and targets the fixed gateway control listener. The closed
+allowlist classifies only this v1 POST with a canonical UUID as Runner;
+classification proves no identity. The real gateway refuses anonymous/worker
+credentials with 401 and viewers with 403 before reading the body. The dedicated
+control listener receives `/api/v1/...`; `gateway_router` also supplies the
+`/control` transport prefix. An authenticated runner reaches all three closed
+DTOs and receives 403 `session_control_recovery_forbidden` when policy is absent.
+Canonical nil remains syntactically classifiable but receives 400 from the
+session handler.
+
+The ordinary `/api/v1/...` gateway route remains exposed: public ingress reads
+its body before gateway authentication and applies public budgets. That path
+does not supply reserved control capacity or the control path's authentication
+ordering. Software routing does not qualify a real Compose deployment or
+cluster. The dashboard's business proxy remains GET-only and does not open
+the runner mutation.
+Standard profiles use `--data` without these policies; SSO profiles use their
+tenant registry. Distributed profiles do not enable them by default: explicit
+configuration and migration11 remain separate prerequisites.
+
+Sources : [handler/DTO](../src/api/kubernetes_sessions.rs),
+[authentification](../src/api/auth/control_recovery.rs),
+[routeurs gateway/dashboard](../src/api.rs), [relais contrôle](../src/ingress/control.rs).
+Ce contrat n'est ni une preuve d'arrêt/drainage, de qualification HTTP réelle,
+de lancement/confinement Kubernetes ou de release production. This contract
+provides no evidence of shutdown/draining, live HTTP qualification, Kubernetes
+launch/confinement or production release readiness.
+
 ## Authentification OIDC Web et CLI / Web and CLI OIDC authentication
 
 Le contrat HTTP ci-dessous décrit **l'implémentation candidate**, configurable explicitement, au 2 novembre 2026. La qualification Keycloak réel et navigateur reste `NOT_RUN` ; aucune qualification production n'en découle. Les guides SSO [français](setup/sso/README.fr.md) et [anglais](setup/sso/README.md) décrivent configuration, profil signé accepté, memberships et exploitation. Les [routes Rust](../src/api/oidc.rs) et leurs [handlers](../src/api/oidc/gateway.rs) font autorité sur ces DTO.

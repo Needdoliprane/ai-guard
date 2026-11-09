@@ -87,7 +87,7 @@ fixture **SETUP_FAIL**. The application correction, GREEN, other S2 tests
 and all-target check remain **NOT_RUN**. No original audit finding or
 runtime qualification is closed by reproducing this candidate defect.
 
-## Routing boundary still open
+## Pre-fix routing gap (historical)
 
 Source inspection of this same composition finds the POST session
 control-recovery route in `gateway_base_router`, but absent from
@@ -103,3 +103,69 @@ for API proxying and does not gain runner mutations.
 
 These are implementation and validation gaps. Neither source review,
 successful compilation nor a corrected fixture closes a production gate.
+
+## Targeted GREEN and integration
+
+The reviewed drain fix retains the first internal JoinError in both drains;
+only its own post-abort cancellations are expected. The exact v1 POST session
+recovery route is added to the Runner allowlist. Other methods, aliases,
+noncanonical IDs and roles remain closed.
+
+| Selection | Source | Passed | Build / tests |
+|---|---|---:|---|
+| `--lib gateway_server::tests::` | r2 | 8 | 1m59s / 20.21s |
+| `--test session_control_transport` | r2 | 4 | 57.40s / 0.61s |
+| `--lib api::auth::control_recovery::tests::` | r3 | 12 | 1m53s / 0.85s |
+| `--lib audit::kubernetes_session::control_recovery::tests::` | r3 | 8 | 0.16s / 3.68s |
+| `--test kubernetes_session_control_recovery` | r3 | 6 | 54.32s / 0.34s |
+| `--bin agentsandbox gateway_config::policy_tests::` | r3 | 10 | 4.17s / 0.08s |
+| `--bin agentsandbox gateway_main_tests::` | r3 | 2 | 0.15s / 0.03s |
+
+Each uses `cargo test --locked --offline` with
+`-- --test-threads=1 --nocapture`, verified cwd/source/toolchain and explicit
+unique target. All return RC0 with the stated counts, zero failed/ignored.
+These are 50 unique targeted parents, not a whole suite or production gates.
+
+| Record | SHA-256 |
+|---|---|
+| r2 source, 2 325 files | `d7cd234935a06f21accb9c7519f541fa742baa1472c50b79e0c483d78ba68dcd` |
+| r3 source, 2 325 files | `6ab7eb135b4b62a91f4f9c7977aae68c87506f1f6ec605e48e9c8bc05d645f7d` |
+| Final Auth test | `1d9232f8e4d50968af6baa5ff07f8f2ff3e9d336e6e430fe10ca61c868664956` |
+| Root application patch | `0b8b7e6acc16d457405a809f8c470df7602bd524225d2664a2cd1131bdf7d11c` |
+| Retained evidence manifest, 45 entries | `d832f7aef4b1f6edfdfbb927c2ed87004cf7fc18ff436737777ce1e58683e6d1` |
+| Parent receipt-label correction | `7008323f7fdb7d039d06cc3052697fb746da34d5da1273e2d5e8ca63bf39f3b8` |
+
+Only `api/control_recovery_auth_tests.rs` differs between r2/r3: a positive
+0700 fixture and a revoked-binding oracle requiring exactly the existing
+typed `Unauthorized`, refusing all other Err/Ok. Missing digests return
+`Ok(None)`; known revoked bindings fail. No application or policy changed.
+The 12 r2 PASS were not rerun on r3; their actual source remains explicit.
+
+`cargo check --locked --offline --all-targets` on r3 returns RC0 in 1m06s.
+Warnings remain: 80 lib, eight lib-test (four duplicates), two in
+`human_sso_gateway_trust`; Clippy NOT_RUN here. Root compares integrated
+`src/tests/Cargo` byte-for-byte with r3 without claiming a new Root test run.
+Configuration, operator guides and API contracts are synchronized EN/FR.
+
+Earlier 0700, HASH_C and PATH-before-Cargo failures remain nonconclusive.
+Auth initially had 11 fixture failures and one incorrect test oracle.
+Config10 had timeout600 instead of the then-required300; it finished in
+4.17s plus 0.08s and was not repeated. Root adjusted only its soft scheduling
+cutoff with shorter command bounds, retaining the environment hard deadline.
+These incidents and the timeout configuration deviation remain documented.
+
+Root observed only PID1 before closing QA
+`b26547b8ee2a7c5981d6e640e1438cb086fb1cd328f41dd505811e03ca2da6f8`:
+Exited, Running=false, ExitCode137, OOMKilled=false, finished
+2026-11-09T00:09:22.430100846Z. Normal removal used no force or volume removal.
+Peak memory7052521472 bytes, zero OOM counters. Forty-five bounded text/JSON
+records were retained and independently hash-checked. Two receipt labels
+(container name and SSO target) have a separate parent correction; actual
+CID, sources, counts and outcomes are unchanged. No raw scratch, source tree,
+DB or binary was promoted. The host backstop watcher94639 subsequently finishes
+RC0 at 00:18:14 UTC; its probes find the already-removed CID, as expected after
+the parent's earlier normal cleanup. No QA or watcher from this run remains active.
+
+No real worker/runtime, physical crash/restore, network confinement, provider,
+multi-host transport, 100-worker capacity, signed audit or production release
+is qualified. S2 recovers centrally proven before-effect reservations only.

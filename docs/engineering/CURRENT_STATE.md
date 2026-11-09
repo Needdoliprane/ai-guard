@@ -1,5 +1,29 @@
 # État constaté — suivi du développement
 
+## 9 novembre — récupération centrale S2 raccordée et vérifiée en logiciel
+
+Le contrôle peut observer une réservation Kubernetes V2 avant effet, engager
+son Close audité ou retrouver le reçu exact après révocation des autorités
+brokers. Le runner technique authentifié sélectionne tenant et Store ; les
+politiques restent explicites et désactivées par défaut. Le créateur historique,
+les budgets, les dates, l'idempotence et le refus d'audit sont conservés.
+Le gateway possède les connexions et retire son contexte avant de les drainer ;
+la panique interne tardive reproduite n'est plus rendue comme un succès.
+Le canal `/control` expose uniquement la nouvelle forme POST Runner fermée.
+
+Cinquante parents ciblés passent sur deux gels : lifecycle/routage (12) sur
+`d7cd2349…`, identité/stockage/HTTP/configuration/Main (38) sur `6ab7eb13…`.
+Seul un fichier de test diffère entre ces gels. Check toutes cibles RC0 sur
+le second ; sources `src/tests/Cargo` intégrées comparées à ce gel exact,
+sans prétendre une nouvelle exécution depuis Root. Les guides EN/FR et le
+contrat API décrivent les vrais prérequis et limites. [Preuves](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration).
+
+Les avertissements restent ouverts (80 lib, huit lib-test dont quatre doublons,
+deux SSO), sans Clippy vert. Aucun lancement Kubernetes, reprise physique,
+transport multi-hôtes ou moteur réel n'est qualifié par ce lot. La QA est
+fermée, ses preuves bornées conservées. D5 et les correctifs relais C1/C2
+restent séparés ; G09 FAIL, aucun gate global fermé.
+
 ## 8 novembre, 23:32 UTC — défaut de drainage S2 reproduit
 
 Après correction des seules fixtures en 0700, le même parent atteint toutes

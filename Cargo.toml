@@ -19,6 +19,7 @@ clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
 hex = "0.4"
 hmac = "=0.12.1"
+hyper-util = { version = "=0.1.21", default-features = false, features = ["http1", "server", "service", "tokio"] }
 libc = "0.2"
 jsonwebtoken = { version = "=11.1.0", default-features = false, features = ["rust_crypto"] }
 openidconnect = { version = "=4.1.0", default-features = false, features = ["reqwest", "rustls-tls"] }

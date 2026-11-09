@@ -1,5 +1,12 @@
 # Gates de qualification production
 
+Récupération centrale S2 du 9 novembre : 50 parents ciblés PASS sur leurs deux
+gels et check toutes cibles RC0, revues traitées et sources composées vérifiées.
+[Preuves et limites](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration).
+Ce raccord avant effet n'active ni Pod, bootstrap, worker, transport ou reprise
+physique. Warnings/Clippy, D5, moteurs et autres qualifications restent ouverts.
+G09 FAIL, aucun des 12 gates globaux fermé.
+
 Profil descriptif Kubernetes V2 du8novembre : `c4d0cd6` composé dans `9af5e99`,
 onze fonctions et check toutes cibles PASS sur k2, revue traitée.
 [Preuves et portée](evidence/2026-11-08/kubernetes-session-profile-v2/README.md).

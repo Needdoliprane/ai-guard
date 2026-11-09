@@ -18,6 +18,24 @@ pub use policy::{
 };
 use validation::{canonical, digest, hash, require, uuid};
 
+/// Descriptive input selected after Runner authentication. It grants no
+/// authority and cannot select a tenant, policy or workload charge.
+pub(crate) enum KubernetesSessionControlRecoveryTargetV2 {
+    ObserveReserved {
+        reservation_id: String,
+        reservation_input_hash: String,
+    },
+    CloseBeforeEffect {
+        close: KubernetesSessionReservationCloseV2,
+    },
+    LookupCloseReceipt {
+        reservation_id: String,
+        reservation_input_hash: String,
+        close_input_hash: String,
+        operation_id: String,
+    },
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KubernetesSessionReservationFailureV2 {
     InvalidRequest,

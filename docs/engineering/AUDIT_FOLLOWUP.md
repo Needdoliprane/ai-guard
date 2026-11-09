@@ -19,6 +19,14 @@ Si ces pièces ne sont pas accessibles, signaler cette limite avant de prétendr
 avoir vérifié un constat. Ne pas reconstruire une conclusion depuis le seul
 résumé du chat.
 
+Le [raccord S2 du 9 novembre](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration)
+passe cinquante parents ciblés sur leurs gels et la compilation finale. Il
+corrige le défaut de drainage découvert dans ce candidat et ouvre le trajet
+de contrôle exact pour une récupération centrale avant effet. Il ne clôture
+aucun constat run-1 sur les anciens workers, pièges de quota, approbation
+humaine, audit signé ou reprise runtime ; leurs critères restent distincts.
+La qualification des moteurs et la composition D5 restent obligatoires.
+
 Suivi du 9 novembre : la composition privée broker/relais sur `4a0d4c6`
 fait l'objet de revues distinctes service/relais, journal/writer/ledger et
 coutures de retrait. **NO-GO_SOURCE** : le client worker du relais perd le

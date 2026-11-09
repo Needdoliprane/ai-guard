@@ -7,6 +7,7 @@ pub mod control;
 pub mod control_fs;
 pub mod control_transport;
 pub mod declared_agents;
+pub mod gateway_server;
 pub mod identity;
 pub mod identity_cli;
 pub mod ingress;

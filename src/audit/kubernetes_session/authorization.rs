@@ -478,14 +478,14 @@ impl Store {
             target_hash,
             reservation_seq: stored.seq,
             reservation_hash: stored.hash,
-            reservation_decision_hash: original.authorization.decision_hash.clone(),
+            reservation_decision_hash: original.authorization.broker()?.decision_hash.clone(),
         };
         let evidence = evidence(
             &tx,
             identity,
             &broker,
             &original.intent,
-            &original.authorization.quota,
+            &original.authorization.broker()?.quota,
             basis,
             clock.at(),
         )?;
@@ -533,7 +533,7 @@ impl Store {
         let creator = Creator::Reservation {
             reservation_seq: stored.seq,
             reservation_hash: stored.hash,
-            actor: original.actor.identity(),
+            actor: original.actor.identity()?,
         };
         let current = replay::load_snapshot(&tx, reservation_id, &self.tenant_id)?
             .ok_or(Failure::NotFound)?;
@@ -585,7 +585,7 @@ impl Store {
             identity,
             &broker,
             &original.intent,
-            &original.authorization.quota,
+            &original.authorization.broker()?.quota,
             basis,
             clock.at(),
         )?;

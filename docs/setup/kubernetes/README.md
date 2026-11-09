@@ -295,7 +295,7 @@ agentsandbox broker control-info \
 ```
 
 Use its exact `control_namespace_uuid`, a runner identity and compatible
-schema 3–10 with `broker_supervision_v1`. The gateway must be an HTTPS origin
+schema 3–11 with `broker_supervision_v1`. The gateway must be an HTTPS origin
 or an explicitly selected HTTP loopback origin; this file does not add private
 CA or mTLS options to the gateway connection. `runner_token_file` is an
 absolute path to a private file containing at most 4 KiB, not a token value. The control runner
@@ -450,6 +450,147 @@ normalizing their strings; entry order does not affect the policy hash.
 These checks validate configuration only; they do not qualify Namespace
 ownership, cluster admission, RBAC or CNI enforcement.
 
+## Configure session reservation V2 policies
+
+Session reservations use schema 11 and three independent, optional fields in
+each existing `--tenants-file` tenant entry. The registry stays at `version:1`;
+the policies use `version:2`. Use this registry for a single tenant too, keeping
+its database, private credential references, quota and audit policies. There is
+no separate session-policy flag or policy accepted from a request body.
+
+This **partial tenant-entry example** contains public fictional values. Replace
+the authority UUID/fingerprint with the approved authority, the image and
+provider tuple with the exact retained profile, and the broker UUIDs with the
+historical creators explicitly approved for this tenant:
+
+```json
+{
+  "session_reservation_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "approvals": [{
+      "authority_id": "11111111-1111-4111-8111-111111111111",
+      "authority_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "image": "registry.example.invalid/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "client": "codex",
+      "auth_mode": "api",
+      "transport": "batch",
+      "profile_id": "codex_api",
+      "profile_revision": 1
+    }]
+  },
+  "session_recovery_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "allowed_broker_ids": ["22222222-2222-4222-8222-222222222222"]
+  },
+  "session_control_recovery_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "allowed_broker_ids": ["22222222-2222-4222-8222-222222222222"]
+  }
+}
+```
+
+Absent or `null` disables that policy; `{}` is invalid. Empty `approvals` or
+`allowed_broker_ids` lists are valid and authorize nothing. Each policy is
+closed/version 2, has a decision TTL of 1–60 seconds, at most 64 distinct entries
+and at most 16384 bytes of canonical compact JSON. Unknown or duplicate JSON
+fields, duplicate tuples/UUIDs, invalid enums and noncanonical or nil UUIDs
+are refused. Startup validates and sorts these typed policies before opening
+any tenant database; it does not rewrite the registry. The registry as a whole
+is limited to 1 MiB. These startup settings have no hot reload.
+
+An approval matches all eight fields exactly: authority UUID, fingerprint of
+64 lowercase hexadecimal characters, immutable image, `client:codex|claude_code`,
+`auth_mode:api|subscription`, `transport:batch|interactive_tty`,
+`profile_id` (1–80 ASCII letters/digits/`_`/`-`) and positive 32-bit
+`profile_revision`. Image validation is the same as for held-create above.
+No wildcard, model, credential, argv or fallback is added. `worker_quota`
+independently bounds allocation; the reservation profile keeps networking
+denied. A reservation creates durable central state, not a Pod or a start right.
+
+`session_recovery_policy` permits only before-effect recovery by a currently
+authenticated broker with the same historical broker ID. The separate
+`session_control_recovery_policy` permits the tenant's authenticated **shared
+technical runner**, without requiring an active successor broker, to use
+`POST /api/v1/kubernetes/session-reservations/{id}/control-recovery` for
+`observe_reserved`, `close_before_effect` or exact `lookup_close_receipt`.
+It applies only to validated Reserved/NeverIssued history with no effect or
+linked legacy identity. The authenticated control chooses the tenant and checks
+the policy against the historical creator. Observe does not grant Close;
+neither recovery policy grants Reserve, CREATE, start or workload credentials.
+Do not supply tenant, policy, role or charge subject in the body. There is no
+new Broker reservation HTTP route or session-launch CLI in this configuration.
+
+The [bilingual API contract](../../api.md#récupération-contrôle-des-réservations-kubernetes-v2--kubernetes-session-control-recovery-v2)
+specifies the exact closed bodies, responses, hashes, failures and replay rules.
+For the Compose-published gateway origin, use
+`POST /control/api/v1/kubernetes/session-reservations/{id}/control-recovery`.
+The fixed control relay and real gateway use the Runner lane and reject
+anonymous/worker/viewer credentials before reading the body. A valid runner
+reaches the three closed action DTOs; absent policy gives 403 and nil UUID
+gives 400 in the session handler. The ordinary `/api/v1/...` public ingress path
+still reads the body before gateway authentication and uses public budgets;
+it does not offer that reserved control transport. The dashboard does not proxy
+this mutation. These software checks do not qualify a real Compose deployment,
+cluster, Kubernetes launch or cloud transport.
+
+The control actor is recorded as `control_shared_runner`, separately from the
+historical broker creator; this shared credential does not identify a human
+operator. Keep it in trusted control storage, outside browsers/workers. Policy
+TTL and fresh authentication apply to every request. Changing the runner file
+does not revoke a live gateway: stop the existing gateway, retire/drain its
+control-recovery context and construct the replacement with the intended
+private configuration. Already leased operations may finish; no fixed drain
+duration or distributed revocation is promised. A retry after restart/rotation
+authenticates anew and can recover the original exact Close receipt without
+new append, charge or historical attribution.
+
+Close requires durable audit even when allocation is held. The workload audit
+budget is charged to the historical broker and tenant, including control Close;
+rotation/regrant does not reset it. On saturation preserve state, policy and
+receipts. An explicit `workload_audit_policy` increase before opening/sharing
+the replacement Store may help only within physical capacity and protected
+reserves; retry the same operation. Without that capacity, recovery stays
+blocked. Never delete audit or release quota without its mandatory record.
+
+## Maintain session reservations: schema 10 to 11
+
+Use a matched product binary for gateway, brokers, clients, dashboard and
+offline maintenance. Older binaries cannot open 11. First follow the existing
+[sequential migrations through 10](../identity/WORKERS.md#upgrade-the-existing-storage-explicitly)
+with a separate new backup at every step. Migration 11 accepts only a verified 10
+source and never runs automatically at startup. Keep all database consumers and
+automatic restarts stopped, preserve runtime/enforcement anchors and use the
+existing private control UID/GID and storage. `--confirm-control-stopped` is
+your attestation, not process exclusion or proof that workers stopped.
+
+Replace the paths, tenant and `--max-events` with this installation's values.
+The backup must be a **new nonexistent file** in its existing private storage:
+
+```sh
+agentsandbox migrate-control \
+  --data /private/control/tenant.sqlite \
+  --tenant-id tenant-a \
+  --backup /private/control/before-session11.sqlite \
+  --target-version 11 \
+  --confirm-control-stopped \
+  --max-events 10000
+```
+
+The default target remains 2: explicitly request 11. Check the exit status and
+report's `from_version:10`, `to_version:11`, backup path and genesis sequence/hash.
+The migration verifies/synchronizes an exact 10 backup and rechecks the source
+audit head before the atomic schema 11 reservation marker/tables change. It
+preserves previous events/hashes, identities, claims, quotas and namespace;
+it does not activate supervision, create credentials or execute anything.
+Preserve any backup left after failure and investigate before choosing another
+new destination. Never overwrite backups, edit `user_version` or restore old
+claims to bypass a refusal. Runtime ownership cutover, bootstrap, activation,
+exclusive workspace/transport and real cluster confinement remain unqualified;
+this storage/configuration procedure closes no production gate.
+
 ## Maintain the audit database: schema 8 to 9
 
 Schema 9 adds a durable held-create policy format marker to an existing,
@@ -525,7 +666,7 @@ credential. The command reads control history and confirms a retained result.
 It opens no Kubernetes connection and requires no Kubernetes credential,
 activation capability or running worker. It cannot prepare a new journal or
 create a reservation, claim or Pod.
-The control must expose the broker held-CREATE protocol on schema 9 or 10.
+The control must expose the broker held-CREATE protocol on schema 9, 10 or 11.
 
 Prepare a new private control JSON file, limited to 16 KiB. Replace every
 placeholder with the existing installation's approved values:

@@ -48,6 +48,7 @@ mod human;
 mod human_state;
 mod human_streams;
 mod kubernetes;
+mod kubernetes_sessions;
 #[cfg(test)]
 mod kubernetes_tests;
 mod oidc;
@@ -58,6 +59,12 @@ mod relay_admission;
 mod store_io;
 mod supervision;
 mod workload;
+pub use auth::GatewayControlRecoveryRetirementV2;
+#[cfg(test)]
+pub(crate) use auth::with_authenticated_control_recovery_for_test;
+#[cfg(test)]
+pub(crate) use auth::with_control_recovery_auth_pair_for_test;
+pub(crate) use auth::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
 use auth::{CredentialIndex, CredentialRole, ReadIdentity, RunnerIdentity, bearer};
 pub use oidc::{OidcClaimRuleV1, OidcClaimsMappingV1, OidcGateway, OidcGatewayConfigV1};
 
@@ -167,6 +174,12 @@ struct TenantState {
     worker_quota: QuotaPolicyV1,
     held_create_policy:
         Option<Arc<crate::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>>,
+    session_reservation_policy:
+        Option<Arc<crate::control::kubernetes_session::KubernetesSessionReservationPolicyV2>>,
+    session_recovery_policy:
+        Option<Arc<crate::control::kubernetes_session::KubernetesSessionRecoveryPolicyV2>>,
+    session_control_recovery_policy:
+        Option<Arc<crate::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2>>,
     io: Arc<store_io::Gate>,
     shared_io: Arc<store_io::Gate>,
     control_proof: Option<Arc<ControlProof>>,
@@ -191,6 +204,9 @@ impl TenantState {
             ingestion_rate: Arc::new(Mutex::new((Instant::now(), 0))),
             worker_quota: QuotaPolicyV1::default(),
             held_create_policy: None,
+            session_reservation_policy: None,
+            session_recovery_policy: None,
+            session_control_recovery_policy: None,
             io: Arc::new(store_io::Gate::new(false)),
             shared_io,
             control_proof: None,
@@ -211,6 +227,7 @@ pub struct GatewayState {
     oidc: Option<Arc<OidcGateway>>,
     io: Arc<store_io::Gate>,
     io_scope: Arc<store_io::Scope>,
+    control_recovery_epoch: Arc<auth::ControlRecoveryAuthEpochV2>,
 }
 impl GatewayState {
     fn scoped(&self, scope: Arc<store_io::Scope>) -> Self {
@@ -289,6 +306,87 @@ impl GatewayState {
         Ok(self)
     }
 
+    /// Trusted server configuration only; absence leaves reservation disabled.
+    pub fn with_kubernetes_session_reservation_policies(
+        mut self,
+        policies: Vec<(
+            String,
+            crate::control::kubernetes_session::KubernetesSessionReservationPolicyV2,
+        )>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, policy) in policies {
+            let policy = policy.canonicalized()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate session reservation policy identity"
+            );
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("session reservation policy identity is not registered")
+                })?;
+            tenant.session_reservation_policy = Some(Arc::new(policy));
+        }
+        Ok(self)
+    }
+
+    /// Broker recovery and control recovery are separate opt-in policies.
+    pub fn with_kubernetes_session_recovery_policies(
+        mut self,
+        policies: Vec<(
+            String,
+            crate::control::kubernetes_session::KubernetesSessionRecoveryPolicyV2,
+        )>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, policy) in policies {
+            let policy = policy.canonicalized()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate session recovery policy identity"
+            );
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("session recovery policy identity is not registered")
+                })?;
+            tenant.session_recovery_policy = Some(Arc::new(policy));
+        }
+        Ok(self)
+    }
+
+    /// Only this policy enables the shared Runner's no-effect recovery route.
+    pub fn with_kubernetes_session_control_recovery_policies(
+        mut self,
+        policies: Vec<(
+            String,
+            crate::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2,
+        )>,
+    ) -> anyhow::Result<Self> {
+        let mut configured = HashSet::new();
+        let tenants = Arc::make_mut(&mut self.tenants);
+        for (identity, policy) in policies {
+            let policy = policy.canonicalized()?;
+            anyhow::ensure!(
+                configured.insert(identity.clone()),
+                "duplicate session control recovery policy identity"
+            );
+            let tenant = tenants
+                .iter_mut()
+                .find(|tenant| tenant.tenant_id == identity)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("session control recovery policy identity is not registered")
+                })?;
+            tenant.session_control_recovery_policy = Some(Arc::new(policy));
+        }
+        Ok(self)
+    }
+
     /// Invalid identity configuration denies every authenticated route.
     pub fn new(
         store: Arc<Store>,
@@ -344,6 +442,7 @@ impl GatewayState {
                     oidc: None,
                     io,
                     io_scope: Arc::default(),
+                    control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
                 };
             }
         };
@@ -373,6 +472,7 @@ impl GatewayState {
             oidc: None,
             io,
             io_scope: Arc::default(),
+            control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
         }
     }
     pub fn for_tenants(
@@ -450,6 +550,7 @@ impl GatewayState {
             oidc: None,
             io,
             io_scope: Arc::default(),
+            control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
         })
     }
     fn control_binding(
@@ -757,6 +858,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .merge(relay_admission::routes())
                 .merge(brokers::routes())
                 .merge(kubernetes::routes())
+                .merge(kubernetes_sessions::routes())
                 .merge(human::routes()),
         )
         .nest("/api", routes)

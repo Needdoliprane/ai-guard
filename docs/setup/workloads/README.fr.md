@@ -78,6 +78,47 @@ L'usage workload est cumulatif et durable, indexé par ID broker ou worker dans 
 
 Sur `429 audit_workload_budget_exhausted` avec `retry_action:"contact_operator"`, préserver base, politique et reçus, puis examiner l'occupation. Les retries périodiques et la rotation ne rétablissent pas ce budget cumulatif. Une augmentation délibérée de politique aide seulement dans les limites physiques et des réserves protégées. Aucun archivage automatique, purge ou procédure d'archivage qualifiée n'est fourni. Ne pas supprimer des événements d'audit pour libérer de la place. L'épuisement physique ou l'indisponibilité du stockage obligatoire reste une erreur.
 
+## Configurer réservation et récupération de session Kubernetes
+
+Le schéma 11 ajoute l'état central des réservations de session ; il ne lance
+pas de Pod, n'active pas la supervision et ne raccorde pas un worker au relais.
+Suivre le [guide Kubernetes existant](../kubernetes/README.fr.md#configurer-les-politiques-de-réservation-de-session-v2)
+pour l'exemple public d'entrée tenant sans secret, les bornes exactes et la
+migration 10→11 hors ligne avec sauvegarde neuve vérifiée et attestation d'arrêt
+du contrôle. Garder tous les lecteurs à une version compatible ; la cible
+par défaut de migration reste 2.
+
+Le `--tenants-file` existant fonctionne avec un ou plusieurs tenants. Ses champs
+facultatifs `session_reservation_policy`, `session_recovery_policy` et
+`session_control_recovery_policy` sont des politiques typées version 2
+indépendantes, validées/canonisées avant toute ouverture de base. Absente/null,
+la politique correspondante est désactivée ; une liste vide n'accorde rien.
+Ces champs ne remplacent ni `worker_quota`, `workload_audit_policy`,
+`audit_capacity_policy` ou la politique held-create distincte. La configuration
+de démarrage est immuable ; elle ne désactive ni audit, isolation tenant
+ou confinement runtime.
+
+La récupération broker conserve le même ID de broker historique et une
+authentification broker courante. La récupération contrôle utilise le runner
+technique partagé du tenant avec permission explicite pour cet ID historique,
+même après décommission de toutes les autorités brokers. Son unique route est
+`POST /api/v1/kubernetes/session-reservations/{id}/control-recovery` :
+Observe/Close/Lookup avant effet seulement, avec autorisation serveur fraîche.
+Elle ne donne ni Reserve/CREATE/start, permission humaine ou credential workload.
+Le créateur reste le broker historique ; `control_shared_runner` est l'acteur
+technique observé, pas une personne identifiée. Le broker historique et le
+tenant supportent le budget d'audit workload cumulé, sans remise à zéro par
+rotation ou regrant.
+
+Pour changer/désactiver ces politiques ou remplacer le secret runner, arrêter
+et drainer l'ancien contexte de contrôle avant de construire son remplaçant.
+Éditer un fichier ne révoque pas le contexte vivant. Garder opérations exactes
+et reçus : un lookup authentifié peut rendre l'ancien reçu Close sans nouvel
+append ni libération de quota. Erreur/saturation de l'audit laisse Close bloqué ;
+préserver les données et suivre la procédure bornée de capacité du guide, sans
+effacer l'historique. Ces champs ne fournissent ni nouvelle route HTTP Broker
+de réservation, CLI de lancement, qualification cluster réel ou gate fermé.
+
 ## Séparer quatre rôles techniques
 
 | Preuve | Périmètre autorisé ici |

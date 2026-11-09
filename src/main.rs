@@ -2,6 +2,7 @@ use agentsandbox::{
     api::{self, GatewayState, TenantGateway},
     audit::Store,
     control_fs::{Directory, absolute_path},
+    gateway_server::GatewayServer,
     jev::{
         JevBackend, JevClient, JevTrust, RuleCatalog, SelectionSource,
         validate_credential_separation, validate_transport_configuration,
@@ -457,6 +458,85 @@ fn prepare_supervised_backups(root: &Path, credential_files: &[&Path]) -> Result
     Ok(root)
 }
 
+fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::ConfiguredTenant> {
+    Ok(gateway_config::ConfiguredTenant {
+        tenant_id: "local".into(),
+        data: args.data.clone(),
+        runner_token_file: args.runner_token_file.clone(),
+        viewer_token_file: args.viewer_token_file.clone(),
+        runner_token: read_token(&args.runner_token_file)?,
+        viewer_token: read_token(&args.viewer_token_file)?,
+        worker_quota: agentsandbox::control::QuotaPolicyV1 {
+            version: 1,
+            max_active_workers: args.worker_limit,
+            max_cpu_millis: args.worker_cpu_millis,
+            max_memory_bytes: args.worker_memory_bytes,
+            max_timeout_seconds: args.worker_max_seconds,
+        },
+        audit_capacity_policy: args
+            .audit_capacity_file
+            .as_deref()
+            .map(Store::load_capacity_policy)
+            .transpose()?,
+        workload_audit_policy: args
+            .workload_audit_file
+            .as_deref()
+            .map(Store::load_workload_audit_policy)
+            .transpose()?,
+        held_create_policy: None,
+        session_reservation_policy: None,
+        session_recovery_policy: None,
+        session_control_recovery_policy: None,
+    })
+}
+
+#[derive(Default)]
+struct GatewaySessionPolicies {
+    reservation: Vec<(
+        String,
+        agentsandbox::control::kubernetes_session::KubernetesSessionReservationPolicyV2,
+    )>,
+    recovery: Vec<(
+        String,
+        agentsandbox::control::kubernetes_session::KubernetesSessionRecoveryPolicyV2,
+    )>,
+    control_recovery: Vec<(
+        String,
+        agentsandbox::control::kubernetes_session::KubernetesSessionControlRecoveryPolicyV2,
+    )>,
+}
+
+impl GatewaySessionPolicies {
+    fn from_tenants(tenants: &[gateway_config::ConfiguredTenant]) -> Self {
+        let mut policies = Self::default();
+        for tenant in tenants {
+            if let Some(policy) = &tenant.session_reservation_policy {
+                policies
+                    .reservation
+                    .push((tenant.tenant_id.clone(), policy.clone()));
+            }
+            if let Some(policy) = &tenant.session_recovery_policy {
+                policies
+                    .recovery
+                    .push((tenant.tenant_id.clone(), policy.clone()));
+            }
+            if let Some(policy) = &tenant.session_control_recovery_policy {
+                policies
+                    .control_recovery
+                    .push((tenant.tenant_id.clone(), policy.clone()));
+            }
+        }
+        policies
+    }
+
+    fn apply(self, state: GatewayState) -> Result<GatewayState> {
+        state
+            .with_kubernetes_session_reservation_policies(self.reservation)?
+            .with_kubernetes_session_recovery_policies(self.recovery)?
+            .with_kubernetes_session_control_recovery_policies(self.control_recovery)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
@@ -495,32 +575,7 @@ async fn main() -> Result<()> {
             let tenants = if let Some(path) = &args.tenants_file {
                 gateway_config::load(path)?
             } else {
-                vec![gateway_config::ConfiguredTenant {
-                    tenant_id: "local".into(),
-                    data: args.data,
-                    runner_token_file: args.runner_token_file.clone(),
-                    viewer_token_file: args.viewer_token_file.clone(),
-                    runner_token: read_token(&args.runner_token_file)?,
-                    viewer_token: read_token(&args.viewer_token_file)?,
-                    worker_quota: agentsandbox::control::QuotaPolicyV1 {
-                        version: 1,
-                        max_active_workers: args.worker_limit,
-                        max_cpu_millis: args.worker_cpu_millis,
-                        max_memory_bytes: args.worker_memory_bytes,
-                        max_timeout_seconds: args.worker_max_seconds,
-                    },
-                    audit_capacity_policy: args
-                        .audit_capacity_file
-                        .as_deref()
-                        .map(Store::load_capacity_policy)
-                        .transpose()?,
-                    workload_audit_policy: args
-                        .workload_audit_file
-                        .as_deref()
-                        .map(Store::load_workload_audit_policy)
-                        .transpose()?,
-                    held_create_policy: None,
-                }]
+                vec![configured_local_tenant(&args)?]
             };
             let mut secrets: Vec<String> = tenants
                 .iter()
@@ -594,6 +649,7 @@ async fn main() -> Result<()> {
             // Validate the complete registry before preparing backups or any
             // fresh origin: a later tenant must not strand an earlier one.
             gateway_config::validate_policies(&tenants, args.max_events)?;
+            let session_policies = GatewaySessionPolicies::from_tenants(&tenants);
             let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
                 let mut credential_files: Vec<&Path> = tenants
                     .iter()
@@ -715,9 +771,13 @@ async fn main() -> Result<()> {
                 })
                 .transpose()?;
             let mut state =
-                GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?
-                    .with_worker_quotas(quotas)?
-                    .with_kubernetes_held_create_policies(held_create_policies)?;
+                GatewayState::for_tenants_with_backend(gateways, policy, jev, redactor)?;
+            // Own retirement before any fallible setup after state creation.
+            let server = GatewayServer::new(state.control_recovery_retirement());
+            state = state
+                .with_worker_quotas(quotas)?
+                .with_kubernetes_held_create_policies(held_create_policies)?;
+            state = session_policies.apply(state)?;
             if let Some(oidc) = oidc {
                 state = state.with_oidc(oidc)?;
             }
@@ -725,32 +785,25 @@ async fn main() -> Result<()> {
                 .control_listen
                 .map(|_| api::gateway_control_router(state.clone()));
             let router = api::gateway_router(state);
-            let shutdown = shutdown_signal()?.shared();
-            let listener = tokio::net::TcpListener::bind(args.listen).await?;
-            // Bind every configured surface before serving any request.
-            let control_listener = match args.control_listen {
-                Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
-                None => None,
-            };
-            eprintln!(
-                "Gateway {} — {} tenant(s), audit vérifié, {} événements",
-                listener.local_addr()?,
-                tenant_count,
-                event_count
-            );
-            for diagnostic in capacity_diagnostics {
-                eprintln!("{diagnostic}");
-            }
-            let control_shutdown = shutdown.clone();
-            tokio::try_join!(serve_http(listener, router, shutdown), async move {
-                match (control_listener, control_router) {
-                    (Some(listener), Some(router)) => {
-                        serve_http(listener, router, control_shutdown).await
-                    }
-                    (None, None) => Ok(()),
-                    _ => anyhow::bail!("control listener configuration is incomplete"),
-                }
-            })?;
+            let shutdown = shutdown_signal()?;
+            let control = args.control_listen.zip(control_router);
+            server
+                .serve(
+                    (args.listen, router),
+                    control,
+                    shutdown,
+                    move |listen, _control| {
+                        eprintln!(
+                            "Gateway {} — {} tenant(s), audit vérifié, {} événements",
+                            listen, tenant_count, event_count
+                        );
+                        for diagnostic in capacity_diagnostics {
+                            eprintln!("{diagnostic}");
+                        }
+                        Ok(())
+                    },
+                )
+                .await?;
         }
         Command::MigrateControl {
             data,
@@ -1000,6 +1053,10 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 #[path = "workload/main_config_tests.rs"]
 mod workload_config_tests;
+
+#[cfg(test)]
+#[path = "gateway_main_tests.rs"]
+mod gateway_main_tests;
 
 #[cfg(test)]
 mod tests {

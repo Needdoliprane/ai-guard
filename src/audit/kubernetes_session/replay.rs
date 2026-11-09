@@ -163,7 +163,7 @@ fn exact_reservation_reference(
     record: &Record,
     tenant: &str,
 ) -> anyhow::Result<()> {
-    let reference = match &record.authorization.basis {
+    let reference = match &record.authorization.broker()?.basis {
         Basis::Reserve { .. } => return Ok(()),
         Basis::Reconcile {
             reservation_seq,
@@ -176,7 +176,7 @@ fn exact_reservation_reference(
                 stored.seq == *reservation_seq
                     && stored.hash == *reservation_hash
                     && original.intent.same(&record.intent)?
-                    && original.authorization.decision_hash == *reservation_decision_hash,
+                    && original.authorization.broker()?.decision_hash == *reservation_decision_hash,
             )?;
             (stored, original)
         }
@@ -199,7 +199,7 @@ fn exact_reservation_reference(
     permission(
         reference.0.seq == *reservation_seq
             && reference.0.hash == *reservation_hash
-            && reference.1.actor.identity() == *actor
+            && reference.1.actor.identity()? == *actor
             && reference.1.intent.same(&record.intent)?,
     )
 }
@@ -209,19 +209,22 @@ pub(super) fn validate_historical(
     record: &Record,
     tenant: &str,
 ) -> anyhow::Result<()> {
-    let actor = record.actor.identity();
+    if record.authorization.control().is_some() {
+        return control_recovery::validate_historical(db, stored, record, tenant);
+    }
+    let authorization = record.authorization.broker()?;
+    let actor = record.actor.identity()?;
     let identity = actor.identity()?;
     let received = parse_time(&record.received_at)?;
-    let issued = parse_time(&record.authorization.issued_at)?;
+    let issued = parse_time(&authorization.issued_at)?;
     permission(
         actor.tenant_id == tenant
-            && record.authorization.actor == actor
+            && authorization.actor == actor
             && parse_time(&stored.received_at)? >= received,
     )?;
-    validate_origin(db, &record.authorization, Some(stored.seq))?;
+    validate_origin(db, authorization, Some(stored.seq))?;
     workload::validate_broker_identity_at(db, &identity, received, stored.seq)?;
-    let before_origin = record
-        .authorization
+    let before_origin = authorization
         .origin_seq
         .checked_add(1)
         .ok_or(Failure::Unavailable)?;
@@ -233,9 +236,8 @@ pub(super) fn validate_historical(
             .ok_or(Failure::PermissionDenied)?;
         permission(
             broker.incarnation_id == actor.incarnation_id
-                && parse_time(&record.authorization.expires_at)?
-                    <= parse_time(&binding.expires_at)?
-                && parse_time(&record.authorization.expires_at)? <= parse_time(&broker.not_after)?
+                && parse_time(&authorization.expires_at)? <= parse_time(&binding.expires_at)?
+                && parse_time(&authorization.expires_at)? <= parse_time(&broker.not_after)?
                 && parse_time(&binding.updated_at)? <= issued
                 && parse_time(&broker.granted_at)? <= issued,
         )?;
@@ -251,7 +253,7 @@ pub(super) fn validate_historical(
             && actor.broker_id == ids.broker_id.to_string(),
     )?;
     if matches!(
-        record.authorization.basis,
+        authorization.basis,
         Basis::Reserve { .. } | Basis::Reconcile { .. }
     ) {
         let broker = broker_registry::broker_at(db, &actor.broker_id, stored.seq)?
@@ -397,7 +399,11 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         ensure_no_legacy_identity(db, &record.intent)?;
         if matches!(record.change, Change::Reserve) {
             ensure_quota(
-                &control::quota_usage_before(db, stored.seq, &record.authorization.quota)?,
+                &control::quota_usage_before(
+                    db,
+                    stored.seq,
+                    &record.authorization.broker()?.quota,
+                )?,
                 &record.intent,
                 true,
             )?;

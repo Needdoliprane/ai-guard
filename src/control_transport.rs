@@ -123,7 +123,8 @@ fn canonical_uuid(value: &str) -> bool {
 
 /// Classify a gateway-root path after the relay removes exactly `/control`.
 /// No decoding/normalization is performed. Historical dynamic IDs remain the
-/// handler's responsibility; the new worker ACK path requires a canonical UUID.
+/// handler's responsibility; worker ACK and session recovery paths require a
+/// canonical UUID. Session recovery additionally refuses nil in its handler.
 pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity> {
     if !path.starts_with('/')
         || !path.is_ascii()
@@ -176,6 +177,11 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         | (&Method::POST, ["relay", "channels", _, "claims"])
         | (&Method::POST, ["relay", "channels", _, "transitions"])
             if v1 =>
+        {
+            Some(Runner)
+        }
+        (&Method::POST, ["kubernetes", "session-reservations", id, "control-recovery"])
+            if v1 && canonical_uuid(id) =>
         {
             Some(Runner)
         }

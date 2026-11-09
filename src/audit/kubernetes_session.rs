@@ -8,6 +8,7 @@ use crate::control::kubernetes_session::*;
 use chrono::{DateTime, Utc};
 
 mod authorization;
+mod control_recovery;
 mod migration;
 mod model;
 mod mutations;
@@ -70,6 +71,10 @@ pub(crate) use authorization::{
     KubernetesSessionRecoverBeforeEffectV2, KubernetesSessionRecoveryAuthorizationV2,
     KubernetesSessionRecoveryReceiptLookupV2, KubernetesSessionReservationAuthorizationV2,
 };
+pub(crate) use control_recovery::{
+    ControlRecoverBeforeEffectV2, ControlRecoveryReceiptLookupV2,
+    KubernetesSessionControlRecoveryAuthorizationV2,
+};
 pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
     migration::initialize(store, tx)
 }
@@ -91,8 +96,13 @@ pub(super) fn workload_audit_identity(
         return Ok(None);
     }
     let record = model::record(event)?;
+    let broker_id = match &record.creator {
+        model::Creator::ThisReserve => record.actor.identity()?.broker_id,
+        model::Creator::Reservation { actor, .. } => actor.broker_id.clone(),
+    };
+    permission(broker_id == record.intent.ids()?.broker_id.to_string())?;
     Ok(Some(capacity::WorkloadAuditPrincipalV1::Broker {
-        broker_id: record.intent.ids()?.broker_id.to_string(),
+        broker_id,
     }))
 }
 

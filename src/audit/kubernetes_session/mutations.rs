@@ -40,7 +40,7 @@ fn prepared(
             Creator::Reservation {
                 reservation_seq: stored.seq,
                 reservation_hash: stored.hash,
-                actor: original.actor.identity(),
+                actor: original.actor.identity()?,
             }
         }
     };
@@ -56,7 +56,7 @@ fn prepared(
         received_at: format_time(at),
         actor: Actor::broker(&evidence.actor),
         creator,
-        authorization: evidence.clone(),
+        authorization: evidence.clone().into(),
         intent: intent.clone(),
         previous_revision: previous
             .as_ref()
@@ -193,7 +193,7 @@ impl Store {
         workload::revalidate_broker_identity(&tx, identity, clock.at())?;
         permission(identity.tenant_id() == self.tenant_id)?;
         let (_, original) = replay::reservation(&tx, id, &self.tenant_id)?;
-        permission(original.actor.identity().broker_id == identity.broker_id())?;
+        permission(original.actor.identity()?.broker_id == identity.broker_id())?;
         self.commit_authorized(tx, &clock)?;
         Ok(original.intent)
     }

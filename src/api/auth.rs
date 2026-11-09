@@ -10,6 +10,15 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
+mod control_recovery;
+pub use control_recovery::GatewayControlRecoveryRetirementV2;
+#[cfg(test)]
+pub(crate) use control_recovery::with_authenticated_control_recovery_for_test;
+#[cfg(test)]
+pub(crate) use control_recovery::with_control_recovery_auth_pair_for_test;
+pub(crate) use control_recovery::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
+pub(super) use control_recovery::{ControlRecoveryAuthEpochV2, VerifiedControlRecoveryRunnerV2};
+
 const MAX_CREDENTIAL_BYTES: usize = 4096;
 
 fn valid_credential(token: &str) -> bool {

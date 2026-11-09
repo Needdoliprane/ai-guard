@@ -78,6 +78,44 @@ Workload usage is cumulative and durable, keyed by broker ID or worker ID within
 
 On `429 audit_workload_budget_exhausted` with `retry_action:"contact_operator"`, preserve database, policy and receipts, and inspect occupancy. Repeated timer retries or rotation cannot recover this cumulative budget. A deliberate policy increase helps only within physical capacity and protected reserves. No automatic archival, purge or qualified archive procedure is supplied. Do not delete audit events to free capacity. Physical exhaustion or unavailable mandatory storage remains an error.
 
+## Configure Kubernetes session reservation and recovery
+
+Schema 11 adds central session reservation state; it does not launch a Pod,
+activate supervision or connect a worker to this relay. Follow the existing
+[Kubernetes guide](../kubernetes/README.md#configure-session-reservation-v2-policies)
+for the secret-free tenant-entry example, exact bounds and offline 10→11
+migration with a verified new backup and stopped-control attestation. Keep
+all readers at a compatible version; the migration default stays 2.
+
+The existing `--tenants-file` works for one or several tenants. Its optional
+`session_reservation_policy`, `session_recovery_policy` and
+`session_control_recovery_policy` are independent typed version 2 policies,
+validated/canonicalized before any database opens. Missing/null disables the
+corresponding policy; an empty allowlist grants nothing. These fields do not
+replace `worker_quota`, `workload_audit_policy`, `audit_capacity_policy` or the
+separate held-create policy. Startup configuration is immutable; it cannot
+disable audit, tenant isolation or runtime confinement.
+
+Broker recovery retains the same historical broker ID and current broker
+authentication. Control recovery instead uses the tenant's shared technical
+runner with explicit permission for that historical broker ID, even after all
+broker authorities have been decommissioned. Its one route is
+`POST /api/v1/kubernetes/session-reservations/{id}/control-recovery`:
+Observe/Close/Lookup before effect only, with fresh server-side authorization.
+It grants no Reserve/CREATE/start, human permission or workload credential.
+Creator remains the historical broker; `control_shared_runner` is the observed
+technical actor, not a named person. Close consumes the historical broker/tenant's
+cumulative workload audit budget, with no reset on rotation or regrant.
+
+To change/disable these policies or replace the runner secret, stop and drain
+the existing control context before constructing the replacement. Editing a
+file is not live revocation. Retain exact operations and receipts: authenticated
+lookup can return an old Close receipt without a new append or quota release.
+Audit failure/saturation keeps Close blocked; preserve data and use the guide's
+bounded capacity procedure, without deleting history. No new Broker reservation
+HTTP route, launch CLI, real-cluster qualification or production gate follows
+from these configuration fields.
+
 ## Keep four technical roles separate
 
 | Proof | Permitted scope here |

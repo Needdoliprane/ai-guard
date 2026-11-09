@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 9 novembre — S2 vérifié ; composer les corrections relais sur la nouvelle base
+
+La récupération centrale avant effet, son authentification et ses trois
+politiques sont raccordées à Main et au transport contrôle fermé. Cinquante
+parents et la compilation finale passent sur les gels des [preuves S2](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration).
+Ce lot ne fournit pas le lancement Kubernetes complet.
+
+Priorités : composer D5 sur la nouvelle base en préservant S1/S2/CLI11/TLS ;
+reproduire puis valider C1 (snapshot TLS du relais) et C2 (causes des attentes)
+après leurs revues ; discriminer la continuation Authorized avant soumission ;
+reprendre l'observation Full3 sans hausser ses délais pour masquer l'échec.
+Puis poursuivre bootstrap, identité/stockage et lifecycle Kubernetes, fédération
+physique, contrôle réseau et qualifications réelles. Les autres obligations
+du mandat restent ouvertes, sans devenir des extensions facultatives.
+
 ## 8 novembre — profil V2 vérifié ; composition et propriétaires d'audit prioritaires
 
 Le contrat descriptif Kubernetes V2 est intégré après revue, onze fonctions et

@@ -1,5 +1,24 @@
 # Validation courante
 
+## 9 novembre — cinquante parents S2 et compilation toutes cibles
+
+Le gel `d7cd2349…` passe huit parents lifecycle et quatre de transport.
+Après deux corrections du seul test Auth (parent 0700 et refus typé
+`Unauthorized` pour un binding révoqué), `6ab7eb13…` passe Auth 12, Core 8,
+HTTP 6, configuration 10 et Main 2 : 38 autres parents. Les douze premiers
+n'ont pas été rejoués sur le second gel ; leurs résultats restent attachés
+au premier. Aucune application, politique, limite ou autre test n'a changé
+entre ces deux gels.
+
+Le check `--all-targets --locked --offline` du second gel termine RC0 en
+1m06s, warnings conservés. Revues des composants/correctifs, formatage et
+égalité finale `src/tests/Cargo` passent. [Commandes et incidents](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration).
+Config10 avait un timeout configuré à 600 s au lieu des 300 s alors prescrites ;
+elle termine en 4,17 s de build et 0,08 s de tests. L'écart reste consigné,
+sans relance. QA fermée normalement à 00:09 UTC, OOM false et zéro événement
+OOM ; 45 pièces texte/JSON vérifiées sont conservées hors du checkout.
+Clippy et les parcours moteurs/provider/cluster restent NOT_RUN ici.
+
 ## 8 novembre, 23:32 UTC — RED lifecycle après correction des fixtures
 
 Le gel `92850e5a…`, 2 324 fichiers, ne diffère du premier essai que par

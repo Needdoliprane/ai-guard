@@ -309,7 +309,7 @@ agentsandbox broker control-info \
 ```
 
 Utiliser son `control_namespace_uuid` exact, une identité runner et un schéma
-compatible 3–10 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
+compatible 3–11 avec `broker_supervision_v1`. Le gateway est une origine HTTPS
 ou une origine HTTP loopback explicitement choisie ; ce fichier n'ajoute pas
 d'options AC privée ou mTLS à la connexion gateway. `runner_token_file` est
 un chemin absolu vers un fichier privé contenant au plus 4 Kio, pas la valeur du jeton. Le runner du
@@ -474,6 +474,156 @@ normaliser leurs chaînes ; leur ordre ne change pas l'empreinte de politique.
 Ces contrôles valident seulement la configuration ; ils ne qualifient ni
 propriété du Namespace, admission cluster, RBAC ou confinement CNI.
 
+## Configurer les politiques de réservation de session V2
+
+Les réservations de session utilisent le schéma 11 et trois champs facultatifs
+indépendants dans chaque entrée tenant du registre existant `--tenants-file`.
+Le registre reste en `version:1` ; les politiques sont en `version:2`. Utiliser
+ce registre aussi en mono-tenant, en conservant sa base, ses références de
+credentials privés, quota et politiques d'audit. Aucun flag de politique de
+session distinct ni politique fournie par un corps de requête n'est accepté.
+
+Cet **exemple partiel d'entrée tenant** contient des valeurs publiques fictives.
+Remplacer UUID/empreinte d'autorité par l'autorité approuvée, image et tuple
+fournisseur par le profil exact retenu, et UUID de brokers par les créateurs
+historiques explicitement approuvés pour ce tenant :
+
+```json
+{
+  "session_reservation_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "approvals": [{
+      "authority_id": "11111111-1111-4111-8111-111111111111",
+      "authority_fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "image": "registry.example.invalid/worker@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "client": "codex",
+      "auth_mode": "api",
+      "transport": "batch",
+      "profile_id": "codex_api",
+      "profile_revision": 1
+    }]
+  },
+  "session_recovery_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "allowed_broker_ids": ["22222222-2222-4222-8222-222222222222"]
+  },
+  "session_control_recovery_policy": {
+    "version": 2,
+    "decision_ttl_seconds": 30,
+    "allowed_broker_ids": ["22222222-2222-4222-8222-222222222222"]
+  }
+}
+```
+
+Absente ou `null`, chaque politique est désactivée ; `{}` est invalide. Des
+listes `approvals` ou `allowed_broker_ids` vides sont valides et n'autorisent
+rien. Chaque politique fermée/version 2 exige un TTL de décision de 1 à 60 secondes,
+au plus 64 entrées distinctes et au plus 16384 octets de JSON compact canonique.
+Champs JSON inconnus ou dupliqués, tuples/UUID dupliqués, enums invalides et
+UUID non canoniques ou nuls sont refusés. Le démarrage valide et trie ces
+politiques typées avant d'ouvrir toute base tenant ; il ne réécrit pas le
+registre. Le registre entier est limité à 1 Mio. Aucun rechargement à chaud
+de ces paramètres de démarrage n'est fourni.
+
+Une approbation correspond exactement aux huit champs : UUID d'autorité,
+empreinte de 64 hex minuscules, image immuable, `client:codex|claude_code`,
+`auth_mode:api|subscription`, `transport:batch|interactive_tty`,
+`profile_id` (1 à 80 lettres/chiffres ASCII/`_`/`-`) et `profile_revision`
+entier 32 bits positif. L'image suit le validateur held-create ci-dessus.
+Aucun wildcard, modèle, credential, argv ou repli n'est ajouté. `worker_quota`
+borne séparément l'allocation ; le profil de réservation garde le réseau
+refusé. Une réservation crée un état central durable, pas un Pod ou un droit
+de démarrage.
+
+`session_recovery_policy` autorise seulement la récupération avant effet par
+un broker actuellement authentifié ayant le même ID de broker historique.
+La politique distincte `session_control_recovery_policy` permet au **runner
+technique partagé** authentifié du tenant, sans broker successeur actif,
+d'utiliser `POST /api/v1/kubernetes/session-reservations/{id}/control-recovery`
+pour `observe_reserved`, `close_before_effect` ou `lookup_close_receipt` exact.
+Elle vise uniquement un historique Reserved/NeverIssued validé, sans effet
+ni identité legacy liée. Le contrôle authentifié choisit le tenant et confronte
+la politique au créateur historique. Observe ne donne pas Close ; aucune de
+ces politiques de récupération ne donne Reserve, CREATE, start ou credential
+workload. Ne fournir ni tenant, politique, rôle ou sujet à facturer dans le
+corps. Cette configuration n'ajoute ni route HTTP Broker de réservation ni
+CLI de lancement de session.
+
+Le [contrat API bilingue](../../api.md#récupération-contrôle-des-réservations-kubernetes-v2--kubernetes-session-control-recovery-v2)
+précise corps fermés, réponses, hashes, erreurs et règles de reprise. Sur
+l'origine gateway publiée par Compose, utiliser
+`POST /control/api/v1/kubernetes/session-reservations/{id}/control-recovery`.
+Le relais contrôle fixe et le vrai gateway utilisent la voie Runner et
+refusent anonyme/worker/viewer avant lecture du corps. Un runner valide atteint
+les trois DTOs d'action fermés ; politique absente donne 403 et UUID nil
+donne 400 dans le handler de session. Le chemin public ordinaire `/api/v1/...`
+lit toujours le corps avant l'authentification gateway, avec ses budgets publics ;
+il n'offre pas cette réserve de transport contrôle. Le dashboard ne relaie
+pas la mutation. Ces vérifications logicielles ne qualifient ni déploiement
+Compose réel, cluster, lancement Kubernetes ou transport cloud.
+
+L'acteur contrôle est enregistré comme `control_shared_runner`, distinct du
+broker créateur historique ; ce credential partagé n'identifie pas une personne.
+Le conserver dans le stockage du contrôle de confiance, hors navigateurs/workers.
+TTL de politique et authentification fraîche s'appliquent à chaque requête.
+Changer le fichier runner ne révoque pas un gateway vivant : arrêter l'ancien
+gateway, retirer/drainer son contexte de récupération contrôle puis construire
+son remplaçant avec la configuration privée voulue. Les usages ayant déjà leur
+lease peuvent finir ; aucune durée fixe de drainage ou révocation distribuée
+n'est promise. Une reprise après redémarrage/rotation s'authentifie de nouveau
+et peut retrouver le reçu Close original exact, sans nouvel append, débit
+ou attribution historique.
+
+Close exige un audit durable même si l'allocation reste retenue. Le budget
+d'audit workload est débité au broker historique et au tenant, y compris pour
+Control Close ; rotation/regrant ne le réinitialisent pas. À saturation,
+préserver état, politique et reçus. Augmenter explicitement
+`workload_audit_policy` avant d'ouvrir/partager le Store remplaçant n'aide que
+dans la marge physique et les réserves protégées ; reprendre la même opération.
+Sans cette capacité, la récupération reste bloquée. Ne jamais effacer l'audit
+ni libérer le quota sans son enregistrement obligatoire.
+
+## Maintenir les réservations de session : schéma 10 vers 11
+
+Employer une même version du produit pour gateway, brokers, clients, dashboard
+et maintenance hors ligne. Les anciens binaires ne peuvent pas ouvrir 11.
+Suivre d'abord les [migrations successives jusqu'à 10](../identity/WORKERS.fr.md#migrer-explicitement-le-stockage-existant)
+avec une sauvegarde neuve distincte à chaque étape. La migration 11 n'accepte
+qu'une source 10 vérifiée et ne s'exécute jamais automatiquement au démarrage.
+Garder tous les consommateurs et redémarrages automatiques arrêtés, préserver
+les ancres runtime/enforcement et utiliser l'UID/GID privé et le stockage
+existants du contrôle. `--confirm-control-stopped` est votre attestation,
+pas une exclusion de processus ou une preuve d'arrêt des workers.
+
+Remplacer chemins, tenant et `--max-events` par ceux de l'installation.
+La sauvegarde doit être un **nouveau fichier inexistant** dans son stockage privé :
+
+```sh
+agentsandbox migrate-control \
+  --data /private/control/tenant.sqlite \
+  --tenant-id tenant-a \
+  --backup /private/control/before-session11.sqlite \
+  --target-version 11 \
+  --confirm-control-stopped \
+  --max-events 10000
+```
+
+La cible par défaut reste 2 : demander 11 explicitement. Vérifier code de sortie
+et rapport : `from_version:10`, `to_version:11`, chemin de sauvegarde et
+séquence/hash de genèse. La migration vérifie/synchronise une sauvegarde 10
+exacte puis revérifie le head source avant le changement atomique du marqueur
+et des tables de réservation au schéma 11. Elle préserve événements/hashes,
+identités, claims, quotas et namespace antérieurs ; elle n'active pas la
+supervision, ne crée pas de credential et n'exécute rien. Conserver toute
+sauvegarde laissée après un échec et enquêter avant une autre destination neuve.
+Ne jamais écraser une sauvegarde, éditer `user_version` ou restaurer d'anciens
+claims pour contourner un refus. Cutover de propriété runtime, bootstrap,
+activation, workspace/transport exclusifs et confinement sur cluster réel
+restent non qualifiés ; cette procédure stockage/configuration ne ferme
+aucun gate de production.
+
 ## Maintenir l'audit : du schéma 8 au schéma 9
 
 Le schéma 9 ajoute un marqueur durable de format de politique held-create à
@@ -553,7 +703,7 @@ credential broker actuellement autorisé. La commande lit l'historique du
 contrôle et confirme un résultat retenu. Elle n'ouvre aucune connexion Kubernetes
 et ne demande ni credential Kubernetes, ni capacité d'activation, ni worker actif.
 Elle ne prépare aucun nouveau journal, réservation, claim ou Pod.
-Le contrôle doit exposer le protocole broker de CREATE retenu au schéma 9 ou 10.
+Le contrôle doit exposer le protocole broker de CREATE retenu au schéma 9, 10 ou 11.
 
 Préparer un nouveau fichier JSON privé de contrôle, limité à 16 Kio. Remplacer
 chaque placeholder par les valeurs approuvées de l'installation existante :

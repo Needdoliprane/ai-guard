@@ -1,4 +1,8 @@
 //! Trusted operator configuration. Request data never selects these scopes.
+use agentsandbox::control::kubernetes_session::{
+    KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,
+    KubernetesSessionReservationPolicyV2,
+};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
@@ -27,6 +31,9 @@ struct TenantFiles {
     workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
     held_create_policy:
         Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
+    session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
+    session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
+    session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
 }
 
 pub struct ConfiguredTenant {
@@ -41,6 +48,9 @@ pub struct ConfiguredTenant {
     pub workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
     pub held_create_policy:
         Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
+    pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
+    pub session_recovery_policy: Option<KubernetesSessionRecoveryPolicyV2>,
+    pub session_control_recovery_policy: Option<KubernetesSessionControlRecoveryPolicyV2>,
 }
 
 #[derive(Deserialize)]
@@ -242,6 +252,21 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             .map(|policy| policy.canonicalized())
             .transpose()
             .context("Politique Kubernetes du tenant invalide")?;
+        let session_reservation_policy = tenant
+            .session_reservation_policy
+            .map(|policy| policy.canonicalized())
+            .transpose()
+            .context("Politique de réservation de session Kubernetes invalide")?;
+        let session_recovery_policy = tenant
+            .session_recovery_policy
+            .map(|policy| policy.canonicalized())
+            .transpose()
+            .context("Politique de récupération broker de session Kubernetes invalide")?;
+        let session_control_recovery_policy = tenant
+            .session_control_recovery_policy
+            .map(|policy| policy.canonicalized())
+            .transpose()
+            .context("Politique de récupération contrôle de session Kubernetes invalide")?;
         agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
         anyhow::ensure!(
             ids.insert(tenant.tenant_id.clone()),
@@ -272,6 +297,9 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             audit_capacity_policy: tenant.audit_capacity_policy,
             workload_audit_policy: tenant.workload_audit_policy,
             held_create_policy,
+            session_reservation_policy,
+            session_recovery_policy,
+            session_control_recovery_policy,
         });
     }
     Ok(result)
@@ -295,6 +323,21 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
             policy
                 .validate()
                 .context("Politique Kubernetes du tenant invalide")?;
+        }
+        if let Some(policy) = &tenant.session_reservation_policy {
+            policy
+                .validate()
+                .context("Politique de réservation de session Kubernetes invalide")?;
+        }
+        if let Some(policy) = &tenant.session_recovery_policy {
+            policy
+                .validate()
+                .context("Politique de récupération broker de session Kubernetes invalide")?;
+        }
+        if let Some(policy) = &tenant.session_control_recovery_policy {
+            policy
+                .validate()
+                .context("Politique de récupération contrôle de session Kubernetes invalide")?;
         }
         agentsandbox::tenancy::validate_tenant_id(&tenant.tenant_id)?;
         for credential in [&tenant.runner_token, &tenant.viewer_token] {

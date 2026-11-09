@@ -1,5 +1,5 @@
 use super::*;
-use authorization::Evidence;
+use control_recovery::JournalAuthorization;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -63,6 +63,15 @@ pub(super) enum Actor {
         binding_revision: u64,
         grant_revision: u64,
     },
+    ControlSharedRunner {
+        tenant_id: String,
+        mechanism: String,
+        role: String,
+        auth_origin: String,
+        auth_epoch_id: String,
+        request_auth_id: String,
+        authenticated_at: String,
+    },
 }
 impl Actor {
     pub(super) fn broker(identity: &IdentityEvidence) -> Self {
@@ -75,7 +84,7 @@ impl Actor {
             grant_revision: identity.grant_revision,
         }
     }
-    pub(super) fn identity(&self) -> IdentityEvidence {
+    pub(super) fn identity(&self) -> anyhow::Result<IdentityEvidence> {
         match self {
             Self::Broker {
                 tenant_id,
@@ -84,14 +93,22 @@ impl Actor {
                 credential_id,
                 binding_revision,
                 grant_revision,
-            } => IdentityEvidence {
+            } => Ok(IdentityEvidence {
                 tenant_id: tenant_id.clone(),
                 broker_id: broker_id.clone(),
                 incarnation_id: incarnation_id.clone(),
                 credential_id: credential_id.clone(),
                 binding_revision: *binding_revision,
                 grant_revision: *grant_revision,
-            },
+            }),
+            Self::ControlSharedRunner { .. } => Err(Failure::PermissionDenied.into()),
+        }
+    }
+    pub(super) fn tenant_id(&self) -> &str {
+        match self {
+            Self::Broker { tenant_id, .. } | Self::ControlSharedRunner { tenant_id, .. } => {
+                tenant_id
+            }
         }
     }
 }
@@ -139,7 +156,7 @@ pub(super) struct Record {
     pub actor: Actor,
     pub creator: Creator,
     #[serde(rename = "control_decision")]
-    pub authorization: Evidence,
+    pub authorization: JournalAuthorization,
     pub intent: KubernetesSessionReservationIntentV2,
     pub previous_revision: u64,
     pub change: Change,
@@ -154,7 +171,7 @@ struct RecordWire {
     actor: Actor,
     creator: Creator,
     #[serde(rename = "control_decision")]
-    authorization: Evidence,
+    authorization: JournalAuthorization,
     intent: Value,
     previous_revision: u64,
     change: Change,
@@ -233,19 +250,16 @@ pub(super) fn record(event: &Event) -> anyhow::Result<Record> {
         change: wire.change,
         post_state: wire.post_state,
     };
-    let actor = record.actor.identity();
-    actor.identity()?;
-    record
-        .authorization
-        .validate(&record.intent, &actor, parse_time(&record.received_at)?)?;
     let ids = record.intent.ids()?;
     let operation = record.change.operation_id(&record.intent);
     conflict(
         record.version == 2
             && event.id == operation
             && event.kind == record.change.kind()
-            && record.input_hash == record.change.input_hash(&record.intent, &actor.tenant_id)?
-            && record.actor.identity() == record.authorization.actor
+            && record.input_hash
+                == record
+                    .change
+                    .input_hash(&record.intent, record.actor.tenant_id())?
             && event.timestamp == record.received_at
             && format_time(parse_time(&record.received_at)?) == record.received_at
             && record.received_at.len() == 24
@@ -263,10 +277,17 @@ pub(super) fn record(event: &Event) -> anyhow::Result<Record> {
             && event.decision.is_none()
             && event.result.is_none(),
     )?;
-    record
-        .authorization
-        .allows(&record.change, &record.intent)?;
     record.post_state.validate()?;
+    if record.authorization.control().is_some() {
+        control_recovery::validate_record(&record)?;
+        return Ok(record);
+    }
+    let actor = record.actor.identity()?;
+    actor.identity()?;
+    let authorization = record.authorization.broker()?;
+    authorization.validate(&record.intent, &actor, parse_time(&record.received_at)?)?;
+    authorization.allows(&record.change, &record.intent)?;
+    permission(actor == authorization.actor)?;
     match (&record.change, &record.creator) {
         (Change::Reserve, Creator::ThisReserve) => conflict(record.previous_revision == 0)?,
         (
