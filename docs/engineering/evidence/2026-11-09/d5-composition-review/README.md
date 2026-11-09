@@ -1,5 +1,36 @@
 # D5 composition — independent source review
 
+## Recomposition after S2, 9 November
+
+The candidate has now been recomposed on published integration commit
+`a9f28ebb1b37a8b68a2a894b4de6e7e76db95c00`. It preserves the S2 gateway,
+policy, authentication and usage paths. The only overlap in the 38 S2 paths
+is `main.rs`: two Full3 CLI additions, with the gateway lifecycle unchanged.
+Root independently materialized and checked every file in all three complete
+source variants. No prior execution result transfers to this composition.
+
+| New record | Files | SHA-256 |
+|---|---:|---|
+| D5 baseline manifest | 2 378 | `852bd12cc5bda87f3b4ed250d5a9d64e90077859065d9746e001766ac04a080e` |
+| C1/C2 reproduction manifest | 2 381 | `7c1981adce24cdf84156681e82b237d7559ce133f57157f4b72e8c251374fff3` |
+| Corrected candidate manifest | 2 381 | `9f16fb3306a9ddeaff920cf5755493213c102f3a47c0f7e1b4a858e042547c1c` |
+| Root composition review | — | `467215e618c510aa258c219967411cbccb4c7c524396e6000bd8739ab0cfc158` |
+| Completed artifact index | 392 entries | `61086218cec9d2c7740f74e158bb99d21b3e923cb1c73cb68c157e1e258427d2` |
+
+The C1 candidate carries the immutable private-CA trust through the real worker
+binding construction. Its semantic review and separate formatting review are
+retained. The C2 candidate preserves the observed cause in two waiters and
+`run_handoff`, without changing the V1 wire enum or extending the original
+deadline. Its independent source review is retained. Other generalized error
+paths are outside this correction's scope.
+
+These are source candidates, not integrated fixes. Compilation and targeted
+RED/GREEN evidence on the new composition remain required. The historical
+Full3 failure and the retirement continuation question remain open; neither
+a source comparison nor a source review establishes runtime recovery.
+
+## Original composition and reviews
+
 The private candidate composes the D5 broker/relay work on integration commit
 `4a0d4c617be23dd58f63deb7325b9306d91c7ade`, preserving S1, CLI11 and TLS
 changes. The 100-path delta contains 49 modifications and 51 additions;

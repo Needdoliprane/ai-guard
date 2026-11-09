@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 9 novembre — composition D5 après S2 et fermeture des worktrees du lot
+
+Le candidat broker/relais est recomposé sur l'intégration S2 `a9f28eb`.
+Les sources complètes baseline, reproduction C1/C2 et correction sont figées
+et vérifiées fichier par fichier. Les chemins S2 sont conservés ; les seuls
+ajouts partagés de Main concernent le CLI Full3. Les corrections TLS et causes
+d'arrêt restent des candidats séparés, à compiler et vérifier avant intégration.
+[Gels, portée des revues et limites](evidence/2026-11-09/d5-composition-review/README.md#recomposition-after-s2-9-november).
+
+Les cinq worktrees des composants S2 sont fermés après vérification de
+l'intégration distante, comparaison des fichiers, inventaire des fichiers
+ignorés/non suivis et contrôles des consommateurs. Les branches d'archive
+locales et les preuves sont conservées ; aucun volume n'a été supprimé.
+Le checkout principal, l'intégration et les worktrees D5 restent préservés.
+Ce nettoyage ne clôture aucun gate ; G09 FAIL et 0/12 gates globaux fermés.
+
 ## 9 novembre — récupération centrale S2 raccordée et vérifiée en logiciel
 
 Le contrôle peut observer une réservation Kubernetes V2 avant effet, engager
