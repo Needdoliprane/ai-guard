@@ -1,5 +1,47 @@
 # Plan d'industrialisation
 
+## 9 novembre — suivi du nouvel audit sans arrêter les développements
+
+Le [registre multi-worktrees](AUDIT_FOLLOWUP.md#audit-multiworktree-20261108)
+conserve les quinze risques et deux rejets du run source-only ; chaque candidat
+demande vérification courante et oracle avant correction. L'archivage privé
+avec empreintes et sauvegarde extérieure est effectué, sans publication du
+rapport dans Git. Il ne ferme aucun constat.
+
+| Propriétaire actif | Lot exclusif et prochaine preuve |
+|---|---|
+| Root | Archive privée et filtre vérifiés ; intégration et revue NV-03, raccord service du r3 et publication des preuves |
+| `import_verification_diagnosis` | R3 gelé et relu en source, tests ouverts ; développement NV-06 des snapshots privés de distribution/build/Compose |
+| `d5_composition_review` | NV-03 livré pour revue/QA ; développement du bootstrap Kubernetes lié à une intention locale durable, sans activation cluster |
+| Luna | QA courante terminée ; préparation des tests stockage NV-03 sans exécution avant nouvelle admission ; développements indépendants maintenus |
+
+NV-05 et NV-11 recoupent l'exécuteur/service broker : Root coordonne ces coutures
+pour éviter les writers concurrents. Distribution, egress et autres groupes
+restent ouverts et sont à réaffecter quand leurs fichiers et créneaux le
+permettent ; leur inscription ici ne signifie pas qu'un agent les implémente.
+La clôture des worktrees reste conditionnée à l'intégration, aux preuves et au
+push. Aucun gate production n'est fermé par ces affectations.
+
+## 9 novembre — composants vérifiés et prochains raccords indépendants
+
+La composition Core12/CLI, checkpoints et préparation/bootstrap passe
+[39 fonctions ciblées et le check](evidence/2026-11-09/control-12-federation-bootstrap/README.md).
+Ce résultat ne clôt ni fédération physique, ni runtime Kubernetes ou fencing.
+
+| Propriétaire | Développement et prochaine preuve |
+|---|---|
+| Root | Raccord du publisher au service avec owner retenu et source de heads confirmées ; correction empruntée de la compilation D5, composition et validation |
+| `import_verification_diagnosis` | Rétention préwire de l'Authorized original, frontière Submitted avant écriture et retrait après final durable/retraite locale exacte |
+| `d5_composition_review` | Cas négatifs Core12 livrés, relus et quatre parents passent sur `03ab798d` ; réaffectation identité ci-dessus |
+
+Les gels STATUS25 et HEADS3 sont archivés et relus indépendamment ; le premier
+essai composé échoue avant sélection sur une capacité non clonable. Le correctif
+emprunté puis les tests ciblés sont maintenant vérifiés sur `03ab798d`, sans
+cloner la capacité. Les 39 PASS historiques restent attachés à leur autre gel.
+Les nouveaux raccords n'empêchent pas les travaux indépendants. Conserver les
+contrats source/identité/arrêt et les preuves par gel jusqu'à intégration/push
+puis fermeture contrôlée de chaque worktree.
+
 ## 9 novembre — trois propriétaires de développement en parallèle
 
 Le mainteneur demande que les gros chantiers avancent en code, au-delà des

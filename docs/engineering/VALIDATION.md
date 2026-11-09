@@ -1,5 +1,40 @@
 # Validation courante
 
+## 9 novembre — conservation privée des audits et filtre de workspace
+
+**PASS** : deux runs disponibles copiés dans `.claude/audit/`, ignoré par Git,
+avec copie complète hors worktree ; trente-cinq pièces lisibles, deux archives
+et seize manifestes de snapshots vérifiés SHA-256. Aucun script de rapport
+exécuté. Deux assertions RED reproduisent l'import/publication des audits,
+puis les deux régressions et seize parents uniques passent sur le gel corrigé
+`a187e733…86565`, revue indépendante traitée. Formatage/diff RC0.
+[Commandes, sources, logs et limites](evidence/2026-11-09/private-audit-history/README.md).
+
+La composition finale `2ddb5664…66077` passe aussi le parent CLI de présence
+après correction du seul chemin d'injection du harnais, les quatre parents
+HTTP checkpoints, le check toutes cibles et le contrat Schema11/12/13. Les
+avertissements restent visibles ; Clippy est `NOT_RUN` (composant épinglé absent).
+La QA est réellement arrêtée (PID0, sans OOM), son watcher terminé et son
+conteneur retiré après conservation des sources, logs et fixture retenue.
+Les quinze NV du nouvel audit demeurent à valider ; aucune qualification
+moteur, cluster, fournisseur ou production n'est transférée à ces checks.
+
+## 9 novembre — checkpoints HTTP, publication et bootstrap Kubernetes
+
+Sur Core12 `53f5f405…`, cinq parents et le check toutes cibles passent après
+le vrai RED de migration. Sur la composition `18dde1ad…`, neuf sélections
+passent exactement 39 parents puis le check toutes cibles termine RC0 en40,07s.
+Les reproductions HTTP POST/GET, corrections, sélections complètes, erreurs
+préparatoires, avertissements et revues sont dans les
+[preuves de composition](evidence/2026-11-09/control-12-federation-bootstrap/README.md).
+Clippy/release/matrice complète et moteurs réels ne sont pas qualifiés.
+
+Le nouveau gel D5/cache `172b1d22…` échoue à la compilation avant sélection,
+E0308 sur un job accepté non clonable ; aucun résultat des 39 fonctions ne
+lui est transféré. Son correctif projette les métadonnées depuis un emprunt et
+reste à vérifier. Full3, les tests négatifs de migration et le nouveau port
+heads conservent leurs sources/statuts propres.
+
 ## 9 novembre — C1/C2 du candidat D5 et prérequis de la sonde Full3
 
 Sur `7c1981ad…`, trois commandes unitaires sélectionnent chacune un parent

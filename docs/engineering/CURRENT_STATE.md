@@ -1,5 +1,54 @@
 # État constaté — suivi du développement
 
+## 9 novembre — historique des audits conservé et suites parallèles attribuées
+
+Le [registre des audits](AUDIT_FOLLOWUP.md#registre-des-audits), lié depuis
+`AGENTS.md`, distingue le run historique démontré du nouveau run source-only
+sur `4a0d4c6` : quinze risques plausibles, deux hypothèses rejetées, aucun test
+cible exécuté par cet audit. Les rapports disponibles, manifestes et archives
+complètes sont conservés en privé dans `.claude/audit/`, avec copie hors du
+worktree ; SHA-256 des copies et des seize snapshots vérifiés. `.claude` est
+ignoré par Git, sans fichier suivi. Les pièces racines du 29 octobre ne sont
+pas retrouvées au chemin fourni : cette lacune historique reste explicite.
+
+Le correctif du filtre `.claude/audit` est relu et vérifié : deux assertions
+RED, puis deux GREEN et seize parents uniques du module passent dans la QA
+isolée, sans rapport réel en fixture. Il conserve les règles et commandes
+d'agent ordinaires. [Preuves et limites](evidence/2026-11-09/private-audit-history/README.md).
+Le candidat de réserve terminale durable du refresh OIDC (NV-03) est livré
+pour revue et QA. Le témoin de retrait r3 a sa revue source limitée ; ses
+tests restent `NOT_RUN`. Les propriétaires avancent maintenant les lots
+distribution NV-06 et bootstrap Kubernetes journalisé dans des worktrees
+séparés ; aucune collision de fichiers autorisée.
+
+Sur le gel composé `03ab798d`, les quatre migrations négatives, dix-neuf
+projections STATUS, six lectures HEADS, quatre consommateurs et le contrat
+STATUS historique passent. Deux parents CLI de présence passent ; le troisième
+échoue car le harnais n'injecte pas ses refus sur la nouvelle route `/control`.
+Ce diagnostic est relu, sans changer seuils ni assertions : le réessai corrigé
+passe sur le gel final `2ddb5664`, avec quatre parents HTTP, le check toutes
+cibles et le contrat Schema11/12/13. Ces nouveaux résultats ne réécrivent pas
+les essais non exécutés sur l'ancien gel `03ab798d`.
+Le test du protocole JSON 11/12 a une RED puis une GREEN sur son gel distinct.
+G09 reste FAIL, aucun gate global fermé.
+
+## 9 novembre — Core12 et composition fédération/bootstrap vérifiés en logiciel
+
+La migration et les confirmations locales passent cinq fonctions sur leur gel.
+La composition suivante passe 39 fonctions ciblées et le check toutes cibles :
+Store/HTTP des checkpoints, publication/reprise/arrêt, journal et bootstrap IO
+Kubernetes, compatibilité et CLI12. Deux régressions reproduisent puis ferment
+le masquage du credential courant sur les nouvelles routes ; les erreurs du
+harnais restent distinctes. [Sources, revues et limites](evidence/2026-11-09/control-12-federation-bootstrap/README.md).
+
+Le raccord du service, la confirmation distante et le lifecycle Kubernetes
+restent ouverts. L'erreur initiale de compilation D5/STATUS/HEADS puis la
+visibilité du helper de test ont été corrigées et relues ; les nouveaux
+résultats composés et leurs limites figurent en tête de ce fichier. Full3
+reste FAIL sur son gel antérieur, Clippy/avertissements et qualifications
+réelles ouverts. La rétention préwire reste en développement. G09 FAIL,
+aucun gate global fermé.
+
 ## 9 novembre — Full3 reste en échec, frontière mieux observée
 
 Après correction de la seule fixture du canari de journal, ce canari passe

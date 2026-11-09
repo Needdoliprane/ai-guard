@@ -56,7 +56,17 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 4. `docs/engineering/TEST_STRATEGY.md` : tests existants, tests manquants et preuves.
 5. Le code, les contrats et les documents directement concernés par la tâche.
 
-Pour tout correctif de sécurité, lire le [suivi du rapport final run-1](docs/engineering/AUDIT_FOLLOWUP.md#audit-final-run-1), puis les pièces primaires et le lot concernés indiqués dans ce registre. Revérifier les constats contre la source courante et conserver reproduction, régression, revue et limites ; un ancien correctif partiel ne clôture pas le constat résiduel. Si les pièces privées ne sont pas accessibles, le signaler explicitement et poursuivre les travaux indépendants.
+Pour tout correctif de sécurité, lire le [registre des audits](docs/engineering/AUDIT_FOLLOWUP.md#registre-des-audits), le [rapport final run-1](docs/engineering/AUDIT_FOLLOWUP.md#audit-final-run-1) et le [suivi multi-worktrees de novembre](docs/engineering/AUDIT_FOLLOWUP.md#audit-multiworktree-20261108), puis les pièces primaires et le lot concernés indiqués dans ces registres. Revérifier les constats contre la source courante et conserver reproduction, régression, revue et limites ; un ancien correctif partiel ne clôture pas le constat résiduel. Si les pièces privées ne sont pas accessibles, le signaler explicitement et poursuivre les travaux indépendants.
+
+Les rapports privés peuvent être conservés dans `.claude/audit/`, qui reste
+ignoré par Git et exclu des workspaces, images et exports distribués. Conserver
+pour chaque run ses pièces originales, références de source, manifestes et
+empreintes, sans remplacer un rapport historique par son successeur. Le suivi
+versionné ne contient que les références, statuts, corrections et preuves
+expurgées ; il ne publie pas les rapports ou traces privés. Avant de supprimer
+un worktree qui porte cet historique, en vérifier une copie pérenne hors du
+worktree. Une copie ou un manifeste valide ne transforme pas un test `NOT_RUN`
+en test exécuté ni un risque plausible en vulnérabilité démontrée.
 
 Pour le chantier global, lire aussi `PROMPT_PRODUCTION.md` et `docs/engineering/IMPLEMENTATION_PLAN.md`. Pour l'identité, les permissions, la configuration, l'inférence interne ou la découverte, lire le contrat canonique `docs/sso.md` ; pour les vues et les travaux visuels, lire `docs/ui.md`. Pour une publication, lire `docs/engineering/RELEASE_CHECKLIST.md`. Pour TLS, mTLS, certificats ou le NAS, lire d'abord `docs/engineering/INFRASTRUCTURE_PKI.md`.
 

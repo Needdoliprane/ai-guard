@@ -1,4 +1,133 @@
-# Suivi de l'audit indépendant — 29 octobre 2026
+# Suivi des audits indépendants
+
+<a id="registre-des-audits"></a>
+
+## Registre des audits et conservation privée
+
+Ce fichier est l'entrée versionnée des audits, pas une publication de leurs
+rapports privés. Les originaux reçus sont conservés sans réécriture dans
+`.claude/audit/`, ignoré par Git ; chaque run garde son identité, ses références
+de source, ses pièces et ses empreintes. Une copie pérenne extérieure aux
+worktrees est obligatoire avant leur fermeture. Le fichier privé
+`.claude/audit/README.md` indique cette copie et les vérifications effectuées.
+Ne jamais exécuter les scripts inclus dans un rapport pour le consulter.
+
+| Run | Sources et pièces primaires | État de preuve à conserver |
+|---|---|---|
+| 29 octobre | instantané `ai-guard-audit-20261029.n8ZxPB`, manifeste `77876e6de40964096f90f458b07b872b7848f1a05257e2f763e5f57679641d34` | Résumé historique : 0 démontrée, 19 risques. Le chemin de rapport annoncé ne contient plus ses pièces racines au 9 novembre : conservation complète non vérifiée, ne pas reconstruire le rapport depuis le chat. |
+| [Final run-1](#audit-final-run-1) | `main@c4c4d2a`, `broker-service@d6cb136`, comparaison `5e52807` ; archive privée `ai-guard-run-1-historical/` | 13 vulnérabilités démontrées dans ce périmètre historique ; correctifs résiduels à suivre séparément. |
+| [Multi-worktrees novembre](#audit-multiworktree-20261108) | `ai-guard-20261108-multiworktree-deep-1`, source primaire `4a0d4c617be23dd58f63deb7325b9306d91c7ade` et 15 comparaisons | 0 démontrée, 15 risques plausibles sans sévérité formelle, 2 hypothèses rejetées ; exécution cible `NOT_RUN`. |
+
+Les identifiants NV ci-dessous sont locaux à leur run : utiliser aussi son
+identité et le fingerprint pour rapprocher les constats. Aucun nouveau run
+n'efface les défauts démontrés d'un ancien audit par différence de comptage.
+
+L'archivage a aussi conduit à corriger une frontière du produit :
+`.claude/audit` était copié à l'import et publié à l'export. Deux assertions
+synthétiques reproduisent ces comportements, puis seize parents uniques
+passent sur la source corrigée après revue indépendante. Les règles et
+commandes `.claude` utiles sont conservées. Ce constat distinct n'ajoute pas
+une confirmation aux quinze NV source-only du rapport.
+[Preuves de conservation et de filtrage](evidence/2026-11-09/private-audit-history/README.md).
+
+<a id="audit-multiworktree-20261108"></a>
+
+## Audit multi-worktrees reçu le 9 novembre
+
+**Pièces lues :** `REPORT.md`, `NEEDS-VALIDATION.md`, `FINDINGS-DETAIL.md`,
+`findings.json`, `coverage-ledger.json`, `BRANCH-WORKTREE-COVERAGE.md`,
+`run-metadata.json`, `phase5-verification.json` et manifestes. Provenance
+originale : `/private/tmp/ai-guard-security-audit-20261108.hIfnan/` ; copie privée
+conservée sous `.claude/audit/ai-guard-20261108-multiworktree-deep-1/`.
+Les 16 snapshots sont aussi conservés dans l'archive complète, car les overlays
+non committés ne sont pas reconstructibles par leur seul commit Git.
+
+| Pièce primaire | SHA-256 reçu |
+|---|---|
+| `REPORT.md` | `299123f6402ee41ad7e2b39d18b9f10c8ef2e6dfd050ccb04d394cc91058d577` |
+| `NEEDS-VALIDATION.md` | `c17dbc2b5748b6c673e619362033197d89074e251db31ee9643b65829e65cb69` |
+| `FINDINGS-DETAIL.md` | `8cab32fdd027993b57aa4b735804b20d263371945cf80f81fd00bbc9e3f967ea` |
+| `findings.json` | `3b27a6fe0f4ce8f8f5856514f7dfb836f2161ab267473dfe04d78dcbed3df212` |
+| `coverage-ledger.json` | `fd6e894bc92afd15cefa3914f4eba2e4cda84e984dad0cc172757762c9f01943` |
+| `run-metadata.json` | `7c5422f86825b1088a29066d78bb31365247949c9719ead0777fa44e54951c8f` |
+| Manifeste primaire `integrated-clean.sha256` | `63a3fccab5687338f5e11ebcbab99c9d840ae11a192f2fdfa7bb93e142fd4c9b` |
+
+Le rapport annonce 17 enregistrements valides, 65 unités (47 couvertes,
+16 candidates, 2 compositions bloquées), 130 branches, 21 worktrees et
+16 snapshots. Root a indépendamment vérifié les fichiers des **16 manifestes**
+avec SHA-256 le 9 novembre : `PASS`, sans exécuter du code cible ou les scripts
+du rapport. Cela vérifie leur intégrité, pas les comportements étudiés.
+Les validateurs 17/65 restent le résultat du rapport, sans nouvelle exécution
+de ces validateurs. Les essais cible de cet audit restent tous `NOT_RUN`.
+
+La source primaire auditée est distincte de la composition courante : tête
+`696efd1` plus modifications non committées Core12/D5/fédération/bootstrap.
+Le gel logiciel courant `2504761c8f344313eece348a0da1a7905c52e6b80d54ae1f87c2046e81dd8701`
+ne reçoit aucune garantie de l'audit par assimilation. Chaque lot doit vérifier
+les fichiers actuels, obtenir un oracle borné avant correction, conserver une
+régression et recevoir une revue indépendante. Un risque non reproduit reste
+plausible ; aucune sévérité ou conclusion production n'est ajoutée.
+
+### Lots de suivi sans collision avec les développements actifs
+
+Tous les NV restent **OPEN / validation comportementale NOT_RUN** à réception.
+Les priorités sont celles de validation du rapport, pas des sévérités.
+Root coordonne les dépendances et attribue des propriétaires exclusifs avant
+édition ; une tâche en file ci-dessous n'est pas présentée comme un agent actif.
+Le candidat NV-03 de `d5_composition_review` est livré et relu pour une QA
+bornée : stockage `src/audit/authentication*` et tests, aucune couture OIDC
+modifiée, compilation et trois tests encore `NOT_RUN`. Il ne clôture pas
+NV-02/04/10 ni le comportement fournisseur/HTTP de NV-03.
+`import_verification_diagnosis` développe séparément les snapshots de
+distribution NV-06 après livraison du r3 broker, relu en source mais non testé.
+`d5_composition_review` avance désormais le bootstrap Kubernetes journalisé.
+Root conserve les raccords service et le suivi NV-05/NV-11 ; Luna prépare
+chaque validation ciblée sur son gel propre, sans réutiliser la QA fermée.
+
+| Lot / NV | Fingerprint stable | Action et dépendance |
+|---|---|---|
+| Audit signé / NV-01 (P1) | `audit:unkeyed-chain:no-independent-signed-checkpoint` | Vérifier la continuité indépendante et définir ancrage signé, restauration et rotation ; ne pas confondre les checkpoints métier de fédération avec cette garantie. |
+| Identité / NV-02 (P1) | `authentication-audit:global-lifetime-capacity:cross-tenant-denial` | Reproduire une petite capacité globale puis isoler les budgets et définir leur migration, avec conservation de l'historique. |
+| Identité / NV-03 (P1) | `authentication-audit:phase-capacity:no-terminal-reservation` | Réserver transactionnellement records **et** octets du terminal avant effet IdP ; prouver commit/reopen et idempotence. Même propriétaire que NV-02. |
+| Identité / NV-04 (P2) | `authentication-audit:prelookup-full-replay:anonymous-cross-tenant-starvation` | Vérifier lookup et replay des credentials inconnus, sans assimiler lenteur du Mac et défaut. |
+| Capture / NV-05 (P1) | `branch:src/runner/broker/executor/results.rs:capture-batch-unbounded-against-outbox-lifetime-budget` | Vérifier la capture bornée puis garantir observation terminale en cas d'échec. Fichiers de l'exécuteur réservés au chantier broker actif ; pas de writer concurrent. Le flux fournisseur réel reste non établi. |
+| Distribution / NV-06 (P1) | `build-compose:live-source:no-content-binding` | Établir d'abord la frontière d'écrivain distinct ; l'opérateur déjà autorisé n'est pas une élévation. Lot indépendant `operations/build/Compose`, à attribuer. |
+| Admission HTTP / NV-07 (P2) | `http:pre-request-admission:unbounded-raw-connections` | Tester bornes de connexions et première requête des listeners réels, puis régression ciblée. |
+| Stockage runtime / NV-08 (P2) | `main:src/runtime.rs:workspace-volume-unbounded-reaches-control-storage` | Mesurer bytes/inodes et séparation du stockage contrôle sur moteurs réels ; ne pas promettre un quota par configuration seule. |
+| CLI / NV-09 (P3) | `oidc-cli:loopback-first-peer:single-attempt-denial` | Vérifier refus d'un premier pair invalide tout en gardant délai et tentative authentifiée bornés. |
+| Identité / NV-10 (P2) | `oidc:anonymous-native-intent:global-volatile-capacity-exhaustion` | Isoler et borner le budget des intentions anonymes ; même propriétaire OIDC que NV-02/03/04. |
+| Reprise relais / NV-11 (P2) | `relay:recovery-only:owner-registry-not-reconstructed` | Revalider sur D5 courant les propriétaires restaurés et leur drainage avant retrait du lease ; coordonné par Root avec le propriétaire broker. |
+| Quotas relais / NV-12 (P2) | `relay:tenant-global-retention:worker-starves-siblings` | Vérifier petite rétention et équité entre workers du même tenant, sans ouvrir de communication implicite. |
+| Egress / NV-13 (P1) | `runtime.bridge-unmediated-egress` | Exigence réseau obligatoire déjà ouverte : médiation Rust de confiance, destinations et audit, puis Docker/Podman/Kubernetes réels. Un bridge ne la ferme pas. |
+| Workloads / NV-14 (P2) | `workload:cross-process-issuance-race:duplicate-digest` | Établir l'unicité durable multi-processus avec fixtures synthétiques ; aucun nouveau stockage sans décision motivée. |
+| Workloads / NV-15 (P2) | `workload:unauthenticated-tenant-scan:shared-read-starvation` | Séparer lookup anonyme et capacité des lectures authentifiées ; coordonner avec NV-14 et l'IO d'identité. |
+
+Les hypothèses `decision:runner-self-approval:no-human-principal` et
+`operator-stack:config-engine-volume:no-durable-binding` restent **REJECTED**
+selon ce rapport, sans rouvrir leur qualification sans nouvelle preuve de
+frontière. L'approbation humaine attribuée reste néanmoins une exigence produit
+ouverte ; le rejet d'une hypothèse de vulnérabilité ne la livre pas.
+
+À chaque retour de lot, compléter ici source exacte, commandes, premier oracle,
+régression, revue, correction intégrée, push et limites. Les campagnes moteurs,
+multi-processus, restauration, chaîne de livraison et performances restent
+requises. Aucune des quinze validations n'est fermée par l'archivage.
+
+## 9 novembre — constat supplémentaire sur les nouvelles routes checkpoints
+
+La revue de la composition détecte un défaut absent du périmètre historique :
+les nouvelles routes ignoraient le redactor du credential Broker courant.
+Deux parents locaux reproduisent séparément l'acceptation d'une preuve factice
+dans un hash valide et sa restitution depuis un ancien record après nouveau
+binding/incarnation/grant. Le correctif vérifie demande/scope/engagement avant
+mutation et les deux enveloppes de réponse, sans substituer les hashes ; les
+quatre parents HTTP passent dans les 39 fonctions composées après revue.
+[Sources exactes, reproductions et limites](evidence/2026-11-09/control-12-federation-bootstrap/README.md).
+
+Ce suivi ne modifie ni le nombre ni la sévérité des constats de l'audit primaire.
+Les cas négatifs de migration, la rétention préwire et le fencing restent
+ouverts ; D5/cache a un échec de compilation distinct avant ses nouveaux tests.
+Aucune qualification production ou runtime réel n'est acquise.
 
 <a id="audit-final-run-1"></a>
 

@@ -138,7 +138,6 @@ fn excluded_name(name: &str) -> bool {
             .any(|suffix| name.ends_with(suffix))
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn export_policy_name(name: &str) -> String {
     let mut folded = String::with_capacity(name.len());
     for character in name.chars().flat_map(char::to_lowercase) {
@@ -164,8 +163,33 @@ fn export_policy_name(name: &str) -> String {
     folded
 }
 
+// Share the export reserved-name projection at this narrow private boundary.
+// Agent rules/commands and ordinary directories named audit remain source.
+fn excluded_private_audit_path(path: &Path) -> bool {
+    let mut claude = false;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            claude = false;
+            continue;
+        };
+        let Some(name) = name.to_str() else {
+            claude = false;
+            continue;
+        };
+        let name = export_policy_name(name);
+        if claude && name == "audit" {
+            return true;
+        }
+        claude = name == ".claude";
+    }
+    false
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn excluded_export_path(path: &Path) -> bool {
+    if excluded_private_audit_path(path) {
+        return true;
+    }
     for component in path.components() {
         let Component::Normal(name) = component else {
             continue;
@@ -348,6 +372,9 @@ fn collect_workspace_from_root(
     if !root.metadata()?.is_dir() {
         bail!("project must be a directory");
     }
+    if excluded_private_audit_path(source) {
+        bail!("project root is within a private Claude audit archive; choose a separate project");
+    }
     #[cfg(unix)]
     let excluded_identities = {
         use std::os::unix::fs::MetadataExt;
@@ -429,7 +456,7 @@ fn collect_workspace_from_root(
             .file_name()
             .to_str()
             .context("project filename is not UTF-8")?;
-        if excluded_name(name) {
+        if excluded_name(name) || excluded_private_audit_path(&relative) {
             excluded_count += 1;
             if excluded.len() < 256 {
                 excluded.push(relative.to_string_lossy().into_owned());
@@ -1372,6 +1399,157 @@ mod tests {
         );
         let file = File::open(project.join("business.txt")).unwrap();
         assert!(prepare_workspace_excluding(&project, Limits::default(), &[&file]).is_err());
+    }
+
+    #[test]
+    fn private_claude_audit_is_absent_from_import_but_agent_rules_are_preserved() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().canonicalize().unwrap();
+        let private = [
+            ".claude/audit/report.md",
+            "nested/.CLAUDE/AUDIT/report.md",
+            "aliases/.clau\u{200d}de/au\u{200d}dit/report.md",
+        ];
+        let kept = [
+            "src/main.rs",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".claude/rules/project.md",
+            ".claude/commands/check.md",
+            ".claude/audit-notes/README.md",
+            "docs/audit/report.md",
+        ];
+        const CANARY: &[u8] = b"PRIVATE_AUDIT_SYNTHETIC_CANARY";
+        for path in private {
+            let path = project_path.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, CANARY).unwrap();
+        }
+        for path in kept {
+            let path = project_path.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"ordinary source or agent rule").unwrap();
+        }
+        let prepared = prepare_workspace(&project_path, Limits::default()).unwrap();
+        for path in private {
+            assert!(
+                !prepared.manifest.contains_key(path),
+                "private import: {path}"
+            );
+            assert_eq!(fs::read(project_path.join(path)).unwrap(), CANARY);
+        }
+        for path in kept {
+            assert!(
+                prepared.manifest.contains_key(path),
+                "useful source omitted: {path}"
+            );
+        }
+        assert_eq!(prepared.manifest.len(), kept.len());
+        assert_eq!(prepared.excluded_count, 3);
+        let mut tar = tar::Archive::new(prepared.archive.reopen().unwrap());
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            assert!(!data.windows(CANARY.len()).any(|part| part == CANARY));
+        }
+        let authorized =
+            AuthorizedSource::open(&project_path, std::slice::from_ref(&project_path)).unwrap();
+        let anchored = authorized.prepare(Limits::default(), &[]).unwrap();
+        assert_eq!(anchored.manifest, prepared.manifest);
+        for path in private {
+            let root = project_path.join(path).parent().unwrap().to_path_buf();
+            let error = prepare_workspace(&root, Limits::default())
+                .err()
+                .expect("a private archive root cannot become a project");
+            assert!(
+                error.to_string().contains("private Claude audit archive"),
+                "{error:#}"
+            );
+            let authorized =
+                AuthorizedSource::open(&root, std::slice::from_ref(&project_path)).unwrap();
+            let error = authorized
+                .prepare(Limits::default(), &[])
+                .err()
+                .expect("the anchored collector must also refuse a private archive root");
+            assert!(
+                error.to_string().contains("private Claude audit archive"),
+                "{error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_claude_audit_is_omitted_from_export_with_implicit_and_late_parents() {
+        const CANARY: &[u8] = b"PRIVATE_AUDIT_SYNTHETIC_CANARY";
+        let private = [
+            ".claude/audit/report.md",
+            "nested/.CLAUDE/AUDIT/report.md",
+            "aliases/.clau\u{200d}de/au\u{200d}dit/report.md",
+        ];
+        let kept = [
+            "src/main.rs",
+            "AGENTS.md",
+            "CLAUDE.md",
+            ".claude/rules/project.md",
+            ".claude/commands/check.md",
+            ".claude/audit-notes/README.md",
+            "docs/audit/report.md",
+        ];
+        let mut entries = Vec::new();
+        for path in private {
+            entries.push((path, b'0', CANARY));
+        }
+        for path in kept {
+            entries.push((path, b'0', b"ordinary source or agent rule".as_slice()));
+        }
+        // Implicit parent paths must be filtered too; a late directory header
+        // must not recreate the private directory after its files were omitted.
+        entries.push((".claude/audit", b'5', b"".as_slice()));
+        let bytes = archive(&entries);
+        let observed = scan_workspace_archive(bytes.as_slice(), Limits::default()).unwrap();
+        for path in private {
+            assert!(
+                observed.contains_key(path),
+                "strict scan preserves observed archive facts"
+            );
+        }
+        let original = tempfile::tempdir().unwrap();
+        fs::write(original.path().join("original.txt"), b"unchanged original").unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("result");
+        let report = extract_workspace_with_report(
+            bytes.as_slice(),
+            &destination,
+            original.path(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(report.omitted_entries, 4);
+        assert_eq!(report.manifest.len(), kept.len());
+        for path in private {
+            assert!(
+                !report.manifest.contains_key(path),
+                "private export: {path}"
+            );
+            assert!(!destination.join(path).exists());
+            assert!(!destination.join(path).parent().unwrap().exists());
+        }
+        for path in kept {
+            assert!(
+                report.manifest.contains_key(path),
+                "useful source omitted: {path}"
+            );
+            assert_eq!(
+                fs::read(destination.join(path)).unwrap(),
+                b"ordinary source or agent rule"
+            );
+        }
+        assert_eq!(
+            fs::read(original.path().join("original.txt")).unwrap(),
+            b"unchanged original"
+        );
+        assert_eq!(fs::read_dir(original.path()).unwrap().count(), 1);
     }
 
     #[test]

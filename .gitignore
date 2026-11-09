@@ -2,6 +2,7 @@
 /.agentsandbox/
 /.superpowers/
 /.worktrees/
+/.claude/
 /.playwright-mcp/
 *.sqlite
 *.sqlite-shm
