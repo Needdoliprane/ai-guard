@@ -13,6 +13,9 @@ use crate::{
 };
 use uuid::Uuid;
 
+#[path = "confirmation_tests.rs"]
+mod s2_confirmation_tests;
+
 fn prepare(f: &Fixture) {
     let path = f._directory.path().join("tenant.sqlite");
     f.store
@@ -133,6 +136,137 @@ fn reserve(
     f.store
         .reserve_kubernetes_session(&f.identity, &authorization, intent, &policy, quota)
         .unwrap()
+}
+
+#[test]
+fn confirmation_retains_only_a_real_reserved_observation_without_new_event() {
+    let f = Fixture::new();
+    prepare(&f);
+    let intent = intent(&f, Uuid::new_v4());
+    let reserved = reserve(&f, &intent, &QuotaPolicyV1::default());
+    let observe = f
+        .store
+        .authorize_kubernetes_session_reconciliation(&f.identity, intent.reservation_id(), None)
+        .unwrap();
+    let head = f.store.head().unwrap();
+    let confirmed = f
+        .store
+        .confirm_kubernetes_session_before_effect(&f.identity, &observe, intent.reservation_id())
+        .unwrap();
+    assert_eq!(confirmed.tenant_id(), "tenant-a");
+    assert_eq!(
+        confirmed.snapshot().input_hash,
+        reserved.snapshot.input_hash
+    );
+    assert_eq!(confirmed.audit_seq(), reserved.receipt.audit_seq);
+    assert_eq!(confirmed.audit_hash(), reserved.receipt.audit_hash);
+    assert_eq!(f.store.head().unwrap(), head);
+    assert_eq!(
+        f.store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+}
+
+#[test]
+fn confirmation_refuses_closed_reservations_and_a_close_authorization() {
+    let f = Fixture::new();
+    prepare(&f);
+    let intent = intent(&f, Uuid::new_v4());
+    reserve(&f, &intent, &QuotaPolicyV1::default());
+    let request = close(&intent);
+    let close = f
+        .store
+        .authorize_kubernetes_session_reconciliation(
+            &f.identity,
+            intent.reservation_id(),
+            Some(&request),
+        )
+        .unwrap();
+    let head = f.store.head().unwrap();
+    let error = f
+        .store
+        .confirm_kubernetes_session_before_effect(&f.identity, &close, intent.reservation_id())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.downcast_ref::<Failure>(),
+        Some(&Failure::PermissionDenied)
+    );
+    assert_eq!(f.store.head().unwrap(), head);
+    assert_eq!(
+        f.store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        1
+    );
+    f.store
+        .close_kubernetes_session_before_effect(&f.identity, &close, &request)
+        .unwrap();
+    let observe = f
+        .store
+        .authorize_kubernetes_session_reconciliation(&f.identity, intent.reservation_id(), None)
+        .unwrap();
+    let head = f.store.head().unwrap();
+    let error = f
+        .store
+        .confirm_kubernetes_session_before_effect(&f.identity, &observe, intent.reservation_id())
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.downcast_ref::<Failure>(),
+        Some(&Failure::PermissionDenied)
+    );
+    assert_eq!(f.store.head().unwrap(), head);
+    assert_eq!(
+        f.store
+            .worker_quota(&QuotaPolicyV1::default())
+            .unwrap()
+            .held_workers,
+        0
+    );
+}
+
+#[test]
+fn schema12_preserves_v2_reservation_quota_and_before_effect_confirmation() {
+    let f = Fixture::new();
+    prepare(&f);
+    let intent = intent(&f, Uuid::new_v4());
+    let policy = QuotaPolicyV1::default();
+    let first = reserve(&f, &intent, &policy);
+    let before = f.store.worker_quota(&policy).unwrap();
+    let path = f._directory.path().join("tenant.sqlite");
+    f.store
+        .migrate_broker_checkpoints_v12(&path.with_extension("before12"))
+        .unwrap();
+    let after = f.store.worker_quota(&policy).unwrap();
+    assert_eq!(
+        (
+            after.held_workers,
+            after.held_cpu_millis,
+            after.held_memory_bytes
+        ),
+        (
+            before.held_workers,
+            before.held_cpu_millis,
+            before.held_memory_bytes
+        )
+    );
+    let observe = f
+        .store
+        .authorize_kubernetes_session_reconciliation(&f.identity, intent.reservation_id(), None)
+        .unwrap();
+    let confirmed = f
+        .store
+        .confirm_kubernetes_session_before_effect(&f.identity, &observe, intent.reservation_id())
+        .unwrap();
+    assert_eq!(confirmed.snapshot().input_hash, first.snapshot.input_hash);
+    assert_eq!(confirmed.audit_seq(), first.receipt.audit_seq);
+    assert_eq!(confirmed.audit_hash(), first.receipt.audit_hash);
+    assert!(f.store.integrity().unwrap().valid);
 }
 
 #[test]

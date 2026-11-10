@@ -8,6 +8,7 @@ use crate::control::kubernetes_session::*;
 use chrono::{DateTime, Utc};
 
 mod authorization;
+mod confirmation;
 mod control_recovery;
 mod migration;
 mod model;
@@ -71,6 +72,7 @@ pub(crate) use authorization::{
     KubernetesSessionRecoverBeforeEffectV2, KubernetesSessionRecoveryAuthorizationV2,
     KubernetesSessionRecoveryReceiptLookupV2, KubernetesSessionReservationAuthorizationV2,
 };
+pub(crate) use confirmation::ConfirmedSessionReservationV2;
 pub(crate) use control_recovery::{
     ControlRecoverBeforeEffectV2, ControlRecoveryReceiptLookupV2,
     KubernetesSessionControlRecoveryAuthorizationV2,

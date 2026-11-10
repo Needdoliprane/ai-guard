@@ -760,6 +760,54 @@ certificate validation remain enabled. Redirects and automatic retries are
 disabled. Rotating retained files requires preparing a new connection;
 replacement is not a transparent credential reload.
 
+### V2 reservation preparation and waiting bootstrap
+
+The internal `session::SessionJournal::prepare_or_resume` API accepts a real
+S1/S2 before-effect confirmation. The control caller must retain
+its filesystem capacity and supply an exclusive private directory, disjoint
+from workspaces and exports. `SessionJournalProtection` excludes known control
+files and database identities and rejects known secret material before writing.
+A decoded response, profile or journal record cannot construct the opaque
+confirmation and never grants CREATE, release or execution permission.
+
+The V2 journal has a distinct fixed inventory: `.session-v2.lock` and
+`prepared-v2.json`. It retains the exact intent, namespace, commitments and
+central audit position. A retry or reopen needs a new real confirmation of
+the same reserved, quota-held, never-issued state. It retains the same bytes;
+partial inventory, replacement, conflicting content or failed durability
+requires reconciliation. Preserve the directory and its files; do not remove
+a lock, recreate the preparation or alter the reservation to obtain a retry.
+
+The Rust bootstrap preamble uses a four-byte length-prefix envelope, a 16 KiB
+maximum frame, a retained 32 KiB wire-buffer reservation and a handshake deadline
+of at most five seconds. Its closed V2 Hello/Ready frames transport metadata only, with no argv,
+credential, Release or Start frame. The IO owner retains its byte reservation
+and task across a cancelled waiter until explicit join. An accepted echo is
+`declared`, not authenticated Pod identity, command execution or quiescence.
+Frame/IO/deadline failure closes that exchange; it creates no automatic retry.
+
+These sources do not add a session CLI, attach endpoint or workload activation.
+The real authenticated remote-confirmation client and orchestration must be
+connected by the control plane. Pod/namespace identity, PVC ownership and
+exclusivity, admission, network isolation, durable Arm, release/handoff,
+runtime observation and quota settlement still require their distinct proofs.
+`require_workload_admission()` continues to refuse. Local Store/filesystem and
+duplex regressions passed on the frozen software composition of 9 November
+2026: six journal and eight bootstrap tests, including two deadline guards.
+These dated results do not qualify another checkout, physical Kubernetes
+bootstrap or the remaining paths above. Each new composition must retain its
+own source identity and validation evidence.
+
+The 10 November source composition preserves the central schema 11/12 guard
+and prepares targeted checks for both confirmation wrappers, schema 12,
+cancellation after the real join first polls pending, retired control-auth
+epochs and a cross-tenant Store refusal. Five targeted parents passed on R1;
+only parent 06 was rerun and passed on R2 after a test-oracle correction. The
+production code is unchanged between those sources. The R2 all-target check
+passed with 11 warnings. [Exact sources, the retained R1 failure and limits](../../engineering/evidence/2026-11-10/kubernetes-session-composition/README.md)
+keep these results separate from the historical fourteen passes. Cluster
+qualification and the historical deadline RED remain `NOT_RUN`.
+
 ## Diagnose and interpret observations
 
 `doctor().await` reads both namespace anchors and the server version. It

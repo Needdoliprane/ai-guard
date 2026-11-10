@@ -1,5 +1,27 @@
 # Validation courante
 
+## 10 novembre — composition Kubernetes : cinq R1 et un R2, sans transfert de preuve
+
+Le gel R1 de 2384 fichiers `9a6d04a879fa50db98125355c288e75cd109245cb330517345d444b348ff3831`
+passe build/liste et cinq parents exacts. Son parent 06 échoue RC101 à
+Arc::ptr_eq avant l'oracle inter-Store : le Store authentifié est un wrapper
+de masquage, pas l'Arc brut initial. Ce FAIL de fixture est conservé.
+R2 `0a6919437e4cb1f3148dd66bca1366a6e9525d6f8163efb01978e9b55e6072c9`
+ne change que cette fonction de test, en vérifiant tenant et ledger exacts.
+Build R2 RC0 19:53:45–19:57:59 UTC, liste RC0 ; le seul parent 06 passe une fois
+19:59:04–19:59:05 UTC. Les cinq premiers parents restent des PASS R1, sans
+rejeu R2. Check toutes cibles R2 RC0 20:00:10–20:01:52 UTC, 11 avertissements
+dont quatre duplications ; aucune qualification Clippy générale n'en découle.
+
+Les revues source `7fcf8def…` et fixture R2 `cdec40ed…` ont donné GO_SOURCE
+dans leurs périmètres. Root confirme les 2384 hashes/pathset, nonregular0,
+cache4 et l'archive réelle R2 `7c33bf49566532a5cc95177334530fcd2ae7fb73790d6fa84a8ae0bc41efe70f`.
+La QA idle est arrêtée puis retirée normalement ; watch terminal0.
+[Oracles, commandes observées, conservation et limites](evidence/2026-11-10/kubernetes-session-composition/README.md).
+Les 14 PASS historiques ne sont pas transférés ; RED deadline NOT_RUN.
+Admission workload et activation restent fermées : aucun Pod/start/release,
+cluster réel ou runtime qualifié. Aucun constat d'audit ni gate global clos.
+
 ## 10 novembre — registre OIDC : douze FIX PASS et observation baseline distincte
 
 Sur le gel2378 `a5511b0b…` (public2cc + six postimages OIDC), les six nouveaux

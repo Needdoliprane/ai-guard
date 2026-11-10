@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — composition Kubernetes : cinq parents R1 et un parent R2
+
+La composition conserve le journal et le préambule V2, les confirmations
+centrales opaques et le refus d'admission workload. Cinq parents passent sur
+R1, puis le seul parent 06 sur R2 après correction de son oracle de fixture ;
+aucun code produit ne change entre ces deux gels. Build/liste RC0 sur les deux
+gels et check toutes cibles R2 RC0, avec 11 avertissements. Les 2384 empreintes
+post-R2, l'export réel et le retrait de la QA sont vérifiés par Root.
+[Sources, sélections et échec R1 conservé](evidence/2026-11-10/kubernetes-session-composition/README.md).
+Les 14 PASS historiques restent sur leur ancien gel ; RED deadline NOT_RUN.
+Aucun Pod, start, release ou cluster qualifié ; activation fermée.
+G09 FAIL, aucun gate global fermé.
+
 ## 10 novembre — part native du registre OIDC bornée par tenant
 
 Après l’observation de32 propriétaires A vivants refusant B, le FIX conserve

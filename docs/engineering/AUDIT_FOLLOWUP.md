@@ -1,5 +1,18 @@
 # Suivi des audits indépendants
 
+## 10 novembre — suivi logiciel de la composition Kubernetes
+
+La composition Kube13 conserve le refus d'admission workload. Cinq parents
+passent sur R1 puis le seul parent 06 sur R2, après correction de son assertion
+de fixture ; le FAIL R1 à Arc::ptr_eq reste conservé et ne démontre pas une
+vulnérabilité produit. Le code de production est identique entre les gels.
+Build/liste et check toutes cibles R2 RC0, 11 avertissements ; post-source,
+exports réels et retrait de la QA sont vérifiés par Root.
+[Preuves exactes et limites](evidence/2026-11-10/kubernetes-session-composition/README.md).
+Aucun des 14 PASS historiques n'est transféré, RED deadline NOT_RUN.
+Activation et admission workload restent fermées ; aucun Pod/start/release ni
+cluster qualifié. Ce suivi ne clôture aucun constat d'audit ni gate global.
+
 ## Rapport run-2 reçu le 10 novembre 2026
 
 Le [registre run-2](AUDIT_RUN_2_20261110.md) conserve la référence `696efd1`,

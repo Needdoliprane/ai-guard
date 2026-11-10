@@ -9,12 +9,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub(crate) mod admission;
+pub(crate) mod bootstrap;
 mod observation;
 mod preflight;
 mod prerequisites;
 #[cfg(test)]
 #[path = "kubernetes/prerequisites_tests.rs"]
 mod prerequisites_tests;
+pub(crate) mod session;
 pub mod session_profile;
 mod transport;
 pub use observation::{

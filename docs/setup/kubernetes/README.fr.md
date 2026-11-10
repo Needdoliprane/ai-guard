@@ -800,6 +800,57 @@ d'hôte et des certificats conservée. Redirections et retries automatiques sont
 désactivés. La rotation des fichiers retenus exige une nouvelle connexion
 préparée ; leur remplacement n'est pas un rechargement transparent.
 
+### Préparation V2 et bootstrap en attente
+
+L'API interne `session::SessionJournal::prepare_or_resume` accepte une vraie
+confirmation S1/S2 avant effet. Le caller du contrôle conserve
+sa capacité filesystem et fournit un répertoire privé exclusif, disjoint des
+workspaces et des exports. `SessionJournalProtection` exclut les fichiers de
+contrôle et identités de bases connus et refuse les secrets connus avant
+écriture. Ni réponse décodée, ni profil, ni record du journal ne construit la
+confirmation opaque ou une permission de CREATE, release ou exécution.
+
+Le journal V2 a un inventaire fixe distinct : `.session-v2.lock` et
+`prepared-v2.json`. Il conserve intent, namespace, engagements et position
+d'audit centrale exacts. Retry ou réouverture demande une nouvelle confirmation
+réelle du même état réservé, quota retenu et jamais émis. Les mêmes octets sont
+conservés ; inventaire partiel, substitution, contenu divergent ou durabilité
+refusée exige une réconciliation. Préserver répertoire et fichiers ; ne pas
+retirer le lock, recréer la préparation ou modifier la réservation pour obtenir
+un nouvel essai.
+
+Le préambule bootstrap Rust utilise une enveloppe à longueur sur quatre octets,
+des trames de 16 Kio maximum, une réservation retenue de 32 Kio pour les buffers
+du canal et une deadline d'au plus cinq secondes. Ses trames V2 fermées Hello/Ready transmettent seulement des
+métadonnées, sans argv, credential, trame Release ou Start. Le propriétaire IO
+conserve sa réservation d'octets et sa tâche après abandon d'un waiter jusqu'au
+join explicite. Un écho accepté reste `declared` : ni identité Pod authentifiée,
+ni exécution de commande, ni quiescence. Erreur de trame, IO ou deadline ferme
+cet échange sans retry automatique.
+
+Ces sources n'ajoutent ni CLI de session, endpoint attach ou activation métier.
+Le vrai client distant de confirmation authentifiée et l'orchestration doivent
+être raccordés par le contrôle. Identité Pod/namespace, propriété et exclusivité
+PVC, admission, isolation réseau, Arm durable, release/handoff, observation
+runtime et clôture du quota demandent toujours leurs preuves distinctes.
+`require_workload_admission()` reste refusé. Les régressions Store/filesystem
+et duplex locales passent sur la composition logicielle figée du 9 novembre
+2026 : six tests journal et huit bootstrap, dont deux gardes de deadline.
+Ces résultats datés ne qualifient ni un autre checkout, ni le bootstrap
+Kubernetes physique, ni les parcours restant ouverts ci-dessus. Chaque nouvelle
+composition conserve sa propre identité de source et ses preuves de validation.
+
+La composition source du 10 novembre préserve le garde central des schémas 11/12
+et prépare les vérifications ciblées des deux confirmations, du schéma 12,
+de l'annulation après le premier poll pending du vrai join, du retrait de
+l'epoch d'authentification contrôle et d'un refus de Store inter-tenant.
+Cinq parents ciblés passent sur R1 ; seul le parent 06 est rejoué et passe sur
+R2 après correction de son oracle de test. Le code produit est inchangé entre
+ces sources. Le check toutes cibles R2 passe avec 11 avertissements. Les
+[sources exactes, le FAIL R1 conservé et les limites](../../engineering/evidence/2026-11-10/kubernetes-session-composition/README.md)
+distinguent ces résultats des quatorze PASS historiques. Qualification cluster
+et RED deadline historique restent `NOT_RUN`.
+
 ## Diagnostiquer et interpréter les observations
 
 `doctor().await` lit les deux ancres de namespace et la version du serveur. Il
