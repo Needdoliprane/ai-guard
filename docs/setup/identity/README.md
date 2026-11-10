@@ -188,6 +188,18 @@ Each page, including an empty one, requires a durable receipt sharing the existi
 
 This registry view does not qualify multi-broker transport, federation, worker/session aggregation, runtime completeness, capacity100 or a production release. It changes no quota or billing contract: allocation remains nonbillable, and unobserved usage remains unknown. See the engineering records for the actual validation scope of the matching sources.
 
+## Human-context capacity
+
+The gateway reserves a fixed share of its human-context registry for each tenant declared and validated in its trusted configuration. The total remains 4096 live contexts. With two configured tenants, each has 2048 places; an idle tenant's share is not lent to another. For `N` tenants, each share is `4096 / N` rounded down, with one additional place for each of the first `4096 % N` tenant IDs in sorted order. Empty, duplicate, invalid or more than 4096 tenant configurations are rejected. A request cannot register an unknown tenant.
+
+The existing bound of 64 contexts still applies to the same principal or credential across all tenants. Credential rotation does not grant that principal another 64 places. Tenant membership, personal/administration modes and permissions still come from Rust authorization; a header or JSON field cannot freely select a tenant. A tenant's share does not guarantee 64 contexts for every one of its users.
+
+If some authorized contexts cannot obtain a place, the identity response can return the available contexts with `contexts_complete=false`. Those contexts remain usable within their permissions: a full tenant A share does not hide an available tenant B context for a person belonging to both. A partial response is not a complete membership inventory and does not mean no activity or lost rights. If capacity prevents every context for that identity, the route returns 429 `capacity_exhausted` with `retry_action:"retry"`. Wait for expiry or ask an authorized administrator to remove unnecessary memberships, then read identity again. Authentication and audit failures keep their own errors; in particular, a revoked local credential returns 401 `identity_revoked` with `authenticate`.
+
+Contexts still last at most 300 seconds, bounded by the authentication proof. Reading identity again does not renew an existing binding: its ID, authorization version and expiry stay unchanged. Expiration, revocation, read revalidation and encrypted cursors retain their existing behavior. Never rotate credentials, reset storage or delete audit to recover capacity.
+
+This partition applies only to the gateway's in-memory human-context registry. It reserves no CPU, ingress, Store I/O or OIDC transaction capacity and promises no throughput, latency or overall SSO/cloud availability. The [engineering ledger](../../engineering/CURRENT_STATE.md) records the matching source, tests and remaining qualification; this guide is not evidence of a pass.
+
 ## Read from the CLI
 
 Restart only the intended control services with the upgraded binary and existing data. Choose the gateway origin, not its `/api` path. HTTPS is verified; local HTTP requires a literal loopback IP such as `127.0.0.1`. Ambient proxies, redirects and automatic retries are disabled by this client.

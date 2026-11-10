@@ -1,5 +1,24 @@
 # État constaté — suivi du développement
 
+## 10 novembre — répartition D8 intégrée et OIDC reproduit
+
+Le correctif de capacité des contextes humains est intégré : parts fixes des
+tenants configurés totalisant4096, plafond64 par principal ou digest conservé,
+aucun prêt/éviction et réponse d'identité partielle explicite. Sur le gel
+`38ce0d5f…`, dix parents D8 dont le producteur HTTP complet, onze contrôles
+existants et le check toutes cibles passent. Six fichiers Rust intégrés
+exactement identiques aux sources vérifiées, guides EN/FR synchronisés et
+revue indépendante finale sans défaut bloquant dans les huit chemins.
+[Preuves et limites](evidence/2026-11-10/human-context-capacity/README.md).
+
+Trois reproductions OIDC atteignent leurs assertions sur le même gel : pool
+et débit anonymes refusent le refresh d'une session réellement admise, et un
+faux bearer consomme le compteur. Le correctif D5 est attribué dans son
+worktree, sans changement du ledger NV-03 ni de la voie Web. Le parent ingress
+échoue à sa barrière de flux avant la sonde visée ; diagnostic SSE en cours,
+sans RED ni correction produit annoncée pour D3. Aucun résultat n'est transféré
+à d'autres WIP ou à une qualification runtime. G09 FAIL, zéro gate global fermé.
+
 ## 10 novembre — première validation D8 et reprise du harnais
 
 Le candidat D8 R1 passe huit des neuf parents exécutés : régression courte,

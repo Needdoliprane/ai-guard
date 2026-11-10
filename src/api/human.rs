@@ -26,9 +26,17 @@ struct BrokerPublicationPause {
     resume: std::sync::mpsc::Receiver<()>,
 }
 impl HumanAccessState {
-    pub(super) fn new() -> Self {
+    pub(super) fn for_tenants<'a>(
+        tenants: impl IntoIterator<Item = &'a str>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::from_contexts(ContextRegistry::for_tenants(tenants)?))
+    }
+    pub(super) fn disabled() -> Self {
+        Self::from_contexts(ContextRegistry::disabled())
+    }
+    fn from_contexts(contexts: ContextRegistry) -> Self {
         Self {
-            contexts: ContextRegistry::new(),
+            contexts,
             #[cfg(test)]
             broker_publication_pause: std::sync::Mutex::new(None),
         }
@@ -52,6 +60,10 @@ impl HumanAccessState {
 }
 #[cfg(test)]
 mod brokers_tests;
+#[cfg(test)]
+mod context_fairness_controls;
+#[cfg(test)]
+mod context_fairness_tests;
 
 pub(super) fn failure(
     status: StatusCode,
@@ -723,6 +735,7 @@ fn identity_sync(
 ) -> ApiResult<Json<HumanIdentityV1>> {
     let mut contexts = Vec::new();
     let mut contexts_complete = true;
+    let mut capacity_exhausted = false;
     let mut display_name = None;
     let principal_key = proof.credential.principal.key().map_err(store_failure)?;
     let mut remaining = proof
@@ -839,11 +852,20 @@ fn identity_sync(
                 };
                 let expires = chrono::Utc::now()
                     + chrono::Duration::from_std(remaining).map_err(|_| invalid_request())?;
-                let context = state
-                    .human
-                    .contexts
-                    .obtain(binding, remaining, expires.to_rfc3339())
-                    .map_err(state_failure)?;
+                let context =
+                    match state
+                        .human
+                        .contexts
+                        .obtain(binding, remaining, expires.to_rfc3339())
+                    {
+                        Ok(context) => context,
+                        Err(StateFailure::Capacity) => {
+                            contexts_complete = false;
+                            capacity_exhausted = true;
+                            continue;
+                        }
+                        Err(error) => return Err(state_failure(error)),
+                    };
                 let capabilities = member
                     .capabilities
                     .iter()
@@ -891,6 +913,9 @@ fn identity_sync(
         contexts_complete,
         contexts,
     };
+    if capacity_exhausted && identity.contexts.is_empty() {
+        return Err(state_failure(StateFailure::Capacity));
+    }
     let value = proof
         .redactor
         .value(&serde_json::to_value(identity).map_err(|_| invalid_request())?);

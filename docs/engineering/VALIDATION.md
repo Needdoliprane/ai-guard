@@ -1,5 +1,28 @@
 # Validation courante
 
+## 10 novembre — D8 GREEN logiciel, D5 RED, D3 non concluant
+
+Sur la composition2336 `38ce0d5f…` : build `--no-run` RC0/1min44s, puis21
+fonctions uniques PASS (D8:10, contrôles existants10+1), check toutes cibles
+RC0/40,30s. Avertissements conservés ; Clippy et runtimes métier `NOT_RUN`.
+Les six SHA des fichiers D8 intégrés sont identiques au manifeste du code
+testé ; guides EN/FR et revue d'intégration indépendante traités.
+[Commandes et empreintes complètes](evidence/2026-11-10/human-context-capacity/README.md).
+
+**D5 RED réellement observés**, trois fonctions sélectionnées séparément :
+pool puis débit refusent le refresh admis429 contre200 attendu ; faux bearer
+consomme1 contre0 attendu. Raws respectifs `4b08bd10…`, `4563c3d0…`,
+`72c3df1e…`. **D3 non concluant** : une fonction exécutée, arrêt à la barrière
+SSE avant l'oracle ingress (raw `e55a6927…`), cleanup des serveurs/lecteurs
+joint avant la publication de l'échec. Aucun retry ou seuil modifié.
+Preuves directes hôte dans `qa-control-capacity-20261110-r1/results/`.
+
+Le précontrôle a aussi détecté les AppleDouble du paquet macOS (avant toute
+compilation), puis une omission actor dans la seule fixture ingress (build
+RC101, aucun test). Sources et échecs restent conservés ; source effective
+recalculée et revue de chaque correction avant nouveau GO. Aucun gate global
+fermé et aucune qualification de disponibilité générale déduite.
+
 ## 10 novembre — D8 R1, correction d'oracle et tentative R2
 
 - **PASS R1** : huit parents uniques, dont la régression qui refusait B après
