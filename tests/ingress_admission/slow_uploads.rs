@@ -274,6 +274,7 @@ async fn upload_budget_is_released_on_cancellation_failure_and_success() {
         client: reqwest::Client::builder().no_proxy().build().unwrap(),
         uploads: uploads.clone(),
         concurrency: exchanges.clone(),
+        streams: Arc::new(tokio::sync::Semaphore::new(super::MAX_SSE_EXCHANGES)),
         timeouts: Timeouts {
             connect: Duration::from_secs(3),
             headers: Duration::from_secs(30),

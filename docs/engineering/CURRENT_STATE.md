@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — rétention SSE bornée, D3 logiciel vérifié
+
+Le défaut de pool ingress est reproduit après64 réponses humaines authentifiées
+retenues : lecture publique429 malgré gateway direct200, reçu contrôle durable
+et récupération200 après libération. Le correctif limite la rétention SSE à48
+dans le plafond64 inchangé, selon le Content-Type amont, avec libération des
+deux permis. Dix parents exacts FIX PASS, check toutes cibles RC0 et2345 hashes
+post-source conformes ; source et paragraphes FR/EN relus indépendamment.
+[Sources, RED/GREEN et limites](evidence/2026-11-10/ingress-sse-capacity/README.md).
+Les marqueurs de fixture ne prouvent pas64 SSE naturels ; les en-têtes en
+attente, autres réponses et équité des flux restent distincts. Les autres WIP
+ne sont pas qualifiés par ce gel. G09 FAIL, zéro gate global fermé.
+
 ## 10 novembre — capacité OIDC et sortie du propriétaire corrigées
 
 Le candidat final passe24 parents gateway exacts, chacun sélectionné une fois,
@@ -13,8 +26,9 @@ des rejeux. Sources relues indépendamment, guides EN/FR synchronisés ;
 migration explicite V2→V3 avec sauvegarde neuve et démarrage normal V3.
 [Sources, commandes et limites](evidence/2026-11-10/native-authentication-capacity/README.md).
 L'ancien lecteur réel, Clippy et les qualifications IdP/runtime restent
-distincts. D3 ingress/SSE est en diagnostic avec de nouveaux tests préparés,
-sans correction ni RED concluante annoncée. G09 FAIL, zéro gate global fermé.
+distincts. D3 était encore en diagnostic à ce checkpoint OIDC ; son RED puis
+son correctif vérifié sont décrits dans l'entrée D3 plus récente ci-dessus.
+G09 FAIL, zéro gate global fermé.
 
 ## 10 novembre — capacité OIDC vérifiée, reprise complémentaire à corriger
 

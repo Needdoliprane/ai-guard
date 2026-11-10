@@ -132,6 +132,10 @@ impl<S: Stream> Stream for LeasedStream<S> {
 }
 
 #[cfg(test)]
+#[path = "human_streams_recovery_tests.rs"]
+mod recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

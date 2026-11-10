@@ -22,6 +22,9 @@ const MAX_URI: usize = 4096;
 const MAX_BODY: usize = 262_144;
 const MAX_CONCURRENT: usize = 64;
 const MAX_UPLOADS: usize = 16;
+// Retained SSE responses share the total exchange cap, but cannot consume it
+// completely. The remaining sixteen slots can serve ordinary exchanges.
+const MAX_SSE_EXCHANGES: usize = 48;
 
 mod control;
 
@@ -46,6 +49,7 @@ pub fn ingress_router_with_control(
 
 struct ExchangeLease {
     permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    stream_permit: Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
     body_done: AtomicBool,
     finished: tokio::sync::Notify,
 }
@@ -53,12 +57,14 @@ impl ExchangeLease {
     fn release(&self) {
         // The critical section cannot await. Recover a poisoned mutex during
         // cancellation so an already failed exchange cannot retain its slot.
-        match self.permit.lock() {
-            Ok(mut permit) => {
-                permit.take();
-            }
-            Err(poisoned) => {
-                poisoned.into_inner().take();
+        for permit in [&self.permit, &self.stream_permit] {
+            match permit.lock() {
+                Ok(mut permit) => {
+                    permit.take();
+                }
+                Err(poisoned) => {
+                    poisoned.into_inner().take();
+                }
             }
         }
     }
@@ -111,6 +117,7 @@ struct Ingress {
     client: reqwest::Client,
     uploads: Arc<tokio::sync::Semaphore>,
     concurrency: Arc<tokio::sync::Semaphore>,
+    streams: Arc<tokio::sync::Semaphore>,
     timeouts: Timeouts,
 }
 
@@ -165,6 +172,7 @@ fn router(upstream: &str, timeouts: Timeouts) -> anyhow::Result<Router> {
             .build()?,
         uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
         concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT)),
+        streams: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_EXCHANGES)),
         timeouts,
     };
     // /healthz goes to the real backend, like every other path. It must not
@@ -179,6 +187,20 @@ fn failure(status: StatusCode, message: &'static str) -> Response {
         axum::http::HeaderValue::from_static("no-store"),
     );
     response
+}
+
+fn is_event_stream(headers: &HeaderMap) -> bool {
+    headers.get_all(header::CONTENT_TYPE).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b';')
+            .next()
+            .is_some_and(|media| {
+                media
+                    .trim_ascii()
+                    .eq_ignore_ascii_case(b"text/event-stream")
+            })
+    })
 }
 
 /// Parse all Connection values before deleting the header itself. A caller may
@@ -387,6 +409,19 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
     if upstream.status() == StatusCode::SWITCHING_PROTOCOLS {
         return failure(StatusCode::BAD_GATEWAY, "Réponse du service invalide.");
     }
+    // Classify the fixed upstream response, never the request path, Accept
+    // header or caller's claimed tenant. Inspect before hop-by-hop filtering,
+    // so a Connection nomination cannot erase its SSE classification.
+    let stream_permit = if is_event_stream(upstream.headers()) {
+        match state.streams.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return failure(StatusCode::TOO_MANY_REQUESTS, "Trop de flux simultanés.");
+            }
+        }
+    } else {
+        None
+    };
     let headers = match end_to_end_headers(upstream.headers(), false) {
         Ok(headers) => headers,
         Err(()) => return failure(StatusCode::BAD_GATEWAY, "Réponse du service invalide."),
@@ -401,6 +436,7 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
     let pump_terminal = terminal.clone();
     let lease = Arc::new(ExchangeLease {
         permit: Mutex::new(Some(permit)),
+        stream_permit: Mutex::new(stream_permit),
         body_done: AtomicBool::new(false),
         finished: tokio::sync::Notify::new(),
     });
@@ -467,6 +503,9 @@ async fn forward(State(state): State<Ingress>, request: Request) -> Response {
 mod admission_tests;
 
 #[cfg(test)]
+mod sse_recovery_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -499,6 +538,71 @@ mod tests {
     }
     fn client() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[tokio::test]
+    async fn sse_budget_uses_upstream_media_type_and_releases_on_body_drop() {
+        use tower::ServiceExt;
+        let upstream = serve(Router::new().fallback(any(|request: Request| async move {
+            if request.uri().path() == "/plain" {
+                return "available".into_response();
+            }
+            let stream = async_stream::stream! {
+                yield Ok::<_, std::io::Error>("data: ready\n\n");
+                std::future::pending::<()>().await;
+            };
+            let mut response = Response::new(Body::from_stream(stream));
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("TeXt/Event-Stream ; charset=utf-8"),
+            );
+            response.headers_mut().insert(
+                header::CONNECTION,
+                axum::http::HeaderValue::from_static("content-type"),
+            );
+            response
+        })))
+        .await;
+        let state = Ingress {
+            origin: reqwest::Url::parse(&upstream.url).unwrap(),
+            client: client(),
+            uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
+            // Small component budgets exercise the same real HTTP admission;
+            // the separate multi-tenant regression uses the production caps.
+            concurrency: Arc::new(tokio::sync::Semaphore::new(2)),
+            streams: Arc::new(tokio::sync::Semaphore::new(1)),
+            timeouts: Timeouts {
+                headers: Duration::from_secs(5),
+                chunk: Duration::from_secs(10),
+                ..Timeouts::default()
+            },
+        };
+        let router = Router::new().fallback(any(forward)).with_state(state);
+        let request = |path| Request::builder().uri(path).body(Body::empty()).unwrap();
+        let retained = router.clone().oneshot(request("/arbitrary")).await.unwrap();
+        assert_eq!(retained.status(), StatusCode::OK);
+        assert!(!retained.headers().contains_key(header::CONTENT_TYPE));
+        let declined = router.clone().oneshot(request("/another")).await.unwrap();
+        assert_eq!(declined.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(declined.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            json!({"error":"Trop de flux simultanés."})
+        );
+        let ordinary = router.clone().oneshot(request("/plain")).await.unwrap();
+        assert_eq!(ordinary.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(ordinary.into_body(), 100)
+                .await
+                .unwrap(),
+            "available"
+        );
+        drop(retained);
+        let next = router.oneshot(request("/arbitrary")).await.unwrap();
+        assert_eq!(next.status(), StatusCode::OK);
+        drop(next);
     }
 
     #[tokio::test]
@@ -599,6 +703,7 @@ mod tests {
             client: client(),
             uploads: uploads.clone(),
             concurrency: exchanges.clone(),
+            streams: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_EXCHANGES)),
             timeouts: Timeouts {
                 upload_total: Duration::from_secs(1),
                 upload_idle: Duration::from_secs(120),
@@ -668,6 +773,7 @@ mod tests {
             client: client(),
             uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
             concurrency: permits.clone(),
+            streams: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_EXCHANGES)),
             timeouts: fast_timeouts(),
         };
         let response = Router::new()
@@ -736,6 +842,7 @@ mod tests {
             client: client(),
             uploads: Arc::new(tokio::sync::Semaphore::new(MAX_UPLOADS)),
             concurrency: permits.clone(),
+            streams: Arc::new(tokio::sync::Semaphore::new(MAX_SSE_EXCHANGES)),
             timeouts,
         };
         let router = Router::new().fallback(any(forward)).with_state(state);

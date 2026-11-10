@@ -1,5 +1,18 @@
 # Validation courante
 
+## 10 novembre — D3 RED puis10 PASS FIX et check
+
+Sur le gel2345 `a3cf44b6…`, deux caractérisations Read/EOF/reconnexion passent ;
+le parent D3_POOL atteint sa RED finale après markers, canaries HTTP/SQLite,
+récupération200 et cleanup. Sur FIX2345 `28b2baf1…`, dix sélections exactes
+donnent chacune1 PASS. Le check toutes cibles termine RC0 à08:13:38UTC,
+puis le post-manifeste vérifie2345 fichiers RC0. Les exports réels des deux
+sources et tous les raws directs sont conservés hors worktrees.
+[Commandes, empreintes et limites](evidence/2026-11-10/ingress-sse-capacity/README.md).
+Le timeout de compilation initial est conservé comme non concluant ; aucun
+test ni défaut produit n'en est déduit. Warnings, Clippy et qualifications
+réelles restent ouverts, aucun gate global fermé.
+
 ## 10 novembre — FIXr3 capacité OIDC et reprise,24 PASS
 
 Sur le gel2343 `c629f4bb…` : build lib RC0, liste compilée égale aux24 noms
