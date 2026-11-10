@@ -1,5 +1,20 @@
 # Validation courante
 
+## 10 novembre — OIDC60 PASS logiciel et nouveau RED de reprise
+
+Sur le candidat2341 `7f06ab13…` : build lib/bin RC0,60 parents sélectionnés
+uniques PASS, check toutes cibles RC0 à05:14:45UTC. Root a vérifié les noms et
+exclu deux sélections nulles, sans doubler les relances corrigées. Les erreurs
+préalables d'environnement/compilation sont conservées séparément.
+
+Sur R7 `5a5a4572…`, seul un enfant de tests est ajouté : build RC0, un parent
+exact échoue à05:22:12UTC sur owner1 contre0 après FRefresh durable/ACK omis,
+Logout/reap503 et vrai Drop. La preuve est relue indépendamment ; elle emploie
+SQLite réel et omission ACK synthétique, sans reproduire un incident OS.
+Les trois autres nouveaux parents ne sont pas exécutés. Nouveau correctif et
+GREEN requis avant intégration ; Clippy et qualifications réelles restent ouverts.
+[Commandes, empreintes et conservation](evidence/2026-11-10/native-authentication-capacity/README.md).
+
 ## 10 novembre — D8 GREEN logiciel, D5 RED, D3 non concluant
 
 Sur la composition2336 `38ce0d5f…` : build `--no-run` RC0/1min44s, puis21

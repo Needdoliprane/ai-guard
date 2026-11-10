@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — capacité OIDC vérifiée, reprise complémentaire à corriger
+
+Le candidat Core/gateway/opérateur passe60 fonctions ciblées uniques et le
+check toutes cibles sur le gel2341 `7f06ab13…`. Une reproduction supplémentaire
+R7, produit inchangé, atteint un nouveau défaut : après FRefresh durable sans
+ACK au keeper avant la première Logout, le propriétaire reste occupé malgré
+son reçu exact rejouable. Cette fonction sélectionnée seule échoue1 contre0 ;
+son correctif gateway FIXr3 est en revue/qualification. Le lot reste non intégré.
+[Sources, résultats et limites](evidence/2026-11-10/native-authentication-capacity/README.md).
+Les preuves et exports ont été conservés, la seule QA attribuée arrêtée et
+retirée. Autres WIP, fournisseurs et moteurs ne sont pas couverts ; G09 FAIL,
+zéro gate global fermé.
+
 ## 10 novembre — répartition D8 intégrée et OIDC reproduit
 
 Le correctif de capacité des contextes humains est intégré : parts fixes des
