@@ -145,6 +145,16 @@ pub enum OperatorCommand {
         config_dir: PathBuf,
         #[arg(long, default_value = "http://127.0.0.1:8787")]
         gateway: String,
+        /// Also verify the signed audit checkpoints of this private directory
+        /// against --anchor, and print that report after the gateway answer.
+        #[arg(long, requires = "anchor")]
+        checkpoint_dir: Option<PathBuf>,
+        /// Trust anchor held outside the controlled storage.
+        #[arg(long, requires = "checkpoint_dir")]
+        anchor: Option<PathBuf>,
+        /// Audit SQLite database to compare with every trusted signed position.
+        #[arg(long, requires = "checkpoint_dir")]
+        data: Option<PathBuf>,
     },
 }
 
@@ -585,6 +595,9 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
         OperatorCommand::VerifyAudit {
             config_dir,
             gateway,
+            checkpoint_dir,
+            anchor,
+            data,
         } => {
             let token = runner::read_token(&config_dir.join("secrets/viewer"))?;
             let answer = AuditClient::new(&gateway, &token)?
@@ -593,6 +606,20 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&answer)?);
             if answer.get("valid").and_then(serde_json::Value::as_bool) != Some(true) {
                 bail!("audit chain verification failed");
+            }
+            if let (Some(checkpoint_dir), Some(anchor)) = (checkpoint_dir, anchor) {
+                use crate::audit::signed_checkpoint::{RecordSource, VerifyRequest, cli};
+                let signed = cli::verification(&VerifyRequest {
+                    anchor: &anchor,
+                    source: RecordSource::Directory(&checkpoint_dir),
+                    data: data.as_deref(),
+                    require_reference: false,
+                    report_out: None,
+                });
+                println!("{}", signed.stdout);
+                if signed.exit_code != 0 {
+                    bail!("signed audit checkpoint verification failed");
+                }
             }
         }
     }

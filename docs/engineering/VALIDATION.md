@@ -1,5 +1,20 @@
 # Validation courante
 
+## 10 novembre — checkpoints signés : S4 RED/FIX et six FIX PASS
+
+RED2403 `4c8cfefd…` et FIX2403 `600148e6…` ne diffèrent que par le
+comportement S4 ; test commun. RED RC101 à la liste des fragments incomplets
+(0 au lieu de1), après témoins absent/vide. Six FIX exacts passent chacun
+une fois : S4, wire verify-audit, migration12, modification de signature,
+réécriture cohérente et rollback face à la référence indépendante.
+Build/listes RC0 ; check toutes cibles RC0, 22:01:52–22:03:21 UTC.
+[Identités, temps, profil isolé, revue et limites](evidence/2026-11-10/audit-signatures/README.md).
+Les vingt fichiers Rust publiés sont identiques au gel exécuté. Deux phrases
+EN/FR corrigent ensuite les contrôles de rotation. Les 2403 hashes, l’export
+réel et le retrait normal de la QA sont vérifiés. Aucune preuve transférée à Full3 non committé ni aux parcours image,
+Compose, runtime, IdP, restauration ou ancres opérées. NV-01 partiel et gates
+ouverts ; suites historiques Claude non recomptées.
+
 ## 10 novembre — candidat frontend B : 79 titres Node uniques, backend et navigateur absents
 
 Sur 61 sources du candidat B non fusionné, le timer de fermeture échoue en RED

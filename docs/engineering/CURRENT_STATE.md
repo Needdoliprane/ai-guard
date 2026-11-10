@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — checkpoints d’audit signés : six parents ciblés vérifiés
+
+Le composant Claude A est composé sans remplacer les modules centraux :
+validation S4 de la destination, raccord CLI explicite et migration jusqu’au
+schéma12. S4 échoue sur l’ancien comportement puis passe sur le correctif ;
+six parents FIX uniques et check toutes cibles donnent RC0 sur le gel2403
+`600148e6…`. Réécriture et rollback sont refusés par les oracles signés avec
+référence indépendante de fixture. [Source, commandes, revue et limites](evidence/2026-11-10/audit-signatures/README.md).
+Le vérificateur HTTP et le CLI sans options restent hash-only ; AuthV4,
+SetupV2, exploitation des ancres, images/Compose et restauration réelle ne
+sont pas qualifiés. Historique Claude non transféré, NV-01 partiel, G09 FAIL
+et aucun gate global fermé.
+
 ## 10 novembre — frontend B : validations Node d'un candidat non fusionné
 
 Le candidat B sur base `2cc29ee`, composition de 40 chemins puis correction du

@@ -18,6 +18,7 @@ This manual describes the complete product contract. The implementation and qual
 | [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |
 | [Enterprise](enterprise/README.md) | Shared control services, tenant boundaries, private CAs, internal inference and operations. |
 | [Kubernetes authority and inspection](kubernetes/README.md) | Explicit HTTPS trust and read-only Rust diagnostics for the Docker Desktop target; worker admission remains unavailable. |
+| [Signed audit checkpoints](audit-signatures/README.md) | Offline `ai-guard-audit-checkpoint` command: Ed25519 signing key, signed checkpoints of a tenant audit chain, independently held trust anchor, rollback detection, key rotation, proof export and diagnosis. Host-path control only; the Compose volume is not served. |
 
 Each guide contains prerequisites, configuration, startup, expected endpoints, diagnosis, stopping and data preservation. English/French versions and configuration examples change together when a contract changes.
 

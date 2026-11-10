@@ -185,6 +185,7 @@ pub(crate) use control::expected_worker_transition;
 pub(crate) use human::{HumanEventFilterV1, HumanEventPollV1, HumanStorePageV1};
 pub(crate) use human_brokers::HumanBrokerFrameV1;
 pub(crate) use human_workers::HumanWorkerFrameV1;
+pub mod signed_checkpoint;
 mod storage;
 use storage::{InitializationGuard, StoreStorage};
 #[cfg(test)]

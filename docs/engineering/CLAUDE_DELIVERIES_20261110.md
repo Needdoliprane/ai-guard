@@ -8,7 +8,7 @@ All three original branches start at `7672078831c74047b98ce85babf91adb625e2b29`.
 
 | Lot | Original branch and head | Integration candidate | Current status |
 |---|---|---|---|
-| A — signed audit checkpoints | `claude/audit-signatures-20261110`, `ad9367d29607f54114d518632e97e61a137d4ccc` | `codex/integrate-audit-signatures-20261110`, `197b246587fadd339b3b795da7b5e439224103b0` | Independent source review accepted the bounded S4, CLI wire and schema-12 changes. New composition execution and publication remain open. |
+| A — signed audit checkpoints | `claude/audit-signatures-20261110`, `ad9367d29607f54114d518632e97e61a137d4ccc` | `codex/integrate-audit-signatures-20261110`, `197b246587fadd339b3b795da7b5e439224103b0` | Composed S4 RED/FIX and six unique FIX parents passed; all-targets check RC0 on the 2,403-file freeze. Independent source review accepted the bounded changes. [Exact source and limits](evidence/2026-11-10/audit-signatures/README.md). Offline signature slice published; deployment and full NV-01 qualification remain open. |
 | B — unified supervision UI | `claude/unified-control-ui-20261110`, `6b7aea7e4f34c5eb1ec351343095e30309e97947` | `codex/integrate-unified-ui-20261110`, unmerged candidate on `2cc29ee`: forty-path composition plus the targeted timer fix | Node QA records 79 unique passed titles and one real-backend SKIP; TypeScript/Vite passed on the 61-source frontend freeze. This candidate is not public code. Backend Rust and browser execution remain NOT_RUN; review, integration and publication of B remain open. [Exact evidence and capture gaps](evidence/2026-11-10/frontend-B-node/README.md). |
 | C — durable and fair relay | `claude/relay-fairness-20261110`, `d0d496f387d77db9cd824a2762ccabe350652f1d` | `codex/integrate-relay-fairness-20261110`, `d2dea1eba4b5ad77b0429856ca1b113d990e6e67` | Core candidate reviewed. Typed client/stdio refusal wire remains a separate, required integration task. Composition tests and publication remain open. |
 
@@ -16,7 +16,7 @@ The new integration candidates use public `2cc29ee42ae3eb3cc8203538bf7a09aee2e26
 
 Important remaining limits:
 
-- A: CLI checkpoint verification is an explicit option using the existing configuration layout. The HTTP integrity route remains hash-chain verification. Setup V2 integration, independent rollback continuity, image/Compose execution and the control-genesis uniqueness observation remain open. Four historical guide links need their evidence curated before publication.
+- A: CLI checkpoint verification is an explicit option using the existing configuration layout. The HTTP integrity route remains hash-chain verification. Setup V2 integration, independent rollback continuity, image/Compose execution and the control-genesis uniqueness observation remain open. Four guide links now resolve to curated composition evidence; historical raw records remain private.
 - B: only the recorded Node frontend slice has been executed. Its timer passed alone and again in the batch; it is counted once among 79 unique passed titles. The backend-dependent parent was skipped, and browser/backend Rust execution remains NOT_RUN. No historical B pass is transferred. The pre-refusal page-size observation outside the four backend wire lines remains open.
 - C: the core and the proposed typed client wire have separate source identities. Passing core tests will not establish the worker transport or the complete refusal path. Runtime, retention and physical disk/inode limits retain their own qualifications.
 

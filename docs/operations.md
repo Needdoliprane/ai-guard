@@ -307,7 +307,20 @@ Le diff de fichiers compare les empreintes SHA-256 de contenu avant/après. Il �
 ./target/release/agentsandbox verify-audit
 ```
 
-Cette commande vérifie la chaîne locale via le gateway. Elle détecte une altération vérifiable de l'audit local, pas une réécriture intégrale par un administrateur capable de remplacer base et chaîne. Sauvegarde/restauration et rétention doivent être implémentées et qualifiées pour le périmètre annoncé. Les points de contrôle signés et l'export vérifiable du [contrat de traçabilité](sso.md#chaîne-de-traçabilité-à-livrer) sont obligatoires, à implémenter et qualifier ; `verify-audit` ne les livre pas. Un ancrage externe éventuel reste à évaluer selon la menace et les gates ; aucune de ces protections n'est présentée comme active.
+Sans option de checkpoint, cette commande vérifie la chaîne locale via le gateway : sa réponse ne détecte pas une réécriture cohérente de la base et de la chaîne. Pour demander en plus la vérification signée hors ligne sur la machine opérateur :
+
+```sh
+./target/release/agentsandbox verify-audit \
+  --config-dir "$CONTROL_CONFIG" --gateway http://127.0.0.1:8787 \
+  --checkpoint-dir "$SIGNING/checkpoints" --anchor "$HOLDER/anchor-2.json" \
+  --data "$AUDIT_DB"
+```
+
+`--checkpoint-dir` et `--anchor` sont exigés ensemble ; `--data` est facultatif, mais nécessaire pour comparer la base aux positions signées. La commande imprime d’abord la réponse du gateway, puis le rapport structuré des checkpoints ; elle échoue si la chaîne locale ou la vérification signée est refusée ou indisponible. Sans les options de checkpoint, sa sortie reste un seul document inchangé. L’opérateur doit choisir le gateway, la base et le matériel du même périmètre : les deux documents ne sont pas fusionnés en un verdict d’autorité commun. Sans référence dans l’ancre, aucun rollback n’est détectable ; sans base comparée, le rapport dit uniquement ce que la clé a signé.
+
+Le raccord lit encore le credential viewer historique dans `--config-dir/secrets/viewer` ; il ne résout pas une installation SetupV2 ni son registre `tenants.json`. L’outil hors ligne distinct peut viser explicitement `tenants/<tenant>/audit.sqlite`, mais ne signe pas `authentication.sqlite` V4 et ne qualifie aucun parcours SetupV2 par ce seul raccord.
+
+La commande distincte `ai-guard-audit-checkpoint` fournit signature, ancre, rotation, export de preuve et diagnostic (guides [EN](setup/audit-signatures/README.md)/[FR](setup/audit-signatures/README.fr.md)). `GET /api/v1/integrity` et `Store::integrity` gardent leur portée de chaîne locale ; ni le gateway ni le dashboard ne vérifient automatiquement les signatures ou la continuité indépendante au démarrage. Aucun paramètre de configuration d’ancre, refus de réactivation ou verdict signé HTTP n’est livré. L’export de preuve des checkpoints ne rend pas les exports d’événements vérifiables. La nouvelle composition et ce raccord restent à compiler et à exercer dans leur QA ; les preuves historiques du composant ne les qualifient pas. Sauvegarde/restauration, rétention et ancrage externe restent à qualifier selon la menace et les gates.
 
 ## Copie, bornes et export
 

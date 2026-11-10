@@ -1,5 +1,17 @@
 # Suivi des audits indépendants
 
+## 10 novembre — suivi NV-01 : signature hors ligne composée et vérifiée
+
+Le fingerprint `audit:unkeyed-chain:no-independent-signed-checkpoint` du
+run multi-worktrees garde son statut primaire et sa source historiques.
+La composition A ajoute les signatures et une vérification CLI explicitement
+demandée : S4 RED discriminant puis six FIX PASS uniques, dont réécriture
+cohérente et rollback face à une référence indépendante de fixture ; check
+toutes cibles RC0. [Sources, revue et preuves bornées](evidence/2026-11-10/audit-signatures/README.md).
+L’exploitation d’une ancre indépendante, AuthV4/SetupV2, le verdict HTTP,
+la restauration réelle et l’unicité du genesis restent ouverts. Les tests
+logiciels ne ferment ni NV-01 entier ni les gates de production.
+
 ## 10 novembre — suivi logiciel de la composition Kubernetes
 
 La composition Kube13 conserve le refus d'admission workload. Cinq parents

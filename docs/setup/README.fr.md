@@ -18,6 +18,7 @@ Ce manuel décrit le contrat du produit complet. L'état d'implémentation et le
 | [IA locale](local-ai/README.fr.md) | Image du petit modèle épinglée, limites mémoire/contexte, inférence interne et remplacement du modèle. |
 | [Entreprise](enterprise/README.fr.md) | Services de contrôle partagés, frontières tenant, AC privées, inférence interne et exploitation. |
 | [Autorité et inspection Kubernetes](kubernetes/README.fr.md) | Confiance HTTPS explicite et diagnostic Rust en lecture seule pour la cible Docker Desktop ; admission de workers indisponible. |
+| [Points de contrôle signés de l'audit](audit-signatures/README.fr.md) | Commande hors ligne `ai-guard-audit-checkpoint` : clé de signature Ed25519, points de contrôle signés de la chaîne d'audit d'un tenant, ancre de confiance tenue de façon indépendante, détection de rollback, rotation de clé, export de preuve et diagnostic. Contrôle sur chemins de l'hôte uniquement ; le volume Compose n'est pas desservi. |
 
 Chaque guide couvre prérequis, configuration, lancement, accès attendus, diagnostic, arrêt et conservation des données. Versions anglaise/française et exemples évoluent ensemble lorsqu'un contrat change.
 
