@@ -1,5 +1,16 @@
 # État constaté — suivi du développement
 
+## 10 novembre — frontend B : validations Node d'un candidat non fusionné
+
+Le candidat B sur base `2cc29ee`, composition de 40 chemins puis correction du
+timer, reste non fusionné. Sur ses 61 sources frontend, RED timer RC1 puis FIX
+RC0 ; le batch compte 79 titres PASS uniques et un SKIP backend absent. Le timer
+repassé dans le batch n'est pas compté une seconde fois. TypeScript/Vite RC0,
+23 modules, avertissement outDir conservé ; post-sources et exports exacts,
+QA retirée normalement. [Preuves et lacunes de capture npm](evidence/2026-11-10/frontend-B-node/README.md).
+Ces résultats ne qualifient pas le front public : backend Rust et navigateur
+NOT_RUN, aucun parcours SSO/runtime ni gate qualifié. Historique B non transféré.
+
 ## 10 novembre — composition Kubernetes : cinq parents R1 et un parent R2
 
 La composition conserve le journal et le préambule V2, les confirmations

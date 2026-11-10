@@ -1,5 +1,26 @@
 # Validation courante
 
+## 10 novembre — candidat frontend B : 79 titres Node uniques, backend et navigateur absents
+
+Sur 61 sources du candidat B non fusionné, le timer de fermeture échoue en RED
+RC1 (1 au lieu de 0), puis passe seul en FIX RC0. Le batch de six fichiers donne
+80 tests, 79 PASS, 0 FAIL, 1 SKIP et 0 annulé. Le filtre négatif n'a pas exclu ce
+timer : ses deux exécutions FIX ne font pas 80 titres PASS uniques. Le test
+réclamant le vrai backend est SKIP/NOT_RUN, pas une preuve d'API réelle.
+Node 24.22.2/npm 11.19.1 effectifs ; `tsc --noEmit` et Vite RC0, 23 modules.
+Le dist neuf dans scratch conserve l'avertissement outDir hors racine.
+
+npm ci RC0/14 paquets est une observation d'outil ; UTC et stdout/stderr bruts
+originaux restent NOT_CAPTURED. L'arbre npm ultérieur RC0, les trois locks et
+les SRI des 14 paquets sont vérifiés séparément ; aucune capture n'est recréée
+par une relance. Root vérifie les 61 empreintes, les chemins exacts, l'absence
+d'entrées non régulières et les exports réels RED/FIX/dist, puis retire
+normalement la QA ; exit 143 de l'arrêt idle, OOM false, watch terminal 0.
+[Gels, résultats et limites](evidence/2026-11-10/frontend-B-node/README.md).
+Le code B et son timer restent candidats : aucun résultat transféré au code
+public ou depuis l'historique B. Backend Rust/browser NOT_RUN ; aucun SSO,
+worker/runtime, fournisseur, cluster ou gate qualifié.
+
 ## 10 novembre — composition Kubernetes : cinq R1 et un R2, sans transfert de preuve
 
 Le gel R1 de 2384 fichiers `9a6d04a879fa50db98125355c288e75cd109245cb330517345d444b348ff3831`
