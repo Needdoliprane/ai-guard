@@ -1,5 +1,34 @@
 # Validation courante
 
+## 10 novembre — validations broker et constructeurs privés
+
+- **RED observé** : un parent r2 avant libération F/retrait, puis un parent D8
+  sur le registre courant (4 096 A, B Capacity). Sources respectives
+  `b9d5bf32…` et `c67e2903…`. Logs SHA-256 `2e37a999…` et `cdf7ca28…`.
+- **PASS logiciel r3** : dix parents uniques sur `55d0ae55…`, check toutes
+  cibles RC0/46,01 s (log `cbd34084…`). Deux autres parents sélectionnés échouent
+  en préparation : expiration avant réception et enforcer indisponible avant
+  réception. Il ne s'agit pas d'une suite de douze tests verte.
+- **Diagnostic** : un build SIGKILL avant sélection, avec pic au plafond 8 Gio
+  et compteur OOM ; après budget QA borné à 9 Gio, préparation observée 5 414 ms,
+  restant zéro, état Unsubmitted (log `08637b68…`). Aucun délai produit modifié.
+- **FAIL préparation NV-06** : compilation réussie, un parent sélectionné,
+  refus EUID/mode 0700 dans le constructeur, avant lecteur et oracle lifecycle
+  (log `aa22584a…`). Le correctif de création et son harnais restent à vérifier.
+- **NOT_RUN** : GREEN D8, nouveau Resume, RED D7, lifecycle NV-06, vrais moteurs,
+  fournisseur, cluster et qualification globale. Les assertions non atteintes
+  restent non prouvées ; un échec de fixture n'est pas une RED du comportement.
+
+Preuves privées persistantes : `qa-prewire-root-20261110-r1/` et
+`qa-snapshot-r2-20261110-r1/` dans la racine d'ingénierie. Les sources/manifestes,
+raws, statuts et clôtures identifient chaque gel et son environnement isolé.
+Limite de conservation : les fixtures broker en tmpfs n'ont pas été exportées
+avant l'arrêt automatique ; les deux fichiers vides sont marqués NOT_CREATED.
+Les octets d'entrée sont reconstruits et vérifiés, sans prétendre récupérer
+l'état des fixtures. NV-06 a son véritable export source vérifié après essai
+(`89c45683…`) et son archive de fixtures (`dcc1457b…`). Deux conteneurs retirés
+normalement après PID0 et watchers terminaux ; aucune suppression de volume.
+
 ## 10 novembre — conservation et lecture du nouvel audit run-2
 
 **PASS conservation** : sept empreintes des pièces principales rapprochées des

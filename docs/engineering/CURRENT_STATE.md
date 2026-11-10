@@ -1,5 +1,36 @@
 # État constaté — suivi du développement
 
+## 10 novembre — broker r3, capacité humaine et capture privée
+
+Sur la composition privée r3 `55d0ae55…`, dix parents ciblés passent et deux
+échouent avant leur point de contrôle ; le check toutes cibles passe (46,01 s).
+La reproduction r2 montre qu'un reçu ordinaire et Q suppriment la rétention
+avant Final/retrait local, contrairement au contrat. Le diagnostic mesure 5 414 ms de
+préparation pour une borne de fixture de 3 s : l'oracle après réception n'est
+pas atteint. Une correction des seuls budgets du harnais est proposée et relue,
+pas exécutée. Ces preuves logicielles utilisent un Ready synthétique ; aucun
+runtime Docker/Podman/Kubernetes ni parcours Full3 réel n'est qualifié.
+
+Le run-2 D8 est reproduit au registre courant : 4 096 contextes A admis, aucun
+refus A, première allocation B refusée Capacity. Le FIX de répartition par
+tenants configurés et d'identité partielle est écrit dans son worktree dédié,
+relu indépendamment sur six fichiers et gelé ; compilation et dix tests FIX,
+dont le producteur Router réel, restent `NOT_RUN`. D7 a un nouveau RED source
+mémoire/replay gelé ; il n'a pas encore été exécuté et aucun FIX n'est écrit.
+
+La QA NV-06 atteint le constructeur produit `PreparedSource::build`, qui refuse
+le nouveau répertoire privé avant de lancer son lecteur. La source confirme une
+création TempDir dépendant de l'umask ; UID/mode exacts n'ont pas été enregistrés.
+La création explicite 0700 et ses régressions sont en correction/revue séparées.
+L'oracle de rétention du vrai CLI reste non atteint. Le nouveau Resume audité
+est gelé sur dix-sept fichiers, avec treize parents source : revue et QA ouvertes.
+
+Les deux QA sont réellement arrêtées et retirées, leurs watchers terminés.
+Les logs et sources d'entrée du broker sont conservés ; ses fixtures temporaires
+n'ont pas été exportées avant le backstop, limite explicite. L'export source et
+fixtures de NV-06 a réussi avant arrêt. Aucun résultat n'est transféré à un
+autre gel ou au produit complet. G09 reste FAIL, zéro gate global fermé.
+
 ## 10 novembre — réserve terminale OIDC et corrections parallèles
 
 NV-03 reçoit un correctif logiciel vérifié : réserve transactionnelle d'un

@@ -1,5 +1,20 @@
 # Plan d'industrialisation
 
+## 10 novembre — lots gelés et prochaines preuves discriminantes
+
+| Propriétaire | Travail courant et acceptation suivante |
+|---|---|
+| `import_verification_diagnosis` | NV-06 r3 : création privée explicite et harnais constructeur sous umask contrôlé ; D8 FIX antérieur gelé après RED réel, sans modification pendant revue/QA |
+| `d5_composition_review` | Revue indépendante NV-06 r3 ; D8 relu en source ; D7 conception/RED gelés avant FIX et en attente de reproduction courante |
+| Luna | Plan ciblé D8/NV-06 après clôture des deux QA ; aucune exécution avant nouveau gel/admission, aucun appel fournisseur |
+| Root | Revue du Resume dix-sept fichiers, composition et nouvelles QA, preuves et publication ; budgets de fixture broker corrigés séparément du produit |
+
+D8 a franchi sa RED de registre mais pas son GREEN/Router. D7 n'a pas franchi
+son RED. Le Resume ne clôt ni D1, ni D7, ni attribution humaine ou reprise sans
+original. La correction du constructeur NV-06 est un prérequis au test lifecycle,
+pas sa réussite. Les sources gelées et leurs limites restent attachées à chaque
+lot ; aucune qualification réelle ne découle de cette file de travail.
+
 ## 10 novembre — trois lots proposés à Claude, intégration coordonnée
 
 Le prompt `/goal` transmis au mainteneur répartit trois développements sur la
