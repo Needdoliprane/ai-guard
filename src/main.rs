@@ -87,7 +87,7 @@ enum Command {
         #[arg(long, default_value_t = 100_000)]
         max_events: u64,
     },
-    /// Migrate the existing offline SSO audit V1 to V2 with a verified new V1 backup.
+    /// Migrate the existing offline SSO audit one explicit version with a new backup.
     MigrateAuthentication {
         /// Existing private gateway OIDC configuration; no provider contact.
         #[arg(long)]
@@ -95,6 +95,9 @@ enum Command {
         /// New private backup path; existing destinations are never overwritten.
         #[arg(long)]
         backup: PathBuf,
+        /// Exact next format: 2 (verified initial proofs), 3 (native logout terminal reserve).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=3))]
+        target_version: u32,
         /// Operator attestation: all audit consumers are stopped; not runtime fencing.
         #[arg(long, required = true)]
         confirm_control_stopped: bool,
@@ -851,22 +854,29 @@ async fn main() -> Result<()> {
         Command::MigrateAuthentication {
             oidc_config,
             backup,
+            target_version,
             confirm_control_stopped,
         } => {
             anyhow::ensure!(
                 confirm_control_stopped,
                 "Stop every authentication audit consumer before migration; --confirm-control-stopped is an operator attestation, not runtime fencing"
             );
+            let migration = match target_version {
+                2 => "verified_initial_v2",
+                3 => "native_logout_v3",
+                _ => anyhow::bail!("unsupported authentication migration target"),
+            };
             let report = gateway_config::migrate_authentication(
                 &oidc_config,
                 &backup,
+                target_version,
                 Redactor::new(vec![]),
             )?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "version": 1,
-                    "migration": "verified_initial_v2",
+                    "migration": migration,
                     "namespace_id": report.namespace_id,
                     "records": report.records,
                     "serialized_bytes": report.serialized_bytes,

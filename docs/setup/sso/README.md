@@ -319,6 +319,40 @@ If `gateway.provider.limits` is present, supply the complete closed object from 
 
 The gateway additionally limits tokens to 16 KiB and PKCE transactions to 300 seconds. Admission is bounded by access-token expiry, an absolute limit of 1 hour and an inactivity limit of 15 minutes; refresh does not extend the absolute deadline. Web token delivery must be redeemed within 30 seconds. These are current implementation bounds, not measured end-to-end revocation or availability guarantees.
 
+### Login and native refresh admission
+
+The running gateway keeps separate in-memory budgets for anonymous login work
+and refreshes of already admitted native CLI sessions. A native refresh uses its
+class only after the gateway verifies the exact session, bearer fingerprint,
+generation and active binding. An intent ID, cookie or claimed session type is
+not an authenticated identity.
+
+| Bound within one running gateway | Limit |
+|---|---|
+| Anonymous login work, including pending exchanges/deliveries | 224 retained operations |
+| Verified native CLI refresh work | 32 retained operations |
+| Both classes combined | 256 retained operations |
+| Starts in one shared one-second window | 8 anonymous + 8 verified native; 16 total |
+| Native refreshes for one verified principal, across its sessions | 4 active operations; 2 starts in that same window |
+| Native refreshes for one admitted session | 1 operation at a time |
+
+Unused places or starts in one class are not lent to the other, and saturation
+does not evict an existing owner. An operation retained for mandatory cleanup
+still counts, even when it can no longer publish tokens. These bounds are
+separate from the existing live-session ceilings of 4096 per gateway and 64 per
+principal. They count gateway state and starts; they do not measure provider,
+CPU or network capacity, establish per-tenant fairness, or qualify 100 cloud
+workers.
+
+`429 capacity_exhausted` with `retry_action: retry` means a volatile place,
+start-rate or cleanup reservation is unavailable. Reduce simultaneous login
+attempts/refreshes; allow the current window or eligible cleanup to progress
+before an explicit retry. Waiting for a window does not release an owner held
+by a failed audit. `503 audit_unavailable` with `retry_action: contact_operator`
+requires diagnosing the mandatory audit and its durable capacity instead.
+Neither response authorizes an automatic provider exchange retry. Keep a failed
+or uncertain refresh distinct from a successful session.
+
 ### Work admission and cancelled refresh
 
 HTTP Store reads, mutations and authentication/audit checks run in blocking tasks outside Tokio workers. The gateway rechecks identity, session, mapping, expiry and permissions in the relevant segment at I/O, after any queueing. Each SSE poll/export page repeats its checks. I/O slots are released before client transport; cancelling a request does not free a running segment's slot before its actual completion or undo a durable commit.
@@ -347,6 +381,79 @@ are not repaired by reopening or increasing a configuration value. Keep the
 original ledger and treat that case as an incident requiring an explicit
 recovery plan. This reservation does not replenish the cumulative global quota,
 provide retention/policy migration, or isolate that global capacity by tenant.
+
+### Native logout while a refresh is pending
+
+When a new logout can start during a pending native CLI refresh, the control
+retains the original operation and records three durable acknowledgements in
+order: **BEGIN**, the original refresh result **FRefresh**, then the logout
+result **END**. BEGIN records the logout intention and reserves its own terminal
+record and up to 32,768 serialized payload bytes in V3, in addition to the
+refresh allowance. FRefresh keeps the refresh's
+first chosen outcome; END records `Logout/Succeeded/UserRequested` against that
+logout intention. END does not overwrite the earlier refresh result.
+
+The control returns `local_session: closed` and `audit: recorded` for this
+pending-refresh logout only after all three acknowledgements. If a required
+stage cannot be recorded, it returns `503 audit_unavailable` with
+`retry_action: contact_operator` and retains the same unusable, counted owner.
+It does not publish a late rotation or free capacity merely because the client
+cleared its local state. Diagnose the audit while preserving its ledger,
+policy, configuration and receipts. Recovery of this pending logout with
+retained live state reuses the same binding, Refresh/Logout operation UUIDs and
+proofs; it does not invent a new logout, receipt, provider call or deadline.
+
+If the original refresh close **FRefresh** was already durable before any first
+logout intention, its acknowledgement may be missing from the live control.
+The control can reconcile only that exact original refresh result. It must
+obtain the real replay acknowledgement with the original binding, Refresh
+operation, causal receipt and first outcome before releasing its old in-memory
+owner. Merely reading a Closed state or assuming that no logout promise exists
+is insufficient. A failed audit or conflicting retained control proofs keep
+the owner unusable and counted, with `503 audit_unavailable` and
+`retry_action: contact_operator`.
+
+This reconciliation creates no new Logout intention, UUID or result. The
+response is HTTP `200` with `local_session: unknown`,
+`provider_logout: not_attempted` and `audit: unavailable`; it does **not** mean
+that this new logout was accepted or audited. These fields alone do not prove
+that the old refresh was reconciled either: a request without a matching live
+owner has the same unknown response. Verified reconciliation releases the old
+volatile owner only after the actual FRefresh acknowledgement, without resetting the
+durable audit quota. If a Logout BEGIN may already have been committed,
+including when its acknowledgement was lost, the original three-acknowledgement
+path and its separate Logout terminal reservation remain required. Do not
+erase retained state or substitute a Closed query for those acknowledgements.
+
+The native refresh **Finish** request remains valid for only its original
+15-second lifetime. A valid Finish may progress the retained closure; after
+that lifetime, Finish is refused and is not a cleanup/recovery path. Logout
+with the same retained proof/binding, expiry cleanup when an eligible control
+path next runs, and cleanup when the in-flight operation is dropped can still
+attempt the same closure. None extends the deadline. There is no independent
+background cleanup service or guaranteed drain time; an unavailable audit or
+stopped runtime can prevent progress and leave capacity retained.
+
+Resuming Logout requires the client's retained proof and the same live control
+owner. Expiry/Drop cleanup depends on retained control state. A restart cannot
+reconstruct that state from the audit, and a client that discarded its proof
+cannot recreate it from the audit either. A later logout returning
+`local_session: unknown` and `audit: unavailable`
+does not prove that an earlier Logout sequence completed, including after the
+refresh-only reconciliation above. Read these fields separately from HTTP
+status. Preserve an unresolved audit error for the operator and repair the
+audit before retrying a retained operation. If live client state was lost,
+sign in again through normal admission; that new sign-in does not repair,
+rewrite or certify the old result. An
+external CLI may already have sent its provider request; local closure does not
+attest cancellation of that request or provider logout. Read the
+[separate logout outcomes](#sign-in-from-the-browser).
+
+Use matching V3 consumers and follow the [explicit V1→V2, then V2→V3 migration
+procedure](#migrate-an-existing-authentication-audit), with a new verified backup
+for each required step. Historical generic logout intentions are not promoted
+to terminal reservations. No automatic migration, audit replacement or fallback
+is a recovery path.
 
 ### Pending login and durable audit
 
@@ -520,12 +627,13 @@ Export needs an existing private parent and a **new** final destination. It has 
 
 ## Migrate an existing authentication audit
 
-The separate authentication ledger has its own format, independent of tenant schema migrations. Normal startup requires format V2; opening a V1 ledger reports that explicit migration is required and does not upgrade or replace it. New authentication ledgers use V2. Keep the existing installation UUID, approved clients, policy, credentials and tenant databases unchanged for this migration.
+The separate authentication ledger has its own format, independent of tenant schema migrations. Normal startup requires format V3; opening an older ledger reports that explicit migration is required and does not upgrade or replace it. New authentication ledgers use V3. Keep the existing installation UUID, approved clients, policy, credentials and tenant databases unchanged.
 
-Stop the gateway and every other consumer of this authentication ledger, then run the matching Rust binary under the control UID in a one-off container with no network and access to the existing private control volume. Prepare an existing private backup parent (`0700`) and select a **new** final backup path. Inside that container:
+Stop the gateway and every other consumer of this authentication ledger, then run the matching Rust binary under the control UID in a one-off container with no network and access to the existing private control volume. Prepare an existing private backup parent (`0700`) and select a **new** final backup path for each step. For an existing V1 ledger, first enable verified initial proofs:
 
 ```sh
 agentsandbox migrate-authentication \
+  --target-version 2 \
   --oidc-config /absolute/private/ai-guard/oidc.json \
   --backup /absolute/private/backups/authentication-before-v2.sqlite \
   --confirm-control-stopped
@@ -533,9 +641,21 @@ agentsandbox migrate-authentication \
 
 `--confirm-control-stopped` is the operator's maintenance attestation, not a check or independent proof that consumers have stopped. The command does not stop services or fence another writer. It reads the closed private OIDC JSON and its existing local audit/optional public CA references, without provider discovery, token exchange or network requests. Relative references inside that JSON remain relative to its parent. No provider credential, tenant runner token or `.env` is needed.
 
-Migration verifies the existing V1 ledger and a coherent, exclusively new private V1 backup before enabling V2's verified-initial-proof marker. It preserves namespace, head, historical records and serialized-byte counters; it does not erase history, reset capacity, change policy or manufacture records for past proofs. The JSON report contains the preserved verification values, not tokens or provider replies. An already V2 ledger is refused before creating another backup. Existing backup destinations, an invalid binding/policy, an untrusted local reference or failed verification are refused; preserve source and backup material and correct the reported precondition before an explicit retry. There is no automatic initialization or replacement fallback.
+For an existing V2 ledger, including the result of the first step, enable native logout terminal reservations:
 
-After success, retain the V1 backup with the matching configuration and binary inventory, then restart matching consumers against the migrated source. The backup remains V1 and needs this explicit migration before normal V2 startup if restored. Validate any recovery in a fresh private isolated destination before cutover; never overwrite the migrated source to test a restore. Migration does not restore tokens, live sessions, execution authority or independent rollback detection. This operator command does not qualify an IdP, release, archive or retention procedure.
+```sh
+agentsandbox migrate-authentication \
+  --target-version 3 \
+  --oidc-config /absolute/private/ai-guard/oidc.json \
+  --backup /absolute/private/backups/authentication-before-v3.sqlite \
+  --confirm-control-stopped
+```
+
+Omitting `--target-version` preserves the historical V1→V2 command; it does not choose the newest format. A V1 source cannot skip directly to V3. Keep consumers stopped between the two steps and preserve both backups.
+
+Each step verifies the exact prior format and a coherent, exclusively new private backup in that prior format before changing the source marker. It preserves namespace, head, historical records and serialized-byte counters; it does not erase history, reset capacity, change policy or manufacture records for past proofs. V3 enables typed native logout intentions to reserve their terminal record while a refresh is pending; migration does not turn historical generic logout intentions into reservations. The JSON report contains the preserved verification values and `migration: verified_initial_v2` or `native_logout_v3`, not tokens or provider replies. A source already at the requested target, a skipped step or unknown target is refused. Existing backup destinations, an invalid binding/policy, an untrusted local reference or failed verification are refused; preserve source and backup material and correct the reported precondition before an explicit retry. There is no automatic initialization or replacement fallback.
+
+After the source reaches V3, retain the backups with the matching configuration and binary inventory, then restart matching V3 consumers against the migrated source. Older binaries refuse V3; opening it with another binary does not downgrade it. The backups remain V1 and V2 respectively and need the remaining explicit steps before normal V3 startup if restored. Validate any recovery in a fresh private isolated destination before cutover; never overwrite the migrated source to test a restore. Migration does not restore tokens, live sessions, execution authority or independent rollback detection. This operator command does not qualify an IdP, release, archive or retention procedure.
 
 ## Diagnose and recover
 
@@ -560,7 +680,7 @@ After success, retain the V1 backup with the matching configuration and binary i
 
 Keep the OIDC file, exact binary/image identities, tenant registry, private identities/grants and their tenant databases together with the separate authentication audit inventory. The audit stores typed outcomes and token fingerprints, not recoverable tokens. It is not atomic with an external IdP: a provider exchange followed by a crash can leave an unknown outcome requiring a new login.
 
-`migrate-authentication` creates the verified new V1 backup required by its explicit V1→V2 migration. There is no standalone authentication-audit backup/restore, archive or retention CLI. The Rust library also has a verified-new backup operation; do not invent a shell wrapper or treat a live SQLite main-file copy as coherent. Before backup/recovery, stop every consumer and preserve a coherent SQLite set, installation identity, audit policy and existing configuration under the installation's approved storage procedure. Keep existing material and validate a recovery in a fresh isolated destination before any cutover. Recovery does not restore tokens, live sessions or execution authority.
+`migrate-authentication` creates the verified new prior-format backup required by each explicit V1→V2 or V2→V3 step. There is no standalone authentication-audit backup/restore, archive or retention CLI. The Rust library also has a verified-new backup operation; do not invent a shell wrapper or treat a live SQLite main-file copy as coherent. Before backup/recovery, stop every consumer and preserve a coherent SQLite set, installation identity, audit policy and existing configuration under the installation's approved storage procedure. Keep existing material and validate a recovery in a fresh isolated destination before any cutover. Recovery does not restore tokens, live sessions or execution authority.
 
 The audit verifies its chain and live process floor, but a complete database rollback across restart needs an independent witness to detect it. Do not promise anti-rollback, signed external checkpoints or release qualification from this configuration. Quotas count records (including genesis) and serialized payload bytes; SQLite pages, WAL/SHM, backups and filesystem use add overhead. An exhausted audit refuses new mandatory operations; an audit-policy migration/retention procedure remains to be supplied before operating at that boundary.
 

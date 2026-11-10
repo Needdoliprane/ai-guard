@@ -261,7 +261,7 @@ impl DurableAuthenticationAudit {
         *floor = replay.verified.head.clone();
         if let Some(receipt) = replay.existing(record, &payload)? {
             if let format::Entry::Session { mutation } = &entry {
-                replay.validate_mutation_replay(mutation, &receipt)?;
+                replay.validate_mutation_replay(mutation, &receipt, &self.policy)?;
             }
             self.verify_backing(&tx)?;
             tx.commit()?;
@@ -368,10 +368,11 @@ impl DurableAuthenticationAudit {
 
     pub fn format_version(&self) -> Result<u32> {
         self.read_projection(|replay| {
-            Ok(if replay.version == format::VERSION {
-                2
-            } else {
-                1
+            Ok(match replay.version {
+                format::LEGACY_VERSION => 1,
+                format::VERIFIED_INITIAL_VERSION => 2,
+                format::VERSION => 3,
+                _ => return Err(AuthenticationAuditFailureV1::Format.into()),
             })
         })
     }
@@ -468,6 +469,23 @@ impl DurableAuthenticationAudit {
         &self,
         backup: &Path,
     ) -> Result<AuthenticationVerificationV1> {
+        self.migrate_format(
+            backup,
+            format::LEGACY_VERSION,
+            format::VERIFIED_INITIAL_VERSION,
+        )
+    }
+
+    pub fn migrate_native_logout_v3(&self, backup: &Path) -> Result<AuthenticationVerificationV1> {
+        self.migrate_format(backup, format::VERIFIED_INITIAL_VERSION, format::VERSION)
+    }
+
+    fn migrate_format(
+        &self,
+        backup: &Path,
+        source_version: i64,
+        destination_version: i64,
+    ) -> Result<AuthenticationVerificationV1> {
         self.healthy()?;
         let mut state = self
             .state
@@ -480,7 +498,7 @@ impl DurableAuthenticationAudit {
         let replay = self.inspect(&tx, floor)?;
         *floor = replay.verified.head.clone();
         ensure!(
-            replay.version == format::LEGACY_VERSION,
+            replay.version == source_version,
             AuthenticationAuditFailureV1::Format
         );
         let expected = replay.verified;
@@ -498,7 +516,7 @@ impl DurableAuthenticationAudit {
             source.commit()?;
         }
         probe.close().map_err(|(_, error)| error)?;
-        tx.pragma_update(None, "user_version", format::VERSION)?;
+        tx.pragma_update(None, "user_version", destination_version)?;
         ensure!(
             self.inspect(&tx, floor)?.verified == expected,
             AuthenticationAuditFailureV1::Integrity

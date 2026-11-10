@@ -149,8 +149,8 @@ pub fn load_oidc(
         )?
     };
     anyhow::ensure!(
-        audit.format_version()? == 2,
-        "Authentication audit migration required: stop the control plane, then run migrate-authentication with a new private backup; do not initialize a replacement audit"
+        audit.format_version()? == 3,
+        "Authentication audit migration required: stop the control plane, migrate V1 to V2 if needed, then V2 to V3 with --target-version 3, each with a new private backup; do not initialize a replacement audit"
     );
     held.revalidate()?;
     agentsandbox::api::OidcGateway::new(file.gateway, std::sync::Arc::new(audit), ca_bundle_pem)
@@ -161,9 +161,14 @@ pub fn load_oidc(
 pub fn migrate_authentication(
     path: &Path,
     backup: &Path,
+    target_version: u32,
     redactor: agentsandbox::redaction::Redactor,
 ) -> Result<agentsandbox::audit::authentication::AuthenticationVerificationV1> {
     use agentsandbox::audit::authentication::AuthenticationAudit;
+    anyhow::ensure!(
+        matches!(target_version, 2 | 3),
+        "Unsupported authentication migration target"
+    );
     // Discard parser/filesystem chains: operator-controlled inputs may include
     // sensitive values in unknown fields, malformed types or path references.
     let prepared = prepare_oidc_file(path).map_err(|_| {
@@ -187,9 +192,15 @@ pub fn migrate_authentication(
             "Authentication configuration changed during preparation; preserve the audit and retry with a stable private configuration"
         )
     })?;
-    audit.migrate_verified_initial_v2(backup).map_err(|_| {
+    let migration = if target_version == 2 {
+        audit.migrate_verified_initial_v2(backup)
+    } else {
+        // The closed target was validated before any configuration/storage I/O.
+        audit.migrate_native_logout_v3(backup)
+    };
+    migration.map_err(|_| {
         anyhow::anyhow!(
-            "Authentication migration refused; requires verified V1 and a new private backup destination; preserve the audit and any backup, check permissions and stopped controls before retrying"
+            "Authentication migration refused; requires the verified immediately prior format and a new private backup destination; preserve the audit and any backup, check the explicit target, permissions and stopped controls before retrying"
         )
     })
 }
@@ -372,6 +383,87 @@ mod policy_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    fn oidc_fixture() -> (tempfile::TempDir, PathBuf, OidcFile) {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let dir = tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().join("oidc.json");
+        let bytes = include_bytes!("../docs/setup/sso/examples/gateway.https.json");
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        std::io::Write::write_all(&mut output, bytes).unwrap();
+        let config = serde_json::from_slice(bytes).unwrap();
+        (dir, path, config)
+    }
+
+    // The real new V3 writer must be usable through the normal config consumer;
+    // a stale ==2 guard rejects it before a gateway can be constructed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn normal_oidc_configuration_accepts_a_new_v3_audit() {
+        use agentsandbox::{audit::authentication::AuthenticationAudit, redaction::Redactor};
+        let (dir, path, config) = oidc_fixture();
+        let loaded = load_oidc(&path, true, Redactor::new(vec![]));
+        let audit = AuthenticationAudit::open_existing(
+            &dir.path().join(config.authentication_audit.path),
+            config.authentication_audit.installation_id,
+            config.authentication_audit.policy,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        assert_eq!(audit.format_version().unwrap(), 3, "V3 writer precondition");
+        assert!(
+            loaded.is_ok(),
+            "new V3 audit refused by normal config: {:?}",
+            loaded.err().map(|error| error.to_string())
+        );
+    }
+
+    // A common-wire genesis marked V2 is a synthetic old-format fixture, not a
+    // production downgrade or proof of an old binary's behavior.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn normal_oidc_configuration_refuses_v2_without_implicit_migration() {
+        use agentsandbox::{audit::authentication::AuthenticationAudit, redaction::Redactor};
+        let (dir, path, config) = oidc_fixture();
+        let data = dir.path().join(config.authentication_audit.path);
+        let audit = AuthenticationAudit::init_new(
+            &data,
+            config.authentication_audit.installation_id,
+            config.authentication_audit.policy.clone(),
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        assert_eq!(audit.format_version().unwrap(), 3, "V3 writer precondition");
+        let before = audit.verify().unwrap();
+        drop(audit);
+        let db = rusqlite::Connection::open(&data).unwrap();
+        db.pragma_update(None, "user_version", 1_000_002_i64)
+            .unwrap();
+        drop(db);
+        let loaded = load_oidc(&path, false, Redactor::new(vec![]));
+        let audit = AuthenticationAudit::open_existing(
+            &data,
+            config.authentication_audit.installation_id,
+            config.authentication_audit.policy,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
+        assert_eq!(audit.format_version().unwrap(), 2);
+        assert_eq!(audit.verify().unwrap(), before);
+        assert!(
+            loaded.is_err(),
+            "V2 normal startup must require explicit migration"
+        );
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, serde_json::Value) {
         let dir = tempfile::tempdir().unwrap();

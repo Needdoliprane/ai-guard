@@ -1,5 +1,21 @@
 # État constaté — suivi du développement
 
+## 10 novembre — capacité OIDC et sortie du propriétaire corrigées
+
+Le candidat final passe24 parents gateway exacts, chacun sélectionné une fois,
+et le check toutes cibles RC0 sur le gel2343 `c629f4bb…`. La régression R7
+passe désormais : après FRefresh durable avant toute ILogout, le reçu original
+exact est rejoué avant retrait du propriétaire, sans inventer une déconnexion.
+Les preuves divergentes ou un audit indisponible conservent le propriétaire.
+Les trois phases Logout existantes restent requises lorsqu'un BEGIN peut
+exister. Les60 résultats du gel R6 restent attachés à ce gel, sans addition
+des rejeux. Sources relues indépendamment, guides EN/FR synchronisés ;
+migration explicite V2→V3 avec sauvegarde neuve et démarrage normal V3.
+[Sources, commandes et limites](evidence/2026-11-10/native-authentication-capacity/README.md).
+L'ancien lecteur réel, Clippy et les qualifications IdP/runtime restent
+distincts. D3 ingress/SSE est en diagnostic avec de nouveaux tests préparés,
+sans correction ni RED concluante annoncée. G09 FAIL, zéro gate global fermé.
+
 ## 10 novembre — capacité OIDC vérifiée, reprise complémentaire à corriger
 
 Le candidat Core/gateway/opérateur passe60 fonctions ciblées uniques et le

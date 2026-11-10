@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const LEGACY_VERSION: i64 = 1_000_001;
-pub(super) const VERSION: i64 = 1_000_002;
+pub(super) const VERIFIED_INITIAL_VERSION: i64 = 1_000_002;
+pub(super) const VERSION: i64 = 1_000_003;
 pub(super) const APPLICATION_ID: i64 = 0x4149_4741; // AIGA
 const PURPOSE: &str = "authentication_audit_v1";
 const MAX_PAYLOAD_BYTES: usize = 32_768;
@@ -78,6 +79,19 @@ pub(super) enum SessionMutation {
         expected_generation: u32,
         expected_access_fingerprint: AuthenticationTokenFingerprintV1,
     },
+    BeginNativeLogoutDuringRefresh {
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+    },
+    RecordNativeLogoutAfterRefreshClosed {
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+        refresh_result: AuthenticationReceiptV1,
+    },
 }
 
 impl SessionMutation {
@@ -86,7 +100,9 @@ impl SessionMutation {
             Self::Admit { record, .. }
             | Self::RefreshPending { record, .. }
             | Self::Rotate { record, .. }
-            | Self::Close { record, .. } => record,
+            | Self::Close { record, .. }
+            | Self::BeginNativeLogoutDuringRefresh { record, .. }
+            | Self::RecordNativeLogoutAfterRefreshClosed { record, .. } => record,
         }
     }
 }
@@ -114,6 +130,16 @@ pub(super) struct Replay {
     // separately or accepted as an independent authority.
     initial_fingerprints: BTreeSet<AuthenticationTokenFingerprintV1>,
     subject_usage: BTreeMap<PrincipalRefV1, (u64, u64)>,
+    // Only a validated V3 BEGIN creates a promise; only its END consumes it.
+    // One entry per durable session, bounded by the same record/byte policy.
+    native_logouts: BTreeMap<Uuid, NativeLogoutPromise>,
+}
+
+struct NativeLogoutPromise {
+    logout_operation_id: Uuid,
+    logout_intention: AuthenticationReceiptV1,
+    refresh_operation_id: Uuid,
+    refresh_intention: AuthenticationReceiptV1,
 }
 
 struct InitialProof {
@@ -349,7 +375,8 @@ pub(super) fn schema_version(db: &Connection) -> Result<i64> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let application: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
     ensure!(
-        matches!(version, LEGACY_VERSION | VERSION) && application == APPLICATION_ID,
+        matches!(version, LEGACY_VERSION | VERIFIED_INITIAL_VERSION | VERSION)
+            && application == APPLICATION_ID,
         AuthenticationAuditFailureV1::Format
     );
     Ok(version)
@@ -455,6 +482,24 @@ impl Replay {
         bytes: u64,
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
+        self.check_terminal_capacity_for_mutation(
+            match entry {
+                Entry::Session { mutation } => Some(mutation.as_ref()),
+                _ => None,
+            },
+            records,
+            bytes,
+            policy,
+        )
+    }
+
+    fn check_terminal_capacity_for_mutation(
+        &self,
+        mutation: Option<&SessionMutation>,
+        records: u64,
+        bytes: u64,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
         let pending = u64::try_from(
             self.sessions
                 .values()
@@ -470,8 +515,8 @@ impl Replay {
         // append_entry has already validated the exact CAS, phase and causal
         // receipt. Only an actual transition out of this Pending consumes its
         // single allowance; exact replays return before this admission check.
-        let remaining = match entry {
-            Entry::Session { mutation } => match mutation.as_ref() {
+        let remaining = match mutation {
+            Some(mutation) => match mutation {
                 SessionMutation::RefreshPending { .. } => pending
                     .checked_add(1)
                     .ok_or(AuthenticationAuditFailureV1::Capacity)?,
@@ -494,6 +539,20 @@ impl Replay {
             },
             _ => pending,
         };
+        let logouts = u64::try_from(self.native_logouts.len())
+            .map_err(|_| AuthenticationAuditFailureV1::Capacity)?;
+        let remaining_logouts = match mutation {
+            Some(SessionMutation::BeginNativeLogoutDuringRefresh { .. }) => logouts
+                .checked_add(1)
+                .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+            Some(SessionMutation::RecordNativeLogoutAfterRefreshClosed { .. }) => logouts
+                .checked_sub(1)
+                .ok_or(AuthenticationAuditFailureV1::Integrity)?,
+            _ => logouts,
+        };
+        let remaining = remaining
+            .checked_add(remaining_logouts)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
         // checked_json applies this absolute bound to every terminal payload,
         // including its session mutation/binding wrapper, not just the record.
         let terminal_bytes = remaining
@@ -511,6 +570,39 @@ impl Replay {
             AuthenticationAuditFailureV1::Capacity
         );
         Ok(())
+    }
+
+    fn check_native_logout_prefix(
+        &self,
+        mutation: Option<&SessionMutation>,
+        payload: &str,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        if self.native_logouts.is_empty()
+            && !matches!(
+                mutation,
+                Some(
+                    SessionMutation::BeginNativeLogoutDuringRefresh { .. }
+                        | SessionMutation::RecordNativeLogoutAfterRefreshClosed { .. }
+                )
+            )
+        {
+            // Historical underfunded refreshes remain readable. No V3 logout
+            // promise exists here that could be retroactively declared funded.
+            return Ok(());
+        }
+        let records = self
+            .verified
+            .records
+            .checked_add(1)
+            .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+        let bytes = self
+            .verified
+            .serialized_bytes
+            .checked_add(payload.len() as u64)
+            .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+        self.check_terminal_capacity_for_mutation(mutation, records, bytes, policy)
+            .map_err(|_| AuthenticationAuditFailureV1::Integrity.into())
     }
 
     pub fn session_current(&self, session_id: Uuid) -> Option<AuthenticationSessionCurrentV1> {
@@ -531,7 +623,7 @@ impl Replay {
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<u64> {
         ensure!(
-            self.version == VERSION,
+            matches!(self.version, VERIFIED_INITIAL_VERSION | VERSION),
             AuthenticationAuditFailureV1::Format
         );
         ensure!(
@@ -702,12 +794,276 @@ impl Replay {
         Ok(current)
     }
 
+    fn durable_phase_entry(
+        &self,
+        operation: Uuid,
+        phase: u8,
+        expected: &AuthenticationReceiptV1,
+    ) -> Result<Entry> {
+        let (payload, receipt) = self
+            .phases
+            .get(&(operation, phase))
+            .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?;
+        ensure!(
+            expected.namespace_id == self.verified.namespace_id && receipt == expected,
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        // phases contains only canonical payloads from the validated prefix.
+        serde_json::from_str(payload).map_err(|_| AuthenticationAuditFailureV1::Integrity.into())
+    }
+
+    fn validate_native_logout_context(
+        &self,
+        record: &AuthenticationRecordV1,
+        binding: &AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: &AuthenticationReceiptV1,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        ensure!(
+            self.version == VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        validate_binding(binding, policy)?;
+        record_matches_binding(record, binding)?;
+        let current = self.current_for(record, binding.generation, binding.access_fingerprint)?;
+        ensure!(
+            binding.kind == OidcSessionKindV1::NativeCli
+                && current.binding == *binding
+                && !refresh_operation_id.is_nil()
+                && refresh_operation_id != record.operation_id,
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        let Entry::Session { mutation } =
+            self.durable_phase_entry(refresh_operation_id, 0, refresh_intention)?
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        let SessionMutation::RefreshPending {
+            record: refresh,
+            expected_generation,
+            expected_access_fingerprint,
+        } = *mutation
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        record_matches_binding(&refresh, binding)?;
+        ensure!(
+            refresh.operation_id == refresh_operation_id
+                && refresh.action == AuthenticationActionV1::Refresh
+                && refresh.phase == AuthenticationPhaseV1::Intention
+                && expected_generation == binding.generation
+                && expected_access_fingerprint == binding.access_fingerprint,
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        Ok(())
+    }
+
+    fn validate_native_logout_begin(
+        &self,
+        record: &AuthenticationRecordV1,
+        binding: &AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: &AuthenticationReceiptV1,
+        existing: Option<&AuthenticationReceiptV1>,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        self.validate_native_logout_context(
+            record,
+            binding,
+            refresh_operation_id,
+            refresh_intention,
+            policy,
+        )?;
+        ensure!(
+            record.action == AuthenticationActionV1::Logout
+                && record.phase == AuthenticationPhaseV1::Intention
+                && record.transaction_id.is_none()
+                && record.causal.is_none(),
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        let current = self.current_for(record, binding.generation, binding.access_fingerprint)?;
+        if let Some(receipt) = existing {
+            ensure!(
+                refresh_intention.sequence < receipt.sequence,
+                AuthenticationAuditFailureV1::PhaseOrder
+            );
+            if let Some(promise) = self.native_logouts.get(&binding.session_id) {
+                ensure!(
+                    promise.logout_operation_id == record.operation_id
+                        && promise.logout_intention == *receipt
+                        && promise.refresh_operation_id == refresh_operation_id
+                        && promise.refresh_intention == *refresh_intention
+                        && matches!(
+                            current.state,
+                            AuthenticationSessionStateV1::RefreshPending { .. }
+                                | AuthenticationSessionStateV1::Closed { .. }
+                        ),
+                    AuthenticationAuditFailureV1::PhaseOrder
+                );
+                return Ok(());
+            }
+            // A consumed promise is proved by its actual END, never by absence.
+            let (_, end_receipt) = self
+                .phases
+                .get(&(record.operation_id, 1))
+                .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?;
+            let Entry::Session { mutation } =
+                self.durable_phase_entry(record.operation_id, 1, end_receipt)?
+            else {
+                return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+            };
+            let SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                record: end,
+                expected_binding,
+                refresh_operation_id: end_refresh,
+                refresh_intention: end_intention,
+                refresh_result,
+            } = *mutation
+            else {
+                return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+            };
+            ensure!(
+                expected_binding == *binding
+                    && end_refresh == refresh_operation_id
+                    && end_intention == *refresh_intention
+                    && end.causal.as_ref() == Some(receipt),
+                AuthenticationAuditFailureV1::PhaseOrder
+            );
+            return self.validate_native_logout_end(
+                &end,
+                binding,
+                refresh_operation_id,
+                refresh_intention,
+                &refresh_result,
+                end_receipt.sequence,
+                false,
+                policy,
+            );
+        }
+        ensure!(
+            matches!(&current.state, AuthenticationSessionStateV1::RefreshPending {
+                operation_id, intention
+            } if *operation_id == refresh_operation_id && intention == refresh_intention)
+                && !self.native_logouts.contains_key(&binding.session_id),
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        Ok(())
+    }
+
+    fn validate_native_logout_end(
+        &self,
+        record: &AuthenticationRecordV1,
+        binding: &AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: &AuthenticationReceiptV1,
+        refresh_result: &AuthenticationReceiptV1,
+        result_sequence: u64,
+        require_promise: bool,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        self.validate_native_logout_context(
+            record,
+            binding,
+            refresh_operation_id,
+            refresh_intention,
+            policy,
+        )?;
+        self.validate_transition(record)?;
+        ensure!(
+            record.action == AuthenticationActionV1::Logout
+                && record.phase
+                    == (AuthenticationPhaseV1::Result {
+                        outcome: AuthenticationOutcomeV1::Succeeded,
+                        reason: AuthenticationReasonV1::UserRequested,
+                    })
+                && record.transaction_id.is_none(),
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        let logout_intention = record
+            .causal
+            .as_ref()
+            .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?;
+        let Entry::Session { mutation } =
+            self.durable_phase_entry(record.operation_id, 0, logout_intention)?
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        let SessionMutation::BeginNativeLogoutDuringRefresh {
+            record: begin,
+            expected_binding,
+            refresh_operation_id: begin_refresh,
+            refresh_intention: begin_intention,
+        } = *mutation
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        record_matches_binding(&begin, binding)?;
+        ensure!(
+            begin.operation_id == record.operation_id
+                && begin.action == AuthenticationActionV1::Logout
+                && begin.phase == AuthenticationPhaseV1::Intention
+                && begin.transaction_id.is_none()
+                && begin.causal.is_none()
+                && expected_binding == *binding
+                && begin_refresh == refresh_operation_id
+                && begin_intention == *refresh_intention,
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        let Entry::Session { mutation } =
+            self.durable_phase_entry(refresh_operation_id, 1, refresh_result)?
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        let SessionMutation::Close {
+            record: refresh,
+            expected_generation,
+            expected_access_fingerprint,
+        } = *mutation
+        else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        record_matches_binding(&refresh, binding)?;
+        let AuthenticationPhaseV1::Result { outcome, reason } = refresh.phase else {
+            return Err(AuthenticationAuditFailureV1::PhaseOrder.into());
+        };
+        let current = self.current_for(record, binding.generation, binding.access_fingerprint)?;
+        ensure!(
+            refresh.operation_id == refresh_operation_id
+                && refresh.action == AuthenticationActionV1::Refresh
+                && outcome != AuthenticationOutcomeV1::Succeeded
+                && refresh.causal.as_ref() == Some(refresh_intention)
+                && expected_generation == binding.generation
+                && expected_access_fingerprint == binding.access_fingerprint
+                && current.state == (AuthenticationSessionStateV1::Closed { reason })
+                && refresh_intention.sequence < logout_intention.sequence
+                && logout_intention.sequence < refresh_result.sequence
+                && refresh_result.sequence < result_sequence,
+            AuthenticationAuditFailureV1::PhaseOrder
+        );
+        if require_promise {
+            let promise = self
+                .native_logouts
+                .get(&binding.session_id)
+                .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?;
+            ensure!(
+                promise.logout_operation_id == record.operation_id
+                    && promise.logout_intention == *logout_intention
+                    && promise.refresh_operation_id == refresh_operation_id
+                    && promise.refresh_intention == *refresh_intention,
+                AuthenticationAuditFailureV1::PhaseOrder
+            );
+        }
+        Ok(())
+    }
+
     /// Exact replay is an observation, never a second exchange grant or a
     /// reactivation of a subsequently advanced/closed session.
     pub fn validate_mutation_replay(
         &self,
         mutation: &SessionMutation,
         receipt: &AuthenticationReceiptV1,
+        policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
         match mutation {
             SessionMutation::RefreshPending {
@@ -732,6 +1088,35 @@ impl Replay {
                 );
             }
             SessionMutation::Close { .. } => {}
+            SessionMutation::BeginNativeLogoutDuringRefresh {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+            } => self.validate_native_logout_begin(
+                record,
+                expected_binding,
+                *refresh_operation_id,
+                refresh_intention,
+                Some(receipt),
+                policy,
+            )?,
+            SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+                refresh_result,
+            } => self.validate_native_logout_end(
+                record,
+                expected_binding,
+                *refresh_operation_id,
+                refresh_intention,
+                refresh_result,
+                receipt.sequence,
+                false,
+                policy,
+            )?,
         }
         Ok(())
     }
@@ -805,7 +1190,8 @@ impl Replay {
                     self.current_for(record, *expected_generation, *expected_access_fingerprint)?;
                 let old = &current.binding;
                 ensure!(
-                    record.action == A::Refresh
+                    !self.native_logouts.contains_key(&old.session_id)
+                        && record.action == A::Refresh
                         && record.phase
                             == (P::Result {
                                 outcome: O::Succeeded,
@@ -840,7 +1226,47 @@ impl Replay {
                                 && matches!(&current.state, AuthenticationSessionStateV1::RefreshPending { operation_id, intention } if *operation_id == record.operation_id && record.causal.as_ref() == Some(intention)))),
                     AuthenticationAuditFailureV1::PhaseOrder
                 );
+                if let Some(promise) = self.native_logouts.get(&current.binding.session_id) {
+                    ensure!(
+                        record.action == A::Refresh
+                            && record.operation_id == promise.refresh_operation_id
+                            && record.causal.as_ref() == Some(&promise.refresh_intention),
+                        AuthenticationAuditFailureV1::PhaseOrder
+                    );
+                }
             }
+            SessionMutation::BeginNativeLogoutDuringRefresh {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+            } => self.validate_native_logout_begin(
+                record,
+                expected_binding,
+                *refresh_operation_id,
+                refresh_intention,
+                None,
+                policy,
+            )?,
+            SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+                refresh_result,
+            } => self.validate_native_logout_end(
+                record,
+                expected_binding,
+                *refresh_operation_id,
+                refresh_intention,
+                refresh_result,
+                self.verified
+                    .records
+                    .checked_add(1)
+                    .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+                true,
+                policy,
+            )?,
         }
         Ok(())
     }
@@ -854,6 +1280,9 @@ impl Replay {
     ) -> Result<()> {
         self.validate_transition(mutation.record())?;
         self.validate_mutation(&mutation, policy)?;
+        // Check the candidate prefix before applying either state/promise
+        // delta. This also covers the END consuming the last live promise.
+        self.check_native_logout_prefix(Some(&mutation), &payload, policy)?;
         // All checks precede projection changes. Replaying a damaged file
         // cannot partially authorize a binding or fingerprint.
         match &mutation {
@@ -914,12 +1343,37 @@ impl Replay {
                     .ok_or(AuthenticationAuditFailureV1::Integrity)?;
                 current.state = AuthenticationSessionStateV1::Closed { reason };
             }
+            SessionMutation::BeginNativeLogoutDuringRefresh {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+            } => {
+                self.native_logouts.insert(
+                    expected_binding.session_id,
+                    NativeLogoutPromise {
+                        logout_operation_id: record.operation_id,
+                        logout_intention: receipt.clone(),
+                        refresh_operation_id: *refresh_operation_id,
+                        refresh_intention: refresh_intention.clone(),
+                    },
+                );
+            }
+            SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                expected_binding, ..
+            } => {
+                self.native_logouts
+                    .remove(&expected_binding.session_id)
+                    .ok_or(AuthenticationAuditFailureV1::Integrity)?;
+            }
         }
         let record = match mutation {
             SessionMutation::Admit { record, .. }
             | SessionMutation::RefreshPending { record, .. }
             | SessionMutation::Rotate { record, .. }
-            | SessionMutation::Close { record, .. } => record,
+            | SessionMutation::Close { record, .. }
+            | SessionMutation::BeginNativeLogoutDuringRefresh { record, .. }
+            | SessionMutation::RecordNativeLogoutAfterRefreshClosed { record, .. } => record,
         };
         self.accept(record, payload, receipt)
     }
@@ -1097,6 +1551,7 @@ pub(super) fn replay(
         initial_proofs: BTreeMap::new(),
         initial_fingerprints: BTreeSet::new(),
         subject_usage: BTreeMap::new(),
+        native_logouts: BTreeMap::new(),
     };
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,length(CAST(payload AS BLOB)),payload,operation_id,phase,length(CAST(received_at AS BLOB)),length(CAST(prev_hash AS BLOB)),length(CAST(hash AS BLOB)),length(CAST(operation_id AS BLOB)),length(CAST(phase AS BLOB)) FROM authentication_entries ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -1197,6 +1652,7 @@ pub(super) fn replay(
                 );
                 validate_record(&record, policy)?;
                 replay.validate_generic_lane(&record)?;
+                replay.check_native_logout_prefix(None, &payload, policy)?;
                 replay.accept(record, payload, receipt.clone())?;
             }
             entry @ Entry::VerifiedInitial { .. } => {
@@ -1205,13 +1661,14 @@ pub(super) fn replay(
                     .ok_or(AuthenticationAuditFailureV1::Integrity)?;
                 ensure!(
                     seq > 1
-                        && replay.version == VERSION
+                        && matches!(replay.version, VERIFIED_INITIAL_VERSION | VERSION)
                         && projected_operation.as_deref()
                             == Some(record.operation_id.to_string().as_str())
                         && projected_phase.as_deref() == Some(phase_key(record.phase).0),
                     AuthenticationAuditFailureV1::Integrity
                 );
                 validate_record(record, policy)?;
+                replay.check_native_logout_prefix(None, &payload, policy)?;
                 replay.accept_initial(entry, payload, receipt.clone(), policy)?;
             }
             Entry::Session { mutation } => {
@@ -1264,6 +1721,47 @@ pub(super) fn replay(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Isolate the final-END arithmetic guard using a real, valid stored prefix
+    // and one deliberately inconsistent in-memory counter. No database bytes
+    // are changed: the separate cold-open oracle covers persisted prefixes.
+    #[test]
+    fn last_logout_end_checks_the_remaining_refresh_reservation() {
+        let (_root, path, policy, installation, entry) =
+            super::super::native_logout_tests::last_end_fixture();
+        let db =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let mut checked = replay(&db, installation, &policy, &Redactor::new(vec![]), None).unwrap();
+        let Entry::Session { mutation } = &entry else {
+            panic!("test END fixture")
+        };
+        let payload = checked_json(&entry, &Redactor::new(vec![])).unwrap();
+        checked.validate_mutation(mutation, &policy).unwrap();
+        assert_eq!(checked.native_logouts.len(), 1);
+        checked
+            .check_native_logout_prefix(Some(mutation), &payload, &policy)
+            .unwrap();
+        // END consumes the last L, but the other session's R still requires
+        // 32768 bytes. Merely checking committed payload bytes would pass.
+        checked.verified.serialized_bytes =
+            policy.max_serialized_bytes - MAX_PAYLOAD_BYTES as u64 - payload.len() as u64 + 1;
+        assert!(
+            checked.verified.serialized_bytes + (payload.len() as u64)
+                < policy.max_serialized_bytes
+        );
+        let error = checked
+            .check_native_logout_prefix(Some(mutation), &payload, &policy)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<AuthenticationAuditFailureV1>(),
+            Some(&AuthenticationAuditFailureV1::Integrity)
+        );
+        assert_eq!(
+            checked.native_logouts.len(),
+            1,
+            "refusal must not consume L"
+        );
+    }
 
     #[test]
     fn genesis_capacity_accepts_exact_serialized_boundary_and_rejects_one_byte_less() {

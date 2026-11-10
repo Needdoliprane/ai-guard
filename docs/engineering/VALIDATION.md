@@ -1,5 +1,19 @@
 # Validation courante
 
+## 10 novembre — FIXr3 capacité OIDC et reprise,24 PASS
+
+Sur le gel2343 `c629f4bb…` : build lib RC0, liste compilée égale aux24 noms
+attendus, puis24 invocations exactes avec chacune un test PASS et aucun
+doublon. Dernier parent terminé à06:05:50UTC. Le check toutes cibles termine
+RC0 à06:10:25UTC après4min18s ; contrôle final des2343 fichiers RC0 et
+export réel conservé. Le correctif reprend le FRefresh déjà durable avant
+première ILogout seulement après son ACK exact, sans BEGIN rétroactif ;
+les refus de preuves/audit et le vrai Drop ont leurs contrôles séparés.
+Aucun test fournisseur ni matrice E2E relancée. Les60 PASS R6 restent
+historiques, les19 parents rejoués ne sont pas recomptés comme nouveaux.
+[Manifestes, commandes, résultats et limites](evidence/2026-11-10/native-authentication-capacity/README.md).
+Warnings conservés ; Clippy et qualifications réelles restent ouverts.
+
 ## 10 novembre — OIDC60 PASS logiciel et nouveau RED de reprise
 
 Sur le candidat2341 `7f06ab13…` : build lib/bin RC0,60 parents sélectionnés

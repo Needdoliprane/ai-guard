@@ -322,6 +322,16 @@ impl AuthenticationAudit {
         self.inner.migrate_verified_initial_v2(backup)
     }
 
+    /// Explicit offline V2 -> V3 migration with an exclusively new verified
+    /// backup. No payload, receipt, quota or historical reservation is rewritten.
+    /// Stop all writers first; this method does not provide runtime fencing.
+    pub fn migrate_native_logout_v3(
+        &self,
+        backup: &Path,
+    ) -> anyhow::Result<AuthenticationVerificationV1> {
+        self.inner.migrate_native_logout_v3(backup)
+    }
+
     /// Consume the exact prior intention and record generation one atomically.
     /// WebPkce uses Login; NativeCli uses SessionAdmission. This observation
     /// does not grant membership, an API credential or execution authority.
@@ -391,6 +401,51 @@ impl AuthenticationAudit {
             .receipt)
     }
 
+    /// Persist the original native logout intention and its own terminal
+    /// allowance while retaining the exact pending refresh and its allowance.
+    /// A replay observes the same receipt; it never grants a provider exchange.
+    pub(crate) fn begin_native_logout_during_refresh(
+        &self,
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .inner
+            .mutate(format::SessionMutation::BeginNativeLogoutDuringRefresh {
+                record,
+                expected_binding,
+                refresh_operation_id,
+                refresh_intention,
+            })?
+            .receipt)
+    }
+
+    /// Consume only the typed logout promise after the original refresh Close
+    /// is durably proved. This records logout without changing a closed binding.
+    pub(crate) fn record_native_logout_after_refresh_closed(
+        &self,
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+        refresh_result: AuthenticationReceiptV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .inner
+            .mutate(
+                format::SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                    record,
+                    expected_binding,
+                    refresh_operation_id,
+                    refresh_intention,
+                    refresh_result,
+                },
+            )?
+            .receipt)
+    }
+
     /// Revalidate the durable chain before returning its phase. Active is not
     /// proof of unexpired tokens or of a live private in-memory token owner.
     /// Restarting that owner never restores credentials from this ledger.
@@ -453,6 +508,7 @@ impl AuthenticationAudit {
 
     /// Validates the complete chain and returns the closed format generation.
     /// V1 can be inspected/backed up/migrated, but cannot reserve a V2 proof.
+    /// Native logout terminal promises require V3.
     pub fn format_version(&self) -> anyhow::Result<u32> {
         self.inner.format_version()
     }
@@ -471,3 +527,7 @@ impl AuthenticationAudit {
         self.inner.ensure_distinct_from_business(store)
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "authentication/native_logout_tests.rs"]
+mod native_logout_tests;

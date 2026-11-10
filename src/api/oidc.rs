@@ -47,6 +47,8 @@ struct PendingRefresh {
     record: AuthenticationRecordV1,
     receipt: AuthenticationReceiptV1,
     deadline: Instant,
+    native_close: Option<gateway::NativeCloseChoice>,
+    native_logout: Option<gateway::NativeLogoutState>,
 }
 // Cookie/PKCE correlation is unverified, bounded, expiring memory state. It
 // must not reserve durable authentication capacity before provider proof.
@@ -67,6 +69,7 @@ struct NativeIntent {
     action: Action,
     previous: Option<SessionBinding>,
     created: Instant,
+    native_close: Option<gateway::NativeCloseChoice>,
 }
 #[derive(Serialize)]
 struct TokenDelivery {
@@ -102,7 +105,7 @@ struct Registry {
     exchanging: HashMap<[u8; 32], ExchangeMarker>,
     sessions: HashMap<String, Session>,
     native: HashMap<Uuid, NativeIntent>,
-    rate: Option<(Instant, u32)>,
+    rate: Option<gateway::StartWindow>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

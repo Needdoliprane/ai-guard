@@ -1,9 +1,11 @@
 # Capacité OIDC native et audit terminal — preuves du 10 novembre
 
-**Lot non intégré.** Le candidat composé passe60 fonctions ciblées et le
-check de toutes les cibles (RC0). Une reproduction supplémentaire démontre
-ensuite une rétention de propriétaire sans sortie dans une fixture de reprise.
-L'intégration attend son correctif, ses tests négatifs, la revue et le GREEN.
+Le candidat composé R6 passe60 fonctions ciblées et le check de toutes les
+cibles (RC0). Une reproduction supplémentaire R7 démontre ensuite une rétention
+de propriétaire sans sortie dans une fixture de reprise. Le correctif gateway
+FIXr3 est relu ;24 parents exacts et un nouveau check toutes cibles passent
+sur son propre gel. Sources et guides EN/FR sont intégrés sélectivement en
+préservant les autres travaux du checkout.
 Aucune clôture du constat D5 complet ni qualification production n'en découle.
 
 ## Sources distinctes
@@ -96,6 +98,63 @@ le reçu FRefresh exact avant retrait, préserver une promesse Logout existante
 et refuser une preuve divergente. Le nouveau candidat gateway FIXr3 est livré
 pour revue/QA ; il n'est pas déclaré testé par les résultats R6.
 
+## Correctif FIXr3 et nouvelle validation — PASS
+
+Base publique `b74e8986803898c2d9f7e358a68156244c345907`, composée avec les
+seuls17 chemins acceptés Core FIXr3/opérateur RootR3/gateway FIXr3. Les autres
+WIP du checkout ne sont pas inclus. Source2343 fichiers :
+`c629f4bbf72c4cf1ad7079aa81476fd797c517640ecbc9901b789c28f603ad05` ;
+manifeste des17 chemins :
+`ce428d3551a01ae3f768f2df224a02b5fcefe28b95ac8ed5eb0b98b7d9d35d6c`.
+Le manifeste final recalculé est identique,2343 fichiers vérifiés RC0.
+Export réel après exécution :
+`8c1f1c419fbf6a244e18413b608bb4a66caf5fd62cfab92235bb6039dc2b70da`.
+
+Avant de créer une nouvelle ILogout, le gateway distingue le Refresh déjà
+fermé durablement avec sa liaison exacte et son choix initial conservé.
+Il doit obtenir le vrai ACK du rejeu FRefresh avant de retirer le propriétaire.
+Il n'invente ni BEGIN rétroactif, UUID, résultat Logout ou preuve de succès.
+La réponse reste `unknown/not_attempted/unavailable` pour cette nouvelle demande.
+Si un BEGIN peut déjà exister, les trois ACK BEGIN/FRefresh/END restent requis.
+Un état Closed consulté, une preuve divergente ou un audit indisponible ne
+suffisent pas au retrait. Le délai Finish initial15s est conservé ; il n'est
+pas présenté comme un service autonome de drainage.
+
+Validation Linux ARM64/Rust1.99.1 dans une nouvelle QA isolée :
+
+| Opération | Résultat constaté |
+|---|---|
+| `cargo test --frozen --offline --lib --no-run` |RC0,05:57:14–06:02:12UTC|
+| Liste compilée des noms et comparaison au plan |RC0,24 noms exacts|
+|24 `cargo test --frozen --offline --lib NOM -- --exact --nocapture --test-threads=1` |Chacun sélectionne1 et PASS ; dernier terminé06:05:50UTC|
+| `cargo check --frozen --offline --all-targets` |RC0,06:06:07–06:10:25UTC|
+| Vérification finale du manifeste source |RC0,2343 fichiers|
+
+La première fonction est la régression R7 exacte ci-dessus ; elle vérifie
+maintenant aussi le retrait après vrai Drop et la voie Router avec un autre
+propriétaire préservé. Le deuxième parent regroupe quatre cas négatifs : preuves
+causale, de choix ou de liaison divergentes, puis writer SQLite indisponible.
+Les22 suivants couvrent budgets anonymes/vérifiés, faux bearer, fenêtres,
+propriétaires, deadline, audit refusé, reprises Logout et Drop réel. Les19
+fonctions déjà vertes sur R6 sont rejouées ici mais ne sont pas des fonctions
+nouvelles à additionner. Core, consommateurs et CLI inchangés gardent leurs
+preuves R6 ; ils ne sont pas relancés par réflexe sur ce gel.
+
+Empreintes des sorties brutes :
+
+- compilation lib stderr : `9e764dd1115d7d3bb1197d909007dd3ac1e051709cba8b0b882906ab26280cfc` ;
+- liste stdout : `c36569e51f14ab7ac467881a43a0fdb2c960a4daab24b6390728c1132d4aed60` ;
+- check toutes cibles stderr : `04b27915233300339b0820674326d1d254584ed5b3d2d2e6543757aae40ba1fe` ;
+- vérification finale stdout : `e449983459644abf47791d1ce4326a765f4b74ea1d0a68e6b8f82dcd1b0e1361`.
+
+Les revues source indépendantes Core/opérateur/gateway et le complément
+documentaire bilingue sont conservés avec les manifestes hors worktrees.
+Le delta final des guides, documentaire uniquement, explique les budgets et
+les deux chemins de fermeture ; aucun nouveau test applicatif n'en découle.
+Les17 blobs indexés sont comparés aux sources acceptées avant commit ; main
+est intégré par ses seuls hunks Auth, sans embarquer ses WIP broker/Kubernetes.
+La qualification d'un ancien lecteur réel reste une vérification distincte.
+
 ## Environnement, conservation et limites
 
 Rust/Cargo1.99.1, Linux ARM64 dans une QA Docker isolée, UID1000, rootfsRO,
@@ -104,7 +163,8 @@ scratch3Gio/65536inodes. Aucun socket moteur, home, secret réel ou preuve
 privée monté. Sources publiques et caches épinglés seuls en lecture seule.
 Les fichiers bruts sont persistés directement sur l'hôte dès chaque commande.
 
-Une première compilation sous4Gio subit un OOM avant les tests ; la reprise
+**Ancienne QA R6/R7, arrêtée avant la nouvelle validation FIXr3 :** une
+première compilation sous4Gio subit un OOM avant les tests ; la reprise
 à9Gio réussit. Une erreur de syntaxe de test est aussi conservée et corrigée
 avant R6. Ces échecs de préparation ne sont pas des RED produit. Pic final QA
 7013416960 octets, aucun nouvel OOM après le premier ; ce n'est pas une mesure
@@ -113,8 +173,14 @@ PID0 à05:26:42UTC, puis retiré normalement ; son indicateur OOM historique
 reste distinct de cet arrêt explicite. Aucun volume ou objet non attribué
 n'est supprimé. Sources, index et rapports survivent hors de tous les worktrees.
 
-**NOT_RUN** : autres trois parents de qualification complémentaires, ancien
-lecteur V2 contre V3, Clippy de cette composition, IdP réel, fournisseurs,
+**Nouvelle QA FIXr3 :** même profil borné décrit ci-dessus, conteneur neuf
+démarré à05:46:02UTC. Le relevé après les24 tests et le check indique un pic
+mémoire5695160320 octets et zéro OOM. Ce relevé ne mesure ni un worker ni un
+modèle. Le conteneur est encore actif à ce relevé ; sa conservation et son
+arrêt sont suivis séparément, sans lui transférer l'arrêt de l'ancienne QA.
+
+**NOT_RUN** : ancien lecteur V2 réel contre V3, Clippy de cette composition,
+IdP réel, fournisseurs,
 workers Docker/Podman/Kubernetes, crash physique et qualification cloud.
 Le dernier END privé altère un compteur mémoire ; il ne prouve pas à lui seul
 un préfixe corrompu persisté à cette dernière ligne. Les fixtures d'anciens

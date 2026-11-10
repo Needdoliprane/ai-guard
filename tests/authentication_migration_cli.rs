@@ -301,3 +301,56 @@ fn existing_backup_is_preserved_and_legacy_source_remains_v1() {
     assert_eq!(schema(&data), V1);
     assert_eq!(open(&data).verify().unwrap(), expected);
 }
+
+// Missing dispatch or silently choosing V1→V2 must fail this real maintenance
+// path; expected versions/history come from the independent historical fixture.
+#[test]
+fn explicit_native_logout_v3_migration_preserves_v2_history_and_new_backup() {
+    let files = support::private_tempdir();
+    let data = files.path().join("authentication.sqlite");
+    let expected = legacy_v1(&data);
+    let path = config_file(files.path(), &configuration());
+    let before_v2 = files.path().join("before-v2.backup");
+    assert!(migrate(&path, &before_v2, true).status.success());
+    assert_eq!(schema(&data), 1_000_002);
+    assert_eq!(schema(&before_v2), V1);
+
+    let before_v3 = files.path().join("before-v3.backup");
+    let output = Command::new(env!("CARGO_BIN_EXE_agentsandbox"))
+        .args([
+            "migrate-authentication",
+            "--target-version",
+            "3",
+            "--oidc-config",
+        ])
+        .arg(&path)
+        .arg("--backup")
+        .arg(&before_v3)
+        .arg("--confirm-control-stopped")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "explicit V2→V3 maintenance failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["migration"], "native_logout_v3");
+    assert_eq!(report["namespace_id"], NAMESPACE.to_string());
+    assert_eq!(report["records"], expected.records);
+    assert_eq!(report["serialized_bytes"], expected.serialized_bytes);
+    assert_eq!(
+        report["head"],
+        serde_json::to_value(&expected.head).unwrap()
+    );
+    assert_eq!(schema(&data), 1_000_003);
+    assert_eq!(schema(&before_v3), 1_000_002);
+    assert_eq!(open(&data).verify().unwrap(), expected);
+    assert_eq!(open(&before_v3).verify().unwrap(), expected);
+    assert_eq!(
+        fs::metadata(&before_v3).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(schema(&before_v2), V1, "previous backup must remain V1");
+}

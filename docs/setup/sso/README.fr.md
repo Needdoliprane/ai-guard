@@ -319,6 +319,42 @@ Si `gateway.provider.limits` est présent, fournissez l’objet fermé complet d
 
 Le gateway borne en plus les tokens à 16 Kio et les transactions PKCE à 300 secondes. L’admission est bornée par l’expiration de l’access token, 1 heure absolue et 15 minutes d’inactivité ; un refresh ne prolonge pas l’échéance absolue. La remise Web doit être consommée en 30 secondes. Ce sont les bornes actuelles d’implémentation, pas des garanties mesurées de révocation de bout en bout ou de disponibilité.
 
+### Admission des connexions et refresh natifs
+
+Le gateway en cours d'exécution garde des budgets en mémoire distincts pour les
+connexions anonymes et les refresh de sessions CLI natives déjà admises. Un
+refresh natif utilise sa classe seulement après vérification par le gateway de
+la session exacte, de l'empreinte du bearer, de la génération et de la liaison
+active. Un ID d'intention, un cookie ou un type de session déclaré ne constitue
+pas une identité authentifiée.
+
+| Borne dans un gateway en cours d'exécution | Plafond |
+|---|---|
+| Connexions anonymes, échanges/remises en attente compris | 224 opérations retenues |
+| Refresh CLI natifs vérifiés | 32 opérations retenues |
+| Deux classes réunies | 256 opérations retenues |
+| Départs dans une même fenêtre d'une seconde | 8 anonymes + 8 natifs vérifiés ; 16 au total |
+| Refresh natifs d'un principal vérifié, toutes ses sessions confondues | 4 opérations actives ; 2 départs dans cette même fenêtre |
+| Refresh natifs d'une session admise | 1 opération à la fois |
+
+Les places ou départs inutilisés d'une classe ne sont pas prêtés à l'autre et la
+saturation n'évince pas un propriétaire existant. Une opération retenue pour un
+cleanup obligatoire reste comptée, même lorsqu'elle ne peut plus publier de
+tokens. Ces bornes sont distinctes des plafonds de sessions vivantes existants :
+4096 par gateway et 64 par principal. Elles comptent des états et départs du
+gateway ; elles ne mesurent ni capacité fournisseur, CPU ou réseau,
+n'établissent pas d'équité par tenant et ne qualifient pas 100 workers cloud.
+
+`429 capacity_exhausted` avec `retry_action: retry` signale qu'une place volatile,
+un départ dans la fenêtre ou une réservation de cleanup manque. Réduisez les
+connexions/refresh simultanés ; laissez la fenêtre courante ou un cleanup
+recevable progresser avant une nouvelle tentative explicite. Attendre une
+fenêtre ne libère pas un propriétaire retenu par un échec d'audit.
+`503 audit_unavailable` avec `retry_action: contact_operator` exige de
+diagnostiquer l'audit obligatoire et sa capacité durable. Aucune de ces réponses
+n'autorise un retry automatique de l'échange fournisseur. Gardez un refresh
+échoué ou incertain distinct d'une session réussie.
+
 ### Admission du travail et refresh annulé
 
 Les lectures Store HTTP, mutations et contrôles d'authentification/audit s'exécutent dans des tâches bloquantes hors des workers Tokio. Le gateway revérifie identité, session, mapping, expiration et permissions dans le segment concerné au point d'I/O, après son éventuelle attente. Chaque poll SSE/page d'export repasse ces contrôles. Les permis d'I/O sont libérés avant le transport au client ; annuler une requête ne libère pas le permis d'un segment déjà lancé avant sa fin réelle et n'annule pas un commit durable.
@@ -349,6 +385,82 @@ hausse d'une valeur de configuration. Conservez le ledger original et traitez
 ce cas comme un incident nécessitant un plan de reprise explicite. Cette
 réservation ne renouvelle pas le quota global cumulatif, ne fournit pas de
 rétention/migration de politique et n'isole pas cette capacité globale par tenant.
+
+### Déconnexion native pendant un refresh en attente
+
+Quand une déconnexion peut démarrer pendant un refresh CLI natif en attente,
+le contrôle conserve l'opération originale et enregistre trois accusés durables dans
+l'ordre : **BEGIN**, le résultat du refresh original **FRefresh**, puis le
+résultat de déconnexion **END**. BEGIN enregistre l'intention Logout et réserve
+son propre record terminal et jusqu'à 32 768 octets de payload sérialisé en V3,
+en plus de la réserve du refresh. FRefresh garde la
+première issue choisie du refresh ; END enregistre
+`Logout/Succeeded/UserRequested` rattaché à cette intention Logout. END ne
+remplace pas le résultat antérieur du refresh.
+
+Le contrôle ne renvoie `local_session: closed` et `audit: recorded` pour cette
+déconnexion pendant un refresh qu'après les trois accusés. Si une étape
+obligatoire ne peut pas être enregistrée, il renvoie `503 audit_unavailable`
+avec `retry_action: contact_operator` et garde le même propriétaire inutilisable
+et compté. Il ne publie pas une rotation tardive et ne libère pas de capacité au
+seul motif que le client a effacé son état local. Diagnostiquez l'audit en
+préservant son ledger, sa politique, sa configuration et ses reçus. Une reprise
+de cette déconnexion en attente avec état vivant conservé réutilise la même
+liaison, les mêmes UUID d'opération Refresh/Logout et preuves ; elle n'invente
+ni déconnexion, reçu, appel fournisseur ou échéance.
+
+Si la fermeture du refresh original **FRefresh** était déjà durable avant toute
+première intention Logout, son accusé peut manquer au contrôle vivant. Le
+contrôle peut seulement réconcilier ce résultat exact du refresh original. Il
+doit obtenir son vrai accusé de rejeu avec la liaison, l'opération Refresh, le
+reçu causal et la première issue d'origine avant de libérer son ancien
+propriétaire en mémoire. Consulter un état Closed ou supposer l'absence de
+promesse Logout ne suffit pas. Un échec d'audit ou des preuves conservées
+divergentes côté contrôle gardent le propriétaire inutilisable et compté, avec
+`503 audit_unavailable` et `retry_action: contact_operator`.
+
+Cette réconciliation ne crée aucune intention, aucun UUID ni résultat Logout
+nouveau. La réponse est HTTP `200` avec `local_session: unknown`,
+`provider_logout: not_attempted` et `audit: unavailable` ; elle ne signifie
+**pas** que cette nouvelle déconnexion a été acceptée ou auditée. Ces champs ne
+prouvent pas non plus à eux seuls que l'ancien refresh a été réconcilié : une
+requête sans propriétaire vivant correspondant reçoit la même réponse unknown.
+La réconciliation vérifiée libère l'ancien propriétaire volatil seulement après le vrai accusé FRefresh, sans
+réinitialiser le quota durable d'audit. Si un BEGIN Logout peut déjà avoir été
+commis, y compris après perte de son accusé, le trajet original à trois accusés
+et sa réserve terminale Logout distincte restent requis. N'effacez pas l'état
+conservé et ne remplacez pas ces accusés par une lecture Closed.
+
+La requête **Finish** du refresh natif reste valable seulement pendant ses
+15 secondes d'origine. Un Finish recevable peut faire progresser la fermeture
+retenue ; après cette durée, Finish est refusé et ne constitue pas un chemin de
+cleanup ou de reprise. Logout avec la même preuve/liaison conservée, le nettoyage
+des expirations au prochain chemin de contrôle qui le réalise et le cleanup à
+la libération de l'opération en cours peuvent encore tenter cette même
+fermeture. Aucun ne prolonge l'échéance. Aucun service indépendant de cleanup en
+arrière-plan ni délai garanti de drainage n'est fourni ; audit indisponible ou
+runtime arrêté peuvent empêcher la progression et laisser la capacité retenue.
+
+Reprendre Logout exige la preuve conservée du client et le même propriétaire
+vivant côté contrôle. Le cleanup d'expiration/Drop dépend de l'état conservé du
+contrôle. Un redémarrage ne reconstruit pas cet état depuis l'audit ; un client
+qui a effacé sa preuve ne peut pas non plus la recréer depuis l'audit. Une
+déconnexion ultérieure renvoyant `local_session: unknown` et
+`audit: unavailable` ne prouve pas qu'une séquence Logout précédente s'est
+achevée, y compris après la réconciliation du seul refresh ci-dessus. Lisez ces
+champs séparément du statut HTTP. Conservez une erreur d'audit non résolue pour
+l'opérateur et réparez l'audit avant de réessayer une opération conservée. Si
+l'état vivant du client est perdu, reconnectez-vous par l'admission habituelle ;
+cette nouvelle connexion ne répare, ne réécrit ni ne certifie cet ancien
+résultat. Un CLI externe peut avoir déjà envoyé sa requête
+fournisseur ; la fermeture locale n'atteste ni son annulation ni la déconnexion
+fournisseur. Lisez les [résultats de logout distincts](#se-connecter-dans-le-navigateur).
+
+Utilisez des consommateurs V3 correspondants et suivez la [migration explicite
+V1→V2, puis V2→V3](#migrer-un-audit-dauthentification-existant), avec une sauvegarde
+neuve vérifiée pour chaque étape nécessaire. Les anciennes intentions Logout
+génériques ne deviennent pas des réserves terminales. Migration automatique,
+remplacement d'audit ou repli ne constituent pas une reprise.
 
 ### Connexion en attente et audit durable
 
@@ -522,12 +634,13 @@ L’export demande un parent privé existant et une destination finale **neuve**
 
 ## Migrer un audit d’authentification existant
 
-Le ledger d’authentification séparé possède son propre format, indépendant des migrations du schéma tenant. Le démarrage normal exige le format V2 ; ouvrir un ledger V1 signale la migration explicite requise, sans le migrer ni le remplacer. Les nouveaux ledgers d’authentification utilisent V2. Conservez UUID d’installation, clients approuvés, politique, credentials et bases tenants existants pour cette migration.
+Le ledger d’authentification séparé possède son propre format, indépendant des migrations du schéma tenant. Le démarrage normal exige le format V3 ; ouvrir un ancien ledger signale la migration explicite requise, sans le migrer ni le remplacer. Les nouveaux ledgers d’authentification utilisent V3. Conservez UUID d’installation, clients approuvés, politique, credentials et bases tenants existants.
 
-Arrêtez le gateway et tous les autres consommateurs de ce ledger d’authentification, puis exécutez le binaire Rust correspondant sous l’UID du contrôle dans un conteneur ponctuel sans réseau, avec accès au volume privé de contrôle existant. Préparez un parent de sauvegarde privé existant (`0700`) et choisissez un chemin final de sauvegarde **neuf**. Dans ce conteneur :
+Arrêtez le gateway et tous les autres consommateurs de ce ledger d’authentification, puis exécutez le binaire Rust correspondant sous l’UID du contrôle dans un conteneur ponctuel sans réseau, avec accès au volume privé de contrôle existant. Préparez un parent de sauvegarde privé existant (`0700`) et choisissez un chemin final de sauvegarde **neuf** pour chaque étape. Pour un ledger V1 existant, activez d’abord les preuves initiales vérifiées :
 
 ```sh
 agentsandbox migrate-authentication \
+  --target-version 2 \
   --oidc-config /absolute/private/ai-guard/oidc.json \
   --backup /absolute/private/backups/authentication-before-v2.sqlite \
   --confirm-control-stopped
@@ -535,9 +648,21 @@ agentsandbox migrate-authentication \
 
 `--confirm-control-stopped` est l’attestation de maintenance de l’opérateur, pas une vérification ni une preuve indépendante d’arrêt des consommateurs. La commande n’arrête aucun service et ne clôture pas l’accès d’un autre writer. Elle lit le JSON OIDC privé fermé et ses références locales existantes d’audit/d’AC publique facultative, sans découverte fournisseur, échange de jeton ni requête réseau. Les références relatives du JSON restent relatives à son parent. Aucun credential fournisseur, token runner tenant ou `.env` n’est nécessaire.
 
-La migration vérifie le ledger V1 existant et une sauvegarde V1 cohérente, privée et exclusivement neuve avant d’activer le marqueur V2 de preuve initiale vérifiée. Elle conserve namespace, head, enregistrements historiques et compteurs d’octets sérialisés ; elle n’efface pas l’historique, ne réinitialise pas la capacité, ne change pas la politique et ne fabrique pas d’enregistrements pour les preuves passées. Le rapport JSON contient les valeurs de vérification conservées, sans jeton ni réponse fournisseur. Un ledger déjà V2 est refusé avant création d’une autre sauvegarde. Une destination de sauvegarde existante, une liaison/politique invalide, une référence locale non fiable ou une vérification échouée sont refusées ; préservez source et sauvegardes puis corrigez la précondition signalée avant un retry explicite. Aucun repli vers une initialisation ou un remplacement automatique.
+Pour un ledger V2 existant, y compris le résultat de la première étape, activez les réserves terminales de déconnexion native :
 
-Après succès, conservez la sauvegarde V1 avec configuration correspondante et inventaire des binaires, puis redémarrez les consommateurs correspondants sur la source migrée. La sauvegarde reste V1 et exige cette migration explicite avant un démarrage normal V2 si elle est restaurée. Validez toute reprise dans une destination isolée privée neuve avant bascule ; n’écrasez jamais la source migrée pour tester une restauration. La migration ne restaure ni tokens, sessions vivantes, autorité d’exécution ou détection indépendante du rollback. Cette commande opérateur ne qualifie ni IdP, release, archivage ou procédure de rétention.
+```sh
+agentsandbox migrate-authentication \
+  --target-version 3 \
+  --oidc-config /absolute/private/ai-guard/oidc.json \
+  --backup /absolute/private/backups/authentication-before-v3.sqlite \
+  --confirm-control-stopped
+```
+
+Sans `--target-version`, la commande conserve le sens historique V1→V2 ; elle ne choisit pas le format le plus récent. Une source V1 ne peut pas passer directement en V3. Gardez les consommateurs arrêtés entre les deux étapes et préservez les deux sauvegardes.
+
+Chaque étape vérifie le format antérieur exact et une sauvegarde cohérente, privée et exclusivement neuve dans ce format avant de changer le marqueur source. Elle conserve namespace, head, enregistrements historiques et compteurs d’octets sérialisés ; elle n’efface pas l’historique, ne réinitialise pas la capacité, ne change pas la politique et ne fabrique pas d’enregistrements pour les preuves passées. V3 permet aux intentions typées de déconnexion native de réserver leur enregistrement terminal pendant un refresh ; la migration ne transforme pas les anciennes intentions génériques en réserves. Le rapport JSON contient les valeurs conservées et `migration: verified_initial_v2` ou `native_logout_v3`, sans jeton ni réponse fournisseur. Une source déjà au format cible, un saut d’étape ou une cible inconnue est refusé. Une destination de sauvegarde existante, une liaison/politique invalide, une référence locale non fiable ou une vérification échouée sont refusées ; préservez source et sauvegardes puis corrigez la précondition signalée avant un retry explicite. Aucun repli vers une initialisation ou un remplacement automatique.
+
+Une fois la source en V3, conservez les sauvegardes avec configuration correspondante et inventaire des binaires, puis redémarrez les consommateurs V3 correspondants sur la source migrée. Les anciens binaires refusent V3 ; ouvrir la base avec un autre binaire ne la rétrograde pas. Les sauvegardes restent respectivement V1 et V2 et exigent les étapes explicites restantes avant un démarrage normal V3 après restauration. Validez toute reprise dans une destination isolée privée neuve avant bascule ; n’écrasez jamais la source migrée pour tester une restauration. La migration ne restaure ni tokens, sessions vivantes, autorité d’exécution ou détection indépendante du rollback. Cette commande opérateur ne qualifie ni IdP, release, archivage ou procédure de rétention.
 
 ## Diagnostiquer et reprendre
 
@@ -562,7 +687,7 @@ Après succès, conservez la sauvegarde V1 avec configuration correspondante et 
 
 Conservez fichier OIDC, identités exactes de binaires/images, registre tenants, identités/grants privés et bases tenants avec l’inventaire de l’audit d’authentification séparé. Cet audit conserve des résultats typés et empreintes de tokens, sans tokens récupérables. Il n’est pas atomique avec l’IdP externe : un échange fournisseur suivi d’un crash peut laisser une issue inconnue nécessitant une nouvelle connexion.
 
-`migrate-authentication` crée la sauvegarde V1 neuve vérifiée nécessaire à sa migration V1→V2 explicite. Aucune commande autonome de sauvegarde/restauration, d’archivage ou de rétention de l’audit d’authentification n’est exposée. La bibliothèque Rust possède aussi une sauvegarde neuve vérifiée ; n’inventez pas de wrapper shell et ne prenez pas la copie du seul fichier SQLite actif pour une sauvegarde cohérente. Avant sauvegarde/reprise, arrêtez tous les consommateurs et préservez un ensemble SQLite cohérent, identité d’installation, politique d’audit et configuration existante selon la procédure de stockage approuvée. Conservez l’existant et validez la reprise dans une destination isolée neuve avant bascule. La reprise ne restaure ni tokens, sessions vivantes ou autorité d’exécution.
+`migrate-authentication` crée la sauvegarde neuve vérifiée dans le format antérieur nécessaire à chaque étape explicite V1→V2 ou V2→V3. Aucune commande autonome de sauvegarde/restauration, d’archivage ou de rétention de l’audit d’authentification n’est exposée. La bibliothèque Rust possède aussi une sauvegarde neuve vérifiée ; n’inventez pas de wrapper shell et ne prenez pas la copie du seul fichier SQLite actif pour une sauvegarde cohérente. Avant sauvegarde/reprise, arrêtez tous les consommateurs et préservez un ensemble SQLite cohérent, identité d’installation, politique d’audit et configuration existante selon la procédure de stockage approuvée. Conservez l’existant et validez la reprise dans une destination isolée neuve avant bascule. La reprise ne restaure ni tokens, sessions vivantes ou autorité d’exécution.
 
 L’audit vérifie sa chaîne et son plancher en processus vivant, mais détecter un rollback complet de base entre redémarrages demande un témoin indépendant. Cette configuration ne prouve ni anti-rollback, points de contrôle externes signés ou qualification de release. Les quotas comptent les enregistrements, genesis inclus, et les octets sérialisés ; pages SQLite, WAL/SHM, sauvegardes et usage filesystem s’y ajoutent. Un audit épuisé refuse de nouvelles opérations obligatoires ; une procédure de migration/rétention de sa politique reste à fournir avant d’atteindre cette limite en exploitation.
 

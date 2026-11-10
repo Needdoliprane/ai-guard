@@ -15,6 +15,9 @@ use crate::identity::*;
 #[path = "../../../tests/support/oidc_fixture.rs"]
 mod controlled;
 
+#[path = "admission_capacity_tests.rs"]
+mod capacity_tests;
+
 async fn verified_memberships(
     state: &GatewayState,
     access: &Arc<VerifiedAccess>,

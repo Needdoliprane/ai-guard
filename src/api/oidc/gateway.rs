@@ -284,30 +284,167 @@ fn membership(
     }
     Ok(ceiling)
 }
-fn reserve(registry: &mut Registry, new_session: bool) -> ApiResult<()> {
-    if registry.transactions.len()
+const START_WINDOW: Duration = Duration::from_secs(1);
+const VOLATILE_START_SLOTS: usize = 256;
+const ANONYMOUS_START_SLOTS: usize = 224;
+const NATIVE_START_SLOTS: usize = 32;
+const STARTS_PER_WINDOW: u32 = 16;
+const ANONYMOUS_STARTS: u8 = 8;
+const NATIVE_STARTS: u8 = 8;
+const NATIVE_PRINCIPAL_SLOTS: usize = 4;
+const NATIVE_PRINCIPAL_STARTS: u8 = 2;
+
+/// One shared monotonic window. Only successfully admitted, verified native
+/// refreshes may add principal keys; at most eight keys can exist per window.
+#[derive(Clone)]
+pub(super) struct StartWindow {
+    started: Instant,
+    anonymous: u8,
+    authenticated: HashMap<String, u8>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct NativeCloseChoice {
+    outcome: Outcome,
+    reason: Reason,
+}
+// Process-local progress of the same original pending owner. No Serde, public
+// constructor, task or map; at most one value per admitted native operation.
+pub(super) struct NativeLogoutState {
+    intention: AuthenticationRecordV1,
+    begin: Option<AuthenticationReceiptV1>,
+    refresh_result: Option<AuthenticationReceiptV1>,
+    end: Option<AuthenticationReceiptV1>,
+}
+impl StartWindow {
+    fn total(&self) -> u32 {
+        u32::from(self.anonymous)
+            + self
+                .authenticated
+                .values()
+                .map(|count| u32::from(*count))
+                .sum::<u32>()
+    }
+}
+
+fn anonymous_slots(registry: &Registry) -> usize {
+    registry.transactions.len()
         + registry.deliveries.len()
-        + registry.native.len()
         + registry.exchanging.len()
-        >= 256
-        || new_session
-            && registry.sessions.len()
-                + registry.transactions.len()
-                + registry.native.len()
-                + registry.exchanging.len()
-                >= 4096
+        + registry
+            .native
+            .values()
+            .filter(|intent| intent.previous.is_none())
+            .count()
+}
+
+/// Pending session ownership bridges begin_refresh -> intent publication and
+/// intent removal -> rotation completion. Retain unmatched intents as owners,
+/// rather than interpreting a missing/different pending session as release.
+fn native_owners(registry: &Registry) -> impl Iterator<Item = &SessionBinding> {
+    registry
+        .sessions
+        .values()
+        .filter(|session| {
+            session.binding.kind == SessionKind::NativeCli
+                && (session.rotating || session.pending_refresh.is_some())
+        })
+        .map(|session| &session.binding)
+        .chain(registry.native.values().filter_map(move |intent| {
+            let previous = intent.previous.as_ref()?;
+            let represented = registry
+                .sessions
+                .get(&previous.session_id.to_string())
+                .is_some_and(|session| {
+                    session.binding == *previous
+                        && session.pending_refresh.as_ref().is_some_and(|pending| {
+                            pending.record.operation_id == intent.operation_id
+                                && intent.intention.as_ref() == Some(&pending.receipt)
+                        })
+                });
+            (!represented).then_some(previous)
+        }))
+}
+
+// Prepare bounded metadata without consuming it. The caller holds the registry
+// mutex through the durable admission and installs this value only on success.
+fn next_window(
+    registry: &Registry,
+    principal: Option<&str>,
+    now: Instant,
+) -> ApiResult<StartWindow> {
+    let mut window = registry
+        .rate
+        .as_ref()
+        .filter(|rate| now.saturating_duration_since(rate.started) < START_WINDOW)
+        .cloned()
+        .unwrap_or_else(|| StartWindow {
+            started: now,
+            anonymous: 0,
+            authenticated: HashMap::new(),
+        });
+    if window.total() >= STARTS_PER_WINDOW {
+        return Err(capacity());
+    }
+    if let Some(principal) = principal {
+        let starts: u32 = window
+            .authenticated
+            .values()
+            .map(|count| u32::from(*count))
+            .sum();
+        if starts >= u32::from(NATIVE_STARTS)
+            || window.authenticated.get(principal).copied().unwrap_or(0) >= NATIVE_PRINCIPAL_STARTS
+            || !window.authenticated.contains_key(principal)
+                && window.authenticated.len() >= usize::from(NATIVE_STARTS)
+        {
+            return Err(capacity());
+        }
+        *window
+            .authenticated
+            .entry(principal.to_owned())
+            .or_default() += 1;
+    } else {
+        if window.anonymous >= ANONYMOUS_STARTS {
+            return Err(capacity());
+        }
+        window.anonymous += 1;
+    }
+    Ok(window)
+}
+
+fn reserve_anonymous(registry: &mut Registry) -> ApiResult<()> {
+    let anonymous = anonymous_slots(registry);
+    let native = native_owners(registry).count();
+    let new_sessions = registry.sessions.len()
+        + registry.transactions.len()
+        + registry.exchanging.len()
+        + registry
+            .native
+            .values()
+            .filter(|intent| intent.previous.is_none())
+            .count();
+    if anonymous >= ANONYMOUS_START_SLOTS
+        || anonymous + native >= VOLATILE_START_SLOTS
+        || new_sessions >= 4096
     {
         return Err(capacity());
     }
-    let rate = registry.rate.get_or_insert((Instant::now(), 0));
-    if rate.0.elapsed() >= Duration::from_secs(1) {
-        *rate = (Instant::now(), 0);
-    }
-    if rate.1 >= 16 {
+    registry.rate = Some(next_window(registry, None, Instant::now())?);
+    Ok(())
+}
+
+fn native_start_window(registry: &Registry, binding: &SessionBinding) -> ApiResult<StartWindow> {
+    let native = native_owners(registry).count();
+    if native >= NATIVE_START_SLOTS
+        || anonymous_slots(registry) + native >= VOLATILE_START_SLOTS
+        || native_owners(registry)
+            .filter(|owner| owner.principal == binding.principal)
+            .count()
+            >= NATIVE_PRINCIPAL_SLOTS
+    {
         return Err(capacity());
     }
-    rate.1 += 1;
-    Ok(())
+    let principal = binding.principal.key().map_err(|_| credential_invalid())?;
+    next_window(registry, Some(&principal), Instant::now())
 }
 
 fn membership_recovery_eligible(
@@ -608,6 +745,437 @@ fn close_record(
         .map_err(audit_failure)?;
     Ok(())
 }
+// Native admission ownership is released only after the exact durable close.
+// An audit error keeps the same unusable pending session/intent counted. Never
+// recreate a session or treat a missing/different owner as permission to close.
+fn retain_native_close_choice(
+    registry: &mut Registry,
+    binding: &SessionBinding,
+    operation: Uuid,
+    receipt: &AuthenticationReceiptV1,
+    outcome: Outcome,
+    reason: Reason,
+) -> ApiResult<(AuthenticationRecordV1, NativeCloseChoice)> {
+    if binding.kind != SessionKind::NativeCli {
+        return Err(conflict());
+    }
+    let record = if let Some(session) = registry.sessions.get(&binding.session_id.to_string()) {
+        let pending = session.pending_refresh.as_ref().ok_or_else(conflict)?;
+        if session.binding != *binding
+            || !session.rotating
+            || pending.record.operation_id != operation
+            || pending.receipt != *receipt
+        {
+            return Err(conflict());
+        }
+        pending.record.clone()
+    } else {
+        // A missing original session cannot prove that no logout promise was
+        // started. Keep an orphan intent counted, without reconstructing state.
+        return Err(audit_unavailable());
+    };
+    let mut choice = registry
+        .sessions
+        .get(&binding.session_id.to_string())
+        .and_then(|session| session.pending_refresh.as_ref())
+        .and_then(|pending| pending.native_close);
+    for intent in registry.native.values().filter(|intent| {
+        intent.operation_id == operation
+            && intent.previous.as_ref() == Some(binding)
+            && intent.intention.as_ref() == Some(receipt)
+    }) {
+        if let Some(retained) = intent.native_close {
+            if choice.is_some_and(|choice| choice != retained) {
+                return Err(conflict());
+            }
+            choice = Some(retained);
+        }
+    }
+    let choice = choice.unwrap_or(NativeCloseChoice { outcome, reason });
+    if let Some(session) = registry.sessions.get_mut(&binding.session_id.to_string())
+        && let Some(pending) = session.pending_refresh.as_mut()
+    {
+        pending.native_close = Some(choice);
+    }
+    for intent in registry.native.values_mut().filter(|intent| {
+        intent.operation_id == operation
+            && intent.previous.as_ref() == Some(binding)
+            && intent.intention.as_ref() == Some(receipt)
+    }) {
+        intent.native_close = Some(choice);
+    }
+    Ok((record, choice))
+}
+
+fn retire_native_owner(
+    registry: &mut Registry,
+    binding: &SessionBinding,
+    operation: Uuid,
+    receipt: &AuthenticationReceiptV1,
+) {
+    registry.sessions.remove(&binding.session_id.to_string());
+    registry.native.retain(|_, intent| {
+        !(intent.operation_id == operation
+            && intent.previous.as_ref() == Some(binding)
+            && intent.intention.as_ref() == Some(receipt))
+    });
+}
+
+fn close_native_operation(
+    oidc: &OidcGateway,
+    registry: &mut Registry,
+    binding: &SessionBinding,
+    operation: Uuid,
+    receipt: &AuthenticationReceiptV1,
+    outcome: Outcome,
+    reason: Reason,
+) -> ApiResult<()> {
+    let (record, choice) =
+        retain_native_close_choice(registry, binding, operation, receipt, outcome, reason)?;
+    if registry
+        .sessions
+        .get(&binding.session_id.to_string())
+        .and_then(|session| session.pending_refresh.as_ref())
+        .is_some_and(|pending| pending.native_logout.is_some())
+    {
+        complete_native_logout(oidc, registry, binding, operation, receipt, record, choice)?;
+    } else {
+        oidc.audit
+            .close_session(
+                result(
+                    record,
+                    receipt.clone(),
+                    choice.outcome,
+                    choice.reason,
+                    Some(binding.principal.clone()),
+                ),
+                binding.generation,
+                binding.access_fingerprint,
+            )
+            .map_err(audit_failure)?;
+    }
+    retire_native_owner(registry, binding, operation, receipt);
+    Ok(())
+}
+
+fn native_logout_state<'a>(
+    registry: &'a mut Registry,
+    binding: &SessionBinding,
+    operation: Uuid,
+    receipt: &AuthenticationReceiptV1,
+) -> ApiResult<&'a mut NativeLogoutState> {
+    let session = registry
+        .sessions
+        .get_mut(&binding.session_id.to_string())
+        .ok_or_else(audit_unavailable)?;
+    let pending = session
+        .pending_refresh
+        .as_mut()
+        .ok_or_else(audit_unavailable)?;
+    if session.binding != *binding
+        || !session.rotating
+        || pending.record.operation_id != operation
+        || pending.receipt != *receipt
+    {
+        return Err(conflict());
+    }
+    pending.native_logout.as_mut().ok_or_else(audit_unavailable)
+}
+
+fn complete_native_logout(
+    oidc: &OidcGateway,
+    registry: &mut Registry,
+    binding: &SessionBinding,
+    operation: Uuid,
+    receipt: &AuthenticationReceiptV1,
+    refresh_record: AuthenticationRecordV1,
+    choice: NativeCloseChoice,
+) -> ApiResult<()> {
+    // No V2/generic fallback. This is a metadata transition, not permission to
+    // issue or reissue a provider request. Migration is an explicit operation.
+    if oidc
+        .audit
+        .format_version()
+        .map_err(|_| audit_unavailable())?
+        != 3
+    {
+        return Err(audit_unavailable());
+    }
+    let (intention, begin, refresh_result, end) = {
+        let state = native_logout_state(registry, binding, operation, receipt)?;
+        (
+            state.intention.clone(),
+            state.begin.clone(),
+            state.refresh_result.clone(),
+            state.end.clone(),
+        )
+    };
+    let begin = match begin {
+        Some(ack) => ack,
+        None => {
+            let ack = oidc
+                .audit
+                .begin_native_logout_during_refresh(
+                    intention.clone(),
+                    binding.clone(),
+                    operation,
+                    receipt.clone(),
+                )
+                .map_err(|_| audit_unavailable())?;
+            native_logout_state(registry, binding, operation, receipt)?.begin = Some(ack.clone());
+            ack
+        }
+    };
+    let refresh_result = match refresh_result {
+        Some(ack) => ack,
+        None => {
+            let ack = oidc
+                .audit
+                .close_session(
+                    result(
+                        refresh_record,
+                        receipt.clone(),
+                        choice.outcome,
+                        choice.reason,
+                        Some(binding.principal.clone()),
+                    ),
+                    binding.generation,
+                    binding.access_fingerprint,
+                )
+                .map_err(|_| audit_unavailable())?;
+            native_logout_state(registry, binding, operation, receipt)?.refresh_result =
+                Some(ack.clone());
+            ack
+        }
+    };
+    if end.is_none() {
+        let ack = oidc
+            .audit
+            .record_native_logout_after_refresh_closed(
+                result(
+                    intention,
+                    begin,
+                    Outcome::Succeeded,
+                    Reason::UserRequested,
+                    Some(binding.principal.clone()),
+                ),
+                binding.clone(),
+                operation,
+                receipt.clone(),
+                refresh_result,
+            )
+            .map_err(|_| audit_unavailable())?;
+        native_logout_state(registry, binding, operation, receipt)?.end = Some(ack);
+    }
+    // Only real BEGIN/FRefresh/END ACKs reach the caller's local retirement.
+    let state = native_logout_state(registry, binding, operation, receipt)?;
+    if state.begin.is_none() || state.refresh_result.is_none() || state.end.is_none() {
+        return Err(audit_unavailable());
+    }
+    Ok(())
+}
+
+fn prepare_native_logout(
+    oidc: &OidcGateway,
+    registry: &mut Registry,
+    binding: &SessionBinding,
+) -> ApiResult<(Uuid, AuthenticationReceiptV1)> {
+    let session = registry
+        .sessions
+        .get_mut(&binding.session_id.to_string())
+        .ok_or_else(audit_unavailable)?;
+    let pending = session
+        .pending_refresh
+        .as_mut()
+        .ok_or_else(audit_unavailable)?;
+    if session.binding != *binding || !session.rotating {
+        return Err(conflict());
+    }
+    if pending.native_logout.is_none() {
+        pending.native_logout = Some(NativeLogoutState {
+            intention: record(
+                oidc,
+                Action::Logout,
+                binding.session_id,
+                &binding.client_id,
+                Some(binding.principal.clone()),
+                None,
+                Uuid::new_v4(),
+            ),
+            begin: None,
+            refresh_result: None,
+            end: None,
+        });
+    }
+    let operation = pending.record.operation_id;
+    let receipt = pending.receipt.clone();
+    // Establish the first issue and all gateway fences before BEGIN is tried.
+    retain_native_close_choice(
+        registry,
+        binding,
+        operation,
+        &receipt,
+        Outcome::Rejected,
+        Reason::Revoked,
+    )?;
+    Ok((operation, receipt))
+}
+
+enum NativeLogoutDisposition {
+    Recorded,
+    AlreadyClosed,
+}
+
+// A Close may have committed before its original keeper received the ACK.
+// Observe that exact old fact before preparing a new Logout intention. This
+// does not accept/audit the new Logout request or grant provider authority.
+fn reconcile_native_close_before_logout(
+    oidc: &OidcGateway,
+    registry: &mut Registry,
+    binding: &SessionBinding,
+) -> ApiResult<bool> {
+    let session = registry
+        .sessions
+        .get(&binding.session_id.to_string())
+        .ok_or_else(audit_unavailable)?;
+    let pending = session
+        .pending_refresh
+        .as_ref()
+        .ok_or_else(audit_unavailable)?;
+    if binding.kind != SessionKind::NativeCli || session.binding != *binding || !session.rotating {
+        return Err(audit_unavailable());
+    }
+    // Some/ACKNone can include a durable BEGIN whose ACK was lost. Never
+    // infer no promise from that state; retain the three-ACK path and L.
+    if pending.native_logout.is_some() {
+        return Ok(false);
+    }
+    let Some(choice) = pending.native_close else {
+        return Ok(false);
+    };
+    let record = pending.record.clone();
+    let receipt = pending.receipt.clone();
+    let current = oidc
+        .audit
+        .session_current(binding.session_id)
+        .map_err(|_| audit_unavailable())?
+        .filter(|current| current.binding == *binding)
+        .ok_or_else(audit_unavailable)?;
+    match current.state {
+        SessionState::RefreshPending {
+            operation_id,
+            intention,
+        } if operation_id == record.operation_id && intention == receipt => Ok(false),
+        SessionState::Closed { .. } => {
+            // CurrentClosed alone is insufficient. On a closed binding Core
+            // can return success only for this exact existing Close payload,
+            // causal receipt, first choice, generation and fingerprint. A
+            // divergent keeper or failed replay leaves ownership untouched.
+            let operation = record.operation_id;
+            let _final_ack = oidc
+                .audit
+                .close_session(
+                    result(
+                        record,
+                        receipt.clone(),
+                        choice.outcome,
+                        choice.reason,
+                        Some(binding.principal.clone()),
+                    ),
+                    binding.generation,
+                    binding.access_fingerprint,
+                )
+                .map_err(|_| audit_unavailable())?;
+            retire_native_owner(registry, binding, operation, &receipt);
+            Ok(true)
+        }
+        _ => Err(audit_unavailable()),
+    }
+}
+
+fn request_native_logout(
+    oidc: &OidcGateway,
+    registry: &mut Registry,
+    binding: &SessionBinding,
+) -> ApiResult<NativeLogoutDisposition> {
+    if reconcile_native_close_before_logout(oidc, registry, binding)? {
+        return Ok(NativeLogoutDisposition::AlreadyClosed);
+    }
+    let (operation, receipt) = prepare_native_logout(oidc, registry, binding)?;
+    close_native_operation(
+        oidc,
+        registry,
+        binding,
+        operation,
+        &receipt,
+        Outcome::Rejected,
+        Reason::Revoked,
+    )?;
+    Ok(NativeLogoutDisposition::Recorded)
+}
+
+// Observation of the original native deadlines only. Product callers supply
+// Instant::now(); tests can observe a retained deadline without rewriting it.
+fn reap_native_at(oidc: &OidcGateway, registry: &mut Registry, now: Instant) -> ApiResult<()> {
+    let expired: Vec<_> = registry
+        .sessions
+        .values()
+        .filter_map(|session| {
+            if session.binding.kind != SessionKind::NativeCli {
+                return None;
+            }
+            let pending = session.pending_refresh.as_ref()?;
+            (now >= pending.deadline).then(|| {
+                (
+                    session.binding.clone(),
+                    pending.record.operation_id,
+                    pending.receipt.clone(),
+                )
+            })
+        })
+        .collect();
+    for (binding, operation, receipt) in expired {
+        close_native_operation(
+            oidc,
+            registry,
+            &binding,
+            operation,
+            &receipt,
+            Outcome::Unknown,
+            Reason::Interrupted,
+        )?;
+    }
+    let expired: Vec<_> = registry
+        .native
+        .values()
+        .filter_map(|intent| {
+            let binding = intent
+                .previous
+                .as_ref()
+                .filter(|binding| binding.kind == SessionKind::NativeCli)?;
+            (now.saturating_duration_since(intent.created) >= Duration::from_secs(15)).then(|| {
+                (
+                    binding.clone(),
+                    intent.operation_id,
+                    intent.intention.clone(),
+                )
+            })
+        })
+        .collect();
+    for (binding, operation, receipt) in expired {
+        close_native_operation(
+            oidc,
+            registry,
+            &binding,
+            operation,
+            &receipt.ok_or_else(audit_unavailable)?,
+            Outcome::Unknown,
+            Reason::Interrupted,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()> {
     let expired: Vec<_> = registry
         .exchanging
@@ -630,6 +1198,7 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
     registry
         .deliveries
         .retain(|_, entry| entry.created.elapsed() < Duration::from_secs(30));
+    reap_native_at(oidc, registry, Instant::now())?;
     let expired: Vec<_> = registry
         .native
         .iter()
@@ -640,6 +1209,26 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
         .map(|(id, _)| *id)
         .collect();
     for id in expired {
+        if let Some(entry) = registry.native.get(&id)
+            && let Some(binding) = entry
+                .previous
+                .as_ref()
+                .filter(|binding| binding.kind == SessionKind::NativeCli)
+        {
+            let binding = binding.clone();
+            let operation = entry.operation_id;
+            let receipt = entry.intention.clone().ok_or_else(audit_unavailable)?;
+            close_native_operation(
+                oidc,
+                registry,
+                &binding,
+                operation,
+                &receipt,
+                Outcome::Unknown,
+                Reason::Interrupted,
+            )?;
+            continue;
+        }
         if let Some(entry) = registry.native.remove(&id) {
             let previous = entry.previous.clone();
             if let Some(binding) = previous {
@@ -674,6 +1263,27 @@ pub(super) fn reap(oidc: &OidcGateway, registry: &mut Registry) -> ApiResult<()>
         .map(|(id, _)| id.clone())
         .collect();
     for id in abandoned {
+        if let Some(session) = registry.sessions.get(&id)
+            && session.binding.kind == SessionKind::NativeCli
+        {
+            let binding = session.binding.clone();
+            let pending = session
+                .pending_refresh
+                .as_ref()
+                .ok_or_else(audit_unavailable)?;
+            let operation = pending.record.operation_id;
+            let receipt = pending.receipt.clone();
+            close_native_operation(
+                oidc,
+                registry,
+                &binding,
+                operation,
+                &receipt,
+                Outcome::Unknown,
+                Reason::Interrupted,
+            )?;
+            continue;
+        }
         if let Some(session) = registry.sessions.remove(&id) {
             registry
                 .native
@@ -742,7 +1352,7 @@ pub(super) async fn start(
             {
                 return Err(conflict());
             }
-            reserve(&mut registry, true)?;
+            reserve_anonymous(&mut registry)?;
             // A caller-created correlation cookie is not an authenticated identity.
             // The durable intention is created only by install after verification.
             registry.transactions.insert(
@@ -1067,7 +1677,7 @@ fn native_intent_sync(
             let session_id = Uuid::new_v4();
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
             reap(&oidc, &mut registry)?;
-            reserve(&mut registry, true)?;
+            reserve_anonymous(&mut registry)?;
             registry.native.insert(
                 intent_id,
                 NativeIntent {
@@ -1077,6 +1687,7 @@ fn native_intent_sync(
                     action: Action::SessionAdmission,
                     previous: None,
                     created: Instant::now(),
+                    native_close: None,
                 },
             );
             Ok(Json(
@@ -1102,6 +1713,21 @@ fn native_intent_sync(
             )?;
             let intent_id = previous.record.operation_id;
             let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+            if registry
+                .sessions
+                .get(&authentication_id.to_string())
+                .is_none_or(|session| {
+                    session.binding != previous.binding
+                        || !session.rotating
+                        || session.pending_refresh.as_ref().is_none_or(|pending| {
+                            pending.native_close.is_some()
+                                || pending.record.operation_id != intent_id
+                                || pending.receipt != previous.receipt
+                        })
+                })
+            {
+                return Err(conflict());
+            }
             // Sample UTC before the monotonic remainder and round down; lock
             // or processing time cannot extend the published ticket lifetime.
             let now = chrono::Utc::now().timestamp();
@@ -1120,6 +1746,7 @@ fn native_intent_sync(
                     action: Action::Refresh,
                     previous: Some(previous.binding.clone()),
                     created: previous.created,
+                    native_close: None,
                 },
             );
             previous.cancel_on_drop = false;
@@ -1139,6 +1766,25 @@ fn native_intent_sync(
                 }
             } else if entry.created.elapsed() >= Duration::from_secs(300) {
                 return Err(conflict());
+            }
+            if let Some(binding) = entry
+                .previous
+                .as_ref()
+                .filter(|binding| binding.kind == SessionKind::NativeCli)
+            {
+                let binding = binding.clone();
+                let operation = entry.operation_id;
+                let receipt = entry.intention.clone().ok_or_else(audit_unavailable)?;
+                close_native_operation(
+                    &oidc,
+                    &mut registry,
+                    &binding,
+                    operation,
+                    &receipt,
+                    Outcome::Unknown,
+                    Reason::Interrupted,
+                )?;
+                return Ok(Json(json!({"version":1,"status":"finished"})));
             }
             let entry = registry.native.remove(&intent_id).ok_or_else(conflict)?;
             let _declared_outcome = match outcome {
@@ -1303,6 +1949,18 @@ impl RefreshCleanup {
             if !owned {
                 return;
             }
+            if self.binding.kind == SessionKind::NativeCli {
+                let _ = close_native_operation(
+                    &owner,
+                    &mut registry,
+                    &self.binding,
+                    self.record.operation_id,
+                    &self.receipt,
+                    Outcome::Unknown,
+                    Reason::Interrupted,
+                );
+                return;
+            }
             let removed = registry
                 .sessions
                 .remove(&self.binding.session_id.to_string())
@@ -1358,15 +2016,16 @@ fn begin_refresh(
     kind: SessionKind,
     refresh: Option<&str>,
 ) -> ApiResult<RefreshOperation> {
-    let cleanup = store_io::CleanupReservation::reserve(&oidc.cleanup_slots)?;
+    let cleanup = if kind == SessionKind::NativeCli {
+        None
+    } else {
+        Some(store_io::CleanupReservation::reserve(&oidc.cleanup_slots)?)
+    };
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
     reap(oidc, &mut registry)?;
-    if kind == SessionKind::NativeCli {
-        reserve(&mut registry, false)?;
-    }
     let session = registry
         .sessions
-        .get_mut(&id.to_string())
+        .get(&id.to_string())
         .ok_or_else(credential_invalid)?;
     if session.binding.kind != kind
         || session.proof.digest != raw_digest(raw)
@@ -1393,6 +2052,15 @@ fn begin_refresh(
         return Err(credential_invalid());
     }
     oidc.active_binding(&session.binding)?;
+    let native_window = if kind == SessionKind::NativeCli {
+        Some(native_start_window(&registry, &session.binding)?)
+    } else {
+        None
+    };
+    let cleanup = match cleanup {
+        Some(cleanup) => cleanup,
+        None => store_io::CleanupReservation::reserve(&oidc.cleanup_slots)?,
+    };
     let record = record(
         oidc,
         Action::Refresh,
@@ -1402,6 +2070,12 @@ fn begin_refresh(
         None,
         Uuid::new_v4(),
     );
+    // Still the exact original session under the same lock. No await/provider
+    // verification occurs between proof, budget and the durable admission.
+    let session = registry
+        .sessions
+        .get_mut(&id.to_string())
+        .ok_or_else(credential_invalid)?;
     let pending = oidc
         .audit
         .refresh_pending(
@@ -1425,8 +2099,10 @@ fn begin_refresh(
         record: record.clone(),
         receipt: pending.receipt.clone(),
         deadline,
+        native_close: None,
+        native_logout: None,
     });
-    Ok(RefreshOperation {
+    let operation = RefreshOperation {
         record,
         receipt: pending.receipt,
         binding: session.binding.clone(),
@@ -1438,7 +2114,13 @@ fn begin_refresh(
         cancel_on_drop: true,
         cleanup: Some(cleanup),
         inline_cleanup: true,
-    })
+    };
+    // Admission refusal leaves counters untouched. Pending ownership is
+    // installed before another request can acquire the registry mutex.
+    if let Some(window) = native_window {
+        registry.rate = Some(window);
+    }
+    Ok(operation)
 }
 fn fail_refresh(
     oidc: &OidcGateway,
@@ -1447,6 +2129,17 @@ fn fail_refresh(
     reason: Reason,
 ) -> ApiResult<()> {
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+    if operation.binding.kind == SessionKind::NativeCli {
+        return close_native_operation(
+            oidc,
+            &mut registry,
+            &operation.binding,
+            operation.record.operation_id,
+            &operation.receipt,
+            outcome,
+            reason,
+        );
+    }
     if registry
         .sessions
         .get(&operation.binding.session_id.to_string())
@@ -1572,7 +2265,8 @@ fn install_rotation(
     if session.binding != operation.binding
         || !session.rotating
         || session.pending_refresh.as_ref().is_none_or(|pending| {
-            pending.record.operation_id != operation.record.operation_id
+            pending.native_close.is_some()
+                || pending.record.operation_id != operation.record.operation_id
                 || pending.receipt != operation.receipt
         })
     {
@@ -1604,7 +2298,9 @@ fn install_rotation(
         operation.binding.generation,
         operation.binding.access_fingerprint,
     ) {
-        registry.sessions.remove(&binding.session_id.to_string());
+        if operation.binding.kind != SessionKind::NativeCli {
+            registry.sessions.remove(&binding.session_id.to_string());
+        }
         return Err(audit_failure(error));
     }
     session.binding = binding.clone();
@@ -1748,8 +2444,17 @@ pub(super) async fn rotate(
             if session.binding != *previous
                 || !session.rotating
                 || session.proof.digest != raw_digest(&raw)
+                || session.pending_refresh.is_none()
             {
                 return Err(credential_invalid());
+            }
+            if intent.native_close.is_some()
+                || session
+                    .pending_refresh
+                    .as_ref()
+                    .is_some_and(|pending| pending.native_close.is_some())
+            {
+                return Err(conflict());
             }
             let record = native_record(&oidc, intent);
             let binding = previous.clone();
@@ -1844,6 +2549,15 @@ pub(super) async fn logout(
             web(&oidc, &headers)?;
         } else {
             native(&headers)?;
+        }
+        if session.binding.kind == SessionKind::NativeCli
+            && (session.rotating || session.pending_refresh.is_some()) {
+            let binding = session.binding.clone();
+            let response = match request_native_logout(&oidc, &mut registry, &binding)? {
+                NativeLogoutDisposition::Recorded => json!({"version":1,"local_session":"closed","provider_logout":"not_attempted","audit":"recorded"}),
+                NativeLogoutDisposition::AlreadyClosed => json!({"version":1,"local_session":"unknown","provider_logout":"not_attempted","audit":"unavailable"}),
+            };
+            return Ok(LogoutPreparation::Complete(Json(response)));
         }
         let session = registry
             .sessions
