@@ -1,5 +1,27 @@
 # Validation courante
 
+## 10 novembre — D8 R1, correction d'oracle et tentative R2
+
+- **PASS R1** : huit parents uniques, dont la régression qui refusait B après
+  4 096 allocations A ; compilation initiale5min58s, puis test court2,59s.
+- **FAIL R1** : un des deux contrôles Router attend un mauvais code de
+  révocation. Source2334 manifeste `1b91a29e…`, raw `1d366a02…` ; le vrai
+  refus401 n'est ni une absence ni un succès. La preuve de l'échec est conservée.
+- **PASS revue source R2** : une seule attente de test devient `identity_revoked`,
+  conformément au Store/API et au test historique de révocation. Aucun code
+  produit modifié. Full2334 manifeste `3bf60e76…` vérifié RC0 hôte et QA.
+- **Non concluant R2** : tentative de module corrigé terminée137 ; sélection,
+  RC interne et oracle inconnus, raw non récupéré. Ne pas compter un test vert
+  ni un défaut produit. Producteur HTTP complet, canaris et check `NOT_RUN`.
+- **Conservation/fermeture** : export réel R1 `b354c45f…` et manifeste vérifiés ;
+  aucune fixture temporaire D8 restante trouvée. Entrée R2 conservée, sans
+  export après essai. PID0/OOMfalse, watcher terminalRC0, retrait normal de la
+  seule QA attribuée. Arrêt prévu01:55UTC, constaté02:10:42UTC ; cause inconnue.
+
+[Commandes, empreintes complètes et périmètre](evidence/2026-11-10/human-context-capacity/README.md).
+Le correctif D8 reste ouvert. Les délais de cette compilation sur le Mac
+chargé ne constituent pas une mesure de latence du produit ou des modèles.
+
 ## 10 novembre — validations broker et constructeurs privés
 
 - **RED observé** : un parent r2 avant libération F/retrait, puis un parent D8

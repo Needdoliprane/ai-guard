@@ -1,5 +1,33 @@
 # État constaté — suivi du développement
 
+## 10 novembre — première validation D8 et reprise du harnais
+
+Le candidat D8 R1 passe huit des neuf parents exécutés : régression courte,
+six contrôles du registre et un contrôle HTTP. Le neuvième échoue sur une
+nouvelle assertion qui attend `credential_invalid` après révocation ; le
+contrat préexistant et la réponse réelle sont `401 identity_revoked`, avec
+`authenticate`. Cette seule assertion est corrigée en R2 et relue indépendamment ;
+aucun comportement d'authentification n'est modifié. La relance R2 se termine
+avec137 sans sortie Cargo récupérable ni sélection confirmée : elle reste
+non concluante. Producteur HTTP complet et check toutes cibles non exécutés.
+Le lot n'est pas intégré ni déclaré corrigé.
+[Sources, commandes et limites](evidence/2026-11-10/human-context-capacity/README.md).
+
+La source R1 et ses résultats ont été exportés avant la relance. La source
+d'entrée R2 est conservée et vérifiée, mais son log et son export après essai
+manquent. La QA est arrêtée puis retirée normalement ; l'arrêt observé est
+postérieur à l'échéance prévue, sans cause établie. La prochaine admission
+séparera compilation/tests et enregistrera les sorties directement sur l'hôte.
+
+Le nouveau Resume a désormais deux revues indépendantes couvrant ses dix-sept
+fichiers (douze et cinq), sans défaut source bloquant relevé dans ces périmètres ;
+ses treize parents restent `NOT_RUN`. Les RED source D3 ingress et D5
+NativeRefresh sont préparés sans FIX produit avant reproduction. Le diagnostic
+des deux fixtures broker est bloqué par un refus d'outillage signalant une
+authentification matérielle manquante ; les lots indépendants continuent.
+Claude reste en cours selon le mainteneur, sans livraison finale reçue.
+G09 reste FAIL et aucun gate global n'est fermé.
+
 ## 10 novembre — broker r3, capacité humaine et capture privée
 
 Sur la composition privée r3 `55d0ae55…`, dix parents ciblés passent et deux
