@@ -359,12 +359,30 @@ not an authenticated identity.
 | Native refreshes for one verified principal, across its sessions | 4 active operations; 2 starts in that same window |
 | Native refreshes for one admitted session | 1 operation at a time |
 
+With V4, `N` is the number of tenants in the exact durable plan. Each tenant's
+native work is additionally capped at `max(1, floor(32/N))` retained operations
+and `max(1, floor(8/N))` starts in that window. With two tenants these are 16 and 4.
+The global 32/8 and principal 4/2 bounds still apply. Unused remainder is not
+lent out. Above 32 tenants for slots, or 8 for starts, the minimum 1 caps add up to
+more than the global bound: capacity is then shared globally, without a
+simultaneous reservation for every tenant. No configuration increases a global
+bound. V3's explicit mono-tenant compatibility retains its original bounds.
+
+Rust chooses the operation's accounting owner only among the positive verified
+membership IDs retained at session admission, resolved by ID rather than plan
+or gateway array position. It keeps that owner through pending intent,
+cleanup/logout and any orphaned intent. This snapshot grants no permission;
+normal authorization and mandatory audit still apply. A member of A+B can use
+both parts through distinct operations. A first login remains anonymous and
+has no tenant reservation; neither a request tenant nor an unverified JWT can
+choose one.
+
 Unused places or starts in one class are not lent to the other, and saturation
 does not evict an existing owner. An operation retained for mandatory cleanup
 still counts, even when it can no longer publish tokens. These bounds are
 separate from the existing live-session ceilings of 4096 per gateway and 64 per
 principal. They count gateway state and starts; they do not measure provider,
-CPU or network capacity, establish per-tenant fairness, or qualify 100 cloud
+CPU or network capacity, establish general per-tenant fairness, or qualify 100 cloud
 workers.
 
 `429 capacity_exhausted` with `retry_action: retry` means a volatile place,

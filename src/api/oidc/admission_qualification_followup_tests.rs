@@ -35,26 +35,26 @@ fn one_sided_rate_eight_refuses_ninth_without_borrowing_the_empty_class() {
     // not constitute authenticated sessions or bypass the Router proof gate.
     let mut anonymous = Registry::default();
     for admitted in 1..=8 {
-        anonymous.rate = Some(next_window(&anonymous, None, now).unwrap());
+        anonymous.rate = Some(next_window(&anonymous, None, None, now).unwrap());
         let window = anonymous.rate.as_ref().unwrap();
         assert_eq!(window.started, now);
         assert_eq!(u32::from(window.anonymous), admitted);
         assert!(window.authenticated.is_empty());
         assert_eq!(window.total(), admitted);
     }
-    capacity_refusal(next_window(&anonymous, None, now));
+    capacity_refusal(next_window(&anonymous, None, None, now));
     let window = anonymous.rate.as_ref().unwrap();
     assert_eq!(window.anonymous, 8);
     assert!(window.authenticated.is_empty());
     assert_eq!(window.total(), 8);
-    let separate_class = next_window(&anonymous, Some(&principals[0]), now).unwrap();
+    let separate_class = next_window(&anonymous, Some(&principals[0]), None, now).unwrap();
     assert_eq!(separate_class.anonymous, 8);
     assert_eq!(separate_class.authenticated[&principals[0]], 1);
     assert_eq!(separate_class.total(), 9);
 
     let mut native = Registry::default();
     for (index, principal) in principals.iter().take(8).enumerate() {
-        native.rate = Some(next_window(&native, Some(principal), now).unwrap());
+        native.rate = Some(next_window(&native, Some(principal), None, now).unwrap());
         let window = native.rate.as_ref().unwrap();
         assert_eq!(window.started, now);
         assert_eq!(window.anonymous, 0);
@@ -62,12 +62,12 @@ fn one_sided_rate_eight_refuses_ninth_without_borrowing_the_empty_class() {
         assert!(window.authenticated.values().all(|count| *count == 1));
         assert_eq!(window.total(), (index + 1) as u32);
     }
-    capacity_refusal(next_window(&native, Some(&principals[8]), now));
+    capacity_refusal(next_window(&native, Some(&principals[8]), None, now));
     let window = native.rate.as_ref().unwrap();
     assert_eq!(window.anonymous, 0);
     assert_eq!(window.authenticated.len(), 8);
     assert_eq!(window.total(), 8);
-    let separate_class = next_window(&native, None, now).unwrap();
+    let separate_class = next_window(&native, None, None, now).unwrap();
     assert_eq!(separate_class.anonymous, 1);
     assert_eq!(separate_class.authenticated, window.authenticated);
     assert_eq!(separate_class.total(), 9);

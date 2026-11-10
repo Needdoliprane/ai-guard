@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — part native du registre OIDC bornée par tenant
+
+Après l’observation de32 propriétaires A vivants refusant B, le FIX conserve
+les plafonds globaux et borne les refresh natifs par tenant vérifié/principal.
+Douze parents exacts PASS et check toutes cibles RC0 sur2378 `a5511b0b…` ;
+le parent principal observe16A/B200,17 finish200 puis reopen, avec débit vérifié
+séparément. Source relue, post-source/pathset/export exacts et QA retirée.
+[Preuves, commandes et limites](evidence/2026-11-10/oidc-registry-tenant-capacity/README.md).
+La baseline R2 reste NONCONCLUSIVE après cleanup401 malgré son observation
+valide ; ce n’est pas une RED finale rebaptisée. A+B, N>8/32, premier login
+anonyme et disponibilité générale gardent leurs limites. IdP/runtime/SLO et
+100workers non qualifiés ; D5 entier ouvert, G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — préparation SetupV2 vérifiée en logiciel
 
 Le manifeste2 finance et crée directement AuthV4/configuration2 avant toute

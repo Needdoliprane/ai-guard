@@ -1,3 +1,6 @@
+use super::registry::{
+    ANONYMOUS_START_SLOTS, NATIVE_START_SLOTS, NATIVE_STARTS, VOLATILE_START_SLOTS,
+};
 use super::*;
 use crate::oidc::{OidcClientKind, OidcError, TokenBundle};
 
@@ -285,12 +288,8 @@ fn membership(
     Ok(ceiling)
 }
 const START_WINDOW: Duration = Duration::from_secs(1);
-const VOLATILE_START_SLOTS: usize = 256;
-const ANONYMOUS_START_SLOTS: usize = 224;
-const NATIVE_START_SLOTS: usize = 32;
 const STARTS_PER_WINDOW: u32 = 16;
 const ANONYMOUS_STARTS: u8 = 8;
-const NATIVE_STARTS: u8 = 8;
 const NATIVE_PRINCIPAL_SLOTS: usize = 4;
 const NATIVE_PRINCIPAL_STARTS: u8 = 2;
 
@@ -301,6 +300,7 @@ pub(super) struct StartWindow {
     started: Instant,
     anonymous: u8,
     authenticated: HashMap<String, u8>,
+    tenants: HashMap<RegistryTenantKey, u8>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct NativeCloseChoice {
@@ -340,7 +340,11 @@ fn anonymous_slots(registry: &Registry) -> usize {
 /// Pending session ownership bridges begin_refresh -> intent publication and
 /// intent removal -> rotation completion. Retain unmatched intents as owners,
 /// rather than interpreting a missing/different pending session as release.
-fn native_owners(registry: &Registry) -> impl Iterator<Item = &SessionBinding> {
+struct NativeOwner<'a> {
+    binding: &'a SessionBinding,
+    tenant: Option<RegistryTenantKey>,
+}
+fn native_owners(registry: &Registry) -> impl Iterator<Item = NativeOwner<'_>> {
     registry
         .sessions
         .values()
@@ -348,7 +352,13 @@ fn native_owners(registry: &Registry) -> impl Iterator<Item = &SessionBinding> {
             session.binding.kind == SessionKind::NativeCli
                 && (session.rotating || session.pending_refresh.is_some())
         })
-        .map(|session| &session.binding)
+        .map(|session| NativeOwner {
+            binding: &session.binding,
+            tenant: session
+                .pending_refresh
+                .as_ref()
+                .and_then(|pending| pending.registry_tenant),
+        })
         .chain(registry.native.values().filter_map(move |intent| {
             let previous = intent.previous.as_ref()?;
             let represented = registry
@@ -359,9 +369,13 @@ fn native_owners(registry: &Registry) -> impl Iterator<Item = &SessionBinding> {
                         && session.pending_refresh.as_ref().is_some_and(|pending| {
                             pending.record.operation_id == intent.operation_id
                                 && intent.intention.as_ref() == Some(&pending.receipt)
+                                && pending.registry_tenant == intent.registry_tenant
                         })
                 });
-            (!represented).then_some(previous)
+            (!represented).then_some(NativeOwner {
+                binding: previous,
+                tenant: intent.registry_tenant,
+            })
         }))
 }
 
@@ -370,6 +384,7 @@ fn native_owners(registry: &Registry) -> impl Iterator<Item = &SessionBinding> {
 fn next_window(
     registry: &Registry,
     principal: Option<&str>,
+    tenant: Option<RegistryTenantKey>,
     now: Instant,
 ) -> ApiResult<StartWindow> {
     let mut window = registry
@@ -381,11 +396,20 @@ fn next_window(
             started: now,
             anonymous: 0,
             authenticated: HashMap::new(),
+            tenants: HashMap::new(),
         });
     if window.total() >= STARTS_PER_WINDOW {
         return Err(capacity());
     }
     if let Some(principal) = principal {
+        if let Some(limits) = &registry.tenant_limits {
+            let tenant = tenant
+                .filter(|key| limits.contains(*key))
+                .ok_or_else(audit_unavailable)?;
+            if window.tenants.get(&tenant).copied().unwrap_or(0) >= limits.starts() {
+                return Err(capacity());
+            }
+        }
         let starts: u32 = window
             .authenticated
             .values()
@@ -402,6 +426,9 @@ fn next_window(
             .authenticated
             .entry(principal.to_owned())
             .or_default() += 1;
+        if let Some(tenant) = tenant {
+            *window.tenants.entry(tenant).or_default() += 1;
+        }
     } else {
         if window.anonymous >= ANONYMOUS_STARTS {
             return Err(capacity());
@@ -428,23 +455,73 @@ fn reserve_anonymous(registry: &mut Registry) -> ApiResult<()> {
     {
         return Err(capacity());
     }
-    registry.rate = Some(next_window(registry, None, Instant::now())?);
+    registry.rate = Some(next_window(registry, None, None, Instant::now())?);
     Ok(())
 }
 
-fn native_start_window(registry: &Registry, binding: &SessionBinding) -> ApiResult<StartWindow> {
-    let native = native_owners(registry).count();
-    if native >= NATIVE_START_SLOTS
-        || anonymous_slots(registry) + native >= VOLATILE_START_SLOTS
-        || native_owners(registry)
-            .filter(|owner| owner.principal == binding.principal)
+struct NativeStart {
+    window: StartWindow,
+    tenant: Option<RegistryTenantKey>,
+}
+fn native_start_window(registry: &Registry, session: &Session) -> ApiResult<NativeStart> {
+    let owners: Vec<_> = native_owners(registry).collect();
+    if owners.len() >= NATIVE_START_SLOTS
+        || anonymous_slots(registry) + owners.len() >= VOLATILE_START_SLOTS
+        || owners
+            .iter()
+            .filter(|owner| owner.binding.principal == session.binding.principal)
             .count()
             >= NATIVE_PRINCIPAL_SLOTS
     {
         return Err(capacity());
     }
-    let principal = binding.principal.key().map_err(|_| credential_invalid())?;
-    next_window(registry, Some(&principal), Instant::now())
+    let principal = session
+        .binding
+        .principal
+        .key()
+        .map_err(|_| credential_invalid())?;
+    let now = Instant::now();
+    if let Some(limits) = &registry.tenant_limits {
+        if owners
+            .iter()
+            .any(|owner| owner.tenant.is_none_or(|key| !limits.contains(key)))
+        {
+            return Err(audit_unavailable());
+        }
+        let scope = session
+            .registry_tenants
+            .as_ref()
+            .ok_or_else(audit_unavailable)?;
+        for tenant in scope.keys() {
+            if !limits.contains(tenant) {
+                return Err(audit_unavailable());
+            }
+            if owners
+                .iter()
+                .filter(|owner| owner.tenant == Some(tenant))
+                .count()
+                >= limits.slots()
+            {
+                continue;
+            }
+            match next_window(registry, Some(&principal), Some(tenant), now) {
+                Ok(window) => {
+                    return Ok(NativeStart {
+                        window,
+                        tenant: Some(tenant),
+                    });
+                }
+                Err(error) if error.0 == StatusCode::TOO_MANY_REQUESTS => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(capacity())
+    } else {
+        Ok(NativeStart {
+            window: next_window(registry, Some(&principal), None, now)?,
+            tenant: None,
+        })
+    }
 }
 
 struct MembershipCapacityObservation {
@@ -643,10 +720,12 @@ fn install(
     // Anonymous nonce creation and rejected provider input never reach here.
     let mut preflight_failure = None;
     let mut unscoped = false;
+    let mut registry_memberships = Vec::new();
     let pending = if oidc.partitioned_capacity {
         let observation = membership_capacity_candidates(state, oidc, &access, &principal);
         unscoped = observation.tenant_ids.is_empty();
         preflight_failure = observation.failure;
+        registry_memberships = observation.tenant_ids.clone();
         let candidates = AuthenticationTenantCandidatesV1::from_verified_memberships(
             principal.clone(),
             observation.tenant_ids,
@@ -744,6 +823,13 @@ fn install(
             Some(principal),
         ));
     }
+    let registry_tenants = match registry.tenant_limits.as_ref() {
+        Some(limits) => match limits.verified_memberships(&registry_memberships) {
+            Ok(scope) => Some(scope),
+            Err(error) => return Err(fail_initial(oidc, record, receipt, error, Some(principal))),
+        },
+        None => None,
+    };
     let now = chrono::Utc::now().timestamp();
     let authenticated_at = Instant::now();
     let maximum_expiry = now.saturating_add(3600);
@@ -803,6 +889,7 @@ fn install(
             rotating: false,
             pending_refresh: None,
             maximum_expiry,
+            registry_tenants,
         },
     );
     Ok(binding)
@@ -1784,6 +1871,7 @@ fn native_intent_sync(
                     previous: None,
                     created: Instant::now(),
                     native_close: None,
+                    registry_tenant: None,
                 },
             );
             Ok(Json(
@@ -1833,6 +1921,12 @@ fn native_intent_sync(
                 .filter(|remaining| remaining.as_secs() > 0)
                 .ok_or_else(credential_invalid)?;
             let expires_at = expiry(now.saturating_add(remaining.as_secs() as i64));
+            let registry_tenant = registry
+                .sessions
+                .get(&authentication_id.to_string())
+                .and_then(|session| session.pending_refresh.as_ref())
+                .ok_or_else(audit_unavailable)?
+                .registry_tenant;
             registry.native.insert(
                 intent_id,
                 NativeIntent {
@@ -1843,6 +1937,7 @@ fn native_intent_sync(
                     previous: Some(previous.binding.clone()),
                     created: previous.created,
                     native_close: None,
+                    registry_tenant,
                 },
             );
             previous.cancel_on_drop = false;
@@ -2149,7 +2244,7 @@ fn begin_refresh(
     }
     oidc.active_binding(&session.binding)?;
     let native_window = if kind == SessionKind::NativeCli {
-        Some(native_start_window(&registry, &session.binding)?)
+        Some(native_start_window(&registry, session)?)
     } else {
         None
     };
@@ -2197,6 +2292,9 @@ fn begin_refresh(
         deadline,
         native_close: None,
         native_logout: None,
+        registry_tenant: native_window
+            .as_ref()
+            .and_then(|admission| admission.tenant),
     });
     let operation = RefreshOperation {
         record,
@@ -2213,8 +2311,8 @@ fn begin_refresh(
     };
     // Admission refusal leaves counters untouched. Pending ownership is
     // installed before another request can acquire the registry mutex.
-    if let Some(window) = native_window {
-        registry.rate = Some(window);
+    if let Some(admission) = native_window {
+        registry.rate = Some(admission.window);
     }
     Ok(operation)
 }

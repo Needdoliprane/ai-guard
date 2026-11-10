@@ -360,13 +360,32 @@ pas une identité authentifiée.
 | Refresh natifs d'un principal vérifié, toutes ses sessions confondues | 4 opérations actives ; 2 départs dans cette même fenêtre |
 | Refresh natifs d'une session admise | 1 opération à la fois |
 
+En V4, `N` désigne le nombre de tenants du plan durable exact. Le travail natif
+de chaque tenant est en plus borné à `max(1, floor(32/N))` opérations retenues
+et `max(1, floor(8/N))` départs dans cette fenêtre. Avec deux tenants : 16 et 4.
+Les plafonds globaux 32/8 et principal 4/2 restent appliqués. Le reste inutilisé
+n'est pas prêté. Au-delà de 32 tenants pour les slots, ou 8 pour les départs, la
+somme des minimums 1 dépasse le global : la capacité reste alors partagée
+globalement, sans réserve simultanée pour chaque tenant. Aucune configuration
+n'augmente un plafond global. La compatibilité mono-tenant V3 explicite garde
+ses bornes d'origine.
+
+Rust choisit le propriétaire comptable de l'opération parmi les seuls IDs de
+memberships positifs vérifiés conservés à l'admission de la session, résolus
+par ID et non par position dans le plan ou le tableau du gateway. Il garde ce
+propriétaire dans l'intention, le cleanup/logout et une éventuelle intention
+orpheline. Ce snapshot n'accorde aucun droit ; autorisation normale et audit
+obligatoire restent appliqués. Un membre A+B peut employer les deux parts par
+des opérations distinctes. Une première connexion reste anonyme, sans réserve
+tenant ; ni tenant de requête ni JWT non vérifié ne peut en choisir une.
+
 Les places ou départs inutilisés d'une classe ne sont pas prêtés à l'autre et la
 saturation n'évince pas un propriétaire existant. Une opération retenue pour un
 cleanup obligatoire reste comptée, même lorsqu'elle ne peut plus publier de
 tokens. Ces bornes sont distinctes des plafonds de sessions vivantes existants :
 4096 par gateway et 64 par principal. Elles comptent des états et départs du
 gateway ; elles ne mesurent ni capacité fournisseur, CPU ou réseau,
-n'établissent pas d'équité par tenant et ne qualifient pas 100 workers cloud.
+n'établissent pas d'équité générale par tenant et ne qualifient pas 100 workers cloud.
 
 `429 capacity_exhausted` avec `retry_action: retry` signale qu'une place volatile,
 un départ dans la fenêtre ou une réservation de cleanup manque. Réduisez les

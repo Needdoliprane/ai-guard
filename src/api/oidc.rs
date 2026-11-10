@@ -19,7 +19,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use uuid::Uuid;
 mod gateway;
+mod registry;
 use gateway::{admit, callback, logout, native_intent, refresh, rotate, start, tokens};
+use registry::{RegistryTenantKey, RegistryTenantLimits, VerifiedRegistryTenants};
 
 #[derive(Clone)]
 pub(super) struct OidcHumanProof {
@@ -42,6 +44,9 @@ struct Session {
     rotating: bool,
     pending_refresh: Option<PendingRefresh>,
     maximum_expiry: i64,
+    // Accounting snapshot from positive verified memberships at admission.
+    // It never authorizes a request and is unrelated to GatewayState indices.
+    registry_tenants: Option<VerifiedRegistryTenants>,
 }
 struct PendingRefresh {
     record: AuthenticationRecordV1,
@@ -49,6 +54,7 @@ struct PendingRefresh {
     deadline: Instant,
     native_close: Option<gateway::NativeCloseChoice>,
     native_logout: Option<gateway::NativeLogoutState>,
+    registry_tenant: Option<RegistryTenantKey>,
 }
 // Cookie/PKCE correlation is unverified, bounded, expiring memory state. It
 // must not reserve durable authentication capacity before provider proof.
@@ -70,6 +76,8 @@ struct NativeIntent {
     previous: Option<SessionBinding>,
     created: Instant,
     native_close: Option<gateway::NativeCloseChoice>,
+    // Preserve the same operation's accounting even if its Session disappears.
+    registry_tenant: Option<RegistryTenantKey>,
 }
 #[derive(Serialize)]
 struct TokenDelivery {
@@ -106,6 +114,7 @@ struct Registry {
     sessions: HashMap<String, Session>,
     native: HashMap<Uuid, NativeIntent>,
     rate: Option<gateway::StartWindow>,
+    tenant_limits: Option<RegistryTenantLimits>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -267,13 +276,27 @@ impl OidcGateway {
         };
         audit.verify()?;
         let partitioned_capacity = audit.format_version()? == 4;
+        let tenant_limits = if partitioned_capacity {
+            let plan = audit.capacity_plan()?.ok_or_else(|| {
+                anyhow::anyhow!("V4 authentication audit requires its durable capacity plan")
+            })?;
+            Some(RegistryTenantLimits::new(
+                plan.tenants.into_iter().map(|tenant| tenant.tenant_id),
+            )?)
+        } else {
+            // The common gateway builder accepts V3 only with one tenant.
+            None
+        };
         Ok(Self {
             config,
             provider: Arc::new(provider),
             audit,
             partitioned_capacity,
             ca_bundle_pem,
-            registry: Mutex::new(Registry::default()),
+            registry: Mutex::new(Registry {
+                tenant_limits,
+                ..Registry::default()
+            }),
             cleanup_slots: Arc::new(tokio::sync::Semaphore::new(32)),
         })
     }

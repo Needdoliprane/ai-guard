@@ -7,6 +7,8 @@ use tower::ServiceExt;
 
 #[path = "admission_capacity_controls.rs"]
 mod controls;
+#[path = "admission_registry_tests.rs"]
+mod registry_tests;
 
 struct Fixture {
     _files: tempfile::TempDir,

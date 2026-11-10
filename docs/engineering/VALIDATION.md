@@ -1,5 +1,28 @@
 # Validation courante
 
+## 10 novembre — registre OIDC : douze FIX PASS et observation baseline distincte
+
+Sur le gel2378 `a5511b0b…` (public2cc + six postimages OIDC), les six nouveaux
+parents et six canaris donnent chacun1PASS/RC0, aucun ignored. Build RC0
+19:15:46–19:18:52UTC, listing RC0, puis check toutes cibles RC0
+19:30:01–19:31:16UTC avec10 avertissements conservés. Le primaire offre32
+requêtes A :16 owners A vivants, intention de refresh B200,17 finish200 après
+l’observation, deux contrôles positifs préalables distincts et reopen exact.
+Le canari de débit prouve séparément4/tenant/fenêtre ; le seul total16 ne le fait pas.
+
+La baseline R1 reste non concluante. R2 `a3cba155…` établit32A vivants/B429,
+audit inchangé et débit disponible, mais son cleanup401 laisse le parent
+NONCONCLUSIVE/RC101, sans reopen ni RED finale. Pas de troisième baseline identique.
+Le PATH réel du parent FIX11 omet `/usr/bin` ; Root vérifie `/bin`→`/usr/bin`
+dans l’image RO et accepte le retrait d’un répertoire alias dupliqué, sans
+rerun ni normalisation des raws. Post2378, pathset, cache4, nonregular0,
+archive réelle et fermeture idle sont conformes. Les anciens post-finals
+R2/STAGES non capturés avant watch restent NOT_CAPTURED.
+[Index exact, empreintes, portée et guides EN/FR](evidence/2026-11-10/oidc-registry-tenant-capacity/README.md).
+Source3/revues inchangées, aucune modification AuthCore/Setup/main. Le cas
+logiciel ciblé est corrigé ; ni D5 entier, SSO réel, runtime, SLO ou100workers
+ne sont qualifiés. G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — SetupV2 : 15 bibliothèque R2 et 5 CLI R3
 
 Les quinze sélections bibliothèque R2 full2370 `21fe6c0a…` donnent chacune
