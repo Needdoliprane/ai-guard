@@ -14,10 +14,14 @@ fn parent() -> tempfile::TempDir {
         .unwrap()
 }
 fn manifest() -> SetupManifestV1 {
-    serde_json::from_str(include_str!(
+    // Historical V1 retry canaries retain their original closed input shape.
+    let mut value: serde_json::Value = serde_json::from_str(include_str!(
         "../../docs/setup/sso/examples/local-demo.json"
     ))
-    .unwrap()
+    .unwrap();
+    value["version"] = 1.into();
+    value.as_object_mut().unwrap().remove("capacity_plan");
+    serde_json::from_value(value).unwrap()
 }
 
 fn event_receipts(store: &Store) -> Vec<(i64, String, String)> {

@@ -225,6 +225,86 @@ fn prepare_creates_schema5_separate_audit_and_only_explicit_oidc_memberships() {
 }
 
 #[test]
+fn prepare_v2_cli_publishes_exact_plan_and_two_real_bootstrap_entries() {
+    let parent = support::private_tempdir();
+    let root = parent.path().join("v2-installation");
+    let mut input = manifest();
+    input["version"] = 2.into();
+    input["capacity_plan"] = json!({"version":1,
+    "unscoped":{"max_records":20,"max_serialized_bytes":65536},
+    "tenants":[
+        {"tenant_id":"tenant-a","capacity":{"max_records":400,"max_serialized_bytes":393216}},
+        {"tenant_id":"tenant-b","capacity":{"max_records":400,"max_serialized_bytes":393216}}
+    ]});
+    let output = prepare(&input, &root);
+    success(&output);
+    let cfg: Value = serde_json::from_slice(&fs::read(root.join("oidc.json")).unwrap()).unwrap();
+    let preparation: Value =
+        serde_json::from_slice(&fs::read(root.join("preparation.json")).unwrap()).unwrap();
+    let origin: Value =
+        serde_json::from_slice(&fs::read(root.join("authentication-origin.json")).unwrap())
+            .unwrap();
+    assert_eq!(cfg["version"], 2);
+    assert_eq!(preparation["version"], 2);
+    assert_eq!(origin["version"], 2);
+    assert_eq!(origin["bootstrap"]["sequence"], 2);
+    let expected_gateway: agentsandbox::api::OidcGatewayConfigV1 =
+        serde_json::from_value(input["gateway"].clone()).unwrap();
+    assert_eq!(
+        cfg["gateway"],
+        serde_json::to_value(expected_gateway).unwrap(),
+        "compare the complete public configuration with its declared defaults"
+    );
+    assert_eq!(
+        cfg["authentication_audit"]["capacity_plan"],
+        input["capacity_plan"]
+    );
+    assert_eq!(
+        cfg["authentication_audit"]["policy"],
+        input["authentication_policy"]
+    );
+    assert_eq!(
+        cfg["authentication_audit"]["path"],
+        root.join("authentication.sqlite")
+            .to_string_lossy()
+            .as_ref()
+    );
+    let installation =
+        serde_json::from_value(cfg["authentication_audit"]["installation_id"].clone()).unwrap();
+    let policy = serde_json::from_value(input["authentication_policy"].clone()).unwrap();
+    let audit = AuthenticationAudit::open_existing(
+        &root.join("authentication.sqlite"),
+        installation,
+        policy,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    assert_eq!(audit.format_version().unwrap(), 4);
+    let verified = audit.verify().unwrap();
+    assert_eq!(
+        verified.records, 2,
+        "genesis and capacity plan are bootstrap facts, not a fabricated login"
+    );
+    assert_eq!(
+        serde_json::to_value(verified.namespace_id).unwrap(),
+        preparation["authentication_namespace_id"]
+    );
+    assert_eq!(
+        serde_json::to_value(audit.capacity_plan().unwrap().unwrap()).unwrap(),
+        input["capacity_plan"]
+    );
+    drop(audit);
+    success(&resume(&root));
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fs::read(root.join("authentication-origin.json")).unwrap()
+        )
+        .unwrap(),
+        origin
+    );
+}
+
+#[test]
 fn prepare_times_out_with_partial_stdin_open_before_any_filesystem_mutation() {
     let parent = support::private_tempdir();
     let root = parent.path().join("installation");

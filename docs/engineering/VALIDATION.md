@@ -1,5 +1,21 @@
 # Validation courante
 
+## 10 novembre — SetupV2 : 15 bibliothèque R2 et 5 CLI R3
+
+Les quinze sélections bibliothèque R2 full2370 `21fe6c0a…` donnent chacune
+1PASS/RC0 ; les cinq CLI R3 full2370 `c7d00086…` donnent chacune1PASS/RC0.
+R2→R3 change uniquement l’attente JSON de `tests/setup_prepare.rs` ; produit
+et trois fichiers des quinze fonctions bibliothèque restent identiques.
+R1 conserve ses deux macros exigeant Debug et sa compilation101 ; R2 garde
+CLIc01FAIL après préparation réussie (defaults null+limits), c02–c05 NOT_RUN.
+R3 compare la valeur complète normalisée par le contrat public. Vingt fonctions
+uniques, aucun faux run de vingt sur le même gel. Check R3 toutes cibles RC0
+14:01:59–14:03:19UTC, post2370/pathset/nonregular0, archive réelle et fermeture
+normale conformes. [Index, commandes et portée](evidence/2026-11-10/setup-authentication-v2/README.md).
+La composition sur fe99 préserve Auth/Core12/Resume ; les dix postimages sont
+QA-exactes, pas une qualification du WIP global. SSO/runtime/physique restent
+hors preuve ; G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — Resume Core/HTTP : trois RED et cinq FIX PASS
 
 Sur RED2365 `6a8a337a…`, Core1/2/4 échouent aux oracles discriminants ; Core3

@@ -66,6 +66,76 @@ fn durable_parent(backing: &StoreStorage) -> Result<()> {
 }
 
 impl DurableAuthenticationAudit {
+    pub fn initialize_prepared_v4(
+        path: &Path,
+        installation_id: Uuid,
+        namespace_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        plan: AuthenticationCapacityPlanV1,
+        redactor: Redactor,
+        verify_reserved: impl FnOnce(AuthenticationStorageIdentityV1) -> Result<()>,
+    ) -> Result<Self> {
+        format::validate_new_v4(installation_id, &policy, &plan, &redactor)?;
+        ensure!(
+            !namespace_id.is_nil(),
+            AuthenticationAuditFailureV1::InvalidInput
+        );
+        let (backing, guard) = StoreStorage::open_existing(path)?;
+        // Check the owned creation witness through a read-only VFS first:
+        // foreign hot-journal recovery cannot mutate a mismatched inode.
+        let probe = connection(&backing, true)?;
+        backing.verify(&probe)?;
+        verify_reserved(AuthenticationStorageIdentityV1(backing.identity_key().1))?;
+        backing.verify(&probe)?;
+        probe.close().map_err(|(_, error)| error)?;
+        let mut db = connection(&backing, false)?;
+        backing.verify(&db)?;
+        durability(&db)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        backing.verify(&tx)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let application: i64 = tx.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        let objects: i64 =
+            tx.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))?;
+        if version == 0 && application == 0 && objects == 0 {
+            // Only a callback-confirmed retained creation inode may enter here.
+            // No schema, history, projection or format is reset or replaced.
+            format::initialize(&tx, installation_id, namespace_id, &policy, &redactor)?;
+            let replay = format::replay(&tx, installation_id, &policy, &redactor, None)?;
+            Self::insert_plan(&tx, replay, plan.clone(), &policy, &redactor)?;
+        }
+        let checked = format::replay(&tx, installation_id, &policy, &redactor, None)?;
+        ensure!(
+            checked.version == format::TENANT_CAPACITY_VERSION
+                && checked.verified.records == 2
+                && checked.verified.head.sequence == 2
+                && checked.verified.namespace_id == namespace_id
+                && checked.budget.plan.as_ref() == Some(&plan),
+            AuthenticationAuditFailureV1::Integrity
+        );
+        backing.verify(&tx)?;
+        tx.commit()?;
+        backing.verify(&db)?;
+        db.close().map_err(|(_, error)| error)?;
+        // The private creation inode is already bound by setup. Synchronize
+        // only after SQLite closes, while its initialization guard is held.
+        backing.verify_names()?;
+        let parent = Directory::open_existing(
+            backing
+                .path()
+                .parent()
+                .context("authentication parent missing")?,
+        )?;
+        let name = backing
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("authentication filename missing")?;
+        parent.sync_closed_private_entry(name)?;
+        backing.verify_names()?;
+        Self::open_prepared(backing, guard, installation_id, policy, redactor)
+    }
+
     pub fn init_new(
         path: &Path,
         installation_id: Uuid,
@@ -421,6 +491,10 @@ impl DurableAuthenticationAudit {
 
     pub fn verify(&self) -> Result<AuthenticationVerificationV1> {
         self.read_projection(|replay| Ok(replay.verified.clone()))
+    }
+
+    pub fn bootstrap_receipt_v4(&self) -> Result<AuthenticationReceiptV1> {
+        self.read_projection(|replay| replay.bootstrap_receipt_v4())
     }
 
     pub fn format_version(&self) -> Result<u32> {

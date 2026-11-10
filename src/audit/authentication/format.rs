@@ -143,6 +143,7 @@ pub(super) struct Replay {
     // One entry per durable session, bounded by the same record/byte policy.
     native_logouts: BTreeMap<Uuid, NativeLogoutPromise>,
     pub budget: budget::BudgetReplay,
+    bootstrap_receipt: Option<AuthenticationReceiptV1>,
 }
 
 struct NativeLogoutPromise {
@@ -455,6 +456,27 @@ fn genesis_payload(
     Ok(payload)
 }
 
+pub(super) fn validate_new_v4(
+    installation_id: Uuid,
+    policy: &AuthenticationAuditPolicyV1,
+    plan: &AuthenticationCapacityPlanV1,
+    redactor: &Redactor,
+) -> Result<()> {
+    validate_policy(installation_id, policy, redactor)?;
+    let genesis = genesis_payload(installation_id, Uuid::from_u128(1), policy, redactor)?;
+    let plan_payload = checked_json(&Entry::CapacityPlan { plan: plan.clone() }, redactor)?;
+    // Reuse the actual plan funding transition, not a second setup formula.
+    budget::BudgetReplay::default().install(
+        plan.clone(),
+        std::iter::empty(),
+        2,
+        (genesis.len() as u64)
+            .checked_add(plan_payload.len() as u64)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+        policy,
+    )
+}
+
 pub(super) fn initialize(
     db: &Connection,
     installation_id: Uuid,
@@ -484,6 +506,15 @@ pub(super) fn timestamp() -> String {
 }
 
 impl Replay {
+    pub fn bootstrap_receipt_v4(&self) -> Result<AuthenticationReceiptV1> {
+        ensure!(
+            self.version == TENANT_CAPACITY_VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        self.bootstrap_receipt
+            .clone()
+            .ok_or_else(|| AuthenticationAuditFailureV1::Format.into())
+    }
     /// Admission-only accounting, rebuilt from the validated durable session
     /// states. Historical underfunded Pending entries remain readable; they
     /// never justify admitting another operation into their terminal budget.
@@ -1786,6 +1817,7 @@ pub(super) fn replay(
         subject_usage: BTreeMap::new(),
         native_logouts: BTreeMap::new(),
         budget: budget::BudgetReplay::default(),
+        bootstrap_receipt: None,
     };
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,length(CAST(payload AS BLOB)),payload,operation_id,phase,length(CAST(received_at AS BLOB)),length(CAST(prev_hash AS BLOB)),length(CAST(hash AS BLOB)),length(CAST(operation_id AS BLOB)),length(CAST(phase AS BLOB)) FROM authentication_entries ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -1953,6 +1985,9 @@ pub(super) fn replay(
                     AuthenticationAuditFailureV1::Integrity
                 );
                 replay.install_plan(plan, payload.len() as u64, policy)?;
+                if expected == 2 {
+                    replay.bootstrap_receipt = Some(receipt.clone());
+                }
                 replay.receipts.insert(expected, receipt.clone());
             }
             Entry::Charged { .. } => return Err(AuthenticationAuditFailureV1::Integrity.into()),

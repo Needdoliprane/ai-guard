@@ -69,7 +69,7 @@ pub(super) struct Preparation {
     pub version: u32,
     pub installation_id: Uuid,
     pub input_sha256: String,
-    pub manifest: SetupManifestV1,
+    pub manifest: SetupManifest,
     pub final_path: PathBuf,
     pub stage_path: PathBuf,
     pub directory: NativeIdentity,
@@ -77,6 +77,8 @@ pub(super) struct Preparation {
     pub secret_material: NativeIdentity,
     pub secret_material_sha256: String,
     pub operations: Vec<TenantOperations>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authentication_namespace_id: Option<Uuid>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,7 +165,10 @@ fn stage_name(final_path: &Path) -> String {
     )
 }
 
-pub(super) fn prepare(manifest: SetupManifestV1, path: &Path) -> Result<PathBuf> {
+pub(super) fn prepare(manifest: impl Into<SetupManifest>, path: &Path) -> Result<PathBuf> {
+    let manifest = manifest.into();
+    // No directory, lock, secret or database may precede this pure preflight.
+    manifest.validate()?;
     let (parent, leaf) = destination(path)?;
     parent.require_absent_child(&leaf)?;
     let final_path = parent.path().join(&leaf);
@@ -190,7 +195,7 @@ pub(super) fn prepare(manifest: SetupManifestV1, path: &Path) -> Result<PathBuf>
         // A crash before a complete intent is retained is diagnostic-only.
         let secrets = save(&stage, "secret-material.json", &bytes(&material)?)?;
         let preparation = Preparation {
-            version: 1,
+            version: manifest.version,
             installation_id,
             input_sha256: hex::encode(Sha256::digest(serde_json::to_vec(&manifest)?)),
             final_path: final_path.clone(),
@@ -216,6 +221,7 @@ pub(super) fn prepare(manifest: SetupManifestV1, path: &Path) -> Result<PathBuf>
                         .collect(),
                 })
                 .collect(),
+            authentication_namespace_id: (manifest.version == 2).then(Uuid::new_v4),
             manifest,
         };
         let intent = save(&stage, "preparation.json", &bytes(&preparation)?)?;
@@ -272,7 +278,16 @@ fn validate(
 ) -> Result<()> {
     preparation.manifest.validate()?;
     ensure!(
-        preparation.version == 1
+        matches!(
+            (
+                preparation.version,
+                preparation.manifest.version,
+                preparation.authentication_namespace_id
+            ),
+            (1, 1, None) | (2, 2, Some(_))
+        ) && preparation
+            .authentication_namespace_id
+            .is_none_or(|id| !id.is_nil())
             && !preparation.installation_id.is_nil()
             && material.version == 1
             && material.installation_id == preparation.installation_id

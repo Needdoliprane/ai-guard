@@ -255,6 +255,11 @@ pub struct AuthenticationVerificationV1 {
 /// Equality uses only the retained device/inode pair, never the path spelling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthenticationStorageIdentityV1(crate::control_fs::PrivateEntryIdentity);
+impl AuthenticationStorageIdentityV1 {
+    pub(crate) fn from_checked_entry(identity: crate::control_fs::PrivateEntryIdentity) -> Self {
+        Self(identity)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthenticationAuditFailureV1 {
@@ -288,6 +293,46 @@ pub struct AuthenticationAudit {
 }
 
 impl AuthenticationAudit {
+    /// Pure setup preflight using the same canonical payloads and budget checks
+    /// as actual V4 initialization. This grants no identity or authority.
+    pub(crate) fn validate_new_v4(
+        installation_id: Uuid,
+        policy: &AuthenticationAuditPolicyV1,
+        plan: &AuthenticationCapacityPlanV1,
+        redactor: &Redactor,
+    ) -> anyhow::Result<()> {
+        format::validate_new_v4(installation_id, policy, plan, redactor)
+    }
+
+    pub(crate) fn bootstrap_receipt_v4(&self) -> anyhow::Result<AuthenticationReceiptV1> {
+        self.inner.bootstrap_receipt_v4()
+    }
+
+    /// Only the retained offline preparation may initialize its reserved inode.
+    /// The callback receives the SQLite-verified storage witness, never a fresh
+    /// independent pathname observation. Ordinary opens never use this port.
+    pub(crate) fn initialize_prepared_v4(
+        path: &Path,
+        installation_id: Uuid,
+        namespace_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        plan: AuthenticationCapacityPlanV1,
+        redactor: Redactor,
+        verify_reserved: impl FnOnce(AuthenticationStorageIdentityV1) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: durable::DurableAuthenticationAudit::initialize_prepared_v4(
+                path,
+                installation_id,
+                namespace_id,
+                policy,
+                plan,
+                redactor,
+                verify_reserved,
+            )?,
+        })
+    }
+
     /// The trusted gateway supplies only memberships it actually verified.
     /// An empty snapshot can fund a rejection, never a session admission.
     pub(crate) fn begin_verified_initial_scoped(

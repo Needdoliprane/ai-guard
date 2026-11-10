@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 10 novembre — préparation SetupV2 vérifiée en logiciel
+
+Le manifeste2 finance et crée directement AuthV4/configuration2 avant toute
+activité. La reprise vérifie binding de création, namespace, témoin SQLite
+et vrai reçu du plan à la séquence2 ; V1 garde genesis1/origine1 inchangés.
+Quinze fonctions bibliothèque passent sur R2 `21fe6c0a…`, puis cinq CLI sur
+R3 `c7d00086…` après correction du seul oracle JSON : vingt uniques sur deux
+sources, check R3 toutes cibles RC0, post2370/export et fermeture conformes.
+[Sources, échecs conservés et limites](evidence/2026-11-10/setup-authentication-v2/README.md).
+Aucune migration utilisateur ni qualification SSO/IdP/runtime/physique ;
+G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — demande Resume Core/HTTP vérifiée en logiciel
 
 La tranche accepte le nouveau fait fermé par la voie runner existante et exige

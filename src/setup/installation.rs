@@ -2,7 +2,9 @@ use super::{storage::*, *};
 use crate::{
     audit::{
         Store,
-        authentication::{AuthenticationAudit, AuthenticationReceiptV1},
+        authentication::{
+            AuthenticationAudit, AuthenticationReceiptV1, AuthenticationStorageIdentityV1,
+        },
     },
     control_fs::Directory,
     identity::{IdentityChangeV1, IdentityMutationV1, IdentityReceiptV1, LegacyControlRoleV1},
@@ -27,11 +29,53 @@ struct Namespace {
 }
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct AuthenticationOrigin {
+struct AuthenticationOriginV1 {
     version: u32,
     installation_id: Uuid,
     identity: NativeIdentity,
     genesis: AuthenticationReceiptV1,
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AuthenticationCreationV2 {
+    version: u32,
+    installation_id: Uuid,
+    input_sha256: String,
+    namespace_id: Uuid,
+    identity: NativeIdentity,
+}
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AuthenticationOriginV2 {
+    version: u32,
+    creation: AuthenticationCreationV2,
+    bootstrap: AuthenticationReceiptV1,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum AuthenticationOrigin {
+    V1(AuthenticationOriginV1),
+    V2(AuthenticationOriginV2),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AuthenticationFault {
+    AfterCreationBinding,
+    AfterBootstrap,
+    AfterOrigin,
+}
+#[cfg(test)]
+thread_local! { pub(super) static AUTHENTICATION_FAULT: std::cell::Cell<Option<AuthenticationFault>> = const { std::cell::Cell::new(None) }; }
+#[cfg(test)]
+fn authentication_fault(point: AuthenticationFault) -> Result<()> {
+    AUTHENTICATION_FAULT.with(|hook| {
+        if hook.get() == Some(point) {
+            hook.set(None);
+            anyhow::bail!("injected failure after real authentication preparation operation");
+        }
+        Ok(())
+    })
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -54,8 +98,20 @@ fn authentication(
     directory: &Directory,
     preparation: &Preparation,
 ) -> Result<(AuthenticationAudit, AuthenticationOrigin)> {
+    if preparation.version == 2 {
+        let (audit, origin) = authentication_v2(directory, preparation)?;
+        return Ok((audit, AuthenticationOrigin::V2(origin)));
+    }
+    let (audit, origin) = authentication_v1(directory, preparation)?;
+    Ok((audit, AuthenticationOrigin::V1(origin)))
+}
+
+fn authentication_v1(
+    directory: &Directory,
+    preparation: &Preparation,
+) -> Result<(AuthenticationAudit, AuthenticationOriginV1)> {
     let path = directory.path().join("authentication.sqlite");
-    let existing_origin: Option<AuthenticationOrigin> =
+    let existing_origin: Option<AuthenticationOriginV1> =
         read(directory, "authentication-origin.json")?;
     if let Some(origin) = &existing_origin {
         ensure!(
@@ -103,7 +159,7 @@ fn authentication(
             verified.records == 1 && verified.head.sequence == 1,
             "authentication audit without its preparation receipt cannot adopt later activity"
         );
-        AuthenticationOrigin {
+        AuthenticationOriginV1 {
             version: 1,
             installation_id: preparation.installation_id,
             identity: NativeIdentity::entry(directory, "authentication.sqlite")?
@@ -112,6 +168,132 @@ fn authentication(
         }
     };
     exact(directory, "authentication-origin.json", &bytes(&origin)?)?;
+    Ok((audit, origin))
+}
+
+fn authentication_v2(
+    directory: &Directory,
+    preparation: &Preparation,
+) -> Result<(AuthenticationAudit, AuthenticationOriginV2)> {
+    let path = directory.path().join("authentication.sqlite");
+    let namespace = preparation
+        .authentication_namespace_id
+        .context("prepared authentication namespace missing")?;
+    let plan = preparation
+        .manifest
+        .capacity_plan
+        .as_ref()
+        .context("prepared authentication plan missing")?;
+    let existing: Option<AuthenticationOriginV2> = read(directory, "authentication-origin.json")?;
+    let retained: Option<AuthenticationCreationV2> =
+        read(directory, "authentication-creation.json")?;
+    let creation = match retained {
+        Some(creation) => creation,
+        None => {
+            ensure!(
+                existing.is_none()
+                    && directory
+                        .private_entry(OsStr::new("authentication.sqlite"))?
+                        .is_none(),
+                "authentication inode without its creation receipt must not be adopted"
+            );
+            let file = directory.create_private_entry(OsStr::new("authentication.sqlite"))?;
+            file.sync_all()?;
+            drop(file); // No extra main-file descriptor may survive a VFS open.
+            directory.sync()?;
+            let creation = AuthenticationCreationV2 {
+                version: 2,
+                installation_id: preparation.installation_id,
+                input_sha256: preparation.input_sha256.clone(),
+                namespace_id: namespace,
+                identity: NativeIdentity::entry(directory, "authentication.sqlite")?
+                    .context("reserved authentication inode missing")?,
+            };
+            save(
+                directory,
+                "authentication-creation.json",
+                &bytes(&creation)?,
+            )?;
+            creation
+        }
+    };
+    ensure!(
+        creation.version == 2
+            && creation.installation_id == preparation.installation_id
+            && creation.input_sha256 == preparation.input_sha256
+            && creation.namespace_id == namespace
+            && NativeIdentity::entry(directory, "authentication.sqlite")?
+                == Some(creation.identity.clone()),
+        "retained authentication creation binding conflicts"
+    );
+    let expected = AuthenticationStorageIdentityV1::from_checked_entry(
+        directory
+            .private_entry(OsStr::new("authentication.sqlite"))?
+            .context("reserved authentication inode missing")?,
+    );
+    #[cfg(test)]
+    authentication_fault(AuthenticationFault::AfterCreationBinding)?;
+    let audit = if existing.is_some() {
+        AuthenticationAudit::open_existing(
+            &path,
+            preparation.installation_id,
+            preparation.manifest.authentication_policy.clone(),
+            Redactor::new(vec![]),
+        )?
+    } else {
+        AuthenticationAudit::initialize_prepared_v4(
+            &path,
+            preparation.installation_id,
+            namespace,
+            preparation.manifest.authentication_policy.clone(),
+            plan.clone(),
+            Redactor::new(vec![]),
+            |actual| {
+                ensure!(
+                    actual == expected,
+                    "SQLite authentication witness differs from reserved creation inode"
+                );
+                ensure!(
+                    NativeIdentity::entry(directory, "authentication.sqlite")?
+                        == Some(creation.identity.clone())
+                        && read::<AuthenticationCreationV2>(
+                            directory,
+                            "authentication-creation.json"
+                        )?
+                        .as_ref()
+                            == Some(&creation),
+                    "authentication creation binding changed before initialization"
+                );
+                Ok(())
+            },
+        )?
+    };
+    ensure!(
+        audit.storage_identity()? == expected
+            && audit.capacity_plan()?.as_ref() == Some(plan)
+            && audit.verify()?.namespace_id == namespace,
+        "prepared authentication storage/plan/namespace differs"
+    );
+    let bootstrap = audit.bootstrap_receipt_v4()?;
+    #[cfg(test)]
+    authentication_fault(AuthenticationFault::AfterBootstrap)?;
+    let origin = match existing {
+        Some(origin) => {
+            ensure!(
+                origin.version == 2 && origin.creation == creation && origin.bootstrap == bootstrap,
+                "retained authentication bootstrap origin differs"
+            );
+            origin
+        }
+        None => AuthenticationOriginV2 {
+            version: 2,
+            creation,
+            bootstrap,
+        },
+    };
+    exact(directory, "authentication-origin.json", &bytes(&origin)?)?;
+    #[cfg(test)]
+    authentication_fault(AuthenticationFault::AfterOrigin)?;
     Ok((audit, origin))
 }
 
@@ -324,20 +506,20 @@ pub(super) fn complete(
     if let Some(pem) = &preparation.manifest.ca_bundle_pem {
         exact(directory, "ca-bundle.pem", pem.as_bytes())?;
     }
-    exact(
-        directory,
-        "oidc.json",
-        &bytes(&serde_json::json!({
-            "version":1,"gateway":preparation.manifest.gateway,
-            "authentication_audit":{"path":preparation.final_path.join("authentication.sqlite"),"installation_id":preparation.installation_id,"policy":preparation.manifest.authentication_policy},
-            "ca_bundle_file":preparation.manifest.ca_bundle_pem.as_ref().map(|_| preparation.final_path.join("ca-bundle.pem"))
-        }))?,
-    )?;
+    let mut oidc = serde_json::json!({
+        "version":preparation.version,"gateway":preparation.manifest.gateway,
+        "authentication_audit":{"path":preparation.final_path.join("authentication.sqlite"),"installation_id":preparation.installation_id,"policy":preparation.manifest.authentication_policy},
+        "ca_bundle_file":preparation.manifest.ca_bundle_pem.as_ref().map(|_| preparation.final_path.join("ca-bundle.pem"))
+    });
+    if let Some(plan) = &preparation.manifest.capacity_plan {
+        oidc["authentication_audit"]["capacity_plan"] = serde_json::to_value(plan)?;
+    }
+    exact(directory, "oidc.json", &bytes(&oidc)?)?;
     exact(
         directory,
         "completion.json",
         &bytes(&Completion {
-            version: 1,
+            version: preparation.version,
             installation_id: preparation.installation_id,
             input_sha256: preparation.input_sha256.clone(),
             authentication_origin: origin,

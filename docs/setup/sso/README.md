@@ -14,6 +14,8 @@ Choose the **fresh local DEMO** below to prepare new control data and the three 
 
 This path uses a new Keycloak project, a new ai-guard project, two locally built images and a new private control volume. It creates schema5 tenant storage, the separate authentication audit, technical credentials, accounts and memberships from the public [local-demo.json](examples/local-demo.json). It creates no sessions, resource grants, worker activity or human execution delegation. An empty authorized resource list after preparation is expected.
 
+**SetupV2 — offline preparation implemented and checked in software.** The supplied `local-demo.json` is now an explicit version2 manifest with the `ai-guard-demo` capacity part. It requires a matching binary/image containing SetupV2; older binaries accept only manifest1. Do not update an existing private manifest or installation in place to match this public example. New manifest2 preparation produces V4/configuration2 directly; retained V1 preparations and the manual V3→V4 procedure below keep their meaning. Targeted software tests cover preparation and resume; they do not qualify SSO/IdP or runtime operation. See the [source-scoped evidence](../../engineering/evidence/2026-11-10/setup-authentication-v2/README.md).
+
 The shipped [Docker](../../../deploy/docker/compose.sso.yaml) and [Podman](../../../deploy/podman/compose.sso.yaml) entry points are standalone opt-in stacks. Do not combine them with the legacy `deploy/*/compose.yaml` or its host-secret mounts. The setup container has no network; only the gateway later joins the selected internal identity network. Dashboard and workers do not join it. No preparation or application container receives an engine socket or the project being executed.
 
 ### 1. Check prerequisites and choose new names
@@ -120,7 +122,8 @@ Proceed only after exit 0 and JSON status `prepared` for `/data/installation`. K
 | Location under `/data/installation` | Purpose |
 |---|---|
 | `tenants.json`, `oidc.json` | Private gateway registry and OIDC configuration referring to the final paths. |
-| `authentication.sqlite` | Separate initialized authentication audit. |
+| `authentication.sqlite` | Manifest2: separate V4 audit with exactly genesis+plan, two bootstrap entries. Manifest1: unchanged V3/genesis1. Neither is a fabricated login. |
+| `authentication-creation.json`, `authentication-origin.json` | V2 retains reserved inode/owner/namespace before initialization, then its verified bootstrap receipt at sequence 2. Legacy origin1 retains the exact genesis1 meaning. |
 | `tenants/<tenant>/audit.sqlite` | Tenant-bound schema5 storage, with retained migration backups and identity receipts. |
 | `tenants/<tenant>/runner`, `viewer` | Generated technical credentials; never browser or worker credentials. |
 | `preparation.json`, `completion.json` and origin/binding records | Private recovery identities, fingerprints, bindings and completion receipts. |
@@ -173,6 +176,8 @@ If preparation fails, read its reported retained directory and stop every contro
 
 `--confirm-control-stopped` is an operator attestation, not process fencing. Resume uses the exact retained files, inode/owner bindings, credentials and operation identities, on the **same volume, UID and `/data` path**. Moving or copying the recovery tree does not preserve those bindings. It does not reread a new manifest, regenerate secrets or adopt an unrelated final directory. A missing/partial intent, substituted file, both staging and final directories present, or conflicting receipt requires preserving the material and resolving the reported cause. Do not delete a directory/volume, edit the recovery JSON, use `down -v`, or rerun `prepare` to force success. If a new destination is required after an incomplete intent, preserve the old material and deliberately prepare a separate installation; the fixed Compose path must then be adapted explicitly.
 
+V2 resume binds the retained creation inode/owner and planned namespace to the actual SQLite storage witness, then compares the real plan bootstrap receipt at sequence 2. A failure after genesis+plan commit but before origin recording can resume only that exact two-entry owned bootstrap. Activity beyond it without its origin, a substituted inode/namespace or a false receipt refuses without reset. A file created before a durable creation receipt remains diagnostic material, not an adoptable database. V1 keeps its original genesis1/origin1 semantics; no retained preparation silently changes version.
+
 ## Understand the connections
 
 | Component | Responsibility |
@@ -199,15 +204,16 @@ For container-owned databases, perform offline maintenance with the existing con
 
 ### Prepare new storage for an approved existing provider
 
-Generic `setup prepare` can create a separate new installation from a reviewed manifest of actual verified subjects. It never adopts an existing tenant database or verifies the IdP online. Its closed version1 input is distinct from the runtime `gateway.https.json` example:
+Generic `setup prepare` creates a separate new installation from a reviewed closed manifest, version1 or version2. It never adopts an existing tenant database or verifies the IdP online. The setup manifest is distinct from the private runtime `gateway.https.json`:
 
-Preparation still creates an authentication V3 ledger and private OIDC configuration version1. A successful `setup prepare` is not a gateway-startup check. With several configured tenants, keep every consumer stopped and complete the [explicit V3→V4 migration](#migrate-an-existing-authentication-audit) before the first gateway start. Prepare a separate reviewed configuration version2 with the capacity plan and point startup at that file. Preserve the generated configuration and recovery records unchanged; do not rerun preparation to add a plan. The shipped `local-demo.json` has one tenant and retains the explicit mono-tenant V3 compatibility path.
+Version1 preparation still creates an authentication V3 ledger and private OIDC configuration version1. A successful `setup prepare` is not a gateway-startup or provider check. With several tenants in a version1 preparation, keep every consumer stopped and complete the [explicit V3→V4 migration](#migrate-an-existing-authentication-audit) before the first gateway start. Prepare a separate reviewed configuration version2 with the plan and point startup at that file. Preserve the generated configuration and recovery records unchanged; do not rerun preparation to add a plan.
 
 | Input field | Content |
 |---|---|
-| `version` | `1`. |
+| `version` | `1` retains the legacy V3 preparation. `2` requires an explicit plan and creates V4/configuration2, without migrating existing data. |
 | `gateway` | Approved `OidcGatewayConfigV1`: provider, exact Web origin, label and role mapping. |
-| `authentication_policy` | Audit quotas and exactly the configured issuer's two public clients. |
+| `authentication_policy` | Original global audit caps and exactly the issuer's two public clients. Both versions retain this separate policy. |
+| `capacity_plan` | Required in manifest2 and forbidden in manifest1. Same closed plan shape as runtime `authentication_audit.capacity_plan`; its exact tenant set and genesis+plan funding are validated before any stage, secret or database is created. See [capacity allocation](#allocate-authentication-capacity). |
 | `ca_bundle_pem` | Optional/null public certificate-only PEM bundle, at most 64 KiB / 8 certificates; no private key. |
 | `tenants` | Array of `tenant_id`, `organization_id`, optional `worker_quota` and `identities`. |
 | Each identity | `principal` with `kind:"human_oidc"`, exact approved `issuer` and verified `subject`, plus `display_name` and `capabilities`. |
@@ -247,7 +253,7 @@ Start from one public example and copy it into a new private operator file outsi
 | Example | Use |
 |---|---|
 | [gateway.https.json](examples/gateway.https.json) | Private configuration version2/V4, illustrative parts for `tenant-a` and `tenant-b`, matching [the tenant registry example](../../../config/tenants.example.json). HTTPS addresses are nonfunctional. Replace provider values, installation UUID and exact tenant plan with approved values. |
-| [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Private configuration version2/V4, isolated DEMO provider values and one part for `ai-guard-demo`. Distinct from the version1 setup manifest and generated mono-tenant V3 configuration. Requires accounts/memberships and an approved provider route. Replace the sample installation UUID. |
+| [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Private configuration version2/V4, isolated DEMO provider values and one part for `ai-guard-demo`. Distinct from the setup manifest, whose schema is independent of this runtime JSON. Requires accounts/memberships and an approved provider route. Replace the sample installation UUID. |
 
 These files contain public example values, not credentials or existing identities. Generate a fresh canonical lowercase non-nil installation UUID for a new audit. Keep it unchanged when reopening that audit. The JSON parser does **not** expand environment variables: `${NAME}` is not a configuration mechanism. The `.env.exemple.*` Keycloak variables configure its Compose services; they do not enable gateway SSO.
 
