@@ -1,12 +1,17 @@
 # Publish the trusted broker's presence
 
+For the explicit schema12 checkpoint extension, see
+[declared checkpoint publication](CHECKPOINTS.md). Presence V1 retains its
+existing format and behavior; that extension requires its full service/gateway
+integration and does not qualify a remote deployment by configuration alone.
+
 [Français](PRESENCE.fr.md) · [Broker setup](README.md) · [Workload identities and grants](../workloads/README.md)
 
 The foreground Rust service can publish its own authenticated presence to the existing tenant broker registry. Enable this separately for each Registry wire2 profile with `presence_file`. Profiles without that field, and Registry wire1, retain their previous behavior. This publishes a broker declaration and the gateway's reception time; it does not inspect workers, prove runtime health, release quota, or establish complete federation across hosts.
 
 ## Prepare authority and private storage
 
-1. Use a gateway with schema6 or7 and the existing tenant namespace. Follow the [explicit migration procedure](../workloads/README.md#prepare-storage-without-activating-execution); this does not activate supervision.
+1. For Presence V1, use a gateway with a supported schema (6–12) and the existing tenant namespace. The opt-in V2 checkpoint profile requires schema 12 and the [backed-up migration](CHECKPOINTS.md#configure-each-trusted-broker). Follow the [explicit migration procedure](../workloads/README.md#prepare-storage-without-activating-execution); this does not activate supervision.
 2. From trusted control, [issue a broker workload credential](../workloads/README.md#prepare-and-record-a-credential-operation-from-the-cli) for the approved broker/incarnation. Retain its credential ID and private token file. Then [prepare and apply a broker grant](../workloads/README.md#prepare-a-broker-grant-or-revocation-from-the-cli) with the trusted runner for the same broker, credential and incarnation, with **exactly one authority** matching this profile's authority ID and runtime kind, the intended lease and future expiry. The general API permits several authorities; this publisher requires the exact single-authority list. The service neither creates nor renews that authority.
 3. Create a **new dedicated private state directory** outside all project/export trees, owned by the control account and mode0700. Preserve an existing directory when resuming. Create the configuration and token as private regular files, mode0600 with private0700 parents; links, unsafe ancestry and substitutions are refused. Do not copy the runner into the workload token file.
 4. Copy [presence.json](examples/presence.json) into that private configuration directory and replace every placeholder and path. It is a typed JSON input, not a dotenv file or an installed identity. A token is referenced by path only and must never appear in the JSON, arguments or logs.
@@ -31,7 +36,7 @@ Add this field to the intended profile in the [complete Registry wire2 template]
 | `max_operations` | Default 8192; range 1–32768 retained operations. Bounds new operations, while an already-counted pending operation still requires enough receipt capacity. |
 | `max_state_bytes` | Default 67108864 (64 MiB); positive and at most 134217728 (128 MiB). Includes retained stream evidence and reserved receipt capacity before POST. |
 
-The HTTP client accepts HTTPS or **numeric loopback HTTP** for deliberate local use. It uses only fixed identity/self/heartbeat routes, disables ambient proxies, redirects and transparent retries, and bounds responses and timeouts. A name resolving to loopback is not numeric loopback. The token and any CA file are retained and revalidated; editing live files is not hot reload.
+The HTTP client accepts HTTPS or **numeric loopback HTTP** for deliberate local use. Presence V1 uses only fixed identity/self/heartbeat routes; the opt-in V2 profile also uses the [two scoped checkpoint routes](CHECKPOINTS.md#publication-and-freshness). The client disables ambient proxies, redirects and transparent retries, and bounds responses and timeouts. A name resolving to loopback is not numeric loopback. The token and any CA file are retained and revalidated; editing live files is not hot reload.
 
 ## Start, observe and stop
 
@@ -39,7 +44,7 @@ Start the same [foreground broker command](README.md#start-the-foreground-servic
 
 Read the resulting entry using technical `GET /api/v1/brokers` with a runner/viewer proof, the broker's own `GET /api/v1/brokers/self` with its Broker proof, or the [named Brokers dashboard view](README.md#read-registered-brokers-after-migration7) with explicit `read_broker_registry` permission and schema7. Check authority, incarnation, reception time, lease and freshness. A heartbeat is `declared`; gateway reception is `observed`; `runtime_inventory_complete` remains false. An old entry after shutdown may remain current until its lease expires. Neither a current nor a stale entry proves a worker's state.
 
-Normal service shutdown signals and joins publisher tasks before releasing its local role. `--recovery-only` does not open presence configuration/state or publish a heartbeat; it retains its existing stop-recovery contract. This does not qualify power-loss recovery, an OS service or an autonomous runtime deadline.
+Normal service shutdown signals and joins publisher tasks before releasing its local role. `--recovery-only` does not open presence configuration/state or publish a heartbeat; it retains its existing stop-recovery contract. A cancelled shutdown observer can resume the same retained join. Filesystem work can hold shutdown open; neither waiting nor Drop proves a physical collection bound, fencing or recovery after process loss. This does not qualify power-loss recovery, an OS service or an autonomous runtime deadline. The V2 source needs the profile's real existing Full writer; enabling it opens no writer or job and an unavailable source remains unknown, as described in the [checkpoint guide](CHECKPOINTS.md).
 
 ## Diagnose and resume without erasing evidence
 

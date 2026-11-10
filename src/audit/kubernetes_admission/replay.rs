@@ -319,7 +319,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(events.is_empty())?;
         return Ok(());
     }
-    conflict([8, 9, 10, 11].contains(&version))?;
+    conflict([8, 9, 10, 11, 12].contains(&version))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],
@@ -350,7 +350,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::POLICY_GENESIS_KIND {
-            conflict([9, 10, 11].contains(&version) && !policy_seen)?;
+            conflict([9, 10, 11, 12].contains(&version) && !policy_seen)?;
             let (genesis_seq, genesis_hash) = create_genesis
                 .as_ref()
                 .ok_or(KubernetesCreateFailureV1::Conflict)?;
@@ -402,7 +402,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(expected == record.snapshot)?;
         creates.insert(record.intent.create_id.clone(), (expected, stored.seq));
     }
-    conflict(create_genesis.is_some() && policy_seen == ([9, 10, 11].contains(&version)))?;
+    conflict(create_genesis.is_some() && policy_seen == ([9, 10, 11, 12].contains(&version)))?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement
         .query_map([], read_row)?

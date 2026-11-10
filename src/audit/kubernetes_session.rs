@@ -56,7 +56,7 @@ pub(super) fn permission(valid: bool) -> anyhow::Result<()> {
 }
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 11 {
+    if [11, 12].contains(&version) {
         Ok(())
     } else {
         Err(Failure::MigrationRequired.into())

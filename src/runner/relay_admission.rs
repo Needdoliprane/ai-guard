@@ -143,7 +143,7 @@ impl AuditClient {
         {
             return Err(Error::Forbidden);
         }
-        check([6, 7, 8, 9, 10, 11].contains(&identity.schema_version))
+        check([6, 7, 8, 9, 10, 11, 12].contains(&identity.schema_version))
     }
     async fn relay_channel_post(
         &self,

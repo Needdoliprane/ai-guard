@@ -3,6 +3,9 @@ use super::*;
 use crate::broker_registry::*;
 use chrono::{DateTime, Duration, Utc};
 
+mod checkpoint;
+#[cfg(test)]
+mod checkpoint_tests;
 pub(super) mod federation;
 
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
@@ -121,6 +124,10 @@ enum Change {
         identity: IdentityEvidence,
         heartbeat: BrokerHeartbeatV1,
     },
+    Checkpoint {
+        identity: IdentityEvidence,
+        checkpoint: BrokerCheckpointV1,
+    },
 }
 impl Change {
     fn operation_id(&self) -> &str {
@@ -128,6 +135,7 @@ impl Change {
             Self::Grant { mutation } => &mutation.operation_id,
             Self::Revoke { mutation } => &mutation.operation_id,
             Self::Heartbeat { heartbeat, .. } => &heartbeat.operation_id,
+            Self::Checkpoint { checkpoint, .. } => &checkpoint.operation_id,
         }
     }
     fn broker_id(&self) -> &str {
@@ -135,6 +143,7 @@ impl Change {
             Self::Grant { mutation } => &mutation.broker_id,
             Self::Revoke { mutation } => &mutation.broker_id,
             Self::Heartbeat { identity, .. } => &identity.broker_id,
+            Self::Checkpoint { identity, .. } => &identity.broker_id,
         }
     }
     fn kind(&self) -> &'static str {
@@ -142,10 +151,23 @@ impl Change {
             Self::Grant { .. } => "control.broker_registry.grant",
             Self::Revoke { .. } => "control.broker_registry.revoke",
             Self::Heartbeat { .. } => "control.broker_registry.heartbeat",
+            Self::Checkpoint { .. } => "control.broker_registry.checkpoint",
         }
     }
     fn input_hash(&self) -> anyhow::Result<String> {
-        crate::control::content_hash("ai-guard:broker-registry-input:v1", self)
+        let domain = if matches!(self, Self::Checkpoint { .. }) {
+            "ai-guard:broker-checkpoint-input:v1"
+        } else {
+            "ai-guard:broker-registry-input:v1"
+        };
+        crate::control::content_hash(domain, self)
+    }
+    fn record_version(&self) -> u32 {
+        if matches!(self, Self::Checkpoint { .. }) {
+            2
+        } else {
+            1
+        }
     }
     fn validate(&self) -> anyhow::Result<()> {
         match self {
@@ -157,6 +179,13 @@ impl Change {
             } => {
                 identity.identity()?;
                 heartbeat.validate()
+            }
+            Self::Checkpoint {
+                identity,
+                checkpoint,
+            } => {
+                identity.identity()?;
+                checkpoint.validate()
             }
         }
     }
@@ -182,7 +211,7 @@ pub(super) fn workload_audit_identity(
     let record: Record = serde_json::from_value(event.data.clone())?;
     record.change.validate()?;
     require(
-        record.version == 1
+        record.version == record.change.record_version()
             && record.input_hash == record.change.input_hash()?
             && event.kind == record.change.kind()
             && event.source == "gateway"
@@ -190,7 +219,7 @@ pub(super) fn workload_audit_identity(
             && event.coverage == "observed",
     )?;
     match record.change {
-        Change::Heartbeat { identity, .. } => {
+        Change::Heartbeat { identity, .. } | Change::Checkpoint { identity, .. } => {
             Ok(Some(super::capacity::WorkloadAuditPrincipalV1::Broker {
                 broker_id: identity.broker_id,
             }))
@@ -205,6 +234,7 @@ struct Projection {
     authorities: BTreeMap<String, (String, BrokerRuntimeKindV1)>,
     incarnations: BTreeMap<String, (String, i64)>,
     operations: BTreeMap<String, (String, i64, BrokerV1)>,
+    checkpoints: BTreeMap<String, (BrokerCheckpointV1, String)>,
 }
 
 fn permission(ok: bool) -> anyhow::Result<()> {
@@ -225,7 +255,10 @@ fn clock(previous: &BrokerV1, now: DateTime<Utc>) -> anyhow::Result<()> {
 impl Projection {
     fn apply(&mut self, record: &Record, tenant: &str, seq: i64) -> anyhow::Result<BrokerV1> {
         record.change.validate()?;
-        require(record.version == 1 && record.input_hash == record.change.input_hash()?)?;
+        require(
+            record.version == record.change.record_version()
+                && record.input_hash == record.change.input_hash()?,
+        )?;
         conflict(!self.operations.contains_key(record.change.operation_id()))?;
         let now = parse_time(&record.received_at)?;
         let previous = self
@@ -320,6 +353,37 @@ impl Projection {
                 });
                 broker
             }
+            Change::Checkpoint {
+                identity,
+                checkpoint,
+            } => {
+                permission(identity.tenant_id == tenant)?;
+                let broker = previous
+                    .cloned()
+                    .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
+                broker.require_current_grant(&identity.identity()?, &record.received_at)?;
+                permission(
+                    checkpoint.incarnation_id == broker.incarnation_id
+                        && broker.authorities.contains(&checkpoint.snapshot.authority),
+                )?;
+                let previous = self.checkpoints.get(&broker.broker_id);
+                let previous_sequence = previous
+                    .filter(|(value, _)| value.incarnation_id == checkpoint.incarnation_id)
+                    .map_or(0, |(value, _)| value.sequence);
+                conflict(checkpoint.previous_sequence == previous_sequence)?;
+                if let Some((_, received_at)) = previous {
+                    if now < parse_time(received_at)? {
+                        return Err(BrokerRegistryFailureV1::ClockRegression.into());
+                    }
+                }
+                self.checkpoints.insert(
+                    broker.broker_id.clone(),
+                    (checkpoint.clone(), record.received_at.clone()),
+                );
+                // This publication neither refreshes heartbeat liveness nor
+                // changes an execution, worker, quota, grant or authority.
+                broker
+            }
         };
         self.brokers
             .insert(broker.broker_id.clone(), (broker.clone(), seq));
@@ -333,7 +397,7 @@ impl Projection {
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [6, 7, 8, 9, 10, 11].contains(&version) {
+    if [6, 7, 8, 9, 10, 11, 12].contains(&version) {
         Ok(())
     } else {
         Err(BrokerRegistryFailureV1::MigrationRequired.into())
@@ -394,7 +458,7 @@ fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![6, 7, 8, 9, 10, 11].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(
@@ -439,12 +503,15 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         require(seen_genesis)?;
         let record: Record = serde_json::from_value(stored.event.data.clone())?;
+        require(!matches!(record.change, Change::Checkpoint { .. }) || version == 12)?;
         require(
             stored.event.kind == record.change.kind()
                 && parse_time(&record.received_at)? <= parse_time(&stored.received_at)?,
         )?;
         super::workload::validate_control_time(db, &record.received_at, Some(stored.seq))?;
-        if let Change::Heartbeat { identity, .. } = &record.change {
+        if let Change::Heartbeat { identity, .. } | Change::Checkpoint { identity, .. } =
+            &record.change
+        {
             super::workload::validate_broker_identity_at(
                 db,
                 &identity.identity()?,
@@ -560,6 +627,13 @@ fn preflight(db: &Connection, change: &Change) -> anyhow::Result<Projection> {
             .brokers
             .insert(broker.broker_id.clone(), (broker, 0));
     }
+    if matches!(change, Change::Checkpoint { .. }) {
+        if let Some((value, time)) = checkpoint::latest_publication(db, change.broker_id())? {
+            projection
+                .checkpoints
+                .insert(change.broker_id().into(), (value, time));
+        }
+    }
     if let Change::Grant { mutation } = change {
         if let Some((broker_id,seq)) = db.query_row("SELECT broker_id,event_seq FROM broker_registry_incarnations WHERE incarnation_id=?1", [&mutation.incarnation_id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?))).optional()? {
             projection.incarnations.insert(mutation.incarnation_id.clone(), (broker_id,seq));
@@ -646,7 +720,7 @@ impl Store {
         view: &BrokerIdentityViewV1,
         heartbeat: &BrokerHeartbeatV1,
     ) -> anyhow::Result<String> {
-        require(view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11))?;
+        require(view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12))?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [
             &view.control_namespace_uuid,
@@ -730,6 +804,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         require_schema(&tx)?;
+        if matches!(change, Change::Checkpoint { .. }) {
+            checkpoint::require_schema12(&tx)?;
+        }
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
         let received_at = format_time(now);
@@ -749,7 +826,7 @@ impl Store {
             return Ok(result);
         }
         let record = Record {
-            version: 1,
+            version: change.record_version(),
             input_hash: change.input_hash()?,
             received_at,
             change,

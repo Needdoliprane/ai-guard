@@ -17,6 +17,14 @@ use tokio::sync::{Semaphore, watch};
 use uuid::Uuid;
 
 mod actor;
+mod run_owner;
+#[cfg(test)]
+pub(in crate::broker) use http_tests::run_owner_tests::ServiceDiskBarrier;
+pub(crate) use run_owner::PresenceRunOwner;
+mod checkpoint_publisher;
+mod checkpoint_storage;
+#[cfg(test)]
+mod checkpoint_storage_tests;
 #[cfg(test)]
 mod hash_tests;
 mod http;
@@ -100,6 +108,12 @@ struct PresenceConfigV1 {
     max_operations: u32,
     #[serde(default = "bytes_default")]
     max_state_bytes: u64,
+    #[serde(default)]
+    checkpoint_state_dir: Option<PathBuf>,
+    #[serde(default)]
+    checkpoint_max_operations: Option<u32>,
+    #[serde(default)]
+    checkpoint_max_state_bytes: Option<u64>,
 }
 fn interval_default() -> u32 {
     30
@@ -121,6 +135,10 @@ pub(crate) struct PreparedPresence {
     secrets: Vec<String>,
     ca: Option<PrivateFile>,
     stream: Option<storage::Stream>,
+    checkpoint_state: Option<Directory>,
+    checkpoint_stream: Option<checkpoint_storage::Stream>,
+    #[cfg(test)]
+    disk_barrier: Option<Arc<http_tests::run_owner_tests::DiskBarrier>>,
 }
 impl fmt::Debug for PreparedPresence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -140,7 +158,26 @@ impl PreparedPresence {
             PrivateFile::open(path, RECORD_BYTES).map_err(|_| PresenceError::InvalidConfig)?;
         let config: PresenceConfigV1 =
             serde_json::from_slice(source.bytes()).map_err(|_| PresenceError::InvalidConfig)?;
-        if config.version != 1
+        let source_value: Value =
+            serde_json::from_slice(source.bytes()).map_err(|_| PresenceError::InvalidConfig)?;
+        let checkpoint_fields = [
+            "checkpoint_state_dir",
+            "checkpoint_max_operations",
+            "checkpoint_max_state_bytes",
+        ];
+        if !matches!(config.version, 1 | 2)
+            || config.version == 1
+                && checkpoint_fields
+                    .iter()
+                    .any(|key| source_value.get(key).is_some())
+            || config.version == 2
+                && (config.checkpoint_state_dir.is_none()
+                    || !config
+                        .checkpoint_max_operations
+                        .is_some_and(|n| (1..=32768).contains(&n))
+                    || !config
+                        .checkpoint_max_state_bytes
+                        .is_some_and(|n| (1..=128 * 1024 * 1024).contains(&n)))
             || !(5..=150).contains(&config.interval_seconds)
             || !(1..=32768).contains(&config.max_operations)
             || config.max_state_bytes == 0
@@ -208,11 +245,25 @@ impl PreparedPresence {
             .transpose()?;
         let state = Directory::open_existing(&config.state_dir)
             .map_err(|_| PresenceError::InvalidConfig)?;
+        let checkpoint_state = config
+            .checkpoint_state_dir
+            .as_ref()
+            .map(|path| {
+                normalized(path)?;
+                if path.starts_with(&config.state_dir) || config.state_dir.starts_with(path) {
+                    return Err(PresenceError::InvalidConfig);
+                }
+                Directory::open_existing(path).map_err(|_| PresenceError::InvalidConfig)
+            })
+            .transpose()?;
         let mut files = vec![source, token_file];
         if let Some(ca) = &ca {
             files.push(ca.clone());
         }
         let mut roots = vec![state.clone()];
+        if let Some(root) = &checkpoint_state {
+            roots.push(root.clone());
+        }
         for file in &files {
             let parent = file.path().parent().ok_or(PresenceError::InvalidConfig)?;
             if !roots.iter().any(|root| root.path() == parent) {
@@ -231,6 +282,10 @@ impl PreparedPresence {
             secrets: known_secrets,
             ca,
             stream: None,
+            checkpoint_state,
+            checkpoint_stream: None,
+            #[cfg(test)]
+            disk_barrier: None,
         };
         prepared.secrets.push(prepared.token.clone());
         prepared.screen_material()?;
@@ -260,6 +315,9 @@ impl PreparedPresence {
             .map_err(|_| PresenceError::InvalidConfig)?;
         self.revalidate()?;
         self.stream = Some(storage::Stream::open(self)?);
+        if self.checkpoint_state.is_some() {
+            self.checkpoint_stream = Some(checkpoint_storage::Stream::open(self)?);
+        }
         Ok(())
     }
     pub(crate) fn revalidate(&self) -> Result<()> {
@@ -315,7 +373,54 @@ impl PreparedPresence {
         attempts: Arc<Semaphore>,
         io: Arc<Semaphore>,
     ) -> Result<()> {
-        actor::run(self, shutdown, attempts, io).await
+        self.start(shutdown, attempts, io)?.join().await
+    }
+    pub(crate) fn start(
+        self,
+        shutdown: watch::Receiver<bool>,
+        attempts: Arc<Semaphore>,
+        io: Arc<Semaphore>,
+    ) -> Result<PresenceRunOwner> {
+        if self.checkpoint_stream.is_some() {
+            // Config V2 cannot silently run without its actual journal source.
+            return Err(PresenceError::InvalidConfig);
+        }
+        run_owner::start(self, None, shutdown, attempts, io)
+    }
+    pub(crate) fn checkpoints_enabled(&self) -> bool {
+        self.config.version == 2
+    }
+    pub(crate) fn checkpoint_authority(&self) -> crate::broker_registry::BrokerAuthorityV1 {
+        crate::broker_registry::BrokerAuthorityV1 {
+            authority_id: self.config.authority_id.clone(),
+            runtime_kind: self.scope.runtime_kind,
+        }
+    }
+    pub(crate) fn publication_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(u64::from(self.config.interval_seconds))
+    }
+    pub(crate) async fn run_with_checkpoints(
+        self,
+        snapshots: watch::Receiver<Option<crate::broker_registry::BrokerCheckpointSnapshotV1>>,
+        shutdown: watch::Receiver<bool>,
+        attempts: Arc<Semaphore>,
+        io: Arc<Semaphore>,
+    ) -> Result<()> {
+        self.start_with_checkpoints(snapshots, shutdown, attempts, io)?
+            .join()
+            .await
+    }
+    pub(crate) fn start_with_checkpoints(
+        self,
+        snapshots: watch::Receiver<Option<crate::broker_registry::BrokerCheckpointSnapshotV1>>,
+        shutdown: watch::Receiver<bool>,
+        attempts: Arc<Semaphore>,
+        io: Arc<Semaphore>,
+    ) -> Result<PresenceRunOwner> {
+        if self.checkpoint_stream.is_none() {
+            return Err(PresenceError::InvalidConfig);
+        }
+        run_owner::start(self, Some(snapshots), shutdown, attempts, io)
     }
 }
 fn uuid(value: &str) -> Result<()> {

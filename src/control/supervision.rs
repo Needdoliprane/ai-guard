@@ -291,12 +291,13 @@ impl HostClockSampleV1 {
 impl SupervisionStateV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         invalid(
-            self.version == 1 && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&self.schema_version),
+            self.version == 1
+                && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&self.schema_version),
         )?;
         if let Some(namespace) = &self.control_namespace_uuid {
             uuid(namespace)?;
         }
-        if [3, 4, 5, 6, 7, 8, 9, 10, 11].contains(&self.schema_version) {
+        if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&self.schema_version) {
             invalid(
                 self.control_namespace_uuid.is_some()
                     && self.protocols == [SupervisionProtocolV1::BrokerSupervisionV1],
@@ -815,7 +816,7 @@ mod schema11_compatibility_tests {
 
     #[test]
     fn schema11_retains_supervision_v1_and_the_closed_schema_range() {
-        for schema_version in 3..=11 {
+        for schema_version in 3..=12 {
             let state = supervised(schema_version);
             assert!(state.validate().is_ok(), "schema {schema_version}");
         }
@@ -827,7 +828,7 @@ mod schema11_compatibility_tests {
             state.active = true;
             assert!(state.validate().is_err());
         }
-        for schema_version in [0, 12, u32::MAX] {
+        for schema_version in [0, 13, u32::MAX] {
             let mut state = supervised(schema_version);
             assert!(state.validate().is_err());
             // Unknown schemas cannot enter through the legacy inactive shape.

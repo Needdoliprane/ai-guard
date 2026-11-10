@@ -188,6 +188,8 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         (&Method::GET, ["brokers", "identity"])
         | (&Method::GET, ["brokers", "self"])
         | (&Method::POST, ["brokers", "heartbeat"])
+        | (&Method::POST, ["brokers", "checkpoints"])
+        | (&Method::GET, ["brokers", "checkpoints", "self"])
             if v1 =>
         {
             Some(BrokerPresence)

@@ -56,6 +56,15 @@ impl Client {
         path: &str,
         request: Option<Vec<u8>>,
     ) -> Result<T> {
+        self.exchange_bounded(p, path, request, RECORD_BYTES).await
+    }
+    async fn exchange_bounded<T: DeserializeOwned>(
+        &self,
+        p: &PreparedPresence,
+        path: &str,
+        request: Option<Vec<u8>>,
+        limit: u64,
+    ) -> Result<T> {
         let method = if request.is_some() {
             reqwest::Method::POST
         } else {
@@ -77,7 +86,7 @@ impl Client {
             .header(header::ACCEPT, "application/json")
             .header(header::CACHE_CONTROL, "no-store");
         if let Some(request) = request {
-            if request.len() as u64 > RECORD_BYTES {
+            if request.len() as u64 > limit {
                 return Err(PresenceError::Protocol);
             }
             builder = builder
@@ -92,7 +101,7 @@ impl Client {
             .sum();
         if response.headers().len() > 64
             || header_bytes > 32768
-            || response.content_length().is_some_and(|n| n > RECORD_BYTES)
+            || response.content_length().is_some_and(|n| n > limit)
             || response
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -112,7 +121,7 @@ impl Client {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|_| PresenceError::Transport)?;
-            if bytes.len().saturating_add(chunk.len()) > RECORD_BYTES as usize {
+            if bytes.len().saturating_add(chunk.len()) > limit as usize {
                 return Err(PresenceError::Protocol);
             }
             bytes.extend_from_slice(&chunk);
@@ -145,6 +154,31 @@ impl Client {
             p,
             "/api/v1/brokers/heartbeat",
             Some(serde_json::to_vec(&pending.heartbeat).map_err(|_| PresenceError::Protocol)?),
+        )
+        .await
+    }
+    pub(super) async fn checkpoint_view(
+        &self,
+        p: &PreparedPresence,
+    ) -> Result<crate::broker_registry::BrokerCheckpointViewV1> {
+        self.exchange_bounded(
+            p,
+            "/api/v1/brokers/checkpoints/self",
+            None,
+            crate::broker_registry::MAX_BROKER_CHECKPOINT_BYTES as u64,
+        )
+        .await
+    }
+    pub(super) async fn checkpoint_post(
+        &self,
+        p: &PreparedPresence,
+        pending: &super::checkpoint_storage::Pending,
+    ) -> Result<crate::broker_registry::BrokerCheckpointResultV1> {
+        self.exchange_bounded(
+            p,
+            "/api/v1/brokers/checkpoints",
+            Some(serde_json::to_vec(&pending.checkpoint).map_err(|_| PresenceError::Protocol)?),
+            crate::broker_registry::MAX_BROKER_CHECKPOINT_BYTES as u64,
         )
         .await
     }

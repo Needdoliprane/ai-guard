@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 10 novembre — source checkpoint du service fédération vérifiée en logiciel
+
+Le raccord Rust lit le Full writer déjà admis du profil : vrai ACK FIFO,
+heads durables et scope exact, inconnu distinct du vide, couverture toujours
+`declared_partial`. Après trois RED discriminants, les huit parents FIX exacts
+et le check toutes cibles passent sur le gel2363 `e9e60e96…`, relu indépendamment.
+Post-source et export réel sont conformes ; la QA attribuée est retirée normalement.
+Le premier coldbuild reste RCUNKNOWN (wrapper), sa vérification inchangée en
+cache retourne le vrai RC0. Le PASS migration R3 et les39 historiques restent
+séparés des huit résultats. [Sources, résultats et limites](evidence/2026-11-10/federation-checkpoint-service/README.md).
+Aucune borne physique FS, reprise/fencing après perte du processus, fédération
+multi-hôtes, runtime ou100workers n'est qualifiée. G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — rétention SSE bornée, D3 logiciel vérifié
 
 Le défaut de pool ingress est reproduit après64 réponses humaines authentifiées

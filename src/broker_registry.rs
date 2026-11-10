@@ -8,7 +8,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+mod checkpoint;
 mod federation;
+pub use checkpoint::{
+    BrokerCheckpointCoverageV1, BrokerCheckpointFreshnessV1, BrokerCheckpointObservationV1,
+    BrokerCheckpointResultV1, BrokerCheckpointSnapshotV1, BrokerCheckpointV1,
+    BrokerCheckpointViewV1, BrokerJobCheckpointV1, MAX_BROKER_CHECKPOINT_BYTES,
+    MAX_BROKER_CHECKPOINT_JOBS,
+};
 pub use federation::{
     AuthorityBrokerAssociationV1, AuthorityBrokerStatusV1, FederationBrokerV1,
     FederationWorkerPageV1, FederationWorkerV1, MAX_FEDERATION_PAGE_BYTES,
@@ -387,3 +394,6 @@ pub(crate) fn next_revision(value: u64) -> anyhow::Result<u64> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod checkpoint_tests;

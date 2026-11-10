@@ -5,7 +5,10 @@ mod support;
 use agentsandbox::{
     api::{GatewayState, TenantGateway, gateway_router},
     audit::Store,
-    broker_registry::{BrokerAuthorityV1, BrokerGrantMutationV1, BrokerRuntimeKindV1},
+    broker_registry::{
+        BrokerAuthorityV1, BrokerCheckpointSnapshotV1, BrokerCheckpointV1, BrokerGrantMutationV1,
+        BrokerJobCheckpointV1, BrokerRevocationV1, BrokerRuntimeKindV1,
+    },
     control::*,
     model::{CommandSpec, DecisionRequest},
     policy::{self, Policy},
@@ -34,6 +37,321 @@ const HASH_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 const HASH_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const HASH_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
+fn checkpoint(hash: &str) -> BrokerCheckpointV1 {
+    BrokerCheckpointV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        incarnation_id: INCARNATION.into(),
+        previous_sequence: 0,
+        sequence: 1,
+        snapshot: BrokerCheckpointSnapshotV1 {
+            version: 1,
+            authority: BrokerAuthorityV1 {
+                authority_id: "declared-software-authority".into(),
+                runtime_kind: BrokerRuntimeKindV1::Docker,
+            },
+            jobs: vec![BrokerJobCheckpointV1 {
+                job_id: Uuid::new_v4().to_string(),
+                revision: 1,
+                checkpoint_hash: hash.into(),
+            }],
+            has_more: false,
+        },
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_http_refuses_the_presented_proof_in_valid_metadata_and_retained_output() {
+    let directory = support::private_tempdir();
+    let a = store(directory.path(), "tenant-a", 12);
+    let b = store(directory.path(), "tenant-b", 12);
+    // A synthetic current proof can also have the syntax of a valid SHA256
+    // field. Its format does not make it public metadata.
+    let proof = hex::encode(Sha256::digest(b"public checkpoint metadata proof fixture"));
+    bind_broker(&a, &proof);
+    bind_broker(&b, BROKER_B);
+    let app = router(a.clone(), b);
+    let input = checkpoint(&proof);
+    let head = a.head().unwrap();
+    let result = checkpoint_post(
+        &app,
+        "/api/v1/brokers/checkpoints",
+        &proof,
+        serde_json::to_vec(&input).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        result.0,
+        StatusCode::BAD_REQUEST,
+        "presented proof must be rejected before checkpoint persistence"
+    );
+    assert_eq!(a.head().unwrap(), head);
+}
+
+#[tokio::test]
+async fn checkpoint_http_withholds_retained_output_after_a_fresh_binding_and_incarnation() {
+    let directory = support::private_tempdir();
+    let a = store(directory.path(), "tenant-a", 12);
+    let b = store(directory.path(), "tenant-b", 12);
+    bind_broker(&a, BROKER_A);
+    bind_broker(&b, BROKER_B);
+    let app = router(a.clone(), b);
+    let proof = hex::encode(Sha256::digest(b"public checkpoint metadata proof fixture"));
+    let input = checkpoint(&proof);
+    assert_eq!(
+        checkpoint_post(
+            &app,
+            "/api/v1/brokers/checkpoints",
+            BROKER_A,
+            serde_json::to_vec(&input).unwrap()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    // A new binding and grant require a fresh incarnation. The old publication
+    // remains historical data; it must not echo a proof now known to the API.
+    let credential = Uuid::new_v4().to_string();
+    let incarnation = Uuid::new_v4().to_string();
+    a.issue_workload_binding(&WorkloadBindingIssueV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        credential_id: credential.clone(),
+        expected_revision: 0,
+        subject: WorkloadSubjectV1::Broker {
+            broker_id: BROKER.into(),
+            incarnation_id: incarnation.clone(),
+        },
+        sha256_digest: hex::encode(Sha256::digest(proof.as_bytes())),
+        expires_at: "2100-01-01T00:00:00.000Z".into(),
+    })
+    .unwrap();
+    a.mutate_broker_grant(&BrokerGrantMutationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: BROKER.into(),
+        expected_revision: Some(1),
+        credential_id: credential,
+        incarnation_id: incarnation,
+        authorities: vec![input.snapshot.authority.clone()],
+        lease_seconds: 120,
+        not_after: "2100-01-01T00:00:00.000Z".into(),
+    })
+    .unwrap();
+    let retained_head = a.head().unwrap();
+    let (status, value) = get(&app, "/api/v1/brokers/checkpoints/self", &proof).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(!serde_json::to_string(&value).unwrap().contains(&proof));
+    assert_eq!(a.head().unwrap(), retained_head);
+}
+
+async fn checkpoint_post(
+    app: &Router,
+    path: &str,
+    token: &str,
+    bytes: Vec<u8>,
+) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(bytes))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(bytes.len() <= 32_768);
+    for secret in [BROKER_A, BROKER_B, WORKER] {
+        assert!(
+            !bytes
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes())
+        );
+    }
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+#[tokio::test]
+async fn checkpoint_http_uses_verified_tenant_and_replays_only_the_exact_operation() {
+    let directory = support::private_tempdir();
+    let a = store(directory.path(), "tenant-a", 12);
+    let b = store(directory.path(), "tenant-b", 12);
+    bind_broker(&a, BROKER_A);
+    bind_broker(&b, BROKER_B);
+    let app = router(a.clone(), b.clone());
+    let first = checkpoint(&hex::encode(Sha256::digest(b"public checkpoint A")));
+    let other = checkpoint(&hex::encode(Sha256::digest(b"public checkpoint B")));
+    let b_head = b.head().unwrap();
+    let (status, receipt) = checkpoint_post(
+        &app,
+        "/control/api/v1/brokers/checkpoints",
+        BROKER_A,
+        serde_json::to_vec(&first).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["replayed"], false);
+    assert_eq!(receipt["checkpoint"], serde_json::to_value(&first).unwrap());
+    assert_eq!(b.head().unwrap(), b_head, "A must not append to B's audit");
+    let a_head = a.head().unwrap();
+    let replay = checkpoint_post(
+        &app,
+        "/api/v1/brokers/checkpoints",
+        BROKER_A,
+        serde_json::to_vec(&first).unwrap(),
+    )
+    .await;
+    assert_eq!(replay.0, StatusCode::OK);
+    assert_eq!(replay.1["replayed"], true);
+    assert_eq!(replay.1["receipt"], receipt["receipt"]);
+    assert_eq!(
+        a.head().unwrap(),
+        a_head,
+        "replay must not duplicate mandatory audit"
+    );
+    let mut divergent = first.clone();
+    divergent.snapshot.jobs[0].checkpoint_hash = HASH_C.into();
+    assert_eq!(
+        checkpoint_post(
+            &app,
+            "/api/v1/brokers/checkpoints",
+            BROKER_A,
+            serde_json::to_vec(&divergent).unwrap()
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(a.head().unwrap(), a_head);
+    assert_eq!(
+        checkpoint_post(
+            &app,
+            "/api/v1/brokers/checkpoints",
+            BROKER_B,
+            serde_json::to_vec(&other).unwrap()
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    for (token, input) in [(BROKER_A, &first), (BROKER_B, &other)] {
+        let (status, view) = get(&app, "/control/api/v1/brokers/checkpoints/self", token).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            view["checkpoint"]["checkpoint"],
+            serde_json::to_value(input).unwrap()
+        );
+        assert_eq!(view["checkpoint"]["coverage"], "declared_partial");
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_http_refuses_other_roles_scope_fields_oversize_and_revoked_replay() {
+    let directory = support::private_tempdir();
+    let a = store(directory.path(), "tenant-a", 12);
+    let b = store(directory.path(), "tenant-b", 12);
+    bind_broker(&a, BROKER_A);
+    bind_broker(&b, BROKER_B);
+    let app = router(a.clone(), b.clone());
+    let input = checkpoint(&hex::encode(Sha256::digest(b"public checkpoint A")));
+    let bytes = serde_json::to_vec(&input).unwrap();
+    let head = a.head().unwrap();
+    for token in [
+        "a".repeat(48),
+        "v".repeat(48),
+        "unknown-public-fixture-proof".into(),
+    ] {
+        let status = checkpoint_post(
+            &app,
+            "/control/api/v1/brokers/checkpoints",
+            &token,
+            bytes.clone(),
+        )
+        .await
+        .0;
+        assert!(
+            matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+            "wrong role: {status}"
+        );
+    }
+    let mut forged = serde_json::to_value(&input).unwrap();
+    forged["tenant_id"] = json!("tenant-b");
+    assert_eq!(
+        checkpoint_post(
+            &app,
+            "/api/v1/brokers/checkpoints",
+            BROKER_A,
+            serde_json::to_vec(&forged).unwrap()
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let mut oversized = bytes.clone();
+    oversized.resize(32_769, b' ');
+    let status = checkpoint_post(
+        &app,
+        "/control/api/v1/brokers/checkpoints",
+        BROKER_A,
+        oversized.clone(),
+    )
+    .await
+    .0;
+    assert!(matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+    ));
+    assert_eq!(
+        checkpoint_post(
+            &app,
+            "/control/api/v1/brokers/checkpoints",
+            "unknown-public-fixture-proof",
+            oversized
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED,
+        "authenticate before accepting a body"
+    );
+    assert_eq!(a.head().unwrap(), head);
+    assert_eq!(
+        checkpoint_post(&app, "/api/v1/brokers/checkpoints", BROKER_A, bytes.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    a.revoke_broker(&BrokerRevocationV1 {
+        version: 1,
+        operation_id: Uuid::new_v4().to_string(),
+        broker_id: BROKER.into(),
+        expected_revision: 1,
+    })
+    .unwrap();
+    let revoked_head = a.head().unwrap();
+    assert_eq!(
+        checkpoint_post(&app, "/api/v1/brokers/checkpoints", BROKER_A, bytes)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        get(&app, "/api/v1/brokers/checkpoints/self", BROKER_A)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(a.head().unwrap(), revoked_head);
+}
+
 fn store(root: &Path, tenant: &str, schema: u32) -> Arc<Store> {
     let path = root.join(format!("{tenant}.sqlite"));
     let store = Store::open_for_tenant(&path, tenant, Redactor::new(vec![]), 10_000).unwrap();
@@ -49,9 +367,26 @@ fn store(root: &Path, tenant: &str, schema: u32) -> Arc<Store> {
     store
         .migrate_workload_v6(&path.with_extension("before6"))
         .unwrap();
-    if schema == 7 {
+    if schema >= 7 {
         store
             .migrate_human_brokers_v7(&path.with_extension("before7"))
+            .unwrap();
+    }
+    if schema == 12 {
+        store
+            .migrate_kubernetes_create_v8(&path.with_extension("before8"))
+            .unwrap();
+        store
+            .migrate_kubernetes_policy_v9(&path.with_extension("before9"))
+            .unwrap();
+        store
+            .migrate_human_workers_v10(&path.with_extension("before10"))
+            .unwrap();
+        store
+            .migrate_kubernetes_session_reservations_v11(&path.with_extension("before11"))
+            .unwrap();
+        store
+            .migrate_broker_checkpoints_v12(&path.with_extension("before12"))
             .unwrap();
     }
     Arc::new(store)

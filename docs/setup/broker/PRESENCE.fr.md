@@ -1,12 +1,17 @@
 # Publier la présence du broker de confiance
 
+L'extension explicite de checkpoints en schéma12 est décrite dans
+[la publication de checkpoints déclarés](CHECKPOINTS.fr.md). La présenceV1 garde
+son format et son comportement ; l'extension exige son raccord service/gateway
+complet et ne qualifie pas un déploiement distant par sa seule configuration.
+
 [English](PRESENCE.md) · [Installation du broker](README.fr.md) · [Identités workload et grants](../workloads/README.fr.md)
 
 Le service Rust au premier plan peut publier sa propre présence authentifiée dans le registre brokers existant du tenant. Activer séparément chaque profil Registry wire2 avec `presence_file`. Les profils sans ce champ et Registry wire1 conservent leur comportement précédent. Cela publie une déclaration du broker et l'heure de réception du gateway ; cela n'inspecte pas les workers, ne prouve pas la santé runtime, ne libère pas de quota et n'établit pas une fédération multi-hôtes complète.
 
 ## Préparer l'autorité et le stockage privé
 
-1. Utiliser un gateway de schéma6 ou7 et le namespace existant du tenant. Suivre la [migration explicite](../workloads/README.fr.md#préparer-le-stockage-sans-activer-lexécution) ; cela n'active pas la supervision.
+1. Pour la présence V1, utiliser un gateway de schéma supporté (6–12) et le namespace existant du tenant. Le profil checkpoint V2 opt-in exige le schéma 12 et la [migration sauvegardée](CHECKPOINTS.fr.md#configurer-chaque-broker-de-confiance). Suivre la [migration explicite](../workloads/README.fr.md#préparer-le-stockage-sans-activer-lexécution) ; cela n'active pas la supervision.
 2. Depuis le contrôle de confiance, [émettre un credential workload broker](../workloads/README.fr.md#préparer-et-enregistrer-une-opération-de-credential-par-cli) pour le broker et l'incarnation approuvés. Conserver son ID et son fichier de jeton privé. Puis [préparer et appliquer un grant broker](../workloads/README.fr.md#préparer-un-grant-ou-une-révocation-de-broker-par-cli) avec le runner de confiance pour les mêmes broker, credential et incarnation, avec **exactement une autorité** correspondant au libellé et au runtime de ce profil, le bail et l'expiration future voulus. L'API générale permet plusieurs autorités ; ce publisher exige la liste exacte d'une seule autorité. Le service ne crée ni ne renouvelle cette autorité.
 3. Créer un **nouveau répertoire privé dédié à l'état**, hors des arbres projet/export, appartenant au compte du contrôle et en0700. Préserver un répertoire existant lors d'une reprise. Créer configuration et jeton dans des fichiers réguliers privés0600 avec parents privés0700 ; liens, ascendance dangereuse et substitutions sont refusés. Ne pas copier le runner dans le fichier du jeton workload.
 4. Copier [presence.json](examples/presence.json) dans ce répertoire privé de configuration et remplacer chaque placeholder et chemin. C'est une entrée JSON typée, pas un dotenv ni une identité installée. Le jeton est référencé uniquement par son chemin ; jamais sa valeur dans le JSON, les arguments ou les logs.
@@ -31,7 +36,7 @@ Ajouter ce champ au profil voulu dans le [modèle Registry wire2 complet](README
 | `max_operations` | Défaut 8192 ; intervalle 1–32768 opérations retenues. Borne les nouvelles opérations ; une opération en attente déjà comptée exige encore la place de son reçu. |
 | `max_state_bytes` | Défaut 67108864 (64 Mio) ; positif et au plus 134217728 (128 Mio). Inclut les preuves du flux et la capacité de reçu réservée avant POST. |
 
-Le client HTTP accepte HTTPS ou **HTTP sur loopback numérique** pour un usage local délibéré. Il utilise seulement les routes fixes identity/self/heartbeat, désactive proxies ambiants, redirections et retries transparents, et borne réponses et délais. Un nom résolu vers loopback n'est pas un loopback numérique. Jeton et éventuel fichier d'AC sont retenus et revalidés ; modifier les fichiers vivants n'est pas un rechargement à chaud.
+Le client HTTP accepte HTTPS ou **HTTP sur loopback numérique** pour un usage local délibéré. La présence V1 utilise seulement les routes fixes identity/self/heartbeat ; le profil V2 opt-in utilise aussi les [deux routes checkpoint de son périmètre](CHECKPOINTS.fr.md#publication-et-fraîcheur). Le client désactive proxies ambiants, redirections et retries transparents, et borne réponses et délais. Un nom résolu vers loopback n'est pas un loopback numérique. Jeton et éventuel fichier d'AC sont retenus et revalidés ; modifier les fichiers vivants n'est pas un rechargement à chaud.
 
 ## Démarrer, observer et arrêter
 
@@ -39,7 +44,7 @@ Démarrer la même [commande broker au premier plan](README.fr.md#démarrer-le-s
 
 Lire l'entrée obtenue avec `GET /api/v1/brokers` technique et une preuve runner/viewer, `GET /api/v1/brokers/self` et la preuve Broker pour sa propre entrée, ou la [vue nominative Brokers du dashboard](README.fr.md#lire-les-brokers-enregistrés-après-migration7) avec permission explicite `read_broker_registry` et schéma7. Vérifier autorité, incarnation, heure de réception, bail et fraîcheur. Le heartbeat est `declared` ; sa réception par le gateway est `observed` ; `runtime_inventory_complete` reste faux. Après arrêt, une ancienne entrée peut rester courante jusqu'à expiration du bail. Ni une entrée courante ni une entrée périmée ne prouvent l'état d'un worker.
 
-L'arrêt normal du service signale et rejoint les tâches de publication avant de libérer son rôle local. `--recovery-only` n'ouvre ni configuration ni état de présence et ne publie aucun heartbeat ; son contrat existant de reprise des arrêts est conservé. Cela ne qualifie ni coupure électrique, ni service OS, ni échéance runtime autonome.
+L'arrêt normal du service signale et rejoint les tâches de publication avant de libérer son rôle local. `--recovery-only` n'ouvre ni configuration ni état de présence et ne publie aucun heartbeat ; son contrat existant de reprise des arrêts est conservé. Un observateur d'arrêt annulé peut reprendre la même jointure retenue. Le filesystem peut maintenir l'arrêt en attente ; ni cette attente ni Drop ne prouvent une borne physique de collecte, un fencing ou une reprise après perte du processus. Cela ne qualifie ni coupure électrique, ni service OS, ni échéance runtime autonome. La source V2 exige le vrai writer Full déjà présent pour le profil ; son activation n'ouvre ni writer ni job et une source indisponible reste inconnue, selon le [guide checkpoint](CHECKPOINTS.fr.md).
 
 ## Diagnostiquer et reprendre sans effacer les preuves
 

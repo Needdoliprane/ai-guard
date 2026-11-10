@@ -2,7 +2,7 @@ use super::*;
 use crate::{audit::Store, broker_registry::*};
 use std::{future::Future, time::Duration};
 
-async fn stopping(shutdown: &mut watch::Receiver<bool>) {
+pub(super) async fn stopping(shutdown: &mut watch::Receiver<bool>) {
     loop {
         if *shutdown.borrow() {
             return;
@@ -12,7 +12,7 @@ async fn stopping(shutdown: &mut watch::Receiver<bool>) {
         }
     }
 }
-async fn interrupt<T>(
+pub(super) async fn interrupt<T>(
     shutdown: &mut watch::Receiver<bool>,
     future: impl Future<Output = Result<T>>,
 ) -> Result<T> {
@@ -21,7 +21,7 @@ async fn interrupt<T>(
         result = future => result,
     }
 }
-async fn disk<T: Send + 'static>(
+pub(super) async fn disk<T: Send + 'static>(
     p: &Arc<PreparedPresence>,
     io: &Arc<Semaphore>,
     shutdown: &mut watch::Receiver<bool>,
@@ -35,35 +35,34 @@ async fn disk<T: Send + 'static>(
     })
     .await?;
     let p = Arc::clone(p);
-    // A cancelled actor may leave this bounded filesystem closure finishing.
-    // It has no HTTP client and can never issue a request after actor shutdown.
+    // Admission can stop; an admitted worker must be joined. It owns the
+    // actual profile/leases and capacity and never contains an HTTP client.
     let task = tokio::task::spawn_blocking(move || {
         let _capacity = capacity;
         p.revalidate()?;
-        action(&p)
+        let result = action(&p);
+        #[cfg(test)]
+        if let Some(barrier) = &p.disk_barrier {
+            barrier.after_operation::<T>();
+        }
+        result
     });
-    interrupt(shutdown, async {
-        task.await.map_err(|_| PresenceError::Unavailable)?
-    })
-    .await
+    let result = task.await.map_err(|_| PresenceError::Unavailable)?;
+    // The common stop has priority over continuation after the joined FS
+    // result. No identity/view/POST request may begin on this stopped branch.
+    match result {
+        Err(error) => Err(error),
+        Ok(_) if *shutdown.borrow() || shutdown.has_changed().is_err() => {
+            Err(PresenceError::Stopped)
+        }
+        Ok(value) => Ok(value),
+    }
 }
 fn stream(p: &PreparedPresence) -> Result<&storage::Stream> {
     p.stream.as_ref().ok_or(PresenceError::UnsafeState)
 }
 
-pub(super) async fn run(
-    p: PreparedPresence,
-    mut shutdown: watch::Receiver<bool>,
-    attempts: Arc<Semaphore>,
-    io: Arc<Semaphore>,
-) -> Result<()> {
-    let result = run_owned(Arc::new(p), &mut shutdown, attempts, io).await;
-    match result {
-        Err(PresenceError::Stopped) => Ok(()),
-        result => result,
-    }
-}
-async fn run_owned(
+pub(super) async fn run_owned(
     p: Arc<PreparedPresence>,
     shutdown: &mut watch::Receiver<bool>,
     attempts: Arc<Semaphore>,
@@ -179,7 +178,7 @@ async fn run_owned(
         .await?;
     }
 }
-fn same_grant(a: &BrokerV1, b: &BrokerV1) -> bool {
+pub(super) fn same_grant(a: &BrokerV1, b: &BrokerV1) -> bool {
     let mut a = a.clone();
     a.heartbeat_revision = b.heartbeat_revision;
     a.last_heartbeat = b.last_heartbeat.clone();
@@ -191,7 +190,7 @@ pub(super) fn validate_handshake(
     view: &BrokerViewV1,
 ) -> Result<()> {
     if identity.version != 1
-        || !matches!(identity.schema_version, 6 | 7 | 8 | 9 | 10 | 11)
+        || !matches!(identity.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12)
         || identity.tenant_id != p.scope.expected_tenant_id
         || identity.control_namespace_uuid != p.scope.control_namespace_uuid.to_string()
         || identity.broker_id != p.config.broker_id

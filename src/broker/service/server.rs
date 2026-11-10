@@ -62,9 +62,16 @@ const WRITER_TIMEOUT: Duration = Duration::from_secs(10);
 #[path = "retained_audit.rs"]
 mod retained_audit;
 
+#[path = "checkpoint_source.rs"]
+mod checkpoint_source;
+
 #[cfg(test)]
 #[path = "presence_material_tests.rs"]
 mod presence_material_tests;
+
+#[cfg(test)]
+#[path = "checkpoint_source_tests.rs"]
+mod checkpoint_source_tests;
 
 #[cfg(test)]
 #[path = "cancel_retry_tests.rs"]
@@ -547,23 +554,7 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
     let connections = Arc::new(Semaphore::new(64));
     let mut requests = JoinSet::new();
     let (presence_shutdown, _) = watch::channel(false);
-    let mut presence_tasks = JoinSet::new();
-    let presence_attempts = Arc::new(Semaphore::new(4));
-    let presence_io = Arc::new(Semaphore::new(2));
-    for (profile, presence) in prepared_presence {
-        let shutdown = presence_shutdown.subscribe();
-        let attempts = Arc::clone(&presence_attempts);
-        let io = Arc::clone(&presence_io);
-        let owner = Arc::clone(&service);
-        presence_tasks.spawn(async move {
-            if let Err(error) = presence.run(shutdown, attempts, io).await {
-                if error.fences_admission() {
-                    owner.fenced.store(true, Ordering::SeqCst);
-                }
-                log_presence_stopped(&profile, error, &owner.material.literals);
-            }
-        });
-    }
+    let mut presence_tasks = service.spawn_presence(prepared_presence, &presence_shutdown);
     // An autonomous reconciler uses only the configured private runner key,
     // never as a substitute for an unauthenticated user's request.
     let reconciler_service = Arc::clone(&service);
@@ -614,6 +605,52 @@ async fn serve_mode(config_path: &Path, recovery_only: bool) -> Result<()> {
 }
 
 impl Service {
+    /// The same service assembly is exercised by focused tests without
+    /// starting an enforcer, installing signals or binding the broker IPC.
+    fn spawn_presence(
+        self: &Arc<Self>,
+        prepared_presence: Vec<(String, PreparedPresence)>,
+        presence_shutdown: &watch::Sender<bool>,
+    ) -> JoinSet<()> {
+        let mut presence_tasks = JoinSet::new();
+        let presence_attempts = Arc::new(Semaphore::new(4));
+        let presence_io = Arc::new(Semaphore::new(2));
+        for (profile, presence) in prepared_presence {
+            let shutdown = presence_shutdown.subscribe();
+            let attempts = Arc::clone(&presence_attempts);
+            let io = Arc::clone(&presence_io);
+            let owner = Arc::clone(self);
+            let publication = match checkpoint_source::Publication::start(
+                self,
+                profile.clone(),
+                presence,
+                shutdown,
+                attempts,
+                io,
+            ) {
+                Ok(publication) => publication,
+                Err(error) => {
+                    if error.fences_admission() {
+                        self.fenced.store(true, Ordering::SeqCst);
+                    }
+                    log_presence_stopped(&profile, error, &self.material.literals);
+                    continue;
+                }
+            };
+            presence_tasks.spawn(async move {
+                // The task is the retained owner, not a disposable observer.
+                // The service drains it without aborting admitted FS work.
+                if let Err(error) = publication.join().await {
+                    if error.fences_admission() {
+                        owner.fenced.store(true, Ordering::SeqCst);
+                    }
+                    log_presence_stopped(&profile, error, &owner.material.literals);
+                }
+            });
+        }
+        presence_tasks
+    }
+
     fn reserve_full_owner(&self) -> Result<FullOwnerSlot, BrokerErrorCodeV1> {
         self.full_owners.try_reserve().map_err(|error| match error {
             retained_audit::OwnerError::Busy => BrokerErrorCodeV1::Busy,
@@ -643,15 +680,13 @@ impl Service {
         {
             degraded = true;
         }
-        // Presence HTTP lives only in these owned futures. A cancelled blocking
-        // filesystem closure may retain its lock; it cannot send a POST.
-        let presence_drain = async { while presence_tasks.join_next().await.is_some() {} };
-        if tokio::time::timeout(Duration::from_secs(15), presence_drain)
-            .await
-            .is_err()
-        {
-            presence_tasks.abort_all();
-            while presence_tasks.join_next().await.is_some() {}
+        // Cancelling this observer leaves the same JoinSet/tasks/publications
+        // retained. An admitted FS operation has no physical shutdown bound;
+        // never release the service lease on an abandoned presence timeout.
+        while let Some(result) = presence_tasks.join_next().await {
+            if result.is_err() {
+                degraded = true;
+            }
         }
         // In-flight framing/writer ACKs receive a short bounded drain. A lost reply
         // never rolls back an already durable accepted job or enforcer registration.

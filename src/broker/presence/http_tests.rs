@@ -1,6 +1,10 @@
 //! Real gateway/SQLite regressions. Faults affect only the HTTP exchange.
+#[path = "checkpoint_http_tests.rs"]
+mod checkpoint_http_tests;
 #[path = "cost_tests.rs"]
 mod cost_tests;
+#[path = "run_owner_tests.rs"]
+pub(super) mod run_owner_tests;
 
 use super::preparation_tests::{Fixture, OWN_TOKEN};
 use super::{PreparedPresence, PresenceError, PresenceScope};
@@ -51,6 +55,9 @@ struct Probe {
     identity_requests: Mutex<usize>,
     transport_paths: Mutex<Vec<String>>,
     transport_refusal: Mutex<Option<u16>>,
+    checkpoint_state: Mutex<Option<PathBuf>>,
+    checkpoint_requests: Mutex<Vec<crate::broker_registry::BrokerCheckpointV1>>,
+    checkpoint_lost_acks: Mutex<usize>,
 }
 
 fn consume_fault(remaining: &Mutex<usize>) -> bool {
@@ -106,6 +113,49 @@ async fn inspect_post(probe: Arc<Probe>, request: Request<Body>, next: Next) -> 
         return response;
     }
     if request.uri().path() != "/control/api/v1/brokers/heartbeat" {
+        if request.uri().path() == "/control/api/v1/brokers/checkpoints" {
+            let (parts, body) = request.into_parts();
+            let bytes = to_bytes(body, crate::broker_registry::MAX_BROKER_CHECKPOINT_BYTES)
+                .await
+                .unwrap();
+            let checkpoint: crate::broker_registry::BrokerCheckpointV1 =
+                serde_json::from_slice(&bytes).unwrap();
+            probe
+                .checkpoint_requests
+                .lock()
+                .unwrap()
+                .push(checkpoint.clone());
+            let root = probe
+                .checkpoint_state
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("checkpoint fixture has private state");
+            let pending = record_paths(&root, "pending.json");
+            assert!(
+                pending.iter().any(|path| {
+                    let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+                    value["checkpoint"] == serde_json::to_value(&checkpoint).unwrap()
+                }),
+                "an exact durable Pending must precede every checkpoint POST"
+            );
+            let response = next
+                .run(Request::from_parts(parts, Body::from(bytes)))
+                .await;
+            if response.status() == 200 && consume_fault(&probe.checkpoint_lost_acks) {
+                probe.faults_observed.add_permits(1);
+                return Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from_stream(futures_util::stream::once(async {
+                        Err::<Vec<u8>, _>(std::io::Error::other(
+                            "fixture lost committed checkpoint ACK",
+                        ))
+                    })))
+                    .unwrap();
+            }
+            return response;
+        }
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();
@@ -267,6 +317,9 @@ impl LiveFixture {
             identity_requests: Mutex::new(0),
             transport_paths: Mutex::new(Vec::new()),
             transport_refusal: Mutex::new(None),
+            checkpoint_state: Mutex::new(None),
+            checkpoint_requests: Mutex::new(Vec::new()),
+            checkpoint_lost_acks: Mutex::new(0),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut scope = filesystem.scope();

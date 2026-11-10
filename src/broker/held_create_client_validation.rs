@@ -42,9 +42,9 @@ pub(super) fn protocol(
 ) -> ClientResult<()> {
     require(
         identity.version == 1
-            && [9, 10, 11].contains(&identity.schema_version)
+            && [9, 10, 11, 12].contains(&identity.schema_version)
             && protocol.version == 1
-            && [9, 10, 11].contains(&protocol.schema_version)
+            && [9, 10, 11, 12].contains(&protocol.schema_version)
             && identity.schema_version == protocol.schema_version
             && revision(identity.binding_revision)
             && revision(identity.grant_revision),
@@ -449,11 +449,11 @@ mod schema11_compatibility_tests {
 
     #[test]
     fn schema11_accepts_only_matching_supported_held_create_v1_negotiation() {
-        for schema_version in [9, 10, 11] {
+        for schema_version in [9, 10, 11, 12] {
             let (scope, identity, view) = negotiation(schema_version);
             assert_eq!(protocol(&scope, &identity, &view), Ok(()));
         }
-        for schema_version in [0, 8, 12, u32::MAX] {
+        for schema_version in [0, 8, 13, u32::MAX] {
             let (scope, identity, view) = negotiation(schema_version);
             assert_eq!(
                 protocol(&scope, &identity, &view),

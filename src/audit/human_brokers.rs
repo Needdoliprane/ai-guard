@@ -127,7 +127,7 @@ pub(super) fn genesis(db: &Connection) -> anyhow::Result<(StoredEvent, u64)> {
     Ok((stored, marker.authorization_revision))
 }
 pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
-    if [7, 8, 9, 10, 11].contains(&version) {
+    if [7, 8, 9, 10, 11, 12].contains(&version) {
         genesis(db)?;
     } else {
         let forbidden: bool = db.query_row(
@@ -223,7 +223,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![7, 8, 9, 10, 11].contains(&version) {
+        if ![7, 8, 9, 10, 11, 12].contains(&version) {
             return Err(IdentityFailureV1::MigrationRequired.into());
         }
         let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;

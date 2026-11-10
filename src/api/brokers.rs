@@ -10,6 +10,11 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/brokers/grants", post(grant))
         .route("/brokers/{id}/revoke", post(revoke))
         .route("/brokers/heartbeat", post(heartbeat))
+        .route(
+            "/brokers/checkpoints",
+            post(checkpoint).layer(DefaultBodyLimit::max(MAX_BROKER_CHECKPOINT_BYTES)),
+        )
+        .route("/brokers/checkpoints/self", get(own_checkpoint))
         .route("/brokers/self", get(own))
         .route("/brokers/identity", get(identity))
         .layer(middleware::from_fn(workload::request_guard))
@@ -79,6 +84,72 @@ async fn own(broker: VerifiedBroker) -> ApiResult<Json<BrokerViewV1>> {
             )?))
         })
         .await
+}
+
+async fn checkpoint(
+    broker: VerifiedBroker,
+    body: Result<Json<BrokerCheckpointV1>, JsonRejection>,
+) -> ApiResult<Json<BrokerCheckpointResultV1>> {
+    let input = parse_json(body)?;
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            // The authenticated broker, not a body field, chooses the Store.
+            // The mutation retains its own workload budget and idempotence.
+            if !checkpoint_is_public(&input, &redactor)? {
+                return Err(workload::invalid());
+            }
+            let scope = tenant
+                .store
+                .broker_authenticated_identity(&identity)
+                .map_err(|error| workload::store_failure(&tenant.store, error))?;
+            if !checkpoint_is_public(&scope, &redactor)? {
+                return Err(checkpoint_unavailable());
+            }
+            let commitment = Store::broker_checkpoint_input_hash(&scope, &input)
+                .map_err(|error| workload::store_failure(&tenant.store, error))?;
+            if !checkpoint_is_public(&commitment, &redactor)? {
+                return Err(workload::invalid());
+            }
+            let result = tenant
+                .store
+                .broker_checkpoint(&identity, &input)
+                .map_err(|error| workload::store_failure(&tenant.store, error))?;
+            // Never mask identifiers or commitments into a different receipt.
+            // A withheld reply does not imply rollback of its durable mutation.
+            if !checkpoint_is_public(&result, &redactor)? {
+                return Err(checkpoint_unavailable());
+            }
+            Ok(Json(result))
+        })
+        .await
+}
+
+async fn own_checkpoint(broker: VerifiedBroker) -> ApiResult<Json<BrokerCheckpointViewV1>> {
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            let view = tenant
+                .store
+                .broker_checkpoint_for_identity(&identity)
+                .map_err(|error| workload::store_failure(&tenant.store, error))?;
+            if !checkpoint_is_public(&view, &redactor)? {
+                return Err(checkpoint_unavailable());
+            }
+            Ok(Json(view))
+        })
+        .await
+}
+
+fn checkpoint_is_public(value: &impl serde::Serialize, redactor: &Redactor) -> ApiResult<bool> {
+    let value = serde_json::to_value(value).map_err(|_| checkpoint_unavailable())?;
+    Ok(redactor.value_unclipped(&value) == value)
+}
+
+fn checkpoint_unavailable() -> (StatusCode, Json<Value>) {
+    workload::response(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "broker_checkpoint_unavailable",
+        "Broker checkpoint metadata is unavailable.",
+    )
 }
 
 async fn identity(broker: VerifiedBroker) -> ApiResult<Json<BrokerIdentityViewV1>> {

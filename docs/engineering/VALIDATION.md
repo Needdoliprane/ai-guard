@@ -1,5 +1,19 @@
 # Validation courante
 
+## 10 novembre — raccord fédération : trois RED, huit PASS FIX et check
+
+Sur le préfixe R4, trois parents atteignent leurs oracles de feature absente,
+chacun RC101 après préconditions et cleanup ; le R3 antérieur n'est pas promu.
+Le gel FIX2363 `e9e60e96…` passe huit sélections exactes uniques puis le check
+toutes cibles RC0. Le premier build4439 garde son RCUNKNOWN à cause du wrapper
+hôte ; la vérification en cache de la même source/cible retourne le vrai RC0.
+Les2363 hashes/pathset post-source et l'export réel sont exacts, OOM0 ; la QA
+est fermée normalement. Revue indépendante `7b4ebcd1…` bornée, guides EN/FR
+distincts du gel compilé. [Commandes, empreintes et portée](evidence/2026-11-10/federation-checkpoint-service/README.md).
+Le seul PASS migration R3 et les39 résultats historiques ne s'ajoutent pas
+aux huit. Pas de borne physique FS, fencing/reprise froide, multi-hôtes,
+transport/runtime ou100workers qualifiés ; G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — D3 RED puis10 PASS FIX et check
 
 Sur le gel2345 `a3cf44b6…`, deux caractérisations Read/EOF/reconnexion passent ;
