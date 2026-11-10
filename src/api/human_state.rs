@@ -4,7 +4,7 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -409,12 +409,48 @@ impl CursorCipher {
 
 pub(super) struct ContextRegistry {
     entries: Mutex<HashMap<String, Arc<RegisteredContext>>>,
+    // Only trusted gateway configuration creates this closed, bounded table.
+    // Idle shares are not lent: an active context is never evicted for a peer.
+    tenant_limits: BTreeMap<String, usize>,
 }
 impl ContextRegistry {
-    pub fn new() -> Self {
+    pub fn for_tenants<'a>(tenants: impl IntoIterator<Item = &'a str>) -> anyhow::Result<Self> {
+        let mut identities = BTreeSet::new();
+        for tenant in tenants {
+            crate::tenancy::validate_tenant_id(tenant)?;
+            anyhow::ensure!(
+                identities.insert(tenant.to_owned()),
+                "duplicate human context tenant"
+            );
+            anyhow::ensure!(
+                identities.len() <= MAX_CONTEXTS,
+                "too many tenants for a guaranteed human context share"
+            );
+        }
+        anyhow::ensure!(!identities.is_empty(), "human context tenants are required");
+        let share = MAX_CONTEXTS / identities.len();
+        let remainder = MAX_CONTEXTS % identities.len();
+        let tenant_limits = identities
+            .into_iter()
+            .enumerate()
+            .map(|(index, tenant)| (tenant, share + usize::from(index < remainder)))
+            .collect();
+        Ok(Self {
+            entries: Mutex::new(HashMap::new()),
+            tenant_limits,
+        })
+    }
+    /// Used only by an already invalid gateway configuration. No tenant can
+    /// acquire a context here; this does not create a zero-sized known share.
+    pub fn disabled() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
+            tenant_limits: BTreeMap::new(),
         }
+    }
+    #[cfg(test)]
+    pub fn new() -> Self {
+        Self::for_tenants(["tenant-a"]).unwrap()
     }
     fn purge_expired(entries: &mut HashMap<String, Arc<RegisteredContext>>) {
         entries.retain(|_, entry| {
@@ -435,6 +471,9 @@ impl ContextRegistry {
         revision: Option<u64>,
         members: &[MembershipV1],
     ) -> Result<(), StateFailure> {
+        if !self.tenant_limits.contains_key(tenant_id) {
+            return Err(StateFailure::InvalidContext);
+        }
         let mut entries = self.entries.lock().map_err(|_| StateFailure::Unavailable)?;
         Self::purge_expired(&mut entries);
         entries.retain(|_, entry| {
@@ -476,6 +515,10 @@ impl ContextRegistry {
         lifetime: Duration,
         expires_at: String,
     ) -> Result<Arc<RegisteredContext>, StateFailure> {
+        let tenant_limit = self
+            .tenant_limits
+            .get(&binding.tenant_id)
+            .ok_or(StateFailure::InvalidContext)?;
         let mut entries = self.entries.lock().map_err(|_| StateFailure::Unavailable)?;
         Self::purge_expired(&mut entries);
         if let Some(entry) = entries.values().find(|entry| entry.binding == binding) {
@@ -498,7 +541,12 @@ impl ContextRegistry {
                     || entry.binding.principal_key == binding.principal_key
             })
             .count();
-        if entries.len() >= MAX_CONTEXTS || own >= MAX_OWNER_CONTEXTS {
+        let tenant_own = entries
+            .values()
+            .filter(|entry| entry.binding.tenant_id == binding.tenant_id)
+            .count();
+        if entries.len() >= MAX_CONTEXTS || own >= MAX_OWNER_CONTEXTS || tenant_own >= *tenant_limit
+        {
             return Err(StateFailure::Capacity);
         }
         let lifetime = lifetime.min(CONTEXT_TTL);
@@ -561,6 +609,11 @@ impl ContextRegistry {
         Ok(Arc::clone(entry))
     }
 }
+
+#[cfg(test)]
+#[path = "human_state/context_fairness_tests.rs"]
+mod context_fairness_tests;
+
 fn lower_hex(byte: u8) -> bool {
     byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
 }

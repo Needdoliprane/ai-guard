@@ -438,7 +438,7 @@ impl GatewayState {
                     policy: Arc::new(policy),
                     jev: jev.map(Arc::new),
                     redactor: Arc::new(redactor),
-                    human: Arc::new(human::HumanAccessState::new()),
+                    human: Arc::new(human::HumanAccessState::disabled()),
                     oidc: None,
                     io,
                     io_scope: Arc::default(),
@@ -456,6 +456,12 @@ impl GatewayState {
             Ok(index) => (index, jev_separation),
             Err(_) => (CredentialIndex::default(), false),
         };
+        let (human, valid_credentials) = match human::HumanAccessState::for_tenants(
+            tenants.iter().map(|tenant| tenant.tenant_id.as_str()),
+        ) {
+            Ok(human) => (human, valid_credentials),
+            Err(_) => (human::HumanAccessState::disabled(), false),
+        };
         Self {
             tenants: Arc::new(
                 tenants
@@ -468,7 +474,7 @@ impl GatewayState {
             policy: Arc::new(policy),
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
-            human: Arc::new(human::HumanAccessState::new()),
+            human: Arc::new(human),
             oidc: None,
             io,
             io_scope: Arc::default(),
@@ -533,6 +539,9 @@ impl GatewayState {
             anyhow::ensure!(tenant.store.integrity()?.valid, "audit integrity failure");
         }
         let credential_index = CredentialIndex::for_tenants(&tenants)?;
+        let human = human::HumanAccessState::for_tenants(
+            tenants.iter().map(|tenant| tenant.tenant_id.as_str()),
+        )?;
         let io = Arc::new(store_io::Gate::new(true));
         Ok(Self {
             tenants: Arc::new(
@@ -546,7 +555,7 @@ impl GatewayState {
             policy: Arc::new(policy),
             jev: jev.map(Arc::new),
             redactor: Arc::new(redactor),
-            human: Arc::new(human::HumanAccessState::new()),
+            human: Arc::new(human),
             oidc: None,
             io,
             io_scope: Arc::default(),
