@@ -19,8 +19,9 @@ lot ; aucune qualification réelle ne découle de cette file de travail.
 
 Le prompt `/goal` transmis au mainteneur répartit trois développements sur la
 base distante `7672078831c74047b98ce85babf91adb625e2b29`, dans des worktrees
-distincts. **Leur démarrage par Claude n'a pas été observé** : ils restent des
-affectations proposées, sans code ni preuve reçus à cette date.
+distincts. **Le mainteneur confirme que Claude travaille encore dessus** ;
+aucune livraison finale ni preuve de validation n'a encore été reçue. Les
+périmètres restent réservés jusqu'à revue des branches et intégration par Root.
 
 | Branche proposée | Livrable attendu |
 |---|---|
