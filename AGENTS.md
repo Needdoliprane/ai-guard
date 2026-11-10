@@ -50,6 +50,8 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 
 ## Lire avant de modifier
 
+Pour intégrer les livraisons externes Claude, lire le [registre des livraisons du 10 novembre](docs/engineering/CLAUDE_DELIVERIES_20261110.md). Il distingue branches originales, compositions, preuves historiques et validations encore ouvertes ; conserver les pièces privées sans les publier.
+
 Pour les correctifs de sécurité, lire aussi le [rapport final run-2 et son
 registre de prise en compte](docs/engineering/AUDIT_RUN_2_20261110.md) : huit
 constats démontrés, cinq pistes à valider et trois rejets sur `696efd1`.
