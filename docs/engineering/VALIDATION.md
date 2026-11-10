@@ -1,5 +1,20 @@
 # Validation courante
 
+## 10 novembre — AuthV4 : 28 fonctions distinctes sur deux sources
+
+Sur R2 full2368 `2211c5b0…`, 19 bibliothèque + 4 config donnent 23 PASS
+exacts. Le parent24 échoue ensuite dans sa fixture URI avant l'oracle ;
+R4 change ce seul fichier et passe les cinq restants sur `ef04abc3…`.
+Les 23 premières fonctions/sept fichiers et tout le produit sont inchangés.
+R1 conserve ses huit erreurs de typage/import de tests ; R2 SIGXFSZ vient du
+cap interne32 Mio erroné du harnais. R3 lib, quatre targets, R4 builder puis
+check toutes cibles terminent RC0. Aucun défaut de setup n'est une RED produit.
+Post-R4 : 2368 hashes/pathset exacts, archive réelle conservée, OOM0 et QA
+retirée normalement. [Empreintes, commandes et portée](evidence/2026-11-10/authentication-tenant-capacity/README.md).
+La RED NV-02 `e01cb406…` reste un cas logiciel contrôlé sans sévérité formelle
+de déploiement. Parts finies, memberships disjoints, sources/guides relus ;
+autres qualifications inchangées, G09 FAIL, 0/12 gates globaux clos.
+
 ## 10 novembre — raccord fédération : trois RED, huit PASS FIX et check
 
 Sur le préfixe R4, trois parents atteignent leurs oracles de feature absente,

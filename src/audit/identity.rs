@@ -3,6 +3,18 @@ use super::*;
 use crate::control::MigrationReportV1;
 use crate::identity::*;
 
+/// One bounded, transaction-consistent metadata observation. This is neither
+/// an authorization capability nor a substitute for the audited human profile.
+pub(crate) struct AuthenticationMembershipSnapshotV1 {
+    pub account: Option<HumanAccountV1>,
+    pub memberships: Vec<MembershipV1>,
+    pub authorization_revision: u64,
+}
+
+#[cfg(all(test, unix))]
+#[path = "identity_authentication_metadata_tests.rs"]
+mod authentication_metadata_tests;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 11] = [
     (
         "table",
@@ -1080,6 +1092,57 @@ impl Store {
         )?;
         self.commit_checked(tx)?;
         Ok(value)
+    }
+    pub(crate) fn authentication_membership_snapshot(
+        &self,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<AuthenticationMembershipSnapshotV1> {
+        let key = principal.key()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        require_identity(&tx)?;
+        let account = json_row::<HumanAccountV1>(
+            &tx,
+            "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
+            &key,
+        )?;
+        let authorization_revision = authorization_revision(&tx)?;
+        let mut memberships = Vec::new();
+        if let Some(account) = &account {
+            anyhow::ensure!(
+                account.principal == *principal,
+                "authentication account metadata binding mismatch"
+            );
+            if account.active {
+                // The sentinel bounds allocation before parsing a 257th row.
+                let mut statement = tx.prepare(
+                    "SELECT payload_json FROM identity_memberships WHERE principal_key=?1 ORDER BY membership_id LIMIT 257",
+                )?;
+                let rows = statement.query_map([key], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    anyhow::ensure!(
+                        memberships.len() < 256,
+                        "human membership capacity exceeded"
+                    );
+                    let membership: MembershipV1 = serde_json::from_str(&row?)?;
+                    anyhow::ensure!(
+                        membership.principal == *principal
+                            && membership.tenant_id == self.tenant_id(),
+                        "authentication membership metadata binding mismatch"
+                    );
+                    memberships.push(membership);
+                }
+            }
+        }
+        self.commit_checked(tx)?;
+        Ok(AuthenticationMembershipSnapshotV1 {
+            account,
+            memberships,
+            authorization_revision,
+        })
     }
     pub fn identity_memberships(
         &self,

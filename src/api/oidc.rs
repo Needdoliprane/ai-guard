@@ -4,8 +4,8 @@ use crate::audit::authentication::{
     AuthenticationActionV1 as Action, AuthenticationOutcomeV1 as Outcome,
     AuthenticationPhaseV1 as Phase, AuthenticationReasonV1 as Reason, AuthenticationReceiptV1,
     AuthenticationRecordV1, AuthenticationSessionBindingV1 as SessionBinding,
-    AuthenticationSessionStateV1 as SessionState, AuthenticationTokenFingerprintV1 as Fingerprint,
-    OidcSessionKindV1 as SessionKind,
+    AuthenticationSessionStateV1 as SessionState, AuthenticationTenantCandidatesV1,
+    AuthenticationTokenFingerprintV1 as Fingerprint, OidcSessionKindV1 as SessionKind,
 };
 use crate::{
     audit::authentication::AuthenticationAudit,
@@ -237,6 +237,10 @@ pub struct OidcGateway {
     pub(super) config: OidcGatewayConfigV1,
     provider: Arc<OidcProvider>,
     pub(super) audit: Arc<AuthenticationAudit>,
+    // Format changes are explicit offline operations. A live format change
+    // still fails closed in the writer; this only avoids rereading the plan
+    // before every admission to choose its accounting API.
+    partitioned_capacity: bool,
     ca_bundle_pem: Option<String>,
     registry: Mutex<Registry>,
     cleanup_slots: Arc<tokio::sync::Semaphore>,
@@ -262,10 +266,12 @@ impl OidcGateway {
             None => OidcProvider::new(config.provider.clone())?,
         };
         audit.verify()?;
+        let partitioned_capacity = audit.format_version()? == 4;
         Ok(Self {
             config,
             provider: Arc::new(provider),
             audit,
+            partitioned_capacity,
             ca_bundle_pem,
             registry: Mutex::new(Registry::default()),
             cleanup_slots: Arc::new(tokio::sync::Semaphore::new(32)),

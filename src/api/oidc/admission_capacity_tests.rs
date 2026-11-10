@@ -14,14 +14,43 @@ struct Fixture {
     state: GatewayState,
     raw: String,
     binding: SessionBinding,
+    installation_id: Uuid,
+    audit_policy: AuthenticationAuditPolicyV1,
 }
 
 async fn fixture() -> Fixture {
-    fixture_with_record_budget(1000).await
+    fixture_with_plan(1000, Some(capacity_plan(32, 483, 483))).await
 }
 
+/// Compatibility-only V3 fixture for the exact G6/G7 terminal oracles. Its
+/// public gateway is freshly assembled with Store A and a new credential index.
 async fn fixture_with_record_budget(max_records: u64) -> Fixture {
+    fixture_with_plan(max_records, None).await
+}
+
+async fn fixture_with_plan(
+    max_records: u64,
+    plan: Option<AuthenticationCapacityPlanV1>,
+) -> Fixture {
     let (files, state, _) = local_identity_state();
+    let state = if plan.is_some() {
+        state
+    } else {
+        let store = state.tenants[0].store.clone();
+        drop(state);
+        GatewayState::for_tenants(
+            vec![crate::api::TenantGateway {
+                tenant_id: "tenant-a".into(),
+                store,
+                runner_token: "synthetic-legacy-runner".repeat(3),
+                viewer_token: "synthetic-legacy-viewer".repeat(3),
+            }],
+            crate::policy::Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap()
+    };
     let issuer = controlled::ControlledIssuer::new().await;
     let principal = PrincipalRefV1::HumanOidc {
         issuer: issuer.issuer.clone(),
@@ -58,22 +87,34 @@ async fn fixture_with_record_budget(max_records: u64) -> Fixture {
             }))
             .unwrap();
     }
+    let installation_id = Uuid::new_v4();
+    let audit_policy = AuthenticationAuditPolicyV1 {
+        max_records,
+        max_serialized_bytes: 4 * 1024 * 1024,
+        approved_clients: ["web-public", "cli-public"]
+            .map(|client_id| ApprovedAuthenticationClientV1 {
+                issuer: issuer.issuer.clone(),
+                client_id: client_id.into(),
+            })
+            .to_vec(),
+    };
+    let path = files.path().join("authentication.sqlite");
     let audit = Arc::new(
-        AuthenticationAudit::init_new(
-            &files.path().join("authentication.sqlite"),
-            Uuid::new_v4(),
-            AuthenticationAuditPolicyV1 {
-                max_records,
-                max_serialized_bytes: 4 * 1024 * 1024,
-                approved_clients: ["web-public", "cli-public"]
-                    .map(|client_id| ApprovedAuthenticationClientV1 {
-                        issuer: issuer.issuer.clone(),
-                        client_id: client_id.into(),
-                    })
-                    .to_vec(),
-            },
-            Redactor::new(vec![]),
-        )
+        match plan {
+            Some(plan) => AuthenticationAudit::init_new_v4(
+                &path,
+                installation_id,
+                audit_policy.clone(),
+                plan,
+                Redactor::new(vec![]),
+            ),
+            None => AuthenticationAudit::init_new(
+                &path,
+                installation_id,
+                audit_policy.clone(),
+                Redactor::new(vec![]),
+            ),
+        }
         .unwrap(),
     );
     let state = state
@@ -145,6 +186,8 @@ async fn fixture_with_record_budget(max_records: u64) -> Fixture {
         state,
         raw,
         binding,
+        installation_id,
+        audit_policy,
     }
 }
 
@@ -329,4 +372,154 @@ async fn known_session_uuid_with_a_false_token_cannot_spend_the_admission_window
         "D5: an unverified bearer spent an admission budget before authentication"
     );
     assert!(oidc.registry.lock().unwrap().native.is_empty());
+}
+
+#[tokio::test]
+async fn saturated_membership_reads_commit_a_funded_unscoped_terminal_without_a_session() {
+    let fixture = fixture().await;
+    let oidc = fixture.state.oidc.as_ref().unwrap();
+    assert_eq!(oidc.audit.format_version().unwrap(), 4);
+    assert_eq!(fixture.state.tenants.len(), 2);
+    let held: Vec<_> = fixture
+        .state
+        .tenants
+        .iter()
+        .flat_map(|tenant| {
+            (0..4)
+                .map(|_| tenant.io.admit(store_io::Lane::Read, false).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(held.len(), 8);
+    for tenant in fixture.state.tenants.iter() {
+        assert_eq!(
+            tenant
+                .io
+                .admit(store_io::Lane::Read, false)
+                .err()
+                .unwrap()
+                .0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+    let raw = fixture._issuer.token(
+        "cli-public",
+        "synthetic-capacity-reader",
+        None,
+        &[],
+        "all-membership-reads-saturated",
+    );
+    assert_ne!(
+        raw, fixture.raw,
+        "setup: a genuinely new signed proof is required"
+    );
+    let (status, intent) = request(&fixture.state, json!({"kind":"login"}), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let before = oidc.audit.verify().unwrap();
+    let sessions_before: BTreeSet<_> = oidc
+        .registry
+        .lock()
+        .unwrap()
+        .sessions
+        .keys()
+        .cloned()
+        .collect();
+    let response = gateway_router(fixture.state.clone())
+        .oneshot(
+            Request::post("/auth/oidc/admit")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {raw}"))
+                .body(Body::from(
+                    json!({"version":1,"intent_id":intent["intent_id"]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+    ));
+    let after = oidc.audit.verify().unwrap();
+    assert_eq!(
+        after.records,
+        before.records + 2,
+        "the verified preflight failure must consume its funded intention and terminal, without leaving a promise pending"
+    );
+    assert!(after.serialized_bytes > before.serialized_bytes);
+    assert_eq!(
+        oidc.registry
+            .lock()
+            .unwrap()
+            .sessions
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        sessions_before
+    );
+    assert!(oidc.authenticate(&raw).is_err());
+    assert_eq!(
+        oidc.authenticate(&fixture.raw).unwrap().authentication_id,
+        fixture.binding.session_id.to_string()
+    );
+
+    // Inspect only this private fixture's two actual persisted entries. An HTTP
+    // refusal without its valid terminal cannot satisfy this regression.
+    let db = rusqlite::Connection::open_with_flags(
+        fixture._files.path().join("authentication.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let payload = |sequence: u64| -> Value {
+        let text: String = db
+            .query_row(
+                "SELECT payload FROM authentication_entries WHERE seq=?1",
+                [i64::try_from(sequence).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&text).unwrap()
+    };
+    let intention = payload(before.records + 1);
+    let terminal = payload(before.records + 2);
+    assert_eq!(intention["kind"], "charged");
+    assert_eq!(intention["charge"]["source"], "unscoped");
+    assert_eq!(intention["entry"]["kind"], "verified_initial");
+    let new_session =
+        Uuid::parse_str(intention["entry"]["record"]["session_id"].as_str().unwrap()).unwrap();
+    assert!(oidc.audit.session_current(new_session).unwrap().is_none());
+    assert_eq!(terminal["charge"]["source"], "unscoped");
+    assert_eq!(terminal["entry"]["kind"], "authentication");
+    assert_eq!(
+        terminal["entry"]["record"]["operation_id"],
+        intention["entry"]["record"]["operation_id"]
+    );
+    assert_eq!(
+        terminal["entry"]["record"]["phase"],
+        json!({"kind":"result","outcome":"unknown","reason":"interrupted"})
+    );
+    assert!(terminal["entry"]["record"]["principal"].is_null());
+    drop(db);
+    let reopened = AuthenticationAudit::open_existing(
+        &fixture._files.path().join("authentication.sqlite"),
+        fixture.installation_id,
+        fixture.audit_policy.clone(),
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    assert_eq!(reopened.verify().unwrap(), after);
+    assert!(reopened.session_current(new_session).unwrap().is_none());
+    assert_eq!(
+        reopened
+            .session_current(fixture.binding.session_id)
+            .unwrap(),
+        oidc.audit
+            .session_current(fixture.binding.session_id)
+            .unwrap()
+    );
+    drop(held);
+    for tenant in fixture.state.tenants.iter() {
+        assert!(tenant.io.admit(store_io::Lane::Read, false).is_ok());
+    }
+    assert_eq!(oidc.audit.verify().unwrap(), after);
 }

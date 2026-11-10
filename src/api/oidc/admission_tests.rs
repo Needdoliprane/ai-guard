@@ -5,7 +5,10 @@ use super::*;
 use crate as test_product;
 use crate::api::read_execution_tests::{identity_change, local_identity_state};
 use crate::audit::{
-    authentication::{ApprovedAuthenticationClientV1, AuthenticationAuditPolicyV1},
+    authentication::{
+        ApprovedAuthenticationClientV1, AuthenticationAuditPolicyV1, AuthenticationCapacityPlanV1,
+        AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
+    },
     read_test_observer::{Call, observe},
 };
 use crate::identity::*;
@@ -17,6 +20,29 @@ mod controlled;
 
 #[path = "admission_capacity_tests.rs"]
 mod capacity_tests;
+
+fn capacity_plan(
+    unscoped_records: u64,
+    a_records: u64,
+    b_records: u64,
+) -> AuthenticationCapacityPlanV1 {
+    AuthenticationCapacityPlanV1 {
+        version: 1,
+        unscoped: AuthenticationCapacityV1 {
+            max_records: unscoped_records,
+            max_serialized_bytes: 256 * 1024,
+        },
+        tenants: [("tenant-a", a_records), ("tenant-b", b_records)]
+            .map(|(tenant_id, max_records)| AuthenticationTenantCapacityV1 {
+                tenant_id: tenant_id.into(),
+                capacity: AuthenticationCapacityV1 {
+                    max_records,
+                    max_serialized_bytes: 1536 * 1024,
+                },
+            })
+            .to_vec(),
+    }
+}
 
 async fn verified_memberships(
     state: &GatewayState,
@@ -71,7 +97,7 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
             .unwrap();
     }
     let audit = Arc::new(
-        AuthenticationAudit::init_new(
+        AuthenticationAudit::init_new_v4(
             &directory.path().join("authentication.sqlite"),
             Uuid::new_v4(),
             AuthenticationAuditPolicyV1 {
@@ -84,6 +110,7 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
                     })
                     .to_vec(),
             },
+            capacity_plan(32, 483, 483), // Genesis + plan + all parts = G1000.
             Redactor::new(vec![]),
         )
         .unwrap(),
@@ -117,16 +144,31 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
     assert_eq!(access.subject(), "profile-reader");
     // Satisfy the helper's durable-intention precondition after real signature
     // verification. The integration canaries verify install's ordering itself.
+    let candidates = membership_capacity_candidates(&state, oidc, &access, &principal);
+    assert!(candidates.failure.is_none());
+    assert_eq!(
+        candidates.tenant_ids,
+        vec!["tenant-a".to_owned(), "tenant-b".to_owned()]
+    );
     oidc.audit
-        .append_typed(record(
-            oidc,
-            Action::SessionAdmission,
-            Uuid::new_v4(),
-            "cli-public",
-            None,
-            None,
-            Uuid::new_v4(),
-        ))
+        .begin_verified_initial_scoped(
+            record(
+                oidc,
+                Action::SessionAdmission,
+                Uuid::new_v4(),
+                "cli-public",
+                None,
+                None,
+                Uuid::new_v4(),
+            ),
+            principal.clone(),
+            Fingerprint::access_token(&raw),
+            AuthenticationTenantCandidatesV1::from_verified_memberships(
+                principal,
+                candidates.tenant_ids,
+            )
+            .unwrap(),
+        )
         .unwrap();
     let observations_a = observe(&state.tenants[0].store);
     let observations_b = observe(&state.tenants[1].store);
@@ -205,7 +247,7 @@ async fn verified_oidc_memberships_do_not_open_saturated_profile_stores() {
 }
 
 #[tokio::test]
-async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_saturated() {
+async fn exhausted_unscoped_budget_preserves_healthy_b_when_first_tenant_read_is_saturated() {
     use axum::{
         body::{Body, to_bytes},
         http::Request,
@@ -244,7 +286,7 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
     let (directory, state, _local_token) = local_identity_state();
     let issuer = controlled::ControlledIssuer::new().await;
     let audit = Arc::new(
-        AuthenticationAudit::init_new(
+        AuthenticationAudit::init_new_v4(
             &directory.path().join("authentication.sqlite"),
             Uuid::new_v4(),
             AuthenticationAuditPolicyV1 {
@@ -257,6 +299,7 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
                     })
                     .to_vec(),
             },
+            capacity_plan(2, 2, 7), // G13 = genesis/plan2 + unscoped2 + A2 + B7.
             Redactor::new(vec![]),
         )
         .unwrap(),
@@ -282,12 +325,15 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
         )
         .unwrap();
     let router = gateway_router(state.clone());
+    assert_eq!(audit.format_version().unwrap(), 4);
+    assert_eq!(audit.verify().unwrap().records, 2);
 
     let denied = issuer.token("cli-public", "exhausted-b", None, &[], "before-provision");
     let (status, body) = attempt(&router, &denied).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(body["error"]["code"], "permission_denied");
-    assert_eq!(audit.verify().unwrap().records, 3);
+    assert_eq!(audit.verify().unwrap().records, 4);
+    let exhausted = audit.verify().unwrap();
     let spent = issuer.token(
         "cli-public",
         "exhausted-b",
@@ -296,11 +342,12 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
         "spent-before-provision",
     );
     let (status, body) = attempt(&router, &spent).await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        body["error"]["code"], "authentication_subject_capacity_exhausted",
-        "HARNESS INCONCLUSIVE: the subject's durable budget was not exhausted"
+        body["error"]["code"], "audit_unavailable",
+        "HARNESS INCONCLUSIVE: the unscoped durable part was not exhausted"
     );
+    assert_eq!(audit.verify().unwrap(), exhausted);
 
     assert_eq!(state.tenants[0].tenant_id, "tenant-a");
     assert_eq!(state.tenants[1].tenant_id, "tenant-b");
@@ -376,12 +423,13 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
         "HARNESS INCONCLUSIVE: fresh B membership was not admitted; error={}",
         fresh_body["error"]["code"]
     );
+    assert_eq!(audit.verify().unwrap().records, 6);
     assert_eq!(refused(), StatusCode::TOO_MANY_REQUESTS);
     let recovery = issuer.token("cli-public", "exhausted-b", None, &[], "healthy-b-recovery");
     let (status, body) = attempt(&router, &recovery).await;
     assert_eq!(refused(), StatusCode::TOO_MANY_REQUESTS);
     println!(
-        "MEMBERSHIP_RECOVERY_B held_a={} fresh_status={} recovery_status={} recovery_error={}",
+        "MEMBERSHIP_CAPACITY_B held_a={} fresh_status={} recovery_status={} recovery_error={}",
         held_a.len(),
         fresh_status.as_u16(),
         status.as_u16(),
@@ -390,8 +438,8 @@ async fn exhausted_subject_recovers_in_healthy_b_when_first_tenant_read_is_satur
     assert_eq!(
         status,
         StatusCode::CREATED,
-        "a saturated neighboring A must not prevent the exhausted subject's current authorized B membership; error={}",
+        "a saturated neighboring A and exhausted unscoped part must preserve the current authorized B membership; error={}",
         body["error"]["code"]
     );
-    assert_eq!(audit.verify().unwrap().records, 7);
+    assert_eq!(audit.verify().unwrap().records, 8);
 }

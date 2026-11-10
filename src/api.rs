@@ -257,6 +257,19 @@ impl GatewayState {
         for tenant in self.tenants.iter() {
             oidc.audit.ensure_distinct_from_business(&tenant.store)?;
         }
+        let version = oidc.audit.format_version()?;
+        anyhow::ensure!(
+            matches!(version, 3 | 4),
+            "authentication audit requires an explicit supported-format migration"
+        );
+        if self.tenants.len() > 1 || version == 4 {
+            let tenants = self
+                .tenants
+                .iter()
+                .map(|tenant| tenant.tenant_id.clone())
+                .collect();
+            oidc.audit.validate_capacity_tenants(&tenants)?;
+        }
         self.oidc = Some(Arc::new(oidc));
         Ok(self)
     }

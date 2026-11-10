@@ -202,8 +202,13 @@ async fn lost_ack_at_each_real_ledger_boundary_replays_the_same_three_facts() {
         let oidc = fixture.state.oidc.as_ref().unwrap();
         assert_eq!(
             oidc.audit.format_version().unwrap(),
-            3,
-            "setup: composed Core V3 required"
+            4,
+            "setup: composed Core V4 capacity plan required"
+        );
+        assert_eq!(
+            oidc.audit.verify().unwrap().records,
+            4,
+            "setup: genesis + plan + initial intention + admission"
         );
         pending(&fixture).await;
         let records = oidc.audit.verify().unwrap().records;

@@ -72,6 +72,27 @@ impl DurableAuthenticationAudit {
         policy: AuthenticationAuditPolicyV1,
         redactor: Redactor,
     ) -> Result<Self> {
+        Self::create_new(path, installation_id, policy, None, redactor)
+    }
+
+    pub fn init_new_v4(
+        path: &Path,
+        installation_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        plan: AuthenticationCapacityPlanV1,
+        redactor: Redactor,
+    ) -> Result<Self> {
+        plan.validate()?;
+        Self::create_new(path, installation_id, policy, Some(plan), redactor)
+    }
+
+    fn create_new(
+        path: &Path,
+        installation_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        plan: Option<AuthenticationCapacityPlanV1>,
+        redactor: Redactor,
+    ) -> Result<Self> {
         format::validate_policy(installation_id, &policy, &redactor)?;
         let (backing, guard) = StoreStorage::create_new(path)?;
         durable_parent(&backing)?;
@@ -83,6 +104,10 @@ impl DurableAuthenticationAudit {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
         backing.verify(&tx)?;
         format::initialize(&tx, installation_id, namespace_id, &policy, &redactor)?;
+        if let Some(plan) = plan {
+            let replay = format::replay(&tx, installation_id, &policy, &redactor, None)?;
+            Self::insert_plan(&tx, replay, plan, &policy, &redactor)?;
+        }
         format::replay(&tx, installation_id, &policy, &redactor, None)?;
         tx.commit()?;
         backing.verify(&db)?;
@@ -241,13 +266,42 @@ impl DurableAuthenticationAudit {
         })
     }
 
+    pub fn begin_verified_initial_scoped(
+        &self,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+        candidates: AuthenticationTenantCandidatesV1,
+    ) -> Result<AuthenticationMutationV1> {
+        // This stable marker describes the V4 snapshot lane, not authorization.
+        // Candidate changes on retries never change the logical entry bytes.
+        self.append_entry_with_candidates(
+            format::Entry::VerifiedInitial {
+                record,
+                principal,
+                access_fingerprint,
+                membership_recovery: true,
+            },
+            Some(candidates),
+        )
+    }
+
     fn append_entry(&self, entry: format::Entry) -> Result<AuthenticationMutationV1> {
+        self.append_entry_with_candidates(entry, None)
+    }
+
+    fn append_entry_with_candidates(
+        &self,
+        entry: format::Entry,
+        candidates: Option<AuthenticationTenantCandidatesV1>,
+    ) -> Result<AuthenticationMutationV1> {
         self.healthy()?;
         // Never persist or alter an identity containing a redaction collision.
-        let payload = format::checked_json(&entry, &self.redactor)?;
+        format::checked_json(&entry, &self.redactor)?;
         let record = entry
             .record()
-            .ok_or(AuthenticationAuditFailureV1::InvalidInput)?;
+            .ok_or(AuthenticationAuditFailureV1::InvalidInput)?
+            .clone();
         let mut state = self
             .state
             .lock()
@@ -259,7 +313,7 @@ impl DurableAuthenticationAudit {
         // Remember it even when a later CAS/phase/capacity check refuses work.
         // A newly inserted, uncommitted receipt is never used as this witness.
         *floor = replay.verified.head.clone();
-        if let Some(receipt) = replay.existing(record, &payload)? {
+        if let Some(receipt) = replay.existing_entry(&entry)? {
             if let format::Entry::Session { mutation } = &entry {
                 replay.validate_mutation_replay(mutation, &receipt, &self.policy)?;
             }
@@ -271,10 +325,10 @@ impl DurableAuthenticationAudit {
                 inserted: false,
             });
         }
-        format::validate_record(record, &self.policy)?;
-        replay.validate_transition(record)?;
+        format::validate_record(&record, &self.policy)?;
+        replay.validate_transition(&record)?;
         if matches!(&entry, format::Entry::Authentication { .. }) {
-            replay.validate_generic_lane(record)?;
+            replay.validate_generic_lane(&record)?;
         }
         if let format::Entry::VerifiedInitial {
             principal,
@@ -284,11 +338,11 @@ impl DurableAuthenticationAudit {
         } = &entry
         {
             replay.validate_initial(
-                record,
+                &record,
                 principal,
                 *access_fingerprint,
                 *membership_recovery,
-                &payload,
+                &format::checked_json(&entry, &self.redactor)?,
                 &self.policy,
             )?;
         }
@@ -305,6 +359,9 @@ impl DurableAuthenticationAudit {
                 );
             }
         }
+        let entry = replay.charge_entry(entry, candidates.as_ref(), &self.redactor)?;
+        let payload = format::checked_json(&entry, &self.redactor)?;
+        replay.validate_charge(&entry, payload.len() as u64)?;
         let records = replay
             .verified
             .records
@@ -372,6 +429,7 @@ impl DurableAuthenticationAudit {
                 format::LEGACY_VERSION => 1,
                 format::VERIFIED_INITIAL_VERSION => 2,
                 format::VERSION => 3,
+                format::TENANT_CAPACITY_VERSION => 4,
                 _ => return Err(AuthenticationAuditFailureV1::Format.into()),
             })
         })
@@ -392,6 +450,113 @@ impl DurableAuthenticationAudit {
 
     pub fn fingerprint_seen(&self, fingerprint: &AuthenticationTokenFingerprintV1) -> Result<bool> {
         self.read_projection(|replay| Ok(replay.fingerprint_seen(fingerprint)))
+    }
+
+    pub fn capacity_plan(&self) -> Result<Option<AuthenticationCapacityPlanV1>> {
+        self.read_projection(|replay| Ok(replay.budget.plan.clone()))
+    }
+
+    pub fn validate_capacity_tenants(
+        &self,
+        tenants: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        self.read_projection(|replay| {
+            ensure!(
+                replay.version == format::TENANT_CAPACITY_VERSION,
+                AuthenticationAuditFailureV1::Format
+            );
+            let plan = replay
+                .budget
+                .plan
+                .as_ref()
+                .ok_or(AuthenticationAuditFailureV1::Format)?;
+            let planned: std::collections::BTreeSet<_> =
+                plan.tenants.iter().map(|t| t.tenant_id.clone()).collect();
+            ensure!(planned == *tenants, AuthenticationAuditFailureV1::Format);
+            Ok(())
+        })
+    }
+
+    fn insert_plan(
+        db: &Connection,
+        mut replay: format::Replay,
+        plan: AuthenticationCapacityPlanV1,
+        policy: &AuthenticationAuditPolicyV1,
+        redactor: &Redactor,
+    ) -> Result<AuthenticationVerificationV1> {
+        let payload = format::checked_json(
+            &format::Entry::CapacityPlan { plan: plan.clone() },
+            redactor,
+        )?;
+        replay.version = format::TENANT_CAPACITY_VERSION;
+        replay.install_plan(plan, payload.len() as u64, policy)?;
+        let records = replay
+            .verified
+            .records
+            .checked_add(1)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        let bytes = replay
+            .verified
+            .serialized_bytes
+            .checked_add(payload.len() as u64)
+            .ok_or(AuthenticationAuditFailureV1::Capacity)?;
+        let received = format::timestamp();
+        let hash = format::digest(records, &received, &replay.verified.head.hash, &payload);
+        ensure!(db.execute("INSERT INTO authentication_entries(seq,received_at,prev_hash,hash,payload) VALUES(?1,?2,?3,?4,?5)", params![records as i64, received, replay.verified.head.hash, hash, payload])? == 1, AuthenticationAuditFailureV1::Integrity);
+        ensure!(db.execute("UPDATE authentication_quota SET records=?1,bytes=?2 WHERE singleton=1 AND records=?3 AND bytes=?4", params![records as i64, bytes as i64, replay.verified.records as i64, replay.verified.serialized_bytes as i64])? == 1, AuthenticationAuditFailureV1::Integrity);
+        db.pragma_update(None, "user_version", format::TENANT_CAPACITY_VERSION)?;
+        Ok(AuthenticationVerificationV1 {
+            namespace_id: replay.verified.namespace_id,
+            records,
+            serialized_bytes: bytes,
+            head: AuthenticationReceiptV1 {
+                namespace_id: replay.verified.namespace_id,
+                sequence: records,
+                hash,
+            },
+        })
+    }
+
+    pub fn migrate_tenant_capacity_v4(
+        &self,
+        backup: &Path,
+        plan: AuthenticationCapacityPlanV1,
+    ) -> Result<AuthenticationVerificationV1> {
+        self.healthy()?;
+        plan.validate()?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?;
+        let LiveState { db, floor } = &mut *state;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let replay = self.inspect(&tx, floor)?;
+        *floor = replay.verified.head.clone();
+        ensure!(
+            replay.version == format::VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        let expected = replay.verified.clone();
+        let mut probe = connection(&self.backing, true)?;
+        {
+            let source = probe.transaction_with_behavior(TransactionBehavior::Deferred)?;
+            ensure!(
+                self.inspect(&source, floor)?.verified == expected,
+                AuthenticationAuditFailureV1::Integrity
+            );
+            self.backup_snapshot(&source, backup, &expected)?;
+            source.commit()?;
+        }
+        probe.close().map_err(|(_, error)| error)?;
+        let appended = Self::insert_plan(&tx, replay, plan, &self.policy, &self.redactor)?;
+        ensure!(
+            self.inspect(&tx, floor)?.verified == appended,
+            AuthenticationAuditFailureV1::Integrity
+        );
+        tx.commit()?;
+        self.verify_backing(db)?;
+        *floor = appended.head.clone();
+        Ok(appended)
     }
 
     pub fn backup_new(&self, path: &Path) -> Result<AuthenticationVerificationV1> {

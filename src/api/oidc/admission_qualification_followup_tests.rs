@@ -159,7 +159,12 @@ async fn valid_finish_resumes_retained_typed_logout_between_begin_and_end_withou
     for refresh_already_closed in [false, true] {
         let fixture = fixture().await;
         let oidc = fixture.state.oidc.as_ref().unwrap();
-        assert_eq!(oidc.audit.format_version().unwrap(), 3);
+        assert_eq!(oidc.audit.format_version().unwrap(), 4);
+        assert_eq!(
+            oidc.audit.verify().unwrap().records,
+            4,
+            "setup: genesis + V4 plan + initial intention + admission"
+        );
         let reader = ReaderToken {
             raw: fixture.raw.clone(),
             binding: fixture.binding.clone(),
@@ -228,7 +233,12 @@ async fn real_refresh_operation_drop_resumes_logout_and_failed_audit_keeps_the_e
         for audit_refused in [false, true] {
             let fixture = fixture().await;
             let oidc = fixture.state.oidc.as_ref().unwrap();
-            assert_eq!(oidc.audit.format_version().unwrap(), 3);
+            assert_eq!(oidc.audit.format_version().unwrap(), 4);
+            assert_eq!(
+                oidc.audit.verify().unwrap().records,
+                4,
+                "setup: genesis + V4 plan + initial intention + admission"
+            );
             let operation = begin_refresh(
                 oidc,
                 &fixture.raw,
@@ -296,7 +306,12 @@ async fn durable_refresh_before_first_logout_must_reconcile_without_a_retroactiv
     for publish_intent in [false, true] {
         let fixture = fixture().await;
         let oidc = fixture.state.oidc.as_ref().unwrap();
-        assert_eq!(oidc.audit.format_version().unwrap(), 3);
+        assert_eq!(oidc.audit.format_version().unwrap(), 4);
+        assert_eq!(
+            oidc.audit.verify().unwrap().records,
+            4,
+            "setup: genesis + V4 plan + initial intention + admission"
+        );
         let operation = if publish_intent {
             let reader = ReaderToken {
                 raw: fixture.raw.clone(),
@@ -506,7 +521,12 @@ async fn current_closed_without_the_exact_original_keeper_proof_never_releases_t
     for divergence in 0..4 {
         let fixture = fixture().await;
         let oidc = fixture.state.oidc.as_ref().unwrap();
-        assert_eq!(oidc.audit.format_version().unwrap(), 3);
+        assert_eq!(oidc.audit.format_version().unwrap(), 4);
+        assert_eq!(
+            oidc.audit.verify().unwrap().records,
+            4,
+            "setup: genesis + V4 plan + initial intention + admission"
+        );
         let operation = begin_refresh(
             oidc,
             &fixture.raw,

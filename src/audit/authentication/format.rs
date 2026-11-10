@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) const LEGACY_VERSION: i64 = 1_000_001;
 pub(super) const VERIFIED_INITIAL_VERSION: i64 = 1_000_002;
 pub(super) const VERSION: i64 = 1_000_003;
+pub(super) const TENANT_CAPACITY_VERSION: i64 = 1_000_004;
 pub(super) const APPLICATION_ID: i64 = 0x4149_4741; // AIGA
 const PURPOSE: &str = "authentication_audit_v1";
 const MAX_PAYLOAD_BYTES: usize = 32_768;
@@ -28,7 +29,7 @@ const SCHEMA: [(&str, &str); 3] = [
     ),
 ];
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Entry {
     Genesis {
@@ -52,11 +53,18 @@ pub(super) enum Entry {
     Session {
         mutation: Box<SessionMutation>,
     },
+    CapacityPlan {
+        plan: AuthenticationCapacityPlanV1,
+    },
+    Charged {
+        charge: budget::CapacityOwner,
+        entry: Box<Entry>,
+    },
 }
 
 /// The audit record and its session transition are one closed, hash-chained
 /// payload. There is no independently writable session projection to trust.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "transition", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum SessionMutation {
     Admit {
@@ -112,7 +120,8 @@ impl Entry {
         match self {
             Self::Authentication { record } | Self::VerifiedInitial { record, .. } => Some(record),
             Self::Session { mutation } => Some(mutation.record()),
-            Self::Genesis { .. } => None,
+            Self::Charged { entry, .. } => entry.record(),
+            Self::Genesis { .. } | Self::CapacityPlan { .. } => None,
         }
     }
 }
@@ -133,6 +142,7 @@ pub(super) struct Replay {
     // Only a validated V3 BEGIN creates a promise; only its END consumes it.
     // One entry per durable session, bounded by the same record/byte policy.
     native_logouts: BTreeMap<Uuid, NativeLogoutPromise>,
+    pub budget: budget::BudgetReplay,
 }
 
 struct NativeLogoutPromise {
@@ -375,8 +385,10 @@ pub(super) fn schema_version(db: &Connection) -> Result<i64> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let application: i64 = db.pragma_query_value(None, "application_id", |row| row.get(0))?;
     ensure!(
-        matches!(version, LEGACY_VERSION | VERIFIED_INITIAL_VERSION | VERSION)
-            && application == APPLICATION_ID,
+        matches!(
+            version,
+            LEGACY_VERSION | VERIFIED_INITIAL_VERSION | VERSION | TENANT_CAPACITY_VERSION
+        ) && application == APPLICATION_ID,
         AuthenticationAuditFailureV1::Format
     );
     Ok(version)
@@ -482,6 +494,15 @@ impl Replay {
         bytes: u64,
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
+        if self.budget.plan.is_some() {
+            // V4 validates every charge and historical ticket separately.
+            // There is no second, transferable global reservation pool.
+            ensure!(
+                records <= policy.max_records && bytes <= policy.max_serialized_bytes,
+                AuthenticationAuditFailureV1::Capacity
+            );
+            return Ok(());
+        }
         self.check_terminal_capacity_for_mutation(
             match entry {
                 Entry::Session { mutation } => Some(mutation.as_ref()),
@@ -578,6 +599,9 @@ impl Replay {
         payload: &str,
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
+        if self.budget.plan.is_some() {
+            return Ok(());
+        }
         if self.native_logouts.is_empty()
             && !matches!(
                 mutation,
@@ -623,7 +647,10 @@ impl Replay {
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<u64> {
         ensure!(
-            matches!(self.version, VERIFIED_INITIAL_VERSION | VERSION),
+            matches!(
+                self.version,
+                VERIFIED_INITIAL_VERSION | VERSION | TENANT_CAPACITY_VERSION
+            ),
             AuthenticationAuditFailureV1::Format
         );
         ensure!(
@@ -809,7 +836,12 @@ impl Replay {
             AuthenticationAuditFailureV1::PhaseOrder
         );
         // phases contains only canonical payloads from the validated prefix.
-        serde_json::from_str(payload).map_err(|_| AuthenticationAuditFailureV1::Integrity.into())
+        let entry: Entry =
+            serde_json::from_str(payload).map_err(|_| AuthenticationAuditFailureV1::Integrity)?;
+        Ok(match entry {
+            Entry::Charged { entry, .. } => *entry,
+            other => other,
+        })
     }
 
     fn validate_native_logout_context(
@@ -821,7 +853,7 @@ impl Replay {
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
         ensure!(
-            self.version == VERSION,
+            matches!(self.version, VERSION | TENANT_CAPACITY_VERSION),
             AuthenticationAuditFailureV1::Format
         );
         validate_binding(binding, policy)?;
@@ -1378,21 +1410,222 @@ impl Replay {
         self.accept(record, payload, receipt)
     }
 
-    pub fn existing(
-        &self,
-        record: &AuthenticationRecordV1,
-        payload: &str,
-    ) -> Result<Option<AuthenticationReceiptV1>> {
-        match self
+    /// Compare the requested logical entry with its exact stored representation
+    /// before considering any current membership candidates or capacity.
+    pub fn existing_entry(&self, entry: &Entry) -> Result<Option<AuthenticationReceiptV1>> {
+        let record = entry
+            .record()
+            .ok_or(AuthenticationAuditFailureV1::InvalidInput)?;
+        let Some((payload, receipt)) = self
             .phases
             .get(&(record.operation_id, phase_key(record.phase).1))
-        {
-            Some((old, receipt)) => {
-                ensure!(old == payload, AuthenticationAuditFailureV1::Conflict);
-                Ok(Some(receipt.clone()))
-            }
-            None => Ok(None),
+        else {
+            return Ok(None);
+        };
+        let stored: Entry =
+            serde_json::from_str(payload).map_err(|_| AuthenticationAuditFailureV1::Integrity)?;
+        let logical = match &stored {
+            Entry::Charged { entry, .. } => entry.as_ref(),
+            other => other,
+        };
+        ensure!(
+            checked_json(logical, &Redactor::new(vec![]))?
+                == checked_json(entry, &Redactor::new(vec![]))?,
+            AuthenticationAuditFailureV1::Conflict
+        );
+        Ok(Some(receipt.clone()))
+    }
+
+    pub fn charge_entry(
+        &self,
+        entry: Entry,
+        candidates: Option<&AuthenticationTenantCandidatesV1>,
+        redactor: &Redactor,
+    ) -> Result<Entry> {
+        if self.version != TENANT_CAPACITY_VERSION {
+            ensure!(candidates.is_none(), AuthenticationAuditFailureV1::Format);
+            return Ok(entry);
         }
+        ensure!(
+            self.budget.plan.is_some(),
+            AuthenticationAuditFailureV1::Format
+        );
+        let owner = if matches!(entry, Entry::VerifiedInitial { .. }) {
+            Some(self.budget.choose_initial(
+                &entry,
+                candidates.ok_or(AuthenticationAuditFailureV1::Format)?,
+                redactor,
+            )?)
+        } else {
+            ensure!(
+                candidates.is_none(),
+                AuthenticationAuditFailureV1::InvalidInput
+            );
+            self.budget.owner(&entry)?
+        };
+        if let Some(owner) = &owner {
+            self.validate_future_terminal(&entry, owner)?;
+        }
+        Ok(match owner {
+            Some(charge) => Entry::Charged {
+                charge,
+                entry: Box::new(entry),
+            },
+            None => entry, // Only the exact historical terminal can own None.
+        })
+    }
+
+    /// Before promising an effect, size all terminal layouts with the retained
+    /// immutable identity and worst-width numeric/fingerprint fields. These
+    /// are sizing templates, never persisted events or claimed observations.
+    /// Unknown future credentials affect only fixed-size digests. Every copied
+    /// identity string comes from this binding and keeps its exact JSON escape
+    /// cost; no guess about a maximum unescaped string is required.
+    fn validate_future_terminal(&self, entry: &Entry, owner: &budget::CapacityOwner) -> Result<()> {
+        let record = entry
+            .record()
+            .ok_or(AuthenticationAuditFailureV1::InvalidInput)?;
+        if record.phase != AuthenticationPhaseV1::Intention {
+            return Ok(());
+        }
+        let principal = match entry {
+            Entry::VerifiedInitial { principal, .. } => principal.clone(),
+            _ => self
+                .sessions
+                .get(
+                    &record
+                        .session_id
+                        .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?,
+                )
+                .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?
+                .binding
+                .principal
+                .clone(),
+        };
+        let receipt = AuthenticationReceiptV1 {
+            namespace_id: self.verified.namespace_id,
+            sequence: u64::MAX,
+            hash: "f".repeat(64),
+        };
+        let access = AuthenticationTokenFingerprintV1 {
+            domain: FingerprintDomainV1::Access,
+            digest: [255; 32],
+        };
+        let binding = AuthenticationSessionBindingV1 {
+            session_id: record
+                .session_id
+                .ok_or(AuthenticationAuditFailureV1::PhaseOrder)?,
+            generation: u32::MAX,
+            principal: principal.clone(),
+            issuer: record.issuer.clone(),
+            client_id: record.client_id.clone(),
+            kind: OidcSessionKindV1::NativeCli,
+            access_fingerprint: access,
+            refresh_fingerprint: Some(AuthenticationTokenFingerprintV1 {
+                domain: FingerprintDomainV1::Refresh,
+                digest: [255; 32],
+            }),
+            expires_at_unix_seconds: i64::MIN,
+        };
+        let terminal = AuthenticationRecordV1 {
+            // This is the longest action/phase/reason representation, including
+            // optional context even when the concrete transition needs less.
+            action: AuthenticationActionV1::SessionAdmission,
+            phase: AuthenticationPhaseV1::Result {
+                outcome: AuthenticationOutcomeV1::Succeeded,
+                reason: AuthenticationReasonV1::ProviderUnavailable,
+            },
+            principal: Some(principal),
+            transaction_id: Some(record.operation_id),
+            causal: Some(receipt.clone()),
+            ..record.clone()
+        };
+        let mutations = [
+            SessionMutation::Admit {
+                record: terminal.clone(),
+                binding: binding.clone(),
+            },
+            SessionMutation::Rotate {
+                record: terminal.clone(),
+                binding: binding.clone(),
+                expected_generation: u32::MAX,
+                expected_access_fingerprint: access,
+            },
+            SessionMutation::Close {
+                record: terminal.clone(),
+                expected_generation: u32::MAX,
+                expected_access_fingerprint: access,
+            },
+            SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                record: terminal,
+                expected_binding: binding,
+                refresh_operation_id: record.operation_id,
+                refresh_intention: receipt.clone(),
+                refresh_result: receipt,
+            },
+        ];
+        for mutation in mutations {
+            checked_json(
+                &Entry::Charged {
+                    charge: owner.clone(),
+                    entry: Box::new(Entry::Session {
+                        mutation: Box::new(mutation),
+                    }),
+                },
+                &Redactor::new(vec![]),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_charge(&self, entry: &Entry, bytes: u64) -> Result<()> {
+        if self.budget.plan.is_none() {
+            return Ok(());
+        }
+        let (logical, owner) = match entry {
+            Entry::Charged { entry, charge } => (entry.as_ref(), Some(charge)),
+            other => (other, None),
+        };
+        // Use the same replay transition before inserting, so a routine
+        // capacity refusal never latches the live handle as damaged.
+        self.budget.validate(logical, owner, bytes)
+    }
+
+    pub fn install_plan(
+        &mut self,
+        plan: AuthenticationCapacityPlanV1,
+        payload_bytes: u64,
+        policy: &AuthenticationAuditPolicyV1,
+    ) -> Result<()> {
+        ensure!(
+            self.version == TENANT_CAPACITY_VERSION,
+            AuthenticationAuditFailureV1::Format
+        );
+        self.budget.install(
+            plan,
+            self.intentions
+                .iter()
+                .filter(|(operation, _)| !self.phases.contains_key(&(**operation, 1)))
+                .map(|(_, (record, receipt))| {
+                    (
+                        record,
+                        receipt,
+                        record
+                            .session_id
+                            .and_then(|id| self.sessions.get(&id))
+                            .map(|current| &current.binding),
+                    )
+                }),
+            self.verified
+                .records
+                .checked_add(1)
+                .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+            self.verified
+                .serialized_bytes
+                .checked_add(payload_bytes)
+                .ok_or(AuthenticationAuditFailureV1::Capacity)?,
+            policy,
+        )
     }
 
     pub fn validate_transition(&self, record: &AuthenticationRecordV1) -> Result<()> {
@@ -1552,6 +1785,7 @@ pub(super) fn replay(
         initial_fingerprints: BTreeSet::new(),
         subject_usage: BTreeMap::new(),
         native_logouts: BTreeMap::new(),
+        budget: budget::BudgetReplay::default(),
     };
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,length(CAST(payload AS BLOB)),payload,operation_id,phase,length(CAST(received_at AS BLOB)),length(CAST(prev_hash AS BLOB)),length(CAST(hash AS BLOB)),length(CAST(operation_id AS BLOB)),length(CAST(phase AS BLOB)) FROM authentication_entries ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -1620,6 +1854,33 @@ pub(super) fn replay(
             sequence: expected,
             hash: hash.clone(),
         };
+        // A single bounded wrapper is permitted only after the unique plan.
+        // Historical terminals retain their exact V3 bytes and receipts.
+        let (entry, charge) = match entry {
+            Entry::Charged { charge, entry } => {
+                ensure!(
+                    replay.version == TENANT_CAPACITY_VERSION
+                        && replay.budget.plan.is_some()
+                        && matches!(
+                            entry.as_ref(),
+                            Entry::Authentication { .. }
+                                | Entry::VerifiedInitial { .. }
+                                | Entry::Session { .. }
+                        ),
+                    AuthenticationAuditFailureV1::Integrity
+                );
+                (*entry, Some(charge))
+            }
+            other => (other, None),
+        };
+        if replay.budget.plan.is_some() && entry.record().is_some() {
+            if let Some(owner) = charge.as_ref() {
+                replay.validate_future_terminal(&entry, owner)?;
+            }
+            replay
+                .budget
+                .accept(&entry, charge.as_ref(), payload.len() as u64, &receipt)?;
+        }
         match entry {
             Entry::Genesis {
                 format,
@@ -1661,7 +1922,10 @@ pub(super) fn replay(
                     .ok_or(AuthenticationAuditFailureV1::Integrity)?;
                 ensure!(
                     seq > 1
-                        && matches!(replay.version, VERIFIED_INITIAL_VERSION | VERSION)
+                        && matches!(
+                            replay.version,
+                            VERIFIED_INITIAL_VERSION | VERSION | TENANT_CAPACITY_VERSION
+                        )
                         && projected_operation.as_deref()
                             == Some(record.operation_id.to_string().as_str())
                         && projected_phase.as_deref() == Some(phase_key(record.phase).0),
@@ -1683,13 +1947,23 @@ pub(super) fn replay(
                 validate_record(record, policy)?;
                 replay.accept_mutation(*mutation, payload, receipt.clone(), policy)?;
             }
+            Entry::CapacityPlan { plan } => {
+                ensure!(
+                    seq > 1 && projected_operation.is_none() && projected_phase.is_none(),
+                    AuthenticationAuditFailureV1::Integrity
+                );
+                replay.install_plan(plan, payload.len() as u64, policy)?;
+                replay.receipts.insert(expected, receipt.clone());
+            }
+            Entry::Charged { .. } => return Err(AuthenticationAuditFailureV1::Integrity.into()),
         }
         replay.verified.records = expected;
         replay.verified.serialized_bytes = bytes;
         replay.verified.head = receipt;
     }
     ensure!(
-        replay.verified.records > 0,
+        replay.verified.records > 0
+            && ((replay.version == TENANT_CAPACITY_VERSION) == replay.budget.plan.is_some()),
         AuthenticationAuditFailureV1::Integrity
     );
     let quota_rows: i64 = db.query_row("SELECT count(*) FROM authentication_quota", [], |row| {

@@ -9,8 +9,13 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
 
+mod budget;
 mod durable;
 mod format;
+pub(crate) use budget::AuthenticationTenantCandidatesV1;
+pub use budget::{
+    AuthenticationCapacityPlanV1, AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -283,6 +288,43 @@ pub struct AuthenticationAudit {
 }
 
 impl AuthenticationAudit {
+    /// The trusted gateway supplies only memberships it actually verified.
+    /// An empty snapshot can fund a rejection, never a session admission.
+    pub(crate) fn begin_verified_initial_scoped(
+        &self,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+        candidates: AuthenticationTenantCandidatesV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.inner
+            .begin_verified_initial_scoped(record, principal, access_fingerprint, candidates)
+    }
+
+    pub fn capacity_plan(&self) -> anyhow::Result<Option<AuthenticationCapacityPlanV1>> {
+        self.inner.capacity_plan()
+    }
+
+    /// Common gateway assembly preflight, including library callers. This
+    /// checks accounting scope and format, not memberships or permissions.
+    pub(crate) fn validate_capacity_tenants(
+        &self,
+        tenants: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        self.inner.validate_capacity_tenants(tenants)
+    }
+
+    /// Explicit offline V3 -> V4 migration with an exclusively new V3 backup.
+    /// Commits the finite plan and format atomically. Existing receipts, G and
+    /// outstanding historical terminal promises are never rewritten.
+    pub fn migrate_tenant_capacity_v4(
+        &self,
+        backup: &Path,
+        plan: AuthenticationCapacityPlanV1,
+    ) -> anyhow::Result<AuthenticationVerificationV1> {
+        self.inner.migrate_tenant_capacity_v4(backup, plan)
+    }
+
     /// V2: atomically consume a verified initial access proof and reserve its
     /// subject budget with the mandatory intention. Neither a proof replay nor
     /// a gateway restart grants a second attempt. This is not membership or
@@ -474,6 +516,26 @@ impl AuthenticationAudit {
                 path,
                 installation_id,
                 policy,
+                redactor,
+            )?,
+        })
+    }
+
+    /// Exclusively new V4 ledger. Genesis and its finite capacity plan commit
+    /// atomically; existing files are never adopted or migrated here.
+    pub fn init_new_v4(
+        path: &Path,
+        installation_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        plan: AuthenticationCapacityPlanV1,
+        redactor: Redactor,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            inner: durable::DurableAuthenticationAudit::init_new_v4(
+                path,
+                installation_id,
+                policy,
+                plan,
                 redactor,
             )?,
         })

@@ -447,19 +447,29 @@ fn native_start_window(registry: &Registry, binding: &SessionBinding) -> ApiResu
     next_window(registry, Some(&principal), Instant::now())
 }
 
-fn membership_recovery_eligible(
+struct MembershipCapacityObservation {
+    tenant_ids: Vec<String>,
+    failure: Option<(StatusCode, Json<Value>)>,
+}
+
+fn membership_capacity_candidates(
     state: &GatewayState,
     oidc: &OidcGateway,
     access: &VerifiedAccess,
     principal: &PrincipalRefV1,
-) -> ApiResult<bool> {
-    let ceiling = oidc
-        .config
-        .mapping
-        .capabilities(access.claims())
-        .map_err(|_| credential_invalid())?;
+) -> MembershipCapacityObservation {
+    let ceiling = match oidc.config.mapping.capabilities(access.claims()) {
+        Ok(ceiling) => ceiling,
+        Err(_) => {
+            return MembershipCapacityObservation {
+                tenant_ids: Vec::new(),
+                failure: Some(credential_invalid()),
+            };
+        }
+    };
     let mut unavailable = false;
     let mut admission_failure = None;
+    let mut candidates = Vec::new();
     for tenant in state.tenants.iter() {
         // Internal authorization preflight only, with no human read payload
         // returned or persisted. The normal atomic, audited human_profile runs
@@ -467,20 +477,19 @@ fn membership_recovery_eligible(
         let eligible = state
             .io_scope
             .with_store(tenant, store_io::Lane::Read, true, |store| {
-                let Some(account) = store
-                    .human_account(principal)?
-                    .filter(|account| account.active)
-                else {
+                let snapshot = store.authentication_membership_snapshot(principal)?;
+                // This revision describes the observation, not an enduring
+                // permission. The normal audited profile is still required.
+                let _observed_revision = snapshot.authorization_revision;
+                let Some(_account) = snapshot.account.filter(|account| account.active) else {
                     return Ok(false);
                 };
-                let members = store.identity_memberships(&account.principal)?;
-                anyhow::ensure!(members.len() <= 256, "human membership capacity exceeded");
-                Ok::<_, anyhow::Error>(members.iter().any(|member| {
+                Ok::<_, anyhow::Error>(snapshot.memberships.iter().any(|member| {
                     member.active && member.capabilities.intersection(&ceiling).next().is_some()
                 }))
             });
         match eligible {
-            Ok(Ok(true)) => return Ok(true),
+            Ok(Ok(true)) => candidates.push(tenant.tenant_id.clone()),
             Ok(Ok(false)) => {}
             Err(error) => {
                 unavailable = true;
@@ -491,13 +500,32 @@ fn membership_recovery_eligible(
     }
     // No tenant is selected yet. A refused neighboring read cannot erase a
     // current allowed membership elsewhere; without one, retain the refusal.
-    if let Some(error) = admission_failure {
-        return Err(error);
+    if !candidates.is_empty() {
+        return MembershipCapacityObservation {
+            tenant_ids: candidates,
+            failure: None,
+        };
     }
-    if unavailable {
-        return Err(audit_unavailable());
+    MembershipCapacityObservation {
+        tenant_ids: candidates,
+        failure: admission_failure.or_else(|| unavailable.then(audit_unavailable)),
     }
-    Ok(false)
+}
+
+fn membership_recovery_eligible(
+    state: &GatewayState,
+    oidc: &OidcGateway,
+    access: &VerifiedAccess,
+    principal: &PrincipalRefV1,
+) -> ApiResult<bool> {
+    let observation = membership_capacity_candidates(state, oidc, access, principal);
+    if !observation.tenant_ids.is_empty() {
+        Ok(true)
+    } else if let Some(error) = observation.failure {
+        Err(error)
+    } else {
+        Ok(false)
+    }
 }
 
 fn subject_capacity() -> (StatusCode, Json<Value>) {
@@ -528,6 +556,30 @@ fn fail_initial(
         Err(error) => audit_failure(error),
     }
 }
+
+fn fail_accounting_preflight(
+    oidc: &OidcGateway,
+    record: AuthenticationRecordV1,
+    receipt: AuthenticationReceiptV1,
+    error: (StatusCode, Json<Value>),
+) -> (StatusCode, Json<Value>) {
+    // The initial verified evidence retains its principal. The closed terminal
+    // format uses no principal for an invalid or interrupted initial admission.
+    // Never leave its funded intention pending or promote a later membership
+    // observation to an unscoped admission.
+    let (outcome, reason) = if error.0 == StatusCode::UNAUTHORIZED {
+        (Outcome::Rejected, Reason::InvalidResponse)
+    } else {
+        (Outcome::Unknown, Reason::Interrupted)
+    };
+    match oidc
+        .audit
+        .append_typed(result(record, receipt, outcome, reason, None))
+    {
+        Ok(_) => error,
+        Err(error) => audit_failure(error),
+    }
+}
 struct NewAdmission<'a> {
     record: AuthenticationRecordV1,
     access: VerifiedAccess,
@@ -537,6 +589,29 @@ struct NewAdmission<'a> {
     kind: SessionKind,
     browser_transaction: Option<([u8; 32], Uuid)>,
 }
+
+fn validate_initial_proof(
+    oidc: &OidcGateway,
+    access: &VerifiedAccess,
+    session_id: Uuid,
+    browser_transaction: Option<([u8; 32], Uuid)>,
+) -> ApiResult<()> {
+    if access.expires_at() <= chrono::Utc::now().timestamp() {
+        return Err(credential_invalid());
+    }
+    if let Some((key, transaction)) = browser_transaction {
+        let registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
+        if registry.exchanging.get(&key).is_none_or(|entry| {
+            entry.transaction_id != transaction
+                || entry.session_id != session_id
+                || entry.created.elapsed() >= Duration::from_secs(35)
+        }) {
+            return Err(conflict());
+        }
+    }
+    Ok(())
+}
+
 fn install(
     state: &GatewayState,
     oidc: &OidcGateway,
@@ -555,29 +630,40 @@ fn install(
     // The blocking queue cannot extend the lifetime of the provider proof or
     // its browser exchange marker. Recheck before the first durable intention;
     // the registry check below is repeated at the actual session mutation.
-    if access.expires_at() <= chrono::Utc::now().timestamp() {
-        return Err(credential_invalid());
-    }
-    if let Some((key, transaction)) = browser_transaction {
-        let registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
-        if registry.exchanging.get(&key).is_none_or(|entry| {
-            entry.transaction_id != transaction
-                || entry.session_id != session_id
-                || entry.created.elapsed() >= Duration::from_secs(35)
-        }) {
-            return Err(conflict());
-        }
-    }
+    validate_initial_proof(oidc, &access, session_id, browser_transaction)?;
     let principal = PrincipalRefV1::HumanOidc {
         issuer: access.issuer().into(),
         subject: access.subject().into(),
     };
     let access_fingerprint = Fingerprint::access_token(raw);
     // VerifiedAccess is produced only by the configured provider's verifier.
-    // Reserve durable audit capacity now, before membership reads (which can
-    // themselves produce business audit) or any session admission/mutation.
+    // Reserve durable audit capacity before audited membership reads or any
+    // session mutation. V4's metadata-only preflight selects accounting from
+    // verified memberships; it produces no business audit or authorization.
     // Anonymous nonce creation and rejected provider input never reach here.
-    let pending = match oidc.audit.begin_verified_initial(
+    let mut preflight_failure = None;
+    let mut unscoped = false;
+    let pending = if oidc.partitioned_capacity {
+        let observation = membership_capacity_candidates(state, oidc, &access, &principal);
+        unscoped = observation.tenant_ids.is_empty();
+        preflight_failure = observation.failure;
+        let candidates = AuthenticationTenantCandidatesV1::from_verified_memberships(
+            principal.clone(),
+            observation.tenant_ids,
+        )
+        .map_err(audit_failure)?;
+        // Metadata I/O cannot prolong the provider proof or browser exchange.
+        validate_initial_proof(oidc, &access, session_id, browser_transaction)?;
+        oidc.audit
+            .begin_verified_initial_scoped(
+                record.clone(),
+                principal.clone(),
+                access_fingerprint,
+                candidates,
+            )
+            .map_err(audit_failure)?
+    } else {
+        match oidc.audit.begin_verified_initial(
         record.clone(),
         principal.clone(),
         access_fingerprint,
@@ -593,6 +679,7 @@ fn install(
             if !membership_recovery_eligible(state, oidc, &access, &principal)? {
                 return Err(subject_capacity());
             }
+            validate_initial_proof(oidc, &access, session_id, browser_transaction)?;
             oidc.audit
                 .begin_verified_initial_after_membership(
                     record.clone(),
@@ -602,11 +689,15 @@ fn install(
                 .map_err(audit_failure)?
         }
         Err(error) => return Err(audit_failure(error)),
+        }
     };
     if !pending.inserted {
         return Err(conflict());
     }
     let receipt = pending.receipt;
+    if let Some(error) = preflight_failure {
+        return Err(fail_accounting_preflight(oidc, record, receipt, error));
+    }
     if state.credential_index.lookup(raw).is_some()
         || human::reject_control_collision(state, raw, None).is_err()
     {
@@ -622,6 +713,11 @@ fn install(
         Ok(value) => value,
         Err(error) => return Err(fail_initial(oidc, record, receipt, error, Some(principal))),
     };
+    if unscoped {
+        // A membership added after the preflight requires a new verified
+        // admission. This exact intention cannot change accounting owner.
+        return Err(fail_accounting_preflight(oidc, record, receipt, conflict()));
+    }
     let mut registry = oidc.registry.lock().map_err(|_| audit_unavailable())?;
     if let Some((key, transaction)) = browser_transaction
         && registry.exchanging.get(&key).is_none_or(|entry| {
@@ -893,12 +989,12 @@ fn complete_native_logout(
 ) -> ApiResult<()> {
     // No V2/generic fallback. This is a metadata transition, not permission to
     // issue or reissue a provider request. Migration is an explicit operation.
-    if oidc
-        .audit
-        .format_version()
-        .map_err(|_| audit_unavailable())?
-        != 3
-    {
+    if !matches!(
+        oidc.audit
+            .format_version()
+            .map_err(|_| audit_unavailable())?,
+        3 | 4
+    ) {
         return Err(audit_unavailable());
     }
     let (intention, begin, refresh_result, end) = {

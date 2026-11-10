@@ -648,6 +648,9 @@ async fn no_membership_and_web_bearer_are_private_audited_cli_refusals() {
 
 #[tokio::test]
 async fn oidc_subjects_read_only_their_durable_tenant_even_with_a_forged_tenant_claim() {
+    use agentsandbox::audit::authentication::{
+        AuthenticationCapacityPlanV1, AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
+    };
     use agentsandbox::{api::TenantGateway, model::Event};
     let f = Fixture::new().await;
     f.member("subject-a");
@@ -728,6 +731,44 @@ async fn oidc_subjects_read_only_their_durable_tenant_even_with_a_forged_tenant_
             }))
             .unwrap();
     }
+    // This two-tenant assembly uses a separate, genuinely new V4 audit. The
+    // later mono-tenant legacy-collision control retains its original V3 audit.
+    let multi_audit = Arc::new(
+        AuthenticationAudit::init_new_v4(
+            &f._files.path().join("authentication-multi.sqlite"),
+            Uuid::new_v4(),
+            AuthenticationAuditPolicyV1 {
+                max_records: 10_000,
+                max_serialized_bytes: 4 * 1024 * 1024,
+                approved_clients: ["web-public", "cli-public"]
+                    .map(|client_id| ApprovedAuthenticationClientV1 {
+                        issuer: f.issuer.issuer.clone(),
+                        client_id: client_id.into(),
+                    })
+                    .to_vec(),
+            },
+            AuthenticationCapacityPlanV1 {
+                version: 1,
+                unscoped: AuthenticationCapacityV1 {
+                    max_records: 64,
+                    max_serialized_bytes: 256 * 1024,
+                },
+                tenants: ["tenant-a", "tenant-b"]
+                    .map(|tenant_id| AuthenticationTenantCapacityV1 {
+                        tenant_id: tenant_id.into(),
+                        capacity: AuthenticationCapacityV1 {
+                            max_records: 4967,
+                            max_serialized_bytes: 1536 * 1024,
+                        },
+                    })
+                    .to_vec(),
+            },
+            Redactor::new(vec![]),
+        )
+        .unwrap(),
+    );
+    assert_eq!(multi_audit.format_version().unwrap(), 4);
+    assert_eq!(multi_audit.verify().unwrap().records, 2);
     let router = gateway_router(
         GatewayState::for_tenants(
             vec![
@@ -749,7 +790,7 @@ async fn oidc_subjects_read_only_their_durable_tenant_even_with_a_forged_tenant_
             Redactor::new(vec![]),
         )
         .unwrap()
-        .with_oidc(OidcGateway::new(f.config.clone(), f.audit.clone(), None).unwrap())
+        .with_oidc(OidcGateway::new(f.config.clone(), multi_audit, None).unwrap())
         .unwrap(),
     );
     let mut proofs = Vec::new();

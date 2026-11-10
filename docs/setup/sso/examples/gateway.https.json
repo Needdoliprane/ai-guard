@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "gateway": {
     "version": 1,
     "provider": {
@@ -46,6 +46,20 @@
         {
           "issuer": "https://login.example.invalid/realms/company",
           "client_id": "ai-guard-cli-public"
+        }
+      ]
+    },
+    "capacity_plan": {
+      "version": 1,
+      "unscoped": { "max_records": 500, "max_serialized_bytes": 1048576 },
+      "tenants": [
+        {
+          "tenant_id": "tenant-a",
+          "capacity": { "max_records": 40000, "max_serialized_bytes": 12582912 }
+        },
+        {
+          "tenant_id": "tenant-b",
+          "capacity": { "max_records": 40000, "max_serialized_bytes": 12582912 }
         }
       ]
     }

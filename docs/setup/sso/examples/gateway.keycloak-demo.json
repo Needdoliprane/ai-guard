@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "gateway": {
     "version": 1,
     "provider": {
@@ -49,6 +49,16 @@
         {
           "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
           "client_id": "ai-guard-demo-cli"
+        }
+      ]
+    },
+    "capacity_plan": {
+      "version": 1,
+      "unscoped": { "max_records": 500, "max_serialized_bytes": 1048576 },
+      "tenants": [
+        {
+          "tenant_id": "ai-guard-demo",
+          "capacity": { "max_records": 80000, "max_serialized_bytes": 25165824 }
         }
       ]
     }

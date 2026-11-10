@@ -1,5 +1,19 @@
 # État constaté — suivi du développement
 
+## 10 novembre — parts finies AuthV4 vérifiées en logiciel
+
+Après la RED logicielle NV-02, le journal d'authentification reçoit des parts
+durables tenant/unscoped en records et octets sous le plafond global inchangé.
+19 fonctions bibliothèque et 4 config passent sur R2 `2211c5b0…` ; cinq
+restantes passent après la correction de fixture R4 `ef04abc3…`. Les 23
+premières restent attachées à leurs sept fichiers inchangés, sans faux run
+28 sur un seul gel. Check toutes cibles R4 RC0, sources et six guides relus.
+Le post-manifeste vérifie 2368 fichiers ; export réel conservé, QA retirée.
+[Sources, résultats et limites](evidence/2026-11-10/authentication-tenant-capacity/README.md).
+La garantie est finie et limitée aux memberships disjoints ; A+B peut
+consommer B. SetupV2 distinct, IdP/runtime/100 workers/facturation non qualifiés.
+G09 FAIL, 0/12 gates globaux clos.
+
 ## 10 novembre — source checkpoint du service fédération vérifiée en logiciel
 
 Le raccord Rust lit le Full writer déjà admis du profil : vrai ACK FIFO,

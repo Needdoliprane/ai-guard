@@ -1,5 +1,27 @@
 # Décisions d'industrialisation
 
+## 10 novembre — format interne AuthV4 et migration explicite
+
+La tranche retient le format4 du journal d'authentification SQLite existant
+pour financer des parts finies tenant/unscoped en records et octets sous G.
+Histoire L, tickets terminaux historiques R et marqueur réel M sont financés
+avant les parts ; aucun emprunt ni recyclage implicite de l'historique commis.
+Le propriétaire comptable n'accorde aucun droit métier. La garantie concerne
+les memberships disjoints : un membre A+B peut consommer B.
+
+Ce changement de format interne garde le contrôle Rust, les bases métier
+séparées et les frontières/API existantes ; aucun nouveau service, moteur
+de stockage ou credential. Le plan durable est immuable, config2/V4 explicite.
+La migration3→4 requiert les consommateurs arrêtés, une sauvegarde V3 neuve,
+les UUID/politique/histoire conservés et ajoute M aux compteurs/head ;
+l'attestation CLI ne fence pas les processus. Aucun utilisateur réel n'est
+migré par les essais de fixtures ; ni hot migration ni antirollback promis.
+Setup1 reste V3/config1 ; SetupV2 est un autre lot, non livré par cette tranche.
+[Preuves, compatibilité et limites](evidence/2026-11-10/authentication-tenant-capacity/README.md).
+Les 28 résultats logiciels ont leurs deux sources explicites ; ils ne
+qualifient ni disponibilité infinie, provider/SSO, runtime, reprise physique,
+100 workers ou facturation. G09 FAIL, 0/12 gates globaux clos.
+
 ## 8 novembre — propriété des connexions pour le lifecycle Gateway S2
 
 Direction technique retenue par l'orchestrateur dans la frontière R3 déjà

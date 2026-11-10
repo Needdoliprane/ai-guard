@@ -95,8 +95,8 @@ enum Command {
         /// New private backup path; existing destinations are never overwritten.
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next format: 2 (verified initial proofs), 3 (native logout terminal reserve).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=3))]
+        /// Exact next format: 2 (verified initial proofs), 3 (native logout terminal reserve), 4 (tenant capacity plan).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=4))]
         target_version: u32,
         /// Operator attestation: all audit consumers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -865,6 +865,7 @@ async fn main() -> Result<()> {
             let migration = match target_version {
                 2 => "verified_initial_v2",
                 3 => "native_logout_v3",
+                4 => "tenant_capacity_v4",
                 _ => anyhow::bail!("unsupported authentication migration target"),
             };
             let report = gateway_config::migrate_authentication(

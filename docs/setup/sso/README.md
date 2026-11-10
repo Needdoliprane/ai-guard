@@ -201,6 +201,8 @@ For container-owned databases, perform offline maintenance with the existing con
 
 Generic `setup prepare` can create a separate new installation from a reviewed manifest of actual verified subjects. It never adopts an existing tenant database or verifies the IdP online. Its closed version1 input is distinct from the runtime `gateway.https.json` example:
 
+Preparation still creates an authentication V3 ledger and private OIDC configuration version1. A successful `setup prepare` is not a gateway-startup check. With several configured tenants, keep every consumer stopped and complete the [explicit V3→V4 migration](#migrate-an-existing-authentication-audit) before the first gateway start. Prepare a separate reviewed configuration version2 with the capacity plan and point startup at that file. Preserve the generated configuration and recovery records unchanged; do not rerun preparation to add a plan. The shipped `local-demo.json` has one tenant and retains the explicit mono-tenant V3 compatibility path.
+
 | Input field | Content |
 |---|---|
 | `version` | `1`. |
@@ -244,19 +246,34 @@ Start from one public example and copy it into a new private operator file outsi
 
 | Example | Use |
 |---|---|
-| [gateway.https.json](examples/gateway.https.json) | HTTPS shape with deliberately nonfunctional `example.invalid` addresses. Replace issuer, endpoints, both logout return URIs, client IDs, audience, origin, role rule and installation UUID with approved values. |
-| [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Exact defaults of the distributed isolated HTTP DEMO provider. Requires separate account/membership setup and an approved gateway route to that provider. Replace the sample installation UUID. |
+| [gateway.https.json](examples/gateway.https.json) | Private configuration version2/V4, illustrative parts for `tenant-a` and `tenant-b`, matching [the tenant registry example](../../../config/tenants.example.json). HTTPS addresses are nonfunctional. Replace provider values, installation UUID and exact tenant plan with approved values. |
+| [gateway.keycloak-demo.json](examples/gateway.keycloak-demo.json) | Private configuration version2/V4, isolated DEMO provider values and one part for `ai-guard-demo`. Distinct from the version1 setup manifest and generated mono-tenant V3 configuration. Requires accounts/memberships and an approved provider route. Replace the sample installation UUID. |
 
 These files contain public example values, not credentials or existing identities. Generate a fresh canonical lowercase non-nil installation UUID for a new audit. Keep it unchanged when reopening that audit. The JSON parser does **not** expand environment variables: `${NAME}` is not a configuration mechanism. The `.env.exemple.*` Keycloak variables configure its Compose services; they do not enable gateway SSO.
 
-The configuration is version 1 and rejects unknown fields at every declared object. Its top-level fields are:
+The closed private configuration accepts version2 with an explicit capacity plan, or version1 without a plan for a mono-tenant V3 deployment. Version1 is refused by a multi-tenant gateway. The nested gateway/provider and tenant registry retain their own version1 formats; these do not select the authentication-ledger format. Unknown fields are rejected.
 
 | Field | Meaning |
 |---|---|
-| `version` | Must be `1`. |
+| `version` | `2` requires `authentication_audit.capacity_plan` and V4. Legacy `1` requires no plan and V3, with one configured tenant. |
 | `gateway` | Version 1 object: `provider`, `provider_label`, `web_origin`, `mapping`. |
-| `authentication_audit` | `path`, `installation_id` and `policy`. A separate private authentication database, distinct from every tenant database. |
+| `authentication_audit` | `path`, `installation_id`, unchanged global `policy`, and mandatory `capacity_plan` in version2. The database remains separate from every tenant database. |
 | `ca_bundle_file` | Optional/null, or a path to approved **public** PEM CA certificates for the OIDC provider. |
+
+### Allocate authentication capacity
+
+`capacity_plan` has exactly `version:1`, `unscoped:{max_records,max_serialized_bytes}` and `tenants:[{tenant_id,capacity:{max_records,max_serialized_bytes}}]`, as shown in the full examples. Each tenant occurs once; the ID set must exactly match the gateway registry. Missing or extra tenants refuse startup, including V4 with one tenant. The plan supports at most 256 IDs of 1–128 ASCII letters, digits, hyphens or underscores; the complete plan entry must fit 32768 serialized bytes. These are format bounds, not a qualified deployment scale. Preserve the exact durable plan, including list ordering, on every restart. Editing a part or adding a tenant is not an implemented plan migration; a divergent file refuses to reopen.
+
+Choose finite lifetime parts in both records and serialized payload bytes. Keep the original global policy G unchanged. Installation must satisfy, separately in both dimensions:
+
+```text
+committed history + historical terminal allowances + exact plan-entry cost
+  + unscoped part + sum(tenant parts) <= original global G
+```
+
+A fresh ledger starts with two committed entries: genesis and the plan. The HTTPS example allocates 80500 records and 25 MiB to its parts under G100000 records/32 MiB; genesis, the plan and any existing history/allowances must also fit. These numbers illustrate the format, without a retention or load recommendation. Every new intention needs its actual entry plus a reserved terminal record and 32768 bytes in the same part; a smaller part cannot finance an attempt. Committed records and bytes remain charged; completion is not a reset. Logical caps exclude SQLite pages, WAL/SHM, backups and filesystem exhaustion.
+
+Rust selects the first available part in lexical order only among positive, verified control-side membership snapshots intersected with the verified token's capability mapping. No request tenant hint chooses accounting. The session retains its owner for refresh/logout/expiration; parts never borrow or switch owner on exhaustion. This observation grants no permission: ordinary authorization still runs. A user with A+B memberships can consume either part through new sessions, so the protection concerns disjoint scopes, not B against B's own members. `unscoped` finances a rejected or interrupted verified attempt with no usable snapshot and can never admit a session. A full part refuses mandatory work, normally with `503 audit_unavailable`; waiting or changing JSON does not replenish it. Preserve history and contact the operator instead of replacing the audit.
 
 The provider object in the examples shows every required field. `end_session_endpoint`, `web_post_logout_redirect_uri` and `cli_post_logout_redirect_uri` are optional/null; either configured logout return requires `end_session_endpoint`. Omitted `limits` uses the defaults below. `transport` is exactly `{"kind":"https_only"}` for normal installations. The isolated DEMO uses `{"kind":"isolated_demo_http","exact_issuer":"..."}`; its exact issuer must match `issuer`. HTTP is limited to literal loopback issuers or the fixed distributed DEMO issuer. Its Web origin/redirect must be a literal HTTP loopback address. This exception cannot approve an arbitrary intranet HTTP provider.
 
@@ -367,7 +384,8 @@ The gateway reserves bounded refresh completion/cleanup capacity before mutation
 
 Before a tracked refresh may contact the identity provider, its durable Pending
 transition must leave room for one terminal record and up to 32,768 serialized
-payload bytes. Admission includes the allowances of every Pending session, so
+payload bytes. V3 accounts for all global Pending allowances; V4 accounts for
+allowances within each finite owner part while retaining global G, so
 `503 audit_unavailable` may occur before the physical record/byte counters reach
 their configured limits. Other appends cannot spend that allowance. A validated
 rotation or close consumes its own allowance once; exact replay does not grant
@@ -379,8 +397,9 @@ writers before relying on this rule; mixed old/new writers are not supported
 for this guarantee. Historical Pending entries that already lack terminal space
 are not repaired by reopening or increasing a configuration value. Keep the
 original ledger and treat that case as an incident requiring an explicit
-recovery plan. This reservation does not replenish the cumulative global quota,
-provide retention/policy migration, or isolate that global capacity by tenant.
+recovery plan. Reservations do not replenish cumulative committed capacity or
+provide retention/policy migration. V3 reservations alone do not isolate tenant
+capacity; V4 adds the finite parts described above.
 
 ### Native logout while a refresh is pending
 
@@ -388,7 +407,7 @@ When a new logout can start during a pending native CLI refresh, the control
 retains the original operation and records three durable acknowledgements in
 order: **BEGIN**, the original refresh result **FRefresh**, then the logout
 result **END**. BEGIN records the logout intention and reserves its own terminal
-record and up to 32,768 serialized payload bytes in V3, in addition to the
+record and up to 32,768 serialized payload bytes in V3 or V4, in addition to the
 refresh allowance. FRefresh keeps the refresh's
 first chosen outcome; END records `Logout/Succeeded/UserRequested` against that
 logout intention. END does not overwrite the earlier refresh result.
@@ -449,10 +468,10 @@ external CLI may already have sent its provider request; local closure does not
 attest cancellation of that request or provider logout. Read the
 [separate logout outcomes](#sign-in-from-the-browser).
 
-Use matching V3 consumers and follow the [explicit V1→V2, then V2→V3 migration
+Use matching V3 mono-tenant or V4 consumers and follow the [explicit V1→V2→V3→V4 migration
 procedure](#migrate-an-existing-authentication-audit), with a new verified backup
-for each required step. Historical generic logout intentions are not promoted
-to terminal reservations. No automatic migration, audit replacement or fallback
+for each required step. No migration invents a typed native Logout BEGIN for
+past generic history. No automatic migration, audit replacement or fallback
 is a recovery path.
 
 ### Pending login and durable audit
@@ -542,7 +561,7 @@ Add the following arguments to your existing gateway service, retaining its actu
 
 Use `--initialize-oidc-audit` only for an exclusively new authentication database at the configured path. It refuses an existing file, including an empty or partial one. A failure may retain a partial new file: preserve it for diagnosis; initialization is not a repair operation. The flag does not create/migrate tenant identities or databases.
 
-On every normal restart, **remove `--initialize-oidc-audit`** and retain `--oidc-config`. Reopen requires the existing valid audit with its original installation UUID and identical audit policy, including approved-client ordering and quotas. Editing quota values or clients is not an implemented audit-policy migration. Keep the original records and resolve capacity/configuration changes explicitly; do not replace the database to clear a refusal. Without `--oidc-config`, the gateway enables no SSO and makes no OIDC provider calls.
+On every normal restart, **remove `--initialize-oidc-audit`** and retain `--oidc-config`. Version2 initializes V4; version1 initializes compatibility V3 and cannot start a multi-tenant gateway. Reopen requires the existing audit, original installation UUID, identical global policy and, for V4, the exact durable plan. Editing quotas, clients, plan values or ordering is not a migration. New initialization is never a repair, capacity reset or upgrade of existing data. Without `--oidc-config`, the gateway enables no SSO and makes no OIDC provider calls.
 
 Enable the dashboard's fixed proxy with the same exact public Web origin as `gateway.web_origin`:
 
@@ -627,9 +646,9 @@ Export needs an existing private parent and a **new** final destination. It has 
 
 ## Migrate an existing authentication audit
 
-The separate authentication ledger has its own format, independent of tenant schema migrations. Normal startup requires format V3; opening an older ledger reports that explicit migration is required and does not upgrade or replace it. New authentication ledgers use V3. Keep the existing installation UUID, approved clients, policy, credentials and tenant databases unchanged.
+The separate authentication ledger has its own format, independent of tenant schema migrations. A multi-tenant gateway requires V4 and private configuration version2; explicit mono-tenant compatibility accepts V3/configuration version1 without capacity isolation. New initialization follows the selected configuration version. Opening never migrates the database. Preserve the existing installation UUID, approved clients, global policy, credentials and tenant databases. Retain configuration version1 for targets2/3; prepare a separate reviewed version2 file for target4, referencing the same database and identity/policy.
 
-Stop the gateway and every other consumer of this authentication ledger, then run the matching Rust binary under the control UID in a one-off container with no network and access to the existing private control volume. Prepare an existing private backup parent (`0700`) and select a **new** final backup path for each step. For an existing V1 ledger, first enable verified initial proofs:
+Stop the gateway, every other audit consumer and their automatic restarts. Run the matching Rust binary under the control UID in a one-off container with no network and access to the existing private control volume. Use an existing private backup parent (`0700`) and a new final backup path for each step. For V1, first enable verified initial proofs:
 
 ```sh
 agentsandbox migrate-authentication \
@@ -639,9 +658,9 @@ agentsandbox migrate-authentication \
   --confirm-control-stopped
 ```
 
-`--confirm-control-stopped` is the operator's maintenance attestation, not a check or independent proof that consumers have stopped. The command does not stop services or fence another writer. It reads the closed private OIDC JSON and its existing local audit/optional public CA references, without provider discovery, token exchange or network requests. Relative references inside that JSON remain relative to its parent. No provider credential, tenant runner token or `.env` is needed.
+`--confirm-control-stopped` is the operator's attestation, not a check or independent proof of stopped consumers. The command stops no service and provides no runtime fencing. It reads the private JSON and local audit/optional public CA references without discovery, token exchange or network requests. Relative references remain relative to the JSON parent. No provider credential, runner token or `.env` is needed.
 
-For an existing V2 ledger, including the result of the first step, enable native logout terminal reservations:
+For V2, including the first step's result, enable native logout terminal reservations:
 
 ```sh
 agentsandbox migrate-authentication \
@@ -651,11 +670,25 @@ agentsandbox migrate-authentication \
   --confirm-control-stopped
 ```
 
-Omitting `--target-version` preserves the historical V1→V2 command; it does not choose the newest format. A V1 source cannot skip directly to V3. Keep consumers stopped between the two steps and preserve both backups.
+For V3, including a completed multi-tenant preparation whose gateway has never started, install the finite plan before startup:
 
-Each step verifies the exact prior format and a coherent, exclusively new private backup in that prior format before changing the source marker. It preserves namespace, head, historical records and serialized-byte counters; it does not erase history, reset capacity, change policy or manufacture records for past proofs. V3 enables typed native logout intentions to reserve their terminal record while a refresh is pending; migration does not turn historical generic logout intentions into reservations. The JSON report contains the preserved verification values and `migration: verified_initial_v2` or `native_logout_v3`, not tokens or provider replies. A source already at the requested target, a skipped step or unknown target is refused. Existing backup destinations, an invalid binding/policy, an untrusted local reference or failed verification are refused; preserve source and backup material and correct the reported precondition before an explicit retry. There is no automatic initialization or replacement fallback.
+```sh
+agentsandbox migrate-authentication \
+  --target-version 4 \
+  --oidc-config /absolute/private/ai-guard/oidc-v2.json \
+  --backup /absolute/private/backups/authentication-before-v4.sqlite \
+  --confirm-control-stopped
+```
 
-After the source reaches V3, retain the backups with the matching configuration and binary inventory, then restart matching V3 consumers against the migrated source. Older binaries refuse V3; opening it with another binary does not downgrade it. The backups remain V1 and V2 respectively and need the remaining explicit steps before normal V3 startup if restored. Validate any recovery in a fresh private isolated destination before cutover; never overwrite the migrated source to test a restore. Migration does not restore tokens, live sessions, execution authority or independent rollback detection. This operator command does not qualify an IdP, release, archive or retention procedure.
+Create `oidc-v2.json` as a new private file with top-level `version:2` and `authentication_audit.capacity_plan`; retain the original file and recovery records. Review the exact tenant set and the two-dimensional inequality above. Restart with `--oidc-config` pointing to that reviewed file, without `--initialize-oidc-audit`. This filename is illustrative; the command uses the file explicitly selected. Reopen checks exact equality with the durable plan and original policy. Do not alter prepared completion/origin records or rerun preparation after migration; finish any retained preparation first under its original input.
+
+Omitting `--target-version` preserves historical V1→V2; it does not choose the newest format. No version may skip a step. Keep consumers stopped between steps and preserve every prior-format backup. Targets2/3 require configuration version1; target4 requires version2 with its explicit plan.
+
+Each step verifies the exact prior format and a coherent, exclusively new backup in that format. V1→V2 and V2→V3 preserve head and counters. V3→V4 preserves every old payload/receipt, namespace and original G, then commits the plan entry and format together: head, records and bytes advance by this real entry. It reserves one record/32768bytes for each historical intention without a result, including pending refresh/logout promises. These tickets have no invented tenant owner and permit only their exact raw terminal once; no result, past typed native BEGIN or successful execution is fabricated. An old Active session without an accounting owner cannot start a new V4 refresh; a fresh verified login establishes a new owner without reattributing history. Restart does not restore old tokens or private keepers from this ledger.
+
+The JSON report names `migration: verified_initial_v2`, `native_logout_v3` or `tenant_capacity_v4` and contains verification values, not tokens/provider replies. If history, historical allowances, the plan-entry cost and all parts do not fit unchanged G, V3→V4 refuses. An already-target source, skipped/unknown target, existing backup destination, invalid identity/policy, changed configuration or failed verification also refuses. Preserve source, configuration and any retained backup; correct the precondition before an explicit retry with a new backup destination. There is no automatic initialization, reset, borrowing or replacement fallback.
+
+After the required target is reached, retain backups with matching configurations and binary identities, then restart matched consumers. V4 startup checks the exact plan tenant set at the common gateway builder, including library assemblies; V3 is accepted only for a single tenant. Older binaries, including already-open V3 writers, refuse V4 at their next transaction; opening does not downgrade it. A V3 backup needs explicit V3→V4 migration before multi-tenant startup after restoration. Validate recovery in a new private isolated destination before cutover; never overwrite the migrated source to test restoration. No tokens, live sessions, execution authority or independent rollback detection are restored. These instructions describe the implementation; they do not qualify an IdP, deployment combination, release, archive or retention procedure.
 
 ## Diagnose and recover
 
@@ -664,7 +697,7 @@ After the source reaches V3, retain the backups with the matching configuration 
 | Result or symptom | Action |
 |---|---|
 | SSO disabled / `oidc_not_configured` | Check explicit gateway `--oidc-config` and dashboard `--oidc-web-origin`, with the matching binary. No local/viewer fallback occurs automatically. |
-| Invalid configuration / startup refusal | Check the closed version1 fields, exact URLs, distinct clients/audience, file ownership/ACLs and separate audit path. No environment interpolation occurs. |
+| Invalid configuration / startup refusal | Check version1/V3 mono-tenant or version2/V4 with its exact plan, exact URLs, distinct clients/audience, private ownership/ACLs and separate audit path. Review tenant IDs before fresh initialization: final builder refusal can leave the new audit in place. Preserve it; editing a durable plan or rerunning initialization is not repair. No environment interpolation occurs. |
 | `origin_denied` / callback refusal | Open the exact configured origin; verify callback and client registration. Begin a fresh login after expiry/cancellation; never replay a callback/code. |
 | `permission_denied` | Check verified `(issuer, sub)`, active account/membership and intersection with mapped capabilities. Then check organization/resource grants. IdP administration is not application authority. |
 | `credential_invalid` / `session_conflict` | The admission is expired, revoked, rotated, consumed or lost on restart. Clear the view and sign in again. Do not retry an ambiguous exchange. |
@@ -675,12 +708,12 @@ After the source reaches V3, retain the backups with the matching configuration 
 | Partial contexts / `contexts_complete:false` | Preserve the affected store and repair its availability. Use **Actualiser les contextes** or run foreground `identity` again; an incomplete list is not proof of absent or revoked access. Each selected context still requires its own healthy store. |
 | Missing or incompatible human identity field | Deploy matching gateway, built dashboard and CLI versions together. Do not drop `contexts_complete`, substitute a tenant hint or replace the database to bypass a contract error. |
 | `capacity_exhausted` / HTTP `429` | Work admission, read frequency, live authentication or cleanup capacity is bounded. Reduce parallel reads/streams and polling; let running work finish or attempts expire before an explicit retry. Cancelling requests does not immediately free running I/O slots. Do not create a new audit to evade the bound; treat ambiguous refresh separately as a new sign-in. |
-| `authentication_subject_capacity_exhausted` / HTTP `429`, `retry_action: contact_operator` | The verified subject's durable failed/pending admission budget is exhausted. Waiting does not reset it. Have the operator check the account, membership and verified claim mapping; a fresh proof after approved provisioning may permit recovery. Keep the ledger and its history. |
+| `authentication_subject_capacity_exhausted` / HTTP `429`, `retry_action: contact_operator` | Legacy V3 subject failed/pending budget exhausted. Waiting does not reset it; check account/membership/mapping. V4 has finite tenant and unscoped parts; exhaustion normally reports `503 audit_unavailable`. Preserve history and inspect capacity/configuration without replacing the ledger. |
 | Lost connection / stale data | Retain an explicit disconnected/stale state. Reauthenticate and select a current context before resuming; loss is not zero activity. |
 
 Keep the OIDC file, exact binary/image identities, tenant registry, private identities/grants and their tenant databases together with the separate authentication audit inventory. The audit stores typed outcomes and token fingerprints, not recoverable tokens. It is not atomic with an external IdP: a provider exchange followed by a crash can leave an unknown outcome requiring a new login.
 
-`migrate-authentication` creates the verified new prior-format backup required by each explicit V1→V2 or V2→V3 step. There is no standalone authentication-audit backup/restore, archive or retention CLI. The Rust library also has a verified-new backup operation; do not invent a shell wrapper or treat a live SQLite main-file copy as coherent. Before backup/recovery, stop every consumer and preserve a coherent SQLite set, installation identity, audit policy and existing configuration under the installation's approved storage procedure. Keep existing material and validate a recovery in a fresh isolated destination before any cutover. Recovery does not restore tokens, live sessions or execution authority.
+`migrate-authentication` creates the verified new prior-format backup required by each explicit V1→V2, V2→V3 or V3→V4 step. There is no standalone authentication-audit backup/restore, archive or retention CLI. The Rust library also has a verified-new backup operation; do not invent a shell wrapper or treat a live SQLite main-file copy as coherent. Before backup/recovery, stop every consumer and preserve a coherent SQLite set, installation identity, audit policy and existing configuration under the installation's approved storage procedure. Keep existing material and validate a recovery in a fresh isolated destination before any cutover. Recovery does not restore tokens, live sessions or execution authority.
 
 The audit verifies its chain and live process floor, but a complete database rollback across restart needs an independent witness to detect it. Do not promise anti-rollback, signed external checkpoints or release qualification from this configuration. Quotas count records (including genesis) and serialized payload bytes; SQLite pages, WAL/SHM, backups and filesystem use add overhead. An exhausted audit refuses new mandatory operations; an audit-policy migration/retention procedure remains to be supplied before operating at that boundary.
 

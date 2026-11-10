@@ -67,6 +67,7 @@ struct AuthenticationAuditFile {
     path: PathBuf,
     installation_id: uuid::Uuid,
     policy: agentsandbox::audit::authentication::AuthenticationAuditPolicyV1,
+    capacity_plan: Option<agentsandbox::audit::authentication::AuthenticationCapacityPlanV1>,
 }
 
 struct PreparedOidcFile {
@@ -84,7 +85,19 @@ fn prepare_oidc_file(path: &Path) -> Result<PreparedOidcFile> {
     let held = PrivateFile::open(&path, 1_048_576)?;
     let file: OidcFile =
         serde_json::from_slice(held.bytes()).context("Invalid OIDC gateway file")?;
-    anyhow::ensure!(file.version == 1, "Unsupported OIDC gateway file version");
+    anyhow::ensure!(
+        matches!(
+            (
+                file.version,
+                file.authentication_audit.capacity_plan.as_ref()
+            ),
+            (1, None) | (2, Some(_))
+        ),
+        "OIDC configuration requires version1 without a capacity plan or version2 with an explicit plan"
+    );
+    if let Some(plan) = &file.authentication_audit.capacity_plan {
+        plan.validate()?;
+    }
     file.gateway.validate()?;
     let parent = path.parent().context("OIDC file has no parent")?;
     let resolve = |path: PathBuf| -> Result<PathBuf> {
@@ -133,13 +146,23 @@ pub fn load_oidc(
         audit_path,
         ca_bundle_pem,
     } = prepare_oidc_file(path)?;
+    let capacity_plan = file.authentication_audit.capacity_plan.clone();
     let audit = if initialize_new {
-        AuthenticationAudit::init_new(
-            &audit_path,
-            file.authentication_audit.installation_id,
-            file.authentication_audit.policy,
-            redactor,
-        )?
+        match &capacity_plan {
+            Some(plan) => AuthenticationAudit::init_new_v4(
+                &audit_path,
+                file.authentication_audit.installation_id,
+                file.authentication_audit.policy,
+                plan.clone(),
+                redactor,
+            )?,
+            None => AuthenticationAudit::init_new(
+                &audit_path,
+                file.authentication_audit.installation_id,
+                file.authentication_audit.policy,
+                redactor,
+            )?,
+        }
     } else {
         AuthenticationAudit::open_existing(
             &audit_path,
@@ -148,10 +171,16 @@ pub fn load_oidc(
             redactor,
         )?
     };
-    anyhow::ensure!(
-        audit.format_version()? == 3,
-        "Authentication audit migration required: stop the control plane, migrate V1 to V2 if needed, then V2 to V3 with --target-version 3, each with a new private backup; do not initialize a replacement audit"
-    );
+    match (file.version, &capacity_plan, audit.format_version()?) {
+        (1, None, 3) => {}
+        (2, Some(plan), 4) => anyhow::ensure!(
+            audit.capacity_plan()?.as_ref() == Some(plan),
+            "Authentication capacity plan differs from the durable plan; preserve the audit and its configuration"
+        ),
+        _ => anyhow::bail!(
+            "Authentication audit migration required: stop all consumers and migrate one explicit version at a time with a new private backup; target4 requires version2 configuration with its capacity plan; never initialize a replacement audit"
+        ),
+    }
     held.revalidate()?;
     agentsandbox::api::OidcGateway::new(file.gateway, std::sync::Arc::new(audit), ca_bundle_pem)
 }
@@ -166,16 +195,21 @@ pub fn migrate_authentication(
 ) -> Result<agentsandbox::audit::authentication::AuthenticationVerificationV1> {
     use agentsandbox::audit::authentication::AuthenticationAudit;
     anyhow::ensure!(
-        matches!(target_version, 2 | 3),
+        matches!(target_version, 2 | 3 | 4),
         "Unsupported authentication migration target"
     );
     // Discard parser/filesystem chains: operator-controlled inputs may include
     // sensitive values in unknown fields, malformed types or path references.
     let prepared = prepare_oidc_file(path).map_err(|_| {
         anyhow::anyhow!(
-            "Authentication migration configuration invalid or unavailable; check closed version1 fields, private ownership/permissions and local audit/CA references"
+            "Authentication migration configuration invalid or unavailable; check the closed configuration version, private ownership/permissions and local audit/CA references"
         )
     })?;
+    anyhow::ensure!(
+        matches!((target_version, prepared.file.version), (2 | 3, 1) | (4, 2)),
+        "Authentication targets2/3 require configuration version1; target4 requires configuration version2 with an explicit capacity plan"
+    );
+    let capacity_plan = prepared.file.authentication_audit.capacity_plan.clone();
     let audit = AuthenticationAudit::open_existing(
         &prepared.audit_path,
         prepared.file.authentication_audit.installation_id,
@@ -192,11 +226,14 @@ pub fn migrate_authentication(
             "Authentication configuration changed during preparation; preserve the audit and retry with a stable private configuration"
         )
     })?;
-    let migration = if target_version == 2 {
-        audit.migrate_verified_initial_v2(backup)
-    } else {
-        // The closed target was validated before any configuration/storage I/O.
-        audit.migrate_native_logout_v3(backup)
+    let migration = match target_version {
+        2 => audit.migrate_verified_initial_v2(backup),
+        3 => audit.migrate_native_logout_v3(backup),
+        4 => audit.migrate_tenant_capacity_v4(
+            backup,
+            capacity_plan.context("Authentication target4 requires a capacity plan")?,
+        ),
+        _ => anyhow::bail!("Unsupported authentication migration target"),
     };
     migration.map_err(|_| {
         anyhow::anyhow!(
@@ -380,12 +417,16 @@ mod workload_tests;
 mod policy_tests;
 
 #[cfg(test)]
+#[path = "gateway_config_capacity_tests.rs"]
+mod capacity_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[cfg(unix)]
-    fn oidc_fixture() -> (tempfile::TempDir, PathBuf, OidcFile) {
+    pub(super) fn oidc_fixture() -> (tempfile::TempDir, PathBuf, OidcFile) {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
         let dir = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
