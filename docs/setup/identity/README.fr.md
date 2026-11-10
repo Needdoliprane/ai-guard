@@ -188,6 +188,18 @@ Chaque page, même vide, exige un reçu durable dans les budgets humains existan
 
 Cette vue ne qualifie ni transport multi-brokers, ni fédération, ni agrégation workers/sessions, ni complétude runtime, ni capacité100, ni release production. Elle ne change aucun contrat de quota ou facturation : l'allocation reste non facturable et l'usage non observé reste inconnu. Consulter les preuves d'ingénierie pour la portée réelle de validation des sources correspondantes.
 
+## Capacité des contextes humains
+
+Le gateway réserve une part fixe de son registre de contextes humains à chaque tenant déclaré et validé dans sa configuration de confiance. Le total reste limité à 4096 contextes vivants. Avec deux tenants configurés, chacun dispose de 2048 places ; la part d'un tenant inactif n'est pas prêtée à un autre. Pour `N` tenants, chaque part vaut `4096 / N` arrondi à l'entier inférieur, avec une place supplémentaire pour chacun des premiers `4096 % N` identifiants de tenants dans l'ordre trié. Une configuration vide, dupliquée, invalide ou de plus de 4096 tenants est refusée. Une requête ne peut pas inscrire un tenant inconnu.
+
+La limite existante de 64 contextes continue à s'appliquer à un même principal ou credential, tous tenants confondus. Renouveler le credential ne donne pas 64 nouvelles places à ce principal. Appartenances, modes personnel/administration et permissions restent établis par l'autorisation Rust ; un header ou un champ JSON ne permet pas de choisir librement un tenant. La part d'un tenant ne garantit pas 64 contextes à chacun de ses utilisateurs.
+
+Si certains contextes autorisés ne peuvent obtenir une place, la réponse d'identité peut rendre les contextes disponibles avec `contexts_complete=false`. Ils restent utilisables selon leurs permissions : la part de A pleine ne masque pas un contexte B disponible pour une personne membre des deux tenants. Un résultat partiel n'est pas un inventaire complet des appartenances et ne signifie ni absence d'activité ni perte de droits. Si la capacité empêche tout contexte pour cette identité, la route renvoie 429 `capacity_exhausted` avec `retry_action:"retry"`. Attendre l'expiration ou demander à un administrateur autorisé de retirer les appartenances inutiles, puis relire l'identité. Les pannes d'authentification et d'audit gardent leurs erreurs propres ; en particulier, un credential local révoqué renvoie 401 `identity_revoked` avec `authenticate`.
+
+Les contextes durent toujours au plus 300 secondes, dans la limite de la preuve d'authentification. Relire l'identité ne renouvelle pas un binding existant : son identifiant, sa version d'autorisation et son expiration restent identiques. Expiration, révocation, revalidation des lectures et curseurs chiffrés conservent leur comportement. Ne jamais renouveler les credentials, réinitialiser le stockage ou supprimer l'audit pour récupérer de la capacité.
+
+Cette répartition porte seulement sur le registre de contextes humains en mémoire du gateway. Elle ne réserve ni CPU, ni ingress, ni I/O Store, ni capacité de transactions OIDC et ne promet ni débit, ni latence, ni disponibilité globale du SSO ou du cloud. Le [registre d'ingénierie](../../engineering/CURRENT_STATE.md) conserve source, tests et qualification restante ; ce guide ne constitue pas une preuve de réussite.
+
 ## Consulter avec le CLI
 
 Redémarrer uniquement les services concernés avec le binaire à jour et les données existantes. Indiquer l'origine du gateway, sans chemin `/api`. HTTPS est vérifié ; HTTP local exige une IP loopback littérale, par exemple `127.0.0.1`. Ce client désactive proxy ambiant, redirections et retries automatiques.
