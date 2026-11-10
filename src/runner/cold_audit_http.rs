@@ -167,40 +167,66 @@ impl AuditClient {
         let value = self
             .cold_exchange("api/v1/events", Some(body), budget)
             .await?;
-        let fields = value
-            .as_object()
-            .ok_or(ColdAuditHttpError::InvalidResponse)?;
-        if fields.len() != STORAGE_FIELDS.len() + EVENT_FIELDS.len()
-            || !STORAGE_FIELDS
-                .iter()
-                .chain(EVENT_FIELDS.iter())
-                .all(|field| fields.contains_key(*field))
-        {
-            return Err(ColdAuditHttpError::InvalidResponse);
-        }
-        // Compare before deserializing the flattened Event. No ignored field,
-        // arbitrary data/result member, or absent Option can disappear here.
-        let mut returned_event = fields.clone();
-        for field in STORAGE_FIELDS {
-            returned_event.remove(field);
-        }
-        if Value::Object(returned_event) != expected {
-            return Err(ColdAuditHttpError::InvalidResponse);
-        }
-        let stored: StoredEvent = decode_closed(value)?;
-        if stored.seq <= 0
-            || !hash64(&stored.prev_hash)
-            || !hash64(&stored.hash)
-            || stored.received_at.len() > 64
-            || chrono::DateTime::parse_from_rfc3339(&stored.received_at).is_err()
-            || serde_json::to_value(&stored.event)
-                .map_err(|_| ColdAuditHttpError::InvalidResponse)?
-                != expected
-        {
-            return Err(ColdAuditHttpError::InvalidResponse);
-        }
+        exact_stored_event_receipt(value, &expected, budget)
+    }
+
+    /// Exact data for this one authenticated control request. A positive seq
+    /// alone, changed masking or a changed stored Event never grants an ACK.
+    pub(crate) async fn post_retirement_resume_event(
+        &self,
+        event: &Event,
+        original_until: Instant,
+    ) -> Result<ExactStoredEventReceipt, ColdAuditHttpError> {
+        let bounded = ColdAuditBudget::start();
+        let budget = ColdAuditBudget {
+            deadline: bounded.deadline().min(original_until),
+        };
         budget.require_remaining()?;
-        Ok(ExactStoredEventReceipt { stored })
+        let (body, expected) = self.retirement_resume_body(event)?;
+        // Reuse the closed runner transport selection, not a caller URL or an
+        // ordinary-ingestion fallback. The cold exchange retains existing IO caps.
+        let path = "control/api/v1/control/events";
+        let selected = self
+            .control_url(Method::POST, "api/v1/control/events")
+            .map_err(|_| ColdAuditHttpError::InvalidRequest)?;
+        if self
+            .base
+            .join(path)
+            .map_err(|_| ColdAuditHttpError::InvalidRequest)?
+            != selected
+        {
+            return Err(ColdAuditHttpError::InvalidRequest);
+        }
+        let value = self.cold_exchange(path, Some(body), &budget).await?;
+        exact_stored_event_receipt(value, &expected, &budget)
+    }
+
+    /// Validation before the local outbox append as well as before HTTP. A
+    /// changed redaction is refused; it cannot silently change a bound digest.
+    pub(crate) fn validate_retirement_resume_event(
+        &self,
+        event: &Event,
+    ) -> Result<(), ColdAuditHttpError> {
+        self.retirement_resume_body(event).map(|_| ())
+    }
+
+    fn retirement_resume_body(
+        &self,
+        event: &Event,
+    ) -> Result<(Vec<u8>, Value), ColdAuditHttpError> {
+        crate::audit::retirement_resume_record(event)
+            .map_err(|_| ColdAuditHttpError::InvalidRequest)?;
+        if event.validate().is_err() || !canonical_timestamp(&event.timestamp) {
+            return Err(ColdAuditHttpError::InvalidRequest);
+        }
+        let mut body = RequestBytes(Vec::new());
+        serde_json::to_writer(&mut body, event).map_err(|_| ColdAuditHttpError::InvalidRequest)?;
+        let expected = crate::json::decode_unique(&body.0, MAX_JSON_DEPTH)
+            .map_err(|_| ColdAuditHttpError::InvalidRequest)?;
+        if self.redactor.value(&expected) != expected {
+            return Err(ColdAuditHttpError::InvalidRequest);
+        }
+        Ok((body.0, expected))
     }
 
     fn cold_event_body(&self, event: &Event) -> Result<(Vec<u8>, Value), ColdAuditHttpError> {
@@ -312,6 +338,46 @@ impl AuditClient {
     }
 }
 
+fn exact_stored_event_receipt(
+    value: Value,
+    expected: &Value,
+    budget: &ColdAuditBudget,
+) -> Result<ExactStoredEventReceipt, ColdAuditHttpError> {
+    let fields = value
+        .as_object()
+        .ok_or(ColdAuditHttpError::InvalidResponse)?;
+    if fields.len() != STORAGE_FIELDS.len() + EVENT_FIELDS.len()
+        || !STORAGE_FIELDS
+            .iter()
+            .chain(EVENT_FIELDS.iter())
+            .all(|field| fields.contains_key(*field))
+    {
+        return Err(ColdAuditHttpError::InvalidResponse);
+    }
+    // Compare before deserializing the flattened Event. No ignored field,
+    // arbitrary data/result member, or absent Option can disappear here.
+    let mut returned_event = fields.clone();
+    for field in STORAGE_FIELDS {
+        returned_event.remove(field);
+    }
+    if &Value::Object(returned_event) != expected {
+        return Err(ColdAuditHttpError::InvalidResponse);
+    }
+    let stored: StoredEvent = decode_closed(value)?;
+    if stored.seq <= 0
+        || !hash64(&stored.prev_hash)
+        || !hash64(&stored.hash)
+        || stored.received_at.len() > 64
+        || chrono::DateTime::parse_from_rfc3339(&stored.received_at).is_err()
+        || serde_json::to_value(&stored.event).map_err(|_| ColdAuditHttpError::InvalidResponse)?
+            != *expected
+    {
+        return Err(ColdAuditHttpError::InvalidResponse);
+    }
+    budget.require_remaining()?;
+    Ok(ExactStoredEventReceipt { stored })
+}
+
 fn decode_closed<T: DeserializeOwned>(value: Value) -> Result<T, ColdAuditHttpError> {
     let mut ignored = false;
     let decoded = serde_ignored::deserialize(value.into_deserializer(), |_| ignored = true)
@@ -377,3 +443,7 @@ impl Write for RequestBytes {
 #[cfg(test)]
 #[path = "cold_audit_http_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retirement_resume_http_tests.rs"]
+mod retirement_resume_tests;

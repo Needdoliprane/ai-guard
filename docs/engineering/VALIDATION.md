@@ -1,5 +1,18 @@
 # Validation courante
 
+## 10 novembre — Resume Core/HTTP : trois RED et cinq FIX PASS
+
+Sur RED2365 `6a8a337a…`, Core1/2/4 échouent aux oracles discriminants ; Core3
+est un canari négatif déjà PASS. Sur FIX2366 `a055c289…`, quatre Core et un HTTP
+sélectionnent chacun1PASS/RC0 ; check toutes cibles RC0 à13:20:25UTC.
+HostPATH127 avant app, buildRED22727RC0 puis FIX3179RC0/6m55 et DEBUG=0 répétés
+avec même valeur sont conservés, sans redo ni faux RED de setup. Post2366,
+archives RED/FIX réelles et fermeture normale sont vérifiés.
+[Commandes, empreintes et portée](evidence/2026-11-10/retirement-resume-core-http/README.md).
+Les cinq postimages se composent sur public81, préimages b6 inchangées ; les
+30écarts hors scope sont Auth/docs, pas un run de tout Root WIP. Aucun résultat
+full Resume/fencing/runtime ou des huit parents natifs. G09 FAIL,0/12 clos.
+
 ## 10 novembre — AuthV4 : 28 fonctions distinctes sur deux sources
 
 Sur R2 full2368 `2211c5b0…`, 19 bibliothèque + 4 config donnent 23 PASS

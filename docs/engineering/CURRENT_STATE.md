@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 10 novembre — demande Resume Core/HTTP vérifiée en logiciel
+
+La tranche accepte le nouveau fait fermé par la voie runner existante et exige
+son reçu HTTP entier exact. Trois RED discriminants et un canari de baseline
+précèdent cinq FIX PASS uniques et check toutes cibles RC0 sur2366 `a055c289…`,
+avec revue indépendante45f4001f, post-source et archives réelles exacts.
+La QA attribuée est retirée normalement ; PATH127 avant app et doublons DEBUG=0
+identiques restent documentés. [Sources et limites](evidence/2026-11-10/retirement-resume-core-http/README.md).
+Le fait/reçu ne donne ni permission ni original et ne raccorde pas Resume
+broker complet, quota, fencing ou runtime. Aucun backend/fixture refusée repris.
+G09 FAIL,0/12 gates globaux clos.
+
 ## 10 novembre — parts finies AuthV4 vérifiées en logiciel
 
 Après la RED logicielle NV-02, le journal d'authentification reçoit des parts

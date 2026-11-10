@@ -274,6 +274,28 @@ guarantee. A writer failure is not an ACK. Preserve the journal and event IDs fo
 recovery; do not reset its root to force a retry. The [validation record](../../engineering/VALIDATION.md)
 states which software, failure and runtime scenarios have actually been run.
 
+### Interpret a retirement Resume audit request
+
+The exact kind `broker.retirement.resume.requested` is closed request data for
+the existing runner-only POST `/api/v1/control/events`, through
+`/control/api/v1/control/events` for control transport. Ordinary ingestion or
+Store append refuses it, including with spare budget. Its version1 body has11
+bounded fields: canonical UUIDs, generation, digests and the original deadline.
+Unknown fields, invalid attribution or a masking collision in a bound field
+refuse. The authenticated credential still selects the tenant.
+
+The internal HTTP sender requires the whole original Event unchanged and
+well-formed StoredEvent metadata; a positive sequence alone is not an ACK.
+It keeps the smaller of the original remaining deadline and the existing
+45-second budget. Preserve original IDs/payloads and receipts after an ambiguous
+response; timeout does not prove rollback of a durable audit commit.
+
+This Core/HTTP slice records only a request. It does not wire a retirement retry
+into `broker resume`, reconstruct an original owner/timer from JSON, confirm a
+local writer ACK, release quota or grant a start. A fact/receipt is no permission,
+runtime observation, fencing or cold recovery. Use the existing status and
+reconciliation procedures; no new CLI, service or credential is introduced.
+
 ## Submit and inspect a job
 
 In the client terminal, set the same path variables. Choose a fresh non-nil operation UUID **once**, record it and keep the same inputs for a retry. The value below must be replaced before execution.

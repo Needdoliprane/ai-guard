@@ -282,6 +282,28 @@ n'est pas un ACK. Préserver journal et IDs pour la reprise ; ne pas réinitiali
 sa racine pour forcer un retry. Le [registre de validation](../../engineering/VALIDATION.md)
 précise les scénarios logiciels, de panne et runtime réellement exécutés.
 
+### Interpréter une demande auditée de Resume de retraite
+
+Le kind exact `broker.retirement.resume.requested` est une donnée de demande
+fermée pour le POST runner existant `/api/v1/control/events`, via
+`/control/api/v1/control/events` pour le transport de contrôle. Ni ingestion
+ordinaire ni append Store ne l'acceptent, même avec de la place. Son corps
+version1 a11 champs bornés : UUID canoniques, génération, digests et échéance
+originale. Champ inconnu, attribution invalide ou collision de masquage d'une
+liaison refusent. Le credential authentifié choisit toujours le tenant.
+
+L'émetteur HTTP interne exige l'Event original entier inchangé et les métadonnées
+formées du StoredEvent ; une séquence positive seule n'est pas un ACK. Il garde
+le minimum entre l'échéance originale restante et le budget existant de45 secondes.
+Préserver IDs/contenus originaux et reçus après une réponse ambiguë ; un timeout
+ne prouve pas l'annulation d'un commit d'audit durable.
+
+Cette tranche Core/HTTP enregistre seulement une demande. Elle ne raccorde pas
+un retry de retraite à `broker resume`, ne reconstruit ni original ni timer depuis
+JSON, ne confirme pas d'ACK writer local, ne libère ni quota ni start. Fait/reçu
+ne donne ni permission, observation runtime, fencing ou reprise froide. Conserver
+les procédures status/réconciliation ; aucune nouvelle CLI, service ou credential.
+
 ## Soumettre et consulter un job
 
 Dans le terminal client, renseigner les mêmes variables de chemins. Choisir **une seule fois** un UUID d'opération neuf non nul, le conserver et garder les mêmes entrées lors d'un retry. La valeur ci-dessous doit être remplacée avant exécution.

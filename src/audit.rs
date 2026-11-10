@@ -27,7 +27,95 @@ pub(crate) const D5_CONTROL_EVENT_KINDS: &[&str] = &[
     "broker.abandon-before-claim.requested",
     "broker.retirement.pending",
     "broker.retirement.final",
+    RETIREMENT_RESUME_EVENT_KIND,
 ];
+
+pub(crate) const RETIREMENT_RESUME_EVENT_KIND: &str = "broker.retirement.resume.requested";
+
+/// Closed request data only. This is neither authentication nor a permission;
+/// the broker must retain the actual original and confirm its exact audit ACK.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetirementResumeRecordV1 {
+    pub(crate) version: u32,
+    pub(crate) operation_id: String,
+    pub(crate) command_id: String,
+    pub(crate) retirement_id: String,
+    pub(crate) arm_id: String,
+    pub(crate) original_epoch: String,
+    pub(crate) generation: u64,
+    pub(crate) identity_sha256: String,
+    pub(crate) evidence_sha256: String,
+    pub(crate) pending_ack_sha256: String,
+    pub(crate) deadline_ns_decimal: String,
+}
+
+pub(crate) fn retirement_resume_record(event: &Event) -> anyhow::Result<RetirementResumeRecordV1> {
+    anyhow::ensure!(
+        event.kind == RETIREMENT_RESUME_EVENT_KIND
+            && event.source == "ai-guard-broker"
+            && event.provenance == "observed"
+            && event.coverage == "native"
+            && event.parent_agent_id.is_none()
+            && event.command.is_none()
+            && event.decision.is_none()
+            && event.result.is_none(),
+        "invalid retirement resume attribution"
+    );
+    let object = event
+        .data
+        .as_object()
+        .context("invalid retirement resume shape")?;
+    anyhow::ensure!(
+        object.len() == 11
+            && object.iter().all(|(key, value)| key.len() <= 32
+                && match value {
+                    Value::String(value) => value.len() <= 64,
+                    Value::Number(value) => value.is_u64(),
+                    _ => false,
+                }),
+        "retirement resume shape exceeds its bound"
+    );
+    let body: RetirementResumeRecordV1 =
+        serde_json::from_value(event.data.clone()).context("invalid retirement resume request")?;
+    let canonical_uuid = |value: &str| {
+        uuid::Uuid::parse_str(value)
+            .is_ok_and(|id| !id.is_nil() && id.hyphenated().to_string() == value)
+    };
+    let digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    anyhow::ensure!(
+        body.version == 1
+            && body.generation != u64::MAX
+            && body.command_id == event.id
+            && [
+                &body.operation_id,
+                &body.command_id,
+                &body.retirement_id,
+                &body.arm_id,
+                &body.original_epoch
+            ]
+            .iter()
+            .all(|value| canonical_uuid(value))
+            && [
+                &body.identity_sha256,
+                &body.evidence_sha256,
+                &body.pending_ack_sha256
+            ]
+            .iter()
+            .all(|value| digest(value))
+            && body
+                .deadline_ns_decimal
+                .parse::<u128>()
+                .is_ok_and(|n| n > 0 && n.to_string() == body.deadline_ns_decimal),
+        "noncanonical retirement resume request"
+    );
+    Ok(body)
+}
 
 /// Closed delivery contract for the authenticated runner audit route. A kind
 /// alone never selects a capacity class; the trusted append method does so.
@@ -1007,6 +1095,7 @@ impl Store {
     pub fn append(&self, event: Event) -> anyhow::Result<StoredEvent> {
         anyhow::ensure!(
             !event.kind.starts_with("control.")
+                && event.kind != RETIREMENT_RESUME_EVENT_KIND
                 && !crate::relay::admission::reserved_kind(&event.kind),
             "control events require typed mutation"
         );
@@ -1029,11 +1118,20 @@ impl Store {
             control_delivery_kind(&event.kind),
             "unsupported control delivery kind"
         );
+        let resume = event.kind == RETIREMENT_RESUME_EVENT_KIND;
+        if resume {
+            retirement_resume_record(&event)?;
+        }
         let (event, payload) = self.prepare_event(event)?;
         anyhow::ensure!(
             control_delivery_kind(&event.kind),
             "control delivery kind changed during preparation"
         );
+        // Mask before persistence and refuse a redaction collision that would
+        // change any canonical binding or the closed request attribution.
+        if resume {
+            retirement_resume_record(&event)?;
+        }
         let mut db = self
             .db
             .lock()

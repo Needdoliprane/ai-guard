@@ -3,6 +3,9 @@
 //! they do not establish a retirement, runtime outcome or broker provenance.
 mod support;
 
+#[path = "d5_control_audit/retirement_resume.rs"]
+mod retirement_resume;
+
 use agentsandbox::{
     api::{GatewayState, gateway_router},
     audit::{AuditCapacityFailureV1, AuditCapacityPolicyV1, Store},
