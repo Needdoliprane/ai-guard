@@ -1,5 +1,17 @@
 # Validation courante
 
+## 10 novembre — conservation et lecture du nouvel audit run-2
+
+**PASS conservation** : sept empreintes des pièces principales rapprochées des
+originaux ; vérification SHA des trois manifestes dans `.claude/audit/` et
+dans la sauvegarde indépendante ; archives/index identiques, `gzip -t` RC0 et
+`git check-ignore` confirme que le rapport privé reste exclu. Le
+[registre run-2](AUDIT_RUN_2_20261110.md) est lié depuis les consignes et le
+suivi des audits. Lecture et contrôle de données uniquement : aucun script du
+rapport ni test produit exécuté par cette conservation. Les huit constats,
+cinq pistes et trois rejets gardent leur source `696efd1` et leurs limites ;
+aucune clôture par rapprochement implicite avec les lots NV ou broker.
+
 ## 10 novembre — commandes bornées et continuité des travaux
 
 **PASS documentaire** : ajout relu indépendamment dans `AGENTS.md` : cible et

@@ -1,5 +1,15 @@
 # Suivi des audits indépendants
 
+## Rapport run-2 reçu le 10 novembre 2026
+
+Le [registre run-2](AUDIT_RUN_2_20261110.md) conserve la référence `696efd1`,
+les empreintes des pièces et les huit constats démontrés, cinq pistes et trois
+rejets du rapport final. Le lire avant les prochains correctifs et rapprocher
+ses fingerprints des sources courantes. Les archives privées et diffs de
+reproduction sont conservés dans `.claude/audit/ai-guard-run-2-2026-11-09/`,
+avec sauvegarde extérieure ; aucun verdict n'est clôturé par cette copie.
+Les résultats historiques ci-dessous ne sont ni remplacés ni transférés.
+
 <a id="registre-des-audits"></a>
 
 ## Registre des audits et conservation privée

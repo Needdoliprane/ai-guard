@@ -50,6 +50,13 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 
 ## Lire avant de modifier
 
+Pour les correctifs de sécurité, lire aussi le [rapport final run-2 et son
+registre de prise en compte](docs/engineering/AUDIT_RUN_2_20261110.md) : huit
+constats démontrés, cinq pistes à valider et trois rejets sur `696efd1`.
+Consulter les pièces primaires privées et rapprocher chaque fingerprint du
+code courant avant correction ; ne pas assimiler un correctif voisin à sa
+clôture. Les audits précédents restent des entrées obligatoires distinctes.
+
 1. `docs/engineering/ARCHITECTURE_CONTRACT.md` : frontières et invariants.
 2. `docs/engineering/CODING_RULES.md` : règles de code applicables.
 3. `docs/engineering/PRODUCTION_READINESS.md` : gates G01 à G12 et écarts actuels.
