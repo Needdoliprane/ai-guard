@@ -4,6 +4,8 @@ use crate::control::uuid;
 use crate::relay::*;
 use chrono::{DateTime, Duration, Utc};
 
+mod retention;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (
         "table",
@@ -403,25 +405,76 @@ fn replay(
 
 const RETAINED_USAGE_SQL: &str = "SELECT COUNT(*),COALESCE(SUM(body_bytes),0) FROM relay_messages INDEXED BY relay_messages_retained WHERE body IS NOT NULL";
 const RECENT_GRANT_SQL: &str = "SELECT COUNT(*) FROM relay_messages INDEXED BY relay_messages_rate WHERE grant_id=?1 AND received_at>?2 AND received_at<=?3";
+fn grant_rate_at(db: &Connection, grant_id: &str, now: DateTime<Utc>) -> anyhow::Result<()> {
+    let recent: i64 = db.query_row(
+        RECENT_GRANT_SQL,
+        params![
+            grant_id,
+            canonical_time(now - Duration::seconds(60)),
+            canonical_time(now)
+        ],
+        |r| r.get(0),
+    )?;
+    if u64::try_from(recent)? >= MAX_MESSAGES_PER_MINUTE {
+        return Err(RelayFailure::RateLimited.into());
+    }
+    Ok(())
+}
 const INBOX_SQL: &str = "SELECT accepted_event_seq,metadata_json,body FROM relay_messages INDEXED BY relay_messages_inbox WHERE destination_worker_id=?1 AND destination_attempt_id=?2 AND destination_generation=?3 AND accepted_event_seq>?4 AND body IS NOT NULL AND acknowledged=0 AND expires_at>?5 ORDER BY accepted_event_seq LIMIT ?6";
 
+/// Why a relay fact is written. Chosen by trusted methods, never by a request field.
+#[derive(Clone, Copy)]
+enum Origin<'a> {
+    /// The authenticated caller's own operation.
+    Request,
+    /// Bounded release of an expired body inside an authorized send:
+    /// `trigger` is that send's operation and `worker` its verified sender.
+    AutomaticPrune { trigger: &'a str, worker: &'a str },
+}
+
 impl Store {
+    /// Every relay fact is dated by its own `clock`, captured after the previous
+    /// append of the transaction: the validator requires each fact to be at or
+    /// after the reception of all earlier events.
     fn persist_relay(
         &self,
         tx: &Transaction<'_>,
         record: &Record,
         body: Option<&str>,
         clock: &super::workload::AuthorizedControlTimeV1,
+        origin: Origin<'_>,
     ) -> anyhow::Result<RelayReceiptV1> {
         let mut event = Event::new("control.relay.mutation");
         event.timestamp = canonical_time(clock.at());
+        if let Origin::AutomaticPrune { trigger, worker } = origin {
+            // Provenance in a free-form field, not attribution: the record
+            // keeps no actor, as the historical prune rule requires.
+            event.correlation_id = Some(format!(
+                "{AUTOMATIC_PRUNE_CORRELATION_PREFIX}{trigger}:{worker}"
+            ));
+        }
         event.data = serde_json::to_value(record)?;
         // Worker and agent identities are different. The typed audit metadata
         // carries the authenticated workload actor without inventing an agent ID.
         let raw = serde_json::to_value(&event)?;
         valid(self.redactor.value(&raw) == raw)?;
         let (event, payload) = self.prepare_event(event)?;
-        let stored = if matches!(record.action.as_str(), "send" | "ack") {
+        let stored = if matches!(origin, Origin::AutomaticPrune { .. }) {
+            anyhow::ensure!(
+                record.action == "prune" && record.actor.is_none(),
+                "automatic relay release must be an unattributed prune"
+            );
+            // Ordinary class: automatic cleanup can never draw on the control
+            // or identity reserves that the runner's deliberate prune may use.
+            self.append_with_authorized_capacity_class_at(
+                tx,
+                event,
+                payload,
+                super::capacity::Class::OrdinaryWrite,
+                clock,
+                Utc::now(),
+            )?
+        } else if matches!(record.action.as_str(), "send" | "ack") {
             let actor = record
                 .actor
                 .as_ref()
@@ -533,7 +586,7 @@ impl Store {
         }
         conflict(grant(&tx, &input.grant_id)?.is_none())?;
         let record = grant_record_at(input, expires, now, hash)?;
-        let result = self.persist_relay(&tx, &record, None, &clock)?;
+        let result = self.persist_relay(&tx, &record, None, &clock, Origin::Request)?;
         self.commit_authorized(tx, &clock)?;
         Ok(result)
     }
@@ -563,7 +616,7 @@ impl Store {
             actor: None,
             resource: Resource::Grant(value),
         };
-        let result = self.persist_relay(&tx, &record, None, &clock)?;
+        let result = self.persist_relay(&tx, &record, None, &clock, Origin::Request)?;
         self.commit_authorized(tx, &clock)?;
         Ok(result)
     }
@@ -604,12 +657,8 @@ impl Store {
         let tx = self.begin_checked(&mut db)?;
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
-        let now = clock.at();
-        let source = self.checked_worker_relay_identity(&tx, identity, now)?;
-        let grant = grant(&tx, &input.grant_id)?.ok_or(RelayFailure::Forbidden)?;
-        forbidden(grant.source == source)?;
-        active_grant_at(&tx, &grant, now)?;
-        self.checked_worker_relay_endpoint(&tx, &grant.destination, now)?;
+        let (source, grant) =
+            self.relay_send_authority(&tx, identity, &input.grant_id, clock.at())?;
         if let Some(receipt) = replay(&tx, &input.operation_id, &hash, "send")? {
             let retained = message(&tx, &receipt.resource_id)?
                 .context("relay send receipt has no message tombstone")?;
@@ -621,60 +670,97 @@ impl Store {
             self.commit_authorized(tx, &clock)?;
             return Ok(receipt);
         }
-        let (count, bytes): (i64, i64) =
-            tx.query_row(RETAINED_USAGE_SQL, [], |r| Ok((r.get(0)?, r.get(1)?)))?;
-        let recent: i64 = tx.query_row(
-            RECENT_GRANT_SQL,
-            params![
-                grant.grant_id,
-                canonical_time(now - Duration::seconds(60)),
-                canonical_time(now)
-            ],
-            |r| r.get(0),
-        )?;
-        if u64::try_from(recent)? >= MAX_MESSAGES_PER_MINUTE {
-            return Err(RelayFailure::RateLimited.into());
+        grant_rate_at(&tx, &grant.grant_id, clock.at())?;
+        let mut retained = retention::Retained::load(&tx)?;
+        let cleanup =
+            self.relay_release_expired(&tx, &mut retained, &source, &input.operation_id, clock)?;
+        let admitted = (|| -> anyhow::Result<RelayReceiptV1> {
+            let now = cleanup.clock.at();
+            let (source, grant) = if cleanup.released > 0 {
+                // The send fact follows the release facts: its authority, rate
+                // window, creation and expiry are all evaluated at its own instant.
+                let authority = self.relay_send_authority(&tx, identity, &input.grant_id, now)?;
+                grant_rate_at(&tx, &authority.1.grant_id, now)?;
+                authority
+            } else {
+                (source, grant)
+            };
+            retention::admit(
+                &self.relay_retention_policy,
+                &retained,
+                &source,
+                &grant.grant_id,
+                input.body.len() as u64,
+                now,
+            )?;
+            let expires = std::cmp::min(
+                timestamp(&grant.expires_at)?,
+                now + Duration::seconds(i64::from(input.ttl_seconds)),
+            );
+            if canonical_time(expires) <= canonical_time(now) {
+                return Err(RelayFailure::Expired.into());
+            }
+            let metadata = RelayMessageMetadataV1 {
+                version: 1,
+                message_id: input.operation_id.clone(),
+                grant_id: grant.grant_id,
+                source: grant.source,
+                destination: grant.destination,
+                channel: grant.channel,
+                created_at: canonical_time(now),
+                expires_at: canonical_time(expires),
+                body_bytes: input.body.len() as u64,
+                body_sha256,
+                acknowledged: false,
+                body_pruned: false,
+            };
+            let record = Record {
+                version: 1,
+                operation_id: input.operation_id.clone(),
+                input_hash: hash,
+                action: "send".into(),
+                actor: Some(Actor::from_verified(identity)),
+                resource: Resource::Message(metadata),
+            };
+            self.persist_relay(
+                &tx,
+                &record,
+                Some(&input.body),
+                &cleanup.clock,
+                Origin::Request,
+            )
+        })();
+        match admitted {
+            Ok(receipt) => {
+                self.commit_authorized(tx, &cleanup.clock)?;
+                Ok(receipt)
+            }
+            // Each release is complete and audited by its own fact. Keeping it
+            // when the send itself is refused lets a retry progress instead of
+            // repeating the same releases, and avoids a rolled-back write.
+            Err(refusal) if cleanup.survives(&tx, &refusal) => {
+                self.commit_authorized(tx, &cleanup.clock)?;
+                Err(refusal)
+            }
+            Err(error) => Err(error),
         }
-        if u64::try_from(count)? >= MAX_RETAINED_MESSAGES
-            || u64::try_from(bytes)?
-                .checked_add(input.body.len() as u64)
-                .context("relay byte overflow")?
-                > MAX_RETAINED_BODY_BYTES
-        {
-            return Err(RelayFailure::Capacity.into());
-        }
-        let expires = std::cmp::min(
-            timestamp(&grant.expires_at)?,
-            now + Duration::seconds(i64::from(input.ttl_seconds)),
-        );
-        if canonical_time(expires) <= canonical_time(now) {
-            return Err(RelayFailure::Expired.into());
-        }
-        let metadata = RelayMessageMetadataV1 {
-            version: 1,
-            message_id: input.operation_id.clone(),
-            grant_id: grant.grant_id,
-            source: grant.source,
-            destination: grant.destination,
-            channel: grant.channel,
-            created_at: canonical_time(now),
-            expires_at: canonical_time(expires),
-            body_bytes: input.body.len() as u64,
-            body_sha256,
-            acknowledged: false,
-            body_pruned: false,
-        };
-        let record = Record {
-            version: 1,
-            operation_id: input.operation_id.clone(),
-            input_hash: hash,
-            action: "send".into(),
-            actor: Some(Actor::from_verified(identity)),
-            resource: Resource::Message(metadata),
-        };
-        let result = self.persist_relay(&tx, &record, Some(&input.body), &clock)?;
-        self.commit_authorized(tx, &clock)?;
-        Ok(result)
+    }
+
+    /// Current authority of a send at `now`: verified source identity, its
+    /// active directed grant and a currently authorized destination endpoint.
+    fn relay_send_authority(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        identity: &WorkerRelayIdentity,
+        grant_id: &str,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<(RelayEndpointV1, Grant)> {
+        let source = self.checked_worker_relay_identity(tx, identity, now)?;
+        let grant = grant(tx, grant_id)?.ok_or(RelayFailure::Forbidden)?;
+        forbidden(grant.source == source)?;
+        active_grant_at(tx, &grant, now)?;
+        self.checked_worker_relay_endpoint(tx, &grant.destination, now)?;
+        Ok((source, grant))
     }
 
     pub fn relay_inbox(
@@ -818,6 +904,11 @@ impl Store {
             return Err(RelayFailure::Expired.into());
         }
         value.acknowledged = true;
+        if self.relay_retention_policy.release_on_ack {
+            // Explicit operator opt-in: this one fact, attributed to the
+            // recipient, also retires the body. No separate prune is written.
+            value.body_pruned = true;
+        }
         let record = Record {
             version: 1,
             operation_id: input.operation_id.clone(),
@@ -826,7 +917,7 @@ impl Store {
             actor: Some(Actor::from_verified(identity)),
             resource: Resource::Message(value),
         };
-        let result = self.persist_relay(&tx, &record, None, &clock)?;
+        let result = self.persist_relay(&tx, &record, None, &clock, Origin::Request)?;
         self.commit_authorized(tx, &clock)?;
         Ok(result)
     }
@@ -862,10 +953,51 @@ impl Store {
             actor: None,
             resource: Resource::Message(value),
         };
-        let result = self.persist_relay(&tx, &record, None, &clock)?;
+        let result = self.persist_relay(&tx, &record, None, &clock, Origin::Request)?;
         self.commit_authorized(tx, &clock)?;
         Ok(result)
     }
+}
+
+/// Metadata rule of an `ack` or `prune` fact over the audited message `old`.
+/// `actor` is the endpoint the fact is attributed to and `at` the instant of
+/// the fact. An acknowledgement comes from the destination, sets
+/// `acknowledged` and may also retire a body before expiry.
+/// A prune is unattributed and never precedes expiry. Neither can restore a
+/// body or change any other field.
+fn check_message_update(
+    action: &str,
+    old: &RelayMessageMetadataV1,
+    value: &RelayMessageMetadataV1,
+    actor: Option<&RelayEndpointV1>,
+    at: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let mut expected = old.clone();
+    if action == "ack" {
+        expected.acknowledged = true;
+        expected.body_pruned = old.body_pruned || value.body_pruned;
+        anyhow::ensure!(
+            actor == Some(&value.destination),
+            "ack actor differs from message destination"
+        );
+        if !old.body_pruned && value.body_pruned {
+            anyhow::ensure!(
+                at < timestamp(&old.expires_at)?,
+                "expired relay body release on acknowledgement"
+            );
+        }
+    } else {
+        expected.body_pruned = true;
+        anyhow::ensure!(
+            actor.is_none() && timestamp(&value.expires_at)? <= at,
+            "premature or worker body prune"
+        );
+    }
+    anyhow::ensure!(
+        expected == *value,
+        "relay message update changed immutable metadata"
+    );
+    Ok(())
 }
 
 /// Reconstruct every relay projection from metadata-only audit and verify retained bodies by hash.
@@ -1053,28 +1185,17 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
                         let (old, accepted, accepted_received_at, _) = messages
                             .get(&value.message_id)
                             .context("message update without genesis")?;
-                        let mut expected = old.clone();
                         if record.action == "ack" {
-                            expected.acknowledged = true;
                             let actor = record.actor.as_ref().context("ack actor missing")?;
                             actor.validate_at(db, &tenant, at, seq)?;
-                            anyhow::ensure!(
-                                actor.endpoint == value.destination,
-                                "ack actor differs from message destination"
-                            );
-                        } else {
-                            expected.body_pruned = true;
-                            anyhow::ensure!(
-                                record.actor.is_none()
-                                    && timestamp(&value.expires_at)?
-                                        <= timestamp(&event.timestamp)?,
-                                "premature or worker body prune"
-                            );
                         }
-                        anyhow::ensure!(
-                            expected == value,
-                            "relay message update changed immutable metadata"
-                        );
+                        check_message_update(
+                            &record.action,
+                            old,
+                            &value,
+                            record.actor.as_ref().map(|actor| &actor.endpoint),
+                            at,
+                        )?;
                         (*accepted, accepted_received_at.clone())
                     }
                     _ => anyhow::bail!("invalid relay message action"),
@@ -1242,5 +1363,119 @@ mod tests {
         let reopened = Connection::open(&path).unwrap();
         validate(&reopened).unwrap();
         assert_eq!(audit_head(&reopened).unwrap(), committed_head);
+    }
+
+    /// Pure rule of the history validator. These synthetic metadata prove no
+    /// worker identity: the validator checks the actor's binding separately.
+    #[test]
+    fn message_update_rule_never_restores_a_body_and_keeps_release_on_ack_narrow() {
+        let endpoint = |worker: &str| RelayEndpointV1 {
+            worker_id: worker.into(),
+            attempt_id: "00000000-0000-4000-8000-000000000000".into(),
+            generation: 1,
+        };
+        let old = RelayMessageMetadataV1 {
+            version: 1,
+            message_id: "11111111-1111-4111-8111-111111111111".into(),
+            grant_id: "22222222-2222-4222-8222-222222222222".into(),
+            source: endpoint("a1a1a1a1-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            destination: endpoint("a2a2a2a2-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            channel: "tasks".into(),
+            created_at: "2026-11-10T12:00:00.000Z".into(),
+            expires_at: "2026-11-10T12:00:10.000Z".into(),
+            body_bytes: 5,
+            body_sha256: "0".repeat(64),
+            acknowledged: false,
+            body_pruned: false,
+        };
+        let live = timestamp("2026-11-10T12:00:09.999Z").unwrap();
+        let expiry = timestamp(&old.expires_at).unwrap();
+        let expired = timestamp("2026-11-10T12:00:10.001Z").unwrap();
+        let recipient = Some(&old.destination);
+        let with = |acknowledged: bool, body_pruned: bool| RelayMessageMetadataV1 {
+            acknowledged,
+            body_pruned,
+            ..old.clone()
+        };
+        let refused = |result: anyhow::Result<()>, reason: &str, case: &str| {
+            let error = result.err().unwrap_or_else(|| panic!("accepted: {case}"));
+            assert!(error.to_string().contains(reason), "{case}: {error}");
+        };
+
+        // An acknowledgement keeps the body, or retires it in the same fact.
+        check_message_update("ack", &old, &with(true, false), recipient, live).unwrap();
+        check_message_update("ack", &old, &with(true, true), recipient, live).unwrap();
+        for at in [expiry, expired] {
+            // Historical acknowledgements that kept the body remain valid.
+            check_message_update("ack", &old, &with(true, false), recipient, at).unwrap();
+            refused(
+                check_message_update("ack", &old, &with(true, true), recipient, at),
+                "expired relay body release on acknowledgement",
+                "an acknowledgement released a body at or after expiry",
+            );
+        }
+        // Once a body is pruned, no later fact may declare it present again.
+        let pruned = with(false, true);
+        refused(
+            check_message_update("ack", &pruned, &with(true, false), recipient, expiry),
+            "changed immutable metadata",
+            "an acknowledgement fact restored a pruned body",
+        );
+        check_message_update("ack", &pruned, &with(true, true), recipient, expiry).unwrap();
+        check_message_update("ack", &pruned, &with(true, true), recipient, expired).unwrap();
+        // Only the destination acknowledges, and with it releases.
+        for actor in [Some(&old.source), None] {
+            refused(
+                check_message_update("ack", &old, &with(true, true), actor, live),
+                "ack actor differs",
+                "a body released by an acknowledgement that is not the recipient's",
+            );
+        }
+        // An `ack` fact cannot release without acknowledging, nor touch anything else.
+        refused(
+            check_message_update("ack", &old, &with(false, true), recipient, live),
+            "changed immutable metadata",
+            "an ack fact that prunes without acknowledging",
+        );
+        let moved = RelayMessageMetadataV1 {
+            expires_at: "2026-11-10T12:00:20.000Z".into(),
+            ..with(true, true)
+        };
+        refused(
+            check_message_update("ack", &old, &moved, recipient, live),
+            "changed immutable metadata",
+            "an ack fact that moved the expiry",
+        );
+
+        // A prune is unattributed and waits for the expiry, inclusive.
+        check_message_update("prune", &old, &with(false, true), None, expiry).unwrap();
+        refused(
+            check_message_update("prune", &old, &with(false, true), None, live),
+            "premature or worker body prune",
+            "a prune before expiry",
+        );
+        refused(
+            check_message_update("prune", &old, &with(false, true), recipient, expiry),
+            "premature or worker body prune",
+            "a prune attributed to a worker",
+        );
+        refused(
+            check_message_update("prune", &old, &with(true, true), None, expiry),
+            "changed immutable metadata",
+            "a prune that also acknowledges",
+        );
+        refused(
+            check_message_update("prune", &old, &with(false, false), None, expiry),
+            "changed immutable metadata",
+            "a prune that keeps the body",
+        );
+        // An acknowledged message stays acknowledged when its body is pruned.
+        let acknowledged = with(true, false);
+        check_message_update("prune", &acknowledged, &with(true, true), None, expiry).unwrap();
+        refused(
+            check_message_update("prune", &acknowledged, &with(false, true), None, expiry),
+            "changed immutable metadata",
+            "a prune that cleared the acknowledgement",
+        );
     }
 }

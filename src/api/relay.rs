@@ -10,11 +10,52 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/relay/messages", post(send).get(inbox))
         .route("/relay/messages/{id}/ack", post(ack))
         .route("/relay/messages/{id}/prune", post(prune))
+        .route("/relay/retention", get(retention))
         .layer(middleware::from_fn(workload::request_guard))
+}
+/// A typed 429 keeps the historical `{code,message}` shape and adds closed
+/// diagnostic fields. No body and no figure of another sender is ever included.
+fn refusal(code: &str, message: &str, detail: Value) -> (StatusCode, Json<Value>) {
+    let mut error = json!({"code":code,"message":message});
+    if let (Some(error), Value::Object(detail)) = (error.as_object_mut(), detail) {
+        error.extend(detail);
+    }
+    (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":error})))
+}
+fn capacity_refusal(own: &RelayCapacityRefusalV1) -> (StatusCode, Json<Value>) {
+    let (code, message) = match own.scope {
+        RelayCapacityScopeV1::Sender => (
+            "relay_sender_capacity_exhausted",
+            "This sender reached its retained relay share.",
+        ),
+        RelayCapacityScopeV1::Grant => (
+            "relay_grant_capacity_exhausted",
+            "This directed grant reached its retained relay share.",
+        ),
+    };
+    // Serialization of this closed struct cannot fail; a failure would only
+    // drop the optional figures, never widen the answer.
+    refusal(
+        code,
+        message,
+        serde_json::to_value(own).unwrap_or(Value::Null),
+    )
 }
 fn failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     if let Some(response) = audit_capacity_failure(&error) {
         return response;
+    }
+    if let Some(own) = error.downcast_ref::<RelayCapacityRefusalV1>() {
+        return capacity_refusal(own);
+    }
+    // The shared ceiling describes other senders: no occupancy, no deadline.
+    // The action tells whether a later retry of the same operation can pass.
+    if let Some(tenant) = error.downcast_ref::<RelayTenantCapacityRefusalV1>() {
+        return refusal(
+            "relay_capacity_exhausted",
+            "Retained relay content reached the tenant limit.",
+            json!({"scope":RelayRefusalScopeV1::Tenant,"retry_action":tenant.retry_action}),
+        );
     }
     let (status, code, message) = match error.downcast_ref::<RelayFailure>() {
         Some(RelayFailure::InvalidRequest) => (
@@ -37,16 +78,29 @@ fn failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
             "relay_conflict",
             "The operation identity belongs to different durable content.",
         ),
-        Some(RelayFailure::RateLimited) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "relay_rate_limited",
-            "The durable relay grant rate limit was reached.",
-        ),
-        Some(RelayFailure::Capacity) => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "relay_capacity_exhausted",
-            "Retained relay content reached its limit; contact the operator.",
-        ),
+        Some(RelayFailure::RateLimited) => {
+            return refusal(
+                "relay_rate_limited",
+                "The durable relay grant rate limit was reached.",
+                json!({
+                    "scope":RelayRefusalScopeV1::Grant,
+                    "retry_action":RelayRetryActionV1::RetryAfterWindow
+                }),
+            );
+        }
+        // Historical untyped form of the tenant ceiling. The Store now reports
+        // it as `RelayTenantCapacityRefusalV1`; without a computed action the
+        // only safe advice is the operator.
+        Some(RelayFailure::Capacity) => {
+            return refusal(
+                "relay_capacity_exhausted",
+                "Retained relay content reached the tenant limit; contact the operator.",
+                json!({
+                    "scope":RelayRefusalScopeV1::Tenant,
+                    "retry_action":RelayRetryActionV1::ContactOperator
+                }),
+            );
+        }
         Some(RelayFailure::Expired) => (
             StatusCode::FORBIDDEN,
             "relay_expired",
@@ -194,6 +248,30 @@ async fn prune(
                 tenant
                     .store
                     .relay_prune(&input)
+                    .map_err(|error| store_failure(&tenant.store, error))?,
+            ))
+        })
+        .await
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetentionQuery {
+    limit: Option<u32>,
+}
+/// Runner or viewer of the authenticated tenant. A worker proof is not a
+/// control credential and is refused before any Store work.
+async fn retention(
+    ReadIdentity(tenant, _): ReadIdentity,
+    query: Result<Query<RetentionQuery>, QueryRejection>,
+) -> ApiResult<Json<RelayRetentionStatusV1>> {
+    let Query(query) = query.map_err(|_| failure(RelayFailure::InvalidRequest.into()))?;
+    let limit = query.limit.unwrap_or(32);
+    tenant
+        .blocking(true, move |tenant| {
+            Ok(Json(
+                tenant
+                    .store
+                    .relay_retention_status(limit)
                     .map_err(|error| store_failure(&tenant.store, error))?,
             ))
         })

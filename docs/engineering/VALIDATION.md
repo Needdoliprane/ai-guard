@@ -1,5 +1,16 @@
 # Validation courante
 
+## 11 novembre — relais CoreC20 : neuf parents ciblés et check toutes cibles
+
+Le gel R3 de 2 422 fichiers `1873f6a4…` compile en R5 avec jobs1/debug0.
+Les trois listes résolvent les neuf sélecteurs avant toute exécution ; chaque
+parent rend 1 PASS, 0 FAIL, 0 ignoré, RC0, entre 11:12:04 et 11:12:28 UTC.
+Check toutes cibles RC0 à 11:13:59. Export réellement capturé avant arrêt,
+contenus/chemins vérifiés indépendamment ; QA retirée, zéro OOM. R4 conserve
+son échec de harnais au linkage et aucun test n'y est compté. Les vingt fichiers
+indexés correspondent au gel exécuté sans emporter les WIP Full3.
+[Commandes, corrections de revue et portée](evidence/2026-11-11/relay-core-retention/README.md).
+
 ## 11 novembre — verify-audit SetupV2 : RED puis GREEN ciblé
 
 Le test inchangé passe par `setup prepare`, le gateway Rust et deux bases

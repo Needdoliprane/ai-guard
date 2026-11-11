@@ -205,6 +205,60 @@ fn retained_quota_and_rate_work_do_not_grow_with_pruned_history() {
     assert!(plan(&large, RECENT_GRANT_SQL, &args).contains("relay_messages_rate"));
 }
 
+fn snapshot(db: &Connection) -> (usize, i32, i32) {
+    let mut stmt = db.prepare(retention::RETAINED_SNAPSHOT_SQL).unwrap();
+    let mut rows = stmt.query([]).unwrap();
+    let mut count = 0;
+    while rows.next().unwrap().is_some() {
+        count += 1;
+    }
+    drop(rows);
+    (
+        count,
+        stmt.get_status(StatementStatus::VmStep),
+        stmt.get_status(StatementStatus::FullscanStep),
+    )
+}
+
+#[test]
+fn retained_snapshot_work_does_not_grow_with_pruned_history() {
+    let small = populated(1024, 0, 2);
+    let large = populated(2048, 0, 2);
+    let a = snapshot(&small);
+    let b = snapshot(&large);
+    eprintln!("relay retained snapshot SQL n=1024 {a:?}; n=2048 {b:?} (rows,VM,fullscan)");
+    assert_eq!((a.0, b.0), (2, 2));
+    assert!(
+        b.1 <= a.1 + 80,
+        "retained snapshot VM work grew with tombstones: {a:?} -> {b:?}"
+    );
+    // Scan steps follow the two retained rows, never the tombstones.
+    assert!(
+        a.2 <= 8 && b.2 == a.2,
+        "retained snapshot visited pruned rows: {a:?} -> {b:?}"
+    );
+    assert!(
+        plan(&large, retention::RETAINED_SNAPSHOT_SQL, &[]).contains("relay_messages_retained")
+    );
+    // The typed admission pass reads exactly those rows.
+    let retained = retention::Retained::load(&large).unwrap();
+    let now = Utc::now();
+    assert_eq!(
+        retained.usage(now, |_| true).retained,
+        RelayCapacityV1 {
+            messages: 2,
+            bytes: 2
+        }
+    );
+    assert_eq!(
+        retained
+            .usage(now, |message| message.source.worker_id == A)
+            .retained,
+        RelayCapacityV1::default(),
+        "fixture bodies are sent by B"
+    );
+}
+
 #[test]
 fn inbox_sql_never_reads_another_destinations_body_or_pruned_history() {
     let small = populated(1024, 256, 0);

@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "tenant": {"messages": 1024, "bytes": 16777216},
+  "sender": {"messages": 128, "bytes": 2097152},
+  "grant": {"messages": 128, "bytes": 2097152},
+  "automatic_prune_batch": 8,
+  "release_on_ack": false
+}

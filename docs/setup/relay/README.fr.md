@@ -183,7 +183,8 @@ bloquer. Ne pas remplacer une requête incertaine par un nouvel ID, ni prendre
 | Décodage JSON | Clés uniques récursivement, profondeur bornée à 64, forme V1 fermée et complète ; `next_after` doit être présent, y compris explicitement `null` |
 
 Le serveur continue d'appliquer limites durables de débit par grant, de contenu
-retenu par tenant et budgets d'audit obligatoires du
+retenu par tenant, par émetteur et par grant dirigé
+([budgets de rétention](RETENTION.fr.md)) et budgets d'audit obligatoires du
 [contrat relais](../workloads/README.fr.md#autoriser-des-messages-dirigés).
 Une reconnexion ne les réinitialise pas. Les lectures d'inbox, même vides, sont
 auditées avant livraison du contenu. Une panne d'audit bloque l'opération.

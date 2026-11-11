@@ -174,8 +174,9 @@ request with a new ID or treat a false `outcome_unknown()` as rollback evidence.
 | Checked response headers | At most 64 fields and 32768 bytes of names+values |
 | JSON decoding | Unique keys recursively, depth bound 64, closed complete V1 shape; `next_after` must be present, including explicit `null` |
 
-The server still applies durable per-grant rate limits, tenant retained-content
-limits and mandatory audit budgets described in the
+The server still applies durable per-grant rate limits, retained-content
+limits per tenant, per sender and per directed grant
+([retention budgets](RETENTION.md)), and mandatory audit budgets described in the
 [relay contract](../workloads/README.md#authorize-directed-messages). These are
 not reset by a client reconnect. Inbox reads, including empty pages, are audited
 before content is delivered. Audit failure blocks the operation. A page is not

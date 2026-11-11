@@ -131,6 +131,9 @@ struct GatewayArgs {
     /// Private workload audit budgets; preserve control/identity reserves and cumulative usage.
     #[arg(long, conflicts_with = "tenants_file")]
     workload_audit_file: Option<PathBuf>,
+    /// Private relay retention budgets for the local tenant; never deletes retained content.
+    #[arg(long, conflicts_with = "tenants_file")]
+    relay_retention_file: Option<PathBuf>,
     /// Explicit private OIDC gateway configuration; absent means no SSO/IdP calls.
     #[arg(long)]
     oidc_config: Option<PathBuf>,
@@ -486,6 +489,11 @@ fn configured_local_tenant(args: &GatewayArgs) -> Result<gateway_config::Configu
             .as_deref()
             .map(Store::load_workload_audit_policy)
             .transpose()?,
+        relay_retention_policy: args
+            .relay_retention_file
+            .as_deref()
+            .map(Store::load_relay_retention_policy)
+            .transpose()?,
         held_create_policy: None,
         session_reservation_policy: None,
         session_recovery_policy: None,
@@ -731,6 +739,28 @@ async fn main() -> Result<()> {
                 } else {
                     store
                 };
+                let relay_source = match (&tenant.relay_retention_policy, &args.tenants_file) {
+                    (None, _) => "derived_defaults",
+                    (Some(_), Some(_)) => "tenant_registry",
+                    (Some(_), None) => "private_policy_file",
+                };
+                let store = if let Some(policy) = tenant.relay_retention_policy {
+                    store.with_relay_retention_policy(policy)?
+                } else {
+                    store
+                };
+                capacity_diagnostics.push(redactor.text(&format!(
+                    "Relay retention tenant={} source={} release_on_ack={} policy={} fingerprint={}",
+                    store.tenant_id(),
+                    relay_source,
+                    if store.relay_retention_policy().release_on_ack {
+                        "enabled_history_unreadable_by_earlier_binaries"
+                    } else {
+                        "disabled"
+                    },
+                    serde_json::to_string(store.relay_retention_policy())?,
+                    store.relay_retention_policy_fingerprint()?,
+                )));
                 capacity_diagnostics.push(redactor.text(&format!(
                     "Audit capacity tenant={} source={} human_read_policy={} policy={} fingerprint={}",
                     store.tenant_id(),

@@ -226,6 +226,7 @@ pub struct Store {
     capacity_policy: AuditCapacityPolicyV1,
     workload_audit_policy: WorkloadAuditPolicyV1,
     workload_audit_policy_explicit: bool,
+    relay_retention_policy: crate::relay::RelayRetentionPolicyV1,
     unhealthy: AtomicBool,
     validated_data_version: AtomicI64,
     validated_total_changes: AtomicU64,
@@ -875,6 +876,7 @@ impl Store {
                 &AuditCapacityPolicyV1::resolved(max_events),
             ),
             workload_audit_policy_explicit: false,
+            relay_retention_policy: crate::relay::RelayRetentionPolicyV1::default(),
             unhealthy: AtomicBool::new(!initial_valid),
             validated_data_version: AtomicI64::new(validated_data_version),
             validated_total_changes: AtomicU64::new(validated_total_changes),
@@ -922,6 +924,7 @@ impl Store {
         sibling.capacity_policy = self.capacity_policy.clone();
         sibling.workload_audit_policy = self.workload_audit_policy.clone();
         sibling.workload_audit_policy_explicit = self.workload_audit_policy_explicit;
+        sibling.relay_retention_policy = self.relay_retention_policy.clone();
         anyhow::ensure!(
             sibling.backing.identity_key() == self.backing.identity_key(),
             "sibling backing differs from live origin"

@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod channel;
 pub mod client;
+pub mod retention;
 mod validation;
+pub use retention::*;
 
 pub const MAX_MESSAGE_BYTES: usize = 65_536;
 pub const MAX_RETAINED_BODY_BYTES: u64 = 16 * 1024 * 1024;
@@ -31,7 +33,7 @@ impl std::fmt::Display for RelayFailure {
             Self::NotFound => "relay resource not found in authorized scope",
             Self::Conflict => "relay operation identity belongs to different content",
             Self::RateLimited => "relay grant rate limit reached",
-            Self::Capacity => "relay retained message capacity reached; prune expired messages",
+            Self::Capacity => "relay tenant retained capacity reached; contact the operator",
             Self::Expired => "relay resource has expired",
         })
     }

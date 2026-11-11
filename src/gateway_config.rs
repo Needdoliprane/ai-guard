@@ -29,6 +29,7 @@ struct TenantFiles {
     worker_quota: agentsandbox::control::QuotaPolicyV1,
     audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
     workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
+    relay_retention_policy: Option<agentsandbox::relay::RelayRetentionPolicyV1>,
     held_create_policy:
         Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
     session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
@@ -46,6 +47,7 @@ pub struct ConfiguredTenant {
     pub worker_quota: agentsandbox::control::QuotaPolicyV1,
     pub audit_capacity_policy: Option<agentsandbox::audit::AuditCapacityPolicyV1>,
     pub workload_audit_policy: Option<agentsandbox::audit::WorkloadAuditPolicyV1>,
+    pub relay_retention_policy: Option<agentsandbox::relay::RelayRetentionPolicyV1>,
     pub held_create_policy:
         Option<agentsandbox::control::kubernetes_admission::KubernetesHeldCreatePolicyV1>,
     pub session_reservation_policy: Option<KubernetesSessionReservationPolicyV2>,
@@ -344,6 +346,7 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
             worker_quota: tenant.worker_quota,
             audit_capacity_policy: tenant.audit_capacity_policy,
             workload_audit_policy: tenant.workload_audit_policy,
+            relay_retention_policy: tenant.relay_retention_policy,
             held_create_policy,
             session_reservation_policy,
             session_recovery_policy,
@@ -403,6 +406,11 @@ pub fn validate_policies(tenants: &[ConfiguredTenant], max_events: u64) -> Resul
                 max_events,
                 tenant.audit_capacity_policy.as_ref().unwrap_or(&defaults),
             )?;
+        }
+        if let Some(policy) = &tenant.relay_retention_policy {
+            policy
+                .validate()
+                .context("Politique de rétention du relais invalide")?;
         }
     }
     Ok(())
@@ -557,6 +565,46 @@ mod tests {
         value["tenants"][0]["audit_capacity_policy"]["unknown"] = json!(true);
         std::fs::write(&path, value.to_string()).unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn relay_retention_policy_is_optional_closed_and_validated_before_any_store_opens() {
+        let (_dir, path, mut value) = fixture();
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(load(&path).unwrap()[0].relay_retention_policy.is_none());
+        let policy = agentsandbox::relay::RelayRetentionPolicyV1 {
+            sender: agentsandbox::relay::RelayCapacityV1 {
+                messages: 10,
+                bytes: 1_048_576,
+            },
+            grant: agentsandbox::relay::RelayCapacityV1 {
+                messages: 5,
+                bytes: 524_288,
+            },
+            automatic_prune_batch: 4,
+            ..Default::default()
+        };
+        value["tenants"][0]["relay_retention_policy"] = serde_json::to_value(&policy).unwrap();
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(
+            load(&path).is_ok(),
+            "the tenant registry refuses a relay retention policy"
+        );
+        let configured = load(&path).unwrap();
+        assert_eq!(configured[0].relay_retention_policy, Some(policy));
+        validate_policies(&configured, 100_000).unwrap();
+        // One sender able to exhaust the tenant is refused before any Store exists.
+        value["tenants"][0]["relay_retention_policy"]["sender"]["messages"] = json!(513);
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(validate_policies(&load(&path).unwrap(), 100_000).is_err());
+        value["tenants"][0]["relay_retention_policy"]["sender"]["messages"] = json!(10);
+        value["tenants"][0]["relay_retention_policy"]["burst"] = json!(1);
+        std::fs::write(&path, value.to_string()).unwrap();
+        assert!(
+            load(&path).is_err(),
+            "an unknown retention field was accepted"
+        );
+        assert!(!path.parent().unwrap().join("a.sqlite").exists());
     }
 
     #[test]

@@ -1,5 +1,18 @@
 # État constaté — suivi du développement
 
+## 11 novembre — stockage durable et rétention du relais publiés
+
+Les vingt postimages CoreC20 correspondent au gel R3 corrigé et relu. Neuf
+parents ciblés passent une fois chacun, et le check toutes cibles donne RC0.
+La source réellement exportée après exécution conserve ses 2 422 fichiers
+exacts ; la QA est retirée sans OOM. Les quotas de corps par tenant, émetteur
+et grant, les conseils de reprise, le nettoyage audité et la configuration
+ont leurs guides EN/FR. Les corrections de revue alignent conseil de capacité
+et reconstruction ACK avec le contrat. Les 124 travaux indépendants sont
+préservés. [Sources, résultats et limites](evidence/2026-11-11/relay-core-retention/README.md).
+Le transport typé, le parcours runtime et NV-12 restent ouverts ; ces plafonds
+ne constituent pas des quotas de disque/inodes ni une qualification cloud.
+
 ## 11 novembre — credential viewer explicite pour verify-audit
 
 Le CLI accepte `--viewer-token-file` pour une installation SetupV2 et conserve
