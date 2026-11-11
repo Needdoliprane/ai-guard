@@ -1,5 +1,16 @@
 # Validation courante
 
+## 11 novembre — preuves Rust de la supervision Web
+
+Sur le gel 2 440 `b4ff38fe…`, build et listes RC0 pour les trois cibles.
+Quinze parents exacts donnent 1 PASS chacun, aucun échec ni ignoré. Le
+registre à 100 entrées utilise des données synthétiques. L’export réel du
+gel et les cinq pins sont vérifiés. Le binaire de supervision exporté
+correspond à son SHA-256 dans le conteneur. Le prévol Chromium, corrigé au
+chargement Playwright, échoue sur chroot avec le profil isolé actuel. Les
+quatre scénarios d’interface restent NOT_RUN. Les QA ont été retirées.
+[Commandes et observations](evidence/2026-11-11/frontend-B-backend/README.md).
+
 ## 11 novembre — douze tests exacts du relais composé
 
 Le gel 2 459 `90d8eb66…` a compilé sur toutes les cibles en r1, puis les

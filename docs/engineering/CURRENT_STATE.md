@@ -1,5 +1,15 @@
 # État constaté — suivi du développement
 
+## 11 novembre — supervision Web, 15 scénarios Rust vérifiés
+
+Le gel e957+B40 de 2 440 fichiers conserve les 61 sources frontend déjà
+vérifiées en Node et les deux index EN/FR. Les trois cibles Rust compilent et
+les quinze sélecteurs passent chacun une fois. Le serveur de supervision a
+été construit et exporté avec son empreinte. Le prévol Chromium atteint le
+zygote avec le profil isolé existant puis échoue sur son contrôle de chroot.
+Les quatre scénarios navigateur restent à exécuter. Le lot est candidat.
+[Sources, résultats et limites](evidence/2026-11-11/frontend-B-backend/README.md).
+
 ## 11 novembre — relais durable et refus typés vérifiés en composition
 
 Le gel de 2 459 fichiers combine la reprise du broker Full3, le stockage
