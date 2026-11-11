@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 17:17 UTC — essai Core/schema13 arrêté et diagnostic ciblé
+
+Le candidat composé compile et passe douze parents exacts, puis échoue sur l'assertion d'ouverture d'une base déclarée13 sans marqueur. Le contrat existant peut retourner un handle de diagnostic bloqué ; son refus effectif des opérations est en cours de vérification. Parents14–26 et check toutes cibles NOT_RUN ; aucune source13 publiée ni qualification étendue. Export réel et fermeture vérifiés, zéro OOM. [Résultat et limites](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).
+
+Le raccord HTTP/SDK de reprise avance séparément. Claude E reste en cours chez son propriétaire ; sa référence observée ne vaut pas livraison et aucune intégration E n'est engagée. Le lot D suit sa propre validation ciblée.
+
 ## 11 novembre, 15:44 UTC — compatibilité held-CREATE sous schéma12 corrigée
 
 Le consommateur accepte désormais les capacités V2 sous schéma12, comme son issuer. Après deux RED exactes, trois régressions réelles passent avec le check toutes cibles ; revue indépendante favorable et deux postimages testées composées sans toucher les 134 travaux Full3. Les refus V1 et les scopes sont préservés. [Preuves et limites](evidence/2026-11-11/kubernetes-schema12/README.md).

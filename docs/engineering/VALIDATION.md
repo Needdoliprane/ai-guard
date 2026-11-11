@@ -1,5 +1,9 @@
 # Validation courante
 
+## 11 novembre, 17:17 UTC — Core/schema13, FAIL_PARENT conservé
+
+Build offline `--lib --bin agentsandbox --test schema13_protocol_contract --no-run --message-format=json` RC0 ; douze parents exacts PASS, puis parent13 RC101 à `schema13_compat_tests.rs:128:5`, attente `open_existing_for_tenant(...).is_err()`. Diagnostic du contrat de quarantaine en cours, sans modification du comportement global d'ouverture. Parents14–26 et check toutes cibles NOT_RUN. Résultat final101, fermeture0, OOM0. Le RC64 de l'invocation préalable avec argument supplémentaire reste distinct et n'a exécuté aucun build/test. Root vérifie les sorties brutes et l'export vivant des2537 sources, SHA4cb697c7… intégralement conforme au manifeste193399a5…. [Preuves et portée](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).
+
 ## 11 novembre, 15:44 UTC — correction du consommateur V2 sous schéma12
 
 Baseline : deux canaris PASS puis deux RED MigrationRequired aux oracles Reserve/Cancel, distincts du troisième RED D6. GREEN : trois parents exacts PASS à 15:34:43–44 UTC, build et check toutes cibles RC0. Les tests sont inchangés ; seul ajout produit `(12,2)`. Revue indépendante GO_SOURCE, deux fichiers composés et 134 chemins Full3 préservés. Export vivant de 26 695 680 octets SHA46d499ad… vérifié intégralement, expérience/fermeture RC0 et zéro OOM. [Commandes, sources et portée](evidence/2026-11-11/kubernetes-schema12/README.md).
