@@ -1,5 +1,12 @@
 # Validation courante
 
+## 11 novembre,15:04 UTC — historique complet et consommateur relais
+
+Gel 2527, manifeste27df9744… : dix-neuf parents uniques PASS entre 15:02:09 et 15:02:21 UTC, build et check toutes cibles RC0. Les deux RED sont établis avant correction ; le complément final change trois tests seulement. Revue indépendante GO_SOURCE, dix-huit postimages exactes composées au Full3 local, 134 chemins protégés vérifiés. Aucun code Full3 complet publié par ce lot de preuves.
+
+Export vivant de 28 467 200 octets SHA b898b80b… et tous les 2 527 contenus exacts ; expérience, fermeture et résultat final RC0, zéro OOM, QA retirée. Pic de 7 069 716 480 octets de QA/compilation, pas un compteur worker. Les limites IO physique, panneOS/runtime et capacité 100 restent ouvertes.
+[Sources, 19 commandes ciblées et portée](evidence/2026-11-11/relay-history-owner/README.md).
+
 ## 11 novembre — historique et retrait du relais, deux gels séparés
 
 Historique2457 `05d54904…` : quatorze parents exacts PASS entre13:28:56 et
@@ -5584,7 +5591,7 @@ respectifs. Trois tests model_ingress locaux ont aussi été sélectionnés par 
 filtre C ; ils ne sont ni un test Qwen ni une inférence. Front B : deux RED du
 nouveau contrat de complétude, puis24/24 PASS et TypeScript5.9.3 `--noEmit` RC0.
 Revues indépendantes source, contrats et guides EN/FR acceptées. Les recettes
-worker Docker/Podman, navigateur/DOM et capacité100 restent hors de ces preuves.
+worker Docker/Podman, navigateur/DOM et capacité 100 restent hors de ces preuves.
 
 Contrôle composé Linux ARM64/Rust1.99.1, dans Docker isolé et borné, sans
 réseau, secrets, socket moteur ou montage du checkout :

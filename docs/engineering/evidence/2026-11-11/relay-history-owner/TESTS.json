@@ -1,0 +1,100 @@
+{
+  "scope": "frozen local Full3 composition, not a public release or runtime qualification",
+  "parents": [
+    {
+      "name": "broker::relay_owner::journal::history_tests::v1_prefix_then_valid_v2_fact_reopens_without_rewriting_legacy",
+      "rc": 0,
+      "at": "2026-11-11T15:02:09Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::legacy_close_at_reserved_cas_retires_without_replaying_claim_or_losing_intent",
+      "rc": 0,
+      "at": "2026-11-11T15:02:10Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::local_only_finalize_requires_unique_terminal_begin_and_complete_empty_index",
+      "rc": 0,
+      "at": "2026-11-11T15:02:10Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::v1_replaced_requests_are_indexed_and_uuid_content_is_unique",
+      "rc": 0,
+      "at": "2026-11-11T15:02:11Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::persisted_proofs_revalidate_scope_and_exact_terminal_receipt",
+      "rc": 0,
+      "at": "2026-11-11T15:02:11Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::legacy_sixteen_records_keep_terminal_reserve_and_new_jobs_reserve_forty_eight",
+      "rc": 0,
+      "at": "2026-11-11T15:02:16Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::full_canonical_envelope_is_bounded_before_any_private_file_mutation",
+      "rc": 0,
+      "at": "2026-11-11T15:02:16Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::new_observations_cannot_regress_head_and_old_proofs_replay_without_writes",
+      "rc": 0,
+      "at": "2026-11-11T15:02:17Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::v1_downgrade_after_v2_and_legacy_seventeenth_record_are_refused",
+      "rc": 0,
+      "at": "2026-11-11T15:02:17Z"
+    },
+    {
+      "name": "broker::relay_owner::journal::v2_tests::structurally_valid_legacy_future_cas_stays_unknown_after_core_terminal",
+      "rc": 0,
+      "at": "2026-11-11T15:02:18Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::fencing_tests::pending_ready_and_recorded_claim_survive_lost_cleanup_ack_without_second_effect",
+      "rc": 0,
+      "at": "2026-11-11T15:02:18Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::fencing_tests::cancelled_cleanup_intent_is_joined_and_reused_before_any_core_effect",
+      "rc": 0,
+      "at": "2026-11-11T15:02:19Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::fencing_tests::cancelled_prefix_read_keeps_old_claim_unjoined_until_admissible_evidence",
+      "rc": 0,
+      "at": "2026-11-11T15:02:19Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::tests::pending_retirement_is_unknown_even_when_an_old_fact_has_no_error",
+      "rc": 0,
+      "at": "2026-11-11T15:02:19Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::tests::retirement_intent_preserves_the_error_and_requires_reconciliation_before_ack",
+      "rc": 0,
+      "at": "2026-11-11T15:02:19Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::tests::terminal_ack_requires_the_compatible_state_and_exact_next_revision",
+      "rc": 0,
+      "at": "2026-11-11T15:02:19Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::tests::journal_accepts_only_joined_error_free_explicit_core_terminals",
+      "rc": 0,
+      "at": "2026-11-11T15:02:21Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::io_tests::failed_intent_io_admission_blocks_core_and_no_admission_close_publication",
+      "rc": 0,
+      "at": "2026-11-11T15:02:21Z"
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::io_tests::cancelled_saves_recover_exact_intent_and_publish_only_durable_terminal",
+      "rc": 0,
+      "at": "2026-11-11T15:02:21Z"
+    }
+  ]
+}

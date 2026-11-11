@@ -97,3 +97,9 @@ The old suspended operations are not resumed by this follow-up. Real worker
 retirement, crash/restart, Docker/Podman/Kubernetes, A1/A2/B1 and the production
 gates remain open. See [current state](CURRENT_STATE.md) and
 [the primary audit register](AUDIT_FOLLOWUP.md#registre-des-audits).
+
+## Composed correction —15:04 UTC
+
+The journal and consumer now have a combined software GREEN: nineteen exact parents and the all-targets check return RC0 after the two baseline REDs. Independent final review covers the exact eighteen postimages and test-only counter correction. Root composes them into local Full3, preserving and verifying 134 paths. [Full evidence and scope](evidence/2026-11-11/relay-history-owner/README.md).
+
+This supersedes the earlier implementation-pending status only for the two named software defects. Full3 remains unpublished; real cold recovery, terminal process/join observations, runtime transport, descriptor/RSS scale and production gates remain open. Unreachable historical CAS remains Unknown by contract; no new execution authority or universal convergence is claimed.
