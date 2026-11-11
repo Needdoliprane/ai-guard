@@ -47,3 +47,16 @@ is `b14b89a9b2b8abecda73335275e1b5307d04055d` and the E ref is still `2cc29ee`.
 These activity/ref observations do not accept a source delivery or establish
 validation. Preserve their ownership and check with the coordinator before
 duplicating either scope.
+
+## 11 November — committed D/E source observed for integration
+
+These newer local references are pinned for source preservation; they do not accept a completed delivery or transfer a historical test result. No external Claude worktree, branch, running QA container or live file was changed.
+
+| Lot | Observed commit | Changed paths from 2cc29ee | Protected Root intersection |
+|---|---|---:|---|
+| D | 15b83b7f6b2b6a48638475f575c1d28805b5b2f9 | 25 | src/runtime.rs |
+| E | d1a367347f08a1171af6eb496c5eefa4dbd7209f | 43 | None in the protected 134-path set |
+
+D provides the Rust source snapshot and retained build/Compose handoff; E provides the Rust operator diagnostic and EN/FR procedures. Their committed trees are retained locally under refs/ai-guard/intake/claude-d-20261111 and claude-e-20261111, with the observation inventory in the private engineering archive claude-deliveries-intake-20261111. These local references are not pushed by this intake.
+
+Composition against the current public source, independent review and new targeted validation remain NOT_RUN. In particular, the absence of a protected-WIP intersection for E does not prove that it composes with intervening public changes. D must preserve the existing Full3 changes in runtime.rs. Root continues this intake while the distinct Kubernetes Core, schema compatibility and targeted test work proceed in parallel.
