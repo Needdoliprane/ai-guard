@@ -1,5 +1,13 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 18:00 UTC — sources build/Compose : 14 parents logiciels PASS
+
+Le gel public `1dc676b` composé avec les 25 postimages D passe quatorze parents exacts et le check toutes cibles. Copie privée, contenu figé après préparation, cycle du consommateur, arrêt inconnu et messages de reprise sont exercés avec de vrais fichiers et des processus Rust synthétiques. La régression R1 complète est inchangée ; les chemins effectifs et la provenance JSON sont préservés.
+
+Les 25 postimages publiques D sont intégrées après revue et comparaison des 2 483 sources testées, sans transfert d’un PASS historique Claude. Les travaux Full3 sont préservés, avec le seul raccord de module supplémentaire dans leur runtime privé ; ce contexte mixte ne reçoit aucune qualification. L’export réel et la fermeture de QA ont réussi, sans OOM. Les moteurs réels, NV-06 global et les gates restent ouverts. Claude E poursuit son propre travail ; le défaut de compilation API Kubernetes est hors de ce gel.
+
+[Sources, commandes et limites](evidence/2026-11-11/source-lifecycle/README.md).
+
 ## 11 novembre, 17:17 UTC — essai Core/schema13 arrêté et diagnostic ciblé
 
 Le candidat composé compile et passe douze parents exacts, puis échoue sur l'assertion d'ouverture d'une base déclarée13 sans marqueur. Le contrat existant peut retourner un handle de diagnostic bloqué ; son refus effectif des opérations est en cours de vérification. Parents14–26 et check toutes cibles NOT_RUN ; aucune source13 publiée ni qualification étendue. Export réel et fermeture vérifiés, zéro OOM. [Résultat et limites](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).

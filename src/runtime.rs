@@ -13,6 +13,7 @@ pub(crate) mod launch_profile;
 mod managed;
 pub(crate) mod model_tls;
 mod prestart;
+pub mod retained_cli;
 pub mod terminal;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
 pub use managed::{

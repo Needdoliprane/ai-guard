@@ -11,6 +11,8 @@ use std::{
     time::Duration,
 };
 
+mod source_snapshot;
+
 #[derive(Subcommand, Debug)]
 pub enum OperatorCommand {
     /// Create isolated configuration and two distinct random authentication keys.
@@ -311,6 +313,12 @@ fn require_successful_resume(result: &serde_json::Value) -> Result<()> {
 
 pub async fn execute(command: OperatorCommand) -> Result<()> {
     use crate::runner::AuditClient;
+    // Build, Up and Down hold a prepared source across engine commands: run
+    // them inside one operator-interruption scope. Every other command,
+    // including VerifyAudit, keeps its existing flow.
+    if source_snapshot::needs_interrupt_scope(&command) {
+        return source_snapshot::interrupt_scope(Box::pin(execute(command))).await;
+    }
     match command {
         OperatorCommand::Init { config_dir } => {
             let config = initialize_config_directory(&config_dir)?;
@@ -383,6 +391,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             }
             let source = source.canonicalize()?;
             preflight_build_inputs(&source)?;
+            let prepared = source_snapshot::prepare_build(&source).await?;
             let runtime = selected_runtime(
                 runtime,
                 runtime_program.as_deref(),
@@ -405,8 +414,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
             ] {
                 let mut args = vec![
                     "build".into(),
-                    "--file".into(),
-                    source.join(dockerfile).to_string_lossy().into_owned(),
+                    // No path here: the prepared source adds `--file` and the context.
                     "--tag".into(),
                     tag.into(),
                 ];
@@ -421,9 +429,11 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                         ]);
                     }
                 }
-                args.push(source.to_string_lossy().into_owned());
                 eprintln!("Building {tag} with {}…", runtime.kind);
-                let output = runtime.cli(&args, Duration::from_secs(30 * 60)).await?;
+                let command = prepared.build_command(dockerfile, &args)?;
+                let output = runtime
+                    .consume_prepared(command, Duration::from_secs(30 * 60), &[], None)
+                    .await?;
                 println!("{}", String::from_utf8_lossy(&output.bytes));
                 if output.truncated {
                     eprintln!(
@@ -977,7 +987,8 @@ fn preflight_build_inputs(source: &Path) -> Result<()> {
         "front/public/favicon.svg",
         "policies/default.json",
     ];
-    // Structural precheck only: the engine later reads the live build context.
+    // Structural precheck, run on the selected source and again on its prepared
+    // copy. source_snapshot owns the bounded reads and the content binding.
     for (paths, directory) in [(DIRECTORIES, true), (FILES, false)] {
         for relative in paths {
             let metadata = fs::symlink_metadata(source.join(relative))
@@ -1033,17 +1044,17 @@ async fn compose(
         "compose".into(),
         "--project-name".into(),
         "agentsandbox".into(),
-        "--file".into(),
-        file.to_string_lossy().into_owned(),
     ];
     args.extend(action.iter().map(|s| s.to_string()));
+    let prepared = source_snapshot::prepare_compose(&source, runtime.kind).await?;
+    let command = prepared.compose_command(&args)?;
     let config_path = config
         .path()
         .to_str()
         .context("configuration path must be UTF-8")?;
     let output = runtime
-        .cli_env(
-            &args,
+        .consume_prepared(
+            command,
             Duration::from_secs(180),
             &[("AGENTSANDBOX_CONFIG_DIR", config_path)],
             Some(config),

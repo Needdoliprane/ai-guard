@@ -42,7 +42,120 @@ L'image worker par défaut permet les commandes ordinaires. Pour Codex ou Claude
 
 `build --source` désigne la distribution source d'ai-guard, pas le projet qu'un agent modifiera. Avant de contacter le moteur, le CLI vérifie les Dockerfiles, `.dockerignore`, manifestes/locks, entrées Rust/frontend et politique requis, ainsi que leurs répertoires parents. Une entrée absente, liée ou du mauvais type est signalée par son chemin relatif. Rétablir cette entrée dans la distribution sélectionnée puis réessayer ; ce refus ne nécessite aucune suppression d'image, de cache ou de données. La racine source explicitement choisie reste canonicalisée normalement.
 
-Ce contrôle porte sur les prérequis structurels. Il ne valide pas tous les imports, le contenu des locks ou les règles `.dockerignore`, ne fige pas des sources modifiées simultanément et ne rend pas atomiques les deux builds. La première image peut encore réussir avant un échec ultérieur. Garder les sources stables pendant la construction et conserver les résultats réels du moteur ; réussir le contrôle ne qualifie ni un build reproductible ni la production.
+Ce contrôle est structurel. `build` copie ensuite ses entrées avant la première commande du moteur et désigne cette copie au CLI du moteur à la place du checkout, comme le décrit [sources préparées de build et Compose](#prepared-source) : une modification du checkout postérieure à la copie n'atteint pas les deux builds. Aucune de ces deux étapes ne valide tous les imports ni le contenu des locks ; `.dockerignore` est comparé octet par octet au fichier que ce CLI reflète et n'est pas interprété ; et les deux builds ne sont pas atomiques : la première image peut encore réussir avant un échec ultérieur. Conserver les résultats réels du moteur, dont le CLI [n'affiche qu'une partie](#engine-output) ; un contrôle réussi et une copie privée ne qualifient ni un build reproductible ni la production.
+
+<a id="prepared-source"></a>
+
+### Sources préparées de build et Compose
+
+Avant toute commande de build ou Compose du moteur, les commandes CLI `build`, `up` et `down` font une copie privée et bornée de ce qu'elles remettent au moteur :
+
+- `build` copie une liste fixe d'entrées publiques de build : `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `LICENSE`, `.dockerignore`, `src/**/*.rs`, `policies/*.json`, cinq fichiers de `front/` (`package.json`, `package-lock.json`, `tsconfig.json`, `vite.config.ts`, `index.html`), `front/src/**/*.ts` et `*.css`, `front/public/favicon.svg`, et `images/*.Dockerfile`. Les deux builds d'image utilisent la même copie, et le contrôle structurel ci-dessus est rejoué sur elle.
+- `up` et `down` copient exactement `deploy/<engine>/compose.yaml` et ajoutent un fichier env vide.
+
+La liste des entrées de build est figée dans le binaire du CLI et reflète le `.dockerignore` de la distribution à partir de laquelle ce CLI a été construit ; le fichier est copié, pas interprété. `build` refuse, avant toute commande du moteur, une distribution sélectionnée dont le `.dockerignore` a d'autres octets (un checkout aux fins de ligne différentes compris) ou qui contient un fichier d'ignore par Dockerfile `images/<name>.Dockerfile.dockerignore` ; les deux messages figurent dans le tableau des entrées refusées ci-dessous. Une distribution adaptée pour envoyer un autre chemin au moteur doit modifier son `.dockerignore` ; elle est alors refusée par un CLI dont la liste n'a pas été modifiée avec lui : aucune entrée n'est écartée de la copie en silence. Construire une telle distribution avec le CLI construit à partir d'elle, après avoir modifié la liste et son SHA-256 épinglé en même temps que le fichier (`Scope::selects_file` et `BUILD_IGNORE_SHA256` dans `src/operations/source_snapshot/capture.rs` ; un test unitaire échoue tant qu'ils diffèrent), ou lancer directement le build du moteur, qui lit le checkout et non une copie préparée.
+
+Le CLI du moteur ne reçoit ensuite en arguments que des chemins situés dans cette copie ; avec Docker, ils suivent `--host <endpoint>` :
+
+```text
+build --file <copy>/context/images/<name>.Dockerfile --tag <tag> [--build-arg <NAME>=<version>]… <copy>/context
+compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml up --detach --force-recreate
+compose --project-name agentsandbox --env-file <copy>/compose-empty.env --file <copy>/context/deploy/<engine>/compose.yaml down
+```
+
+La source sélectionnée est lue sans suivre de lien, n'est jamais écrite et n'est jamais nommée dans ces arguments. Chaque préparation affiche une ligne sur la sortie d'erreur :
+
+```text
+Prepared public distribution (build): sha256=<hex> files=<n> bytes=<n> shared_writable=<n> device=<n> inode=<n> source=<path>
+```
+
+`up` et `down` affichent la même ligne avec `(compose)`. `sha256` couvre le chemin relatif, la longueur et le SHA-256 de chaque fichier préparé ; il identifie donc les octets préparés et n'est pas un digest d'image. `shared_writable` compte les originaux que le groupe ou les autres peuvent écrire : ce fait est rapporté, pas refusé. `device`, `inode` et `source` identifient le répertoire sélectionné. La copie est vérifiée fichier par fichier contre les longueurs et empreintes enregistrées à la fin de la préparation, juste avant le départ de chaque commande du moteur, puis après sa fin.
+
+La copie est un nouveau répertoire sous le répertoire temporaire : `TMPDIR` s'il est défini, sinon la valeur par défaut de la plateforme, soit `/tmp` sous Linux. Ses répertoires sont en mode `0700` et ses fichiers en `0600` :
+
+```text
+<TMPDIR>/ai-guard-distribution-<random>/
+  context/                arbre visible du moteur : le contexte de build, ou deploy/<engine>/compose.yaml
+  compose-empty.env       `up` et `down` seulement
+  manifest.json           chemin, device et inode de la source ; chemin, octets et SHA-256 de chaque fichier ; l'empreinte d'ensemble
+  RETAINED-UNKNOWN.json   seulement lorsque la terminaison d'une commande du moteur est inconnue
+```
+
+Elle est supprimée dès que les commandes du moteur qui l'utilisent sont terminées, que la commande ait réussi, ait été refusée, ait échoué ou ait été interrompue ; `up` la supprime avant d'attendre les URL de disponibilité. La seule exception est une [terminaison inconnue](#prepared-source-retained). La suppression se fait par nom, et seulement tant que ce nom désigne encore le répertoire qui a été créé (même périphérique et même inode). Deux avertissements sur la sortie d'erreur signalent une copie qui n'a pas été supprimée :
+
+```text
+warning: prepared source at <path> could not be removed: <error>
+warning: prepared source at <path> was not removed: the path no longer names the directory that was prepared (<another entry has that name | system error>); nothing was removed
+```
+
+Le premier laisse en place le répertoire, ou ce qu'il en reste. Le second signifie que la copie a été déplacée, ou qu'autre chose a pris son nom, pendant la commande : ni la copie, où qu'elle se trouve désormais, ni l'entrée présente à ce chemin ne sont touchées, et la commande a le plus souvent échoué avec `the prepared copy changed`. Dans les deux cas, suivre [un répertoire laissé par un CLI tué](#prepared-source-retained) avant de supprimer quoi que ce soit.
+
+**Répertoire temporaire.** `build`, `up` et `down` exigent donc un répertoire temporaire conforme à la même politique de répertoire privé que le répertoire de configuration. `TMPDIR` doit être un chemin absolu situé hors de la source sélectionnée : les deux points sont vérifiés avant toute création, le second par périphérique et inode le long des répertoires qui y mènent, de sorte qu'aucune écriture du chemin ne masque la source. Chaque répertoire, de `/` jusqu'à lui, doit être un vrai répertoire, appartenir à root ou au compte qui lance le CLI, se trouver sur un système de fichiers local pris en charge (ext2/3/4, XFS, Btrfs, tmpfs, overlayfs, ramfs ou F2FS sous Linux ; APFS ou HFS+ local avec propriété activée sous macOS) et ne pas être inscriptible par le groupe ou les autres, sauf un répertoire appartenant à root avec le sticky bit, comme l'est habituellement `/tmp`. Un lien symbolique dans ce chemin est refusé, sauf les alias système macOS `/tmp` et `/var`, traduits vers `/private` (le répertoire temporaire par utilisateur de macOS se trouve par défaut sous `/var/folders`) ; une ACL qui permet à un autre principal de modifier l'un de ces répertoires est refusée elle aussi. Le `/tmp` usuel, appartenant à root avec sticky bit, sur l'un de ces systèmes de fichiers sur disque ou sur tmpfs, est donc accepté. Trois messages refusent un répertoire temporaire, chacun avant toute commande de build ou Compose du moteur :
+
+```text
+Error: the temporary directory must be an absolute path, but TMPDIR is "<value>"; set TMPDIR to an absolute directory outside the selected source
+Error: the temporary directory <TMPDIR> (TMPDIR) is the selected source <source> or lies inside it; set TMPDIR to a directory outside the source
+Error: cannot create the private prepared-source directory under <directory> (TMPDIR). Set TMPDIR to a directory owned by you or root, not writable by group or others, on a supported local filesystem, with no symbolic link in its path
+```
+
+Le premier refuse une valeur relative ou vide (`TMPDIR=` définit une valeur vide, il ne supprime pas la variable) : une telle valeur serait résolue par rapport au répertoire de travail, qui est la source sélectionnée dans les commandes de ce guide. Le deuxième refuse un `TMPDIR` qui est la source ou un répertoire situé sous elle, quelle que soit son écriture. Tous deux précèdent toute création. Le troisième refuse un répertoire temporaire sur ZFS, NFS ou un montage FUSE, atteint par un autre lien symbolique, ou inscriptible par le groupe ou les autres sans le sticky bit de root ; le motif propre à la politique suit sous `Caused by:` et nomme la règle enfreinte, pas le répertoire qui l'enfreint, et un répertoire privé vide créé pour ce contrôle est supprimé aussitôt. Un `TMPDIR` dont le chemin n'est pas UTF-8 n'est pas utilisable non plus : les chemins remis au moteur doivent être UTF-8 (`the prepared-source path must be UTF-8; choose a UTF-8 TMPDIR`).
+
+Pour `build`, le moteur n'a pas été contacté lorsque ces refus, ou ceux du tableau suivant, surviennent. Pour `up` et `down`, ils viennent après les sondes du moteur : avec Docker, son contexte (sauf si `--runtime-endpoint` est fourni) et son identité ; pour `up`, avec l'un ou l'autre moteur, ses informations telles que `doctor` les lit ; un `down` avec Podman n'en fait aucune. `up` a aussi déjà créé ou rafraîchi le répertoire de configuration et ses projections de credentials, sans recréer les services : relancer `up` une fois la cause corrigée.
+
+Rien n'est réparé et aucun mode n'est modifié à votre place. Choisir un répertoire existant et conforme, avec assez de place pour les entrées (256 Mio au plus), et le désigner pour cette commande :
+
+```sh
+TMPDIR="/absolute/path/to/a/conforming/directory" "$AIGUARD_BIN" build --runtime docker --source .
+```
+
+Pour trouver le répertoire qui enfreint la politique, examiner chaque répertoire de `/` jusqu'à celui qui est refusé : son propriétaire, son mode et son sticky bit, s'il s'agit d'un lien, et son type de système de fichiers. Sous Linux :
+
+```sh
+AIGUARD_TMP="/absolute/path/of/the/refused/temporary/directory"
+namei -l "$AIGUARD_TMP"
+stat -f -c %T "$AIGUARD_TMP"
+```
+
+Sous macOS, lancer `ls -lde` sur chaque répertoire tour à tour (il affiche aussi les ACL) et lire le type de système de fichiers dans la sortie de `mount`. Ce sont des outils standard ; ils n'ont pas été exécutés dans le cadre de cette validation. Si `/` lui-même, ou un autre répertoire commun à tous les chemins, enfreint la politique, aucun `TMPDIR` ne peut convenir et les commandes CLI `build`, `up` et `down` ne sont pas utilisables sur cet hôte ; la même politique protège déjà le répertoire de configuration.
+
+**Entrées refusées.** Chaque refus ci-dessous précède la commande de build ou Compose du moteur et laisse la source intacte ; aucun fichier existant n'est modifié pour faire passer un contrôle. La cause rapportée par le système, lorsqu'il y en a une, suit sous `Caused by:`.
+
+| Ce qui est refusé | Message |
+|---|---|
+| Un lien symbolique à un chemin que la commande sélectionne. Pour `build`, il s'agit de **tout** lien symbolique sous `src/` ou `front/src/`, quel que soit son nom, y compris un nom que la liste ne sélectionne pas, comme `src/notes`, ou un lien de verrou d'éditeur comme `src/.#main.rs`, et d'une entrée liée ailleurs, comme `policies/extra.json` ou `images/extra.Dockerfile`. Pour `up` et `down`, il s'agit de `deploy`, `deploy/<engine>` ou `compose.yaml` lui-même. Les liens situés à des chemins que la commande ne sélectionne pas sont ignorés. Une entrée requise liée est signalée plus tôt, par le contrôle structurel et avec son propre message. | `source input must not be a symbolic link: <path>` |
+| Une FIFO, un périphérique ou un socket là où un fichier d'entrée est attendu | `source input must be a regular file: <path>` |
+| Pour `build`, un `.dockerignore` dont les octets diffèrent de ceux que ce CLI reflète | `the build input list of this CLI mirrors a .dockerignore whose SHA-256 is <pinned>; the .dockerignore of the selected distribution has SHA-256 <actual>. Build with the CLI built from that distribution, or run the engine build directly` |
+| Pour `build`, un fichier d'ignore par Dockerfile `images/<name>.Dockerfile.dockerignore` | `the build input list of this CLI mirrors .dockerignore only: the per-Dockerfile ignore file <path> of the selected distribution is not reconciled with it, and a builder may apply that file instead. Remove it, or run the engine build directly` |
+| Plus de 16 384 entrées examinées. Pour `build` : les entrées de la racine de la source, tout ce qui se trouve sous `src/` et `front/src/`, et les entrées directes de `policies/`, `front/`, `front/public/` et `images/`. Pour `up` et `down` : les entrées de la racine de la source, de `deploy/` et de `deploy/<engine>/`. Un répertoire que la commande ne parcourt pas, comme `target/` ou `.git/`, compte pour une entrée. | `source exceeds the bound of 16384 entries in its selected directories` |
+| Une entrée de plus de 32 Mio, ou un fichier Compose de plus de 1 Mio | `source input exceeds the per-file bound of <n> bytes: <path>` |
+| Plus de 256 Mio d'entrées au total ; le chemin nommé est celui où la borne a été franchie, pas nécessairement le plus gros fichier | `source inputs exceed the total bound of 268435456 bytes of the prepared copy at: <path>` |
+| Un chemin sélectionné de plus de 64 composants ou de plus de 4 096 octets, non UTF-8, ou contenant un caractère de contrôle | `source path exceeds the bound of 64 components or 4096 bytes: <path>`, `source path must be UTF-8: <path>` ou `invalid source path: "<path>"` |
+| Une entrée ou un répertoire qui a changé, disparu, est devenu un lien ou n'a pas pu être lu pendant sa copie ou sa confirmation | `source file changed while it was being read: <path>`, `source changed while it was being prepared: <path>`, `source directory changed while it was being prepared: <path>`, `source input is unavailable or is a symbolic link: <path>`, `source input is unavailable: <path>`, `source input cannot be read: <path>` ou `source enumeration failed: <path>` |
+| Le répertoire source sélectionné, ou un répertoire situé au-dessus de lui, qui ne peut pas être ouvert sans suivre de lien ; sous macOS, aussi un répertoire que le compte qui lance le CLI ne peut pas lire | `source directory is unavailable or reached through a symbolic link: <path>` |
+| La limite de fichiers ouverts du processus ou du système atteinte pendant la préparation | ``the open-file limit of this process or of the system was reached while the source was being prepared; raise the descriptor limit (`ulimit -n`) and run the command again`` |
+
+Dans ces messages, un nom de la source qui n'a pas été validé est affiché avec ses caractères de contrôle et ses barres obliques inverses échappés, et coupé après 1 024 caractères ; `invalid source path:` affiche le nom entre guillemets, échappé. Les caractères de format qui ne sont pas des caractères de contrôle (les surcharges bidirectionnelles, par exemple) ne sont ni refusés ni échappés.
+
+Retirer le lien ou fermer l'éditeur qui tient le verrou, réduire l'entrée, ou attendre la fin de l'outil qui écrit dans la source ; puis réessayer. Pour un refus de fichier d'ignore, utiliser le CLI construit à partir de cette distribution ou retirer le fichier d'ignore par Dockerfile, comme le dit le message. Pour la limite de fichiers ouverts, la relever dans ce shell (`ulimit -n <number>`, dans la limite dure) et relancer : une préparation tient environ deux descripteurs par niveau de profondeur du répertoire sélectionné le plus profond, un par composant du chemin de la source et une vingtaine de plus, quel que soit le nombre de répertoires sélectionnés. Pour un répertoire source indisponible, lire la cause : sous Linux, les répertoires situés au-dessus de la source sélectionnée n'ont besoin que de la permission de traversée pour le compte qui lance le CLI, tandis que le répertoire source et les répertoires que la commande parcourt doivent être lisibles ; sous macOS, chaque répertoire de `/` jusqu'à la source sélectionnée doit aussi être lisible, sinon `Permission denied` suit sous `Caused by:`.
+
+**Une copie qui a changé.** Si quoi que ce soit sous `context/` a été créé, modifié ou supprimé pendant l'utilisation de la copie, y compris par le CLI du moteur lui-même écrivant dans son contexte de build ou à côté du fichier Compose, la commande échoue. Avant la commande du moteur : `the prepared copy changed before docker build started (<detail>); docker build was not started`. Après elle : `the prepared copy changed while docker build was running (<detail>); the CLI process exited (<status>) but its result is not bound to the reported digest`. Lorsque cette commande a aussi été arrêtée par un signal ou à son délai, le message d'arrêt vient en premier et se termine par `The prepared copy also changed while it was running (<detail>)`. `<detail>` nomme ce qui a été constaté : `unexpected entry in the prepared copy: <path>`, `prepared copy content changed: <path>`, `prepared copy entry disappeared: <path>`, `prepared copy directory changed: <path>`, `prepared Compose environment file changed` ou, lorsque la copie elle-même a été déplacée ou remplacée, `control directory path identity changed; reopen the intended private configuration` ; le motif donné par la politique des fichiers privés peut le suivre, par exemple `private file exceeds the configured size limit` pour un fichier qui a grossi. Dans les deux derniers cas, la commande du moteur a déjà été exécutée et une image ou un changement de la pile peut exister. Sauf si un avertissement indique que la copie n'a pas été supprimée, elle n'existe plus quand vous lisez le message et ne peut pas être inspectée : chercher ce qui écrit sous `<TMPDIR>/ai-guard-distribution-*` pendant la commande, vérifier le résultat du moteur, puis relancer.
+
+**Une commande qui n'a pas été lancée.** Tout autre refus entre la préparation et le lancement de la commande du moteur se lit `docker build was not started` (ou `podman compose was not started`, …), avec son motif sous `Caused by:` : par exemple un programme du moteur qui a changé depuis son approbation par le CLI, ou qui ne peut pas être exécuté (`docker is unavailable; install and start a container runtime. No local fallback exists`). La copie préparée est supprimée et rien n'a été lancé ; corriger la cause et relancer.
+
+**Ce que cela établit et n'établit pas.**
+
+- La copie est une suite de lectures stables, fichier par fichier, suivie d'une passe de confirmation ; ce n'est pas un instantané atomique de l'arbre. Un original est comparé par périphérique, inode, longueur, mode et ses deux horodatages : une réécriture qui conserve la longueur d'un fichier et tombe dans la précision de ces horodatages n'est pas vue, et un changement antérieur à la préparation est simplement ce qui est copié.
+- Le propriétaire, les modes, le nombre de liens et le système de fichiers de la source ne sont pas jugés. `shared_writable` compte seulement les originaux que le groupe ou les autres peuvent écrire ; rien d'autre n'est rapporté à leur sujet. Une copie ne rend pas fiable une source qui ne l'est pas. Le compte qui lance le CLI, root et les administrateurs du stockage et du moteur restent de confiance.
+- Le CLI du moteur reçoit ces chemins ; il n'y est pas confiné. Sa propre configuration et ses plugins sont lus comme auparavant.
+- Cela s'applique seulement aux commandes CLI `build`, `up` et `down`. Une commande directe `docker build`, `podman build` ou Compose lit les chemins que vous lui donnez.
+- La liste de build ne connaît que `.dockerignore`. `.containerignore` et `images/<name>.Dockerfile.containerignore` n'en font pas partie : ils ne sont ni copiés ni comparés, donc le moteur ne les reçoit pas par la commande CLI `build`. Le traitement de ces noms par un constructeur, et le fait qu'il applique un fichier d'ignore par Dockerfile à la place de `.dockerignore`, n'ont pas été observés sur un vrai moteur.
+- La suppression de la copie se fait par nom après un contrôle d'identité. C'est un contrôle, pas un verrou : entre la comparaison et la suppression, un processus du compte du CLI ou de root peut encore échanger le répertoire ; les autres comptes ne le peuvent pas sous la politique du répertoire temporaire. L'identité enregistrée est celle de ce que le chemin nommait juste après la création, pas celle d'un descripteur.
+- Métadonnées Compose après `up` (`NOT_RUN` sur un vrai fournisseur). `up` remet à Compose un fichier et un fichier env situés sous `<TMPDIR>/ai-guard-distribution-<random>/` et supprime ce répertoire à la fin de la commande. Un fournisseur qui enregistre ses fichiers de configuration, son répertoire de travail et son fichier env dans les labels du projet nomme alors des chemins qui n'existent plus, et, sous le `/tmp` par défaut de Linux, un autre compte local peut créer plus tard un répertoire de ce nom. ai-guard ne lit jamais ces labels : `down` prépare une nouvelle copie et s'adresse au projet par son nom, et les fichiers Compose livrés ne contiennent aucun chemin relatif. Un outil tiers ou une commande manuelle qui relirait le chemin porté par un label lirait ce qui s'y trouve ; aucun n'a été exécuté. S'adresser à la pile par `--project-name agentsandbox` ou par le fichier Compose du checkout, comme dans [suivre une pile démarrée par `up` du CLI](#cli-up-stack), jamais par le chemin d'un label, et, sur un hôte partagé avec d'autres comptes locaux, lancer `up` avec un `TMPDIR` privé (appartenant au compte, mode `0700`).
+- Acceptation de `--env-file` par le fournisseur Compose (`NOT_RUN`). Les commandes CLI `up` et `down` ajoutent `--env-file <empty prepared file>` à la commande Compose ; avec Podman, la commande entière est transmise au fournisseur externe. Aucun fournisseur n'a été exécuté, et la fixture qui en tient lieu accepte n'importe quel argument. Les commandes Podman directes de ce guide utilisent déjà `podman compose --env-file` : c'est la même exigence envers le fournisseur, désormais nécessaire aussi au CLI. Si un fournisseur rejette l'option, `up` et `down` échouent avec le seul message `podman command failed (<status>)` ; la sortie d'erreur du fournisseur est capturée mais [pas affichée](#engine-output).
+- Descripteurs. Exécuté sous Linux : 300 répertoires sélectionnés sont construits sous une limite de 128 descripteurs, et une chaîne sélectionnée profonde de 40 niveaux est refusée sous une limite de 64 avec le message qui nomme la limite. Calculé, non mesuré : environ 170 descripteurs pour la source acceptée la plus profonde (64 niveaux), sous la limite souple habituelle de macOS, 256.
+- Répertoires situés au-dessus de la source. Exécuté sous Linux : une source placée sous un répertoire que le compte peut seulement traverser est préparée, avec un répertoire de ce même compte. `NOT_RUN` : un répertoire appartenant à un autre compte, et macOS, où une telle source reste refusée. Sur toute plateforme, le répertoire temporaire et, pour `up` et `down`, le répertoire de configuration exigent des ancêtres lisibles (politique de répertoire privé).
+- Le comportement a été exercé avec des processus de fixture Rust tenant lieu de CLI du moteur, sous Linux ARM64, y compris une commande lancée sans `TMPDIR` sous le `/tmp` de ce système, appartenant à root avec sticky bit. Un vrai moteur Docker ou Podman, un vrai fournisseur Compose, macOS et un second compte local écrivant dans la source ou le répertoire temporaire sont `NOT_RUN`. En particulier, aucun vrai CLI de moteur n'a été observé lisant un contexte en `0700`/`0600`, et aucun vrai fournisseur Compose n'a été observé avec un `--env-file` vide et sans `--project-directory`.
+- Documenté d'après le code, sans test exécuté : les refus du répertoire temporaire pour un système de fichiers non pris en charge (ZFS, NFS, FUSE), un autre propriétaire, une ACL et un chemin non UTF-8 ; un lien sur `deploy` ou `deploy/<engine>` (le cas `compose.yaml` a été exécuté) ; et les messages `source file changed while it was being read`, `source input is unavailable:`, `source input cannot be read:` et `source enumeration failed`. Par le binaire du CLI, `<engine> <verb> was not started` n'a été exécuté que pour une copie altérée avant le lancement ; ses autres causes l'ont été au niveau du consommateur retenu et sur des fins construites.
 
 ## Créer la configuration de la pile
 
@@ -76,7 +189,42 @@ podman compose --env-file "$AIGUARD_CONFIG/local.env" -f deploy/podman/compose.y
 "$AIGUARD_BIN" healthcheck --url "$AIGUARD_GATEWAY/healthz" --url "$AIGUARD_DASHBOARD/healthz"
 ```
 
-Conserver le même compte moteur, contexte/endpoint, fichier env et fichier Compose. Utiliser ce parcours Compose direct pour les ports ou noms de projet personnalisés ; le parcours CLI `up/down` possède son propre projet fixe et ses URL de disponibilité par défaut.
+Conserver le même compte moteur, contexte/endpoint, fichier env et fichier Compose. Utiliser ce parcours Compose direct pour les ports ou noms de projet personnalisés ; le parcours CLI `up/down` possède son propre projet fixe et ses URL de disponibilité par défaut. Les commandes CLI `up` et `down` remettent à Compose une [copie privée](#prepared-source) de `deploy/<engine>/compose.yaml` et un `--env-file` vide, sans `--project-directory`, dans un environnement qui porte `AGENTSANDBOX_CONFIG_DIR` issu de `--config-dir` et aucune des variables Compose de votre shell : le répertoire de cette copie ne contient pas de `.env`, donc un `.env` placé à côté de `deploy/<engine>/compose.yaml` n'est pas lu par ces deux commandes et les valeurs par défaut du fichier Compose s'appliquent. Les commandes directes `docker compose --env-file …` et `podman compose --env-file …` ci-dessus sont inchangées. Le traitement des arguments du CLI par un vrai fournisseur Compose n'a pas été vérifié.
+
+<a id="cli-up-stack"></a>
+
+### Suivre une pile démarrée par `up` du CLI
+
+La commande CLI `up` crée sa pile sous le nom de projet Compose fixe `agentsandbox`, à partir d'une copie temporaire de `deploy/<engine>/compose.yaml` et d'un fichier env vide, tous deux supprimés dès la fin de la commande Compose, avant l'attente des URL de disponibilité. La seule variable qu'elle donne à Compose est `AGENTSANDBOX_CONFIG_DIR`, le chemin absolu de `--config-dir`. Pour cette pile, « la même configuration » désigne donc ce nom de projet, ce moteur et cette variable, pas un fichier qui existerait encore. Ce qui suit est écrit d'après les arguments et l'environnement que le CLI construit ; aucune de ces commandes n'a été exécutée contre Docker Compose ou un fournisseur Compose de Podman.
+
+- **Projet.** S'adresser au projet par son nom, `--project-name agentsandbox`. Un fournisseur Compose qui enregistre le fichier Compose, le répertoire de travail et le fichier env d'un projet dans les labels de ses conteneurs nomme, pour cette pile, des chemins situés sous le répertoire supprimé `<TMPDIR>/ai-guard-distribution-<random>/` : ne jamais diriger une commande ou un outil vers un tel chemin (voir la limite sur les métadonnées Compose dans [sources préparées de build et Compose](#prepared-source)). Les commandes directes ci-dessus, lancées avec `--env-file "$AIGUARD_CONFIG/local.env"`, s'adressent au projet nommé par le `COMPOSE_PROJECT_NAME` de ce fichier (`ai-guard-local` dans l'exemple), pas à celui-ci.
+- **Moteur.** Avec Docker, le CLI vise un seul endpoint, `--host <endpoint>` : la valeur de `--runtime-endpoint` lorsqu'elle a été fournie, sinon l'hôte Docker du contexte courant du compte, que le CLI lit par `docker context inspect --format '{{json .Endpoints.docker.Host}}'` dans un environnement reconstruit qui porte le répertoire personnel du compte et `DOCKER_CONFIG=<home>/.docker`, sans le `DOCKER_HOST` ni le `DOCKER_CONTEXT` de votre shell. `doctor` n'affiche pas cet endpoint. Une commande `docker` directe lancée dans un shell où ces variables sont définies peut s'adresser à un autre moteur : passer l'endpoint explicitement. Avec Podman, le CLI n'ajoute aucune option globale du moteur, et `--runtime-endpoint` est refusé pour ces commandes.
+- **Variable.** Une commande directe à laquelle on donne le fichier Compose du checkout a besoin de `AGENTSANDBOX_CONFIG_DIR`, défini sur le même répertoire de configuration : le fichier l'exige (`${AGENTSANDBOX_CONFIG_DIR:?Run agentsandbox init first}`).
+
+Pour Docker, lire l'endpoint comme le fait le CLI lorsqu'aucun `--runtime-endpoint` n'a été fourni. La première commande affiche une chaîne JSON telle que `"unix:///var/run/docker.sock"` ; l'utiliser sans ses guillemets :
+
+```sh
+env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG docker context inspect --format '{{json .Endpoints.docker.Host}}'
+AIGUARD_ENDPOINT="unix:///the/endpoint/printed/above"
+docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox ps
+docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+```
+
+Pour Podman :
+
+```sh
+podman compose --project-name agentsandbox ps
+podman compose --project-name agentsandbox logs --tail 100 gateway dashboard ingress
+```
+
+Lorsqu'un fournisseur a besoin d'un fichier Compose pour trouver le projet, ajouter le fichier du checkout et la variable ; `$AIGUARD_CONFIG` représente le répertoire donné à `up` par `--config-dir` :
+
+```sh
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" docker --host "$AIGUARD_ENDPOINT" compose --project-name agentsandbox --file deploy/docker/compose.yaml ps
+AGENTSANDBOX_CONFIG_DIR="$AIGUARD_CONFIG" podman compose --project-name agentsandbox --file deploy/podman/compose.yaml ps
+```
+
+Pour arrêter ou recréer cette pile, utiliser les commandes CLI `down` et `up` avec les mêmes `--runtime`, `--runtime-program`, `--runtime-endpoint` et `--config-dir` : chacune prépare une nouvelle copie et s'adresse au projet par son nom. Examiner les logs avant tout partage pour en exclure les secrets.
 
 ### Bornes du relais HTTP
 
@@ -175,7 +323,13 @@ La copie exclut des noms sensibles connus et des répertoires de dépendances/ca
 |---|---|
 | Moteur absent, exécutable dangereux ou mauvais endpoint | Lancer `doctor` sous le même compte et répéter les choix explicites `--runtime-program`/`--runtime-endpoint` sur les commandes qui les acceptent. Ne pas exécuter la tâche sur l'hôte en repli. |
 | Daemon non rootless refusé | Configurer rootless ou appliquer volontairement l'exception par commande décrite plus haut. |
-| Pile indisponible | Consulter Compose `ps` et `logs --tail 100 gateway dashboard ingress` avec la même configuration. Vérifier collisions de ports et projections privées des credentials. Examiner les logs avant toute publication pour exclure les secrets. |
+| `build`, `up` ou `down` refuse une entrée de la source, un fichier d'ignore ou le répertoire temporaire | Rapprocher le chemin nommé et le motif des [sources préparées de build et Compose](#prepared-source) : lien, fichier spécial, borne, changement pendant la préparation, `.dockerignore` différent de celui que le CLI reflète, répertoire illisible au-dessus de la source, limite de fichiers ouverts ou règles de `TMPDIR`. Corriger le checkout ou choisir un `TMPDIR` conforme ; rien n'est réparé automatiquement et la source n'est jamais modifiée. |
+| `build`, `up` ou `down` signale `the prepared copy changed` | Quelque chose a écrit dans la copie privée pendant son utilisation, peut-être le CLI du moteur lui-même. La commande du moteur a pu être exécutée : vérifier son résultat, trouver l'écrivain et relancer. Voir les [sources préparées de build et Compose](#prepared-source). |
+| `build`, `up` ou `down` se termine par `docker command failed (<status>)` ou `podman command failed (<status>)` | La commande du moteur a échoué d'elle-même. Le CLI n'a rien affiché de sa sortie et la copie préparée est supprimée. Lire [ce que le CLI montre de la sortie du moteur](#engine-output) pour obtenir le diagnostic propre au moteur, puis relancer. |
+| `build`, `up` ou `down` refuse de démarrer avec `SIGCHLD is ignored in this process` | Le programme qui a lancé le CLI ignore `SIGCHLD` ; rien n'a été préparé et aucune commande du moteur n'a été lancée. Lancer la commande avec la disposition par défaut : voir [interrompre un build ou une commande Compose, ou dépasser son délai](#interrupt-build-or-compose). |
+| `build`, `up` ou `down` interrompu ou au-delà de son délai | Le message dit ce qui a été observé du processus CLI local du moteur ; voir [interrompre un build ou une commande Compose, ou dépasser son délai](#interrupt-build-or-compose). Vérifier l'état propre du moteur, puis relancer la même commande. Un `up` interrompu peut laisser une pile partielle : relancer `up` ou lancer `down`. |
+| `termination is unknown`, un avertissement `was not removed` ou `could not be removed`, ou un répertoire `ai-guard-distribution-*` resté dans le répertoire temporaire | Suivre [reprendre après une source préparée conservée](#prepared-source-retained) avant de supprimer quoi que ce soit. ai-guard ne supprime pas ce répertoire. |
+| Pile indisponible, ou `stack started but readiness did not pass within 45 seconds; inspect docker compose logs` | Consulter Compose `ps` et `logs --tail 100 gateway dashboard ingress` avec la même configuration : le même fichier env et le même fichier Compose pour le parcours direct, ou le projet `agentsandbox` adressé par son nom pour une pile démarrée par `up` du CLI, comme dans [suivre une pile démarrée par `up` du CLI](#cli-up-stack). Vérifier collisions de ports et projections privées des credentials. Examiner les logs avant toute publication pour exclure les secrets. |
 | HTTP 429 via l'ingress | Distinguer les [budgets de lecture/échange](#bornes-du-relais-http) des quotas amont à l'aide du message retourné. Réduire les requêtes parallèles et réessayer une lecture lorsque la capacité est disponible. Vérifier la session enregistrée avant de répéter un lancement. |
 | HTTP 408 ou 413 pendant l'envoi d'un corps | Vérifier les délais de 5 secondes au total/2 secondes sans fragment et la limite de 256 Kio. Réduire le contenu ou corriger l'émetteur bloqué ; modifier le fichier dotenv ne relève pas ces bornes. |
 | HTTP 503 avec pénurie de descripteurs d'audit (`EMFILE`/`ENFILE`) | Conserver la session et l'identité de l'opération. Une fois les descripteurs disponibles, reprendre une lecture autorisée qui atteint la validation du Store ; consulter la [reprise des descripteurs d'audit](#reprise-des-descripteurs-daudit) avant de rejouer une mutation. |
@@ -184,6 +338,146 @@ La copie exclut des noms sensibles connus et des répertoires de dépendances/ca
 | Copie ou export refusé | Vérifier taille, liens, nouveauté de la destination et permissions des répertoires. Préserver l'original et tout export déjà publié. |
 | Runtime indisponible ou état inconnu | Conserver session, plans et volume. Consulter le statut et réconcilier l'autorité runtime enregistrée ; ne pas créer un autre démarrage pour masquer l'incertitude. |
 | Connexion fournisseur ou client indisponible | Suivre le [diagnostic fournisseur](../providers/README.fr.md#diagnostiquer-les-problèmes-fournisseur) ; les contrôles de disponibilité ne valident pas cet accès. |
+
+<a id="interrupt-build-or-compose"></a>
+
+### Interrompre un build ou une commande Compose, ou dépasser son délai
+
+Pendant `build`, `up` et `down`, un `SIGINT` (Ctrl-C), `SIGTERM` ou `SIGHUP` reçu par le processus du CLI est une demande d'arrêt, pas la fin immédiate du CLI. La commande de build ou Compose du moteur s'exécute dans son propre groupe de processus : le CLI relaie donc une fois le signal à ce groupe, attend jusqu'à 10 secondes (moins si le délai propre de la commande expire avant), puis envoie `SIGKILL` au groupe. Un nouveau signal, au moins une seconde après le premier, met fin aussitôt à cette attente ; les signaux reçus pendant la première seconde comptent comme la même demande. Le CLI n'annonce une commande réussie qu'après avoir récolté le vrai statut de sortie du processus CLI du moteur **et** atteint la fin de fichier sur ses deux tubes de sortie. Lorsqu'un arrêt a été demandé et que ces faits sont récoltés, il supprime la [copie préparée](#prepared-source), affiche ce qu'il a observé et se termine avec le statut **1**, pas `128 + signal`. Si l'un de ces faits reste inconnu après la récolte bornée qui suit `SIGKILL`, il rend au contraire une erreur `termination is unknown` et conserve la copie pour la [reprise](#prepared-source-retained), sans annoncer la fin du processus ni de ses consommateurs. Aucune autre commande du moteur de cette invocation n'est lancée : un premier build d'image interrompu n'est pas suivi du second.
+
+| Moment où le signal est arrivé | Message, après `Error: ` | Copie préparée |
+|---|---|---|
+| Aucune commande de build ou Compose du moteur n'était en cours, par exemple pendant une sonde du moteur | `interrupted by SIGINT: no engine build or Compose command was running` | Supprimée s'il en existait une |
+| Pendant la copie de la source | `interrupted by SIGINT while the source was being prepared; no engine build or Compose command was started` | La copie partielle est supprimée |
+| Juste avant le lancement de la commande du moteur | `interrupted by SIGINT: docker build was not started` | Supprimée |
+| Pendant la commande du moteur, terminée dans le délai d'attente | `interrupted by SIGINT: SIGINT was forwarded to the process group of the CLI process for docker build; that process exited (<status>) and both of its output pipes reached end of file` | Supprimée |
+| Même cas, mais `SIGKILL` a été nécessaire | `interrupted by SIGINT: SIGINT was forwarded to the process group of the CLI process for docker build, then SIGKILL was sent; that process exited (signal: 9 (SIGKILL)) and both of its output pipes reached end of file` | Supprimée |
+| La fin n'a pas pu être établie dans les 2 secondes suivant `SIGKILL` | `docker build termination is unknown: …` | **Conservée** : voir [reprendre après une source préparée conservée](#prepared-source-retained) |
+
+Les messages nomment le signal reçu et la commande du moteur (`docker build`, `podman compose`, …). Un signal déjà ignoré au lancement du CLI, sous `nohup` par exemple, reste ignoré : le CLI poursuit et ne relaie rien. Lorsque la préparation elle-même se termine sans résultat, ce qu'aucune entrée connue ne provoque, le message est `the source preparation ended without a result; no engine build or Compose command was started` : chercher une copie restante comme pour [un répertoire laissé par un CLI tué](#prepared-source-retained), puis relancer.
+
+**Un processus qui ne peut pas attendre ses enfants.** `build`, `up` et `down` refusent de démarrer dans un processus dont `SIGCHLD` est ignoré (hérité d'un superviseur, d'un script ou d'un lanceur de CI qui l'ignore) ou porte `SA_NOCLDWAIT` : le statut d'attente d'un processus CLI du moteur ne pourrait pas être obtenu, donc la fin d'une commande du moteur ne pourrait pas être établie.
+
+```text
+Error: SIGCHLD is ignored in this process, inherited from the program that started this CLI: the wait status of an engine CLI process could not be obtained, so the end of an engine command could not be established. Start this CLI with the default SIGCHLD disposition. Nothing was prepared and no engine command was started
+```
+
+Le statut de sortie est 1. Rien n'est copié, `up` ne crée ni ne rafraîchit le répertoire de configuration et aucune commande du moteur n'est lancée ; la disposition est lue, jamais modifiée. La variante pour le drapeau commence par `SIGCHLD has SA_NOCLDWAIT set in this process`. Lancer la commande depuis un programme qui laisse `SIGCHLD` à sa disposition par défaut, un shell interactif par exemple, ou corriger le lanceur. Le `env` de GNU coreutils peut la rétablir pour une commande, `env --default-signal=CHLD "$AIGUARD_BIN" build --runtime docker --source .` ; cet exemple n'a pas été exécuté dans le cadre de cette validation. Les autres commandes du CLI ne lisent pas cette disposition.
+
+**Délais.** Chaque build d'image est borné à 30 minutes et chaque commande Compose à 180 secondes. Ces deux délais sont figés dans le binaire : aucune option, variable ou réglage dotenv ne les modifie. À l'échéance, `SIGKILL` est envoyé au groupe de processus et le résultat est rapporté une fois le même statut et les mêmes fins de fichier obtenus :
+
+```text
+Error: docker compose exceeded its 180 s bound: SIGKILL was sent to the process group of the CLI process for docker compose; that process exited (signal: 9 (SIGKILL)) and both of its output pipes reached end of file
+```
+
+Lorsque le CLI du moteur était déjà sorti et qu'un processus lancé par lui a tenu un tube de sortie ouvert jusqu'à l'échéance, le statut entre parenthèses est celui du CLI, par exemple `exit status: 0`, et le message ajoute `The CLI process had already exited when SIGKILL was sent; the command was not collected earlier, usually because a process it started kept an output pipe open`. Ce processus appartient au groupe signalé et est tué avec lui. La commande est tout de même rapportée en échec, et un `build` ne passe pas à sa seconde image.
+
+<a id="engine-output"></a>
+
+**Ce que le CLI montre de la sortie du moteur.** Pendant qu'une commande de build ou Compose du moteur s'exécute, le CLI n'affiche rien de sa sortie : les deux flux sont capturés. Après une commande réussie, il affiche la sortie standard de la commande, 256 Kio au plus ; un log de build plus long est coupé à cette taille et la coupure est annoncée par `Build log was truncated to 256 KiB; runtime reported successful completion.`, et une sortie Compose plus longue est coupée sans annonce. La sortie d'erreur du moteur est capturée, 64 Kio au plus, et n'est jamais affichée. Après un échec, un délai dépassé ou une interruption, aucun des deux flux n'est affiché. Une commande qui a échoué d'elle-même n'est rapportée que par son statut de sortie :
+
+```text
+Error: docker command failed (exit status: 1)
+```
+
+Ces tailles sont elles aussi figées dans le binaire. Pour lire le diagnostic propre au moteur, lancer directement la commande du moteur depuis le checkout, avec `podman` à la place de `docker` pour Podman, et avec le `--host <endpoint>` et les paires `--build-arg` que le CLI aurait employés :
+
+```sh
+docker build --file images/control.Dockerfile --tag agentsandbox-control:local .
+docker build --file images/worker.Dockerfile --tag agentsandbox-worker:local .
+```
+
+Une commande directe lit le checkout vivant et non une copie préparée, n'applique aucun des contrôles des [sources préparées de build et Compose](#prepared-source) et n'a pas été exécutée dans le cadre de cette validation. Un build qui demande plus de 30 minutes peut rencontrer de nouveau le même délai lorsque la commande CLI est relancée telle quelle ; un build direct du moteur n'a pas ce délai.
+
+**Que faire ensuite.** Le statut de sortie et le message décrivent seulement le processus CLI local du moteur. Vérifier l'état propre du moteur sous le même compte et le même endpoint (`docker image ls` et `docker ps --all`, ou `podman image ls` et `podman ps --all` ; pour une pile démarrée par `up`, les commandes de [suivre une pile démarrée par `up` du CLI](#cli-up-stack)), puis relancer la même commande avec les mêmes options. `build` reconstruit les deux images. Un `up` interrompu ou arrêté à son délai peut laisser la pile partiellement ou entièrement démarrée : relancer `up`, qui recrée les services, ou lancer `down`. Relancer un `down` interrompu. Ne supprimer ni image, ni volume, ni configuration pour reprendre.
+
+**Limites.**
+
+- Ce sont des faits locaux : le statut de sortie du processus CLI du moteur, la fin de fichier sur ses deux tubes de sortie et les signaux envoyés par le CLI. Rien n'est établi sur le travail d'un daemon du moteur, ni sur un processus lancé par la commande du moteur qui ne détient plus aucun de ses deux tubes de sortie, qu'il soit resté ou non dans le groupe de processus de la commande : lorsque la commande se termine d'elle-même ou sur le signal relayé, aucun autre signal n'est envoyé et le groupe n'est pas inspecté ; un tel processus peut donc encore s'exécuter, et lire la copie, quand le CLI la supprime. Après `SIGKILL`, il en va de même pour un processus qui a quitté le groupe ou que votre compte ne peut pas signaler. Exécuté avec des processus de fixture sous Linux ARM64, au niveau du consommateur retenu : un assistant lancé avec sa sortie sur `/dev/null`, dans le groupe de processus de la commande, est vivant après la récolte de la commande et la libération de son entrée, aussi bien lorsque la commande se termine d'elle-même que lorsqu'elle se termine sur un `SIGINT` relayé que l'assistant ignore. Qu'un tel processus lise la copie quand le CLI la supprime est la conséquence lue dans le code.
+- Un CLI lui-même tué (`SIGKILL`, plantage, coupure de courant ; `SIGQUIT` garde son action par défaut) ne peut ni relayer un signal ni nettoyer. La commande du moteur, dans son propre groupe de processus, ne reçoit aucun signal d'ai-guard, et la copie reste sans marqueur : voir [reprendre après une source préparée conservée](#prepared-source-retained).
+- Une suspension par le contrôle des tâches (Ctrl-Z) ne suspend que le CLI ; la commande du moteur continue. Tant qu'il est suspendu, le CLI ne lit rien de la sortie de la commande du moteur, qui peut donc se bloquer dès qu'un tube est plein, et le délai de 30 minutes ou de 180 secondes continue de courir ; à la reprise du CLI, une commande qui a dépassé son délai est tuée aussitôt et rapportée par `exceeded its … bound`. Déduit du code, non exécuté.
+- La préparation a des bornes d'entrées et d'octets mais aucune borne de temps. Une demande d'arrêt (`SIGINT`, `SIGTERM`, `SIGHUP`) reçue pendant la préparation prend effet entre deux entrées de la copie ou deux contrôles de la confirmation ; un signal répété n'y provoque aucune escalade. Si une lecture de la source ou une écriture sous `TMPDIR` ne rend pas la main (réseau qui ne répond plus, système de fichiers FUSE ou amovible), le CLI ne se termine pas tant que cet appel système n'est pas revenu. Seul `SIGKILL` ou `SIGQUIT` y met fin, en laissant un répertoire `ai-guard-distribution-*` partiel, sans manifeste ni marqueur : le traiter comme [un répertoire laissé par un CLI tué](#prepared-source-retained). Déduit par lecture ; `NOT_RUN`.
+- À l'échéance d'une commande, `SIGKILL` est envoyé à tout le groupe de processus du CLI du moteur, y compris lorsque ce processus CLI était déjà sorti avec le statut 0 et que seul un processus lancé par lui tient encore un tube de sortie ; la commande est alors rapportée en échec. Un signal de l'opérateur reçu dans cet état est relayé à ce même groupe : avec des processus de fixture, le détenteur se termine sur ce signal et la commande est récoltée avec le statut de sortie 0, sans `SIGKILL`. Qu'un vrai moteur laisse un tel processus après `up --detach` (premier candidat : Podman rootless avec un fournisseur Compose externe) est `NOT_RUN` ; si c'est le cas, `up` est rapporté en échec au délai de 180 secondes et ce processus est tué avec le groupe.
+- La commande du moteur n'est pas dans le groupe de processus d'avant-plan du terminal et son entrée standard est `/dev/null`. Un assistant qui interroge le terminal, un assistant de credentials par exemple, n'est pas pris en charge par ces commandes et, d'après les règles du contrôle des tâches, resterait suspendu jusqu'à l'échéance : déverrouiller ou se connecter au moteur au préalable. Ce point est déduit, pas exécuté.
+- Si le signal arrive pendant que `up` attend les URL de disponibilité, la commande Compose est déjà terminée : le message est le premier du tableau et les services lancés par Compose restent en l'état. Ce point découle du chemin de code et n'a pas été exercé par un test.
+- Le refus `SIGCHLD` a été exécuté sous Linux ARM64 pour un `SIGCHLD` ignoré hérité (`down` avec un moteur de fixture de type Podman, `build`, `up`). Non exécuté : `SA_NOCLDWAIT` ; macOS, où il n'a pas été déterminé si un `SIGCHLD` ignoré le reste à travers `exec`.
+- macOS `NOT_RUN` : il n'a pas été établi sous Darwin que `kill(2)` vers un groupe de processus dont le seul membre est le processus CLI du moteur, sorti et non récolté, est accepté (Linux l'accepte). Si Darwin le refuse, une terminaison inconnue se lit `<SIGNAL> was forwarded to process group N, SIGKILL was not sent` (ou `no signal was sent to process group N` lorsque le signal relayé a été refusé lui aussi), sans `2 s later`, et `RETAINED-UNKNOWN.json` enregistre `kill_sent: false` alors que `kill(2)` a été appelé. Une commande récoltée ne rapporte que les signaux acceptés (`no signal was accepted by the process group of the CLI process for …` lorsqu'aucun ne l'a été). La conservation n'est pas affectée : rien, chez le propriétaire de la commande, ne dépend de la valeur de retour de `kill`.
+- Exercé avec des signaux envoyés à l'identifiant de processus du CLI et des processus de fixture Rust tenant lieu de CLI du moteur, sous Linux ARM64, y compris l'attente réelle de 10 secondes, une commande qui a échoué d'elle-même et un log de build de plus de 256 Kio. Le délai Compose réel de 180 secondes est exercé par un seul test, ignoré par défaut : il est `NOT_RUN` dans `cargo test` et dans toute sélection par défaut, et s'exécute par son nom en trois minutes environ :
+
+  ```sh
+  cargo test --test source_lifecycle -- --ignored --exact paths::r15_compose_command_whose_output_is_held_past_its_real_bound_is_killed_and_reported --nocapture --test-threads=1
+  ```
+
+  `NOT_RUN` : un Ctrl-C délivré par un vrai terminal à un groupe de processus d'avant-plan, un vrai moteur Docker ou Podman (réaction de son CLI au signal relayé ou à `SIGKILL`, arrêt du travail côté daemon), macOS et le délai de build de 30 minutes.
+- Documenté d'après le code, sans test exécuté par le binaire du CLI : `<engine> <verb> was not started` après une interruption, la variante `SA_NOCLDWAIT`, le message d'une préparation qui se termine sans résultat, et le message d'une commande tuée à son échéance alors que son processus CLI s'exécutait encore, montré dans le bloc ci-dessus (le test du délai réel exécute la variante où le processus CLI était déjà sorti). Le premier et le dernier ont été exécutés au niveau du consommateur retenu et sur des fins construites.
+
+<a id="prepared-source-retained"></a>
+
+### Reprendre après une source préparée conservée
+
+Lorsque la fin d'une commande du moteur n'a pas pu être établie, la commande se termine avec le statut 1 et nomme le répertoire qu'elle conserve. Le groupe de processus et le chemin ci-dessous sont des valeurs d'exemple :
+
+Dans ces messages, les caractères de contrôle et les antislashs des chemins sont échappés. Un chemin de plus de 1 024 caractères est abrégé par `…` ; ce sont des règles de présentation, sans modification du nom du répertoire ni de la source enregistrée dans `manifest.json`. Ne pas employer un message échappé ou abrégé comme chemin de fichier : identifier le vrai répertoire sous le `TMPDIR` effectif avant de renseigner `AIGUARD_RETAINED` ci-dessous. Pour les commandes suivantes, un chemin temporaire court avec des noms imprimables facilite cette reprise.
+
+```text
+Error: docker build termination is unknown: SIGTERM was forwarded to process group 4242, then SIGKILL was sent and, 2 s later, stdout was still open and stderr was still open. The prepared copy is kept at /tmp/ai-guard-distribution-AbC123 and is not removed by ai-guard; see docs/setup/local/README.md#prepared-source-retained
+```
+
+Cela signifie que le CLI n'a pas pu établir la fin du processus CLI du moteur dans son temps d'observation : ce processus n'a pas été récolté, son statut de sortie n'a pas pu être obtenu, ou l'un de ses tubes de sortie était encore ouvert, le plus souvent parce qu'un processus lancé par lui s'exécute encore hors du groupe de processus signalé. Un processus peut donc encore lire la copie. ai-guard conserve le répertoire, n'envoie plus aucun signal et ne supprime rien automatiquement dans cet état, ni à la sortie du CLI ni lors d'une commande ultérieure. Un nettoyeur système de fichiers temporaires, s'il est configuré, agit indépendamment d'ai-guard.
+
+La même procédure s'applique à `<engine> <verb> ended without a collected result. The prepared copy is kept at <path> and is not removed by ai-guard`, une défaillance interne du CLI pour laquelle la présence d'un marqueur n'est pas établie : sauter l'étape 2 lorsqu'il n'y en a pas.
+
+1. Lire pourquoi la copie a été conservée. `manifest.json` donne la portée (`build` ou `compose`), la source et l'empreinte ; le marqueur donne les faits de l'arrêt : `version`, `written_at` (UTC), `control_pid`, `runtime`, `verb`, `leader_pid` et `process_group` (le même nombre), `stop_reason`, `forwarded_signal`, `kill_sent`, `leader_reaped`, `wait_uncertain`, `stdout_open`, `stderr_open`, `scope` et `sha256`. Il ne contient ni argument ni environnement.
+
+   ```sh
+   AIGUARD_RETAINED="/absolute/path/of/the/identified/directory"
+   cat "$AIGUARD_RETAINED/RETAINED-UNKNOWN.json"
+   cat "$AIGUARD_RETAINED/manifest.json"
+   ```
+
+   Si le marqueur lui-même n'a pas pu être écrit, le CLI a affiché `warning: RETAINED-UNKNOWN.json could not be written in <path>: <error>` ; le répertoire est conservé tout de même et le message porte le groupe de processus.
+
+2. Lister les processus encore présents dans ce groupe de processus. Remplacer `4242` par le `process_group` enregistré. Le résultat est souvent vide, car le détenteur habituel a quitté le groupe.
+
+   ```sh
+   ps -A -o pid,pgid,stat,command | awk -v group=4242 '$2 == group'
+   ```
+
+3. Lister les processus dont la ligne de commande nomme la copie, ou qui tiennent un fichier ou un répertoire de travail sous elle. Ignorer la ligne de `grep` lui-même. `lsof` peut devoir être installé et, sans privilèges, ne montre que les processus de votre compte. Lorsqu'il n'est pas installé, sous Linux, les liens `/proc/<pid>/cwd` et `/proc/<pid>/fd/*` d'un processus que vous pouvez inspecter montrent son répertoire de travail et ses fichiers ouverts.
+
+   ```sh
+   ps -A -o pid,pgid,stat,command | grep -F -- "$AIGUARD_RETAINED"
+   lsof +D "$AIGUARD_RETAINED"
+   ```
+
+4. Vérifier l'état propre du moteur sous le même compte et le même endpoint : `docker image ls` et `docker ps --all`, ou `podman image ls` et `podman ps --all` ; pour Docker, nommer l'endpoint visé par le CLI, comme dans [suivre une pile démarrée par `up` du CLI](#cli-up-stack). ai-guard n'en a rien observé ; l'image ou le changement de la pile peut exister ou non.
+
+5. Si l'étape 2 ou 3 liste un processus, quelque chose lit peut-être encore la copie. `ps -A` liste les processus de tous les comptes : ce n'est donc pas nécessairement l'un des vôtres. Le laisser finir ou, une fois identifié comme un processus que vous pouvez arrêter, l'arrêter avec vos outils habituels, puis refaire ces deux étapes. Ne pas signaler un numéro de groupe de processus tiré d'un ancien marqueur sans le vérifier d'abord : les identifiants sont réutilisés.
+
+6. Lorsque les deux étapes ne listent rien, supprimer ce répertoire exact et rien d'autre. Ces contrôles ne montrent que les utilisateurs actuels ; aucun ne prouve que rien ne lira le répertoire plus tard. Ne jamais supprimer d'images, de volumes, la source ou la configuration pour réparer cet état.
+
+   ```sh
+   rm -r -- "$AIGUARD_RETAINED"
+   ```
+
+7. Relancer la commande d'origine avec les mêmes options.
+
+**Un répertoire laissé par un CLI tué.** Un CLI tué pendant `build`, `up` ou `down` laisse sa copie sans marqueur ni message ; une copie nommée par un avertissement `was not removed` ou `could not be removed` est dans le même état. Vérifier d'abord qu'aucun `build`, `up` ou `down` de votre compte n'est encore en cours : une commande en cours possède un tel répertoire. Chercher une ligne de votre compte dont la commande est `agentsandbox` avec `build`, `up` ou `down`, et ignorer la ligne de `grep` lui-même :
+
+```sh
+ps -A -o pid,user,stat,command | grep -F -- agentsandbox
+```
+
+Lister ensuite ce qui reste dans le répertoire temporaire utilisé par cette commande. Nommer ce répertoire explicitement : un préfixe `TMPDIR=… <command>` ne le définit que pour cette commande, donc le `TMPDIR` de votre shell peut désigner un autre répertoire. Lorsque la commande a été lancée sans `TMPDIR`, ce répertoire est `/tmp` sous Linux. Sous macOS, une session définit normalement `TMPDIR` sur un répertoire par utilisateur situé sous `/var/folders`, qu'affiche `getconf DARWIN_USER_TEMP_DIR` ; ce que le CLI y utilise lorsque `TMPDIR` n'est pas défini n'a pas été vérifié, et macOS n'a pas été exécuté.
+
+```sh
+AIGUARD_TMP="/absolute/path/of/the/temporary/directory/that/command/used"
+ls -ld "$AIGUARD_TMP"/ai-guard-distribution-*
+```
+
+Ne considérer que les répertoires appartenant à votre compte : sous un `/tmp` partagé, la liste montre aussi les copies d'autres comptes, que vous ne pouvez ni lire ni supprimer. Lire le `manifest.json` de chaque répertoire si sa préparation était terminée, et lui appliquer les étapes 3 à 6 ; il n'y a aucun groupe de processus enregistré à rechercher.
+
+La conservation et son message ont été exercés avec des processus de fixture Rust sous Linux ARM64. Les commandes d'inspection ci-dessus sont des outils standard et n'ont pas été exécutées dans le cadre de cette validation ; aucun vrai moteur, ni macOS, n'était impliqué.
 
 ### Reprise des descripteurs d'audit
 

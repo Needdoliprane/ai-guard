@@ -56,6 +56,8 @@ Pour **Docker Desktop ou un daemon qui ne déclare pas rootless**, le produit re
 
 `build` produit `agentsandbox-control:local` et `agentsandbox-worker:local`. Le dashboard **Rust conteneurisé** sert les fichiers TypeScript compilés ; aucun serveur Node de production n'est requis. Gateway, dashboard et relais d'entrée sont séparés. Aucun ne reçoit le socket moteur ni le projet original.
 
+Avant leurs commandes de build ou Compose, `build`, `up` et `down` remettent au moteur une copie privée et bornée de leurs entrées, créée sous le répertoire temporaire (`TMPDIR`), et affichent une ligne `Prepared public distribution (…)` portant son SHA-256. Le [guide local](setup/local/README.fr.md#prepared-source) décrit les exigences de ce répertoire temporaire, les refus, l'[interruption](setup/local/README.fr.md#interrupt-build-or-compose) et la [reprise d'une copie conservée](setup/local/README.fr.md#prepared-source-retained).
+
 `init` crée les clés `runner` et `viewer` si elles manquent et **préserve les valeurs existantes**. Les répertoires privés sont `0700`, les clés originales `0600`. Des projections de montage séparées sont `0444` dans un parent `0700` : ne pas les déplacer dans un dossier public. Un emplacement existant non conforme est refusé sans réparation générale. Détails dans [Exploitation](operations.md).
 
 `up` attend la disponibilité des deux accès et recrée les services de contrôle, même s'ils tournent déjà. Cette opération coupe les connexions d'audit en cours : attendre la fin des sessions avant de la répéter.
@@ -274,7 +276,7 @@ Un essai ultérieur du **parcours géré Claude/API batch** a créé/exporté un
 | Symptôme | Reprise utile |
 |---|---|
 | Moteur absent, programme refusé ou rootless non détecté | Lire `doctor`, démarrer le moteur choisi, vérifier son chemin approuvé et ses permissions. Pour un emplacement personnalisé, répéter `--runtime-program` sur chaque commande qui le prend ; aucun choix global ni repli hôte n'est prévu. |
-| `up` échoue ou ports occupés | Vérifier les ports 4000/8787 et les logs Compose de cette stack avec la même configuration ; conserver volumes et données. |
+| `up` échoue ou ports occupés | Vérifier les ports 4000/8787 et les logs Compose de cette stack. `up` la crée sous le projet `agentsandbox` à partir d'une copie temporaire déjà supprimée : s'y adresser par ce nom, sur le même moteur et avec `AGENTSANDBOX_CONFIG_DIR`, comme dans [suivre une pile démarrée par `up` du CLI](setup/local/README.fr.md#cli-up-stack). Conserver volumes et données. |
 | Jeton refusé / écran déconnecté | Utiliser `secrets/viewer` de la même installation. Vérifier le collecteur et reconnecter après une rotation ; ne pas substituer `runner`. |
 | `migration_required`, permissions ou ACL refusées | Suivre la maintenance hors ligne documentée ; ne pas supprimer la base, les verrous ou les checkpoints pour contourner le refus. |
 | Audit plein ou indisponible | Les nouvelles écritures bloquent les lancements. Conserver l'audit, diagnostiquer la capacité et appliquer une maintenance autorisée. |

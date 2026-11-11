@@ -239,9 +239,53 @@ async fn build_accepts_complete_source_and_forwards_provider_versions() {
             .iter()
             .any(|arg| arg == "CLAUDE_CODE_VERSION=4.5.6")
     );
-    assert!(builds.iter().all(|args| args.last().is_some_and(|path| {
-        Path::new(path).is_absolute() && Path::new(path).starts_with(&source)
-    })));
+    assert!(
+        builds.iter().all(|args| args.last().is_some_and(|path| {
+            Path::new(path).is_absolute() && !path.ends_with(".Dockerfile")
+        }))
+    );
+    for args in &builds {
+        assert_engine_paths(args);
+    }
+}
+
+/// The value that follows `flag` in one recorded engine invocation.
+fn path_after<'a>(args: &'a [String], flag: &str) -> Option<&'a Path> {
+    args.windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| Path::new(&pair[1]))
+}
+
+/// Wherever the source the engine reads is located, one recorded build or
+/// Compose invocation names it by absolute paths only: a build is given a
+/// Dockerfile under `images/` of the very context it is given, a Compose
+/// command its file under `deploy/docker/`.
+fn assert_engine_paths(args: &[String]) {
+    if args.iter().any(|arg| arg == "build") {
+        let context = args.last().map(Path::new).expect("build context");
+        let dockerfile = path_after(args, "--file").expect("build --file");
+        assert!(
+            context.is_absolute() && dockerfile.is_absolute(),
+            "relative build path: {args:?}"
+        );
+        assert!(
+            matches!(
+                dockerfile.strip_prefix(context).ok().and_then(Path::to_str),
+                Some("images/control.Dockerfile" | "images/worker.Dockerfile")
+            ),
+            "Dockerfile outside the context handed to the engine: {args:?}"
+        );
+    } else if args.iter().any(|arg| arg == "compose") {
+        let file = path_after(args, "--file").expect("compose --file");
+        assert!(
+            file.is_absolute() && file.ends_with("deploy/docker/compose.yaml"),
+            "relative or foreign Compose file: {args:?}"
+        );
+        assert!(
+            path_after(args, "--env-file").is_none_or(Path::is_absolute),
+            "relative Compose environment file: {args:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -580,10 +624,12 @@ async fn build_and_compose_use_the_same_program_and_absolute_source_paths() {
         );
     }
     let calls = fs::read_to_string(program.with_extension("calls")).unwrap();
-    let source = source.canonicalize().unwrap();
-    assert!(calls.contains(source.join("images/control.Dockerfile").to_str().unwrap()));
-    assert!(calls.contains(source.join("images/worker.Dockerfile").to_str().unwrap()));
-    assert!(calls.contains(source.join("deploy/docker/compose.yaml").to_str().unwrap()));
+    assert!(calls.contains("/images/control.Dockerfile\""));
+    assert!(calls.contains("/images/worker.Dockerfile\""));
+    assert!(calls.contains("/deploy/docker/compose.yaml\""));
+    assert!(
+        !calls.contains("\"./") && !calls.contains("\"images/") && !calls.contains("\"deploy/")
+    );
     assert_eq!(
         calls
             .lines()
@@ -591,6 +637,21 @@ async fn build_and_compose_use_the_same_program_and_absolute_source_paths() {
                 .is_ok_and(|args| args.iter().any(|arg| arg == "build")))
             .count(),
         2
+    );
+    let invocations = calls
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Vec<String>>(line).ok())
+        .collect::<Vec<_>>();
+    for args in &invocations {
+        assert_engine_paths(args);
+    }
+    assert_eq!(
+        invocations
+            .iter()
+            .filter(|args| args.iter().any(|arg| arg == "compose"))
+            .count(),
+        1,
+        "expected exactly one Compose command: {calls}"
     );
 }
 

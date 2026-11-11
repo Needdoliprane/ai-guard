@@ -1,5 +1,15 @@
 # Validation courante
 
+## 11 novembre, 18:00 UTC — D source lifecycle, GREEN logiciel borné
+
+Base publique `1dc676b` + 25 postimages : 2 483 fichiers, archive d’entrée SHA `55f21aca…`, manifeste `1474e06b…`. Le build offline `--lib --test source_lifecycle --test retained_cli_lifecycle --test runtime_program --no-run --message-format=json` passe ; les quatre listes réelles résolvent les quatorze parents exacts. Chacun exécute une fonction avec un PASS, zéro FAIL/ignoré, RC0. Le check `--frozen --offline --all-targets --message-format=json` passe aussi, sans erreur de compilation.
+
+Le test R1 inchangé vérifie maintenant tous ses oracles, après le marqueur de vraie capture. Son premier essai reste RC101 / classifieur92 `FAIL_HARNESS`, réexaminé indépendamment depuis les mêmes logs ; aucun renommage en `EXPECTED_RED` ni nouvelle exécution RED. Les preuves GREEN proviennent de ce nouveau gel, pas des validations historiques de Claude.
+
+Export vivant de 27 330 560 octets SHA `46bcff74…`, vérification source et fermeture de la QA exacte RC0. Pic cgroup 6 752 890 880 octets, OOM0 : mesure de compilation/QA, pas d’usage worker ni de capacité. Les 25 postimages publiques sont intégrées après comparaison de tout l’arbre source à ce manifeste ; le contexte Full3 privé reste préservé et non qualifié. Aucun moteur, fournisseur, macOS natif, Clippy ou matrice complète exécuté dans ce lot ; API Kubernetes et ses résultats restent distincts.
+
+[14 résultats curatés, hashes complets, profil et limites](evidence/2026-11-11/source-lifecycle/README.md).
+
 ## 11 novembre, 17:17 UTC — Core/schema13, FAIL_PARENT conservé
 
 Build offline `--lib --bin agentsandbox --test schema13_protocol_contract --no-run --message-format=json` RC0 ; douze parents exacts PASS, puis parent13 RC101 à `schema13_compat_tests.rs:128:5`, attente `open_existing_for_tenant(...).is_err()`. Diagnostic du contrat de quarantaine en cours, sans modification du comportement global d'ouverture. Parents14–26 et check toutes cibles NOT_RUN. Résultat final101, fermeture0, OOM0. Le RC64 de l'invocation préalable avec argument supplémentaire reste distinct et n'a exécuté aucun build/test. Root vérifie les sorties brutes et l'export vivant des2537 sources, SHA4cb697c7… intégralement conforme au manifeste193399a5…. [Preuves et portée](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).
