@@ -228,6 +228,8 @@ AIGUARD_BIN="/absolute/path/to/agentsandbox"
 
 Pour un stockage conteneurisé, exécutez cette même commande Rust dans un conteneur ponctuel sans réseau sous l’UID du contrôle et avec son volume privé préparé ; `--input -` et stdin public évitent un bind dont le propriétaire hôte ou le filesystem est incompatible. L’entrée fichier exige toujours les sémantiques locales de filesystem/ACL prises en charge par le contrôle ; une projection non prise en charge est refusée même montée en lecture seule. Stdin conserve validation du manifeste, bornes de taille/durée et contrôles de destination privée. Omettez `--demo-defaults` pour un manifeste générique. Cela n’adapte **pas** les ports, origine ou réseau fournisseur codés dans le Compose DEMO autonome ; utilisez une configuration de services correspondante relue. L’`oidc.json` généré référence `ca-bundle.pem` seulement s’il est fourni. Ce bundle public configure la confiance fournisseur, pas la confiance OS du navigateur ou le trajet CLI→gateway distinct. Un stockage existant suit plutôt les sections de maintenance/mutation explicites ci-dessous.
 
+Une fois le gateway démarré, [vérifiez l'audit SetupV2](../local/README.fr.md#vérifier-laudit-dun-tenant-setupv2) avec le fichier viewer du tenant autorisé.
+
 ## Enregistrer les clients publics et l’audience API
 
 Enregistrez deux clients publics Web et CLI distincts, avec Authorization Code et PKCE S256 obligatoire. Ne distribuez aucun `client_secret`. Désactivez les flux implicite et mot de passe. La connexion actuelle demande `openid` ; ce fichier ne configure pas de scopes, algorithmes ou formats de tokens arbitraires.

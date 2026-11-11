@@ -138,6 +138,17 @@ Pour produire un changement volontaire uniquement dans la copie de travail :
 
 Cette autre session reçoit une nouvelle copie du projet. `observe` ne signifie pas que tous les effets transitifs sont médiés ou compris. Choisir `review` lorsqu'une demande exige une approbation humaine : examiner la demande exacte puis reprendre son hash complet avec `--approve-hash` en la soumettant à nouveau. Des entrées modifiées nécessitent une nouvelle décision ; ne jamais approuver un hash sans rapport pour contourner un refus.
 
+## Vérifier l'audit d'un tenant SetupV2
+
+Dans le `tenants.json` de l'installation préparée, repérer le champ `viewer_token_file` du tenant autorisé. Utiliser le fichier privé correspondant tel qu'il est accessible depuis la machine qui exécute le CLI. Le gateway détermine le tenant à partir de ce credential.
+
+```sh
+AIGUARD_VIEWER_FILE="/absolute/private/installation/tenants/<tenant>/viewer"
+"$AIGUARD_BIN" verify-audit --gateway "$AIGUARD_GATEWAY" --viewer-token-file "$AIGUARD_VIEWER_FILE"
+```
+
+Omettre `--viewer-token-file` pour lire `<config-dir>/secrets/viewer`. Un fichier explicite illisible fait échouer la commande. Pour ajouter le rapport signé hors ligne, suivre le [guide des checkpoints](../audit-signatures/README.fr.md) et choisir la base, les checkpoints et l'ancre du même tenant.
+
 ## Examiner et exporter les changements
 
 Sélectionner la session qui a créé le fichier et utiliser son UUID. Le parent d'export doit exister et la destination doit être **neuve**, hors du projet original. Ne pas exporter dans une copie de travail existante.

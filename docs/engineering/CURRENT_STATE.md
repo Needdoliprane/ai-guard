@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 11 novembre — credential viewer explicite pour verify-audit
+
+Le CLI accepte `--viewer-token-file` pour une installation SetupV2 et conserve
+le chemin historique en l'absence d'option. La régression échoue d'abord sur
+l'option inconnue après le témoin historique, puis passe avec le correctif :
+un vrai gateway et deux stores de tenants vérifient les têtes distinctes.
+Check toutes cibles RC0 et revue indépendante favorable. Les neuf postimages
+publiées correspondent au gel testé ; l'export après exécution GREEN n'a pas
+été capturé. Les guides EN/FR sont synchronisés. Le test porte sur le verdict
+HTTP de chaîne locale, pas sur les signatures SetupV2 ni le SSO réel.
+[Preuves et limites](evidence/2026-11-11/verify-audit-setup-v2/README.md).
+
 ## 11 novembre — supervision Web, 15 scénarios Rust vérifiés
 
 Le gel e957+B40 de 2 440 fichiers conserve les 61 sources frontend déjà

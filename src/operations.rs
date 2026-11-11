@@ -143,6 +143,9 @@ pub enum OperatorCommand {
     VerifyAudit {
         #[arg(long, default_value = ".agentsandbox")]
         config_dir: PathBuf,
+        /// Private viewer credential file. Defaults to <config-dir>/secrets/viewer.
+        #[arg(long, value_name = "FILE")]
+        viewer_token_file: Option<PathBuf>,
         #[arg(long, default_value = "http://127.0.0.1:8787")]
         gateway: String,
         /// Also verify the signed audit checkpoints of this private directory
@@ -594,12 +597,15 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
         }
         OperatorCommand::VerifyAudit {
             config_dir,
+            viewer_token_file,
             gateway,
             checkpoint_dir,
             anchor,
             data,
         } => {
-            let token = runner::read_token(&config_dir.join("secrets/viewer"))?;
+            let viewer_token_file =
+                viewer_token_file.unwrap_or_else(|| config_dir.join("secrets/viewer"));
+            let token = runner::read_token(&viewer_token_file)?;
             let answer = AuditClient::new(&gateway, &token)?
                 .get_json("api/integrity")
                 .await?;

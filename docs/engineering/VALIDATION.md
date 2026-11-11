@@ -1,5 +1,16 @@
 # Validation courante
 
+## 11 novembre — verify-audit SetupV2 : RED puis GREEN ciblé
+
+Le test inchangé passe par `setup prepare`, le gateway Rust et deux bases
+SQLite. RED : build/liste RC0, test RC101 après lecture historique A, CLI2
+pour l'option inconnue. GREEN : build/liste RC0, un parent exécuté une seule
+fois donne 1 PASS, 0 FAIL, 0 ignoré en 0,31 s ; check toutes cibles RC0.
+Neuf fichiers intégrés identiques au manifeste GREEN et 124 changements
+indépendants préservés. Pas d'export source post-exécution GREEN ni d'instant
+initial individuel capturé ; ces limites ne sont pas reconstruites. Les deux
+QA ont été retirées. [Commandes, revue et portée](evidence/2026-11-11/verify-audit-setup-v2/README.md).
+
 ## 11 novembre — preuves Rust de la supervision Web
 
 Sur le gel 2 440 `b4ff38fe…`, build et listes RC0 pour les trois cibles.

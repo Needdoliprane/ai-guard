@@ -228,6 +228,8 @@ AIGUARD_BIN="/absolute/path/to/agentsandbox"
 
 For container-owned storage, execute this same Rust command inside a no-network one-shot container under the control UID and its prepared private volume; use `--input -` with public stdin to avoid a host-owner or filesystem bind mismatch. File input still requires the supported local control-filesystem/ACL semantics; an unsupported projection is refused even when mounted read-only. Stdin retains manifest validation, size/time bounds and private destination checks. Omit `--demo-defaults` for a generic manifest. This does **not** adapt the standalone DEMO Compose's hardcoded ports, origin or provider network; use reviewed matching service configuration. The generated `oidc.json` references `ca-bundle.pem` only when supplied. That public bundle configures provider trust, not browser OS trust or the separate CLI→gateway connection. Existing storage instead follows the explicit maintenance/mutation sections below.
 
+Once the gateway is running, use the [SetupV2 audit check](../local/README.md#verify-the-audit-for-a-setupv2-tenant) with the viewer credential file of the authorized tenant.
+
 ## Register public clients and the API audience
 
 Register distinct Web and CLI public clients with Authorization Code and required PKCE S256. Do not distribute a `client_secret`. Disable implicit and password grants. The current login requests `openid`; arbitrary scopes, algorithms or token formats are not configurable through this file.

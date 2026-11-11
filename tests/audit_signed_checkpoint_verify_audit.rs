@@ -8,13 +8,14 @@
 
 #![cfg(unix)]
 
-use agentsandbox::{audit::Store, model::Event, redaction::Redactor};
+use agentsandbox::{audit::Store, model::Event, redaction::Redactor, setup::SetupManifestV2};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::{OsStr, OsString},
     io::{BufRead, BufReader},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    net::SocketAddr,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::mpsc,
@@ -97,14 +98,21 @@ impl Drop for Gateway {
 }
 
 fn start_gateway(site: &Site) -> Gateway {
-    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/default.json");
-    let child = agentsandbox()
-        .args(["gateway", "--listen", "127.0.0.1:0", "--data"])
+    let mut command = agentsandbox();
+    command
+        .args(["gateway", "--data"])
         .arg(&site.database)
         .arg("--runner-token-file")
         .arg(site.config_dir.join("secrets/runner"))
         .arg("--viewer-token-file")
-        .arg(site.config_dir.join("secrets/viewer"))
+        .arg(site.config_dir.join("secrets/viewer"));
+    start_gateway_command(command)
+}
+
+fn start_gateway_command(mut command: Command) -> Gateway {
+    let policy = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/default.json");
+    let child = command
+        .args(["--listen", "127.0.0.1:0"])
         .arg("--policy")
         .arg(policy)
         .stdout(Stdio::null())
@@ -135,9 +143,15 @@ fn start_gateway(site: &Site) -> Gateway {
             .strip_prefix("Gateway ")
             .and_then(|rest| rest.split_whitespace().next())
         {
-            break address.to_owned();
+            break address
+                .parse::<SocketAddr>()
+                .expect("a gateway socket address");
         }
     };
+    assert!(
+        address.ip().is_loopback(),
+        "the gateway must bind to loopback"
+    );
     let url = format!("http://{address}");
     let healthy = (0..100).any(|_| {
         let probe = agentsandbox()
@@ -159,15 +173,21 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    agentsandbox()
-        .arg("verify-audit")
-        .arg("--config-dir")
-        .arg(&site.config_dir)
-        .arg("--gateway")
-        .arg(&gateway.url)
+    verify_audit_command(&site.config_dir, gateway)
         .args(extra)
         .output()
         .unwrap()
+}
+
+fn verify_audit_command(config_dir: &Path, gateway: &Gateway) -> Command {
+    let mut command = agentsandbox();
+    command
+        .arg("verify-audit")
+        .arg("--config-dir")
+        .arg(config_dir)
+        .arg("--gateway")
+        .arg(&gateway.url);
+    command
 }
 
 /// The JSON documents printed on standard output, in order.
@@ -176,6 +196,118 @@ fn documents(output: &Output) -> Vec<Value> {
         .into_iter::<Value>()
         .map(|document| document.expect("standard output holds JSON documents only"))
         .collect()
+}
+
+#[test]
+fn verify_audit_uses_setup_v2_viewer_token_and_preserves_legacy_default() {
+    let root = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let mut manifest: SetupManifestV2 =
+        serde_json::from_str(include_str!("../docs/setup/sso/examples/local-demo.json")).unwrap();
+    let first_id = manifest.tenants[0].tenant_id.clone();
+    let second_id = "verify-audit-tenant";
+    let mut second = manifest.tenants[0].clone();
+    second.tenant_id = second_id.into();
+    second.organization_id = second_id.into();
+    second.identities.clear();
+    manifest.tenants.push(second);
+    let first_capacity = &mut manifest.capacity_plan.tenants[0];
+    first_capacity.capacity.max_records = 10_000;
+    first_capacity.capacity.max_serialized_bytes = 8 * 1024 * 1024;
+    let mut second_capacity = first_capacity.clone();
+    second_capacity.tenant_id = second_id.into();
+    manifest.capacity_plan.tenants.push(second_capacity);
+
+    let input = root_path.join("manifest.json");
+    private_file(&input, &serde_json::to_vec(&manifest).unwrap());
+    let installation = root_path.join("installation");
+    let prepared = agentsandbox()
+        .args(["setup", "prepare", "--input"])
+        .arg(&input)
+        .arg("--output-dir")
+        .arg(&installation)
+        .output()
+        .unwrap();
+    assert!(
+        prepared.status.success(),
+        "SetupV2 failed: {}",
+        prepared.status
+    );
+    assert_eq!(documents(&prepared)[0]["status"], "prepared");
+    assert!(!installation.join("secrets/viewer").exists());
+
+    let registry = installation.join("tenants.json");
+    let config: Value = serde_json::from_slice(&std::fs::read(&registry).unwrap()).unwrap();
+    let fixture = |tenant_id: &str| {
+        let entry = config["tenants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["tenant_id"] == tenant_id)
+            .expect("SetupV2 registered the fixture tenant");
+        let data = Path::new(entry["data"].as_str().unwrap());
+        let viewer = PathBuf::from(entry["viewer_token_file"].as_str().unwrap());
+        assert!(data.starts_with(&installation) && viewer.starts_with(&installation));
+        let store =
+            Store::open_existing_for_tenant(data, tenant_id, Redactor::new(vec![]), 100_000)
+                .unwrap();
+        let integrity = store.integrity().unwrap();
+        assert!(integrity.valid);
+        (viewer, integrity.head_hash)
+    };
+    let (first_viewer, first_head) = fixture(&first_id);
+    let (second_viewer, second_head) = fixture(second_id);
+    assert_ne!(
+        first_head, second_head,
+        "the tenant heads must discriminate"
+    );
+
+    let legacy_config = private_dir(&root_path.join("legacy-config"));
+    let legacy_secrets = private_dir(&legacy_config.join("secrets"));
+    private_file(
+        &legacy_secrets.join("viewer"),
+        agentsandbox::runner::read_token(&first_viewer)
+            .unwrap()
+            .as_bytes(),
+    );
+    let mut gateway_command = agentsandbox();
+    gateway_command
+        .args(["gateway", "--tenants-file"])
+        .arg(&registry);
+    let gateway = start_gateway_command(gateway_command);
+
+    let legacy = verify_audit_command(&legacy_config, &gateway)
+        .output()
+        .unwrap();
+    assert!(
+        legacy.status.success(),
+        "legacy verify-audit failed: {}",
+        legacy.status
+    );
+    let answers = documents(&legacy);
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0]["valid"], true);
+    assert_eq!(answers[0]["head_hash"], first_head);
+
+    let explicit = verify_audit_command(&installation, &gateway)
+        .arg("--viewer-token-file")
+        .arg(second_viewer)
+        .output()
+        .unwrap();
+    let option_rejected = String::from_utf8_lossy(&explicit.stderr)
+        .contains("unexpected argument '--viewer-token-file'");
+    assert!(
+        explicit.status.success(),
+        "verify-audit did not accept the SetupV2 viewer file: {}, option_rejected={option_rejected}",
+        explicit.status
+    );
+    let answers = documents(&explicit);
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0]["valid"], true);
+    assert_eq!(answers[0]["head_hash"], second_head);
 }
 
 fn checkpoint<I, S>(arguments: I) -> Value

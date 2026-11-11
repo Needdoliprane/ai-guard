@@ -138,6 +138,17 @@ To make a deliberate change only in the copied workspace:
 
 This is a separate session with a fresh project copy. `observe` does not mean that every transitive effect is mediated or understood. Select `review` when a request requires human approval: inspect the exact request and use its full approval hash with `--approve-hash` when resubmitting that request. Changed inputs need a new decision; never approve an unrelated hash to get past a refusal.
 
+## Verify the audit for a SetupV2 tenant
+
+In the prepared installation's `tenants.json`, find `viewer_token_file` for the authorized tenant. Use the corresponding private file as seen from the machine running the CLI. The gateway selects the tenant from that credential.
+
+```sh
+AIGUARD_VIEWER_FILE="/absolute/private/installation/tenants/<tenant>/viewer"
+"$AIGUARD_BIN" verify-audit --gateway "$AIGUARD_GATEWAY" --viewer-token-file "$AIGUARD_VIEWER_FILE"
+```
+
+Omit `--viewer-token-file` to read `<config-dir>/secrets/viewer`. An unreadable explicit file fails the command. To add the offline signed report, use the [checkpoint guide](../audit-signatures/README.md) and select the database, checkpoints and anchor for the same tenant.
+
 ## Inspect and export changes
 
 Select the session that created the file, then use its UUID. The export parent must exist and the destination must be **new**, outside the original project. Do not use an existing working tree as the export destination.

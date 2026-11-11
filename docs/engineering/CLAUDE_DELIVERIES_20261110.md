@@ -16,7 +16,7 @@ The new integration candidates use public `2cc29ee42ae3eb3cc8203538bf7a09aee2e26
 
 Important remaining limits:
 
-- A: CLI checkpoint verification is an explicit option using the existing configuration layout. The HTTP integrity route remains hash-chain verification. Setup V2 integration, independent rollback continuity, image/Compose execution and the control-genesis uniqueness observation remain open. Four guide links now resolve to curated composition evidence; historical raw records remain private.
+- A: CLI checkpoint verification remains explicit and the HTTP integrity route remains hash-chain verification. A separate [SetupV2 viewer-file regression](evidence/2026-11-11/verify-audit-setup-v2/README.md) now passes with the real gateway and two stores, preserving the legacy default. That test does not exercise signed SetupV2 operation. Independent rollback continuity, image/Compose execution and the control-genesis uniqueness observation retain their own open qualifications. Four guide links resolve to curated composition evidence; historical raw records remain private.
 - B: only the recorded Node frontend slice has been executed. Its timer passed alone and again in the batch; it is counted once among 79 unique passed titles. The backend-dependent parent was skipped, and browser/backend Rust execution remains NOT_RUN. No historical B pass is transferred. The pre-refusal page-size observation outside the four backend wire lines remains open.
 - C: the core and the proposed typed client wire have separate source identities. Passing core tests will not establish the worker transport or the complete refusal path. Runtime, retention and physical disk/inode limits retain their own qualifications.
 
