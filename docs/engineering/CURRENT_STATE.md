@@ -1,5 +1,15 @@
 # État constaté — suivi du développement
 
+## 11 novembre — deux écarts de reprise du propriétaire relais en correction
+
+Une revue source ciblée du Full3 non publié identifie un retrait incomplet sur
+snapshot Core ancien et un statut de réconciliation qui peut être effacé avant
+acquittement durable. Les refus restent conservateurs ; aucun effet runtime
+ni accès indu n'est démontré. Deux chantiers isolés traitent le propriétaire et
+la lecture historique Core/API/SDK, avec régressions et revue indépendantes.
+[Registre de prise en compte, périmètre et critères](RELAY_RECOVERY_REVIEW_20261111.md).
+Cette revue ne transfère aucun PASS du client SendV2 au propriétaire Full3.
+
 ## 11 novembre — refus SendV2 publiés dans le client et les composants stdio
 
 Les dix-sept postimages sont identiques au gel exécuté. Quatorze parents

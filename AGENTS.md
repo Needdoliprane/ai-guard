@@ -245,7 +245,9 @@ effets et les sélections larges lorsqu'une cible précise suffit. Ne jamais
 afficher l'environnement complet, les credentials ou les arguments susceptibles
 de contenir un secret. Borner les sorties et les délais, conserver le code de
 sortie de l'opération utile et vérifier sa terminaison réelle avant une autre
-mutation de la même ressource. Ces précautions réduisent les erreurs évitables ;
+mutation de la même ressource. Dans l'orchestration, vérifier aussi les échecs
+renvoyés sans exception (`isError`, `exit_code`, annulation) avant toute étape
+qui dépend du succès de l'outil précédent. Ces précautions réduisent les erreurs évitables ;
 elles ne garantissent pas l'absence de refus d'outillage.
 
 Lorsqu'un chantier impose un profil d'exécution isolé, le transmettre explicitement
