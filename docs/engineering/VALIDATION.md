@@ -1,5 +1,16 @@
 # Validation courante
 
+## 11 novembre — douze tests exacts du relais composé
+
+Le gel 2 459 `90d8eb66…` a compilé sur toutes les cibles en r1, puis les
+deux cibles de test ont compilé en r2. Les douze sélecteurs ont été résolus
+dans les listes des binaires réels et ont chacun rendu 1 PASS, 0 FAIL,
+0 ignoré, RC0. Les exports réels r1 et r2 sont identiques. R2 a conservé
+les cinq pins et le pathset exact, sans OOM, puis le conteneur a été retiré.
+[Commandes, horodatages et portée](evidence/2026-11-11/relay-full3-composition/README.md).
+La preuve porte sur les échanges logiciels et les fixtures déclarées.
+Elle reste attachée à cette composition, avant la publication de CoreC20.
+
 ## 10 novembre — checkpoints signés : S4 RED/FIX et six FIX PASS
 
 RED2403 `4c8cfefd…` et FIX2403 `600148e6…` ne diffèrent que par le

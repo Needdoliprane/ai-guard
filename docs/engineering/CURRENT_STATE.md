@@ -1,5 +1,15 @@
 # État constaté — suivi du développement
 
+## 11 novembre — relais durable et refus typés vérifiés en composition
+
+Le gel de 2 459 fichiers combine la reprise du broker Full3, le stockage
+durable du relais et les réponses typées SendV2. Check toutes cibles et
+compilation des deux cibles de test RC0. Douze parents exacts passent, dont
+le maintien de V1 et la conservation d'un résultat inconnu après une reprise.
+[Source, résultats et limites](evidence/2026-11-11/relay-full3-composition/README.md).
+La composition reste candidate. Le stockage durable et son API sont en
+intégration sur la base publique. Le parcours runtime et NV-12 restent ouverts.
+
 ## 10 novembre — checkpoints d’audit signés : six parents ciblés vérifiés
 
 Le composant Claude A est composé sans remplacer les modules centraux :
