@@ -6,10 +6,15 @@ pub(crate) use authorization::KubernetesCreateAuthorization;
 mod migration;
 mod model;
 mod mutations;
+mod recovery;
 mod replay;
 #[cfg(test)]
 mod schema12_tests;
 pub(crate) use mutations::{ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit};
+pub(crate) use recovery::{
+    KubernetesCreateRecoveryAuthorization, KubernetesCreateRecoveryLookupAuthorization,
+    PreparedRecovery,
+};
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -26,10 +31,15 @@ fn require_capability_schema(
     db: &Connection,
     evidence: &authorization::AuthorizationEvidence,
 ) -> anyhow::Result<()> {
+    // Recovery has a separate opaque proof and consumer; descriptive V3 data
+    // cannot be submitted through an Admission/Reconcile entry point.
+    if matches!(evidence, authorization::AuthorizationEvidence::V3(_)) {
+        return Err(KubernetesCreateFailureV1::PermissionDenied.into());
+    }
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if matches!(
         (version, *evidence.version()),
-        (8, 1) | (9, 2) | (10, 2) | (11, 2) | (12, 2)
+        (8, 1) | (9, 2) | (10, 2) | (11, 2) | (12, 2) | (13, 2)
     ) {
         Ok(())
     } else {
@@ -108,6 +118,16 @@ pub(super) fn initialize_policy(store: &Store, tx: &Transaction<'_>) -> anyhow::
     migration::initialize(store, tx)
 }
 
+pub(super) fn initialize_recovery(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
+    migration::initialize_recovery(store, tx)
+}
+pub(super) fn recovery_event(event: &Event) -> anyhow::Result<()> {
+    migration::recovery_event(event)
+}
+pub(super) fn validate_recovery_marker(db: &Connection) -> anyhow::Result<()> {
+    migration::validate_recovery_marker(db)
+}
+
 #[cfg(test)]
 pub(super) fn validate_unwrapped_for_test(db: &Connection) -> anyhow::Result<()> {
     replay::validate(db)
@@ -123,11 +143,17 @@ pub(super) fn workload_audit_identity(
         migration::policy_event(event)?;
         return Ok(None);
     }
+    if event.kind == migration::RECOVERY_GENESIS_KIND {
+        migration::recovery_event(event)?;
+        return Ok(None);
+    }
     let record: model::Record = serde_json::from_value(event.data.clone())?;
     record.change.validate()?;
     let is_result = matches!(record.change, model::Change::Result { .. });
     model::conflict(
-        matches!(record.version, 1 | 2)
+        matches!(record.version, 1 | 2 | 3)
+            && (record.version == 3)
+                == matches!(record.change, model::Change::RecoverBeforeEmission { .. })
             && record.version == *record.authorization.version()
             && record.input_hash == record.change.input_hash()?
             && event.id == record.change.operation_id()
@@ -136,6 +162,9 @@ pub(super) fn workload_audit_identity(
             && event.provenance == if is_result { "declared" } else { "observed" }
             && event.coverage == if is_result { "partial" } else { "observed" },
     )?;
+    record
+        .authorization
+        .validate_access(&record.change, mutations::HeldChangeAccess::Mutate)?;
     record.identity.identity()?;
     Ok(Some(capacity::WorkloadAuditPrincipalV1::Broker {
         broker_id: record.identity.broker_id,
@@ -143,6 +172,14 @@ pub(super) fn workload_audit_identity(
 }
 
 impl Store {
+    /// Explicit semantic migration with verified exclusive schema12 backup.
+    pub fn migrate_kubernetes_recovery_v13(
+        &self,
+        backup_path: &Path,
+    ) -> anyhow::Result<crate::control::MigrationReportV1> {
+        self.migrate_control_version(backup_path, 12, 13)
+    }
+
     /// Explicit maintenance with a new, verified schema7 backup. This never
     /// manufactures an origin, broker authorization or runtime emission permit.
     pub fn migrate_kubernetes_create_v8(

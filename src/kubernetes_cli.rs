@@ -233,7 +233,7 @@ fn control_identity_matches_preflight_scope(
 ) -> bool {
     let expected_namespace = expected_namespace.to_string();
     identity.role == "runner"
-        && (3..=12).contains(&identity.schema_version)
+        && (3..=13).contains(&identity.schema_version)
         && identity.protocols == [crate::control::SupervisionProtocolV1::BrokerSupervisionV1]
         && identity.control_namespace_uuid.as_deref() == Some(expected_namespace.as_str())
 }
@@ -789,7 +789,7 @@ mod identity_scope_tests {
     #[test]
     fn supported_runner_with_exact_protocol_and_namespace_passes_preflight_scope() {
         let expected_namespace = Uuid::from_u128(3);
-        for version in 3..=12 {
+        for version in 3..=13 {
             let identity = protocol(
                 version,
                 "runner",
@@ -812,7 +812,7 @@ mod identity_scope_tests {
         let invalid = [
             (
                 "future schema",
-                protocol(12, "runner", Some(&expected_text), vec![broker_protocol]),
+                protocol(14, "runner", Some(&expected_text), vec![broker_protocol]),
             ),
             (
                 "below supervision schema",

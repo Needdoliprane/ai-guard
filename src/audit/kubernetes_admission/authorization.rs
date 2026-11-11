@@ -93,16 +93,78 @@ pub(super) enum AdmissionPolicySourceV2 {
     TenantConfiguration,
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AuthorizationEvidenceV3 {
+    pub(super) version: u32,
+    pub(super) tenant_id: String,
+    pub(super) control_namespace_uuid: String,
+    pub(super) broker_id: String,
+    pub(super) incarnation_id: String,
+    pub(super) credential_id: String,
+    pub(super) binding_revision: u64,
+    pub(super) grant_revision: u64,
+    pub(super) origin_seq: i64,
+    pub(super) origin_hash: String,
+    pub(super) authority_fingerprint: String,
+    pub(super) intent_hash: String,
+    pub(super) quota: QuotaPolicyV1,
+    pub(super) issued_at: String,
+    pub(super) expires_at: String,
+    pub(super) decision_hash: String,
+    pub(super) basis: RecoveryBasisV3,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum RecoveryBasisV3 {
+    RecoverBeforeEmission {
+        reservation_seq: i64,
+        reservation_hash: String,
+        admission_decision_hash: String,
+        creator_incarnation_id: String,
+        reserved_snapshot_hash: String,
+        recovery_input_hash: String,
+    },
+}
+impl AuthorizationEvidenceV3 {
+    pub(super) fn commitment(&self) -> anyhow::Result<String> {
+        crate::control::content_hash(
+            "ai-guard:kubernetes-create-authorization:v3",
+            &(
+                self.version,
+                &self.tenant_id,
+                &self.control_namespace_uuid,
+                &self.broker_id,
+                &self.incarnation_id,
+                &self.credential_id,
+                self.binding_revision,
+                self.grant_revision,
+                self.origin_seq,
+                &self.origin_hash,
+                &self.authority_fingerprint,
+                &self.intent_hash,
+                &self.quota,
+                &self.issued_at,
+                &self.expires_at,
+                &self.basis,
+            ),
+        )
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum AuthorizationEvidence {
     V1(AuthorizationEvidenceV1),
     V2(AuthorizationEvidenceV2),
+    V3(AuthorizationEvidenceV3),
 }
 impl Serialize for AuthorizationEvidence {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::V1(value) => value.serialize(serializer),
             Self::V2(value) => value.serialize(serializer),
+            Self::V3(value) => value.serialize(serializer),
         }
     }
 }
@@ -117,6 +179,9 @@ impl<'de> Deserialize<'de> for AuthorizationEvidence {
             Some(2) => serde_json::from_value(value)
                 .map(Self::V2)
                 .map_err(D::Error::custom),
+            Some(3) => serde_json::from_value(value)
+                .map(Self::V3)
+                .map_err(D::Error::custom),
             _ => Err(D::Error::custom(
                 "unsupported held Kubernetes authorization version",
             )),
@@ -130,6 +195,7 @@ macro_rules! evidence_field {
             match self {
                 Self::V1(value) => &value.$name,
                 Self::V2(value) => &value.$name,
+                Self::V3(value) => &value.$name,
             }
         }
     };
@@ -156,6 +222,7 @@ impl AuthorizationEvidence {
         match self {
             Self::V1(_) => None,
             Self::V2(value) => Some(&value.basis),
+            Self::V3(_) => None,
         }
     }
     pub(super) fn validate_access(
@@ -165,8 +232,19 @@ impl AuthorizationEvidence {
     ) -> anyhow::Result<()> {
         use model::Change;
         use mutations::HeldChangeAccess;
+        if let Self::V3(value) = self {
+            let RecoveryBasisV3::RecoverBeforeEmission {
+                recovery_input_hash,
+                ..
+            } = &value.basis;
+            return permission(
+                access == HeldChangeAccess::Mutate
+                    && matches!(change, Change::RecoverBeforeEmission { recovery }
+                    if recovery.input_hash()? == *recovery_input_hash),
+            );
+        }
         permission(match self.basis() {
-            None => true,
+            None => !matches!(change, Change::RecoverBeforeEmission { .. }),
             Some(AuthorizationBasisV2::Admission { .. }) => {
                 access == HeldChangeAccess::Mutate
                     && matches!(change, Change::Reserve { .. } | Change::Claim { .. })
@@ -191,6 +269,7 @@ impl AuthorizationEvidence {
     fn commitment(&self) -> anyhow::Result<String> {
         match self {
             Self::V1(value) => value.commitment(),
+            Self::V3(value) => value.commitment(),
             Self::V2(value) => crate::control::content_hash(
                 "ai-guard:kubernetes-create-authorization:v2",
                 &(
@@ -220,6 +299,9 @@ impl AuthorizationEvidence {
         intent: &KubernetesCreateIntentV1,
         at: DateTime<Utc>,
     ) -> anyhow::Result<()> {
+        if let Self::V3(value) = self {
+            return super::recovery::validate_evidence(value, identity, intent, at);
+        }
         self.quota().validate()?;
         permission(
             [1, 2].contains(self.version())
@@ -441,7 +523,7 @@ impl Store {
 
 fn require_v2_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if [9, 10, 11, 12].contains(&version) {
+    if [9, 10, 11, 12, 13].contains(&version) {
         Ok(())
     } else {
         Err(KubernetesCreateFailureV1::MigrationRequired.into())
@@ -515,3 +597,7 @@ mod tests;
 #[cfg(test)]
 #[path = "authorization_v2_tests.rs"]
 mod v2_tests;
+
+#[cfg(test)]
+#[path = "quota_recovery_tests.rs"]
+mod quota_recovery_tests;

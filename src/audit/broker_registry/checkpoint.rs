@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn require_schema12(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if version == 12 {
+    if matches!(version, 12 | 13) {
         Ok(())
     } else {
         Err(BrokerRegistryFailureV1::MigrationRequired.into())
@@ -142,7 +142,7 @@ impl Store {
         revision(identity.grant_revision)?;
         require(
             identity.version == 1
-                && identity.schema_version == 12
+                && matches!(identity.schema_version, 12 | 13)
                 && identity.binding_revision > 0
                 && identity.grant_revision > 0
                 && identity.incarnation_id == checkpoint.incarnation_id,

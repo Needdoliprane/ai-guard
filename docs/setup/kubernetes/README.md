@@ -634,7 +634,7 @@ policy enables Kubernetes worker launch.
 
 ## Use the central broker control API
 
-The gateway exposes six broker-only HTTP routes under `/api/v1` for protocol
+The gateway exposes six legacy broker-only HTTP routes under `/api/v1` for protocol
 metadata, reservation, claim, historical claim lookup, result and cancellation;
 see the [route and DTO contract](../../api.md#kubernetes-held-create-http-v1).
 They authenticate the current broker and derive the tenant from its bearer
@@ -658,6 +658,43 @@ in the internal held-CREATE path. Activation, workspace transfer and Kubernetes
 agent sessions remain unavailable. These control routes and preflight do not
 create or admit a Pod in a cluster.
 
+## Close a never-claimed reservation after broker replacement
+
+Schema 13 adds two broker-only control routes: POST
+`/api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries` and GET
+`/api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries/{operation_id}`.
+Apply the explicit backed-up 12→13 migration before using them; no request
+migrates a database automatically. See the [closed request/result and error
+contract](../../api.md#close-only-held-create-recovery-v3--récupération-sans-effet).
+The protocol reports `recover` and `observe_recovery` only on schema 13.
+
+Trusted control retains the complete original intent, its hash, and a single
+version-3 request with one operation UUID, expected_revision=1 and
+expected_create_epoch=1. The authenticated current broker can be the original
+creator or a successor incarnation of the same stable broker and tenant,
+with the required historical authority still granted. Current credentials,
+grants and expiry are checked on every POST and GET, including old receipts.
+The creator's intent/incarnation is preserved, never rewritten as its successor.
+
+Only the exact original never-claimed reservation closes. A prior claim,
+result, cancellation or divergent state is a conflict; an absent Pod or timeout
+is not evidence of no effect. The close appends mandatory broker workload
+audit and releases this one quota reservation atomically. Audit capacity failure
+preserves the quota. No Kubernetes connection, credentials or Pod deletion is
+involved, and legacy Reconcile keeps its incarnation checks.
+
+The internal Rust integration uses `HeldCreateControlClient::recover` with the
+retained intent/request and `observe_recovery` for that exact receipt. On an
+uncertain response, retain the same request and operation UUID. An exact POST
+replays the committed receipt; GET is read-only and absent=404, without a hidden
+POST or replacement UUID. The result is descriptive, cancelled before emission,
+with no emission window or Fresh permission. There is no new CLI command and
+`reconcile-held-create` below continues to handle its original result journal.
+
+This connection is delivered as source with targeted Store/router/loopback
+regressions; its composed execution is **NOT_RUN** at this handoff. It does
+not qualify a cluster, physical recovery or the whole D6 audit finding.
+
 ## Reconcile a retained held-CREATE journal
 
 Use `agentsandbox kubernetes reconcile-held-create` from trusted control storage
@@ -666,7 +703,7 @@ credential. The command reads control history and confirms a retained result.
 It opens no Kubernetes connection and requires no Kubernetes credential,
 activation capability or running worker. It cannot prepare a new journal or
 create a reservation, claim or Pod.
-The control must expose the broker held-CREATE protocol on schema 9, 10 or 11.
+The control must expose the broker held-CREATE protocol on schema 9 through 13.
 
 Prepare a new private control JSON file, limited to 16 KiB. Replace every
 placeholder with the existing installation's approved values:

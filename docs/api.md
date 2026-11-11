@@ -215,14 +215,14 @@ An envelope containing retained credential material is refused as opaque
 ## Kubernetes held-CREATE HTTP v1
 
 Les six routes suivantes du gateway exigent une preuve Bearer **broker**
-courante et le schéma 9 ; elles n'ont aucun alias `/api`. Le tenant est résolu
+courante et un schéma de 9 à 13 ; elles n'ont aucun alias `/api`. Le tenant est résolu
 par l'authentification, puis identité/grant sont revérifiés dans le segment
 Store borné. Aucun header, query ou champ de corps ne sélectionne tenant,
 politique ou quota ; les queries sont refusées. Ces routes contrôlent des
 transactions SQLite, sans credentials Kubernetes ni appel cluster au gateway.
 
 These six gateway routes require a current **broker** bearer proof and schema
-9, with no `/api` alias. Authentication selects the tenant; the bounded Store
+9 through 13, with no `/api` alias. Authentication selects the tenant; the bounded Store
 segment revalidates identity and grant. No header, query or body field selects
 tenant, policy or quota; queries are refused. The gateway performs control
 transactions, holds no Kubernetes credentials and makes no cluster request.
@@ -258,7 +258,8 @@ Les réponses fermées portent `version:1` : mutation =
 Le snapshot appartient au reçu de l'opération, pas nécessairement à l'état
 courant. Le protocole contient schéma/tenant/namespace/broker/incarnation,
 révisions binding/grant, `admission_policy_configured` et les opérations
-`reserve|claim|observe_claim|result|cancel`. Ce booléen indique une configuration,
+`reserve|claim|observe_claim|result|cancel`, complétées sur 13 par
+`recover|observe_recovery`. Ce booléen indique une configuration,
 pas une admission garantie. Claim `201` exige une preuve Store Fresh du premier
 commit, liée aux claim/reçu/snapshot exacts, et une fenêtre encore valide avant
 restitution ; sinon `200 observe_only`. Replay/GET ne rendent jamais Fresh.
@@ -323,11 +324,93 @@ chaîne d'erreur brute n'est exposé. Source effective du mapping :
 Control errors have a closed code/message envelope; existing audit fallbacks
 may use an opaque error string. Neither format exposes raw error chains.
 
-Le client HTTP broker/ACK live, le Coordinator 9 et l'activation cluster
-restent à raccorder et qualifier. Ces routes ne livrent ni workspace, ni
-session Kubernetes, ni permission d'activation. Broker HTTP/live ACK,
-schema-9 Coordinator, activation and real runtime qualification remain open.
+Le client HTTP broker/ACK live et le coordinateur interne sont raccordés ;
+l'activation et la qualification cluster restent ouvertes. Ces routes ne
+livrent ni workspace, ni session Kubernetes, ni permission d'activation.
+The broker HTTP/live-ACK client and internal coordinator are connected;
+activation and real runtime qualification remain open.
 Voir les guides [EN](setup/kubernetes/README.md) / [FR](setup/kubernetes/README.fr.md).
+
+### Close-only held-CREATE recovery v3 / Récupération sans effet
+
+Ces deux routes exigent la migration explicite et sauvegardée 12→13 et une
+identité **broker courante**. Aucun droit runner, worker, CREATE, inspection,
+suppression ou activation Kubernetes n'est accordé. Le serveur déduit tenant,
+acteur et quota ; le corps ne contient aucune preuve d'autorité.
+These routes require the explicit backed-up 12→13 migration and a current
+**broker** identity. They grant no runner, worker or Kubernetes runtime right.
+Tenant, actor and quota come from authenticated server state.
+
+| Method / méthode | Request / requête | Response / réponse |
+|---|---|---|
+| `POST /api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries` | `KubernetesCreateRecoveryV3` | `201` first close / première fermeture, `200` exact replay / rejeu exact ; `KubernetesCreateRecoveryResultV3` |
+| `GET /api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries/{operation_id}` | No body or query / aucun corps ni query | `200 KubernetesCreateRecoveryResultV3`, `replayed=true` ; absent `404`, never a mutation / jamais une mutation |
+
+Le POST fermé contient exactement / the closed POST contains exactly :
+
+```json
+{
+  "version": 3,
+  "operation_id": "00000000-0000-4000-8000-000000000002",
+  "create_id": "00000000-0000-4000-8000-000000000001",
+  "intent_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected_revision": 1,
+  "expected_create_epoch": 1
+}
+```
+
+Ces valeurs sont illustratives : retenir les vrais UUID/hash de la réservation
+et une identité d'opération unique avant l'échange. UUID canoniques, non nuls
+et distincts ; create_id du path et du corps égaux. Champs inconnus/dupliqués,
+query ou forme invalide sont refusés avec les limites JSON et erreurs fermées
+ci-dessus. Le résultat est `{version:3,recovery,receipt,snapshot,replayed}`.
+Le reçu reste V1, descriptif, sans fenêtre d'émission. Le snapshot exact est
+`cancelled_before_emission`, révision/epoch2, quota libéré, sans claim/résultat,
+avec le `last_cancel` descriptif équivalent.
+
+Values above are illustrative. Retain the real reservation IDs/hash and one
+operation UUID before exchange. Canonical nonnil UUIDs must differ and body/path
+create IDs must agree. The strict JSON bounds, timeouts and typed errors above
+apply. The version-3 result carries the exact request, a descriptive V1 receipt
+without an emission window and the cancelled snapshot at revision/epoch2.
+It cannot reconstruct Fresh or runtime authority.
+
+Seul l'état initial complet, prouvé par le Reserve durable et son historique,
+peut être fermé : aucun claim, fenêtre, résultat ni annulation antérieure.
+Le broker courant peut être le créateur ou son successeur du **même broker
+stable**, tenant, namespace et authority autorisée ; l'intention et son
+incarnation historique restent inchangées. Reconcile V1/V2 demeure strict.
+Un claim concurrent, un contenu divergent ou un autre broker est refusé.
+Révocation, remplacement ou expiration sont revérifiés avant tout ancien reçu.
+L'audit obligatoire utilise le budget workload du broker ; une capacité épuisée
+refuse l'opération en conservant le quota, sans réserve implicite ni édition SQLite.
+
+Only the complete original never-claimed reservation can close. A current
+creator or successor must retain the same stable broker, tenant, control
+namespace and authorized historical authority. The original intent/incarnation
+remains historical; legacy Reconcile is unchanged. A concurrent claim or
+conflicting request denies recovery. Current identity, grant, binding and
+expiry are revalidated before replay. Mandatory workload-audit failure denies
+the close and preserves quota; no hidden reserve or database repair is used.
+
+Après perte d'ACK, conserver **la même requête et le même operation_id**. GET
+lit son reçu exact ; POST identique retrouve le reçu avant le test d'état
+initial, sans quota ni événement de fermeture supplémentaire. GET absent ne
+crée rien. Le client Rust interne expose `recover(intent,request)` et
+`observe_recovery(intent,request)` sur ces routes fixes, valide entièrement
+le résultat et ne génère aucun UUID en reprise. Aucune commande CLI nouvelle ;
+`reconcile-held-create` garde son contrat historique.
+
+After an uncertain ACK, retain **the same request and operation_id**. GET reads
+that receipt; exact POST replays it without another close event or quota release.
+Missing GET never mutates. Internal Rust methods `recover(intent,request)` and
+`observe_recovery(intent,request)` use only these fixed routes and validate the
+whole descriptive result. No recovery UUID is regenerated and no new CLI is
+introduced. The existing `reconcile-held-create` command remains unchanged.
+
+Validation dynamique de ce nouveau raccord : **NOT_RUN** à sa livraison source ;
+QA composée et revue indépendante requises. This source delivery is not a
+runtime qualification or closure of audit run-2 D6.
 
 ## Récupération contrôle des réservations Kubernetes V2 / Kubernetes session control recovery V2
 

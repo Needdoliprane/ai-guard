@@ -29,6 +29,14 @@ pub(super) fn routes() -> Router<GatewayState> {
             "/brokers/kubernetes/held-creates/{create_id}/cancellations",
             post(cancel),
         )
+        .route(
+            "/brokers/kubernetes/held-creates/{create_id}/recoveries",
+            post(recover),
+        )
+        .route(
+            "/brokers/kubernetes/held-creates/{create_id}/recoveries/{operation_id}",
+            get(observe_recovery),
+        )
         .layer(DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(workload::request_guard))
 }
@@ -195,8 +203,21 @@ async fn protocol(broker: VerifiedBroker, request: Request) -> ApiResult<Respons
                 .store
                 .broker_authenticated_identity(&identity)
                 .map_err(|e| failure(&tenant.store, e))?;
-            if ![9, 10, 11, 12].contains(&view.schema_version) {
+            if ![9, 10, 11, 12, 13].contains(&view.schema_version) {
                 return Err(unavailable_reply());
+            }
+            let mut operations = vec![
+                KubernetesHeldCreateOperationV1::Reserve,
+                KubernetesHeldCreateOperationV1::Claim,
+                KubernetesHeldCreateOperationV1::ObserveClaim,
+                KubernetesHeldCreateOperationV1::Result,
+                KubernetesHeldCreateOperationV1::Cancel,
+            ];
+            if view.schema_version == 13 {
+                operations.extend([
+                    KubernetesHeldCreateOperationV1::Recover,
+                    KubernetesHeldCreateOperationV1::ObserveRecovery,
+                ]);
             }
             let body = KubernetesHeldCreateProtocolV1 {
                 version: 1,
@@ -208,13 +229,7 @@ async fn protocol(broker: VerifiedBroker, request: Request) -> ApiResult<Respons
                 binding_revision: view.binding_revision,
                 grant_revision: view.grant_revision,
                 admission_policy_configured: tenant.held_create_policy.is_some(),
-                operations: vec![
-                    KubernetesHeldCreateOperationV1::Reserve,
-                    KubernetesHeldCreateOperationV1::Claim,
-                    KubernetesHeldCreateOperationV1::ObserveClaim,
-                    KubernetesHeldCreateOperationV1::Result,
-                    KubernetesHeldCreateOperationV1::Cancel,
-                ],
+                operations,
             };
             encode_response(StatusCode::OK, &body, &redactor)
         })
@@ -444,6 +459,99 @@ async fn cancel(
                 snapshot,
                 replayed,
             };
+            encode_response(StatusCode::OK, &body, &redactor)
+        })
+        .await
+}
+
+/// Close-only recovery has its own proof boundary. Reconcile remains bound to
+/// the historical incarnation and is never a fallback for this operation.
+async fn recover(
+    broker: VerifiedBroker,
+    path: Result<Path<String>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    if request.uri().path().contains('%') {
+        return Err(invalid());
+    }
+    let create_id = path_id(path)?;
+    let input: KubernetesCreateRecoveryV3 = input(request).await?;
+    workload::match_path(&create_id, &input.create_id)?;
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            screen_input(&input, &redactor)?;
+            input.validate().map_err(|_| invalid())?;
+            let store = tenant
+                .store
+                .with_additional_redaction(&redactor)
+                .map_err(|e| failure(&tenant.store, e))?;
+            // Preparation checks the exact recorded operation before the
+            // initial-state fence. An ACK lost after commit remains replayable.
+            let prepared = store
+                .prepare_kubernetes_create_recovery(&identity, &input, &tenant.worker_quota)
+                .map_err(|e| failure(&store, e))?;
+            let body = match prepared {
+                crate::audit::PreparedRecovery::Historical(proof) => {
+                    store.lookup_kubernetes_create_recovery(&identity, &proof)
+                }
+                crate::audit::PreparedRecovery::New(proof) => {
+                    store.recover_kubernetes_create(&identity, &proof)
+                }
+            }
+            .map_err(|e| failure(&store, e))?;
+            encode_response(
+                if body.replayed {
+                    StatusCode::OK
+                } else {
+                    StatusCode::CREATED
+                },
+                &body,
+                &redactor,
+            )
+        })
+        .await
+}
+
+async fn observe_recovery(
+    broker: VerifiedBroker,
+    path: Result<Path<(String, String)>, PathRejection>,
+    request: Request,
+) -> ApiResult<Response> {
+    no_query(&request)?;
+    if request.uri().path().contains('%') {
+        return Err(invalid());
+    }
+    let Path((create_id, operation_id)) = path.map_err(|_| invalid())?;
+    if create_id == operation_id {
+        return Err(invalid());
+    }
+    for id in [&create_id, &operation_id] {
+        let parsed = uuid::Uuid::parse_str(id).map_err(|_| invalid())?;
+        if parsed.is_nil() || parsed.to_string() != *id {
+            return Err(invalid());
+        }
+    }
+    // GET is an exact bodyless receipt lookup, never a new recovery request.
+    // Uploading data does not retain a Store I/O permit.
+    let bytes = tokio::time::timeout(Duration::from_secs(5), to_bytes(request.into_body(), 1))
+        .await
+        .map_err(|_| invalid())?
+        .map_err(|_| invalid())?;
+    if !bytes.is_empty() {
+        return Err(invalid());
+    }
+    broker
+        .blocking(move |tenant, identity, redactor| {
+            let store = tenant
+                .store
+                .with_additional_redaction(&redactor)
+                .map_err(|e| failure(&tenant.store, e))?;
+            let proof = store
+                .authorize_kubernetes_create_recovery_lookup(&identity, &create_id, &operation_id)
+                .map_err(|e| failure(&store, e))?;
+            let body = store
+                .lookup_kubernetes_create_recovery(&identity, &proof)
+                .map_err(|e| failure(&store, e))?;
             encode_response(StatusCode::OK, &body, &redactor)
         })
         .await

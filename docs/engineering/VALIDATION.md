@@ -1,5 +1,11 @@
 # Validation courante
 
+## 11 novembre, 20:33 UTC — Kubernetes public : cinq parents restants et compilation r8
+
+**PASS borné**, source `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7` (base publique `3145315` + K54 corrigé, 2 497 fichiers) : `cargo test --frozen --offline --lib --bin agentsandbox --test schema13_protocol_contract --test kubernetes_held_create_recovery_api --no-run --message-format=json`, quatre listes, cinq parents exacts (quatre lib, un test HTTP de refus worker), puis `cargo check --frozen --offline --all-targets --message-format=json`. RC 0 et Cargo JSON `success=true` pour build/check ; chaque parent : un PASS, aucun FAIL/ignored. Les commandes, noms, SHA des sorties et sources sont dans [TESTS.json](evidence/2026-11-11/kubernetes-recovery-integration/TESTS.json).
+
+QA Linux isolée et hors ligne ; export vivant exact (SHA `a3b0d5e97a499120d90e9d80158cba90d92e096376e46b448f6eed9ac9d27044`), fermeture ciblée RC 0, OOM 0. Les quatre PASS r5 et treize PASS r6 restent historiques sur leurs sources distinctes ; r3/r4/r7 ont échoué à compiler, r5/r6 ont échoué sur des fixtures désormais corrigées. Aucun PASS transféré des campagnes privées ou du lot D. [Détail et périmètre NOT_RUN](evidence/2026-11-11/kubernetes-recovery-integration/README.md) : aucune qualification moteur/cluster, fournisseur, macOS natif, Full3, charge, restauration, egress, Clippy strict ou suite complète.
+
 ## 11 novembre, 18:00 UTC — D source lifecycle, GREEN logiciel borné
 
 Base publique `1dc676b` + 25 postimages : 2 483 fichiers, archive d’entrée SHA `55f21aca…`, manifeste `1474e06b…`. Le build offline `--lib --test source_lifecycle --test retained_cli_lifecycle --test runtime_program --no-run --message-format=json` passe ; les quatre listes réelles résolvent les quatorze parents exacts. Chacun exécute une fonction avec un PASS, zéro FAIL/ignoré, RC0. Le check `--frozen --offline --all-targets --message-format=json` passe aussi, sans erreur de compilation.

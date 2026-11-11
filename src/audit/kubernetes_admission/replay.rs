@@ -84,8 +84,10 @@ pub(super) fn record(stored: &StoredEvent) -> anyhow::Result<Record> {
     record.intent.validate()?;
     let is_result = matches!(record.change, Change::Result { .. });
     conflict(
-        matches!(record.version, 1 | 2)
+        matches!(record.version, 1 | 2 | 3)
             && record.version == *record.authorization.version()
+            && (record.version == 3)
+                == matches!(record.change, Change::RecoverBeforeEmission { .. })
             && stored.event.id == record.change.operation_id()
             && stored.event.kind == record.change.kind()
             && record.input_hash == record.change.input_hash()?
@@ -97,6 +99,20 @@ pub(super) fn record(stored: &StoredEvent) -> anyhow::Result<Record> {
             && format_time(parse_time(&record.received_at)?) == record.received_at
             && parse_time(&record.received_at)? <= parse_time(&stored.received_at)?,
     )?;
+    if record.version == 3 {
+        conflict(
+            stored.event.session_id.is_none()
+                && stored.event.project_id.is_none()
+                && stored.event.sandbox_id.is_none()
+                && stored.event.agent_id.is_none()
+                && stored.event.parent_agent_id.is_none()
+                && stored.event.correlation_id.is_none()
+                && stored.event.trace_id.is_none()
+                && stored.event.command.is_none()
+                && stored.event.decision.is_none()
+                && stored.event.result.is_none(),
+        )?;
+    }
     record
         .authorization
         .validate_access(&record.change, mutations::HeldChangeAccess::Mutate)?;
@@ -158,6 +174,7 @@ pub(super) fn validate_current_basis(
     intent: &KubernetesCreateIntentV1,
     tenant: &str,
 ) -> anyhow::Result<()> {
+    permission(*evidence.version() != 3)?;
     let Some(basis) = evidence.basis() else {
         return Ok(());
     };
@@ -185,6 +202,9 @@ pub(super) fn validate_historical_identity(
     record: &Record,
     tenant: &str,
 ) -> anyhow::Result<()> {
+    if let authorization::AuthorizationEvidence::V3(evidence) = &record.authorization {
+        return super::recovery::validate_historical_identity(db, stored, record, tenant, evidence);
+    }
     let identity = record.identity.identity()?;
     let at = parse_time(&record.received_at)?;
     permission(identity.tenant_id() == tenant && record.authorization.tenant_id() == tenant)?;
@@ -287,7 +307,7 @@ pub(super) fn held_usage_before(db: &Connection, before: i64) -> anyhow::Result<
         return Ok((0, 0, 0));
     }
     let mut creates = BTreeMap::new();
-    let mut query = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind GLOB 'control.kubernetes.create.*' AND kind NOT IN ('control.kubernetes.create.genesis','control.kubernetes.create.policy.genesis') AND seq<?1 ORDER BY seq")?;
+    let mut query = db.prepare("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind GLOB 'control.kubernetes.create.*' AND kind NOT IN ('control.kubernetes.create.genesis','control.kubernetes.create.policy.genesis','control.kubernetes.create.recovery.genesis') AND seq<?1 ORDER BY seq")?;
     for item in query.query_map([before], row_event)? {
         let record = record(&item?)?;
         creates.insert(record.intent.create_id.clone(), record.snapshot);
@@ -319,7 +339,8 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(events.is_empty())?;
         return Ok(());
     }
-    conflict([8, 9, 10, 11, 12].contains(&version))?;
+    conflict([8, 9, 10, 11, 12, 13].contains(&version))?;
+    migration::validate_recovery_marker(db)?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],
@@ -332,6 +353,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     )?;
     let mut create_genesis: Option<(i64, String)> = None;
     let mut policy_seen = false;
+    let mut recovery_seen = false;
     let mut creates = BTreeMap::<String, (KubernetesCreateSnapshotV1, i64)>::new();
     for stored in events {
         if stored.event.kind == GENESIS_KIND {
@@ -350,7 +372,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::POLICY_GENESIS_KIND {
-            conflict([9, 10, 11, 12].contains(&version) && !policy_seen)?;
+            conflict([9, 10, 11, 12, 13].contains(&version) && !policy_seen)?;
             let (genesis_seq, genesis_hash) = create_genesis
                 .as_ref()
                 .ok_or(KubernetesCreateFailureV1::Conflict)?;
@@ -358,9 +380,19 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             policy_seen = true;
             continue;
         }
+        if stored.event.kind == migration::RECOVERY_GENESIS_KIND {
+            conflict(version == 13 && policy_seen && !recovery_seen)?;
+            migration::recovery_event(&stored.event)?;
+            recovery_seen = true;
+            continue;
+        }
         conflict(create_genesis.is_some())?;
         let record = record(&stored)?;
-        conflict(record.version == if policy_seen { 2 } else { 1 })?;
+        if record.version == 3 {
+            conflict(recovery_seen && policy_seen)?;
+        } else {
+            conflict(record.version == if policy_seen { 2 } else { 1 })?;
+        }
         validate_historical_identity(db, &stored, &record, &tenant)?;
         let previous = creates
             .get(record.change.create_id())
@@ -402,7 +434,11 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(expected == record.snapshot)?;
         creates.insert(record.intent.create_id.clone(), (expected, stored.seq));
     }
-    conflict(create_genesis.is_some() && policy_seen == ([9, 10, 11, 12].contains(&version)))?;
+    conflict(
+        create_genesis.is_some()
+            && policy_seen == ([9, 10, 11, 12, 13].contains(&version))
+            && recovery_seen == (version == 13),
+    )?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement
         .query_map([], read_row)?

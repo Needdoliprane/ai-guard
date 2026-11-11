@@ -44,7 +44,7 @@ pub enum HumanCommand {
 
 #[derive(Args)]
 pub struct OfflineArgs {
-    /// Existing schema4, schema5 or schema6 tenant database; never created or migrated implicitly.
+    /// Existing validated schema4 through schema13 tenant database; registry permissions still require their explicit migrations. Never created or migrated implicitly.
     #[arg(long)]
     pub data: PathBuf,
     /// Verify the existing database binding; this grants no remote tenant access.

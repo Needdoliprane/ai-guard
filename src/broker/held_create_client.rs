@@ -255,6 +255,58 @@ impl HeldCreateControlClient {
         }
         Ok(response)
     }
+
+    /// Close one retained, never-claimed reservation. The caller retains both
+    /// values and retries this exact operation ID after an uncertain exchange.
+    /// This method never creates an operation ID or a runtime authorization.
+    pub(crate) async fn recover(
+        &self,
+        intent: &KubernetesCreateIntentV1,
+        recovery: &KubernetesCreateRecoveryV3,
+    ) -> ClientResult<KubernetesCreateRecoveryResultV3> {
+        validation::recovery_request(&self.scope, intent, recovery)?;
+        let bytes = self.request_bytes(recovery)?;
+        let (_, protocol) = self.handshake().await?;
+        if protocol.schema_version != 13 {
+            return Err(HeldCreateClientError::Protocol);
+        }
+        let (status, response) = self
+            .exchange(
+                &format!(
+                    "/api/v1/brokers/kubernetes/held-creates/{}/recoveries",
+                    recovery.create_id
+                ),
+                Some(bytes),
+            )
+            .await?;
+        validation::recovery(&self.scope, intent, recovery, &response, status, false)?;
+        Ok(response)
+    }
+
+    /// Read only the receipt for this retained exact request. Missing data is
+    /// NotFound; no POST, issuer, replacement UUID or launch fallback is used.
+    pub(crate) async fn observe_recovery(
+        &self,
+        intent: &KubernetesCreateIntentV1,
+        recovery: &KubernetesCreateRecoveryV3,
+    ) -> ClientResult<KubernetesCreateRecoveryResultV3> {
+        validation::recovery_request(&self.scope, intent, recovery)?;
+        let (_, protocol) = self.handshake().await?;
+        if protocol.schema_version != 13 {
+            return Err(HeldCreateClientError::Protocol);
+        }
+        let (status, response) = self
+            .exchange(
+                &format!(
+                    "/api/v1/brokers/kubernetes/held-creates/{}/recoveries/{}",
+                    recovery.create_id, recovery.operation_id
+                ),
+                None,
+            )
+            .await?;
+        validation::recovery(&self.scope, intent, recovery, &response, status, true)?;
+        Ok(response)
+    }
 }
 
 /// One owned invocation, sampled before every preclaim control read.
@@ -418,3 +470,7 @@ opaque_debug!(
 #[cfg(test)]
 #[path = "held_create_client_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "held_create_recovery_tests.rs"]
+mod recovery_tests;

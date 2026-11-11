@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 11 novembre — reprise Kubernetes avant émission, suivi limité
+
+La reprise V3 et la compatibilité schéma 13 disposent d'une [preuve logicielle publique bornée](evidence/2026-11-11/kubernetes-recovery-integration/README.md) : cinq parents r8 et compilation de toutes les cibles PASS sur `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7`. Le contrat exige l'état initial exact Reserved/révision 1/époque 1 avant émission, une identité de broker courante au périmètre requis et une clôture audit/état/quota atomique ; GET ne mute pas. Les quatre PASS r5 et treize PASS r6 restent sur leurs sources historiques, et les échecs successifs ainsi que les corrections TEST ONLY et revues sont conservés.
+
+Ce suivi ne clôture aucun fingerprint global, aucun autre piège de quota ni gate de production. Les émissions et reprises sur moteurs réels, la restauration, Full3 privé et la médiation réseau restent hors de cette preuve. Le lot E demeure indépendant et en cours.
+
 ## 10 novembre — suivi NV-01 : signature hors ligne composée et vérifiée
 
 Le fingerprint `audit:unkeyed-chain:no-independent-signed-checkpoint` du

@@ -162,7 +162,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+        if ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
             self.commit_checked(tx)?;
             return Ok(None);
         }
@@ -215,7 +215,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+        if ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
             self.commit_checked(tx)?;
             return Ok(HumanProfileSnapshotV1 {
                 account: None,
@@ -555,7 +555,7 @@ fn local_credential_binding(
     digest: &[u8; 32],
 ) -> anyhow::Result<Option<LocalCredentialV1>> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if [4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         identity::json_row(
             db,
             "SELECT payload_json FROM identity_credentials WHERE digest=?1",

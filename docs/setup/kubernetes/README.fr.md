@@ -669,7 +669,7 @@ politique configurée n'activent le lancement de workers Kubernetes.
 
 ## Utiliser l'API centrale de contrôle des brokers
 
-Le gateway expose six routes HTTP réservées au broker sous `/api/v1` :
+Le gateway expose six routes HTTP historiques réservées au broker sous `/api/v1` :
 métadonnées de protocole, réservation, claim, lookup historique du claim,
 résultat et annulation ; voir le [contrat des routes et DTO](../../api.md#kubernetes-held-create-http-v1).
 Elles authentifient le broker courant et déduisent le tenant de sa preuve
@@ -695,6 +695,44 @@ le transfert du workspace et les sessions d'agents Kubernetes restent
 indisponibles. Ces routes de contrôle et le préflight ne créent ni n'admettent
 de Pod dans un cluster.
 
+## Fermer une réservation jamais réclamée après remplacement du broker
+
+Le schéma 13 ajoute deux routes de contrôle réservées au broker : POST
+`/api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries` et GET
+`/api/v1/brokers/kubernetes/held-creates/{create_id}/recoveries/{operation_id}`.
+Effectuer la migration explicite et sauvegardée 12→13 avant leur utilisation ;
+aucune requête ne migre automatiquement une base. Voir le [contrat fermé des
+requêtes, résultats et erreurs](../../api.md#close-only-held-create-recovery-v3--récupération-sans-effet).
+Le protocole annonce `recover` et `observe_recovery` uniquement sur 13.
+
+Le contrôle de confiance conserve l'intention originale entière, son hash et
+une seule requête V3 avec un UUID d'opération, expected_revision=1 et
+expected_create_epoch=1. Le broker authentifié courant peut être le créateur
+ou son successeur du même broker stable et tenant, toujours autorisé pour
+l'authority historique. Credentials, grant et expiration courants sont vérifiés
+à chaque POST et GET, même pour un reçu ancien. L'intention et l'incarnation
+du créateur restent historiques ; elles ne sont pas réattribuées au successeur.
+
+Seule la réservation initiale exacte, jamais réclamée, peut être fermée. Un
+claim, résultat, annulation ou état divergent antérieur provoque un conflit ;
+absence de Pod ou timeout ne prouve aucune absence d'effet. La fermeture
+inscrit l'audit workload obligatoire du broker et libère cette seule réservation
+de quota dans la même transaction. Un refus de capacité d'audit conserve le
+quota. Aucune connexion Kubernetes, credential cluster ou suppression de Pod ;
+Reconcile historique conserve ses contrôles d'incarnation.
+
+L'intégration Rust interne appelle `HeldCreateControlClient::recover` avec
+intention/requête conservées, et `observe_recovery` pour lire ce reçu exact.
+Après une réponse incertaine, conserver la même requête et le même UUID. POST
+identique relit le reçu commité ; GET est une lecture, absent=404, sans POST
+caché ni UUID de remplacement. Le résultat descriptif est annulé avant émission,
+sans fenêtre ni permission Fresh. Aucune commande CLI nouvelle ;
+`reconcile-held-create` ci-dessous garde son journal de résultat historique.
+
+Ce raccord est livré en source avec régressions ciblées Store/router/loopback ;
+son exécution composée reste **NOT_RUN** à ce handoff. Il ne qualifie ni cluster,
+reprise physique ou totalité du constat D6.
+
 ## Réconcilier un journal privé de CREATE retenu
 
 Utiliser `agentsandbox kubernetes reconcile-held-create` depuis le stockage du
@@ -703,7 +741,7 @@ credential broker actuellement autorisé. La commande lit l'historique du
 contrôle et confirme un résultat retenu. Elle n'ouvre aucune connexion Kubernetes
 et ne demande ni credential Kubernetes, ni capacité d'activation, ni worker actif.
 Elle ne prépare aucun nouveau journal, réservation, claim ou Pod.
-Le contrôle doit exposer le protocole broker de CREATE retenu au schéma 9, 10 ou 11.
+Le contrôle doit exposer le protocole broker de CREATE retenu sur un schéma de 9 à 13.
 
 Préparer un nouveau fichier JSON privé de contrôle, limité à 16 Kio. Remplacer
 chaque placeholder par les valeurs approuvées de l'installation existante :

@@ -244,9 +244,12 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version),
+        [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version),
         "unsupported control schema"
     );
+    if version == 13 {
+        super::kubernetes_admission::validate_recovery_marker(db)?;
+    }
     let (namespace, genesis_seq, genesis_hash): (String, i64, String) = db.query_row(
         "SELECT namespace_uuid,genesis_seq,genesis_hash FROM control_meta WHERE singleton=1",
         [],
@@ -294,20 +297,31 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for stored in events {
         if stored.event.kind == super::broker_checkpoint_migration::GENESIS_KIND {
-            anyhow::ensure!(version == 12, "broker checkpoint marker requires schema12");
+            anyhow::ensure!(
+                matches!(version, 12 | 13),
+                "broker checkpoint marker requires schema12 or schema13"
+            );
             super::broker_checkpoint_migration::marker(&stored.event)?;
+            continue;
+        }
+        if stored.event.kind == "control.kubernetes.create.recovery.genesis" {
+            anyhow::ensure!(
+                version == 13,
+                "held-create recovery marker requires schema13"
+            );
+            super::kubernetes_admission::recovery_event(&stored.event)?;
             continue;
         }
         if stored.event.kind.starts_with("control.kubernetes.session.") {
             anyhow::ensure!(
-                [11, 12].contains(&version),
+                [11, 12, 13].contains(&version),
                 "Kubernetes session event requires schema11"
             );
             continue;
         }
         if stored.event.kind.starts_with("control.kubernetes.create.") {
             anyhow::ensure!(
-                [8, 9, 10, 11, 12].contains(&version),
+                [8, 9, 10, 11, 12, 13].contains(&version),
                 "held Kubernetes event requires schema8 or schema9"
             );
             continue;
@@ -317,14 +331,14 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             || stored.event.kind.starts_with("control.relay.")
         {
             anyhow::ensure!(
-                [6, 7, 8, 9, 10, 11, 12].contains(&version),
+                [6, 7, 8, 9, 10, 11, 12, 13].contains(&version),
                 "workload control event requires schema6"
             );
             continue;
         }
         if stored.event.kind.starts_with("control.identity.") {
             anyhow::ensure!(
-                [4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version),
+                [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version),
                 "identity event requires schema4 or5"
             );
             continue;
@@ -582,7 +596,7 @@ pub(in crate::audit) fn worker_at(
     uuid(worker_id)?;
     invalid(before_seq > 0)?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    invalid([6, 7, 8, 9, 10, 11, 12].contains(&version))?;
+    invalid([6, 7, 8, 9, 10, 11, 12, 13].contains(&version))?;
     worker_snapshot_before(db, worker_id, before_seq)
 }
 
@@ -617,7 +631,7 @@ fn worker_snapshot_before(
 
 fn require_control(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -677,7 +691,7 @@ fn admission_result(stored: &StoredEvent, record: &ControlRecord) -> AdmissionRe
 }
 pub(super) fn quota_usage(db: &Connection, policy: &QuotaPolicyV1) -> anyhow::Result<QuotaUsageV1> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let query = if [11, 12].contains(&version) {
+    let query = if [11, 12, 13].contains(&version) {
         "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_session_reservations WHERE quota_held=1)"
     } else if [8, 9, 10].contains(&version) {
         "SELECT count(*),COALESCE(SUM(cpu_millis),0),COALESCE(SUM(memory_bytes),0) FROM (SELECT cpu_millis,memory_bytes FROM workers WHERE quota_held=1 UNION ALL SELECT cpu_millis,memory_bytes FROM kubernetes_creates WHERE quota_held=1)"
@@ -704,7 +718,7 @@ pub(super) fn quota_usage_before(
 ) -> anyhow::Result<QuotaUsageV1> {
     policy.validate()?;
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    invalid([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version))?;
+    invalid([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version))?;
     let (head, _) = audit_head(db)?;
     invalid(before_seq > 0 && head.checked_add(1).is_some_and(|end| before_seq <= end))?;
     let mut usage = QuotaUsageV1 {
@@ -886,7 +900,7 @@ impl Store {
         )?;
         conflict(!existing)?;
         let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if [8, 9, 10, 11, 12].contains(&schema) {
+        if [8, 9, 10, 11, 12, 13].contains(&schema) {
             let reserved: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM kubernetes_creates WHERE session_id=?1)",
                 [&admission.launch.session_id],
@@ -894,7 +908,7 @@ impl Store {
             )?;
             conflict(!reserved)?;
         }
-        if [11, 12].contains(&schema) {
+        if [11, 12, 13].contains(&schema) {
             let reserved: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE session_id=?1)",
                 [&admission.launch.session_id],
@@ -926,7 +940,7 @@ impl Store {
             )?;
             let worker_id = uuid::Uuid::new_v4().to_string();
             let attempt_id = uuid::Uuid::new_v4().to_string();
-            if [11, 12].contains(&schema) {
+            if [11, 12, 13].contains(&schema) {
                 let duplicate: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM kubernetes_session_reservations WHERE worker_id=?1 OR attempt_id=?2)",
                     params![worker_id, attempt_id], |row| row.get(0))?;
@@ -1272,6 +1286,9 @@ impl Store {
         from_version: u32,
         to_version: u32,
     ) -> anyhow::Result<MigrationReportV1> {
+        // The recovery format has one explicit semantic edge. An internal
+        // caller cannot skip the checkpoint marker and history of schema12.
+        invalid(to_version != 13 || from_version == 12)?;
         let mut db = self
             .db
             .lock()
@@ -1364,6 +1381,7 @@ impl Store {
             10 => self.initialize_human_workers(&tx)?,
             11 => super::kubernetes_session::initialize(self, &tx)?,
             12 => super::broker_checkpoint_migration::initialize(self, &tx)?,
+            13 => super::kubernetes_admission::initialize_recovery(self, &tx)?,
             _ => return Err(ControlFailure::InvalidRequest.into()),
         }
         tx.pragma_update(None, "user_version", to_version)?;
@@ -1389,6 +1407,7 @@ impl Store {
                 10 => "SELECT seq,hash FROM events WHERE kind='control.identity.workers_access.genesis'",
                 11 => "SELECT genesis_seq,genesis_hash FROM kubernetes_session_reservation_meta WHERE singleton=1",
                 12 => "SELECT seq,hash FROM events WHERE kind='control.broker_checkpoints.genesis'",
+                13 => "SELECT seq,hash FROM events WHERE kind='control.kubernetes.create.recovery.genesis'",
                 _ => return Err(ControlFailure::InvalidRequest.into()),
             },
             [],
@@ -1448,7 +1467,7 @@ impl Store {
         }
         let mut worker = load_worker(&tx, &mutation.worker_id)?.ok_or(ControlFailure::NotFound)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+        if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
             if !tx.lease.active
                 && !matches!(
                     &mutation.transition,

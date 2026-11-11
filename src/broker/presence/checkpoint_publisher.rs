@@ -4,10 +4,35 @@ use super::*;
 use crate::{audit::Store, broker_registry::*};
 use std::time::Duration;
 
+#[cfg(test)]
+#[path = "schema13_checkpoint_tests.rs"]
+mod schema13_checkpoint_tests;
+
 fn stream(p: &PreparedPresence) -> Result<&checkpoint_storage::Stream> {
     p.checkpoint_stream
         .as_ref()
         .ok_or(PresenceError::UnsafeState)
+}
+
+/// Only a retained Pending may bridge the explicit semantic 12-to-13 upgrade.
+/// Current identity came through the authenticated gateway handshake. No field
+/// is rewritten, and this is not a general identity-equivalence rule.
+fn pending_identity_matches_current(
+    pending: &BrokerIdentityViewV1,
+    current: &BrokerIdentityViewV1,
+) -> bool {
+    matches!(
+        (pending.schema_version, current.schema_version),
+        (12, 12) | (13, 13) | (12, 13)
+    ) && pending.version == 1
+        && current.version == 1
+        && pending.tenant_id == current.tenant_id
+        && pending.control_namespace_uuid == current.control_namespace_uuid
+        && pending.broker_id == current.broker_id
+        && pending.incarnation_id == current.incarnation_id
+        && pending.credential_id == current.credential_id
+        && pending.binding_revision == current.binding_revision
+        && pending.grant_revision == current.grant_revision
 }
 fn validate_remote(
     p: &PreparedPresence,
@@ -16,7 +41,7 @@ fn validate_remote(
     head: &checkpoint_storage::Head,
 ) -> Result<()> {
     actor::validate_handshake(p, identity, &view.broker)?;
-    if identity.schema_version != 12 || view.version != 1 {
+    if !matches!(identity.schema_version, 12 | 13) || view.version != 1 {
         return Err(PresenceError::Forbidden);
     }
     if let Some(remote) = &view.checkpoint {
@@ -35,7 +60,7 @@ fn validate_remote(
         }
     }
     if let Some(pending) = &head.pending {
-        if identity != &pending.identity {
+        if !pending_identity_matches_current(&pending.identity, identity) {
             return Err(PresenceError::Conflict);
         }
         // A committed response may have been lost. It must be the exact

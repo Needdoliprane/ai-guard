@@ -1,0 +1,847 @@
+{
+  "formatVersion": 1,
+  "scope": "Public Kubernetes held-CREATE recovery and schema13 compatibility; 54 final feature postimages only",
+  "publicBaseCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+  "counts": {
+    "modified": 43,
+    "added": 11,
+    "featurePaths": 54,
+    "testedSourceFiles": 2497
+  },
+  "testedInput": {
+    "archiveSha256": "0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7",
+    "contentManifestSha256": "0701956fd901908f811c50b7ab79a868aa70ac979206a4f7c14aec51f648d887"
+  },
+  "observedLiveExport": {
+    "archiveSha256": "a3b0d5e97a499120d90e9d80158cba90d92e096376e46b448f6eed9ac9d27044",
+    "contentManifestSha256": "0701956fd901908f811c50b7ab79a868aa70ac979206a4f7c14aec51f648d887",
+    "files": 2497,
+    "contentExact": true
+  },
+  "verification": {
+    "beforeImages": "43 retained regular-file preimages compared with the public base Git blob identities; 11 added paths absent in that base",
+    "afterImages": "54 hashes and 0644 modes compared with the frozen tested input; live export equality independently checked by the integrator",
+    "evidenceDocumentation": "These three evidence documents and the dated engineering additions are not included in the tested source input. This manifest does not qualify the entire integration checkout."
+  },
+  "files": [
+    {
+      "path": "docs/api.md",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "dddfc5249898884ff563e7d1005934bfd847fa60cddcd8b4c624c2c0af6476d4",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "dc65f597a4f42d7096e9273a5c2c3aba3dc98973485128760514f0c46534e2d4",
+        "bytes": 157060,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "docs/setup/kubernetes/README.fr.md",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "b9d94c89ff99cf60e7c19a5017eec42f599d48aa92a49249deab6bd7528036d1",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "348b7c2a4b7edd81832f0cbdfe95f560ecb8ce64754f57485e74aa3c8e32b235",
+        "bytes": 54905,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "docs/setup/kubernetes/README.md",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "4b206d6b5ffa39fe16a7c4a6ea46676968f8da0818fa895887bbb742f592ae5b",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "41c8ca0a9e4c1d6d8f62fa0e6450a391a76241a811c907fc4968d026cc59c30e",
+        "bytes": 51239,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "schemas/supervision-protocol.schema.json",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "385f245b2c7519f1d8d89059d5dd4c683092f94ad7c9473eaa55cd23b6446045",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "b7a3d56f7f13c60afeb722eb7bb566b9fa26f7f3e3ea4cc0dfd624aa85602455",
+        "bytes": 1341,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/api/kubernetes.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "45e5c228fdb743250d5a20556f083f9bfa4607c2a7b85fe2f4150fd184cd859f",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "6cbccaad9b49fa2751cdd0bfbc3d52b7d327eb72454d48c881611707b907b086",
+        "bytes": 20324,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/api/supervision.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "50c23471631848d9bc96801db6e42074b5d6b01a0e7d35fa9e0f2197575296e2",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "933404ff7e96dfeb8837ba431212fbd71900f3ebc9bf85ad9812a05af93ac170",
+        "bytes": 8971,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "10c65b6d4d01efbf083ed7dbad1f257c69bf1b05593bf5e73125c64ff48f2713",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "4bb07a7e653cf724011fe42924bceb4e9d6f28aabe004d7132fdfc609d5c08ad",
+        "bytes": 91606,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/broker_checkpoint_migration.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "8e7c2faa9ff3c72dd82359bdcddb1810dc5b4a3af6af89e90f2b0868cd0d5d97",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "042fec4c54c1536d7e5597d24bcfb2b4b6a98ab8ab5883a136b3acb9373bd2f3",
+        "bytes": 5278,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/broker_checkpoint_migration_tests.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "472a798f14f927c600c462971e9dbfb25e8ed05815b2d60c6c17af78325544ce",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "31b78851b4309f34f54315dc50fe9c5bb7715a75bd69aa9007c99abe869c8fd2",
+        "bytes": 8134,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/broker_registry.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "3811240f8bc8502b4117e989f5063aea4ca0cf67ed7dc1430ff1ed3d316db26f",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "194663a2e192f701f6e41a919e386c47a27e4a34953002b1e3f247d967f8105d",
+        "bytes": 50541,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/broker_registry/checkpoint.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "f20404e0f89c6efd4d83f3a1e4a766ed0b42b00425b5291a923f3fd13010c571",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "134cb22552ae8e57c18c51af7db76d1d04da38ee498c9b53a5dfb2d902ca209b",
+        "bytes": 11988,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/broker_registry/federation.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "f8f9286dc03f43f8b6497e061600db3bebc516840d3f322f5050a8ea471d344e",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "08060a14358b77304e96f169e0f5f88a8302caf5ad66524eaa1d2abc7f1fcd65",
+        "bytes": 7710,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/control.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "f740cdbc17abf5d3a7be6240b357b34626f311403ccdde3ddf5ec8f4b90ac304",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "d014b9bb7a7de254a1acc01786d509955175896bcb0ac1e98a5905587303614f",
+        "bytes": 88662,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/human.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "61c21681408a0f9911a5ab2575dbaf3beba78d50b87febbe0b846891452f2cb0",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "4d0e54da63a1a0cd08e67c99c040323a7fdd2ea47fd0d26ca2d3485065034c1d",
+        "bytes": 23125,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/human_brokers.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "075ce178460bc18d0889baf8ba35f795ccbba8b2d4b495a8d0a6f61c2366a88f",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ef24a8133bfc3acbf4b812b235ae9c468a90b89bb80732858b0e3fe21c052c5d",
+        "bytes": 24267,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/human_workers.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "1f5e3b6c901fe15e59510e65229fdd0b9a85c7a4ba7552f127dd6c7f4750fc9a",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "0cdadb878a70a6d8d292adb8706e058b255e9bb4334e5f11e0eb911a240b95cc",
+        "bytes": 35169,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/identity.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "faedce7465616a4df5d57eb850552d5a25c1f5418d74b91236dbcf5c2118a5f8",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ae93a5927a68b57738e90fd90b74d48d6e0835768521e7535a097fbe80f39716",
+        "bytes": 58725,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "dab7143492cd32b129230a1245bf565e27c50547479a17c3d04e14943e5aebcb",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "19657089d3a9a8dd5bb8af63dcc790d8120a56fa2cb38aa43c3a1a2afd8c0821",
+        "bytes": 7778,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/authorization.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "4a084172968c4bc1e9d61145eaf2fadcd988ca37a70aafde130f98dcb2017998",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "0ce93e6640b443f716872cf2bb5aa2157f5d345508e987315cc55b4a2fe70eba",
+        "bytes": 22741,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/migration.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "88fe685d57f4fb8c6a7e2f8def3f919b9a846f129697363b938952563eb15586",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "bf6fd170931818c565911a1ea8053e0430e5ab4e1f89fc1279373868629a70f0",
+        "bytes": 11124,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/model.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "ff48256f250c3d8476b6aa33f7ee2db376a270aae419844cb071552c7804e4ea",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "f1989ac9f0f2061909b953bcae6392233ada97dd49bc1232b303845e4bbc9459",
+        "bytes": 12575,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/mutations.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "bfdfd75645f665b7b0814844e662bb21f97ef08289cdebaf559137d1bf5423ab",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "f8d0c6b07723c206333d06d5d9e412697f49fb78840f506df1d8997c2e6b3dc5",
+        "bytes": 16989,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/quota_recovery_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "7c176b1eaef0fd8a94287186516ae54a786ff570205f9065eff717b06d9faa36",
+        "bytes": 32379,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/recovery.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "0f62c0c144e6edeee6b2b9e65f173ee4bac6f619eb5d1175b4542680828f1660",
+        "bytes": 20313,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/recovery_history.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "60503783ffccd3a7f182bebdec521bd582c5fc85fa47a759aa87502a09d956d1",
+        "bytes": 5786,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_admission/replay.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "6801323c94481cabb2f200a52d26cf5b1eb935f18c9f7ba4dddc86f27f96645c",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "0c3b01e0a2c88771fd37e6f9c7a3b45f4ee3901145b4656284334ebeb1a6d49c",
+        "bytes": 19554,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/kubernetes_session.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "da39e808e14639931f4139d05fd2352ff4fef60a6c3fc06aae2fca3aa8db1a58",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "f9232a7b9395b1bf76ac6d9afba30f04802838964002629b1f287de1f3cd1e75",
+        "bytes": 5199,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/relay_admission.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "9bb88e0d87406ae74fcde23072aebcc42098fe253a5ca6148325dc2fac560656",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ce504c79d93ea6c97e464c47700221c78e2c673dc3d6e26ad6e6b4f254d145cf",
+        "bytes": 31207,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/schema13_compat_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "10f46f0ab4fc659b1e98930c9843d0b8569835ec234e56ae2dff4307c31aaafc",
+        "bytes": 15936,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/schema13_read_baseline_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "60b8db55d31594e8c4835a3760b4c0a5c78cf6f0131b489ec1ec37fc05275902",
+        "bytes": 1940,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/supervision.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "000e25b41d4b0230b10d1771778b34551be98196cbd3decd72b10c327386e760",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ac171b496fd8de3ccc82e2ac003cddb615c9c7f5e4d3cfb0e5743f2ecc0ce110",
+        "bytes": 51504,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/audit/workload.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "a88023fa5b21339baa3ab30e3b7d9d440f60d99d31711b42377f56b559d184a7",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "3b4ab98a4dcd7f3dc2261a1d6dd824a2a6953276057bacf0cab10e53f01372dd",
+        "bytes": 46006,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/held_create_client.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "32e18c14e38d5183e4359e91fbd570940c8e3c693241ed5a9788028d360fb9ad",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "08a24552933eecd78f1a57916d649d623885ac306c8fd27c58b0d146bd666002",
+        "bytes": 17171,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/held_create_client_validation.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "00653098b2fa1be5a789fde5c4463c4d41e440e6638c030c10e9199bf6611516",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "f54331d293f332058f99f4ada3ca32950c8b670d68e2296bf5e23164cd634821",
+        "bytes": 21362,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/held_create_recovery_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "8bd87f789c9ca623c28e3b838e03e4e65d65143c20b2f7cfceac518c8c960928",
+        "bytes": 30096,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/presence/actor.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "f30216bf6bcd2bf43092f05f1a6973dceb806e307dbc9615886f6279dca85ace",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "4892fdb20e295b79593c34ae332fc2af52d41e4cd5a397acc169d248cefd659d",
+        "bytes": 10414,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/presence/checkpoint_publisher.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "68b2030b53ff4ca642883e57303f3946fb8add0efc1a02a9a0ecaa7c35eca29d",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ad65fff7a0b80aedb9e85e84a1ff216d96fd5c0a74c85686b9702b089807d29c",
+        "bytes": 9704,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/presence/checkpoint_storage.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "fb907c762a8a9aa710ed038f0a8ca1cd443dddaf29d06b2313e6c392fbce7448",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "8fd72192e0b768232f64848801dff0bf3dcc7ad714598acbcbd078d20e3e9366",
+        "bytes": 14687,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/presence/schema13_checkpoint_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "16c7c1845d6aaf599f4f29486453a989afdb928d3fd3b5245f17bc2833bc58a1",
+        "bytes": 8853,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/broker/service/mod.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "d102084f59f458e9f5c72119d12bf1a60ac9b05c0ea3a5902cd57eff97693cee",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "6740140aa3b6e47bfbdf08584f6663cc92cf95be491ab9946d21a2f757b736c3",
+        "bytes": 8681,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/control/kubernetes_admission.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "23b7f695fce7efa0cc4ed61d512dd74ace914c3a01bbd364843db1dfd986eb59",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "45b8266c6b6ff23f58f2dd79840a168cd30740f7fc4f1437969aa0b3d7a3d3c0",
+        "bytes": 11319,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/control/kubernetes_admission/http.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "37f338028836e5db5d253996aebfbda5b697a315a7a4587e306d3e0b5c243201",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "31ea4d34c5fcb41f94b1e4091a211d185e6a04a6d35534ce68b2e16aa2ea9108",
+        "bytes": 1424,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/control/supervision.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "c3d96ec504f743e6e19848b4eca7982c88b6c8418afb49d4ef736e9d49a69cdc",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "3a1f6172cd3fc7a236587751cad99921cb9fd3a95417cb5b8cbaa084ed54eae0",
+        "bytes": 28324,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/identity_cli.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "247acf0434a40d8dafef7f8e9ce00808fb4594d9f4d081c1e0f0cefb3479a48b",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "1cc846cd7184205e38b55f8155a4bea6538d8f7b52252bbfae415df508a2ca2d",
+        "bytes": 7426,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/identity_cli/offline.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "ad9d4d97b95e16624ae576f59797dc9bb1a2082c2232a170cee21cb7d81ac13b",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "abd8b30e3e9ea2428db8c956e3d80f20db2e00972912c0314e006ae99ed852b7",
+        "bytes": 17589,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/identity_cli/schema13_offline_baseline_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "37a86623132f8569784faab421c9a8b4f6ca99d4ec781bdaf2da45a5e1f84c43",
+        "bytes": 7364,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/identity_cli/schema13_offline_tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "a0f86c5583f4fc31bdeab7b3d533fd3410ad00630266d330162f464708d3e21d",
+        "bytes": 4847,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/kubernetes_cli.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "34b99fdf2ec6facc6dc5b5122b46560a353456797fde528154f3d5085ffe35ed",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "5624909fef588bcae956b653e488bb5696dc59bdc8bbcb5042f7cd2f13029738",
+        "bytes": 37943,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/main.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "7ab1e8f229f574fede563d5edc3ab1982f7a9e0329ba9a5fce056575d2cbdcd6",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "7915ed28b6991427aee8390dd162568365fea58209c5c4177cb9dd083f830013",
+        "bytes": 56290,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/runner/relay_admission.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "5a13660e07f4135f3f3251d4d07361d42b687e69cc442341aa30d753965997bc",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "ebb2c6b487bd555b350969bf64ac505b06ff6a6988afe6a4d7e9bde0e08c2fa7",
+        "bytes": 21683,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/runtime/kubernetes/admission_coordinator.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "7f1a1931f30291ae1cf0696e309a412393f1341d242950fabc20941905141521",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "878b7f06d3800029e3726e8a37f458e4a1604a7c1364f1213165b030a93f22b0",
+        "bytes": 11369,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/workload_cli/storage.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": "ddb78431562e8516652fd016b1d8eb3fd550e86f8c59f7cc64f87347baa0c20e",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "6314e1b6877e305f6848f75efb8857ae167e15e1bd536ef122fc0496296172c6",
+        "bytes": 26581,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "tests/kubernetes_held_create_recovery_api.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "f7eaabe7c06cf1eefc388d77e5628ae9ad491f18a27c667e9e14743f54048c0e",
+        "bytes": 5699,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "tests/schema13_protocol_contract.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "31453151b958c605a4200d6b0c3980d1fa3628bf",
+        "sha256": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "e8bb53004a59f21357262e8d1b12b4b85226d19e5433b5df9dbfbffb4b2846de",
+        "bytes": 9066,
+        "mode": "0644"
+      }
+    }
+  ],
+  "integratorComparison": {
+    "observedAt": "2026-11-11T20:40:43.839Z",
+    "publicSourceTreeSha1": "b6e3a59c52c09fe65cd4a010d2bef994330247c3",
+    "files": 2497,
+    "gitModes": "100644",
+    "allPathsAndGitBlobsExact": true,
+    "liveExportSha256": "a3b0d5e97a499120d90e9d80158cba90d92e096376e46b448f6eed9ac9d27044",
+    "scope": "Source-only Git tree, before these six evidence documents are staged; comparison is not whole-checkout or runtime qualification"
+  }
+}

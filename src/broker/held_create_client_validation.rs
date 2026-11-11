@@ -20,6 +20,83 @@ fn revision(value: u64) -> bool {
     value > 0 && value <= i64::MAX as u64
 }
 
+/// Recovery preserves the original intent, while current authentication is
+/// independently checked by handshake and Store. Do not relax `intent`, used
+/// by Reserve/Claim/Reconcile, to accept a successor's incarnation.
+pub(super) fn recovery_request(
+    scope: &HeldCreateClientScope,
+    intent: &KubernetesCreateIntentV1,
+    request: &KubernetesCreateRecoveryV3,
+) -> ClientResult<()> {
+    intent
+        .validate()
+        .map_err(|_| HeldCreateClientError::InvalidRequest)?;
+    request
+        .validate()
+        .map_err(|_| HeldCreateClientError::InvalidRequest)?;
+    if scope.control_namespace_uuid != intent.control_namespace_uuid
+        || scope.broker_id != intent.broker_id
+    {
+        return Err(HeldCreateClientError::InvalidContext);
+    }
+    if request.create_id != intent.create_id
+        || request.intent_hash
+            != intent
+                .intent_hash()
+                .map_err(|_| HeldCreateClientError::InvalidRequest)?
+    {
+        return Err(HeldCreateClientError::InvalidRequest);
+    }
+    Ok(())
+}
+
+pub(super) fn recovery(
+    scope: &HeldCreateClientScope,
+    intent: &KubernetesCreateIntentV1,
+    request: &KubernetesCreateRecoveryV3,
+    response: &KubernetesCreateRecoveryResultV3,
+    status: StatusCode,
+    lookup: bool,
+) -> ClientResult<()> {
+    recovery_request(scope, intent, request).map_err(|_| HeldCreateClientError::Protocol)?;
+    receipt(
+        scope,
+        &response.receipt,
+        &request.operation_id,
+        &request
+            .input_hash()
+            .map_err(|_| HeldCreateClientError::Protocol)?,
+    )?;
+    let prepared = admission::prepare(intent).map_err(|_| HeldCreateClientError::Protocol)?;
+    let expected = KubernetesCreateSnapshotV1 {
+        version: 1,
+        intent: intent.clone(),
+        intent_hash: request.intent_hash.clone(),
+        target: prepared.target().clone(),
+        state: KubernetesCreateStateV1::CancelledBeforeEmission,
+        create_epoch: 2,
+        revision: 2,
+        quota_held: false,
+        claim: None,
+        emission_window: None,
+        last_result: None,
+        last_cancel: Some(request.descriptive_cancel()),
+    };
+    require(
+        response.version == 3
+            && response.recovery == *request
+            && response.snapshot == expected
+            && response.receipt.emission_window.is_none()
+            && if lookup {
+                status == StatusCode::OK && response.replayed
+            } else if response.replayed {
+                status == StatusCode::OK
+            } else {
+                status == StatusCode::CREATED
+            },
+    )
+}
+
 pub(super) fn intent(
     scope: &HeldCreateClientScope,
     intent: &KubernetesCreateIntentV1,
@@ -40,11 +117,24 @@ pub(super) fn protocol(
     identity: &BrokerIdentityViewV1,
     protocol: &KubernetesHeldCreateProtocolV1,
 ) -> ClientResult<()> {
+    let mut operations = vec![
+        KubernetesHeldCreateOperationV1::Reserve,
+        KubernetesHeldCreateOperationV1::Claim,
+        KubernetesHeldCreateOperationV1::ObserveClaim,
+        KubernetesHeldCreateOperationV1::Result,
+        KubernetesHeldCreateOperationV1::Cancel,
+    ];
+    if protocol.schema_version == 13 {
+        operations.extend([
+            KubernetesHeldCreateOperationV1::Recover,
+            KubernetesHeldCreateOperationV1::ObserveRecovery,
+        ]);
+    }
     require(
         identity.version == 1
-            && [9, 10, 11, 12].contains(&identity.schema_version)
+            && [9, 10, 11, 12, 13].contains(&identity.schema_version)
             && protocol.version == 1
-            && [9, 10, 11, 12].contains(&protocol.schema_version)
+            && [9, 10, 11, 12, 13].contains(&protocol.schema_version)
             && identity.schema_version == protocol.schema_version
             && revision(identity.binding_revision)
             && revision(identity.grant_revision),
@@ -64,14 +154,7 @@ pub(super) fn protocol(
             && protocol.incarnation_id == identity.incarnation_id
             && protocol.binding_revision == identity.binding_revision
             && protocol.grant_revision == identity.grant_revision
-            && protocol.operations
-                == vec![
-                    KubernetesHeldCreateOperationV1::Reserve,
-                    KubernetesHeldCreateOperationV1::Claim,
-                    KubernetesHeldCreateOperationV1::ObserveClaim,
-                    KubernetesHeldCreateOperationV1::Result,
-                    KubernetesHeldCreateOperationV1::Cancel,
-                ],
+            && protocol.operations == operations,
     )
 }
 fn window(window: &KubernetesCreateEmissionWindowV1) -> ClientResult<()> {
@@ -426,6 +509,19 @@ mod schema11_compatibility_tests {
             binding_revision: 1,
             grant_revision: 2,
         };
+        let mut operations = vec![
+            KubernetesHeldCreateOperationV1::Reserve,
+            KubernetesHeldCreateOperationV1::Claim,
+            KubernetesHeldCreateOperationV1::ObserveClaim,
+            KubernetesHeldCreateOperationV1::Result,
+            KubernetesHeldCreateOperationV1::Cancel,
+        ];
+        if schema_version == 13 {
+            operations.extend([
+                KubernetesHeldCreateOperationV1::Recover,
+                KubernetesHeldCreateOperationV1::ObserveRecovery,
+            ]);
+        }
         let protocol = KubernetesHeldCreateProtocolV1 {
             version: 1,
             schema_version,
@@ -436,24 +532,18 @@ mod schema11_compatibility_tests {
             binding_revision: identity.binding_revision,
             grant_revision: identity.grant_revision,
             admission_policy_configured: false,
-            operations: vec![
-                KubernetesHeldCreateOperationV1::Reserve,
-                KubernetesHeldCreateOperationV1::Claim,
-                KubernetesHeldCreateOperationV1::ObserveClaim,
-                KubernetesHeldCreateOperationV1::Result,
-                KubernetesHeldCreateOperationV1::Cancel,
-            ],
+            operations,
         };
         (scope, identity, protocol)
     }
 
     #[test]
     fn schema11_accepts_only_matching_supported_held_create_v1_negotiation() {
-        for schema_version in [9, 10, 11, 12] {
+        for schema_version in [9, 10, 11, 12, 13] {
             let (scope, identity, view) = negotiation(schema_version);
             assert_eq!(protocol(&scope, &identity, &view), Ok(()));
         }
-        for schema_version in [0, 8, 13, u32::MAX] {
+        for schema_version in [0, 8, 14, u32::MAX] {
             let (scope, identity, view) = negotiation(schema_version);
             assert_eq!(
                 protocol(&scope, &identity, &view),

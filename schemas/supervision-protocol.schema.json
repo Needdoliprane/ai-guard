@@ -7,7 +7,7 @@
   "required": ["version", "schema_version", "control_namespace_uuid", "tenant_id", "role", "protocols", "active"],
   "properties": {
     "version": {"const": 1},
-    "schema_version": {"enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
+    "schema_version": {"enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]},
     "control_namespace_uuid": {
       "oneOf": [
         {"type": "null"},
@@ -24,7 +24,7 @@
       "if": {"properties": {"active": {"const": true}}, "required": ["active"]},
       "then": {
         "properties": {
-          "schema_version": {"enum": [3, 4, 5, 6, 7, 8, 9, 10]},
+          "schema_version": {"enum": [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]},
           "control_namespace_uuid": {"type": "string"},
           "protocols": {"const": ["broker_supervision_v1"]}
         }

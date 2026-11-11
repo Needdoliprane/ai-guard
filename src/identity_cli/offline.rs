@@ -14,6 +14,14 @@ use uuid::Uuid;
 const MAX_RECOVERY: u64 = 262_144;
 const MAX_CREDENTIAL: u64 = 128;
 
+#[cfg(test)]
+#[path = "schema13_offline_baseline_tests.rs"]
+mod schema13_offline_baseline_tests;
+
+#[cfg(test)]
+#[path = "schema13_offline_tests.rs"]
+mod schema13_offline_tests;
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Recovery {
@@ -94,8 +102,8 @@ fn open(args: &OfflineArgs) -> Result<OfflineStore> {
     );
     let state = store.supervision_state()?;
     ensure!(
-        matches!(state.schema_version, 4..=12) && !state.active,
-        "offline identity maintenance requires an existing validated schema4, schema5, schema6, schema7, schema8, schema9, schema10 or schema11 database and inactive supervision; migrate explicitly with controls stopped"
+        matches!(state.schema_version, 4..=13) && !state.active,
+        "offline identity maintenance requires an existing validated schema4 through schema13 database and inactive supervision; migrate explicitly with controls stopped"
     );
     let namespace = state
         .control_namespace_uuid
@@ -230,7 +238,10 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .capabilities
             .iter()
             .any(|cap| matches!(cap, super::Capability::ReadWorkerRegistry))
-            || matches!(control.store.supervision_state()?.schema_version, 10 | 11),
+            || matches!(
+                control.store.supervision_state()?.schema_version,
+                10 | 11 | 12 | 13
+            ),
         "read-worker-registry requires explicit migration9→10 before preparing a local identity"
     );
     ensure!(
@@ -240,7 +251,7 @@ pub(super) fn provision(args: ProvisionArgs) -> Result<()> {
             .any(|cap| matches!(cap, super::Capability::ReadBrokerRegistry))
             || matches!(
                 control.store.supervision_state()?.schema_version,
-                7 | 8 | 9 | 10 | 11
+                7 | 8 | 9 | 10 | 11 | 12 | 13
             ),
         "read-broker-registry requires explicit migration6→7 before preparing a local identity"
     );

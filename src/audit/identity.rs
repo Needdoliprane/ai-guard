@@ -168,7 +168,7 @@ fn conflict(ok: bool) -> anyhow::Result<()> {
 }
 pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -176,7 +176,7 @@ pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
 }
 pub(super) fn require_human_access(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -550,7 +550,7 @@ pub(super) fn validate_human_access_capability(
     db: &Connection,
     version: i64,
 ) -> anyhow::Result<()> {
-    if [5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         human_access_genesis(db)?;
     } else {
         let forbidden:bool = db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE kind IN ('control.identity.access','control.identity.human_access.genesis'))",[],|r|r.get(0))?;
@@ -562,7 +562,7 @@ pub(super) fn validate_human_access_capability(
 /// Full replay is an integrity/startup operation, never a human read query.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![4, 5, 6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         return Ok(());
     }
     let genesis = genesis(db)?;
@@ -587,7 +587,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         if stored.event.kind == "control.identity.human_access.genesis" {
             let (expected, marker) = human_access_genesis(db)?;
             invalid(
-                [5, 6, 7, 8, 9, 10, 11, 12].contains(&version)
+                [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)
                     && seen_genesis
                     && !seen_human_access
                     && stored.seq == expected.seq
@@ -599,7 +599,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == "control.identity.access" {
             invalid(
-                [5, 6, 7, 8, 9, 10, 11, 12].contains(&version)
+                [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)
                     && seen_genesis
                     && seen_human_access
                     && stored.event.source == "gateway"
@@ -634,7 +634,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         if stored.event.kind == super::human_brokers::GENESIS_KIND {
             let (expected, revision) = super::human_brokers::genesis(db)?;
             invalid(
-                [7, 8, 9, 10, 11, 12].contains(&version)
+                [7, 8, 9, 10, 11, 12, 13].contains(&version)
                     && seen_human_access
                     && !seen_broker_access
                     && stored.seq == expected.seq
@@ -646,7 +646,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == super::human_brokers::READ_KIND {
             invalid(
-                [7, 8, 9, 10, 11, 12].contains(&version)
+                [7, 8, 9, 10, 11, 12, 13].contains(&version)
                     && seen_broker_access
                     && stored.event.source == "gateway"
                     && stored.event.provenance == "observed"
@@ -677,7 +677,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         if stored.event.kind == super::human_workers::GENESIS_KIND {
             let (expected, revision) = super::human_workers::genesis(db)?;
             invalid(
-                matches!(version, 10 | 11 | 12)
+                matches!(version, 10 | 11 | 12 | 13)
                     && seen_human_access
                     && seen_broker_access
                     && !seen_worker_access
@@ -690,7 +690,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         if stored.event.kind == super::human_workers::READ_KIND {
             invalid(
-                matches!(version, 10 | 11 | 12)
+                matches!(version, 10 | 11 | 12 | 13)
                     && seen_worker_access
                     && stored.event.source == "gateway"
                     && stored.event.provenance == "observed"
@@ -734,9 +734,9 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         invalid(record.authorization_revision == projection.revision)?;
     }
     invalid(seen_genesis)?;
-    invalid(([5, 6, 7, 8, 9, 10, 11, 12].contains(&version)) == seen_human_access)?;
-    invalid(([7, 8, 9, 10, 11, 12].contains(&version)) == seen_broker_access)?;
-    invalid((matches!(version, 10 | 11 | 12)) == seen_worker_access)?;
+    invalid(([5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)) == seen_human_access)?;
+    invalid(([7, 8, 9, 10, 11, 12, 13].contains(&version)) == seen_broker_access)?;
+    invalid((matches!(version, 10 | 11 | 12 | 13)) == seen_worker_access)?;
     let mut expected = projection.rows(&genesis)?;
     for (table, query) in QUERIES {
         let mut statement = db.prepare(query)?;
@@ -995,11 +995,11 @@ impl Store {
         for mutation in &provision.mutations {
             super::human_brokers::require_mutation_capability(
                 mutation,
-                [7, 8, 9, 10, 11, 12].contains(&version),
+                [7, 8, 9, 10, 11, 12, 13].contains(&version),
             )?;
             super::human_workers::require_mutation_capability(
                 mutation,
-                matches!(version, 10 | 11 | 12),
+                matches!(version, 10 | 11 | 12 | 13),
             )?;
         }
         let existing = provision
@@ -1027,11 +1027,11 @@ impl Store {
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         super::human_brokers::require_mutation_capability(
             mutation,
-            [7, 8, 9, 10, 11, 12].contains(&version),
+            [7, 8, 9, 10, 11, 12, 13].contains(&version),
         )?;
         super::human_workers::require_mutation_capability(
             mutation,
-            matches!(version, 10 | 11 | 12),
+            matches!(version, 10 | 11 | 12 | 13),
         )?;
         let value = serde_json::to_value(mutation)?;
         invalid(self.redactor.value(&value) == value)?;

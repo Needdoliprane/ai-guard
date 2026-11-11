@@ -10,6 +10,8 @@ pub enum KubernetesHeldCreateOperationV1 {
     ObserveClaim,
     Result,
     Cancel,
+    Recover,
+    ObserveRecovery,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -267,7 +267,7 @@ impl AuditClient {
         {
             return Err(Error::Forbidden);
         }
-        check([6, 7, 8, 9, 10, 11, 12].contains(&identity.schema_version))?;
+        check([6, 7, 8, 9, 10, 11, 12, 13].contains(&identity.schema_version))?;
         self.validate_identity_payload(request)
             .map_err(|_| Error::InvalidRequest)?;
         let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
@@ -346,7 +346,7 @@ impl AuditClient {
         {
             return Err(Error::Forbidden);
         }
-        check([6, 7, 8, 9, 10, 11, 12].contains(&identity.schema_version))
+        check([6, 7, 8, 9, 10, 11, 12, 13].contains(&identity.schema_version))
     }
     async fn relay_channel_post(
         &self,

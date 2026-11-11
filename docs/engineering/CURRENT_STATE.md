@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 20:33 UTC — reprise Kubernetes stricte : cinq parents r8 PASS
+
+Le gel public `3145315` + 54 postimages Kubernetes (2 497 fichiers, source SHA-256 `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7`) obtient cinq parents logiciels PASS, les quatre listes et le build des artefacts, puis `cargo check --all-targets` PASS. Reprise V3 limitée à l'état initial exact avant émission, preuve courante ou successeur du même broker stable, transaction audit/état/quota et GET sans mutation ; migration 12 → 13 explicite, sans activation runtime.
+
+Les quatre PASS r5 et treize PASS r6 restent liés à leurs deux sources antérieures : aucun total de 22 PASS n'est attribué au gel courant. Échecs et corrections de fixtures conservés. [Preuves et limites](evidence/2026-11-11/kubernetes-recovery-integration/README.md). Aucun gate global fermé ; Docker/Podman métier, cluster Kubernetes, Full3 privé, fournisseurs, macOS natif, charge, restauration et egress non qualifiés par ce lot.
+
 ## 11 novembre, 18:00 UTC — sources build/Compose : 14 parents logiciels PASS
 
 Le gel public `1dc676b` composé avec les 25 postimages D passe quatorze parents exacts et le check toutes cibles. Copie privée, contenu figé après préparation, cycle du consommateur, arrêt inconnu et messages de reprise sont exercés avec de vrais fichiers et des processus Rust synthétiques. La régression R1 complète est inchangée ; les chemins effectifs et la provenance JSON sont préservés.

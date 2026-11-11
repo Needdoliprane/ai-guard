@@ -105,7 +105,7 @@ pub(super) fn validate_pending(p: &PreparedPresence, pending: &Pending) -> Resul
         .map_err(|_| PresenceError::UnsafeState)?;
     if pending.version != 1
         || identity.version != 1
-        || identity.schema_version != 12
+        || !matches!(identity.schema_version, 12 | 13)
         || identity.tenant_id != p.scope.expected_tenant_id
         || identity.control_namespace_uuid != p.scope.control_namespace_uuid.to_string()
         || identity.broker_id != p.config.broker_id

@@ -111,6 +111,77 @@ pub struct KubernetesCreateCancelV1 {
     pub expected_create_epoch: u64,
 }
 
+/// A request to close one proven initial reservation. This descriptive value
+/// is neither a capability nor permission to create or contact a runtime.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesCreateRecoveryV3 {
+    pub version: u32,
+    pub operation_id: String,
+    pub create_id: String,
+    pub intent_hash: String,
+    pub expected_revision: u64,
+    pub expected_create_epoch: u64,
+}
+impl KubernetesCreateRecoveryV3 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let valid = self.version == 3
+            && self.expected_revision == 1
+            && self.expected_create_epoch == 1
+            && self.operation_id != self.create_id;
+        if !valid {
+            return Err(KubernetesCreateFailureV1::InvalidRequest.into());
+        }
+        for id in [&self.operation_id, &self.create_id] {
+            let parsed =
+                uuid::Uuid::parse_str(id).map_err(|_| KubernetesCreateFailureV1::InvalidRequest)?;
+            if parsed.is_nil() || parsed.to_string() != *id {
+                return Err(KubernetesCreateFailureV1::InvalidRequest.into());
+            }
+        }
+        crate::control::hash(&self.intent_hash)
+            .map_err(|_| KubernetesCreateFailureV1::InvalidRequest)?;
+        Ok(())
+    }
+
+    pub fn input_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        crate::control::content_hash(
+            "ai-guard:kubernetes-create-recovery:v3",
+            &(
+                self.version,
+                &self.operation_id,
+                &self.create_id,
+                &self.intent_hash,
+                self.expected_revision,
+                self.expected_create_epoch,
+            ),
+        )
+    }
+
+    /// Snapshot compatibility only; this never constructs a V1 authorization.
+    pub(crate) fn descriptive_cancel(&self) -> KubernetesCreateCancelV1 {
+        KubernetesCreateCancelV1 {
+            version: 1,
+            operation_id: self.operation_id.clone(),
+            create_id: self.create_id.clone(),
+            intent_hash: self.intent_hash.clone(),
+            expected_revision: self.expected_revision,
+            expected_create_epoch: self.expected_create_epoch,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct KubernetesCreateRecoveryResultV3 {
+    pub version: u32,
+    pub recovery: KubernetesCreateRecoveryV3,
+    pub receipt: KubernetesCreateReceiptV1,
+    pub snapshot: KubernetesCreateSnapshotV1,
+    pub replayed: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct KubernetesCreateEmissionWindowV1 {
@@ -262,4 +333,5 @@ opaque_debug!(
     KubernetesCreateResultV1,
     KubernetesCreateSnapshotV1,
     KubernetesCreateClaimResponseV1,
+    KubernetesCreateRecoveryResultV3,
 );

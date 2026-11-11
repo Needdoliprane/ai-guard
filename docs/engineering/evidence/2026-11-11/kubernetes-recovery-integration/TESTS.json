@@ -1,0 +1,429 @@
+{
+  "formatVersion": 1,
+  "observedAt": "2026-11-11T20:33:12.730Z",
+  "status": "SCOPED_SOFTWARE_PASS",
+  "scope": {
+    "currentSourceSha256": "0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7",
+    "currentContentManifestSha256": "0701956fd901908f811c50b7ab79a868aa70ac979206a4f7c14aec51f648d887",
+    "currentSourceFiles": 2497,
+    "currentParentsExecuted": 5,
+    "currentParentsPassed": 5,
+    "wholeCheckoutQualified": false,
+    "qualificationGateClosed": false,
+    "rawLogsPublished": false
+  },
+  "qa": {
+    "platform": "Linux aarch64 isolated software QA",
+    "toolImageSha256": "2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "rust": "1.99.1",
+    "network": "none",
+    "uid": 1000,
+    "rootFilesystem": "read-only",
+    "capabilities": "ALL dropped",
+    "noNewPrivileges": true,
+    "seccomp": 2,
+    "cpuLimit": 4,
+    "memoryLimitGiB": 9,
+    "swapLimit": 0,
+    "pidLimit": 128,
+    "scratchTmpfsGiB": 4,
+    "offline": true,
+    "cargoJobs": 1,
+    "scopeNote": "Docker is the software QA sandbox here; no product Docker/Podman/Kubernetes runtime path is qualified by this run."
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "test",
+      "--frozen",
+      "--offline",
+      "--lib",
+      "--bin",
+      "agentsandbox",
+      "--test",
+      "schema13_protocol_contract",
+      "--test",
+      "kubernetes_held_create_recovery_api",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "status": "PASS",
+    "finishedSuccess": true,
+    "timeoutSeconds": 1200,
+    "rc": 0,
+    "stdoutSha256": "aced103f721111aa6d71c987b747ef9e7bd3c6d808dd4a8551ed2e1151790834",
+    "stderrSha256": "b9aa445a29cfe972312d8c501c6ed0f0a0a464041c22cccba0cbf84397eb013f"
+  },
+  "artifactLists": [
+    {
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "rc": 0,
+      "stdoutSha256": "b32e2ddfb3a96d3d7e66325c24e2f28b6567d2fc3389fc83b4b4579758ee2ed1",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "target": {
+        "kind": "bin",
+        "name": "agentsandbox"
+      },
+      "rc": 0,
+      "stdoutSha256": "92619234d1625085ff83f22431e021aec3adf6c3f77e757bbf916de322ff057e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "target": {
+        "kind": "integration",
+        "name": "schema13_protocol_contract"
+      },
+      "rc": 0,
+      "stdoutSha256": "81688d8bcf59f95d6fcadff58a576946f59c5ec7acb2f42eaf793d20490de741",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "target": {
+        "kind": "integration",
+        "name": "kubernetes_held_create_recovery_api"
+      },
+      "rc": 0,
+      "stdoutSha256": "82f2e8d42099f73c72cc7cc33262b69a9251aff66fa7717b1f983df872c40305",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "parents": [
+    {
+      "index": 1,
+      "name": "broker::held_create_client::recovery_tests::recovery_rejects_other_stable_broker_authority_tenant_and_expired_actor",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "source": "src/broker/held_create_recovery_tests.rs",
+      "line": 601,
+      "sourceSha256": "8bd87f789c9ca623c28e3b838e03e4e65d65143c20b2f7cfceac518c8c960928",
+      "status": "PASS",
+      "rc": 0,
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "stdoutSha256": "0b89836d1576defcfe839592ae6000523f80e5d34d97e802c4b06fd06eed9d69",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeoutSeconds": 60
+    },
+    {
+      "index": 2,
+      "name": "broker::held_create_client::recovery_tests::recovery_client_validates_entire_descriptive_result_without_relaxing_legacy_intent",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "source": "src/broker/held_create_recovery_tests.rs",
+      "line": 749,
+      "sourceSha256": "8bd87f789c9ca623c28e3b838e03e4e65d65143c20b2f7cfceac518c8c960928",
+      "status": "PASS",
+      "rc": 0,
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "stdoutSha256": "951b4098a61884c3aa7e3a0608cfc79d34fe7152646597475141d47df2622dee",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeoutSeconds": 60
+    },
+    {
+      "index": 3,
+      "name": "broker::held_create_client::recovery_tests::recovery_client_reuses_exact_operation_after_a_real_commit_loses_its_ack",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "source": "src/broker/held_create_recovery_tests.rs",
+      "line": 879,
+      "sourceSha256": "8bd87f789c9ca623c28e3b838e03e4e65d65143c20b2f7cfceac518c8c960928",
+      "status": "PASS",
+      "rc": 0,
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "stdoutSha256": "67283fd6c373696d070e76171b5e54139a17f61a2906a3f9e244532f7efb8279",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeoutSeconds": 60
+    },
+    {
+      "index": 4,
+      "name": "broker::held_create_client::recovery_tests::recovery_client_refuses_an_altered_real_http_result_and_keeps_lookup_read_only",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "source": "src/broker/held_create_recovery_tests.rs",
+      "line": 920,
+      "sourceSha256": "8bd87f789c9ca623c28e3b838e03e4e65d65143c20b2f7cfceac518c8c960928",
+      "status": "PASS",
+      "rc": 0,
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "stdoutSha256": "cff079da8f33292f2e8cc526e82c42462c0552e1332758b4fd55bc9b2e66812e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeoutSeconds": 60
+    },
+    {
+      "index": 5,
+      "name": "authenticated_worker_cannot_mutate_or_read_broker_recovery",
+      "target": {
+        "kind": "integration",
+        "name": "kubernetes_held_create_recovery_api"
+      },
+      "source": "tests/kubernetes_held_create_recovery_api.rs",
+      "line": 60,
+      "sourceSha256": "f7eaabe7c06cf1eefc388d77e5628ae9ad491f18a27c667e9e14743f54048c0e",
+      "status": "PASS",
+      "rc": 0,
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      "stdoutSha256": "35b85b86049e0c2f0892aceb6c93f24295756d3df38857f49fd3320343d4a5df",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "timeoutSeconds": 60
+    }
+  ],
+  "checkAllTargets": {
+    "command": [
+      "cargo",
+      "check",
+      "--frozen",
+      "--offline",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "status": "PASS",
+    "finishedSuccess": true,
+    "timeoutSeconds": 900,
+    "rc": 0,
+    "stdoutSha256": "71ef09295d96148acca9ac8d39b5c7270d0216160729c761a5c72291f6a1c396",
+    "stderrSha256": "db094cb1262b3b24b7ff69e742800ba5a72e974d760bfddd38c1a93bc3172451"
+  },
+  "historicalEvidenceNotTransferred": [
+    {
+      "run": "r5",
+      "sourceSha256": "d6d3b711d84f6a74258c4920d884aee5e327d183c210d999e94dae514b004e99",
+      "sourceFiles": 2478,
+      "publicBase": "1dc676b103249171d584385060e3de3fedeea4bf",
+      "passed": 4,
+      "status": "HISTORICAL_PASS_ON_R5_ONLY",
+      "scope": "Schema13 migration, retained backups, schema12 checkpoint receipts and federation read baseline",
+      "parents": [
+        {
+          "name": "audit::broker_checkpoint_migration_tests::schema13_compat_tests::a_declared_schema13_without_its_recovery_marker_is_not_adopted_or_repaired",
+          "status": "HISTORICAL_PASS_ON_R5_ONLY",
+          "stdoutSha256": "6a296deb4d43388e8e31a6714c52dccdcde9a9f9742f1a4054cc4ab21896ca70",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "audit::broker_checkpoint_migration_tests::schema13_compat_tests::schema13_refuses_a_skipped_source_and_a_retained_backup_without_replacing_it",
+          "status": "HISTORICAL_PASS_ON_R5_ONLY",
+          "stdoutSha256": "5e1a3a5871d8e340f47e940309af693a3801d8c85b9ca85c0e742728898383c6",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "audit::broker_checkpoint_migration_tests::schema13_compat_tests::schema12_checkpoint_receipt_replays_exactly_after_real_schema13_migration",
+          "status": "HISTORICAL_PASS_ON_R5_ONLY",
+          "stdoutSha256": "0c507a5ea7c474e31c7d1bf1e4e13473cb7bd4b82f7e4f6c7677c9adcdd8aec6",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "audit::broker_checkpoint_migration_tests::schema13_read_baseline_tests::schema12_federation_read_keeps_the_registry_available_after_checkpoint_migration",
+          "status": "HISTORICAL_PASS_ON_R5_ONLY",
+          "stdoutSha256": "13a4708cf682d88003e77f63fbdd96099a8f6909b21d3b725ab999f5ed1ba8dc",
+          "stderrSha256": "0f0f52f6f2b6c36172d325841b6a4eecef4b0208dab84e90355347a4ddbdbe89"
+        }
+      ]
+    },
+    {
+      "run": "r6",
+      "sourceSha256": "9fde5e90a2e76d1d7b30b10d31e4d8e56932a9aa798a54254104fee98c0007f0",
+      "sourceFiles": 2478,
+      "publicBase": "1dc676b103249171d584385060e3de3fedeea4bf",
+      "passed": 13,
+      "status": "HISTORICAL_PASS_ON_R6_ONLY",
+      "scope": "Pending schema12/13 compatibility, offline provisioning, protocol, held-CREATE recovery and HTTP authorization",
+      "parents": [
+        {
+          "name": "broker::presence::checkpoint_publisher::schema13_checkpoint_tests::pending12_can_finish_after_schema13_without_rewriting_its_identity_or_input",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "aaea58763568d4e1a7df41330dbb9eb94ad7061eb0e6fba0c342a157e4b772c9",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "broker::presence::checkpoint_publisher::schema13_checkpoint_tests::pending_identity_downgrade_binding_or_grant_drift_is_refused_without_stream_writes",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "7f48bbf2d22fff185916a15d5a5953bd79a6fb814baaaedf8aa04a369d25c959",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "identity_cli::offline::schema13_offline_baseline_tests::schema12_offline_provisioning_preserves_both_inherited_registry_permissions",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "fe7ab3592c07a14edb7175df1b4f68b026b1fc6c8c69cd3ab80a50e36394bf1e",
+          "stderrSha256": "1bc9ba51f9b439b0d30ef5f8e242561247348bf6877e86a7350c0e7de157e774"
+        },
+        {
+          "name": "identity_cli::offline::schema13_offline_baseline_tests::schema12_offline_broker_only_provisioning_reaches_its_own_registry_guard",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "9ec4ef8690096ba6e621fa800d7d7ec3d27c4773e949255aec0316cbc6d9be16",
+          "stderrSha256": "e211beb15d63c85d4e70d8aa8ade6a1697bd425ac364e6dc4fbf1f66f70bc993"
+        },
+        {
+          "name": "identity_cli::offline::schema13_offline_tests::schema13_local_registry_identity_authenticates_and_replays_without_rotating_or_appending",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "9337e94acd26b1ef4f0ea5f8133959e68a3a7e209ddbcb78a6af462e9fe2e001",
+          "stderrSha256": "5f361a17ffef61abf6001ac45fa83267a0df1bc68454b903652dfb77287d0a94"
+        },
+        {
+          "name": "cli_schema13_and_the_served_protocol_keep_the_same_inactive_namespace",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "abe14147c53a2fc08c566cb100547d5ae5f645da39f3292e6e51536e6b043cb0",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "audit::kubernetes_admission::schema12_tests::schema_and_scope_refusals_preserve_audit_and_quota_across_real_migrations",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "00fe8bcd7c8b9d56b584740b7abc4eae13235c4e7b86144cbc4e5e9b7e011e50",
+          "stderrSha256": "c6d72013cad1c4833b98ae442a6855af7205a8fece2b76d7de3bc328d1c71142"
+        },
+        {
+          "name": "audit::kubernetes_admission::schema12_tests::schema12_v2_admission_reserves_once_and_reopens_its_exact_audit",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "8545152244635b543cac08cfb8cb8995d9483e3ff34fbe034dd1246c92da5fdb",
+          "stderrSha256": "a77c0bfbe2d7f4693b63fa2797f61aa9829ac961092319b491ab52e96cda2033"
+        },
+        {
+          "name": "audit::kubernetes_admission::schema12_tests::schema12_v2_reconcile_cancels_migrated_v1_reservation_without_activation",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "f52d10e39ea174bd8173dde1997f535c1fa02397ede6b05b988153b74113d11d",
+          "stderrSha256": "ffbcf9b282438c77b7efe3b12f6cde458442e9ae45631082ab740bef96dc0b1c"
+        },
+        {
+          "name": "tests::migration_cli_accepts_12_and_preserves_default_and_upper_bound",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "a64e4f3373d4a98000ceeb41c425007e1557a31445529776b5dec4f4dc9e1cd9",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "broker::held_create_client::recovery_tests::recovery_successor_http_post_retry_and_get_keep_one_exact_close_and_legacy_scope",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "fc221f895e728169261f9255b1e190715676a25661eed6d35421a57cc745a8bb",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "broker::held_create_client::recovery_tests::recovery_http_is_closed_scoped_and_get_never_mutates",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "a4fb610ef2d105fe917509719820822ba221b3150952e7d77bf235ed707cfffe",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "broker::held_create_client::recovery_tests::recovery_current_auth_is_rechecked_before_existing_receipt_lookup",
+          "status": "HISTORICAL_PASS_ON_R6_ONLY",
+          "stdoutSha256": "a627e13e131b3f0a9ebefe7830c34e8ca5a4f95b5e04933734842af500373231",
+          "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      ]
+    }
+  ],
+  "failureHistory": [
+    {
+      "run": "r3",
+      "sourceSha256": "a95f4240c89f4fd9b436d518d1d126ec10578353991378d00870e0182aedc536",
+      "status": "FAIL_BUILD",
+      "rc": 101,
+      "testsExecuted": 0,
+      "cause": "Integration test accessed pub(crate) API; corrected only the test through public HTTP behavior."
+    },
+    {
+      "run": "r4",
+      "sourceSha256": "0a64cc9d3bb5f8cec6bb19b14469f4f9ff97db84a4e5226adedaca43af8a8641",
+      "status": "FAIL_BUILD",
+      "rc": 101,
+      "testsExecuted": 0,
+      "cause": "Test unwrap_err required Debug on the success DTO; assertion changed to the same typed error match."
+    },
+    {
+      "run": "r5",
+      "sourceSha256": "d6d3b711d84f6a74258c4920d884aee5e327d183c210d999e94dae514b004e99",
+      "status": "FAIL_AFTER_FOUR_PASS",
+      "rc": 101,
+      "cause": "Pending-checkpoint fixture lease30 violated the existing interval30 guard requiring at least60; lease and checkpoint expiration fixture values corrected."
+    },
+    {
+      "run": "r6",
+      "sourceSha256": "9fde5e90a2e76d1d7b30b10d31e4d8e56932a9aa798a54254104fee98c0007f0",
+      "status": "FAIL_AFTER_THIRTEEN_PASS",
+      "rc": 101,
+      "cause": "Different stable-broker fixture attempted to reuse an authority historically owned by the original broker; test setup now uses its own authority before checking denial."
+    },
+    {
+      "run": "r7",
+      "sourceSha256": "756034bc087870290a3fe7b25901319826f27ed95c794dc3d152186d12c599bd",
+      "status": "FAIL_BUILD",
+      "rc": 101,
+      "testsExecuted": 0,
+      "cause": "Test assertion compared String with Uuid; one canonical to_string operand corrected, no production change."
+    }
+  ],
+  "independentReviews": [
+    {
+      "scope": "D314 composition and other-stable-broker fixture correction",
+      "markdownSha256": "65f1500c372410825b97e9801f1e020feb80a87230f56bf2e147035ce537b7ee",
+      "jsonSha256": "b2ead818dae6bf3ed1f621f8ba2cc6d1296b30e990beec5250b9a66922fef309"
+    },
+    {
+      "scope": "String/Uuid assertion correction; prior type-check miss retained in review history",
+      "markdownSha256": "aba9d38c57377aeea579a1a8b64328ffed212c933fe9983a3398db85f220ee86",
+      "jsonSha256": "c261d7ed984d9e5f3affdb19983a3e353ba2663686ce77e31dbcc39c85f5bd3c"
+    }
+  ],
+  "sourceObservation": {
+    "inputArchiveSha256": "0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7",
+    "liveExportArchiveSha256": "a3b0d5e97a499120d90e9d80158cba90d92e096376e46b448f6eed9ac9d27044",
+    "contentManifestSha256": "0701956fd901908f811c50b7ab79a868aa70ac979206a4f7c14aec51f648d887",
+    "files": 2497,
+    "directories": 321,
+    "contentExact": true,
+    "exportBeforeHolderStop": true
+  },
+  "qaClosure": {
+    "rc": 0,
+    "oomEvents": 0,
+    "oomKillEvents": 0,
+    "holderOomKilled": false,
+    "exactResourceRemoved": true,
+    "memoryCurrentBytes": 2210467840,
+    "memoryPeakBytes": 6983442432,
+    "memoryScope": "QA compilation/source tmpfs cgroup; not worker usage, latency or capacity qualification"
+  },
+  "notRunOrOpen": [
+    "Product Docker runtime execution",
+    "Product Podman runtime execution",
+    "Real Kubernetes cluster, Pod creation/release and runtime recovery",
+    "Private Full3 integration and historical private Core10 source composition",
+    "Provider CLI/API calls",
+    "Native macOS execution",
+    "100-worker capacity",
+    "Strict Clippy",
+    "Full repository test suite",
+    "Backup restoration and crash recovery on real deployment",
+    "Egress mediation qualification"
+  ],
+  "interpretation": "The 4 r5, 13 r6 and 5 r8 passes belong to three different source archives. They are not 22 passes on the current source. The historical D14 campaign is not transferred either."
+}

@@ -397,7 +397,7 @@ impl Projection {
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if [6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if [6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
     } else {
         Err(BrokerRegistryFailureV1::MigrationRequired.into())
@@ -458,7 +458,7 @@ fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(
@@ -503,7 +503,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         }
         require(seen_genesis)?;
         let record: Record = serde_json::from_value(stored.event.data.clone())?;
-        require(!matches!(record.change, Change::Checkpoint { .. }) || version == 12)?;
+        require(!matches!(record.change, Change::Checkpoint { .. }) || matches!(version, 12 | 13))?;
         require(
             stored.event.kind == record.change.kind()
                 && parse_time(&record.received_at)? <= parse_time(&stored.received_at)?,
@@ -720,7 +720,9 @@ impl Store {
         view: &BrokerIdentityViewV1,
         heartbeat: &BrokerHeartbeatV1,
     ) -> anyhow::Result<String> {
-        require(view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12))?;
+        require(
+            view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13),
+        )?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [
             &view.control_namespace_uuid,

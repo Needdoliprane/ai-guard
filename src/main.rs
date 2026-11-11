@@ -78,8 +78,8 @@ enum Command {
         tenant_id: String,
         #[arg(long)]
         backup: PathBuf,
-        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workloads), 7 (human broker registry reads), 8 (held Kubernetes creates), 9 (held-create policy marker), 10 (human worker registry reads), 11 (effect-free Kubernetes session reservations), 12 (broker checkpoint records).
-        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=12))]
+        /// Exact next schema version: 2 (control), 3 (supervision), 4 (identity), 5 (human read audit), 6 (workloads), 7 (human broker registry reads), 8 (held Kubernetes creates), 9 (held-create policy marker), 10 (human worker registry reads), 11 (effect-free Kubernetes session reservations), 12 (broker checkpoint records), 13 (control-only held-create recovery).
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(2..=13))]
         target_version: u32,
         /// Operator attestation: gateway and brokers are stopped; not runtime fencing.
         #[arg(long, required = true)]
@@ -878,6 +878,7 @@ async fn main() -> Result<()> {
                 10 => store.migrate_human_workers_v10(&backup)?,
                 11 => store.migrate_kubernetes_session_reservations_v11(&backup)?,
                 12 => store.migrate_broker_checkpoints_v12(&backup)?,
+                13 => store.migrate_kubernetes_recovery_v13(&backup)?,
                 _ => anyhow::bail!("unsupported migration target"),
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1125,7 +1126,7 @@ mod tests {
                 ..
             }
         ));
-        for target in ["11", "12"] {
+        for target in ["11", "12", "13"] {
             let parsed = Cli::try_parse_from(base.into_iter().chain(["--target-version", target]))
                 .expect("explicit supported migration target");
             let Command::MigrateControl { target_version, .. } = parsed.command else {
@@ -1133,7 +1134,7 @@ mod tests {
             };
             assert_eq!(target_version.to_string(), target);
         }
-        for unknown in ["1", "13", "4294967295"] {
+        for unknown in ["1", "14", "4294967295"] {
             assert!(
                 Cli::try_parse_from(base.into_iter().chain(["--target-version", unknown])).is_err()
             );

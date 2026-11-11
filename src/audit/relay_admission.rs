@@ -448,7 +448,7 @@ fn reconstruct(db: &Connection) -> anyhow::Result<Projection> {
         return Ok(Projection::default());
     }
     let schema: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    allowed([6, 7, 8, 9, 10, 11, 12].contains(&schema))?;
+    allowed([6, 7, 8, 9, 10, 11, 12, 13].contains(&schema))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],
@@ -574,7 +574,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if ![6, 7, 8, 9, 10, 11, 12].contains(&schema) {
+        if ![6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
             return Err(crate::control::ControlFailure::MigrationRequired.into());
         }
         // Required even on an absent admission: a foreign namespace is never
@@ -698,7 +698,7 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
         let tx = self.begin_checked(&mut db)?;
         let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![6, 7, 8, 9, 10, 11, 12].contains(&schema) {
+        if ![6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
             return Err(crate::control::ControlFailure::MigrationRequired.into());
         }
         let clock = super::workload::capture_control_time(&tx)?;

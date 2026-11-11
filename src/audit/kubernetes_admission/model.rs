@@ -37,10 +37,21 @@ impl IdentityEvidence {
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Change {
-    Reserve { intent: KubernetesCreateIntentV1 },
-    Claim { claim: KubernetesCreateClaimV1 },
-    Result { result: KubernetesCreateResultV1 },
-    Cancel { cancel: KubernetesCreateCancelV1 },
+    Reserve {
+        intent: KubernetesCreateIntentV1,
+    },
+    Claim {
+        claim: KubernetesCreateClaimV1,
+    },
+    Result {
+        result: KubernetesCreateResultV1,
+    },
+    Cancel {
+        cancel: KubernetesCreateCancelV1,
+    },
+    RecoverBeforeEmission {
+        recovery: KubernetesCreateRecoveryV3,
+    },
 }
 impl Change {
     pub fn operation_id(&self) -> &str {
@@ -49,6 +60,7 @@ impl Change {
             Self::Claim { claim } => &claim.operation_id,
             Self::Result { result } => &result.operation_id,
             Self::Cancel { cancel } => &cancel.operation_id,
+            Self::RecoverBeforeEmission { recovery } => &recovery.operation_id,
         }
     }
     pub fn create_id(&self) -> &str {
@@ -57,6 +69,7 @@ impl Change {
             Self::Claim { claim } => &claim.create_id,
             Self::Result { result } => &result.create_id,
             Self::Cancel { cancel } => &cancel.create_id,
+            Self::RecoverBeforeEmission { recovery } => &recovery.create_id,
         }
     }
     pub fn input_hash(&self) -> anyhow::Result<String> {
@@ -65,6 +78,7 @@ impl Change {
             Self::Claim { claim } => claim.input_hash(),
             Self::Result { result } => result.input_hash(),
             Self::Cancel { cancel } => cancel.input_hash(),
+            Self::RecoverBeforeEmission { recovery } => recovery.input_hash(),
         }
     }
     pub fn validate(&self) -> anyhow::Result<()> {
@@ -73,6 +87,7 @@ impl Change {
             Self::Claim { claim } => claim.validate(),
             Self::Result { result } => result.validate(),
             Self::Cancel { cancel } => cancel.validate(),
+            Self::RecoverBeforeEmission { recovery } => recovery.validate(),
         }
     }
     pub fn kind(&self) -> &'static str {
@@ -81,6 +96,9 @@ impl Change {
             Self::Claim { .. } => "control.kubernetes.create.emission_possible",
             Self::Result { .. } => "control.kubernetes.create.result",
             Self::Cancel { .. } => "control.kubernetes.create.cancelled",
+            Self::RecoverBeforeEmission { .. } => {
+                "control.kubernetes.create.recovered_before_emission"
+            }
         }
     }
     pub fn requires_active(&self) -> bool {
@@ -184,6 +202,11 @@ pub(super) fn transition(
             cancel.expected_create_epoch,
             &cancel.intent_hash,
         ),
+        Change::RecoverBeforeEmission { recovery } => (
+            recovery.expected_revision,
+            recovery.expected_create_epoch,
+            &recovery.intent_hash,
+        ),
         Change::Reserve { .. } => return Err(KubernetesCreateFailureV1::Conflict.into()),
     };
     conflict(&old.intent_hash == intent_hash)?;
@@ -271,6 +294,23 @@ pub(super) fn transition(
                     return Err(KubernetesCreateFailureV1::Conflict.into());
                 }
             }
+        }
+        Change::RecoverBeforeEmission { recovery } => {
+            // Equality to the deterministic initial post-state is stronger than
+            // a caller's assertion, timeout or absence of an observed Pod.
+            let initial = transition(
+                intent,
+                None,
+                &Change::Reserve {
+                    intent: intent.clone(),
+                },
+                None,
+            )?;
+            conflict(window.is_none() && *old == initial)?;
+            next.create_epoch = advance(old.create_epoch)?;
+            next.state = KubernetesCreateStateV1::CancelledBeforeEmission;
+            next.quota_held = false;
+            next.last_cancel = Some(recovery.descriptive_cancel());
         }
         Change::Reserve { .. } => return Err(KubernetesCreateFailureV1::Conflict.into()),
     }
