@@ -13,14 +13,36 @@ validate this broker owner or its real runtime handoff.
 
 | Item | Source observation | Required result | Current evidence |
 |---|---|---|---|
-| R1 — historical reconciliation | A reservation or possibly committed claim can retain an older local snapshot. Retirement then uses an incompatible state or stale CAS. Reopening conservatively avoids a second exec but does not complete retirement. | Reconcile exact durable identities and pending operations, choose a compatible transition at the confirmed revision, preserve unknown outcomes without new execution authority. | Source review only. Existing `CancelReserved`/terminal transitions and a bounded historical read are being implemented and tested separately. |
-| R2 — faithful reconciliation status | Retirement clears an error before close acknowledgement. A refused/lost close can appear as ordinary waiting with `reconciliation_required=false`. Publication in memory can also precede durable save. | Keep a truthful pending/unknown state until durable compatible acknowledgement; a failed save must not publish completion in memory. | Four synthetic unit regressions prepared, including real temporary journal files. Baseline execution pending; no FIX pass claimed. |
+| R1 — historical reconciliation | A reservation or possibly committed claim can retain an older local snapshot. Retirement then uses an incompatible state or stale CAS. Reopening conservatively avoids a second exec but does not complete retirement. | Reconcile exact durable identities and pending operations, choose a compatible transition at the confirmed revision, preserve unknown outcomes without new execution authority. | The absent historical route is reproduced by one HTTP404-versus-200 test after a real reserved-channel positive control. The new read/SDK and broker consumption remain separate implementation and validation work. |
+| R2 — faithful reconciliation status | Retirement clears an error before close acknowledgement. A refused/lost close can appear as ordinary waiting with `reconciliation_required=false`. Publication in memory can also precede durable save. | Keep a truthful pending/unknown state until durable compatible acknowledgement; a failed save must not publish completion in memory. | Three exact unit RED results establish the status, error-retention and acknowledgement defects. The corrected journal case now separately reproduces the missing terminal compatibility after valid positive controls. The candidate includes two additional asynchronous IO regressions; independent review and GREEN remain open. |
 
 The source review found no demonstrated unauthorized execution or cross-tenant
 disclosure in this scope. Its runtime consequences are NOT_RUN. Four principal
 sources and their immediate dependencies were examined; the private primary
 audit consultation was partial. The raw review and source hashes remain in the
 private engineering archive under `full3-relay-contract-review-20261111/`.
+
+Baseline evidence is retained separately in the private engineering archive:
+`qa-relay-history-20261111-red-r1/` contains the single historical HTTP RED
+and the genuine 2,457-file post-run source export; the complete experiment and
+cleanup returned RC0. `qa-relay-owner-retirement-20261111-red-r1/` contains
+three classified REDs and one unrecognized fixture failure, so its overall
+experiment remains INCOMPLETE. The 2,516-file source export and cleanup were
+verified. The second journal RED uses the same production source and one
+corrected test only; it does not repeat the three established REDs. It returned
+the expected test RC101 at the `Scope` oracle, after successful Reserved/reopen
+and Closed positive controls. Its experiment and cleanup returned RC0; the
+genuine 2,516-file post-run export has SHA-256
+`30b0b7826d391716cef1c93e9d6c88582def736fc041423997754f2d7e730b50`,
+and every source payload matches its input manifest. No source fix or product
+pass is inferred from a successful experiment harness exit.
+
+Both source candidates are frozen for separate independent reviews. R1 adds
+the typed historical read and its SDK checks; R2 preserves durable retirement
+intent and includes real local-journal IO cancellation/capacity tests. Neither
+candidate has a GREEN result at this checkpoint. The capacity test does not
+establish behavior under a filesystem failure, and a synthetic acknowledgement
+does not qualify the Core HTTP or runtime handoff.
 
 ## Implementation ownership
 
