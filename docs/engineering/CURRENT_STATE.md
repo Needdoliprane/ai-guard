@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 21:47 UTC — primitives d'autorité : 34 parents logiciels PASS
+
+Sur la source publique `4b1927f` + quatre sources owner r3 / filesystem r2 et deux déclarations de modules, 33 parents automatiques (25 owner, 8 FS Linux) et un négatif Docker de métadonnées explicitement exécuté passent ; build lib et `cargo check --all-targets` PASS. Source testée `a9fcb802…`, export vivant exact `1f15580d…`, 2 504 fichiers0644, fermeture RC 0/OOM 0. [Preuves, 34 noms et sources](evidence/2026-11-11/human-authority-primitives/README.md).
+
+Primitives de propriété OS/epochs et observation de montage uniquement : aucun Ready, Store14/AuthLedger5, approbation humaine, SSO ou runtime worker qualifié. r1 reste un échec de préparation sans compilation/test ; son export vide n'est pas une preuve de source. Aucun gate global fermé.
+
 ## 11 novembre, 20:33 UTC — reprise Kubernetes stricte : cinq parents r8 PASS
 
 Le gel public `3145315` + 54 postimages Kubernetes (2 497 fichiers, source SHA-256 `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7`) obtient cinq parents logiciels PASS, les quatre listes et le build des artefacts, puis `cargo check --all-targets` PASS. Reprise V3 limitée à l'état initial exact avant émission, preuve courante ou successeur du même broker stable, transaction audit/état/quota et GET sans mutation ; migration 12 → 13 explicite, sans activation runtime.

@@ -1,0 +1,847 @@
+{
+  "formatVersion": 1,
+  "observedAt": "2026-11-11T21:47:13.484Z",
+  "status": "SCOPED_LINUX_SOFTWARE_PASS",
+  "scope": {
+    "sourceArchiveSha256": "a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd",
+    "actualLiveExportSha256": "1f15580d61636a9de8bfae9781d83580da87b52dbdfb7d537abb4ab55e308cab",
+    "sourceFiles": 2504,
+    "automaticParentsPassed": 33,
+    "ownerParentsPassed": 25,
+    "linuxFilesystemParentsPassed": 8,
+    "explicitDockerMetadataParentPassed": 1,
+    "totalExecutedParents": 34,
+    "helperCountedAsIndependentParent": false,
+    "allListedTestsExecuted": false,
+    "productionGateClosed": false,
+    "rawLogsPublished": false
+  },
+  "build": {
+    "command": [
+      "cargo",
+      "test",
+      "--frozen",
+      "--offline",
+      "--lib",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "target": {
+      "kind": "lib",
+      "name": "agentsandbox"
+    },
+    "status": "PASS",
+    "finishedSuccess": true,
+    "timeoutSeconds": 1200,
+    "rc": 0,
+    "stdoutSha256": "b24a6f6035c790380f3cf1a54a91246fd2681e3107029f89bf7156c75ac8e24b",
+    "stderrSha256": "cc68f0cbaba00b656bc254b31e83d1bd7e30f4178a81fab6759824dccd3d8473"
+  },
+  "actualLibList": {
+    "rc": 0,
+    "stdoutSha256": "ea841145dd5d355a65bd2135c65748f49b32bcbe4a990880095b787e5b306ed9",
+    "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "listedTests": 971,
+    "scope": "The list resolves exact selectors; it is not 971 executed passes."
+  },
+  "parents": [
+    {
+      "name": "human_authority::tests::independent_owners_exclude_and_tokens_retain_actual_flocks",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "77bed10a7b8306eea6c11801b1a5685f198ceb8b89171113f9fcb11be47328c4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::canonical_acquisition_releases_earlier_parents_on_contention",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "1efae311defd3e8ec38521915f62f4f5af9d9fc7ad8e5f7d7c7a5ee5a01b0ec0",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::two_sources_in_the_same_physical_parent_share_its_fixed_lock",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "a07e3ed5b534ea1273212c661c417aa70ee2d53643f40b0d27ee1a53fb3a1d5a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::lock_protocol_and_changed_source_modes_fail_closed_without_repair",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "d8b84b15b426a0b3217b8dc0e8bd8afa2b3cce97ca963790d3967016159f3f31",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::replacement_configuration_and_source_inode_are_detected",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "fb38a580fd7b65a1b0f6c3f8fe88ac23a6b63b793d5799baa2609f71dea2eb1e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::exact_closure_domains_and_foreign_source_tokens_are_rejected",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "d86530cf220475a796dfffe94e55d078dc4e851e8cbaf686a6fb6f0ec63e6972",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::manifest_is_closed_digest_bound_and_configuration_exact",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "699e18faef9d547fd6e1f29709681bca7b06bd86c79bde02c6e46519eeff8e40",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::closing_drains_cancelled_observer_and_retains_the_owner_until_task_finishes",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "dd0d0f94a19dd0e0d4cb9d2e1ddb70377ac268ae89144d44a2f3c482e027cac5",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::read_write_ordering_and_bounded_wait_do_not_poison_the_owner",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "75cd3375bc6cbbc4f4bde9958b873fc4326789dbb7beefac9d879dc0407b8952",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "bae8e8b3e124d29a4f3f843dd5a7fa6fc79d6476aa2fd98fd0c036debb441904",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::diagnostics_and_runtime_debug_do_not_include_private_paths_or_contents",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "98b9173c4b1ba24a02c0a7944f992c7fb24eb8fa55eae9fc21a552c1d58ee5ad",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::replacing_the_lock_inode_latches_the_original_owner_closed",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "168667d2b39b5c77355031300f359b45e4477cac36789b55a492fea0af3670fe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::hardlinks_and_symlinks_cannot_alias_a_source",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "cd10629164ab79b079004ba18625a7d6c4bc4b2f8783c6e9fcb7303eea26796e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::manifest_source_bound_is_not_bypassed_with_unique_descriptors",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "8f0006835bdce68cca1e1c1624dbfbabfa1d823e338745b2e2b4e1c51e8b88fd",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::detached_work_alone_retains_the_os_owner_after_the_observer_is_cancelled",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "9ed12b4e2ca7eedd9ba4a36dffa7d9dbb23a3bc82e0a34ffb584665289869ad0",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::an_independent_process_observes_the_retained_source_owner",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "8612c9f785452d799b29a117dc93920a8ea4cdec0ddf23fb79466bb487cce443",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::typed_source_invalidation_rejects_all_accepted_epochs_and_retains_locks_until_drop",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "e41cabea32ed2867da35e16b1a0f906846144470a3ae3d50490d33d6150956d0",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::typed_owner_invalidation_rejects_an_already_accepted_write_epoch",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "55e6589b9b078b7050c4fc91a5a3a223848a3acf608c230c6f95c9d6e49edbc4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::normal_close_allows_existing_epochs_to_finish_without_invalidating_them",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "da9c76fa7d34063c87fae9fe8b4c5397b9025eca37dac484e989e1f5beaabd3d",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::individual_work_refusal_and_wrong_source_do_not_latch_the_authority",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "877ea7e108f9d6acf39b0c1eff2038820735914c91eaeeaa3712c1543340bec3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::only_structured_emfile_and_enfile_classify_as_descriptor_shortage",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "c1adeb518fe6f4c8013ae8a72df8ed543871e0c9dab9036474d14c90242edf66",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::structured_descriptor_shortage_refuses_without_unlock_and_same_owner_revalidates",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "721d413ee5ca68867bc596e7ca91c74e673d75c4fddaf614083f6c2db75e5776",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::descriptor_shortage_followed_by_changed_other_source_never_reuses_an_old_check",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "24635d81cfafb313cdc4260a17785248a3c58f56474a388afbdc265faa8e0d3e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::unknown_and_non_descriptor_failures_still_latch_the_owner",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "7c797d3e5cbaa81fe3fa405ce090dcb08b5564d7cbe8c192ae514d3a7a2d18fb",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "human_authority::tests::descriptor_shortage_cannot_clear_a_proven_durable_invalidation",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "124ab4fe342904498091611c5fcf34fb066a834cc1d719748c659ab750e7f363",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "642f7f2c878c15850e61e8b7c86dbc42390913a51bb74ec9d24e71d3ebb3b251",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::same_mount_source_refuses_absence_and_unchecked_names",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "d2570406766f236600802ab8cfb52f2a71665be7b0891d6750a5e82a730a720b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "d385ef426569cefe788a7baa922213a7a25f612b2b628ae38f8bf7ade9ea828b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::physical_identity_and_same_mount_refuse_replaced_parent",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "db574338bdd8bea92fc19e6bdf7b55dcf7f80b738887aef244f669c8709a2a5e",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::physical_identity_and_same_mount_refuse_parent_permission_change",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "baed609abe0355174eb6fc1aaf18835c333c148fd589334480fb8e95af331712",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::native_mount_failure_preserves_typed_errno_through_context_without_private_name",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "0ca8d929c6d9d9801143ca94d23bb44caebb263f98bdd8dbad7eb39a8fb35d2a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::linux_mount_response_refuses_missing_fields_and_identity_mismatch",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "142bb549d6304f6ccf6742e7b6b6910f1c74b3fb499a23bd0419b2a55435f0df",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::linux_mount_observation_does_not_follow_a_symlink",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "e5a51b8b4716917ebd8f7248105caea8fdd08c1e13865d49d06b3c52d35cc068",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "automatic_exact",
+      "timeoutSeconds": 30
+    },
+    {
+      "name": "control_fs::source_owner::tests::linux_docker_file_mount_is_observed_outside_its_parent_domain",
+      "target": {
+        "kind": "lib",
+        "name": "agentsandbox"
+      },
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "be5da7e6c17cf6d2314e9360dc9dd31229835a1404b7b27d31ae261e80b7d70b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "oracle": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0
+      },
+      "selection": "explicit_default_ignored_test",
+      "timeoutSeconds": 30
+    }
+  ],
+  "automaticCommandTemplate": [
+    "<resolved-libtest-artifact>",
+    "--exact",
+    "<name>",
+    "--nocapture",
+    "--test-threads=1"
+  ],
+  "explicitDockerMetadataTest": {
+    "name": "control_fs::source_owner::tests::linux_docker_file_mount_is_observed_outside_its_parent_domain",
+    "commandTemplate": [
+      "<resolved-libtest-artifact>",
+      "--exact",
+      "control_fs::source_owner::tests::linux_docker_file_mount_is_observed_outside_its_parent_domain",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "executed": true,
+    "status": "PASS_OBSERVED_NOT_IGNORED",
+    "separateFromAutomaticCount": true,
+    "precondition": {
+      "parentMountId": 1138,
+      "fileMountId": 1181,
+      "domainsDistinct": true,
+      "regularNonsymlink": true,
+      "metadataOnly": true,
+      "fileContentRead": false,
+      "newMountCreated": false
+    },
+    "scope": "Existing Docker QA mount metadata only; no worker/runtime behavior or content read qualified.",
+    "orderedAfterAllTargetsCheck": true
+  },
+  "checkAllTargets": {
+    "command": [
+      "cargo",
+      "check",
+      "--frozen",
+      "--offline",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "status": "PASS",
+    "finishedSuccess": true,
+    "timeoutSeconds": 900,
+    "rc": 0,
+    "stdoutSha256": "5ce9ec826ecedeea33ed50edd9f83d85a3e48b02f45c385c41937b25fdb6bd85",
+    "stderrSha256": "24793a7fc613d44e7d19662cc8c28611722cf450ce42a78f1b7ecf220127e571",
+    "orderedAfterAll33AutomaticPass": true
+  },
+  "qa": {
+    "platform": "Linux aarch64",
+    "observedKernel": "7.0.14-linuxkit",
+    "pinnedToolchain": "1.99.1",
+    "toolImageSha256": "2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "uid": 1000,
+    "gid": 1000,
+    "network": "none",
+    "readOnlyRoot": true,
+    "capabilitiesDropped": "ALL",
+    "noNewPrivileges": true,
+    "seccomp": 2,
+    "ipc": "private",
+    "cgroupNamespace": "private",
+    "cpuLimit": 4,
+    "memoryLimitBytes": 9663676416,
+    "swapLimitBytes": 0,
+    "pidsLimit": 128,
+    "scratchTmpfsBytes": 4294967296,
+    "scratchInodes": 131072,
+    "nofile": 1024,
+    "fileSizeLimitBytes": 536870912,
+    "coreDumpBytes": 0,
+    "readOnlyInputs": 2,
+    "emptyAllowlistedEnvironment": true,
+    "cargoOffline": true,
+    "cargoJobs": 1,
+    "debugInfo": 0,
+    "testTimeoutSeconds": 30,
+    "holderSeconds": 5400,
+    "fullBudgetWithExplicitMetadataCaseSeconds": 4305,
+    "qualification": "Software QA sandbox only; no product runtime qualification."
+  },
+  "resourceObservation": {
+    "memoryCurrentBytes": 1451266048,
+    "memoryPeakBytes": 6229848064,
+    "oomEvents": 0,
+    "oomKillEvents": 0,
+    "holderOomKilled": false,
+    "scope": "Final QA cgroup current and peak, including compilation/source scratch; not worker usage, capacity or latency qualification."
+  },
+  "closure": {
+    "rc": 0,
+    "exportProducerRc": 0,
+    "exportSinkRc": 0,
+    "exportOverflowBytes": 0,
+    "stopExactResourceRc": 0,
+    "removeExactResourceRc": 0,
+    "exactResourceAbsent": true,
+    "holderExitCode": 137,
+    "holderOomKilled": false,
+    "holderExitMeaning": "Controlled stop of the QA sleep holder; not a product test exit."
+  },
+  "historicalFailure": {
+    "run": "r1",
+    "status": "FAIL_PREPARATION",
+    "runRc": 1,
+    "closureRc": 1,
+    "preparation": {
+      "rc": 1,
+      "stdoutSha256": "10369906e278cf641322fb567095bfd68987036645daf9b1ca216b192ef89b7d",
+      "stderrSha256": "0af9b9e8904e0a12c906d384f18e1fa16b1cc464f764d2f45da4e0d238fa5307"
+    },
+    "sourceArchiveSha256": "a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd",
+    "sourceUnchangedInR2": true,
+    "sourceExtraction": "NOT_RUN",
+    "build": "NOT_RUN",
+    "testList": "NOT_RUN",
+    "parentsExecuted": 0,
+    "allTargets": "NOT_RUN",
+    "explicitMetadataCase": "NOT_RUN",
+    "cause": "Two obsolete pinned-cache paths in the QA harness; r2 changes the harness pin paths only, with source, isolation profile and test oracles retained.",
+    "actualEmptyExport": {
+      "archiveSha256": "cbe4dd8a49c2125ca7ff2f8e437f147d7c15f306b8faa49dc2e6af6fda8faceb",
+      "archiveBytes": 10240,
+      "regularPayloadFiles": 0,
+      "valid2504SourceExport": false,
+      "postSourceVerificationRc": 1
+    }
+  },
+  "evidence": {
+    "retainedQaArtifactsVerifiedByIntegrator": 631,
+    "rootResultSha256": "c2b98d9e286e16dd29379fe4f9932637634387204a83f9574084fd1b49216e8d",
+    "lunaResultSha256": "a524c5e6fafad5fca299c6af920660bf87661a265ae3ca80901492d51f2a9621",
+    "sourceContentManifestSha256": "6e40607f5dc52bad7a0b6fa32815b9f7263a111af4f4eb087e25ef74b7fab77b"
+  },
+  "notRunOrUnqualified": [
+    "Named human approval, ApproveLaunch, targets/admission/claim",
+    "Store14 and AuthenticationLedger1000005 guarded constructors, source markers, migrations, backups and startup Ready",
+    "Complete SSO and identity-mutator integration",
+    "Live authority/maintenance r4 and Store/credential-index r2 outside this package",
+    "Product Docker worker runtime, Podman and Kubernetes",
+    "Native macOS filesystem/locking behavior",
+    "Actual file-descriptor exhaustion",
+    "100-worker load, strict Clippy and full repository suite"
+  ],
+  "executionOrder": [
+    "build-lib-no-run",
+    "list-lib",
+    "automatic-parents-01-through-33",
+    "check-all-targets",
+    "explicit-docker-metadata-negative"
+  ]
+}

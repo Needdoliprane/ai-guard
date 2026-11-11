@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 11 novembre — primitives d'autorité humaine, preuve limitée
+
+Les [primitives owner r3 / filesystem r2](evidence/2026-11-11/human-authority-primitives/README.md) ont une preuve Linux bornée : 33 parents automatiques plus un négatif de montage Docker réellement exécuté, build lib et `cargo check --all-targets` PASS. Le montage n'est observé que par métadonnées ; aucun contenu, montage neuf, FD exhaustion ou runtime worker testé. Source et export vivant sont hashés, r1 FAIL préparation reste conservé.
+
+Ce lot n'implémente ni ne qualifie l'approbation nominative complète, Store14/AuthLedger5, migrations, startup Ready ou l'intégration de tous mutateurs ; r4/Store/index sont hors paquet. Aucun fingerprint global ni gate fermé. E reste indépendant chez Claude.
+
 ## 11 novembre — reprise Kubernetes avant émission, suivi limité
 
 La reprise V3 et la compatibilité schéma 13 disposent d'une [preuve logicielle publique bornée](evidence/2026-11-11/kubernetes-recovery-integration/README.md) : cinq parents r8 et compilation de toutes les cibles PASS sur `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7`. Le contrat exige l'état initial exact Reserved/révision 1/époque 1 avant émission, une identité de broker courante au périmètre requis et une clôture audit/état/quota atomique ; GET ne mute pas. Les quatre PASS r5 et treize PASS r6 restent sur leurs sources historiques, et les échecs successifs ainsi que les corrections TEST ONLY et revues sont conservés.

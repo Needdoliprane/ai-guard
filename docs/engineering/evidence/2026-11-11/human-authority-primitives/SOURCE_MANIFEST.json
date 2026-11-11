@@ -1,0 +1,154 @@
+{
+  "formatVersion": 1,
+  "scope": "Reviewed/tested human-authority owner r3 and filesystem source-owner r2 primitives only",
+  "publicBaseCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+  "counts": {
+    "publicBaseFiles": 2500,
+    "added": 4,
+    "modified": 2,
+    "featurePaths": 6,
+    "unchangedPublicFiles": 2498,
+    "testedPayloadFiles": 2504
+  },
+  "testedInput": {
+    "archiveSha256": "a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd",
+    "archiveBytes": 27560448,
+    "contentManifestSha256": "6e40607f5dc52bad7a0b6fa32815b9f7263a111af4f4eb087e25ef74b7fab77b"
+  },
+  "actualLiveExport": {
+    "archiveSha256": "1f15580d61636a9de8bfae9781d83580da87b52dbdfb7d537abb4ab55e308cab",
+    "archiveBytes": 27729920,
+    "regularPayloads": 2504,
+    "regularFileModes": "0644",
+    "directories": 323,
+    "allPayloadHashesAndModesMatchInput": true,
+    "exportedBeforeStop": true
+  },
+  "files": [
+    {
+      "path": "src/control_fs.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": "a7ea003015c1b97bacb83b09396e742bcd1aab249ff92c419b4fb2272458f923",
+        "gitBlobSha1": "ea355826d08d1560cdb683cdeeef548d3c247a38",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "4f17bde09cc92483c6ea0736e83004c7ec3bc9bf49093fca03f73b3add5122f3",
+        "bytes": 42298,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/control_fs/source_owner.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "9040a50d945621bc4b05e6741dac9fa049dfcc4548a7646fda235b06fbfb8197",
+        "bytes": 18440,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/human_authority.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "bf7ac63e0645cca65a4e3fb4b5de6b95286ec3d8a46819148b36e0191eb184e9",
+        "bytes": 33367,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/human_authority/manifest.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "f3427c28048db39a2f1e62fc897f1f1b36106c89f41bb11bde331333a9aedd2e",
+        "bytes": 11159,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/human_authority/tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "733a269111d82e92a7fe5b0bf332ca66bf4b465362219e4a82e1ce2505db9bdd",
+        "bytes": 36041,
+        "mode": "0644"
+      }
+    },
+    {
+      "path": "src/lib.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "4b1927f03ab9be76aefbfbec56dfc21a7ad52abf",
+        "sha256": "ebe6301b5f6b2d0f6dcdcd761a472c8b42048a99b6ae215d6ad6b1f65563aee1",
+        "gitBlobSha1": "fbda1b65a291983f4c00a5ae3cb0f0a3ee2a160c",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "4b96d77a222a871b0f3c3128bf01f92b7db35e85aef4b6f75c145b4cd20eb685",
+        "bytes": 625,
+        "mode": "0644"
+      }
+    }
+  ],
+  "integrationInspection": {
+    "moduleDeclarations": [
+      {
+        "path": "src/lib.rs",
+        "addedLine": "pub mod human_authority;",
+        "onlyOneDeclaration": true,
+        "noOtherBytesChanged": true
+      },
+      {
+        "path": "src/control_fs.rs",
+        "addedLine": "mod source_owner;",
+        "onlyOneDeclaration": true,
+        "noOtherBytesChanged": true
+      }
+    ],
+    "existingRoutesStartupFormatsChanged": false,
+    "activation": "No route, modern Store/AuthLedger opener, migration or startup Ready is activated by the six-file composition.",
+    "rootPublicPostsMatch": true,
+    "verification": "All2498 other public-base blobs match; four reviewed source postimages match their r3 review fingerprints. This is a data/source comparison, not another compilation."
+  },
+  "independentReview": {
+    "ownerSource": "r3",
+    "filesystemSource": "r2",
+    "verdict": "GO_SOURCE_BOUNDED",
+    "jsonSha256": "92ed267c1d6c13042baeb7f85f37fe8056f67e47a466506bd98f479c1843443f",
+    "markdownSha256": "bae8570794b37fb30f7c2a3b6bb22c5ca17c75f95ee8247263eb16f8703809c6",
+    "scope": "Only these four primitive postimages from the broader review are included; binding modules are not part of this tested source delta."
+  },
+  "limitation": "These proof documents and dated engineering additions are outside the tested input. No validation is transferred to a live worktree, later r4, Store14, credentials or the whole product."
+}

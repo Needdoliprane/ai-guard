@@ -1,5 +1,11 @@
 # Validation courante
 
+## 11 novembre, 21:47 UTC — QA Linux des primitives owner/FS
+
+**PASS borné** sur `a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd` : `cargo test --frozen --offline --lib --no-run --message-format=json`, liste réelle971, 33 parents automatiques exacts, puis `cargo check --frozen --offline --all-targets --message-format=json`, enfin le test normalement ignoré exécuté séparément (34 succès, aucun ignoré compté PASS). [Registre RC/SHA et limites](evidence/2026-11-11/human-authority-primitives/TESTS.json).
+
+Archive réellement vivante `1f15580d61636a9de8bfae9781d83580da87b52dbdfb7d537abb4ab55e308cab` : 2 504 payloads0644, empreintes/modes exacts ; fermeture ciblée0 et OOM0. QA Linux isolée, sans réseau, UID1000, 4CPU/9Gio/swap0 ; aucune qualification worker ou macOS natif. r1 : FAIL préparation1, zéro compilation/test et export vide10240B conservé ; r2 ne corrige que le harnais/pinpaths. [Contexte complet](evidence/2026-11-11/human-authority-primitives/README.md).
+
 ## 11 novembre, 20:33 UTC — Kubernetes public : cinq parents restants et compilation r8
 
 **PASS borné**, source `0c96db41d708f98eef96c4cbb38775db5aa32b9da3c757070383f278ea9f2ba7` (base publique `3145315` + K54 corrigé, 2 497 fichiers) : `cargo test --frozen --offline --lib --bin agentsandbox --test schema13_protocol_contract --test kubernetes_held_create_recovery_api --no-run --message-format=json`, quatre listes, cinq parents exacts (quatre lib, un test HTTP de refus worker), puis `cargo check --frozen --offline --all-targets --message-format=json`. RC 0 et Cargo JSON `success=true` pour build/check ; chaque parent : un PASS, aucun FAIL/ignored. Les commandes, noms, SHA des sorties et sources sont dans [TESTS.json](evidence/2026-11-11/kubernetes-recovery-integration/TESTS.json).
