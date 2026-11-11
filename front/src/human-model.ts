@@ -29,7 +29,7 @@ export interface HumanEvent {
   content: { command: unknown; decision: unknown; result: unknown; data: unknown } | null;
 }
 export interface HumanEventPage extends HumanPage<HumanEvent> { view: HumanView; selection_complete?: boolean }
-export interface HumanSelection { view: HumanView; resource?: ResourceRef; cursor?: string | null }
+export interface HumanSelection { view: HumanView; resource?: ResourceRef; cursor?: string | null; limit?: number }
 export interface HumanBroker {
   broker_id: string; incarnation_id: string; grant_revision: string; heartbeat_revision: string;
   state: "unseen" | "current" | "stale" | "expired" | "revoked" | "clock_uncertain";
@@ -168,10 +168,17 @@ export function parseHumanEventPage(value: unknown, exporting = false, transport
   if (exporting) requireContract(typeof value.selection_complete === "boolean" && value.selection_complete === !parsed.has_more);
   return { ...parsed, view, ...(exporting ? { selection_complete: value.selection_complete as boolean } : {}) };
 }
+/** Server bound of one page. A cursor stays bound to the limit of its traversal. */
+export const HUMAN_DEFAULT_PAGE_LIMIT = 25;
+export const HUMAN_MAX_PAGE_LIMIT = 100;
+export function pageLimit(value: number = HUMAN_DEFAULT_PAGE_LIMIT): string {
+  requireContract(typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= HUMAN_MAX_PAGE_LIMIT);
+  return String(value);
+}
 export function humanUrl(endpoint: "resources" | "events" | "export" | "stream", selection?: HumanSelection): string {
   requireContract(["resources", "events", "export", "stream"].includes(endpoint) &&
     (selection === undefined || ["metadata", "content"].includes(selection.view)));
-  const query = new URLSearchParams({ limit: "25" });
+  const query = new URLSearchParams({ limit: pageLimit(selection?.limit) });
   if (endpoint !== "resources") query.set("view", selection?.view ?? "metadata");
   if (selection?.resource) {
     const ref = resource(selection.resource);
@@ -179,6 +186,31 @@ export function humanUrl(endpoint: "resources" | "events" | "export" | "stream",
   }
   if (selection?.cursor != null) { requireContract(opaque(selection.cursor)); query.set("cursor", selection.cursor); }
   return `/api/v1/human/${endpoint}?${query}`;
+}
+
+/** `GET /human/events/recent`: newest authorized events first. `live_cursor` exists on the first page only. */
+export interface HumanRecentEventPage {
+  version: 1; context_id: string; authorization_version: string; view: HumanView; order: "newest_first"; coverage: "authorized_selection";
+  items: HumanEvent[]; has_more: boolean; next_cursor: string | null; live_cursor: string | null; read_receipt: ReadReceipt;
+}
+export function parseHumanRecentEventPage(value: unknown, first: boolean): HumanRecentEventPage {
+  closed(value, ["version", "context_id", "authorization_version", "view", "order", "coverage", "items", "has_more", "next_cursor", "live_cursor", "read_receipt"]);
+  requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
+    ["metadata", "content"].includes(String(value.view)) && value.order === "newest_first" && value.coverage === "authorized_selection" &&
+    Array.isArray(value.items) && value.items.length <= HUMAN_MAX_PAGE_LIMIT && typeof value.has_more === "boolean" &&
+    (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null) &&
+    (first ? opaque(value.live_cursor) && value.live_cursor !== value.next_cursor : value.live_cursor === null));
+  closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
+  requireContract(uuid(value.read_receipt.request_id) && uuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
+  const view = value.view as HumanView;
+  const items = value.items.map((item) => parseHumanEvent(item, view));
+  requireContract(new Set(items.map((item) => item.metadata.id)).size === items.length);
+  return { version: 1, context_id: value.context_id, authorization_version: value.authorization_version, view, order: "newest_first", coverage: "authorized_selection",
+    items, has_more: value.has_more, next_cursor: value.next_cursor as string | null, live_cursor: value.live_cursor as string | null,
+    read_receipt: { request_id: value.read_receipt.request_id, audit_event_id: value.read_receipt.audit_event_id, received_at: value.read_receipt.received_at } };
+}
+export function humanRecentEventsUrl(selection: HumanSelection): string {
+  return humanUrl("events", selection).replace("/api/v1/human/events?", "/api/v1/human/events/recent?");
 }
 
 function closed(value: unknown, fields: string[]): asserts value is Record<string, unknown> {
@@ -230,8 +262,8 @@ export function parseHumanBrokerPage(value: unknown): HumanBrokerPage {
     has_more: value.has_more, next_cursor: value.next_cursor as string | null,
     read_receipt: { request_id: value.read_receipt.request_id, audit_event_id: value.read_receipt.audit_event_id, received_at: value.read_receipt.received_at } };
 }
-export function humanBrokersUrl(cursor: string | null = null): string {
-  const query = new URLSearchParams({ limit: "25" });
+export function humanBrokersUrl(cursor: string | null = null, limit?: number): string {
+  const query = new URLSearchParams({ limit: pageLimit(limit) });
   if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
   return `/api/v1/human/brokers?${query}`;
 }
@@ -343,8 +375,8 @@ export function parseHumanWorkerPage(value: unknown): HumanWorkerPage {
   requireContract(new Set(items.map((item) => item.worker_id)).size === items.length);
   return { ...structuredClone(value), items } as unknown as HumanWorkerPage;
 }
-export function humanWorkersUrl(cursor: string | null = null): string {
-  const query = new URLSearchParams({ limit: "25" });
+export function humanWorkersUrl(cursor: string | null = null, limit?: number): string {
+  const query = new URLSearchParams({ limit: pageLimit(limit) });
   if (cursor !== null) { requireContract(opaque(cursor)); query.set("cursor", cursor); }
   return `/api/v1/human/workers?${query}`;
 }
@@ -355,7 +387,7 @@ export interface HumanFederationWorkerPage {
   version: 1; source: "tenant_federation_registry"; consistency: "independent_snapshots";
   coverage: "partial"; runtime_inventory: "unknown"; workers: HumanWorkerPage; brokers: HumanBrokerPage;
 }
-export interface HumanFederationSelection { workerCursor?: string | null; brokerCursor?: string | null }
+export interface HumanFederationSelection { workerCursor?: string | null; brokerCursor?: string | null; workerLimit?: number; brokerLimit?: number }
 /** Presentation gating only. Rust remains the authorization authority for every read. */
 export function canReadHumanFederation(context: HumanContext | null): boolean {
   return context?.mode === "administration" && context.capabilities.includes("read_worker_registry") && context.capabilities.includes("read_broker_registry");
@@ -370,7 +402,7 @@ export function parseHumanFederationWorkerPage(value: unknown): HumanFederationW
   return { version: 1, source: "tenant_federation_registry", consistency: "independent_snapshots", coverage: "partial", runtime_inventory: "unknown", workers, brokers };
 }
 export function humanFederationWorkersUrl(selection: HumanFederationSelection = {}): string {
-  const query = new URLSearchParams({ worker_limit: "25", broker_limit: "25" });
+  const query = new URLSearchParams({ worker_limit: pageLimit(selection.workerLimit), broker_limit: pageLimit(selection.brokerLimit) });
   if (selection.workerCursor != null) { requireContract(opaque(selection.workerCursor)); query.set("worker_cursor", selection.workerCursor); }
   if (selection.brokerCursor != null) { requireContract(opaque(selection.brokerCursor)); query.set("broker_cursor", selection.brokerCursor); }
   return `/api/v1/human/federation/workers?${query}`;

@@ -1,6 +1,6 @@
 import { createSseParser } from "./sse.ts";
-import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseResourcePage, uuid } from "./human-model.ts";
-import type { HumanContext, HumanEventPage, HumanIdentity, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
+import { HUMAN_FEDERATION_PAGE_BYTES, HumanContractError, boundedText, humanBrokersUrl, humanWorkersUrl, humanFederationWorkersUrl, humanRecentEventsUrl, humanUrl, object, opaque, parseHumanBrokerPage, parseHumanWorkerPage, parseHumanFederationWorkerPage, parseHumanEventPage, parseHumanIdentity, parseHumanRecentEventPage, parseResourcePage, uuid } from "./human-model.ts";
+import type { HumanContext, HumanEventPage, HumanIdentity, HumanRecentEventPage, HumanSelection, HumanFederationSelection, ResourceRef } from "./human-model.ts";
 
 export class HumanSuperseded extends Error { constructor() { super("Lecture abandonnée après changement de contexte."); } }
 export class HumanApiError extends Error {
@@ -8,6 +8,16 @@ export class HumanApiError extends Error {
   constructor(status: number, code: string, message: string, retryAction = "retry") {
     super(message); this.status = status; this.code = code; this.retryAction = retryAction;
   }
+}
+/**
+ * The control did not serve the newest-first read. A gateway that predates the route answers 404 with the
+ * ordinary "not found" contract, so the cause is certain only for a read without resource filter (`ambiguous`
+ * is false). With a filter, and until this client has seen the route answer, the same 404 may also be a
+ * resource this context cannot read: callers fall back to the forward read, which is the authority for that refusal.
+ */
+export class HumanRecentUnavailable extends Error {
+  ambiguous: boolean;
+  constructor(ambiguous: boolean) { super("Lecture des événements récents indisponible sur ce contrôle. Mettez à jour gateway et dashboard ensemble."); this.ambiguous = ambiguous; }
 }
 export const HUMAN_EXPORT_LIMITS = Object.freeze({ pages: 25, bytes: 4 * 1024 * 1024, milliseconds: 60000 });
 interface Snapshot { generation: number; context: HumanContext | null; operatorRetry?: boolean }
@@ -36,6 +46,8 @@ export class HumanApiClient {
   #credentialExpiry: ReturnType<typeof setTimeout> | undefined;
   #readBudgetStopped = false;
   #operatorReadAllowed = false;
+  /** True once this client received a page from the newest-first route. */
+  #recentServed = false;
   constructor(token: string, handlers: Handlers, fetcher: typeof fetch = fetch) {
     this.#token = token; this.#handlers = handlers; this.#fetcher = fetcher;
   }
@@ -76,9 +88,12 @@ export class HumanApiClient {
     if (object(value) && object(value.error) && typeof value.error.code === "string" && codes.has(value.error.code) &&
       boundedText(value.error.message, 1024) && typeof value.error.retry_action === "string" && actions.has(value.error.retry_action))
       return new HumanApiError(status, value.error.code, value.error.message, value.error.retry_action);
+    // A refusal that does not follow the error contract, as an intermediary may answer, is still a refusal:
+    // it is never offered another attempt as an unavailable control is.
     return new HumanApiError(status, status === 401 ? "authentication_required" : status === 403 ? "permission_denied" : "identity_unavailable",
       status === 401 ? "Credential personnel refusé ou expiré. Reconnectez-vous." :
-        status === 403 ? "Consultation refusée pour cette ressource. Faites vérifier vos permissions." : `Lecture humaine indisponible (HTTP ${status}). Réessayez ou contactez l’opérateur.`);
+        status === 403 ? "Consultation refusée pour cette ressource. Faites vérifier vos permissions." : `Lecture humaine indisponible (HTTP ${status}). Réessayez ou contactez l’opérateur.`,
+      status === 401 ? "authenticate" : status === 403 ? "review_permissions" : "retry");
   }
   #parseText(text: string): unknown {
     // Defense in depth against an echo of this request's bearer, before any UI/export persistence.
@@ -106,7 +121,7 @@ export class HumanApiClient {
   async #request(path: string, snapshot: Snapshot, signal?: AbortSignal, stream = false): Promise<Response> {
     this.#assert(snapshot);
     if (!/^\/api\/v1\/human\/(identity|resources|events|export|stream|brokers|workers)(?:\/[0-9a-f-]{36})?(?:\?[^#]*)?$/.test(path) &&
-      !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
+      !/^\/api\/v1\/human\/federation\/workers(?:\?[^#]*)?$/.test(path) && !/^\/api\/v1\/human\/events\/recent(?:\?[^#]*)?$/.test(path)) throw new HumanContractError();
     if (this.#readBudgetStopped) {
       if (!this.#operatorReadAllowed || stream) throw new HumanApiError(429, "audit_read_budget_exhausted", "Lecture automatique suspendue : budget durable de lecture atteint. Contactez l’opérateur.", "contact_operator");
       this.#operatorReadAllowed = false; snapshot.operatorRetry = true;
@@ -207,19 +222,19 @@ export class HumanApiClient {
     checkExpiry();
     return structuredClone(selected);
   }
-  async resources(cursor: string | null = null, signal?: AbortSignal) {
+  async resources(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    const body = await this.#json(await this.#request(humanUrl("resources", { view: "metadata", cursor }), snapshot, signal), snapshot);
+    const body = await this.#json(await this.#request(humanUrl("resources", { view: "metadata", cursor, limit }), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseResourcePage(body.value), snapshot), snapshot, signal);
   }
-  async brokers(cursor: string | null = null, signal?: AbortSignal) {
+  async brokers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    const body = await this.#json(await this.#request(humanBrokersUrl(cursor), snapshot, signal), snapshot);
+    const body = await this.#json(await this.#request(humanBrokersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanBrokerPage(body.value), snapshot), snapshot, signal);
   }
-  async workers(cursor: string | null = null, signal?: AbortSignal) {
+  async workers(cursor: string | null = null, signal?: AbortSignal, limit?: number) {
     const snapshot = this.#snapshot(true);
-    const body = await this.#json(await this.#request(humanWorkersUrl(cursor), snapshot, signal), snapshot);
+    const body = await this.#json(await this.#request(humanWorkersUrl(cursor, limit), snapshot, signal), snapshot);
     return this.#finishRead(this.#validatePage(parseHumanWorkerPage(body.value), snapshot), snapshot, signal);
   }
   async federationWorkers(selection: HumanFederationSelection = {}, signal?: AbortSignal) {
@@ -237,6 +252,25 @@ export class HumanApiClient {
     if (page.view !== selection.view || ref && page.items.some((item) =>
       item.metadata.resource.kind !== ref.kind || item.metadata.resource.resource_id !== ref.resource_id)) throw new HumanContractError();
     return this.#finishRead(page, snapshot, signal);
+  }
+  /** Newest authorized events first. The first page carries the position from which `listen` continues without replay. */
+  async recentEvents(selection: HumanSelection, signal?: AbortSignal): Promise<HumanRecentEventPage> {
+    const snapshot = this.#snapshot(true);
+    let response: Response;
+    try { response = await this.#request(humanRecentEventsUrl(selection), snapshot, signal); }
+    catch (error) {
+      if (error instanceof HumanApiError && error.status === 404 && (!selection.resource || !this.#recentServed))
+        throw new HumanRecentUnavailable(!!selection.resource);
+      throw error;
+    }
+    const body = await this.#json(response, snapshot);
+    const page = this.#validatePage(parseHumanRecentEventPage(body.value, selection.cursor == null), snapshot);
+    const ref = selection.resource;
+    if (page.view !== selection.view || ref && page.items.some((item) =>
+      item.metadata.resource.kind !== ref.kind || item.metadata.resource.resource_id !== ref.resource_id)) throw new HumanContractError();
+    this.#finishRead(page, snapshot, signal);
+    this.#recentServed = true;
+    return page;
   }
   async event(id: string, view: HumanSelection["view"], signal?: AbortSignal) {
     if (!uuid(id)) throw new HumanContractError();
@@ -275,9 +309,11 @@ export class HumanApiClient {
     }
     throw new Error("Export arrêté après 25 pages. Aucune sélection partielle n’a été téléchargée. Choisissez une ressource plus précise.");
   }
-  async listen(selection: HumanSelection, signal: AbortSignal, onPage: (page: HumanEventPage) => void,
+  /** `onPage` also receives the position after its batch: a caller whose stream was refused for a while can restart exactly there. */
+  async listen(selection: HumanSelection, signal: AbortSignal, onPage: (page: HumanEventPage, position: string) => void,
     onStatus: (status: "connecting" | "live" | "retrying" | "closed") => void): Promise<void> {
-    const snapshot = this.#snapshot(true); let cursor: string | null = null; let attempt = 0;
+    // Without a start position the control replays the authorized history from its beginning.
+    const snapshot = this.#snapshot(true); let cursor: string | null = selection.cursor ?? null; let attempt = 0;
     const cancel = AbortSignal.any([this.#lifetime.signal, this.#scope.signal, signal]);
     while (!cancel.aborted && this.#current(snapshot)) {
       onStatus(attempt ? "retrying" : "connecting");
@@ -297,7 +333,7 @@ export class HumanApiClient {
           if (message.event !== "human_audit") return;
           const page = this.#validatePage(parseHumanEventPage(this.#parseText(message.data), false, "stream"), snapshot);
           if (page.view !== selection.view || !opaque(message.id)) throw new HumanContractError();
-          cursor = message.id; onPage(page); attempt = 0;
+          cursor = message.id; onPage(page, message.id); attempt = 0;
         }, 256 * 1024);
         try {
           for (;;) {

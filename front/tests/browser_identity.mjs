@@ -263,7 +263,8 @@ try {
   aDenied = true;
   await page.evaluate(() => { window.__identityHold = true; });
   await page.getByRole("button", { name: "Actualiser", exact: true }).click(); await waitHeld("/api/overview");
-  await navigate("Workers"); await waitHeld("/api/v1/workers");
+  // La vue Workers lit le registre fédéré : c’est cette lecture de liste, refusée à A, qui est retenue.
+  await navigate("Workers"); await waitHeld("/api/v1/federation/workers?limit=50");
   await page.getByRole("button", { name: "Se déconnecter", exact: true }).click();
   bOutage = false;
   await login("b"); await page.getByText("Flux connecté", { exact: true }).waitFor();

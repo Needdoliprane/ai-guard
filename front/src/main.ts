@@ -2200,6 +2200,9 @@ function browserOidcSession(): OidcSession {
 }
 async function mountOidc(session: OidcSession): Promise<void> {
   const token = session.accessToken; if (!token || oidcSession !== session) return;
+  // A token rotation replaces the dashboard. Hand over at most the open view and its typed filters;
+  // the successor reads the identity and asks for confirmation before any data read.
+  const resume = humanSession?.continuity() ?? null;
   ++authenticationView; humanSession?.close();
   const candidate = new HumanDashboard(root, token, { brand, themeButton }, () => {
     if (humanSession !== candidate || oidcSession !== session) return;
@@ -2213,7 +2216,7 @@ async function mountOidc(session: OidcSession): Promise<void> {
     }).catch(() => {
       if (authenticationView === closedView) login("Session locale fermée. Fournisseur et audit de fermeture non confirmés.", "human");
     });
-  });
+  }, resume);
   humanSession = candidate;
   try { await candidate.start(); }
   catch (cause) {

@@ -11,15 +11,20 @@ indépendants préservés. Pas d'export source post-exécution GREEN ni d'instan
 initial individuel capturé ; ces limites ne sont pas reconstruites. Les deux
 QA ont été retirées. [Commandes, revue et portée](evidence/2026-11-11/verify-audit-setup-v2/README.md).
 
-## 11 novembre — preuves Rust de la supervision Web
+## 11 novembre — supervision Web : quinze parents Rust et quatre parcours navigateur
 
 Sur le gel 2 440 `b4ff38fe…`, build et listes RC0 pour les trois cibles.
 Quinze parents exacts donnent 1 PASS chacun, aucun échec ni ignoré. Le
 registre à 100 entrées utilise des données synthétiques. L’export réel du
 gel et les cinq pins sont vérifiés. Le binaire de supervision exporté
-correspond à son SHA-256 dans le conteneur. Le prévol Chromium, corrigé au
-chargement Playwright, échoue sur chroot avec le profil isolé actuel. Les
-quatre scénarios d’interface restent NOT_RUN. Les QA ont été retirées.
+correspond à son SHA-256 dans le conteneur. Le premier profil navigateur échoue
+sur chroot. Une variante relue ajoute l'autorisation chroot à tous les processus
+QA ; les autres restrictions sont conservées et constatées. Prévol puis journal,
+focus, reprise et droits donnent chacun RC0/PASS. Le job se termine RC0,
+douze PNG sont vérifiés après terminaison et deux relus visuellement. Les QA ont
+été retirées. Les quarante fichiers indexés correspondent au gel exécuté ;
+les autres travaux du checkout ont été préservés. Pas de qualification runtime,
+IdP, restauration ou charge de cent workers réels.
 [Commandes et observations](evidence/2026-11-11/frontend-B-backend/README.md).
 
 ## 11 novembre — douze tests exacts du relais composé

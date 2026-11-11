@@ -12,6 +12,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 mod brokers;
+mod recent;
 mod workers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
@@ -716,6 +717,7 @@ pub(super) fn routes() -> Router<GatewayState> {
         )
         .route("/human/resources", get(resources))
         .route("/human/events", get(events))
+        .route("/human/events/recent", get(recent::recent))
         .route("/human/events/{id}", get(event))
         .route("/human/export", get(export))
         .route("/human/stream", get(stream))

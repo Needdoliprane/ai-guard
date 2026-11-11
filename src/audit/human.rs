@@ -2,6 +2,7 @@
 use super::*;
 use crate::identity::*;
 use rusqlite::named_params;
+mod recent;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

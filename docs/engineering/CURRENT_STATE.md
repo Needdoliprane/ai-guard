@@ -12,14 +12,18 @@ publiées correspondent au gel testé ; l'export après exécution GREEN n'a pas
 HTTP de chaîne locale, pas sur les signatures SetupV2 ni le SSO réel.
 [Preuves et limites](evidence/2026-11-11/verify-audit-setup-v2/README.md).
 
-## 11 novembre — supervision Web, 15 scénarios Rust vérifiés
+## 11 novembre — supervision Web publiée, backend et quatre parcours navigateur vérifiés
 
 Le gel e957+B40 de 2 440 fichiers conserve les 61 sources frontend déjà
 vérifiées en Node et les deux index EN/FR. Les trois cibles Rust compilent et
 les quinze sélecteurs passent chacun une fois. Le serveur de supervision a
-été construit et exporté avec son empreinte. Le prévol Chromium atteint le
-zygote avec le profil isolé existant puis échoue sur son contrôle de chroot.
-Les quatre scénarios navigateur restent à exécuter. Le lot est candidat.
+été construit et exporté avec son empreinte. Après le refus de chroot du profil
+initial, une variante QA relue autorise cette opération pour tous ses processus,
+en conservant les autres restrictions. Le prévol puis journal, focus, reprise et
+changement de droits passent. Douze captures sont vérifiées ; les vues desktop
+claires et mobile sombres ont été relues visuellement. Les quarante postimages
+publiées correspondent au gel testé. Les workers des fixtures sont synthétiques,
+pas des conteneurs exécutés ; aucun gate runtime/capacité n'est fermé.
 [Sources, résultats et limites](evidence/2026-11-11/frontend-B-backend/README.md).
 
 ## 11 novembre — relais durable et refus typés vérifiés en composition

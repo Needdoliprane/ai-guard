@@ -13,6 +13,7 @@ This manual describes the complete product contract. The implementation and qual
 | [Workload identities and relay](workloads/README.md) | Explicit migrations5→6→7, scoped credentials, broker registry and its separately authorized human view, directed messages, audit budgets and maintenance. Runtime transport remains separate. |
 | [AI providers](providers/README.md) | Codex and Claude Code with subscription or API, explicit selection, private credentials and optional Jev. |
 | [Named local access](identity/README.md) | Private human account provisioning, explicit resource and broker-registry permissions, authenticated reads, export and recovery without an IdP. |
+| [Unified supervision view](supervision/README.md) | Named dashboard page joining brokers, workers and authorized resources: who sees what, freshness and coverage, search, correlation, refusals, read budget and limits. Candidate component. |
 | [ai-guard SSO](sso/README.md) | Fresh local DEMO: own images, inspected identity network, UID1000 volume preparation and normal reopen. Also covers existing/enterprise providers, Web sign-in, foreground CLI and recovery. Complete gateway/Web/CLI interoperability remains unqualified. |
 | [Keycloak provider](keycloak/README.md) | Separate local identity-provider project, public Web/CLI clients, PKCE, claims and enterprise IdP preparation. |
 | [Local AI](local-ai/README.md) | Pinned small-model image, memory/context limits, internal inference and model replacement. |
