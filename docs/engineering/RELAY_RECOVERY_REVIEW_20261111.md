@@ -46,23 +46,52 @@ acknowledgement does not qualify the Core HTTP or runtime handoff.
 
 ## Implementation ownership
 
-- Broker owner: isolated `codex/relay-owner-retirement-20261111` on the local
-  seed above. R2 uses transition/status units without engine, CLI, child,
-  socket or HTTP operations. The journal uses synthetic files and leases.
-- Historical Core/API/SDK lookup: isolated
-  `codex/relay-history-reconciliation-20261111` on public `ed37805`. The
-  proposed exact route uses the existing authenticated runner boundary,
-  tenant/namespace validation and checked Store transaction. It creates no
-  reserve, claim, transition, Fresh claim or current dispatch authority.
+- The Core/API/SDK slice is published in `300cb4a`; the R2 correction is composed
+  into the protected local Full3 work. Historical author branches remain at
+  `515c797` and `9eb4302`, while their two worktrees were closed normally after
+  source, ignored-file and consumer checks. Private backups remain.
+- Current journal and consumer work use separate
+  `codex/relay-history-journal-20261111` and
+  `codex/relay-history-consumer-20261111` worktrees with exclusive file owners.
+  Local-only base `7cf3aa0` preserves 126 Full3 paths on public `300cb4a`;
+  that seed and the whole development branches are not public deliveries.
+- The read uses the existing authenticated runner boundary, tenant/namespace
+  validation and checked Store transaction. It creates no reserve, claim,
+  transition, Fresh claim or current dispatch authority.
 - Root owns integration and source preservation; Luna executes admitted,
   targeted QA. Independent review remains required after the corrections.
+
+## Full-prefix and consumer baseline
+
+The combined 2,522-file baseline has two independently reviewed, exact RED
+results. The current reader rejects a valid chained V2 fact after successful
+V1 reopen; the current consumer cannot retire an old Close(CAS1) from Reserved
+after a successful historical SDK `InapplicableState` control. Both return the
+expected test RC101 at distinct oracles; build, experiment and cleanup return
+RC0. A successful RED experiment is not a product pass.
+
+Actual post-run source archive: 28,344,320 bytes, SHA-256
+`2a6d4a29b0f344b24b50483e8073d154f082d27b2b99ab06619b912225467cae`.
+All 2,522 payloads match input manifest
+`4872891d52e994f5e3374ca7c4be8ae2e001bd15a47deb65f77dd30553af7f49`.
+The two parents share one offline build; no all-targets or provider matrix was
+repeated for this baseline. The exact container was removed without OOM.
+
+The independently reviewed correction contract requires full-prefix V1/V2
+validation, immutable intention identities and proofs, and explicit retirement
+before finalization. Its finite budget is 48 total records per job: the first
+16 include legacy/ordinary records, with 32 reserved for terminal progress.
+This is an implementation contract, not a deployed configuration or a proven
+disk/RSS bound. Consumer and journal fixes are being implemented in parallel;
+their combined FIX, GREEN and runtime proof remain open.
 
 Historical lookup must distinguish an exact recorded receipt, a deterministic
 resolution at a verified monotonic snapshot, and an unresolved outcome. A
 simple 404 is not a fencing proof. An absent admission can be resolved only
 with the separately specified exact terminal worker/attempt observation and
-Store serialization proof; otherwise it remains unknown. These are acceptance
-requirements, not claims that the endpoint is available.
+Store serialization proof; otherwise it remains unknown. The public Core/API/SDK
+slice implements these read semantics; broker recovery and runtime acceptance
+remain separate obligations.
 
 The old suspended operations are not resumed by this follow-up. Real worker
 retirement, crash/restart, Docker/Podman/Kubernetes, A1/A2/B1 and the production
