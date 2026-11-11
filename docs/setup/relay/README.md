@@ -59,6 +59,81 @@ refuses admission and never purges evidence automatically. Retention and
 compaction remain open engineering work; preserve evidence and follow the limits in the
 [admission contract](../../engineering/RELAY_ADMISSION.md).
 
+### Reconcile an uncertain control operation
+
+Trusted control can call the internal SDK
+`reconcile_relay_channel(&RelayChannelReconcileV1)` to read historical channel
+facts. It uses `POST /control/api/v1/relay/channels/{channel_id}/reconcile` with
+the exact retained admission and, when present, the exact pending claim or
+transition. The pending includes its original operation UUID, type, canonical
+content/hash and expected revision. This request compares identities; it does
+not apply a mutation. The path UUID must be canonical, non-nil and equal to the
+admission channel. No query or unversioned alias is accepted.
+
+The SDK takes no tenant argument. It obtains tenant, namespace and runner role
+from the authenticated supervision identity and verifies the response against
+the retained admission. The server resolves the tenant from the runner
+credential and checks the namespace inside the verified transaction, including
+when no admission is found. Historical lookup remains available after worker
+termination, workload expiry/revocation or inactive namespace admission. The
+runner must still be authenticated and authorized; an inactive admission mode
+does not bypass revoked authentication. Worker, viewer, broker-presence and human
+credentials gain no access.
+
+A successful HTTP 200 response is a `RelayChannelReconciliationV1` containing
+`version`, authenticated `tenant_id`, `control_namespace_uuid`,
+`admission_input_hash`, `audit_seq`, `audit_hash` and a closed `outcome`.
+The request pending uses `kind:claim|transition` with `request`; outcomes and
+pending resolutions use `kind`. For an exact admission, `historical` contains
+the current historical snapshot and `admission_receipt`, separately from the
+exact pending and its resolution:
+
+| Pending result | Meaning and next action |
+|---|---|
+| `recorded` | The exact type, operation UUID and content are recorded; retain its real receipt. |
+| `inapplicable_cas` | The exact pending is absent and the same verified channel snapshot has a revision strictly above its expected revision. Its old CAS can no longer commit. Persist this deterministic resolution before replacing the intention. |
+| `inapplicable_state` | The exact pending is absent, its CAS revision equals the snapshot revision, and the shared mutation rules forbid it in that state. Every state change advances the revision, so this exact intention can never apply. Persist this resolution before replacing it. |
+| `unresolved` | No receipt or deterministic proof of inapplicability is available. Preserve the intention and its resources. |
+
+For example, an old `CloseExactWorkerTerminal` with expected revision 1 against
+`Reserved`/revision 1 is `inapplicable_state`, even with exact worker terminal
+evidence. Close is forbidden while Reserved; reaching a compatible state would
+advance the revision and invalidate that old CAS. This lookup first checks the
+exact receipt and never invents a refusal receipt or replaces the intention.
+
+A recorded operation UUID with different type or content is a conflict. An
+absent admission ordinarily yields `admission_unresolved`: absence at the
+observed snapshot leaves the owner `Unknown` and does not prove that an earlier
+Reserve cannot still commit.
+
+The stronger `admission_never_recorded_exact_terminal` outcome requires absence
+of the exact admission and conflicting channel/operation facts, plus the exact
+durable terminal of the same worker, attempt, session, inspection and StartedAt,
+all verified in the same serialized transaction. It carries
+`admission_operation_id`, `channel_id`, `epoch`, `endpoint`, `worker_revision`
+and `terminal_observation_receipt`: the real `MutationReceiptV1` for the terminal
+observation. It creates no channel receipt. A later Reserve cannot pass its
+Running requirement, and Observe cannot revive a terminal worker. Incomplete or
+mismatched terminal evidence yields `admission_unresolved` instead. This outcome
+establishes no local process join or transport closure.
+
+A 404, unsupported route, lost response, authentication refusal, audit error or
+invalid response supplies no closure evidence. Preserve the original operation
+and recover its cause without selecting another identity or replaying Reserve
+or Claim as a lookup.
+
+The response binds these facts to the real audit head sequence/hash from the
+same checked transaction. This head is a snapshot marker, not a new mutation
+receipt or signature. This narrow technical metadata read follows
+`worker_operation`: it reconstructs existing facts without adding a channel
+fact, claim or access receipt. This read regime does not apply to human reads or
+the inbox. Request and response bodies are bounded
+to 16 KiB. The port never constructs an exec capability, opens a transport,
+renews a deadline, frees quota or proves that local tasks have joined. Existing
+active admission, claim and dispatch checks remain in force. Local journals
+must retain the original intention and persist its exact receipt or admissible
+resolution before preparing a replacement; this lookup does not migrate them.
+
 The broker/runtime connection is a separate integration step. There is no new
 relay CLI or automatically enabled exec channel. See the
 [source-specific validation](../../engineering/evidence/2026-11-07/relay-admission/README.md)

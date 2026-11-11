@@ -66,9 +66,11 @@ de son identité ; aucun champ du corps ne choisit un tenant. Le transport
 | POST | `/api/v1/relay/channels/admissions` | `RelayChannelAdmissionV1` | Réserve sans permis exec / Reserves without an exec permit |
 | POST | `/api/v1/relay/channels/{channel_id}/claims` | `RelayChannelClaimV1` | Claim exec unique / One-shot exec claim |
 | POST | `/api/v1/relay/channels/{channel_id}/transitions` | `RelayChannelTransitionV1` | Transition de cycle / Lifecycle transition |
+| POST | `/api/v1/relay/channels/{channel_id}/reconcile` | `RelayChannelReconcileV1` | Lecture historique exacte / Exact historical lookup |
 
 Admission et claim frais répondent 201 ; leurs rejeux identiques répondent 200.
-Une transition répond 200. Les réponses sont des `RelayChannelResultV1` fermés.
+Une transition répond 200. Ces trois mutations renvoient des
+`RelayChannelResultV1` fermés.
 Le binding courant, l'instance worker, son Arm et l'audit durable sont recoupés
 avant acceptation. Une réservation ou un reçu rejoué ne donne aucun nouveau
 permis moteur. Une erreur de persistance refuse l'acceptation.
@@ -81,6 +83,69 @@ must agree. These control APIs alone do not connect a worker to the relay.
 See the [typed contract](engineering/RELAY_ADMISSION.md),
 [English guide](setup/relay/README.md#trusted-control-admission) and
 [French guide](setup/relay/README.fr.md#admission-par-le-contrôle-de-confiance).
+
+Le rapprochement répond 200 avec un `RelayChannelReconciliationV1` fermé.
+Sa requête versionnée contient l'admission immuable exacte et, facultativement,
+le claim ou la transition pendante exacte : type, UUID d'opération, contenu/hash
+canonique et CAS. Ces champs servent uniquement à comparer les faits conservés.
+Le `channel_id` du chemin est un UUID canonique non nul égal à celui de
+l'admission ; aucun alias `/api`, query ou sélecteur de tenant n'est admis.
+Tenant et namespace sont recoupés côté serveur dans le snapshot vérifié.
+
+L'enveloppe porte `version`, `tenant_id`, `control_namespace_uuid`,
+`admission_input_hash`, `audit_seq`, `audit_hash` et `outcome`. Le pending est
+fermé par `kind:claim|transition` et `request`. Pour l'outcome `historical`, la
+réponse sépare `admission_receipt` du résultat du pending : `recorded` porte son
+propre reçu réel ; `inapplicable_cas` exige son absence et une révision du même
+canal strictement supérieure à son CAS ; `inapplicable_state` exige son absence,
+la révision exactement attendue et un état incompatible selon les mêmes règles
+que les mutations. Un changement d'état augmente toujours la révision : une
+ancienne Close au CAS1 face à Reserved/rev1 ne pourra donc jamais s'appliquer.
+`unresolved` conserve l'intention inconnue lorsque ces preuves manquent.
+Les résultats et résolutions utilisent un discriminant `kind`. Un UUID
+enregistré avec un autre type ou contenu produit un conflit, jamais une
+résolution sans effet. La tête d'audit seq/hash accompagne les faits du même
+snapshot ; elle ne constitue ni nouveau reçu de mutation ni signature.
+
+Reconciliation returns a closed `RelayChannelReconciliationV1` with HTTP 200.
+It compares the exact immutable admission and optional typed pending claim or
+transition, without applying either. An exact recorded pending returns its own
+historical receipt. An absent pending is `inapplicable_cas` only when the same
+verified snapshot has a channel revision strictly above its expected revision.
+At the exact expected revision, an incompatible state yields `inapplicable_state`
+using the mutation's shared state rules. Every state change advances the revision,
+so a retained Close at CAS1 against Reserved/rev1 cannot later apply. Without
+either proof it remains `unresolved`. A divergent operation identity is a conflict.
+Preserve the original intention and persist its receipt or deterministic
+resolution before replacing it. With no admission, `admission_unresolved` leaves
+the owner `Unknown`. Only `admission_never_recorded_exact_terminal` establishes
+that the exact admission was not recorded and can no longer be accepted: the
+same checked transaction verifies the same worker/attempt/session, inspection,
+StartedAt and durable terminal observation. It returns the real
+`MutationReceiptV1` of that observation with the admission/channel/epoch/endpoint
+identities and worker revision; it fabricates no channel receipt. A later
+Reserve requires Running, and a terminal worker cannot be revived by Observe.
+Incomplete or mismatched terminal evidence leaves `admission_unresolved`.
+HTTP 404, an unavailable route, lost response or failed verification supplies
+no such proof.
+
+Cette lecture technique étroite de métadonnées suit le régime de
+`worker_operation` : transaction et contrôles d'intégrité existants, sans créer
+de fait de canal, de claim ou de reçu d'accès. Ce régime ne s'étend pas aux
+lectures humaines ni à l'inbox. Elle reste
+accessible après terminal, expiration/révocation du workload ou désactivation de
+l'admission du namespace, avec un runner toujours authentifié et autorisé.
+Les requêtes/réponses du SDK sont bornées à 16 Kio ; le SDK déduit le tenant de
+l'identité de supervision et ne prend aucun tenant libre. Aucun repli vers
+Reserve, Claim, une autre route ou une autre identité n'est effectué.
+
+This metadata read requires a currently authenticated, authorized runner and
+remains historical after workload termination, expiry or revocation. Inactive
+namespace admission is not revoked runner authentication. It creates no channel
+fact or exec capability, opens no transport, renews no deadline, releases no
+quota and proves no local process join. Active admission/claim/dispatch methods
+keep their existing checks. The SDK bounds request and response bodies to
+16 KiB and never falls back to an active mutation or another identity.
 
 ### Projection workers et brokers / Worker and broker projection
 

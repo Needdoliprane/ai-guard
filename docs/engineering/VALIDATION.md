@@ -1,5 +1,19 @@
 # Validation courante
 
+## 11 novembre — historique et retrait du relais, deux gels séparés
+
+Historique2457 `05d54904…` : quatorze parents exacts PASS entre13:28:56 et
+13:29:08UTC, check toutes cibles RC0 à13:30:36. Le FAIL_BUILD E0433 du candidat
+précédent reste conservé avec zéro test exécuté. Les dix postimages indexées
+correspondent au gel corrigé ; les travaux Full3 indépendants sont préservés.
+[Commandes, environnement et portée](evidence/2026-11-11/relay-history-reconciliation/README.md).
+
+Retrait local R2/Full32517 `085651a3…` : six parents exacts PASS, check toutes
+cibles RC0 à13:24:59. Compilation historique et check R2 ont avancé en parallèle.
+Les deux vrais exports pré-arrêt sont vérifiés intégralement ; les deux QA ont
+été retirées sans OOM. Pas de moteur ou fournisseur, ni de qualification de
+panne physique. [Preuves R2 et limites](evidence/2026-11-11/relay-owner-retirement/README.md).
+
 ## 11 novembre — SendV2 : quatorze parents et compilation publique composée
 
 Gel2456 `e45a1923…` sur fb956b7 +17postimages : build/liste/résolution RC0,

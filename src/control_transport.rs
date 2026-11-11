@@ -185,6 +185,13 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         {
             Some(Runner)
         }
+        (&Method::POST, ["relay", "channels", id, "reconcile"])
+            if v1
+                && uuid::Uuid::parse_str(id)
+                    .is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == *id) =>
+        {
+            Some(Runner)
+        }
         (&Method::GET, ["brokers", "identity"])
         | (&Method::GET, ["brokers", "self"])
         | (&Method::POST, ["brokers", "heartbeat"])
@@ -199,5 +206,41 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
             Some(WorkerRelay)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_tests {
+    use super::*;
+
+    #[test]
+    fn reconciliation_route_accepts_only_exact_runner_v1_without_query() {
+        let path = "/api/v1/relay/channels/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/reconcile";
+        assert_eq!(
+            control_route(&Method::POST, path),
+            Some(ControlRouteIdentity::Runner)
+        );
+        for method in [Method::GET, Method::PUT, Method::DELETE] {
+            assert_eq!(control_route(&method, path), None);
+        }
+        for path in [
+            "/api/relay/channels/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/reconcile",
+            "/api/v1/relay/channels/00000000-0000-0000-0000-000000000000/reconcile",
+            "/api/v1/relay/channels/AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA/reconcile",
+            "/api/v1/relay/channels/free/reconcile",
+            "/api/v1/relay/channels/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/reconcile/extra",
+        ] {
+            assert_eq!(control_route(&Method::POST, path), None);
+        }
+        assert_eq!(
+            control_query(&Method::POST, path, None),
+            Ok(ControlQuery::None)
+        );
+        for query in ["", "tenant=tenant-a", "after=0"] {
+            assert_eq!(
+                control_query(&Method::POST, path, Some(query)),
+                Err(InvalidControlQuery)
+            );
+        }
     }
 }

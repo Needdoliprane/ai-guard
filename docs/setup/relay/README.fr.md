@@ -61,6 +61,84 @@ actuellement l'admission à 100 endpoints actifs et 4096 faits par tenant ; son
 compaction restent à développer ; conserver les preuves et respecter les limites du
 [contrat d'admission](../../engineering/RELAY_ADMISSION.md).
 
+### Rapprocher une opération de contrôle incertaine
+
+Le contrôle de confiance peut appeler le SDK interne
+`reconcile_relay_channel(&RelayChannelReconcileV1)` pour lire les faits
+historiques d'un canal. Il emploie
+`POST /control/api/v1/relay/channels/{channel_id}/reconcile` avec l'admission
+exacte conservée et, s'il existe, le claim ou la transition pendante exacte.
+Le pending garde son UUID d'opération, son type, son contenu/hash canonique et
+sa révision attendue. Ces champs servent à comparer les identités ; ils ne
+demandent aucune mutation. L'UUID du chemin est canonique, non nul et égal au
+canal de l'admission. Aucune query ni alias non versionné n'est accepté.
+
+Le SDK ne prend aucun tenant en argument. Il obtient tenant, namespace et rôle
+runner depuis l'identité de supervision authentifiée, puis recoupe la réponse
+avec l'admission conservée. Le serveur résout le tenant depuis le credential
+runner et contrôle le namespace dans la transaction vérifiée, y compris si
+l'admission est absente. La lecture historique reste accessible après terminal
+du worker, expiration/révocation du workload ou désactivation de l'admission du
+namespace. Le runner doit rester authentifié et autorisé ; un mode d'admission
+inactif ne contourne pas une authentification révoquée. Les credentials worker,
+viewer, présence broker et humains n'acquièrent aucun accès.
+
+Une réponse HTTP 200 valide est un `RelayChannelReconciliationV1` contenant
+`version`, le `tenant_id` authentifié, `control_namespace_uuid`,
+`admission_input_hash`, `audit_seq`, `audit_hash` et un `outcome` fermé.
+Le pending de la requête emploie `kind:claim|transition` et `request` ; les
+outcomes et résolutions du pending emploient `kind`. Pour une admission exacte,
+`historical` contient le snapshot historique courant et `admission_receipt`,
+séparés du pending exact et de sa résolution :
+
+| Résultat du pending | Sens et action de reprise |
+|---|---|
+| `recorded` | Le type, l'UUID d'opération et le contenu exacts sont enregistrés ; conserver son reçu réel. |
+| `inapplicable_cas` | Le pending exact est absent et le snapshot vérifié du même canal porte une révision strictement supérieure à sa révision attendue. Son ancien CAS ne peut plus committer. Persister cette résolution déterministe avant de remplacer l'intention. |
+| `inapplicable_state` | Le pending exact est absent, sa révision CAS égale celle du snapshot et les règles partagées des mutations l'interdisent dans cet état. Tout changement d'état augmente la révision : cette intention exacte ne pourra jamais s'appliquer. Persister la résolution avant de la remplacer. |
+| `unresolved` | Aucun reçu ni preuve déterministe d'inapplicabilité n'est disponible. Conserver l'intention et ses ressources. |
+
+Par exemple, une ancienne `CloseExactWorkerTerminal` avec révision attendue 1
+face à `Reserved`/révision 1 produit `inapplicable_state`, même avec le terminal
+worker exact. Close est interdit dans Reserved ; atteindre un état compatible
+augmente la révision et invalide cet ancien CAS. La lecture recherche d'abord
+le reçu exact et ne fabrique ni reçu de refus ni remplacement de l'intention.
+
+Un UUID d'opération enregistré avec un autre type ou contenu est un conflit.
+Une admission absente produit ordinairement `admission_unresolved` : l'absence
+au snapshot observé laisse le propriétaire `Unknown` et ne prouve pas qu'un
+ancien Reserve ne peut plus committer.
+
+L'outcome plus fort `admission_never_recorded_exact_terminal` exige l'absence de
+l'admission exacte et de faits de canal/opération divergents, ainsi que le
+terminal durable exact du même worker, tentative, session, inspection et
+StartedAt, tous vérifiés dans la même transaction sérialisée. Il porte
+`admission_operation_id`, `channel_id`, `epoch`, `endpoint`, `worker_revision`
+et `terminal_observation_receipt` : le vrai `MutationReceiptV1` de l'observation
+terminale. Aucun reçu de canal n'est créé. Une Reserve ultérieure ne peut plus
+satisfaire son exigence Running et Observe ne peut pas réanimer un worker
+terminal. Une preuve terminale incomplète ou divergente produit
+`admission_unresolved`. Cet outcome ne prouve aucune jonction locale ni
+fermeture de transport.
+
+Un 404, une route non prise en charge, une réponse perdue, un refus
+d'authentification, une erreur d'audit ou une réponse invalide ne fournit aucune
+preuve de clôture. Conserver l'opération initiale et résoudre la cause sans
+changer d'identité ni rejouer Reserve ou Claim comme moyen de consultation.
+
+La réponse lie ces faits à la séquence/hash réels de tête d'audit de la même
+transaction vérifiée. Cette tête est un repère de snapshot, pas un nouveau reçu
+de mutation ni une signature. Cette lecture technique étroite de métadonnées
+suit `worker_operation` : elle reconstruit les faits existants sans ajouter de
+fait de canal, claim ou reçu d'accès. Ce régime de lecture ne s'applique ni aux
+lectures humaines ni à l'inbox. Les corps de requête et de réponse sont bornés
+à 16 Kio. Ce port ne construit aucune capability exec,
+n'ouvre aucun transport, ne renouvelle aucun délai, ne libère aucun quota et ne
+prouve aucune jonction de tâches locales. Les contrôles d'admission, claim et
+dispatch actifs restent applicables. Le journal local conserve l'intention
+initiale et persiste son reçu exact ou sa résolution admissible avant de
+préparer un remplacement ; cette lecture ne migre pas ce journal.
+
 Le raccord broker/runtime est une étape d'intégration distincte. Aucun nouveau
 CLI relais ou canal exec automatiquement activé n'est fourni. La
 [validation attachée aux sources](../../engineering/evidence/2026-11-07/relay-admission/README.md)

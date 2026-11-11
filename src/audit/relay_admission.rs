@@ -20,7 +20,20 @@ enum Input {
     Claim(RelayChannelClaimV1),
     Transition(RelayChannelTransitionV1),
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperationKind {
+    Reserve,
+    Claim,
+    Transition,
+}
 impl Input {
+    fn kind(&self) -> OperationKind {
+        match self {
+            Self::Reserve(_) => OperationKind::Reserve,
+            Self::Claim(_) => OperationKind::Claim,
+            Self::Transition(_) => OperationKind::Transition,
+        }
+    }
     fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::Reserve(r) => r.validate(),
@@ -78,7 +91,7 @@ struct Channel {
 #[derive(Default)]
 struct Projection {
     channels: BTreeMap<String, Channel>,
-    operations: BTreeMap<String, (String, RelayChannelReceiptV1)>,
+    operations: BTreeMap<String, (String, RelayChannelReceiptV1, OperationKind)>,
     latest_endpoint: BTreeMap<String, String>,
     count: usize,
 }
@@ -365,7 +378,7 @@ impl Projection {
                     input.expected_revision,
                     &input.admission_input_hash,
                 )?;
-                conflict(channel.snapshot.state == RelayChannelStateV1::Reserved)?;
+                conflict(channel.snapshot.state.accepts_claim())?;
                 authority(db, &channel.admission, at, before, false)?;
                 channel.snapshot.state = RelayChannelStateV1::AcceptedBeforeExec;
                 channel.snapshot.revision += 1;
@@ -381,42 +394,19 @@ impl Projection {
                     input.expected_revision,
                     &input.admission_input_hash,
                 )?;
-                use RelayChannelStateV1 as S;
                 use RelayChannelTransitionKindV1 as T;
-                let state = channel.snapshot.state;
-                channel.snapshot.state = match &input.transition {
-                    T::CancelReserved => {
-                        conflict(state == S::Reserved)?;
-                        S::CancelledBeforeClaim
-                    }
-                    T::KnownRefusedBeforeSpawn => {
-                        conflict(state == S::Reserved)?;
-                        S::KnownRefusedBeforeSpawn
-                    }
+                let next_state = input
+                    .transition
+                    .target_state(channel.snapshot.state)
+                    .ok_or(RelayAdmissionFailure::Conflict)?;
+                match &input.transition {
                     T::Ready => {
-                        conflict(state == S::AcceptedBeforeExec)?;
                         authority(db, &channel.admission, at, before, false)?;
-                        S::Ready
-                    }
-                    T::Closing => {
-                        conflict(matches!(state, S::AcceptedBeforeExec | S::Ready))?;
-                        S::Closing
-                    }
-                    T::Unknown => {
-                        conflict(matches!(
-                            state,
-                            S::AcceptedBeforeExec | S::Ready | S::Closing
-                        ))?;
-                        S::Unknown
                     }
                     T::CloseExactWorkerTerminal {
                         worker_revision,
                         terminal_observation_id,
                     } => {
-                        conflict(matches!(
-                            state,
-                            S::AcceptedBeforeExec | S::Ready | S::Closing | S::Unknown
-                        ))?;
                         terminal(
                             db,
                             &channel.admission,
@@ -424,9 +414,10 @@ impl Projection {
                             terminal_observation_id,
                             before,
                         )?;
-                        S::Closed
                     }
-                };
+                    T::CancelReserved | T::KnownRefusedBeforeSpawn | T::Closing | T::Unknown => {}
+                }
+                channel.snapshot.state = next_state;
                 channel.snapshot.revision += 1;
             }
         }
@@ -494,7 +485,7 @@ fn reconstruct(db: &Connection) -> anyhow::Result<Projection> {
         };
         projection.operations.insert(
             record.input.operation_id().into(),
-            (record.input_hash, receipt),
+            (record.input_hash, receipt, record.input.kind()),
         );
     }
     Ok(projection)
@@ -503,7 +494,177 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     reconstruct(db).map(|_| ())
 }
 
+fn pending_kind(pending: &RelayChannelPendingV1) -> OperationKind {
+    match pending {
+        RelayChannelPendingV1::Claim(_) => OperationKind::Claim,
+        RelayChannelPendingV1::Transition(_) => OperationKind::Transition,
+    }
+}
+
+/// A missing admission is final only for the exact durably terminal incarnation.
+/// Reserve requires Running, and the checked worker state machine cannot revive
+/// Terminal. The caller's Immediate transaction serializes this read with every
+/// possible late Reserve, including one whose HTTP response was lost.
+fn absent_terminal(
+    db: &Connection,
+    admission: &RelayChannelAdmissionV1,
+) -> anyhow::Result<Option<(u64, crate::control::MutationReceiptV1)>> {
+    let Some(current) = worker(db, &admission.endpoint.worker_id, None)? else {
+        return Ok(None);
+    };
+    if current.state != WorkerStateV1::Terminal
+        || current.worker_id != admission.endpoint.worker_id
+        || current.launch.session_id != admission.session_id
+        || current.revision < admission.expected_worker_revision
+        || current.attempt.attempt_id != admission.endpoint.attempt_id
+        || current.attempt.created_inspection.as_ref() != Some(&admission.inspection)
+        || current
+            .observed_started_at
+            .as_deref()
+            .map(time)
+            .transpose()?
+            != Some(time(&admission.started_at)?)
+    {
+        return Ok(None);
+    }
+    let observation_id: Option<String> = db
+        .query_row(
+            "SELECT terminal_observation_id FROM worker_allocations WHERE attempt_id=?1",
+            [&admission.endpoint.attempt_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(observation_id) = observation_id else {
+        return Ok(None);
+    };
+    if let Err(error) = terminal(db, admission, current.revision, &observation_id, None) {
+        if error.downcast_ref::<RelayAdmissionFailure>() == Some(&RelayAdmissionFailure::Conflict) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let Some(receipt) = super::control::supervision::operation_receipt(db, &observation_id)? else {
+        return Ok(None);
+    };
+    if receipt.worker_id.as_deref() != Some(admission.endpoint.worker_id.as_str())
+        || !receipt.revision.is_some_and(|revision| {
+            revision >= admission.expected_worker_revision && revision <= current.revision
+        })
+    {
+        return Ok(None);
+    }
+    Ok(Some((current.revision, receipt)))
+}
+
 impl Store {
+    /// Runner metadata lookup. No admission/claim/transition is attempted, and
+    /// no active workload or namespace admission lease is needed for history.
+    /// Authentication and its queued revalidation remain the API's authority.
+    pub fn reconcile_relay_channel(
+        &self,
+        request: &RelayChannelReconcileV1,
+    ) -> anyhow::Result<RelayChannelReconciliationV1> {
+        request.validate()?;
+        let admission = &request.admission;
+        let admission_hash = admission.input_hash()?;
+        let mut db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        let tx = self.begin_checked(&mut db)?;
+        let schema: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if ![6, 7, 8, 9, 10, 11, 12].contains(&schema) {
+            return Err(crate::control::ControlFailure::MigrationRequired.into());
+        }
+        // Required even on an absent admission: a foreign namespace is never
+        // converted into a proof about this tenant's history.
+        let namespace = namespace(&tx)?;
+        allowed(namespace == admission.control_namespace_uuid)?;
+        let projection = reconstruct(&tx)?;
+        let outcome = if let Some((hash, receipt, kind)) =
+            projection.operations.get(&admission.operation_id)
+        {
+            conflict(hash == &admission_hash && *kind == OperationKind::Reserve)?;
+            let channel = projection
+                .channels
+                .get(&admission.channel_id)
+                .ok_or(RelayAdmissionFailure::Conflict)?;
+            conflict(channel.admission == *admission)?;
+            let pending = request
+                .pending
+                .as_ref()
+                .map(|pending| -> anyhow::Result<_> {
+                    let resolution = if let Some((hash, receipt, kind)) =
+                        projection.operations.get(pending.operation_id())
+                    {
+                        // Domain-separated canonical hash covers the full
+                        // typed request, including its original CAS and kind.
+                        conflict(
+                            *kind == pending_kind(pending)
+                                && hash == &pending.input_hash()?
+                                && receipt.channel_id == admission.channel_id
+                                && receipt.epoch == admission.epoch,
+                        )?;
+                        RelayChannelPendingResolutionV1::Recorded {
+                            receipt: receipt.clone(),
+                        }
+                    } else if channel.snapshot.revision > pending.expected_revision() {
+                        RelayChannelPendingResolutionV1::InapplicableCas
+                    } else if channel.snapshot.revision == pending.expected_revision()
+                        && !pending.accepts_state(channel.snapshot.state)
+                    {
+                        RelayChannelPendingResolutionV1::InapplicableState
+                    } else {
+                        RelayChannelPendingResolutionV1::Unresolved
+                    };
+                    Ok(RelayChannelPendingHistoryV1 {
+                        pending: pending.clone(),
+                        resolution,
+                    })
+                })
+                .transpose()?;
+            RelayChannelHistoryOutcomeV1::Historical {
+                channel: channel.snapshot.clone(),
+                admission_receipt: receipt.clone(),
+                pending,
+            }
+        } else {
+            conflict(!projection.channels.contains_key(&admission.channel_id))?;
+            if let Some(pending) = &request.pending {
+                conflict(!projection.operations.contains_key(pending.operation_id()))?;
+            }
+            match absent_terminal(&tx, admission)? {
+                Some((worker_revision, terminal_observation_receipt)) => {
+                    RelayChannelHistoryOutcomeV1::AdmissionNeverRecordedExactTerminal {
+                        admission_operation_id: admission.operation_id.clone(),
+                        channel_id: admission.channel_id.clone(),
+                        epoch: admission.epoch,
+                        endpoint: admission.endpoint.clone(),
+                        worker_revision,
+                        terminal_observation_receipt,
+                    }
+                }
+                None => RelayChannelHistoryOutcomeV1::AdmissionUnresolved,
+            }
+        };
+        let (audit_seq, audit_hash) = audit_head(&tx)?;
+        let result = RelayChannelReconciliationV1 {
+            version: 1,
+            tenant_id: self.tenant_id.clone(),
+            control_namespace_uuid: namespace,
+            admission_input_hash: admission_hash,
+            audit_seq,
+            audit_hash,
+            outcome,
+        };
+        capacity(serde_json::to_vec(&result)?.len() <= 16_384)?;
+        // Same technical read regime as worker_operation: validate the held
+        // origin/floor at commit; no channel fact or access receipt is created.
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+
     pub fn reserve_relay_channel(
         &self,
         request: &RelayChannelAdmissionV1,
@@ -542,7 +703,7 @@ impl Store {
         }
         let clock = super::workload::capture_control_time(&tx)?;
         let mut projection = reconstruct(&tx)?;
-        if let Some((hash, receipt)) = projection.operations.get(record.input.operation_id()) {
+        if let Some((hash, receipt, _)) = projection.operations.get(record.input.operation_id()) {
             conflict(
                 hash == &record.input_hash && receipt.channel_id == record.input.channel_id(),
             )?;

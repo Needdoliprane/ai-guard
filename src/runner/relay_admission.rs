@@ -120,7 +120,210 @@ fn context(
     )
 }
 
+fn history_receipt_head(result: &RelayChannelReconciliationV1, seq: i64, hash: &str) -> Result<()> {
+    check(
+        seq > 0
+            && seq <= result.audit_seq
+            && crate::control::hash(hash).is_ok()
+            && (seq != result.audit_seq || hash == result.audit_hash),
+    )
+}
+
+/// Historical wire checks only. This function never constructs ClaimEvidence,
+/// FreshRelayExecClaim or CurrentRelayAuthority, including recorded claim reads.
+fn history_context(
+    result: &RelayChannelReconciliationV1,
+    tenant: &str,
+    request: &RelayChannelReconcileV1,
+) -> Result<()> {
+    let admission = &request.admission;
+    let admission_hash = admission.input_hash().map_err(|_| Error::InvalidRequest)?;
+    check(
+        result.version == 1
+            && result.tenant_id == tenant
+            && result.control_namespace_uuid == admission.control_namespace_uuid
+            && result.admission_input_hash == admission_hash
+            && result.audit_seq >= 0
+            && crate::control::hash(&result.audit_hash).is_ok()
+            && (result.audit_seq != 0 || result.audit_hash == "0".repeat(64)),
+    )?;
+    match &result.outcome {
+        RelayChannelHistoryOutcomeV1::Historical {
+            channel,
+            admission_receipt,
+            pending,
+        } => {
+            // Reuse the exact admission/snapshot/receipt correlation checks;
+            // wrapping a DTO here does not grant the SDK's opaque exec types.
+            let historical = RelayChannelResultV1 {
+                version: 1,
+                replayed: true,
+                channel: channel.clone(),
+                receipt: admission_receipt.clone(),
+            };
+            context(
+                &historical,
+                tenant,
+                admission,
+                &admission.operation_id,
+                &admission_hash,
+            )?;
+            history_receipt_head(
+                result,
+                admission_receipt.audit_seq,
+                &admission_receipt.audit_hash,
+            )?;
+            match (&request.pending, pending) {
+                (None, None) => Ok(()),
+                (Some(expected), Some(observed)) => {
+                    check(expected == &observed.pending)?;
+                    match &observed.resolution {
+                        RelayChannelPendingResolutionV1::Recorded { receipt } => {
+                            let recorded = RelayChannelResultV1 {
+                                receipt: receipt.clone(),
+                                ..historical
+                            };
+                            context(
+                                &recorded,
+                                tenant,
+                                admission,
+                                expected.operation_id(),
+                                &expected.input_hash().map_err(|_| Error::InvalidRequest)?,
+                            )?;
+                            check(
+                                channel.revision > expected.expected_revision()
+                                    && receipt.audit_seq > admission_receipt.audit_seq,
+                            )?;
+                            history_receipt_head(result, receipt.audit_seq, &receipt.audit_hash)
+                        }
+                        RelayChannelPendingResolutionV1::InapplicableCas => {
+                            check(channel.revision > expected.expected_revision())
+                        }
+                        RelayChannelPendingResolutionV1::InapplicableState => check(
+                            channel.revision == expected.expected_revision()
+                                && !expected.accepts_state(channel.state),
+                        ),
+                        RelayChannelPendingResolutionV1::Unresolved => check(
+                            channel.revision < expected.expected_revision()
+                                || channel.revision == expected.expected_revision()
+                                    && expected.accepts_state(channel.state),
+                        ),
+                    }
+                }
+                _ => Err(Error::Protocol),
+            }
+        }
+        RelayChannelHistoryOutcomeV1::AdmissionUnresolved => Ok(()),
+        RelayChannelHistoryOutcomeV1::AdmissionNeverRecordedExactTerminal {
+            admission_operation_id,
+            channel_id,
+            epoch,
+            endpoint,
+            worker_revision,
+            terminal_observation_receipt: receipt,
+        } => {
+            check(
+                admission_operation_id == &admission.operation_id
+                    && channel_id == &admission.channel_id
+                    && *epoch == admission.epoch
+                    && endpoint == &admission.endpoint
+                    && *worker_revision >= admission.expected_worker_revision
+                    && *worker_revision < i64::MAX as u64
+                    && receipt.worker_id.as_deref() == Some(admission.endpoint.worker_id.as_str())
+                    && receipt.revision.is_some_and(|revision| {
+                        revision >= admission.expected_worker_revision
+                            && revision <= *worker_revision
+                    })
+                    && uuid::Uuid::parse_str(&receipt.operation_id)
+                        .is_ok_and(|id| !id.is_nil() && id.to_string() == receipt.operation_id)
+                    && crate::control::hash(&receipt.input_hash).is_ok(),
+            )?;
+            history_receipt_head(result, receipt.audit_seq, &receipt.audit_hash)
+        }
+    }
+}
+
 impl AuditClient {
+    /// Obtain tenant/namespace only from authenticated supervision identity.
+    /// `active` describes namespace admission mode, not runner authentication;
+    /// historical reads remain valid in maintenance after workload retirement.
+    pub(crate) async fn reconcile_relay_channel(
+        &self,
+        request: &RelayChannelReconcileV1,
+    ) -> Result<RelayChannelReconciliationV1> {
+        request.validate().map_err(|_| Error::InvalidRequest)?;
+        let identity = self
+            .control_supervision_identity()
+            .await
+            .map_err(|error| match error {
+                super::ControlIdentityError::Unauthorized => Error::Authentication,
+                super::ControlIdentityError::Forbidden => Error::Forbidden,
+                super::ControlIdentityError::Unavailable => Error::Unavailable,
+                super::ControlIdentityError::InvalidResponse => Error::Protocol,
+            })?;
+        if identity.role != "runner"
+            || identity.control_namespace_uuid.as_deref()
+                != Some(request.admission.control_namespace_uuid.as_str())
+        {
+            return Err(Error::Forbidden);
+        }
+        check([6, 7, 8, 9, 10, 11, 12].contains(&identity.schema_version))?;
+        self.validate_identity_payload(request)
+            .map_err(|_| Error::InvalidRequest)?;
+        let bytes = serde_json::to_vec(request).map_err(|_| Error::InvalidRequest)?;
+        if bytes.len() > 16_384 {
+            return Err(Error::InvalidRequest);
+        }
+        let path = format!(
+            "/api/v1/relay/channels/{}/reconcile",
+            request.admission.channel_id
+        );
+        let url = self
+            .control_url(reqwest::Method::POST, &path)
+            .map_err(|_| Error::InvalidRequest)?;
+        let mut response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        use reqwest::StatusCode as S;
+        match response.status() {
+            S::OK => {}
+            S::UNAUTHORIZED => return Err(Error::Authentication),
+            S::FORBIDDEN => return Err(Error::Forbidden),
+            S::CONFLICT => return Err(Error::Conflict),
+            S::TOO_MANY_REQUESTS => return Err(Error::Capacity),
+            S::BAD_REQUEST | S::PAYLOAD_TOO_LARGE => return Err(Error::InvalidRequest),
+            S::CREATED => return Err(Error::Protocol),
+            // An old/absent route (404), loss or other status supplies no
+            // historical proof and never falls back to a mutation endpoint.
+            _ => return Err(Error::Unavailable),
+        }
+        check(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|header| header.to_str().ok())
+                == Some("application/json"),
+        )?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unavailable)? {
+            if bytes.len().saturating_add(chunk.len()) > 16_384 {
+                return Err(Error::Protocol);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let json = crate::json::decode_unique(&bytes, 64).map_err(|_| Error::Protocol)?;
+        let result: RelayChannelReconciliationV1 =
+            serde_json::from_value(json).map_err(|_| Error::Protocol)?;
+        history_context(&result, &identity.tenant_id, request)?;
+        Ok(result)
+    }
+
     async fn relay_channel_identity(
         &self,
         tenant: &str,

@@ -13,8 +13,8 @@ validate this broker owner or its real runtime handoff.
 
 | Item | Source observation | Required result | Current evidence |
 |---|---|---|---|
-| R1 — historical reconciliation | A reservation or possibly committed claim can retain an older local snapshot. Retirement then uses an incompatible state or stale CAS. Reopening conservatively avoids a second exec but does not complete retirement. | Reconcile exact durable identities and pending operations, choose a compatible transition at the confirmed revision, preserve unknown outcomes without new execution authority. | The absent historical route is reproduced by one HTTP404-versus-200 test after a real reserved-channel positive control. The new read/SDK and broker consumption remain separate implementation and validation work. |
-| R2 — faithful reconciliation status | Retirement clears an error before close acknowledgement. A refused/lost close can appear as ordinary waiting with `reconciliation_required=false`. Publication in memory can also precede durable save. | Keep a truthful pending/unknown state until durable compatible acknowledgement; a failed save must not publish completion in memory. | Three exact unit RED results establish the status, error-retention and acknowledgement defects. The corrected journal case now separately reproduces the missing terminal compatibility after valid positive controls. The candidate includes two additional asynchronous IO regressions; independent review and GREEN remain open. |
+| R1 — historical reconciliation | A reservation or possibly committed claim can retain an older local snapshot. Retirement then uses an incompatible state or stale CAS. Reopening conservatively avoids a second exec but does not complete retirement. | Reconcile exact durable identities and pending operations, choose a compatible transition at the confirmed revision, preserve unknown outcomes without new execution authority. | The Core/API/SDK slice is independently reviewed and passes fourteen exact tests plus the all-targets check after its HTTP404-versus-200 baseline. Broker consumption and full-prefix local history remain open. |
+| R2 — faithful reconciliation status | Retirement clears an error before close acknowledgement. A refused/lost close can appear as ordinary waiting with `reconciliation_required=false`. Publication in memory can also precede durable save. | Keep a truthful pending/unknown state until durable compatible acknowledgement; a failed save must not publish completion in memory. | Four baseline defects are reproduced across two separate experiments. The reviewed local Full3 correction passes six exact tests, including two asynchronous IO regressions, and the all-targets check. Full Core/runtime retirement is still unqualified. |
 
 The source review found no demonstrated unauthorized execution or cross-tenant
 disclosure in this scope. Its runtime consequences are NOT_RUN. Four principal
@@ -37,12 +37,12 @@ genuine 2,516-file post-run export has SHA-256
 and every source payload matches its input manifest. No source fix or product
 pass is inferred from a successful experiment harness exit.
 
-Both source candidates are frozen for separate independent reviews. R1 adds
-the typed historical read and its SDK checks; R2 preserves durable retirement
-intent and includes real local-journal IO cancellation/capacity tests. Neither
-candidate has a GREEN result at this checkpoint. The capacity test does not
-establish behavior under a filesystem failure, and a synthetic acknowledgement
-does not qualify the Core HTTP or runtime handoff.
+The two corrected candidates have separate GREEN results and source reviews:
+[Core/API/SDK, fourteen parents](evidence/2026-11-11/relay-history-reconciliation/README.md)
+and [local Full3 R2, six parents](evidence/2026-11-11/relay-owner-retirement/README.md).
+These results do not validate their combined broker consumer. The capacity test
+does not establish behavior under a filesystem failure, and a synthetic
+acknowledgement does not qualify the Core HTTP or runtime handoff.
 
 ## Implementation ownership
 

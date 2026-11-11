@@ -7,6 +7,10 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route("/relay/channels/admissions", post(reserve))
         .route("/relay/channels/{id}/claims", post(claim))
         .route("/relay/channels/{id}/transitions", post(transition))
+        .route(
+            "/relay/channels/{id}/reconcile",
+            post(reconcile).layer(DefaultBodyLimit::max(16_384)),
+        )
 }
 fn failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     if let Some(response) = audit_capacity_failure(&error) {
@@ -97,6 +101,32 @@ async fn transition(
                 tenant
                     .store
                     .transition_relay_channel(&input)
+                    .map_err(failure)?,
+            ))
+        })
+        .await
+}
+
+async fn reconcile(
+    RunnerIdentity(tenant): RunnerIdentity,
+    Path(id): Path<String>,
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+    body: Result<Json<RelayChannelReconcileV1>, JsonRejection>,
+) -> ApiResult<Json<RelayChannelReconciliationV1>> {
+    tenant
+        .blocking(true, move |tenant| {
+            let input = parse(body)?;
+            input.validate().map_err(failure)?;
+            path(&id, &input.admission.channel_id)?;
+            let raw_path = uri.path().strip_prefix("/control").unwrap_or(uri.path());
+            if uri.query().is_some() || raw_path != format!("/api/v1/relay/channels/{id}/reconcile")
+            {
+                return Err(failure(RelayAdmissionFailure::InvalidRequest.into()));
+            }
+            Ok(Json(
+                tenant
+                    .store
+                    .reconcile_relay_channel(&input)
                     .map_err(failure)?,
             ))
         })

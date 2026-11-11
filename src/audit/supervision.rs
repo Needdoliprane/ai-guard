@@ -208,7 +208,7 @@ fn load_record(db: &Connection, id: &str) -> anyhow::Result<Option<(StoredEvent,
         })
         .transpose()
 }
-pub(super) fn operation_receipt(
+pub(in crate::audit) fn operation_receipt(
     db: &Connection,
     id: &str,
 ) -> anyhow::Result<Option<MutationReceiptV1>> {

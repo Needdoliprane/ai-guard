@@ -1,5 +1,22 @@
 # État constaté — suivi du développement
 
+## 11 novembre — historique Core/API/SDK validé, retrait local R2 vérifié séparément
+
+La lecture historique liée au runner authentifié distingue reçu exact,
+inapplicabilité CAS/état et inconnue, sans créer d'autorité d'exécution. Ses dix
+postimages relues correspondent au gel de quatorze parents PASS et check toutes
+cibles RC0. Le premier candidat avait échoué à compiler avant tout test ; sa
+correction interne de deux lignes et ses preuves restent distinctes.
+[Sources et limites](evidence/2026-11-11/relay-history-reconciliation/README.md).
+
+Le candidat Full3 local R2 passe séparément six régressions et le check toutes
+cibles, avec vrai export post-run et retrait de QA. Son code reste dans le
+périmètre Full3 non publié ; capacité IO et ACK synthétique ne qualifient pas
+une panne physique ou Core/runtime.
+[Preuves R2](evidence/2026-11-11/relay-owner-retirement/README.md).
+Le raccord broker, l'historique complet des intentions et les qualifications
+réelles restent ouverts ; aucun gate global n'est fermé.
+
 ## 11 novembre — deux écarts de reprise du propriétaire relais en correction
 
 Une revue source ciblée du Full3 non publié identifie un retrait incomplet sur

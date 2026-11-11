@@ -190,6 +190,25 @@ pub enum RelayChannelTransitionKindV1 {
         terminal_observation_id: String,
     },
 }
+impl RelayChannelTransitionKindV1 {
+    /// State precondition only: authority, audit, identity and terminal evidence
+    /// remain separate mandatory checks before a mutation can be accepted.
+    pub fn target_state(&self, state: RelayChannelStateV1) -> Option<RelayChannelStateV1> {
+        use RelayChannelStateV1 as S;
+        match (self, state) {
+            (Self::CancelReserved, S::Reserved) => Some(S::CancelledBeforeClaim),
+            (Self::KnownRefusedBeforeSpawn, S::Reserved) => Some(S::KnownRefusedBeforeSpawn),
+            (Self::Ready, S::AcceptedBeforeExec) => Some(S::Ready),
+            (Self::Closing, S::AcceptedBeforeExec | S::Ready) => Some(S::Closing),
+            (Self::Unknown, S::AcceptedBeforeExec | S::Ready | S::Closing) => Some(S::Unknown),
+            (
+                Self::CloseExactWorkerTerminal { .. },
+                S::AcceptedBeforeExec | S::Ready | S::Closing | S::Unknown,
+            ) => Some(S::Closed),
+            _ => None,
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayChannelTransitionV1 {
@@ -239,6 +258,10 @@ pub enum RelayChannelStateV1 {
     Closed,
 }
 impl RelayChannelStateV1 {
+    /// Pure state precondition, never proof of current execution authority.
+    pub fn accepts_claim(self) -> bool {
+        self == Self::Reserved
+    }
     pub fn active(self) -> bool {
         !matches!(
             self,
@@ -285,4 +308,133 @@ pub struct RelayChannelResultV1 {
     pub replayed: bool,
     pub channel: RelayChannelSnapshotV1,
     pub receipt: RelayChannelReceiptV1,
+}
+
+/// An exact retained intention to look up, never an instruction to apply it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    content = "request",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum RelayChannelPendingV1 {
+    Claim(RelayChannelClaimV1),
+    Transition(RelayChannelTransitionV1),
+}
+impl RelayChannelPendingV1 {
+    pub fn accepts_state(&self, state: RelayChannelStateV1) -> bool {
+        match self {
+            Self::Claim(_) => state.accepts_claim(),
+            Self::Transition(input) => input.transition.target_state(state).is_some(),
+        }
+    }
+    pub fn validate(&self, admission: &RelayChannelAdmissionV1) -> anyhow::Result<()> {
+        let (channel, epoch, admission_hash) = match self {
+            Self::Claim(input) => {
+                input.validate()?;
+                (&input.channel_id, input.epoch, &input.admission_input_hash)
+            }
+            Self::Transition(input) => {
+                input.validate()?;
+                (&input.channel_id, input.epoch, &input.admission_input_hash)
+            }
+        };
+        valid(
+            channel == &admission.channel_id
+                && epoch == admission.epoch
+                && admission_hash == &admission.input_hash()?,
+        )
+    }
+    pub fn operation_id(&self) -> &str {
+        match self {
+            Self::Claim(input) => &input.operation_id,
+            Self::Transition(input) => &input.operation_id,
+        }
+    }
+    pub fn expected_revision(&self) -> u64 {
+        match self {
+            Self::Claim(input) => input.expected_revision,
+            Self::Transition(input) => input.expected_revision,
+        }
+    }
+    pub fn input_hash(&self) -> anyhow::Result<String> {
+        match self {
+            Self::Claim(input) => input.input_hash(),
+            Self::Transition(input) => input.input_hash(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayChannelReconcileV1 {
+    pub version: u32,
+    pub admission: RelayChannelAdmissionV1,
+    pub pending: Option<RelayChannelPendingV1>,
+}
+impl RelayChannelReconcileV1 {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        valid(self.version == 1)?;
+        self.admission.validate()?;
+        if let Some(pending) = &self.pending {
+            pending.validate(&self.admission)?;
+        }
+        valid(serde_json::to_vec(self)?.len() <= 16_384)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RelayChannelPendingResolutionV1 {
+    Recorded {
+        receipt: RelayChannelReceiptV1,
+    },
+    /// Absent in this snapshot and its exact CAS can never pass again.
+    InapplicableCas,
+    /// Absent, same CAS revision and incompatible state. Every possible later
+    /// state change increments that revision, so this intention cannot apply.
+    InapplicableState,
+    Unresolved,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayChannelPendingHistoryV1 {
+    pub pending: RelayChannelPendingV1,
+    pub resolution: RelayChannelPendingResolutionV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RelayChannelHistoryOutcomeV1 {
+    Historical {
+        channel: RelayChannelSnapshotV1,
+        admission_receipt: RelayChannelReceiptV1,
+        pending: Option<RelayChannelPendingHistoryV1>,
+    },
+    /// Absence at a snapshot is insufficient to resolve an in-flight Reserve.
+    AdmissionUnresolved,
+    /// The exact incarnation is durably terminal under the same serialized
+    /// snapshot. This proves no admission can arrive later, never process join.
+    AdmissionNeverRecordedExactTerminal {
+        admission_operation_id: String,
+        channel_id: String,
+        epoch: u64,
+        endpoint: RelayEndpointV1,
+        worker_revision: u64,
+        terminal_observation_receipt: crate::control::MutationReceiptV1,
+    },
+}
+/// A verified historical snapshot, with no conversion into an exec capability.
+/// The head is a real observed audit prefix, not a new receipt or signature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayChannelReconciliationV1 {
+    pub version: u32,
+    pub tenant_id: String,
+    pub control_namespace_uuid: String,
+    pub admission_input_hash: String,
+    pub audit_seq: i64,
+    pub audit_hash: String,
+    pub outcome: RelayChannelHistoryOutcomeV1,
 }
