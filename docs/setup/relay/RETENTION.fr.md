@@ -347,10 +347,13 @@ Cette route n'est servie que par l'API du gateway. Elle n'est pas publiée sous
 
 ## Limites
 
-- Le client Rust du worker et le helper stdio rapportent tout HTTP 429 comme
-  `Capacity`, dont le texte demande de contacter l'opérateur ; ils ne lisent
-  pas les champs typés ci-dessus. Seul un appelant qui lit le corps d'erreur
-  HTTP voit la portée et les chiffres.
+- Le client Rust du worker lit les champs typés ci-dessus par
+  [`send_with_refusal`](README.fr.md#lire-un-envoi-refusé). `send` et stdio V1
+  conservent le `Capacity` générique. L'enveloppe explicite
+  [V2 réservée aux envois stdio](README.fr.md#choisir-les-détails-de-refus-denvoi-sur-stdio)
+  peut transporter le même détail fermé par un helper/contrôle compatibles,
+  sans changer l'identité d'opération ni les résultats inconnus. Ce nouveau
+  raccord reste source-only, sans QA comportementale ou qualification runtime.
 - Le démarrage du binaire gateway avec ces options est couvert par un test
   logiciel sur loopback, avec des stores préparés par les migrations
   explicites : ligne de démarrage, politique appliquée lue par la route de

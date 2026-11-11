@@ -1,4 +1,5 @@
 //! Software seams only: retained authority is a test fixture, never a runtime permit.
+mod refusal_wire_tests;
 use super::*;
 use crate::relay::channel::ChannelLimitsV1;
 use crate::relay::{RelayAckV1, RelaySendV1};
@@ -276,6 +277,7 @@ struct HttpFixture {
     inputs: Mutex<Vec<Value>>,
     lose_first: AtomicBool,
     refuse: AtomicBool,
+    typed_capacity: AtomicBool,
     hold: AtomicBool,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
@@ -314,6 +316,20 @@ async fn post_send(
     }
     if fixture.lose_first.swap(false, Ordering::SeqCst) {
         return (StatusCode::CREATED, Json(json!({}))).into_response();
+    }
+    if fixture.typed_capacity.load(Ordering::SeqCst) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error": {
+                "code": "relay_sender_capacity_exhausted", "message": "remote-private-diagnostic",
+                "scope": "sender", "dimension": "messages",
+                "limit": {"messages": 1, "bytes": 65536},
+                "retained": {"messages": 1, "bytes": 24},
+                "requested_bytes": input.body.len(), "next_release_at": null,
+                "retry_action": "contact_operator"
+            }})),
+        )
+            .into_response();
     }
     let replayed = previous > 0;
     (

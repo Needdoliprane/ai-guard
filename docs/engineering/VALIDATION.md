@@ -1,5 +1,17 @@
 # Validation courante
 
+## 11 novembre — SendV2 : quatorze parents et compilation publique composée
+
+Gel2456 `e45a1923…` sur fb956b7 +17postimages : build/liste/résolution RC0,
+quatorze parents uniques avec 1 PASS chacun, 0 FAIL, 0 ignoré entre 11:38:39
+et 11:38:51 UTC. Check toutes cibles RC0 jusqu'à 11:40:22, couvrant les lots
+publics B, Setup, Core et wire. Export vivant réel vérifié intégralement ;
+collecte et retrait exact de QA RC0. Les dix-sept fichiers indexés correspondent
+au gel et les 124 travaux indépendants sont conservés en composition.
+Le helper utilise des réponses HTTP déclarées ; le client HTTP utilise le vrai
+gateway/SQLite avec faits workers synthétiques. Pas de runtime worker qualifié.
+[Résultats et limites](evidence/2026-11-11/relay-sendv2/README.md).
+
 ## 11 novembre — relais CoreC20 : neuf parents ciblés et check toutes cibles
 
 Le gel R3 de 2 422 fichiers `1873f6a4…` compile en R5 avec jobs1/debug0.

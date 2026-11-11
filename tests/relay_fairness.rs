@@ -2307,3 +2307,232 @@ async fn rate_limited_send_names_its_grant_and_the_window_to_wait_for() {
     assert_eq!(status, StatusCode::CREATED, "{answer}");
     assert!(w.a.integrity().unwrap().valid);
 }
+
+/// The gateway router behind a real HTTP listener on loopback, for the Rust
+/// worker client. Worker runtime facts stay synthetic.
+struct Listener {
+    origin: String,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Listener {
+    async fn start(app: Router) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self { origin, task }
+    }
+    fn worker(&self, token: &str, worker: &WorkerV1) -> client::WorkerRelayClient {
+        client::WorkerRelayClient::new(&self.origin, token, endpoint(worker)).unwrap()
+    }
+}
+impl Drop for Listener {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A fixture send that must be accepted. As in `relay_send`, an untyped 429
+/// is the shared I/O admission gate: the same operation is replayed.
+async fn client_accepts(client: &client::WorkerRelayClient, input: &RelaySendV1) {
+    for _ in 0..80 {
+        match client.send_with_refusal(input).await {
+            Ok(_) => return,
+            Err(failure)
+                if failure.error == client::RelayClientError::Capacity
+                    && failure.refusal.is_none() =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(failure) => panic!("fixture send failed: {failure:?}"),
+        }
+    }
+    panic!("the shared I/O admission gate never admitted the fixture send");
+}
+
+#[tokio::test]
+async fn worker_client_tells_a_retry_from_an_operator_call_and_learns_nothing_about_neighbors() {
+    use client::RelayClientError::Capacity;
+    for (automatic_prune_batch, action) in [
+        (8, RelayRetryActionV1::RetryAfterRelease),
+        (0, RelayRetryActionV1::ContactOperator),
+    ] {
+        let w = world(with_batch(
+            budgets(
+                capacity(2, 131_072),
+                capacity(1, 65_536),
+                capacity(1, 65_536),
+            ),
+            automatic_prune_batch,
+        ))
+        .await;
+        let a3 = running_now(&w.a);
+        let token_a3 = "4".repeat(48);
+        bind(&w.a, &a3, &token_a3);
+        let from_a1 = directed(&w.a1, &w.a2, "tasks");
+        let from_a2 = directed(&w.a2, &w.a1, "tasks");
+        let from_a3 = directed(&a3, &w.a1, "tasks");
+        for grant in [&from_a1, &from_a2, &from_a3] {
+            authorize(&w.app, grant).await;
+        }
+        let server = Listener::start(w.app.clone()).await;
+        let client_a1 = server.worker(&w.token_a1, &w.a1);
+        let client_a2 = server.worker(&w.token_a2, &w.a2);
+        let client_a3 = server.worker(&token_a3, &a3);
+
+        // A1 fills its own share: the refusal carries A1's own figures.
+        let first = message(&from_a1, 60, &format!("{MARKER} first"));
+        client_accepts(&client_a1, &first).await;
+        let second = message(&from_a1, 60, "second");
+        let failure = client_a1.send_with_refusal(&second).await.unwrap_err();
+        assert_eq!(failure.error, Capacity);
+        let refusal = failure
+            .refusal
+            .clone()
+            .expect("the worker client reduced a typed relay refusal to a bare capacity error");
+        assert_eq!(
+            (refusal.scope, refusal.retry_action),
+            (RelayRefusalScopeV1::Sender, action),
+            "automatic_prune_batch {automatic_prune_batch}"
+        );
+        assert_eq!(
+            refusal.own,
+            Some(RelayOwnShareV1 {
+                dimension: RelayCapacityDimensionV1::Messages,
+                limit: capacity(1, 65_536),
+                retained: capacity(1, first.body.len() as u64),
+                requested_bytes: second.body.len() as u64,
+                next_release_at: Some(expiry_of(&w.path_a(), &first.operation_id)),
+            })
+        );
+        assert_eq!(
+            failure.to_string().contains("operator"),
+            action == RelayRetryActionV1::ContactOperator,
+            "{failure}"
+        );
+        // The historical method reports the same refusal as before.
+        assert_eq!(client_a1.send(&second).await.unwrap_err(), Capacity);
+
+        // A2 fills the tenant. A3 retains nothing and meets the shared
+        // ceiling: it learns what to do and nothing about A1 or A2.
+        client_accepts(&client_a2, &message(&from_a2, 60, MARKER)).await;
+        let blocked = message(&from_a3, 60, "blocked");
+        let failure = client_a3.send_with_refusal(&blocked).await.unwrap_err();
+        assert_eq!(failure.error, Capacity);
+        assert_eq!(
+            failure.refusal,
+            Some(RelaySendRefusalV1 {
+                scope: RelayRefusalScopeV1::Tenant,
+                retry_action: action,
+                own: None,
+            }),
+            "automatic_prune_batch {automatic_prune_batch}"
+        );
+        let surfaced = format!("{failure:?} {failure}");
+        for private in [
+            w.a1.worker_id.as_str(),
+            w.a2.worker_id.as_str(),
+            first.operation_id.as_str(),
+            MARKER,
+            w.token_a1.as_str(),
+            w.token_a2.as_str(),
+            token_a3.as_str(),
+        ] {
+            assert!(
+                !surfaced.contains(private),
+                "a refused send surfaced data of another sender, a body or a credential: {surfaced}"
+            );
+        }
+        assert_eq!(
+            failure.to_string().contains("operator"),
+            action == RelayRetryActionV1::ContactOperator,
+            "{failure}"
+        );
+        assert_eq!(retained(&w.path_a()).0, 2, "a refused send was stored");
+        assert!(w.a.integrity().unwrap().valid);
+    }
+
+    // A tighter directed-grant share refuses before the sender share. Read the
+    // real HTTP refusal through the same worker client, not a synthetic body.
+    let w = world(budgets(
+        capacity(8, 524_288),
+        capacity(3, 196_608),
+        capacity(2, 131_072),
+    ))
+    .await;
+    let tasks = directed(&w.a1, &w.a2, "tasks");
+    authorize(&w.app, &tasks).await;
+    let server = Listener::start(w.app.clone()).await;
+    let client_a1 = server.worker(&w.token_a1, &w.a1);
+    let first = message(&tasks, 60, "first");
+    let second = message(&tasks, 60, "second");
+    for input in [&first, &second] {
+        client_accepts(&client_a1, input).await;
+    }
+    let head = w.a.head().unwrap();
+    let blocked = message(&tasks, 60, "blocked");
+    let failure = client_a1.send_with_refusal(&blocked).await.unwrap_err();
+    assert_eq!(failure.error, Capacity);
+    assert_eq!(
+        failure.refusal,
+        Some(RelaySendRefusalV1 {
+            scope: RelayRefusalScopeV1::Grant,
+            retry_action: RelayRetryActionV1::RetryAfterRelease,
+            own: Some(RelayOwnShareV1 {
+                dimension: RelayCapacityDimensionV1::Messages,
+                limit: capacity(2, 131_072),
+                retained: capacity(2, (first.body.len() + second.body.len()) as u64),
+                requested_bytes: blocked.body.len() as u64,
+                next_release_at: Some(expiry_of(&w.path_a(), &first.operation_id)),
+            }),
+        })
+    );
+    assert_eq!(
+        w.a.head().unwrap(),
+        head,
+        "a grant refusal wrote an audit fact"
+    );
+    assert_eq!(
+        retained(&w.path_a()).0,
+        2,
+        "a grant refusal retained its body"
+    );
+    assert!(w.a.integrity().unwrap().valid);
+
+    // The durable rate of one grant: wait for the window, nothing to release.
+    let w = world(RelayRetentionPolicyV1::default()).await;
+    let tasks = directed(&w.a1, &w.a2, "tasks");
+    authorize(&w.app, &tasks).await;
+    let server = Listener::start(w.app.clone()).await;
+    let client_a1 = server.worker(&w.token_a1, &w.a1);
+    let started = std::time::Instant::now();
+    for _ in 0..MAX_MESSAGES_PER_MINUTE {
+        client_accepts(&client_a1, &message(&tasks, 60, "r")).await;
+    }
+    // A fresh window of the shared I/O admission gate for the refused send.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let failure = client_a1
+        .send_with_refusal(&message(&tasks, 60, "over the rate"))
+        .await
+        .unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(50),
+        "fixture too slow: the 60-second rate window moved during the fill"
+    );
+    assert_eq!(failure.error, Capacity);
+    assert_eq!(
+        failure.refusal,
+        Some(RelaySendRefusalV1 {
+            scope: RelayRefusalScopeV1::Grant,
+            retry_action: RelayRetryActionV1::RetryAfterWindow,
+            own: None,
+        })
+    );
+    assert!(
+        failure.to_string().contains("60-second window"),
+        "{failure}"
+    );
+    assert_eq!(retained(&w.path_a()), (60, 60));
+    assert!(w.a.integrity().unwrap().valid);
+}

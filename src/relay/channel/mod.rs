@@ -73,6 +73,7 @@ enum Phase {
 }
 
 struct Pending {
+    version: u32,
     correlation: String,
     operation: OperationV1,
     payload: PendingPayload,
@@ -179,6 +180,7 @@ impl ChannelState {
         };
         self.seen.insert(request.correlation_id.clone());
         self.pending = Some(Pending {
+            version: request.version,
             correlation: request.correlation_id.clone(),
             operation: request.operation(),
             payload,
@@ -200,7 +202,9 @@ impl ChannelState {
         response.validate()?;
         self.binding(&response.channel_id, response.epoch)?;
         let pending = self.pending.as_ref().ok_or(ChannelError::Correlation)?;
-        if response.correlation_id != pending.correlation || response.operation != pending.operation
+        if response.version != pending.version
+            || response.correlation_id != pending.correlation
+            || response.operation != pending.operation
         {
             return Err(ChannelError::Correlation);
         }

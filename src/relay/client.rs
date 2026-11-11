@@ -4,6 +4,7 @@
 //! Callers retain their exact send/ACK requests before submission. A failed or
 //! lost response may follow a durable mutation: retries are explicit and reuse
 //! the same operation ID and content. No method generates an operation ID.
+use super::refusal::RelaySendFailureV1;
 use super::validation::{self, MAX_RECEIPT_BYTES, validate_receipt};
 use super::{
     MAX_INBOX_BYTES, RelayAckV1, RelayEndpointV1, RelayInboxV1, RelayReceiptV1, RelaySendV1,
@@ -218,21 +219,35 @@ impl WorkerRelayClient {
             .map_err(|_| RelayClientError::Transport)
     }
 
-    pub async fn send(&self, input: &RelaySendV1) -> Result<RelayReceiptV1> {
+    /// `send`, keeping what a typed relay 429 says about the refusal: its scope,
+    /// the retry action and the sender's own figures. `error` is the value
+    /// `send` returns; any other failure carries no refusal.
+    pub async fn send_with_refusal(
+        &self,
+        input: &RelaySendV1,
+    ) -> std::result::Result<RelayReceiptV1, RelaySendFailureV1> {
         let bytes = self.validated_send_bytes(input)?;
         let request = self.send_request(bytes);
         let response = self.dispatch(request).await?;
         let (status, bytes) = response_bytes(response, MAX_RECEIPT_BYTES).await?;
-        require_success(status)?;
+        if let Err(error) = require_success(status) {
+            return Err(RelaySendFailureV1::refused(error, &bytes));
+        }
         let receipt: RelayReceiptV1 = self.decode(&bytes)?;
         validate_receipt(&receipt, &input.operation_id, &input.operation_id)?;
         if !matches!(
             (status, receipt.replayed),
             (StatusCode::CREATED, false) | (StatusCode::OK, true)
         ) {
-            return Err(RelayClientError::Protocol);
+            return Err(RelayClientError::Protocol.into());
         }
         Ok(receipt)
+    }
+
+    pub async fn send(&self, input: &RelaySendV1) -> Result<RelayReceiptV1> {
+        self.send_with_refusal(input)
+            .await
+            .map_err(|failure| failure.error)
     }
 
     /// Return one bounded page; an error never becomes an empty inbox. The caller

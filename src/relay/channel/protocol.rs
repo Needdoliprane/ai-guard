@@ -1,7 +1,9 @@
-//! Closed V1 values. None of these values creates workload or runtime authority.
+//! Closed V1 channel values, with explicit send-only envelope V2 opt-in.
+//! The V2 exchange carries the same V1 business request and authority.
 use super::{ChannelError, FrameLimit};
 use crate::relay::{
-    MAX_INBOX_BYTES, RelayAckV1, RelayInboxV1, RelayReceiptV1, RelaySendV1, validation,
+    MAX_INBOX_BYTES, RelayAckV1, RelayInboxV1, RelayReceiptV1, RelaySendRefusalV1, RelaySendV1,
+    validation,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, value::RawValue};
@@ -97,7 +99,7 @@ impl RequestV1 {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ChannelError> {
-        header(self.version, &self.channel_id, self.epoch)?;
+        exchange_header(self.version, &self.channel_id, self.epoch, self.operation())?;
         correlation(&self.correlation_id)?;
         let result = match &self.payload {
             RequestPayloadV1::Send(input) => {
@@ -164,6 +166,8 @@ impl ErrorCodeV1 {
 pub enum ResponseResultV1 {
     Ok(ReplyV1),
     Error(ErrorCodeV1),
+    /// Only an explicitly opted-in V2 send may carry this capacity detail.
+    SendRefusal(RelaySendRefusalV1),
 }
 
 #[derive(Clone)]
@@ -177,8 +181,13 @@ pub struct ResponseV1 {
 }
 impl ResponseV1 {
     pub(super) fn validate(&self) -> Result<(), ChannelError> {
-        header(self.version, &self.channel_id, self.epoch)?;
+        exchange_header(self.version, &self.channel_id, self.epoch, self.operation)?;
         correlation(&self.correlation_id)?;
+        if let ResponseResultV1::SendRefusal(refusal) = &self.result {
+            if self.version != 2 || self.operation != OperationV1::Send || !refusal.valid() {
+                return Err(ChannelError::Protocol);
+            }
+        }
         if let ResponseResultV1::Ok(reply) = &self.result {
             if reply.operation() != self.operation {
                 return Err(ChannelError::Correlation);
@@ -295,6 +304,11 @@ impl FrameV1 {
                         put(&mut object, "result", "error")?;
                         put(&mut object, "error", code)?;
                     }
+                    ResponseResultV1::SendRefusal(refusal) => {
+                        put(&mut object, "result", "error")?;
+                        put(&mut object, "error", &ErrorCodeV1::Capacity)?;
+                        put(&mut object, "refusal", refusal)?;
+                    }
                 }
             }
             Self::Close(value) => put(&mut object, "reason", &value.reason)?,
@@ -367,7 +381,20 @@ impl FrameV1 {
                             OperationV1::Ack => ReplyV1::Ack(exact(payload)?),
                         })
                     }
-                    "error" => ResponseResultV1::Error(take(&mut object, "error")?),
+                    "error" => {
+                        let code: ErrorCodeV1 = take(&mut object, "error")?;
+                        if let Some(detail) = object.remove("refusal") {
+                            if version != 2
+                                || operation != OperationV1::Send
+                                || code != ErrorCodeV1::Capacity
+                            {
+                                return Err(ChannelError::Protocol);
+                            }
+                            ResponseResultV1::SendRefusal(exact(detail)?)
+                        } else {
+                            ResponseResultV1::Error(code)
+                        }
+                    }
                     _ => return Err(ChannelError::Protocol),
                 };
                 Self::Response(ResponseV1 {
@@ -415,6 +442,21 @@ pub(crate) fn header(version: u32, channel: &str, epoch: u64) -> Result<(), Chan
         Err(ChannelError::Protocol)
     } else {
         Ok(())
+    }
+}
+
+// Deliberately separate from channel/discovery headers: V2 is not a handshake,
+// a new identity, or permission to send V2 inbox/ACK payloads.
+fn exchange_header(
+    version: u32,
+    channel: &str,
+    epoch: u64,
+    operation: OperationV1,
+) -> Result<(), ChannelError> {
+    if version == 1 || version == 2 && operation == OperationV1::Send {
+        header(1, channel, epoch)
+    } else {
+        Err(ChannelError::Protocol)
     }
 }
 

@@ -141,6 +141,7 @@ async fn send_prepared(
 | Method | Existing worker route and behavior |
 |---|---|
 | `send(&RelaySendV1)` | `POST /api/v1/relay/messages`; version 1, retained operation UUID, authorized grant UUID, TTL and nonempty body. Returns the correlated receipt, with 201 for a new send or 200 for an exact replay. The send operation ID also identifies its message. |
+| `send_with_refusal(&RelaySendV1)` | The same request, route and checks as `send`. Its failure is a `RelaySendFailureV1`: `error` is the value `send` returns, and `refusal` is what a [typed relay refusal](#read-a-refused-send) said, when the response was one. |
 | `inbox(after: Option<i64>, limit: u32)` | `GET /api/v1/relay/messages`; nonnegative cursor and limit 1–32. Returns one checked page; an error never becomes an empty inbox. The caller retains/advances its cursor explicitly. |
 | `ack(&RelayAckV1)` | `POST /api/v1/relay/messages/{message_id}/ack`; the retained ACK has its own operation UUID and the received message UUID. Returns a correlated 200 receipt. An ACK is acknowledgement, not execution or an observed effect. |
 
@@ -197,11 +198,99 @@ perfect DLP; do not send credentials or sensitive tokens through business data.
 `Forbidden` require the operator to correct worker authority; they never trigger
 another role or credential. `NotFound` and `Conflict` require preserving and
 checking resource/request identity. `Capacity` covers HTTP 429, including audit
-budgets; contact the operator rather than rotating a proof to reset a budget.
+budgets; contact the operator rather than rotating a proof to reset a budget,
+unless a [typed relay refusal](#read-a-refused-send) says that a retry can pass.
 `Unavailable`, `Transport` and `Protocol` leave mutation outcome unresolved.
 No error text includes the remote diagnostic body. The
 [workload diagnostics](../workloads/README.md#diagnose-stop-and-preserve-state)
 retain the server-side distinctions.
+
+### Read a refused send
+
+A send beyond a retained share or beyond the rate of its grant is answered
+with a typed HTTP 429 ([retention budgets](RETENTION.md#refusals)). `send`
+reports it as `Capacity`, like any other 429. `send_with_refusal` reports the
+same `error` and adds a `RelaySendRefusalV1` in `refusal`:
+
+| Field | Content |
+|---|---|
+| `scope` | `Tenant`, `Sender` or `Grant` (`RelayRefusalScopeV1`) |
+| `retry_action` | `RetryAfterRelease`, `RetryAfterWindow` or `ContactOperator` (`RelayRetryActionV1`) |
+| `own` | For a sender or grant share only: `dimension`, `limit`, `retained`, `requested_bytes` and `next_release_at`, all about the refused sender itself. `None` for a tenant or rate refusal. |
+
+```rust
+use agentsandbox::relay::{
+    RelayReceiptV1, RelayRetryActionV1, RelaySendFailureV1, RelaySendV1,
+    client::WorkerRelayClient,
+};
+
+/// `Ok(None)`: keep the retained request and retry that same operation later.
+async fn send_or_keep(
+    client: &WorkerRelayClient,
+    prepared_send: &RelaySendV1,
+) -> Result<Option<RelayReceiptV1>, RelaySendFailureV1> {
+    match client.send_with_refusal(prepared_send).await {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(failure) => match failure.refusal.as_ref().map(|refusal| refusal.retry_action) {
+            Some(RelayRetryActionV1::RetryAfterRelease | RelayRetryActionV1::RetryAfterWindow) => {
+                Ok(None)
+            }
+            // `ContactOperator`, or a failure the relay did not type.
+            _ => Err(failure),
+        },
+    }
+}
+```
+
+- `refusal` is `None` for every failure that is not a published relay refusal:
+  an audit budget, the I/O admission gate, any other status. Nothing is
+  inferred from such a response.
+- The client reads only the closed fields above. It never returns the remote
+  message text, and it does not accept a tenant or rate refusal that came with
+  figures: those would describe other senders.
+- The library still performs no retry. A refused send was not stored: keep the
+  exact request and retry that same operation, as described in the
+  [retention guide](RETENTION.md#refusals).
+- A V1 stdio send still returns plain `capacity`. The explicit send-only V2
+  envelope below can carry the same closed refusal through a compatible helper
+  and control. This new software wire is source-only until its named QA runs.
+
+### Opt in to send refusal details on stdio
+
+Keep the validated V1 hello/ready, helper version, discovery, channel, epoch and
+resolved limits. For an individual send, set only the **outer request version**
+to `2`; `RequestPayloadV1::Send(prepared_send.clone())` keeps the exact retained
+V1 payload and operation UUID. The existing Rust `RequestV1`/`FrameV1` types
+represent this explicit exchange extension. Generate a fresh correlation for
+each explicit exchange; it does not replace the business operation UUID.
+
+The response must have that same version/channel/epoch/correlation/operation.
+Only a V2 send error `capacity` may add `refusal`, with exactly `scope`,
+`retry_action` and `own`. Own capacity figures are required for sender/grant
+capacity, and explicit `null` for tenant/grant-rate. Unknown/duplicate/missing
+fields, invalid scope/action combinations and noncanonical deadlines are
+refused. Remote free text is discarded. A generic audit/I/O/other capacity
+refusal stays `capacity` without inferred details. See the documentary
+[V2 exchange schema](SEND-REFUSAL.schema.json); Rust retains the byte, identity,
+receipt and frame checks that JSON Schema alone cannot establish.
+
+| Application envelope | Helper/control | Result |
+|---|---|---|
+| V1 send | Old or new | Existing strict response, no added refusal field |
+| V2 send | Both support this extension | Correlated V2 response, closed detail only when published |
+| V2 send | Either peer predates this extension | Incompatible protocol, no automatic fallback or second dispatch |
+| V2 inbox/ACK/hello/ready/close/discovery | New | Refused; those contracts stay V1 |
+
+An old helper has only the fixed diagnostic `relay_helper:protocol`, not a
+retroactive `unsupported_version` code. A connection failure is not a receipt
+or proof of rollback: after forwarding, preserve any uncertain outcome and
+reconcile the exact retained operation. A later capacity refusal cannot erase
+a prior unknown dispatch. This extension adds no retry, pruning, secret
+rotation, worker authority, runtime transport or application CLI option.
+
+Wire V1 remains compatible. Rust consumers upgrading the library must handle
+the new `ResponseResultV1::SendRefusal` variant in any exhaustive match;
+`ErrorCodeV1` and its existing meanings are unchanged.
 
 The [profile evidence](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
 records six new profile tests and thirteen existing client tests passing on

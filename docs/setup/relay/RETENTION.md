@@ -321,10 +321,13 @@ This route is served on the gateway API only. It is not published under
 
 ## Limits
 
-- The Rust worker client and the stdio helper report every HTTP 429 as
-  `Capacity`, whose text asks to contact the operator; they do not read the
-  typed fields above. Only a caller that reads the HTTP error body sees the
-  scope and figures.
+- The Rust worker client reads the typed fields above through
+  [`send_with_refusal`](README.md#read-a-refused-send). `send` and V1 stdio
+  retain the generic `Capacity` surface. The explicit
+  [send-only V2 stdio envelope](README.md#opt-in-to-send-refusal-details-on-stdio)
+  can carry the same closed detail through compatible helper/control, with no
+  change to operation identity or unknown outcomes. This new wire is source
+  only, not yet behavioral QA or runtime qualification.
 - Starting the gateway binary with these options is covered by a software
   test on loopback, with stores prepared by the explicit migrations: startup
   line, applied policy read through the diagnostic route, and refused

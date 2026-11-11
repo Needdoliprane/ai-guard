@@ -516,3 +516,36 @@ async fn async_fd_pipe_eof_wakes_reader_without_a_blocking_stdin_thread() {
     drop(output);
     assert_eq!(input.read(&mut bytes).await.unwrap(), 0);
 }
+
+#[test]
+fn helper_requires_send_opt_in_and_exact_response_version() {
+    use crate::relay::RelaySendV1;
+    let mut input = request(CORRELATION);
+    input.version = 2;
+    input.payload = RequestPayloadV1::Send(RelaySendV1 {
+        version: 1,
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        grant_id: uuid::Uuid::new_v4().to_string(),
+        ttl_seconds: 60,
+        body: "kept request".into(),
+    });
+    let mut output = ResponseV1 {
+        version: 1,
+        channel_id: CHANNEL.into(),
+        epoch: 9,
+        correlation_id: CORRELATION.into(),
+        operation: OperationV1::Send,
+        result: ResponseResultV1::Error(ErrorCodeV1::Capacity),
+    };
+    assert_eq!(
+        response_matches(&hello(), &input, &output),
+        Err(HelperError::Protocol)
+    );
+    output.version = 2;
+    response_matches(&hello(), &input, &output).unwrap();
+    output.correlation_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        response_matches(&hello(), &input, &output),
+        Err(HelperError::Protocol)
+    );
+}

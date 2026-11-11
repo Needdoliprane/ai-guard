@@ -147,6 +147,7 @@ async fn send_prepared(
 | Méthode | Route worker existante et comportement |
 |---|---|
 | `send(&RelaySendV1)` | `POST /api/v1/relay/messages` ; version 1, UUID d'opération conservé, UUID de grant autorisé, TTL et corps non vide. Renvoie le reçu corrélé : 201 pour un nouvel envoi ou 200 au rejeu exact. L'ID de l'opération send identifie aussi son message. |
+| `send_with_refusal(&RelaySendV1)` | Même requête, même route et mêmes contrôles que `send`. Son échec est un `RelaySendFailureV1` : `error` est la valeur rendue par `send`, et `refusal` ce qu'a dit un [refus typé du relais](#lire-un-envoi-refusé), lorsque la réponse en était un. |
 | `inbox(after: Option<i64>, limit: u32)` | `GET /api/v1/relay/messages` ; curseur non négatif et limite 1–32. Renvoie une seule page vérifiée ; une erreur ne devient jamais une inbox vide. L'appelant conserve et avance explicitement son curseur. |
 | `ack(&RelayAckV1)` | `POST /api/v1/relay/messages/{message_id}/ack` ; l'ACK conservé possède son propre UUID d'opération et l'UUID du message reçu. Renvoie un reçu 200 corrélé. L'ACK atteste un acquittement, pas une exécution ou un effet observé. |
 
@@ -208,10 +209,102 @@ sensibles dans les données métier.
 déclenchent aucun autre rôle ou credential. `NotFound` et `Conflict` demandent de
 préserver et vérifier l'identité de la ressource/requête. `Capacity` couvre
 HTTP 429, y compris les budgets d'audit ; contacter l'opérateur plutôt que tourner
-une preuve pour réinitialiser un budget. `Unavailable`, `Transport` et `Protocol`
+une preuve pour réinitialiser un budget, sauf si un
+[refus typé du relais](#lire-un-envoi-refusé) indique qu'un nouvel essai peut
+passer. `Unavailable`, `Transport` et `Protocol`
 laissent le résultat d'une mutation incertain. Aucun texte d'erreur ne reprend
 le diagnostic distant. Les [diagnostics workload](../workloads/README.fr.md#diagnostiquer-arrêter-et-préserver-létat)
 conservent les distinctions côté serveur.
+
+### Lire un envoi refusé
+
+Un envoi au-delà d'une part retenue ou de la fréquence de son grant reçoit un
+HTTP 429 typé ([budgets de rétention](RETENTION.fr.md#refus)). `send` le
+rapporte comme `Capacity`, comme tout autre 429. `send_with_refusal` rapporte
+le même `error` et ajoute un `RelaySendRefusalV1` dans `refusal` :
+
+| Champ | Contenu |
+|---|---|
+| `scope` | `Tenant`, `Sender` ou `Grant` (`RelayRefusalScopeV1`) |
+| `retry_action` | `RetryAfterRelease`, `RetryAfterWindow` ou `ContactOperator` (`RelayRetryActionV1`) |
+| `own` | Pour une part émetteur ou grant seulement : `dimension`, `limit`, `retained`, `requested_bytes` et `next_release_at`, qui décrivent tous l'émetteur refusé lui-même. `None` pour un refus tenant ou de fréquence. |
+
+```rust
+use agentsandbox::relay::{
+    RelayReceiptV1, RelayRetryActionV1, RelaySendFailureV1, RelaySendV1,
+    client::WorkerRelayClient,
+};
+
+/// `Ok(None)` : garder la requête conservée et réessayer cette même opération plus tard.
+async fn send_or_keep(
+    client: &WorkerRelayClient,
+    prepared_send: &RelaySendV1,
+) -> Result<Option<RelayReceiptV1>, RelaySendFailureV1> {
+    match client.send_with_refusal(prepared_send).await {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(failure) => match failure.refusal.as_ref().map(|refusal| refusal.retry_action) {
+            Some(RelayRetryActionV1::RetryAfterRelease | RelayRetryActionV1::RetryAfterWindow) => {
+                Ok(None)
+            }
+            // `ContactOperator`, ou un échec que le relais n'a pas typé.
+            _ => Err(failure),
+        },
+    }
+}
+```
+
+- `refusal` vaut `None` pour tout échec qui n'est pas un refus publié du
+  relais : budget d'audit, porte d'admission d'E/S, tout autre statut. Rien
+  n'est déduit d'une telle réponse.
+- Le client ne lit que les champs fermés ci-dessus. Il ne rend jamais le texte
+  du message distant et n'accepte pas un refus tenant ou de fréquence
+  accompagné de chiffres : ils décriraient d'autres émetteurs.
+- La bibliothèque ne réessaie toujours rien. Un envoi refusé n'a pas été
+  stocké : conserver la requête exacte et réessayer cette même opération,
+  comme décrit dans le [guide de rétention](RETENTION.fr.md#refus).
+- Un envoi stdio V1 garde le simple `capacity`. L'enveloppe V2 réservée aux
+  envois et explicitement choisie ci-dessous peut transporter le même refus
+  fermé par un helper et un contrôle compatibles. Ce nouveau raccord logiciel
+  reste source-only jusqu'à ses exécutions QA identifiées.
+
+### Choisir les détails de refus d'envoi sur stdio
+
+Conserver hello/ready V1 validés, version du helper, découverte, canal, epoch et
+limites résolues. Pour un envoi, passer seulement la **version externe de la
+requête** à `2` ; `RequestPayloadV1::Send(prepared_send.clone())` conserve le
+payload V1 exact et l'UUID d'opération retenu. Les types Rust existants
+`RequestV1`/`FrameV1` représentent cette extension explicite d'échange. Une
+nouvelle corrélation par échange explicite ne remplace pas l'UUID métier.
+
+La réponse doit porter les mêmes version/canal/epoch/corrélation/opération.
+Seule l'erreur `capacity` d'un envoi V2 peut ajouter `refusal`, contenant
+exactement `scope`, `retry_action` et `own`. Les chiffres propres sont requis
+pour la capacité émetteur/grant, et `null` explicite pour tenant/fréquence du
+grant. Champs inconnus/dupliqués/manquants, combinaisons portée/action invalides
+et échéances non canoniques sont refusés. Le texte distant est écarté. Un
+refus générique d'audit/E/S/autre capacité reste `capacity` sans détail déduit.
+Voir le [schéma documentaire d'échange V2](SEND-REFUSAL.schema.json) ; Rust
+conserve les contrôles d'octets, identité, reçus et trames qu'un schéma JSON ne
+peut établir seul.
+
+| Enveloppe application | Helper/contrôle | Résultat |
+|---|---|---|
+| Envoi V1 | Anciens ou nouveaux | Réponse stricte existante, aucun champ de refus ajouté |
+| Envoi V2 | Tous deux compatibles avec cette extension | Réponse V2 corrélée, détail fermé seulement s'il est publié |
+| Envoi V2 | Au moins un pair antérieur à l'extension | Protocole incompatible, aucun fallback ni second dispatch automatique |
+| Inbox/ACK/hello/ready/close/découverte V2 | Nouveau | Refus ; ces contrats restent V1 |
+
+Un ancien helper ne possède que le diagnostic fixe `relay_helper:protocol`,
+aucun code rétroactif `unsupported_version`. Une panne de connexion n'est ni
+un reçu ni une preuve de rollback : après transfert, conserver tout résultat
+incertain et réconcilier l'opération exacte retenue. Un refus de capacité
+ultérieur n'efface pas un dispatch antérieur inconnu. Cette extension n'ajoute
+ni retry, pruning, rotation de secret, autorité worker, transport runtime ou
+option CLI applicative.
+
+Le wire V1 reste compatible. Un consommateur Rust qui met la bibliothèque à
+jour doit traiter le nouveau variant `ResponseResultV1::SendRefusal` dans ses
+matchs exhaustifs ; `ErrorCodeV1` et ses sens existants restent inchangés.
 
 Les [preuves des profils](../../engineering/evidence/2026-11-07/relay-control-profile/README.md)
 consignent six nouveaux tests de profil et treize tests client existants passant

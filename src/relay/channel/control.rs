@@ -312,7 +312,12 @@ impl ControlOwner {
             request,
             match result {
                 Ok(reply) => ResponseResultV1::Ok(reply),
-                Err(error) => ResponseResultV1::Error(error_code(error)),
+                Err(failure) => match (request.version, failure.error, failure.refusal) {
+                    (2, RelayClientError::Capacity, Some(refusal)) => {
+                        ResponseResultV1::SendRefusal(refusal)
+                    }
+                    (_, error, _) => ResponseResultV1::Error(error_code(error)),
+                },
             },
         ))
     }
@@ -320,7 +325,7 @@ impl ControlOwner {
 
 fn response(request: &RequestV1, result: ResponseResultV1) -> ResponseV1 {
     ResponseV1 {
-        version: 1,
+        version: request.version,
         channel_id: request.channel_id.clone(),
         epoch: request.epoch,
         correlation_id: request.correlation_id.clone(),
@@ -331,14 +336,19 @@ fn response(request: &RequestV1, result: ResponseResultV1) -> ResponseV1 {
 async fn dispatch(
     client: &WorkerRelayClient,
     payload: &RequestPayloadV1,
-) -> Result<ReplyV1, RelayClientError> {
+) -> Result<ReplyV1, crate::relay::RelaySendFailureV1> {
     match payload {
-        RequestPayloadV1::Send(input) => client.send(input).await.map(ReplyV1::Send),
+        RequestPayloadV1::Send(input) => client.send_with_refusal(input).await.map(ReplyV1::Send),
         RequestPayloadV1::Inbox(input) => client
             .inbox(input.after, input.limit)
             .await
-            .map(ReplyV1::Inbox),
-        RequestPayloadV1::Ack(input) => client.ack(input).await.map(ReplyV1::Ack),
+            .map(ReplyV1::Inbox)
+            .map_err(Into::into),
+        RequestPayloadV1::Ack(input) => client
+            .ack(input)
+            .await
+            .map(ReplyV1::Ack)
+            .map_err(Into::into),
     }
 }
 fn client_error(error: RelayClientError) -> ControlError {

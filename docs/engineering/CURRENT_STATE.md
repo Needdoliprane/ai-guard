@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 11 novembre — refus SendV2 publiés dans le client et les composants stdio
+
+Les dix-sept postimages sont identiques au gel exécuté. Quatorze parents
+uniques passent et le check toutes cibles vérifie la composition publique
+B + Setup + Core + wire. V1 reste strict, V2 exige l'opt-in send et une réponse
+corrélée ; un refus ne remplace pas un résultat métier inconnu. Source exportée
+réellement après exécution et QA retirée. Les quatre intersections avec Full3
+conservent leur travail hors index ; 120 autres WIP restent intacts.
+[Sources, commandes et limites](evidence/2026-11-11/relay-sendv2/README.md).
+L'admission de production reste fermée dans cette tranche. La reprise du relais
+Full3 et les validations sur workers réels ne sont pas qualifiées.
+
 ## 11 novembre — stockage durable et rétention du relais publiés
 
 Les vingt postimages CoreC20 correspondent au gel R3 corrigé et relu. Neuf

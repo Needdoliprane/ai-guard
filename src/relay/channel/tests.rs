@@ -645,3 +645,148 @@ fn fragmented_unix_stream_carries_a_complete_frame_without_line_delimiters() {
     assert!(reader.read(FrameLimit::Control).unwrap().is_none());
     task.join().unwrap();
 }
+
+#[test]
+fn send_v2_refusal_is_closed_opt_in_and_keeps_v1_capacity_exact() {
+    use crate::relay::{RelayRefusalScopeV1, RelayRetryActionV1, RelaySendRefusalV1};
+    let detail = RelaySendRefusalV1 {
+        scope: RelayRefusalScopeV1::Tenant,
+        retry_action: RelayRetryActionV1::ContactOperator,
+        own: None,
+    };
+    let mut response = receipt(OperationV1::Send, OPERATION);
+    response.result = ResponseResultV1::Error(ErrorCodeV1::Capacity);
+    let legacy = FrameV1::Response(response.clone()).encode().unwrap();
+    let legacy: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+    assert_eq!(legacy["version"], 1);
+    assert_eq!(legacy["error"], "capacity");
+    assert!(legacy.get("refusal").is_none());
+    assert_eq!(
+        legacy,
+        serde_json::json!({
+            "version":1, "type":"response", "channel_id":CHANNEL, "epoch":7,
+            "correlation_id":CORRELATION, "operation":"send", "result":"error", "error":"capacity"
+        })
+    );
+
+    response.result = ResponseResultV1::SendRefusal(detail.clone());
+    assert!(FrameV1::Response(response.clone()).encode().is_err());
+    response.version = 2;
+    let encoded = FrameV1::Response(response.clone()).encode().unwrap();
+    let FrameV1::Response(decoded) = FrameV1::decode(&encoded, FrameLimit::Response).unwrap()
+    else {
+        panic!("missing response");
+    };
+    assert!(matches!(decoded.result, ResponseResultV1::SendRefusal(value) if value == detail));
+    let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(value["error"], "capacity");
+    assert!(value["refusal"]["own"].is_null());
+    for field in ["unknown", "message", "tenant_id", "sender_id"] {
+        let mut bad = value.clone();
+        bad["refusal"][field] = serde_json::json!("remote-private-text");
+        assert!(FrameV1::decode(&serde_json::to_vec(&bad).unwrap(), FrameLimit::Response).is_err());
+    }
+    for error in ["forbidden", "protocol", "unavailable"] {
+        let mut bad = value.clone();
+        bad["error"] = serde_json::json!(error);
+        assert!(FrameV1::decode(&serde_json::to_vec(&bad).unwrap(), FrameLimit::Response).is_err());
+    }
+    let mut missing = value.clone();
+    missing["refusal"].as_object_mut().unwrap().remove("own");
+    assert!(FrameV1::decode(&serde_json::to_vec(&missing).unwrap(), FrameLimit::Response).is_err());
+    let duplicated = String::from_utf8(encoded)
+        .unwrap()
+        .replace("\"own\":null", "\"own\":null,\"own\":null");
+    assert!(FrameV1::decode(duplicated.as_bytes(), FrameLimit::Response).is_err());
+    let mut wrong = detail;
+    wrong.scope = RelayRefusalScopeV1::Sender;
+    response.result = ResponseResultV1::SendRefusal(wrong);
+    assert!(FrameV1::Response(response).encode().is_err());
+    let mut inbox = inbox();
+    inbox.version = 2;
+    assert!(FrameV1::Request(inbox).encode().is_err());
+    let mut ack = request(RequestPayloadV1::Ack(RelayAckV1 {
+        version: 1,
+        operation_id: OPERATION.into(),
+        message_id: MESSAGE.into(),
+    }));
+    ack.version = 2;
+    assert!(FrameV1::Request(ack).encode().is_err());
+    let mut hello = handshake();
+    hello.version = 2;
+    assert!(FrameV1::Hello(hello).encode().is_err());
+}
+
+#[test]
+fn send_v2_requires_exact_response_version_without_changing_business_identity() {
+    let mut request = send();
+    let original = match &request.payload {
+        RequestPayloadV1::Send(value) => serde_json::to_value(value).unwrap(),
+        _ => unreachable!(),
+    };
+    request.version = 2;
+    let encoded = FrameV1::Request(request.clone()).encode().unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(value["payload"], original);
+    let mut state = open();
+    state.admit_request(&request).unwrap();
+    assert_eq!(
+        state.accept_response(&receipt(OperationV1::Send, OPERATION)),
+        Err(ChannelError::Correlation)
+    );
+    let mut state = open();
+    state.admit_request(&request).unwrap();
+    let mut response = receipt(OperationV1::Send, OPERATION);
+    response.version = 2;
+    state.accept_response(&response).unwrap();
+    // The opt-in is not an operation/correlation replay bypass.
+    assert_eq!(
+        state.admit_request(&request),
+        Err(ChannelError::Correlation)
+    );
+}
+
+#[test]
+fn send_v2_never_accepts_own_figures_for_a_neighbor_scope_or_rate() {
+    use crate::relay::{
+        RelayCapacityDimensionV1, RelayCapacityV1, RelayOwnShareV1, RelayRefusalScopeV1,
+        RelayRetryActionV1, RelaySendRefusalV1,
+    };
+    let own = RelayOwnShareV1 {
+        dimension: RelayCapacityDimensionV1::Messages,
+        limit: RelayCapacityV1 {
+            messages: 1,
+            bytes: 65536,
+        },
+        retained: RelayCapacityV1 {
+            messages: 1,
+            bytes: 24,
+        },
+        requested_bytes: 12,
+        next_release_at: Some("2026-11-10T12:00:42.000Z".into()),
+    };
+    let mut response = receipt(OperationV1::Send, OPERATION);
+    response.version = 2;
+    let mut detail = RelaySendRefusalV1 {
+        scope: RelayRefusalScopeV1::Sender,
+        retry_action: RelayRetryActionV1::RetryAfterRelease,
+        own: Some(own.clone()),
+    };
+    for scope in [RelayRefusalScopeV1::Sender, RelayRefusalScopeV1::Grant] {
+        detail.scope = scope;
+        response.result = ResponseResultV1::SendRefusal(detail.clone());
+        let encoded = FrameV1::Response(response.clone()).encode().unwrap();
+        FrameV1::decode(&encoded, FrameLimit::Response).unwrap();
+    }
+    detail.scope = RelayRefusalScopeV1::Tenant;
+    response.result = ResponseResultV1::SendRefusal(detail.clone());
+    assert!(FrameV1::Response(response.clone()).encode().is_err());
+    detail.scope = RelayRefusalScopeV1::Grant;
+    detail.retry_action = RelayRetryActionV1::RetryAfterWindow;
+    response.result = ResponseResultV1::SendRefusal(detail.clone());
+    assert!(FrameV1::Response(response.clone()).encode().is_err());
+    detail.retry_action = RelayRetryActionV1::RetryAfterRelease;
+    detail.own.as_mut().unwrap().next_release_at = Some("2026-11-10T12:00:42Z".into());
+    response.result = ResponseResultV1::SendRefusal(detail);
+    assert!(FrameV1::Response(response).encode().is_err());
+}

@@ -437,7 +437,8 @@ fn response_matches(
     response: &ResponseV1,
 ) -> Result<(), HelperError> {
     binding(hello, &response.channel_id, response.epoch)?;
-    if request.correlation_id != response.correlation_id
+    if request.version != response.version
+        || request.correlation_id != response.correlation_id
         || request.operation() != response.operation
     {
         return Err(HelperError::Protocol);

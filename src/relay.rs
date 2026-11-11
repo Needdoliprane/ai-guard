@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 
 pub mod channel;
 pub mod client;
+pub mod refusal;
 pub mod retention;
 mod validation;
+pub use refusal::*;
 pub use retention::*;
 
 pub const MAX_MESSAGE_BYTES: usize = 65_536;

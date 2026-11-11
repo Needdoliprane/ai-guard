@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ai-guard explicit send-only envelope V2",
+  "description": "Documentary exchange schema; hello/ready/discovery/close remain V1. Rust additionally validates UTF-8 byte bounds, unique keys, non-nil channel/correlation IDs, scope tuples, calendar timestamps and exact request/receipt correlation. No runtime authority or automatic negotiation is created.",
+  "oneOf": [{"$ref": "#/$defs/request"}, {"$ref": "#/$defs/ok"}, {"$ref": "#/$defs/error"}, {"$ref": "#/$defs/refused"}],
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
+    "channel_uuid": {"allOf": [{"$ref": "#/$defs/uuid"}], "not": {"const": "00000000-0000-0000-0000-000000000000"}},
+    "u64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "capacity": {"type": "object", "additionalProperties": false, "required": ["messages", "bytes"], "properties": {"messages": {"$ref": "#/$defs/u64"}, "bytes": {"$ref": "#/$defs/u64"}}},
+    "own": {"type": "object", "additionalProperties": false, "required": ["dimension", "limit", "retained", "requested_bytes", "next_release_at"], "properties": {
+      "dimension": {"enum": ["messages", "bytes"]}, "limit": {"$ref": "#/$defs/capacity"}, "retained": {"$ref": "#/$defs/capacity"}, "requested_bytes": {"$ref": "#/$defs/u64"},
+      "next_release_at": {"oneOf": [{"type": "null"}, {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"}]}
+    }},
+    "refusal": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["scope", "retry_action", "own"], "properties": {"scope": {"enum": ["sender", "grant"]}, "retry_action": {"enum": ["retry_after_release", "contact_operator"]}, "own": {"$ref": "#/$defs/own"}}},
+      {"type": "object", "additionalProperties": false, "required": ["scope", "retry_action", "own"], "properties": {"scope": {"const": "tenant"}, "retry_action": {"enum": ["retry_after_release", "contact_operator"]}, "own": {"type": "null"}}},
+      {"type": "object", "additionalProperties": false, "required": ["scope", "retry_action", "own"], "properties": {"scope": {"const": "grant"}, "retry_action": {"const": "retry_after_window"}, "own": {"type": "null"}}}
+    ]},
+    "send": {"type": "object", "additionalProperties": false, "required": ["version", "operation_id", "grant_id", "ttl_seconds", "body"], "properties": {"version": {"const": 1}, "operation_id": {"$ref": "#/$defs/uuid"}, "grant_id": {"$ref": "#/$defs/uuid"}, "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}, "body": {"type": "string", "minLength": 1, "maxLength": 65536}}},
+    "receipt": {"type": "object", "additionalProperties": false, "required": ["version", "operation_id", "resource_id", "audit_seq", "audit_hash", "replayed"], "properties": {"version": {"const": 1}, "operation_id": {"$ref": "#/$defs/uuid"}, "resource_id": {"$ref": "#/$defs/uuid"}, "audit_seq": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807}, "audit_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "replayed": {"type": "boolean"}}},
+    "envelope": {"type": "object", "required": ["version", "type", "channel_id", "epoch", "correlation_id", "operation"], "properties": {"version": {"const": 2}, "type": {"enum": ["request", "response"]}, "channel_id": {"$ref": "#/$defs/channel_uuid"}, "epoch": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "correlation_id": {"$ref": "#/$defs/channel_uuid"}, "operation": {"const": "send"}}},
+    "request": {"allOf": [{"$ref": "#/$defs/envelope"}], "unevaluatedProperties": false, "required": ["payload"], "properties": {"type": {"const": "request"}, "payload": {"$ref": "#/$defs/send"}}},
+    "ok": {"allOf": [{"$ref": "#/$defs/envelope"}], "unevaluatedProperties": false, "required": ["result", "payload"], "properties": {"type": {"const": "response"}, "result": {"const": "ok"}, "payload": {"$ref": "#/$defs/receipt"}}},
+    "error": {"allOf": [{"$ref": "#/$defs/envelope"}], "unevaluatedProperties": false, "required": ["result", "error"], "properties": {"type": {"const": "response"}, "result": {"const": "error"}, "error": {"enum": ["invalid_request", "authentication", "forbidden", "not_found", "conflict", "capacity", "unavailable", "transport", "protocol"]}}},
+    "refused": {"allOf": [{"$ref": "#/$defs/envelope"}], "unevaluatedProperties": false, "required": ["result", "error", "refusal"], "properties": {"type": {"const": "response"}, "result": {"const": "error"}, "error": {"const": "capacity"}, "refusal": {"$ref": "#/$defs/refusal"}}}
+  }
+}
