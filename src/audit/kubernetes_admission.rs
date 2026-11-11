@@ -7,6 +7,8 @@ mod migration;
 mod model;
 mod mutations;
 mod replay;
+#[cfg(test)]
+mod schema12_tests;
 pub(crate) use mutations::{ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit};
 
 fn require_schema(db: &Connection) -> anyhow::Result<()> {
@@ -27,7 +29,7 @@ fn require_capability_schema(
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     if matches!(
         (version, *evidence.version()),
-        (8, 1) | (9, 2) | (10, 2) | (11, 2)
+        (8, 1) | (9, 2) | (10, 2) | (11, 2) | (12, 2)
     ) {
         Ok(())
     } else {

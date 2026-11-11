@@ -1,5 +1,11 @@
 # Validation courante
 
+## 11 novembre, 15:44 UTC — correction du consommateur V2 sous schéma12
+
+Baseline : deux canaris PASS puis deux RED MigrationRequired aux oracles Reserve/Cancel, distincts du troisième RED D6. GREEN : trois parents exacts PASS à 15:34:43–44 UTC, build et check toutes cibles RC0. Les tests sont inchangés ; seul ajout produit `(12,2)`. Revue indépendante GO_SOURCE, deux fichiers composés et 134 chemins Full3 préservés. Export vivant de 26 695 680 octets SHA46d499ad… vérifié intégralement, expérience/fermeture RC0 et zéro OOM. [Commandes, sources et portée](evidence/2026-11-11/kubernetes-schema12/README.md).
+
+D6 et la migration13 restent des chantiers distincts en cours ; aucun nouveau parcours runtime n’est qualifié.
+
 ## 11 novembre,15:04 UTC — historique complet et consommateur relais
 
 Gel 2527, manifeste27df9744… : dix-neuf parents uniques PASS entre 15:02:09 et 15:02:21 UTC, build et check toutes cibles RC0. Les deux RED sont établis avant correction ; le complément final change trois tests seulement. Revue indépendante GO_SOURCE, dix-huit postimages exactes composées au Full3 local, 134 chemins protégés vérifiés. Aucun code Full3 complet publié par ce lot de preuves.

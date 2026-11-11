@@ -1,0 +1,2 @@
+dab7143492cd32b129230a1245bf565e27c50547479a17c3d04e14943e5aebcb  src/audit/kubernetes_admission.rs
+8cc48001e229f4a9c3e7e08d6bdf156c7db4e67cf0492617eda88365e793efb0  src/audit/kubernetes_admission/schema12_tests.rs

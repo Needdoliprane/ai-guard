@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 15:44 UTC — compatibilité held-CREATE sous schéma12 corrigée
+
+Le consommateur accepte désormais les capacités V2 sous schéma12, comme son issuer. Après deux RED exactes, trois régressions réelles passent avec le check toutes cibles ; revue indépendante favorable et deux postimages testées composées sans toucher les 134 travaux Full3. Les refus V1 et les scopes sont préservés. [Preuves et limites](evidence/2026-11-11/kubernetes-schema12/README.md).
+
+La reprise après changement d’incarnation D6 reste distincte : son Core et la migration/compatibilité13 sont développés par deux propriétaires en parallèle. Aucun lancement Kubernetes réel ni gate global n’est qualifié.
+
 ## 11 novembre,15:04 UTC — reprise du relais composée et vérifiée localement
 
 Le gel Full3 composé passe dix-neuf parents exacts et le check toutes cibles après deux RED réellement reproduits. Historique V1/V2 complet, clôture durable, ACK perdu et annulations IO ont leurs régressions ; le garde de lecture froide reste conservateur. Les dix-huit postimages relues sont composées au travail local, dont 134 chemins protégés ont été revérifiés. La publication du Full3 complet et la qualification runtime restent ouvertes.

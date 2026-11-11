@@ -50,11 +50,15 @@ acknowledgement does not qualify the Core HTTP or runtime handoff.
   into the protected local Full3 work. Historical author branches remain at
   `515c797` and `9eb4302`, while their two worktrees were closed normally after
   source, ignored-file and consumer checks. Private backups remain.
-- Current journal and consumer work use separate
+- The combined journal and consumer correction used separate
   `codex/relay-history-journal-20261111` and
   `codex/relay-history-consumer-20261111` worktrees with exclusive file owners.
   Local-only base `7cf3aa0` preserves 126 Full3 paths on public `300cb4a`;
   that seed and the whole development branches are not public deliveries.
+  After the combined GREEN, the two worktrees were removed normally following
+  verified eighteen-source backups, clean/ignored inventories and empty
+  consumer observations. Local preservation commits 9bd733d and 0e07464 and
+  their branches remain; the protected Root composition is retained.
 - The read uses the existing authenticated runner boundary, tenant/namespace
   validation and checked Store transaction. It creates no reserve, claim,
   transition, Fresh claim or current dispatch authority.
