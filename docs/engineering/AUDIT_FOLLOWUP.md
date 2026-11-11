@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 11 novembre — maintenance des sources humaines, correction bornée vérifiée
+
+Le [lot maintenance r4](evidence/2026-11-11/human-source-maintenance/README.md) ajoute un guard réel de l’union old/new et deux méthodes de token, après revue indépendante et 19 parents logiciels PASS. Cela prépare les corrections d’attribution/autorité ; aucun fingerprint n’est clôturé par ces primitives. Store14/AuthLedger5, writers/backup/migration, approbation nominative et Ready restent ouverts. Claude E est livré et en revue d’intégration distincte ; ses résultats historiques ne sont pas des PASS de composition.
+
 ## 11 novembre — primitives d'autorité humaine, preuve limitée
 
 Les [primitives owner r3 / filesystem r2](evidence/2026-11-11/human-authority-primitives/README.md) ont une preuve Linux bornée : 33 parents automatiques plus un négatif de montage Docker réellement exécuté, build lib et `cargo check --all-targets` PASS. Le montage n'est observé que par métadonnées ; aucun contenu, montage neuf, FD exhaustion ou runtime worker testé. Source et export vivant sont hashés, r1 FAIL préparation reste conservé.

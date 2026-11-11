@@ -15,6 +15,7 @@
 
 mod manifest;
 pub use manifest::*;
+pub(crate) mod maintenance;
 
 use crate::control_fs::{Directory, PrivateEntryIdentity, PrivateFile};
 use std::{
@@ -549,6 +550,20 @@ impl OwnedHumanSources {
 }
 
 impl OwnedSourceToken {
+    /// Fresh filesystem/owner validation for a Store validator already under
+    /// its matching read/write epoch. This does not acquire a recursive gate,
+    /// inspect SQLite markers or supply readiness/permission evidence.
+    pub(crate) fn revalidate_authority(&self) -> Result<(), HumanAuthorityFailure> {
+        self.owner.revalidate()
+    }
+
+    /// Retained capability identity only, never a database/permission check.
+    pub(crate) fn same_owner_and_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+            && self.source_id == other.source_id
+            && self.incarnation == other.incarnation
+    }
+
     /// Same global invalidator as the owner, reachable from a retained source
     /// transaction only after its validator has proven the technical mismatch.
     /// No permission/proof refusal, expiry or capacity error is such a proof.

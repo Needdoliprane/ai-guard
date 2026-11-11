@@ -965,3 +965,43 @@ fn descriptor_shortage_cannot_clear_a_proven_durable_invalidation() {
         Err(HumanAuthorityFailure::OwnerContended)
     ));
 }
+
+#[test]
+fn retained_tokens_compare_exact_owner_and_source_without_an_authority_assertion() {
+    // Equal source UUIDs in another actual owner must not make Store's retained
+    // token equal. Clones retain exactly the same owner/source/incarnation.
+    let fixture = Fixture::new(2);
+    let foreign_fixture = Fixture::new(1);
+    let owner = fixture.acquire().unwrap();
+    let foreign_owner = foreign_fixture.acquire().unwrap();
+    let first = owner.source_token(fixture.sources[0].source_id).unwrap();
+    let first_clone = first.clone();
+    let second = owner.source_token(fixture.sources[1].source_id).unwrap();
+    let foreign = foreign_owner
+        .source_token(foreign_fixture.sources[0].source_id)
+        .unwrap();
+    assert!(first.same_owner_and_source(&first_clone));
+    assert!(!first.same_owner_and_source(&second));
+    assert!(!first.same_owner_and_source(&foreign));
+}
+
+#[test]
+fn retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate() {
+    // A recursive gate acquisition would fail under this actual write epoch;
+    // a cached check would miss the later real source-B mode change.
+    let fixture = Fixture::new(2);
+    let owner = fixture.acquire().unwrap();
+    let token = owner.source_token(fixture.sources[0].source_id).unwrap();
+    let epoch = owner.try_write_epoch().unwrap();
+    token.revalidate_authority().unwrap();
+    owner.begin_close();
+    token.revalidate_authority().unwrap();
+    epoch.validate_source(&token).unwrap();
+    let path_b = fixture.sources[1].storage_binding.path();
+    std::fs::set_permissions(path_b, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(
+        token.revalidate_authority(),
+        Err(HumanAuthorityFailure::OwnerInvalid)
+    );
+    assert_eq!(epoch.check(), Err(HumanAuthorityFailure::OwnerInvalid));
+}

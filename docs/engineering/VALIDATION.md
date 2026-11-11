@@ -1,5 +1,9 @@
 # Validation courante
 
+## 11 novembre, 22:44 UTC — maintenance owner r4 : PASS ciblé
+
+Source `5075a7f9…` : build lib, liste réelle puis 19 oracles exacts et `cargo check --all-targets` passent. Aucun test ignoré compté PASS. Export vivant `bc4f91a9…` vérifié sur les 2 509 contenus/modes, fermeture RC0/OOM0. Incident administratif CREATE RC66 avant création conservé ; aucun changement de source/profil/oracle. [Commandes, noms et empreintes](evidence/2026-11-11/human-source-maintenance/SOURCE_MANIFEST.json). Les 34 PASS antérieurs restent propres à leur source ; qualifications runtime et verticale moderne NOT_RUN.
+
 ## 11 novembre, 21:47 UTC — QA Linux des primitives owner/FS
 
 **PASS borné** sur `a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd` : `cargo test --frozen --offline --lib --no-run --message-format=json`, liste réelle971, 33 parents automatiques exacts, puis `cargo check --frozen --offline --all-targets --message-format=json`, enfin le test normalement ignoré exécuté séparément (34 succès, aucun ignoré compté PASS). [Registre RC/SHA et limites](evidence/2026-11-11/human-authority-primitives/TESTS.json).

@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 11 novembre, 22:44 UTC — maintenance des sources : 19 parents logiciels PASS
+
+Sur public `103130d` plus cinq postimages owner r4, les 19 parents ciblés (12 maintenance, 2 token, 5 régressions), le build lib et le check toutes cibles passent. Source `5075a7f9…`, export vivant exact `bc4f91a9…`, 2 509 fichiers0644 ; fermeture RC0/OOM0. [Preuves et limites](evidence/2026-11-11/human-source-maintenance/README.md). Aucune activation Store14/AuthLedger5, migration, approbation ou Ready par ce lot.
+
+Claude E est désormais livré sur sa branche locale `claude/operator-diagnostics-20261110` (source annoncée `469d625`, tête `cf272b2`) : revue d’intégration en cours, pas encore intégré ni qualifié sur la composition Codex. D reste intégré par `3145315`. Les mentions antérieures « E en cours » ci-dessous sont historiques.
+
 ## 11 novembre, 21:47 UTC — primitives d'autorité : 34 parents logiciels PASS
 
 Sur la source publique `4b1927f` + quatre sources owner r3 / filesystem r2 et deux déclarations de modules, 33 parents automatiques (25 owner, 8 FS Linux) et un négatif Docker de métadonnées explicitement exécuté passent ; build lib et `cargo check --all-targets` PASS. Source testée `a9fcb802…`, export vivant exact `1f15580d…`, 2 504 fichiers0644, fermeture RC 0/OOM 0. [Preuves, 34 noms et sources](evidence/2026-11-11/human-authority-primitives/README.md).

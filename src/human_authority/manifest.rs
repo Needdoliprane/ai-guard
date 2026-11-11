@@ -48,7 +48,7 @@ impl SourceStorageBindingV1 {
         (self.source_device, self.source_inode)
     }
 
-    fn validate(&self) -> Result<(), HumanAuthorityFailure> {
+    pub(super) fn validate(&self) -> Result<(), HumanAuthorityFailure> {
         let normalized = crate::control_fs::absolute_path(&self.parent_path)
             .map_err(|_| HumanAuthorityFailure::InvalidManifest)?;
         if normalized != self.parent_path

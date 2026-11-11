@@ -1,0 +1,464 @@
+{
+  "formatVersion": 1,
+  "status": "PASS_ROOT_VERIFIED_SOFTWARE_MAINTENANCE_PRIMITIVES",
+  "scope": "Owner/configuration maintenance primitives r4 only; no modern Store/AuthLedger/approval activation",
+  "publicBase": {
+    "commit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+    "tree": "14ade579a48db202d0c9f90e1ee42838d42a4d94",
+    "files": 2507
+  },
+  "candidate": {
+    "archiveSha256": "5075a7f9407867c0d8efb8014a08ce83614f0d413be9697221978a01d5abe6d6",
+    "archiveBytes": 27650560,
+    "files": 2509,
+    "regularFileModes": "0644",
+    "changedPaths": 5,
+    "modified": 3,
+    "added": 2,
+    "unchangedPublicBlobsAndModes": 2504
+  },
+  "files": [
+    {
+      "path": "src/human_authority.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+        "sha256": "bf7ac63e0645cca65a4e3fb4b5de6b95286ec3d8a46819148b36e0191eb184e9",
+        "gitBlobSha1": "ecb4e46127d876c12744c0226f1eaa853238b1b9",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "231cabba5798790ceef419e562744e34b37a3b2925bda303c53219fea1aad596",
+        "gitBlobSha1": "48bd9857bcd97341f3211a01f62ccbb1751b957b",
+        "mode": "0644",
+        "bytes": 34053
+      }
+    },
+    {
+      "path": "src/human_authority/manifest.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+        "sha256": "f3427c28048db39a2f1e62fc897f1f1b36106c89f41bb11bde331333a9aedd2e",
+        "gitBlobSha1": "c5b842d15a9bf186e851b95edb5f1a2ee4dbdfd1",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "3437cb9270541c012e17e58d4e09550dc3967781b0ca481af543820a232e7023",
+        "gitBlobSha1": "bf30a156dd9c7e77be81c8aaa5284494d7d4735f",
+        "mode": "0644",
+        "bytes": 11170
+      }
+    },
+    {
+      "path": "src/human_authority/tests.rs",
+      "change": "modified",
+      "before": {
+        "exists": true,
+        "publicCommit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+        "sha256": "733a269111d82e92a7fe5b0bf332ca66bf4b465362219e4a82e1ce2505db9bdd",
+        "gitBlobSha1": "8484c9e1f560e334a531c946d934a54133a98842",
+        "mode": "0644"
+      },
+      "after": {
+        "sha256": "31094c3b48f5a477af1c5408f59a33f06ad8d11f1f052718007a5240a9585bbe",
+        "gitBlobSha1": "fb3a85538c194fa48d909d2ff5934f05be3b3705",
+        "mode": "0644",
+        "bytes": 37874
+      }
+    },
+    {
+      "path": "src/human_authority/maintenance.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "c6337a23f1226bd1cb1a7fefde9901b2861780d230c06976cc95a1533a9aa818",
+        "gitBlobSha1": "e5444a2605fa938d9d0f738ed7f3ca631acfd897",
+        "mode": "0644",
+        "bytes": 25280
+      }
+    },
+    {
+      "path": "src/human_authority/maintenance/tests.rs",
+      "change": "added",
+      "before": {
+        "exists": false,
+        "publicCommit": "103130d61675829109429e7d2f00c1ff3bb7b059",
+        "sha256": null,
+        "gitBlobSha1": null,
+        "mode": null
+      },
+      "after": {
+        "sha256": "a53d9b9b91fdf7d71e22e921a329d150ada67516d6edc3cfc39871ccd8ebb211",
+        "gitBlobSha1": "afd7db3f0cba0dee077182763269f1819616092e",
+        "mode": "0644",
+        "bytes": 19418
+      }
+    }
+  ],
+  "review": {
+    "verdict": "GO_SOURCE_BOUNDED",
+    "archiveSha256": "4e4cdf472d0aaf58f2a99ab04f7b7537b888674beced0fdb890e6325682784da",
+    "markdownSha256": "4ebc0efaa2edc4e5acceda0eaaa7e299a858a0932690dd71b8fc45652a8d411c",
+    "jsonSha256": "b917520140ae6adaf193706783949a1b38032e8e45242ec9ee8f172275bc2763",
+    "dynamicValidation": false
+  },
+  "validation": {
+    "status": "PASS",
+    "plannedParentCount": 19,
+    "newMaintenance": 12,
+    "newActiveToken": 2,
+    "sharedRegressions": 5,
+    "parents": [
+      {
+        "name": "human_authority::maintenance::tests::initial_and_legacy_prior_plans_acquire_without_any_future_receipt",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "13c200455c4870deef5036497fd9074134f5c81f66c5f6dbfca6e15782aacced",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::moved_source_token_retains_both_prior_and_target_parent_locks",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "89326e7fef9f4c7b8c6b51dda42e48fb349be84c6356a42ad6f7016fc9410bf2",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::canonical_parent_order_releases_partial_locks_after_later_contention",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "111a13e4859f834dc419025d29718d7e35132b997e06fbe5cb6d57926caf6be2",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::unchanged_source_shared_by_views_is_owned_without_self_contention",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "b7cb787d635cd2480a1915d50f44dfafc919e5ef30ee5c8c5b7360265bab2bab",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::actual_configuration_missing_or_adding_a_source_is_rejected_before_locks",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "d394e3be28af00c95d4b22d701a4b73f72ee5ddbcff912d4c5391babe8f84926",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::plan_and_retained_credentials_substitution_latch_without_releasing_sources",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "b24e03ffc6c0beda5d0d8bd7cee5faa7b491c91d03c82e74b0d6bffb2a688911",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::main_substitution_cannot_become_a_new_expected_binding",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "bf4fbafc1817c6975d4226d81d7268cb6389752257991b2822c07979280228d1",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::structured_shortage_keeps_ownership_and_next_check_validates_the_whole_union",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "ea7bd44ed0e3bdb866e59fad6a10bd7eda039f84f85953d8131dfc1ffb1db432",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::unknown_or_non_descriptor_failure_permanently_invalidates_the_union",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "d3f815299aad2872f674a9332693d341019683aeff422eeda0d2fe97b4629046",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::plan_is_closed_bounded_and_rejects_physical_or_logical_aliases",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "ba0553e0f88eaaa5e3585488f61a513b7d3491193621dfb6ee373b4ed4a234b4",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::previous_active_manifest_is_not_fabricated_from_legacy_scope_or_arbitrary_bytes",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "d23a5a04ce4f60e40ac136da3ba9aba0ce1029e535ea93f4de37f3f5c718e5db",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::maintenance::tests::unknown_target_and_foreign_guard_tokens_do_not_create_authority_or_expose_data",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_maintenance",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "cb0351db3b2fba866545b9f82329c1b8d20fb4ce20249be46fbebfe720cc5045",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::retained_tokens_compare_exact_owner_and_source_without_an_authority_assertion",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_active_token",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "6e94212351b054f0b224d910b7836d5d9346e398c91fcbdfb50ec7adac9a3387",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "new_active_token",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "400853a8c08d382e4875b2699c2765f98decc8c24d314499ba85e2048b6fd11a",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::canonical_acquisition_releases_earlier_parents_on_contention",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "shared_regression",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "5d0ea5ebefc97f90f077eb81a8ef1c1e94b7386c847df9835a819e75279b2e26",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::independent_owners_exclude_and_tokens_retain_actual_flocks",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "shared_regression",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "f859177ad6257958d39d0ff2ec79a2dcac0a1aac0dd81fd9dcc66c7764437940",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::typed_source_invalidation_rejects_all_accepted_epochs_and_retains_locks_until_drop",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "shared_regression",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "c03b0146fd14a8890a0ed92ffba2173d810572fc97effe4bf3fb5392e33feee1",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::normal_close_allows_existing_epochs_to_finish_without_invalidating_them",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "shared_regression",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "a1dfe416fb8567be675810acf42bee5a152ea60f277fe918ab5565095f8dd8d9",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "human_authority::tests::descriptor_shortage_followed_by_changed_other_source_never_reuses_an_old_check",
+        "target": {
+          "kind": "lib",
+          "name": "agentsandbox"
+        },
+        "group": "shared_regression",
+        "status": "PASS",
+        "rc": 0,
+        "stdoutSha256": "bab5c1284b527a8d74e6caaf50d6936f58fc7bf3e85ceb558f3d8468ae61cf7b",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ],
+    "build": {
+      "command": [
+        "cargo",
+        "test",
+        "--frozen",
+        "--offline",
+        "--lib",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "c6b87bc3df54164ed2e416e12361733c35be67cd07505ad4adfd3f92ccb472de",
+      "stderrSha256": "edf5fbc79e2b71154d0300244f4df0b92aa88a8a976f21db513d891e42dfdca5",
+      "successfulBuildFinishedCount": 1,
+      "errorDiagnosticCount": 0
+    },
+    "check": {
+      "command": [
+        "cargo",
+        "check",
+        "--frozen",
+        "--offline",
+        "--all-targets",
+        "--message-format=json"
+      ],
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "739e0dd0e09d88552ec583d00fffd6a5a2c10bc6122cca7d1e861c9138cba674",
+      "stderrSha256": "8f9ee3d84b1eb071f87e8d1606d5e1c1a632b556cd28f93f2cabeccaf17c4bca",
+      "successfulBuildFinishedCount": 1,
+      "errorDiagnosticCount": 0
+    },
+    "plannedOrderOnly": [
+      "fresh isolated source/profile admission",
+      "one lib no-run build",
+      "one all-targets software check",
+      "one actual libtest list and exact selector admission",
+      "19 single exact software parents",
+      "full source verification/export and exact owned-CID closure"
+    ],
+    "observedOrder": [
+      "source/profile/kernel admission",
+      "lib no-run build",
+      "actual libtest list/exact admission",
+      "19 single exact parents",
+      "all-targets check",
+      "source verification/live export/exact CID closure"
+    ],
+    "actualLibTestCount": 985,
+    "liveExport": {
+      "sha256": "bc4f91a9efe07f1ea6458a6d11d3ffda68a576cd75002dfd998b8bdd11f43eb1",
+      "bytes": 27822080,
+      "files": 2509,
+      "directories": 325,
+      "regularFileModes": "0644",
+      "contentExact": true,
+      "producerRc": 0,
+      "sinkRc": 0,
+      "overflowBytes": 0
+    },
+    "actualProfileVerified": {
+      "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+      "linux": "aarch64",
+      "uid": 1000,
+      "gid": 1000,
+      "network": "none",
+      "readOnlyRoot": true,
+      "capabilities": "none",
+      "noNewPrivileges": true,
+      "seccomp": 2,
+      "memoryLimitBytes": 9663676416,
+      "memorySwapMax": 0,
+      "cpus": 4,
+      "pids": 128,
+      "scratchTmpfsBytes": 4294967296,
+      "scratchTmpfsInodes": 131072,
+      "readOnlyBinds": [
+        "frozen public source inputs",
+        "public Cargo registry cache"
+      ],
+      "freshTarget": true,
+      "frozenOffline": true,
+      "kernelPreflightRc": 0
+    },
+    "closureRc": 0,
+    "oomKilled": false,
+    "rootVerifiedAt": "2026-11-11T22:47:17.940Z",
+    "plannedOrderNote": "The frozen candidate plan listed check before list; Root admitted and executed the proven build-list-parents-check order. The original plan is retained unchanged.",
+    "actualLibTestCountIsExecutionCount": false,
+    "memoryCurrentBytes": 1377333248,
+    "memoryPeakBytes": 6255329280,
+    "runStartedAt": "2026-11-11T22:40:02.855347844Z",
+    "runFinishedAt": "2026-11-11T22:44:16.693388628Z",
+    "runScriptSha256": "0cfde3104e5c1f72cad7a1aa58d7a9ec9c702967750cb902e737473f39ebc433",
+    "administrativeIncident": "First host CREATE precheck returned66 because two empty QA preparation directories existed; no container, preparation, build or test started. Root corrected a function-boundary comparison, rechecked/rmdir only the two empty directories, then admitted CREATE0. No product source, profile or oracle changed. Preserved in private ROOT_CREATE_PRECHECK_STOP.json.",
+    "rawEvidence": "Private qa-human-maintenance-20261111-r1; raw stdout/stderr hashes below; no secrets or ephemeral absolute paths published."
+  },
+  "historicalEvidence": {
+    "publicPrimitiveEvidence": "../human-authority-primitives/README.md",
+    "previousInputSha256": "a9fcb80227dfae5ef1275d3c89ccf322b9c470761a161ab7b414aa15aeaca9bd",
+    "previousLiveExportSha256": "1f15580d61636a9de8bfae9781d83580da87b52dbdfb7d537abb4ab55e308cab",
+    "previousParents": 34,
+    "transferredPasses": 0
+  },
+  "notDeliveredByThisPackage": [
+    "Modern Store14 or AuthLedger5 constructors and source/format/history verification",
+    "All-source SQLite writer transactions, verified backups, migrations and old-writer fencing",
+    "Transfer/retirement/anti-rollback facts, mixed-state journal, clock floors and durable incarnations",
+    "Final active manifest/startup Ready and all identity/OIDC/registry mutators",
+    "ApproveLaunch identity permissions and full target/consent/admission/claim/runtime workflow",
+    "Native macOS, Docker/Podman worker runtimes, Kubernetes, providers, actual FD exhaustion or load qualification"
+  ],
+  "gatesClosed": 0
+}
