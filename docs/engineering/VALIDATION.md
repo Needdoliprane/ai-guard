@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — intégrité de réception du rapport de risques
+
+PASS documentaire :33 lignes de SHA256SUMS vérifiées sur34 fichiers réguliers (3 988 823octets), nouvelle copie privée byte-identique, originaux conservés ; règle `/.claude/` de Git vérifiée. Le commit source711ba137… et son tree8c282a50… correspondent à la passation et sont ancêtres du public6699a133…/treee8a96023…. Les95 identifiants,93 garanties,70 scénarios,123 lignes de couverture,124 rapprochements et140 non examinés concordent avec les pièces structurées. [Reçus, empreintes, limites et suivi](RISK_COVERAGE_20261112.md).
+
+La comparaison initiale est une comparaison de blobs seulement :269 références identiques,84 modifiées,2 références larges non résolues. Elle ne valide ni les lignes actuelles de chaque constat, ni ses conditions ou son correctif. Tous les tests de l’analyse sont NOT_RUN ; aucun code du produit ou du rapport exécuté. Les résultats historiques de validation restent sur leurs sources propres. Aucun fingerprint ou gate clos.
+
 ## 12 novembre — ports scoped et contrat : deux gels vérifiés
 
 Store : source436cfe76… /2 597 fichiers,22 parents exacts PASS (1 réussi/0 échec/0 ignoré chacun), build/list et check toutes cibles RC0 ;692 pièces runtime/27 statiques, export e329fd86… entièrement comparé, fermeture0/OOMfalse. Contrat séparé : source acc40251… /2 597 fichiers,5 parents exacts PASS, build/list RC0, all-targets NOT_RUN ;258 pièces runtime/28 statiques, export a7b35482… exact et fermeture0/OOMfalse. Les15 fichiers applicatifs Store sont identiques entre ces gels ; les comptes ne sont pas présentés comme une suite unique. [Commandes, sélecteurs, reçus et limites](evidence/2026-11-12/human-scoped-ports/README.md), [données vérifiables](evidence/2026-11-12/human-scoped-ports/TESTS.json).

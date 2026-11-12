@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 12 novembre — analyse indépendante de couverture reçue et archivée
+
+Le rapport final `ai-guard-risk-coverage-2026-11-12` est désormais une entrée obligatoire distincte de run-1/run-2 : [registre et règles de reprise](RISK_COVERAGE_20261112.md), [95 entrées et comparaison initiale des blobs](RISK_COVERAGE_20261112.json). Les34 fichiers sont conservés en privé sous `.claude/audit/` ignoré ; les33 empreintes du manifeste et chaque copie correspondent aux originaux. Source auditée711ba13, comparaison publique initiale6699a13, changements privés exclus.
+
+L’analyse retient80 risques, dont1P0 conditionnel/19P1/45P2/15P3 ;11 rejets,3 fusions et1 hypothèse rouverte restent préservés séparément. Tous ses tests sont NOT_RUN : ni vulnérabilité reproduite, ni garantie runtime, ni correctif ou gate clos n’est déduit. Les cinq décisions et onze entrées indépendantes sont tracées sans présumer d’autorisation nouvelle. Les intégrations Claude A–E et leurs preuves ne sont pas rétroactivement qualifiées par cette analyse.
+
 ## 12 novembre — ports Store scoped : preuve de prérequis, pas clôture d’audit
 
 Les22 parents Store et5 parents de contrat ont leurs gels, vrais fichiers/migrations, oracles et reçus séparés : [preuves](evidence/2026-11-12/human-scoped-ports/README.md). Les contrôles de source/epoch/permissions, reçus atomiques et cycles conservateurs sont vérifiés dans ce périmètre ; aucun ancien correctif partiel n’est assimilé à la clôture d’un fingerprint. Ready, approbation nominative, raccord complet de tous les mutateurs et qualification runtime restent ouverts. La borne courte de contention du Mutex Store n’est pas établie. Les deux défauts ACK/keeper SSO reproduits sur un candidat distinct et sa reprise après fermeture ambiguë restent suivis séparément. Les pièces primaires privées et les audits successifs restent conservés dans leurs registres. Aucun gate global clos.

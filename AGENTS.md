@@ -50,6 +50,18 @@ Le mainteneur a ensuite fourni deux visuels OVPT et demandé leur adaptation au 
 
 ## Lire avant de modifier
 
+Pour les travaux de confinement, harness, identité, runtime, audit et déploiement,
+lire aussi l’[analyse de couverture des risques reçue le 12 novembre et son
+registre](docs/engineering/RISK_COVERAGE_20261112.md), puis les pièces primaires
+privées indiquées. Elle retient 80 risques sur la source `711ba13`, dont un P0
+conditionnel ; tous ses tests sont `NOT_RUN`. Comparer chaque fingerprint,
+condition et conclusion au code courant avant correction, sans transférer une
+garantie de source en qualification runtime. Conserver les rejets, les liens
+de fusion et les audits antérieurs ; renseigner le statut courant et les
+preuves dans le registre, sans clôture par assimilation à un correctif voisin.
+Les rapports privés restent sous `.claude/audit/`, ignoré par Git ; seul leur
+suivi non sensible est versionné.
+
 Pour intégrer les livraisons externes Claude, lire le [registre des livraisons du 10 novembre](docs/engineering/CLAUDE_DELIVERIES_20261110.md). Il distingue branches originales, compositions, preuves historiques et validations encore ouvertes ; conserver les pièces privées sans les publier.
 
 Pour les correctifs de sécurité, lire aussi le [rapport final run-2 et son

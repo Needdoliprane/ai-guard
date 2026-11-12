@@ -1,5 +1,11 @@
 # Plan d'industrialisation
 
+## 12 novembre — intégrer la couverture de risques aux prochains lots
+
+Lire le [rapport reçu et son suivi](RISK_COVERAGE_20261112.md) avant de choisir un correctif :80 risques retenus,95 enregistrements avec rejets/fusions/réouverture, tous tests NOT_RUN. La comparaison initiale de fichiers sur6699a13 ne clôt aucun risque. Les onze entrées de vague0 doivent être rapprochées des chantiers et des preuves actuels, puis réparties par propriétaires et fichiers disjoints ; conserver une source figée et une revue indépendante.
+
+Les lots réseau/credential, politique d’organisation/profil worker, fichiers de pilotage de harness et arrêt autonome ont cinq décisions à rapprocher des décisions existantes avant une proposition nouvelle. Ils ne bloquent ni les correctifs indépendants, ni l’intégration API/SSO/Store, ni les travaux broker/relais/Kubernetes. Les rapports restent privés et ignorés, leur suivi est versionné. L’arrêt de deux agents Luna sur quota laisse leurs tests NOT_RUN ; ne pas perdre les préparations ni transformer cet incident en résultat produit.
+
 ## 10 novembre — lots gelés et prochaines preuves discriminantes
 
 | Propriétaire | Travail courant et acceptation suivante |

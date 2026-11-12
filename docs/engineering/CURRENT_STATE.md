@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre — rapport de couverture final reçu, suivi obligatoire créé
+
+L’analyse Claude de risques est livrée et archivée ; son ancien statut en cours devient historique. [Registre durable](RISK_COVERAGE_20261112.md) :34 fichiers privés byte-identiques et33 empreintes vérifiées,95 identifiants/fingerprints conservés, source711ba13 rapprochée au niveau des fichiers de la source publique6699a13. Les80 risques retenus et les conditions P0/P1 restent à revalider individuellement ; les cinq décisions et la vague0 sont tracées. Aucun essai cible exécuté par ce rapport, aucune qualification transférée.
+
+Les deux agents Luna de QA se sont arrêtés sur limite de quota, sans CREATE/RUN de leurs expériences : tests Store et nouvelle régression SSO restent NOT_RUN. Leurs préparations sont conservées. Les travaux de réception, revue et lots indépendants continuent ; aucun blocage global ou gate fermé.
+
 ## 12 novembre — ports Store retenus : 22 tests et contrat séparé de cinq tests PASS
 
 Les accès internes identité/lectures humaines, supervision/relais et workload/registre exigent la vraie source et l’epoch emprunté. Vingt-deux parents exacts passent sur le gel Store, puis le check toutes cibles ; cinq parents de contrat passent sur un gel distinct qui préserve aussi les parcours11/12 et la représentation14. Root vérifie contenus/modes vivants, oracles et fermeture de chaque QA. [Sources, échecs conservés et limites](evidence/2026-11-12/human-scoped-ports/README.md). Les appels legacy restent fermés au format14.
