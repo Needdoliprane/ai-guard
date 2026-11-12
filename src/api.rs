@@ -59,6 +59,7 @@ mod relay_admission;
 mod store_io;
 mod supervision;
 mod workload;
+pub(crate) use auth::AuthenticatedReviewRunnerCredential;
 pub use auth::GatewayControlRecoveryRetirementV2;
 #[cfg(test)]
 pub(crate) use auth::with_authenticated_control_recovery_for_test;

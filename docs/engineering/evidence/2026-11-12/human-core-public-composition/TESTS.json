@@ -1,0 +1,608 @@
+{
+  "version": 1,
+  "scope": "Frozen public7170b866 + exact17 Core postimages; software QA only",
+  "source_archive_sha256": "5e1189c150ed748e7297654cafd3c21e651304561321f4ecfb1440c6373b2d8f",
+  "source_files": 2566,
+  "parent_commit": "7170b86607acb15bab40b4def731dd54c7c4247f",
+  "parent_tree": "dde48da82a395ff708fa1dc0e34371cf9e0efc69",
+  "public_application_baseline_unchanged_through": "3cc7694bb830b57abe017a393f8f44487e34c064",
+  "root_results_receipt_sha256": "a98d10e64167279bac3f100c9d9679b35007263068f6a5a8a6ced716055bc9f1",
+  "observed_status": "PASS",
+  "build": "PASS",
+  "check_all_targets": "PASS",
+  "postrun_archive": {
+    "sha256": "8b23f187cfb51c67bee191857958c0dde5c0a0a434cbabe761440faf48c95b8d",
+    "bytes": 29634560,
+    "files": 2566,
+    "paths_payloads_modes_exact": true
+  },
+  "raw_evidence": {
+    "entries": 956,
+    "manifest_sha256": "1b501c29d183dc2c55e346fcc307308ad9b2e7d341156fb0c36e7ce5580fa4c2"
+  },
+  "static_preparation": {
+    "entries": 2600,
+    "manifest_sha256": "b8e92f76fed4eb44f13b09b465f82cd38045943f6723454abc5a41777d093962"
+  },
+  "closure": {
+    "run_rc": 0,
+    "closure_rc": 0,
+    "exact_cid_removed": true,
+    "exact_ps_empty": true,
+    "OOMKilled": false,
+    "container_stop_exit": 137
+  },
+  "memory": {
+    "peak_bytes": 7316529152,
+    "cap_bytes": 9663676416,
+    "oom": 0,
+    "oom_kill": 0,
+    "oom_group_kill": 0,
+    "meaning": "Compilation/QA cgroup, not worker usage"
+  },
+  "tests": [
+    {
+      "index": 1,
+      "target": "lib",
+      "selector": "control::review_binding::tests::strict_binding_rejects_unknown_noncanonical_and_unbounded_input",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 2,
+      "target": "lib",
+      "selector": "control::review_binding::tests::policy_cannot_name_technical_owner_duplicate_share_or_wider_permissions",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 3,
+      "target": "lib",
+      "selector": "control::review_binding::tests::owner_permissions_are_mandatory_canonical_and_always_include_content",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 4,
+      "target": "lib",
+      "selector": "control::review_binding::tests::explicit_owner_approval_changes_policy_and_bound_command_digests",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 5,
+      "target": "lib",
+      "selector": "control::review_binding::tests::provision_pairs_exact_policy_and_binds_every_routing_reference",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 6,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::policy_identity_cannot_remap_or_be_reused_after_revision_and_revocation",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 7,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::revoked_snapshots_keep_credential_floors_namespace_and_policy_collisions",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 8,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::projection_replay_cas_revocation_and_divergence_preserve_prefix",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 9,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::sqlite_projection_is_exact_and_replay_rejects_tampered_snapshot",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 10,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::first_grant_has_only_policy_owner_shares_and_exact_session",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 11,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::content_only_owner_does_not_require_approval_capability",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 12,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::explicit_owner_approver_requires_both_current_content_and_approval_capabilities",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 13,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::content_only_share_has_no_approval_requirement_but_explicit_share_does",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 14,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::owner_permission_change_requires_exact_policy_and_binding_cas",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 15,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::authenticated_credential_tuple_must_match_generation_namespace_config_and_closure",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 16,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::retained_target_cannot_remap_broker_profile_source_project_routing_or_policy",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 17,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::store_event_replay_and_exact_retry_are_descriptive_inside_rolled_back_transaction",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 18,
+      "target": "lib",
+      "selector": "audit::review_binding::tests::policy_account_revalidation_refuses_revoked_or_missing_current_capability_without_mutating",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 19,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::ordinary_thirteen_never_validates_as_review_authority",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 20,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::exact_replay_rejects_projection_divergence_and_duplicate_anchor",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 21,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::incarnation_requires_exact_anchor_and_previous_incarnation_receipt",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 22,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::anchor_is_closed_bounded_and_independent_of_closure_digest",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 23,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::identical_copy_transaction_refuses_without_mutating_or_poisoning_the_source",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 24,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::actual_retained_backing_replacement_keeps_the_permanent_failure_path",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 25,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::an_additional_schema_refuses_until_detached_without_poisoning_the_source",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 26,
+      "target": "lib",
+      "selector": "audit::review_authority_migration::tests::pinned_writer_backup_is_exact_new_and_original_prefix_unchanged",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 27,
+      "target": "lib",
+      "selector": "audit::review_authority_migration::tests::a_read_transaction_cannot_pin_the_offline_migration",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 28,
+      "target": "lib",
+      "selector": "audit::review_authority_migration::tests::a_changed_writer_prefix_cannot_reuse_a_verified_backup",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 29,
+      "target": "lib",
+      "selector": "audit::review_authority_migration::tests::changed_backup_contents_refuse_without_repairing_the_original",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 30,
+      "target": "lib",
+      "selector": "audit::review_authority_migration::tests::foreign_writer_refuses_before_backup_creation_and_both_prefixes_stay_unchanged",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 31,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::private_envelope_resolves_only_the_exact_configured_runner_entries",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 32,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::missing_extra_or_cross_role_credentials_cannot_create_an_index",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 33,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::stable_credential_ids_are_unique_across_tenants_and_roles",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 34,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::closure_identity_revision_and_public_configuration_are_all_bound",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 35,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::private_values_and_parser_errors_never_appear_in_diagnostics",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 36,
+      "target": "lib",
+      "selector": "api::auth::review_credentials::tests::every_tenant_needs_one_exact_modern_source_and_no_duplicate_scope",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 37,
+      "target": "lib",
+      "selector": "audit::review_access::tests::legacy_header_refusal_precedes_suspended_recovery_and_cache_publication",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 38,
+      "target": "lib",
+      "selector": "audit::review_access::tests::unscoped_storage_and_diagnostic_checks_refuse_header_without_latching",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 39,
+      "target": "lib",
+      "selector": "audit::review_access::tests::legacy_commit_rechecks_format_and_rolls_back_without_advancing_floor",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 40,
+      "target": "lib",
+      "selector": "audit::review_access::tests::foreign_checked_transaction_refuses_without_invalidating_either_origin",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 41,
+      "target": "lib",
+      "selector": "audit::review_access::tests::legacy_authority_helper_rechecks_current_header_before_identity_replay",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 42,
+      "target": "lib",
+      "selector": "audit::identity::review_capability_tests::approval_capability_is_personal_and_not_a_legacy_resource_permission",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 43,
+      "target": "lib",
+      "selector": "audit::identity::review_capability_tests::approval_membership_requires_exact_format_fourteen_even_when_inactive",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 44,
+      "target": "lib",
+      "selector": "audit::identity::review_capability_tests::legacy_provision_and_idempotent_mutation_refuse_approval_before_any_write",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 45,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::an_initialized_empty_temporary_schema_keeps_the_exact_main_connection_valid",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 46,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::temporary_objects_refuse_until_dropped_without_poisoning_the_source",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 47,
+      "target": "lib",
+      "selector": "audit::review_authority::tests::an_attached_schema_after_empty_temp_refuses_until_detached",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 48,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_envelope_field_names_equal_the_loaders",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 49,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_registry_file_is_read_as_the_loader_reads_it",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 50,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_registry_structural_rules",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 51,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_registry_policies",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 52,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_token_content_is_outside_the_restated_half",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 53,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_oidc_file_envelope_and_validators",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 54,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_oidc_references_and_ca_bundle",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 55,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_authentication_policy_is_checked_after_the_file_loader",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 56,
+      "target": "bin",
+      "selector": "gateway_config::diagnostics_parity_tests::diagnostics_parity_relay_retention_policy",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 57,
+      "target": "human_access",
+      "selector": "local_identity_is_named_and_legacy_classes_remain_separate",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 58,
+      "target": "human_access",
+      "selector": "local_provisioning_is_atomic_and_exact_replay_never_overwrites_an_account",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 59,
+      "target": "human_access",
+      "selector": "maintenance_open_requires_existing_versioned_data_without_creation_or_adoption",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 60,
+      "target": "human_access",
+      "selector": "unavailable_mandatory_read_audit_returns_error_instead_of_empty_identity",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 61,
+      "target": "human_access",
+      "selector": "credential_collisions_between_tenants_and_classes_never_select_a_tenant",
+      "status": "PASS",
+      "exact_parents": 1,
+      "ignored": 0,
+      "timeout_seconds": 30
+    }
+  ],
+  "not_run": [
+    "Format14 global activation",
+    "AuthLedger5 composition",
+    "Complete personal human approval/launch",
+    "Real Docker/Podman/Kubernetes worker qualification",
+    "Actual OIDC/provider/interactive CLI",
+    "Native macOS",
+    "Production gates"
+  ],
+  "limitations": [
+    "R1 failed mode-text admission before Cargo;61parents NOT_RUN",
+    "Application source matches verified candidate; publication bookkeeping changes documentation only",
+    "No previous pass transferred"
+  ]
+}

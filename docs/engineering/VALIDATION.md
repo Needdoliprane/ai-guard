@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre, 07:07 UTC — composition publique + Core : 61 parents PASS
+
+Sur le gel `5e1189c150ed748e7297654cafd3c21e651304561321f4ecfb1440c6373b2d8f`, build lib/bin/human_access et trois listes réelles RC 0, 61 parents exacts PASS, zéro échec/ignoré ; check toutes cibles RC 0. Export vivant `8b23f187…` de 29 634 560 octets : 2 566 chemins/contenus/modes identiques. Root vérifie 956 empreintes brutes et2 600 pièces statiques ; exécution/fermeture RC 0, aucun OOM, CID exact retiré. [Noms et preuves](evidence/2026-11-12/human-core-public-composition/README.md).
+
+R1 conserve son échec de représentation des modes avant Cargo (61 parents NOT_RUN). R2 garde le même code et les mêmes sélecteurs ; aucun PASS transféré depuis l’ancien candidat privé. Portée : logiciel Linux ARM64 hors ligne, 4 CPU / 9 Gio ; aucun runtime métier réel, IdP/fournisseur, format 14/AuthLedger5 ou parcours complet qualifié. La publication change ensuite seulement la documentation de preuve. Aucun gate fermé.
+
 ## 12 novembre — 47 parents Core privés et consommateurs de reprise, sources distinctes
 
 Tests-first `6d06a47d…` : un parent réel échoue après vérification de TEMP sans objet (`FAIL_EXPECTED_RED`, RC 101, 0 PASS). Candidat privé corrigé `72ea2425…` : 47 parents exacts PASS, build/list/check toutes cibles et fermeture RC 0 ; Root vérifie 761 pièces et 2 525 contenus/modes, sans OOM. Anciennes erreurs de build, fixture, prédicat et préflight conservées. Gel relais privé `94628626…` : deux pertes d’ACK PASS et check toutes cibles RC 0 ; Root vérifie 175 pièces et 2 583 contenus/modes. [Commandes, empreintes, revues et limites](evidence/2026-11-12/private-control-candidates/README.md).

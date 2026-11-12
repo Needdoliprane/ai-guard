@@ -988,7 +988,37 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let mut tx = self.begin_checked(&mut db)?;
+        let tx = self.begin_checked(&mut db)?;
+        self.mutate_identity_checked(tx, mutation)
+    }
+    /// Modern trusted-control entrance. The epoch serializes authority changes;
+    /// it does not authenticate the supplied actor or grant human approval.
+    /// Startup/source14 validation remains mandatory before this can succeed.
+    pub(crate) fn mutate_identity_scoped(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        mutation: &IdentityMutationV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        mutation.validate()?;
+        let access = HumanSourceAccess::write(epoch, source)?;
+        // Never wait on a second control mutex while retaining a write epoch.
+        // Both contention and poison refuse this operation without claiming a
+        // durable source mismatch or releasing another task's owner.
+        let mut db = self
+            .db
+            .try_lock()
+            .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
+        let tx =
+            self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
+        self.mutate_identity_checked(tx, mutation)
+    }
+    fn mutate_identity_checked(
+        &self,
+        mut tx: CheckedTransaction<'_>,
+        mutation: &IdentityMutationV1,
+    ) -> anyhow::Result<IdentityReceiptV1> {
+        tx.require_identity_authority()?;
         require_identity(&tx)?;
         let result = self.persist_identity_mutation(&tx, mutation)?;
         if matches!(&mutation.change, IdentityChangeV1::Credential { .. }) {
@@ -1009,7 +1039,35 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let mut tx = self.begin_checked(&mut db)?;
+        let tx = self.begin_checked(&mut db)?;
+        self.provision_local_human_checked(tx, provision)
+    }
+    /// Exact three-operation provisioning under the same write epoch and real
+    /// SQLite transaction. No serialized scope or stopped-control assertion can
+    /// construct the retained source/epoch needed by this entrance.
+    pub(crate) fn provision_local_human_scoped(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        provision: &LocalHumanProvisionV1,
+    ) -> anyhow::Result<Vec<IdentityReceiptV1>> {
+        provision.validate()?;
+        let access = HumanSourceAccess::write(epoch, source)?;
+        let mut db = self
+            .db
+            .try_lock()
+            .map_err(|_| crate::human_authority::HumanAuthorityFailure::StorageUnavailable)?;
+        let tx =
+            self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
+        self.provision_local_human_checked(tx, provision)
+    }
+    fn provision_local_human_checked(
+        &self,
+        mut tx: CheckedTransaction<'_>,
+        provision: &LocalHumanProvisionV1,
+    ) -> anyhow::Result<Vec<IdentityReceiptV1>> {
+        tx.require_identity_authority()?;
+        provision.validate()?;
         require_identity(&tx)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // Validate the complete atomic preparation before any replay lookup or
@@ -1044,9 +1102,12 @@ impl Store {
     }
     fn persist_identity_mutation(
         &self,
-        tx: &Transaction<'_>,
+        tx: &CheckedTransaction<'_>,
         mutation: &IdentityMutationV1,
     ) -> anyhow::Result<IdentityReceiptV1> {
+        // Keep the class/epoch check at the narrow mutation helper as well:
+        // Deref to a raw SQLite transaction must not bypass Write authority.
+        tx.require_identity_authority()?;
         mutation.validate()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         require_approval_capability_format(mutation, version)?;

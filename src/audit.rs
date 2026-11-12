@@ -163,11 +163,16 @@ mod identity;
 mod kubernetes_admission;
 pub(crate) mod kubernetes_session;
 mod metadata;
+mod review_access;
+mod review_authority;
+mod review_authority_migration;
+mod review_binding;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
     KubernetesCreateAuthorization, PreparedRecovery,
 };
 pub(crate) use metadata::MetadataLookup;
+pub(crate) use review_access::{HumanSourceAccess, StoreOperationClass};
 #[cfg(test)]
 pub(crate) mod kubernetes_admission_state_tests;
 #[cfg(test)]
@@ -231,6 +236,9 @@ pub struct Store {
     validated_data_version: AtomicI64,
     validated_total_changes: AtomicU64,
     supervision_lease: Arc<SupervisionOrigin>,
+    // Only a verified modern opener may retain this capability. Legacy
+    // constructors leave it absent; an epoch or policy DTO cannot install it.
+    review_authority: Option<review_authority::RetainedReviewAuthority>,
     #[cfg(test)]
     read_test_observer: read_test_observer::ReadTestObserver,
 }
@@ -256,9 +264,13 @@ struct SupervisionLease {
     invalidated: bool,
 }
 
-struct CheckedTransaction<'a> {
+pub(crate) struct CheckedTransaction<'a> {
     transaction: Transaction<'a>,
+    connection: &'a Connection,
+    origin: &'a Store,
     lease: MutexGuard<'a, SupervisionLease>,
+    source_access: Option<&'a HumanSourceAccess<'a>>,
+    operation_class: StoreOperationClass,
     activate_supervision: bool,
     positive_bindings: Option<metadata::PositiveBindings>,
 }
@@ -885,6 +897,7 @@ impl Store {
             validated_data_version: AtomicI64::new(validated_data_version),
             validated_total_changes: AtomicU64::new(validated_total_changes),
             supervision_lease,
+            review_authority: None,
             #[cfg(test)]
             read_test_observer: read_test_observer::ReadTestObserver::default(),
         })
@@ -971,6 +984,9 @@ impl Store {
             .store(true, Ordering::Release);
     }
     fn storage_failure(&self, lease: &mut SupervisionLease, error: &anyhow::Error) {
+        if review_access::admission_refusal(error, false) {
+            return;
+        }
         if storage::descriptor_shortage(error) || metadata::preparation_unavailable(error) {
             // Do not invalidate or recreate the live execution capability. It
             // remains closed until its exact backing and witness are validated.
@@ -1003,6 +1019,18 @@ impl Store {
         db: &Connection,
         lease: &mut SupervisionLease,
     ) -> anyhow::Result<()> {
+        self.recover_suspended_with_access(db, lease, None, StoreOperationClass::Business)
+    }
+    fn recover_suspended_with_access(
+        &self,
+        db: &Connection,
+        lease: &mut SupervisionLease,
+        access: Option<&HumanSourceAccess<'_>>,
+        class: StoreOperationClass,
+    ) -> anyhow::Result<()> {
+        // Also fence a preopened legacy handle before looking at a suspension
+        // flag or publishing any recovered caches/activation witness.
+        review_access::validate_context(self, db, access, class)?;
         if !self.supervision_lease.suspended.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -1011,6 +1039,7 @@ impl Store {
             "audit integrity failure is latched; recovery required"
         );
         let tx = db.unchecked_transaction()?;
+        review_access::validate_context(self, &tx, access, class)?;
         self.backing.verify(&tx)?;
         let before_snapshot: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
         validate_schema(&tx, false)?;
@@ -1025,14 +1054,12 @@ impl Store {
         );
         let current_version: i64 = tx.pragma_query_value(None, "data_version", |r| r.get(0))?;
         let checked_changes = tx.total_changes();
-        let mut capacity = self
-            .supervision_lease
-            .capacity
-            .lock()
-            .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+        let mut capacity = self.lock_access_capacity(access)?;
+        review_access::validate_context(self, &tx, access, class)?;
         let prefix = capacity.prepare(&tx)?;
         let positive_bindings = Arc::new(metadata::PositiveBindings::load(&tx)?);
         self.backing.verify(&tx)?;
+        review_access::validate_context(self, &tx, access, class)?;
         // All fallible validation is complete on one stable snapshot. The
         // permanent latches are never reset, and activation comes exclusively
         // from a known committed transaction retained by this live origin.
@@ -1056,6 +1083,7 @@ impl Store {
         Ok(())
     }
     fn verify_storage(&self, db: &Connection) -> anyhow::Result<()> {
+        review_access::require_legacy(db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| {
             self.recover_suspended(db, &mut lease)?;
@@ -1068,6 +1096,7 @@ impl Store {
         result
     }
     fn verify_diagnostic_backing(&self, db: &Connection) -> anyhow::Result<()> {
+        review_access::require_legacy(db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| {
             // A permanently fenced Store remains readable for diagnosis, but
@@ -1153,12 +1182,41 @@ impl Store {
         &'a self,
         db: &'a mut Connection,
     ) -> anyhow::Result<CheckedTransaction<'a>> {
+        self.begin_checked_with_access(db, None, StoreOperationClass::Business)
+    }
+    pub(crate) fn begin_checked_scoped<'a>(
+        &'a self,
+        db: &'a mut Connection,
+        access: &'a HumanSourceAccess<'a>,
+        class: StoreOperationClass,
+    ) -> anyhow::Result<CheckedTransaction<'a>> {
+        access.check(class)?;
+        // Caller retains its exclusive Store.db guard for the transaction.
+        // Only this borrowed handle is configured; no shared timeout is reset
+        // outside that guard, and no owner gate is reacquired here.
+        db.busy_timeout(std::time::Duration::from_millis(100))?;
+        self.begin_checked_with_access(db, Some(access), class)
+    }
+    fn begin_checked_with_access<'a>(
+        &'a self,
+        db: &'a mut Connection,
+        source_access: Option<&'a HumanSourceAccess<'a>>,
+        operation_class: StoreOperationClass,
+    ) -> anyhow::Result<CheckedTransaction<'a>> {
         #[cfg(test)]
         self.read_test_observer
             .record(read_test_observer::Call::BeginChecked);
-        let mut lease = self.lock_supervision_lease()?;
-        if let Err(error) = self.recover_suspended(db, &mut lease) {
-            self.storage_failure(&mut lease, &error);
+        // db has already been acquired by the caller. Validate after that wait
+        // and before lease/recovery/cache/replay, including on legacy handles.
+        review_access::validate_context(self, db, source_access, operation_class)?;
+        let mut lease = self.lock_access_lease(source_access)?;
+        review_access::validate_context(self, db, source_access, operation_class)?;
+        if let Err(error) =
+            self.recover_suspended_with_access(db, &mut lease, source_access, operation_class)
+        {
+            if !review_access::admission_refusal(&error, source_access.is_some()) {
+                self.storage_failure(&mut lease, &error);
+            }
             return Err(error);
         }
         anyhow::ensure!(
@@ -1169,7 +1227,12 @@ impl Store {
             self.storage_failure(&mut lease, &error);
             return Err(error);
         }
-        let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // Retain the same connection for the postcommit check. The exclusive
+        // &mut entry and the caller's DB guard still prevent a nested caller;
+        // new_unchecked additionally refuses an already-open transaction.
+        let connection: &'a Connection = db;
+        let tx = Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+        review_access::validate_context(self, &tx, source_access, operation_class)?;
         if let Err(error) = self.backing.verify(&tx) {
             self.storage_failure(&mut lease, &error);
             return Err(error);
@@ -1196,17 +1259,17 @@ impl Store {
             }
             // integrity() can already have validated an external commit. The
             // independent capacity anchor still has to advance in that case.
-            let mut capacity = self
-                .supervision_lease
-                .capacity
-                .lock()
-                .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+            let mut capacity = self.lock_access_capacity(source_access)?;
+            review_access::validate_context(self, &tx, source_access, operation_class)?;
             let prefix = capacity.prepare(&tx)?;
+            review_access::validate_context(self, &tx, source_access, operation_class)?;
             capacity.publish(prefix); // No new event exists in this transaction yet.
             Ok(())
         })();
         if let Err(error) = verification {
-            self.storage_failure(&mut lease, &error);
+            if !review_access::admission_refusal(&error, source_access.is_some()) {
+                self.storage_failure(&mut lease, &error);
+            }
             return Err(error);
         }
         if changed {
@@ -1215,21 +1278,37 @@ impl Store {
             // Publish before its validation marker even if the caller later
             // returns a business error and rolls this transaction back.
             let bindings = Arc::new(metadata::PositiveBindings::load(&tx)?);
+            review_access::validate_context(self, &tx, source_access, operation_class)?;
             self.supervision_lease.positive_bindings.store(bindings);
         }
+        review_access::validate_context(self, &tx, source_access, operation_class)?;
         self.validated_data_version
             .store(current_version, Ordering::Release);
         Ok(CheckedTransaction {
             transaction: tx,
+            connection,
+            origin: self,
             lease,
+            source_access,
+            operation_class,
             activate_supervision: false,
             positive_bindings: None,
         })
     }
     fn commit_checked(&self, tx: CheckedTransaction<'_>) -> anyhow::Result<()> {
+        // A foreign CheckedTransaction is an argument refusal, before touching
+        // either Store's health or the actual origin's retained lease.
+        if !std::ptr::eq(self, tx.origin) {
+            return Err(review_authority::ReviewAuthorityFailure::ForeignTransaction.into());
+        }
+        review_access::validate_context(self, tx.connection, tx.source_access, tx.operation_class)?;
         let CheckedTransaction {
             transaction,
+            connection,
+            origin: _,
             mut lease,
+            source_access,
+            operation_class,
             activate_supervision,
             positive_bindings,
         } = tx;
@@ -1257,13 +1336,10 @@ impl Store {
                 None
             };
             let checked_changes = transaction.total_changes();
-            let mut capacity = self
-                .supervision_lease
-                .capacity
-                .lock()
-                .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
+            let mut capacity = self.lock_access_capacity(source_access)?;
             let capacity_prefix = capacity.prepare(&transaction)?;
             let positive_bindings = positive_bindings.map(Arc::new);
+            review_access::validate_context(self, &transaction, source_access, operation_class)?;
             transaction.commit()?;
             // Publish committed positive ownership before any fallible
             // filesystem observation. This is not an authority/ACK: a failed
@@ -1277,6 +1353,10 @@ impl Store {
             lease.floor = next_head;
             lease.namespace = namespace;
             lease.pending_activation = activate_supervision;
+            // COMMIT is known: its floor is already retained even if the epoch
+            // expired during COMMIT or the source check now refuses the ACK.
+            // Use the exact connection, never a synthetic postcommit tx.
+            review_access::validate_context(self, connection, source_access, operation_class)?;
             self.backing.verify_names()?;
             capacity.publish(capacity_prefix);
             // The shared guard still covers this publication, before an ACK or EmitOnce.
@@ -1291,7 +1371,9 @@ impl Store {
             Ok(())
         })();
         if let Err(error) = &result {
-            self.storage_failure(&mut lease, error);
+            if !review_access::admission_refusal(error, source_access.is_some()) {
+                self.storage_failure(&mut lease, error);
+            }
         }
         result
     }
@@ -1301,6 +1383,7 @@ impl Store {
         tx: CheckedTransaction<'_>,
         clock: &workload::AuthorizedControlTimeV1,
     ) -> anyhow::Result<()> {
+        review_access::validate_context(self, tx.connection, tx.source_access, tx.operation_class)?;
         workload::validate_fresh_control_time(&tx, clock)?;
         self.commit_checked(tx)
     }
@@ -1741,6 +1824,7 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
+        review_access::require_legacy(&db)?;
         let mut lease = self.lock_supervision_lease()?;
         let result = (|| -> anyhow::Result<Integrity> {
             if self.permanently_healthy() {

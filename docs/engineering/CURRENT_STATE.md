@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre, 07:07 UTC — socle humain/SQLite composé : 61 parents logiciels PASS
+
+Le code applicatif public `7170b866` + 17 postimages Core passe 47 parents du socle, neuf parités du binaire diagnostic et cinq cas human_access. Build ciblé et check toutes cibles RC 0 ; Root vérifie 956 empreintes brutes,2 600 pièces de préparation et les 2 566 contenus/modes après exécution. [Source, commandes, oracles et limites](evidence/2026-11-12/human-core-public-composition/README.md). Les quatre documents ajoutés par `3cc7694` ne changent pas cette base applicative.
+
+Ces primitives de bindings explicites, credentials runner vérifiés, ACL humaines explicites, autorité/migration et connexion SQLite sont intégrées avec leurs postimages testées ; elles ne livrent pas encore l’approbation/lancement humain complet. Format14 global, AuthLedger5, Ready et routes restent fermés. Les lots tenant14 et authentification restent privés ; leurs revues/régressions ne sont pas couvertes par les 61 PASS. Les 134 fichiers runtime privés sont préservés sans chevauchement. Aucun gate global fermé.
+
 ## 12 novembre, 03:58 UTC — candidats privés : 47 parents Core et deux reprises du relais
 
 Le nouveau test SQLite reproduit le refus erroné d’une connexion main avec TEMP vide : `FAIL_EXPECTED_RED`, 0 PASS. Sur le gel privé corrigé `72ea2425…`, les 47 parents exacts et le check toutes cibles passent ; Root vérifie 761 empreintes brutes et les 2 525 contenus/modes exportés. Une campagne séparée du relais passe deux régressions de perte d’ACK et le check, sur son propre gel. [Sources, historique et limites](evidence/2026-11-12/private-control-candidates/README.md). Ces résultats ne sont pas transférés au code public ni fusionnés en un total : les deltas Core et les 134 dépendances Full3 restent privés. Le format 14 global, `AuthLedger5`, `Ready` et l’approbation complète restent fermés.
