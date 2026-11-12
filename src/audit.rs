@@ -167,6 +167,7 @@ mod review_access;
 mod review_authority;
 mod review_authority_migration;
 mod review_binding;
+mod review_format14;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
     KubernetesCreateAuthorization, PreparedRecovery,
@@ -399,6 +400,16 @@ const WORKER_SNAPSHOT_PREDICATE: &str = "action IN ('admit','prepare','create_is
 fn schema_objects(
     version: i64,
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
+    // Format14 inherits the complete, closed13 profile. Its extensions are
+    // explicit; no future version can inherit it by a range comparison.
+    let inherited = if version == 14 { 13 } else { version };
+    inherited_schema_objects(inherited)
+        .chain(review_format14::schema_objects().filter(move |_| version == 14))
+}
+
+fn inherited_schema_objects(
+    version: i64,
+) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     SCHEMA
         .iter()
         .chain(if version >= 2 {
@@ -470,7 +481,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version)
             || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
@@ -492,45 +503,47 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         );
         return Ok(true);
     }
+    let inherited = if version == 14 { 13 } else { version };
     let automatic = AUTO_INDEX_COUNTS
         .iter()
         .chain(
-            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&inherited) {
                 control::supervision::AUTO_INDEX_COUNTS.iter()
             } else {
                 [].iter()
             },
         )
-        .chain(if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        .chain(if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&inherited) {
             identity::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&inherited) {
             workload::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&inherited) {
             broker_registry::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        .chain(if [6, 7, 8, 9, 10, 11, 12, 13].contains(&inherited) {
             relay::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [8, 9, 10, 11, 12, 13].contains(&version) {
+        .chain(if [8, 9, 10, 11, 12, 13].contains(&inherited) {
             kubernetes_admission::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
-        .chain(if [11, 12, 13].contains(&version) {
+        .chain(if [11, 12, 13].contains(&inherited) {
             kubernetes_session::AUTO_INDEX_COUNTS.iter()
         } else {
             [].iter()
         })
+        .chain(review_format14::auto_index_counts().filter(move |_| version == 14))
         .filter(|(table, _)| {
             if *table == "events" {
                 true
@@ -598,6 +611,12 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
                         "relay_messages_retained" | "relay_messages_rate" | "relay_messages_inbox"
                     ) {
                         "relay_messages"
+                    } else if matches!(
+                        name.as_str(),
+                        "runner_review_bindings_active_credential"
+                            | "runner_review_bindings_active_tenant"
+                    ) {
+                        "runner_review_bindings"
                     } else {
                         "events"
                     },
@@ -626,7 +645,7 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "internal audit schema index is missing"
         );
     }
-    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
         identity::validate_human_access_capability(db, version)?;
     }
     human_brokers::validate_capability(db, version)?;
@@ -771,6 +790,12 @@ impl Store {
         backing.verify(&db)?;
         db.busy_timeout(std::time::Duration::from_secs(5))?;
         db.execute_batch("PRAGMA trusted_schema=OFF;")?;
+        // Descriptive format14 validation is also used by maintenance. A
+        // legacy opener must not thereby acquire access or alter its journal.
+        let prepared_format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if prepared_format == 14 {
+            review_access::require_legacy(&db)?;
+        }
         // Unknown schemas are inspected without even changing journal mode.
         // Revalidate below while holding the write transaction to close races.
         validate_schema(&db, allow_initialization)?;
@@ -780,8 +805,14 @@ impl Store {
         // A preexisting audit can only be adopted by the historical local identity.
         let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         backing.verify(&tx)?;
-        let empty = validate_schema(&tx, allow_initialization)?;
         let initial_version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        // A maintenance writer can commit format14 after the initial probe.
+        // Recheck inside this writer before any binding or projection access.
+        // Format0 still follows the ordinary empty-database initialization.
+        if initial_version == 14 {
+            review_access::require_legacy(&tx)?;
+        }
+        let empty = validate_schema(&tx, allow_initialization)?;
         if empty {
             for (_, _, sql) in SCHEMA {
                 tx.execute_batch(sql)?;
@@ -1544,9 +1575,9 @@ impl Store {
         let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // During the explicit5→6 migration the projection is created/seeded
         // before its genesis events, while user_version still correctly is5.
-        let project_time = [6, 7, 8, 9, 10, 11, 12, 13].contains(&schema)
+        let project_time = [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema)
             || (schema == 5 && workload::time_floors_present(tx)?);
-        if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
+        if [5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
             let mut cache = self
                 .supervision_lease
                 .capacity
@@ -1567,7 +1598,7 @@ impl Store {
             };
             if let capacity::Class::Workload(principal) = &class {
                 anyhow::ensure!(
-                    [6, 7, 8, 9, 10, 11, 12, 13].contains(&schema),
+                    [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema),
                     "workload audit requires schema6"
                 );
                 let event_principal = capacity::workload_identity(&event)?
@@ -1930,7 +1961,7 @@ impl Store {
     }
     fn check_integrity(db: &Connection) -> anyhow::Result<Integrity> {
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let query = if [6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
+        let query = if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
             "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload,e.id,e.kind,e.agent_id,e.sandbox_id,e.project_id,e.decision,f.max_received_at FROM events e LEFT JOIN audit_time_floors f ON f.event_seq=e.seq ORDER BY e.seq"
         } else {
             "SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq"
@@ -1965,7 +1996,7 @@ impl Store {
             } else {
                 false
             };
-            let time_valid = if [6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
+            let time_valid = if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
                 let received = workload::canonical_control_time(
                     crate::broker_registry::parse_time(&received)?,
                 )?;
@@ -1992,7 +2023,7 @@ impl Store {
             prev = hash;
             count += 1;
         }
-        if [6, 7, 8, 9, 10, 11, 12, 13].contains(&schema) {
+        if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
             let floors: i64 =
                 db.query_row("SELECT COUNT(*) FROM audit_time_floors", [], |row| {
                     row.get(0)

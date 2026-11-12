@@ -1,5 +1,17 @@
 # État constaté — suivi du développement
 
+## 12 novembre — profil tenant14 : onze régressions de migration et replay PASS
+
+Le profil exact14, les replays hérités et le fencing legacy sont corrigés et relus. Une vraie migration avait échoué sur le profil global puis sur le nom d’index ; après correction, neuf parents de migration/historique et deux projections non vides passent, ainsi que le check toutes cibles. Root vérifie 290 pièces runtime, 2604 pièces statiques et 2579 contenus/modes postrun. [Sources, résultats et limites](evidence/2026-11-12/tenant14-storage/README.md). Le contrôle du format est aussi répété sous writer ; le canari spécifique de concurrence reste BLOCKED/NOT_RUN, sans clôture dynamique.
+
+Ce lot de stockage interne ne fournit ni commande de migration, ni fermeture complète A+B+Auth, ni Ready ou lancement humain. Les nouveaux openers et le coordinateur avancent dans deux worktrees dédiés ; leurs propres preuves restent ouvertes. Aucun gate global fermé.
+
+## 12 novembre — reprise du relais : deux consommateurs sur composition courante vérifiés
+
+Sur public c173086 +134 chemins Full3 privés figés, les deux régressions de perte d’ACK réserve/claim et le check toutes cibles passent. Root vérifie171 empreintes runtime et les2643 contenus/modes réellement exportés ; fermeture exacte0, aucun OOM. [Sources, oracles et limites](evidence/2026-11-12/relay-current-composition/README.md). Les changements Full3 restent privés ; ce résultat ne qualifie pas leur ensemble ni un moteur réel. Une modification post-exécution du seul rapport HANDOFF est tracée ; source/harnais/pins restent exacts et le manifeste statique complet n’est pas annoncé vert après cette édition.
+
+Le worktree AuthLedger5 livré est fermé normalement après inventaire indépendant, rehash complet et sauvegarde Git vérifiée ; sa branche et ses preuves sont conservées. Migration humaine14 : onze régressions ciblées et check toutes cibles passent après reproduction et correction relue. Les nouveaux openers et le coordinateur de fermeture A+B+Auth ont chacun un propriétaire de développement dans un worktree distinct. Aucun gate global fermé.
+
 ## 12 novembre — stockage AuthLedger5 : 17 régressions logicielles PASS
 
 Le candidat interne de stockage génération 5 passe 17 parents exacts, build lib et check toutes cibles. Deux défauts du développement ont été reproduits puis corrigés : sauvegarde confondue avec sa source, et acquittement neuf après expiration pendant le dernier contrôle physique. La régression corrigée couvre append/retry/read/backup tout en conservant le commit connu et un owner sain. Root vérifie 365 empreintes brutes et 2 571 contenus/modes post-exécution ; fermeture RC 0, aucun OOM. [Sources, historique et limites](evidence/2026-11-12/authledger5-storage/README.md).

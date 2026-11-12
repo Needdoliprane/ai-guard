@@ -63,6 +63,16 @@ fn require_schema(db: &Connection) -> anyhow::Result<()> {
         Err(Failure::MigrationRequired.into())
     }
 }
+// Descriptive replay must preserve the complete11..13 projection in14.
+// Mutations continue using require_schema and do not gain modern authority.
+fn require_replay_schema(db: &Connection) -> anyhow::Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if [11, 12, 13, 14].contains(&version) {
+        Ok(())
+    } else {
+        Err(Failure::MigrationRequired.into())
+    }
+}
 pub(super) fn memory_bytes(intent: &KubernetesSessionReservationIntentV2) -> anyhow::Result<u64> {
     u64::from(intent.resources().memory_mib)
         .checked_mul(1_048_576)

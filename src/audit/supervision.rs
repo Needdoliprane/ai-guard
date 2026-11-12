@@ -373,7 +373,7 @@ impl Replay {
     }
     pub(super) fn new(db: &Connection, version: i64, namespace: String) -> anyhow::Result<Self> {
         let (genesis_seq, genesis_hash) =
-            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
                 let row: (i64, String) = db.query_row(
                     "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                     [],

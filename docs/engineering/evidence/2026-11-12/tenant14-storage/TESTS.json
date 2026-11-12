@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "date": "2026-11-12",
+  "scope": "internal exact tenant14 storage/migration/descriptive replay",
+  "base": "c173086e53f734e3e1988e5468725858ee90720b",
+  "sourceSha256": "4184cf827918d49a34ee6777451fc81cc6cbcaa212ee775af362ae3126bff988",
+  "sourceFiles": 2579,
+  "sourceBytes": 29706240,
+  "changedPaths": [
+    {
+      "path": "src/audit/review_format14.rs",
+      "sha256": "f433fd2d13c09b50577118528c35139c5bcb1bc3477a6776f5ef66716390f686",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/review_format14/tests.rs",
+      "sha256": "beffc23e99aa5bccfb409e6a40b6db6aa566da0c20dfdb94cf30f6103be82056",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/identity.rs",
+      "sha256": "55bac7465a9e8efd0600253fed8ddf62f789099ebc1a9831f5fd6630454eff1f",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/review_binding.rs",
+      "sha256": "f459d3e662a256e75e42bf6710781d688df2a05e9fec8d2d926bc65d554b5505",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/review_authority_migration.rs",
+      "sha256": "708d0de8cad47da852a13cd0052d24c09cebb6323c8e9f463f7e0e99f6f8dbab",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/workload.rs",
+      "sha256": "ff42c907164a003c68ad5b4a60b28fd987cbbc9581c3aad897ab006e0a64d6b0",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/broker_registry.rs",
+      "sha256": "5dd8ea9ed828455fb4c2069005b12be50b3b334c1ded5156f0a284130d06d222",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/relay_admission.rs",
+      "sha256": "60f2244e73ea38c1c65a63f10d4a9ca76a7699fa9207b852f0e4ee6c58527821",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/supervision.rs",
+      "sha256": "cb2ec12795145c53cffbf6acd5fc7cc6f49a5c230bf4aefbc21c2e38112f7dda",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/kubernetes_admission/migration.rs",
+      "sha256": "2868cdeaaac2d2fe8b0ec2cf74aac824d49062885b7e09dfaf0319f29f4a9c3b",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/kubernetes_admission/replay.rs",
+      "sha256": "e8e07c02deb2f421e7fc7582d1066d588b7aed617d4b45639d71c44fdeeb3681",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/kubernetes_session.rs",
+      "sha256": "3e310ff59ea97e9d588c805f989fff7e41c020144ea136551872f442b6da17a9",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/kubernetes_session/replay.rs",
+      "sha256": "a7f05c96e2e07d633bb4e806e56ff41493395855a5747032468eb82bb260391c",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/broker_checkpoint_migration.rs",
+      "sha256": "f2bbce95c48206e4a8c916e50f1ba609a02276f6be62eeb9c391553ac79797be",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/human_brokers.rs",
+      "sha256": "117929eac54dda1f5da2f90fc92cb6427a8f9cab8cfec35691efe98a202999bd",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/human_workers.rs",
+      "sha256": "c02dce25117e9349bee4f00dd02c11cc7a0708b80b751d86995ea0433a6b6195",
+      "mode": 420
+    },
+    {
+      "path": "src/audit.rs",
+      "sha256": "78d71f8d88833f04957180f6871b3d5c88c1db8fda9ea636b2a3033773fd31ad",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/control.rs",
+      "sha256": "90794ad9f6aba75ae3a8c5384158a0733ecee1ce9aacf98ba6f5891a7d95e581",
+      "mode": 420
+    },
+    {
+      "path": "src/audit/control/projection14_tests.rs",
+      "sha256": "dcb1134d2a06694e6e7e52ed256ff07e462dacaed25d1ee049ce7914459cfe2a",
+      "mode": 420
+    }
+  ],
+  "parents": [
+    {
+      "name": "audit::review_format14::tests::real_maintenance_migration_creates_closed_format14_and_preserves_history",
+      "rc": 0,
+      "stdoutSha256": "0d45d3c0a313741a54b178df9b51653b30172a197f382cff39573fb20a1eb510",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::format14_requires_all_exact_new_objects_and_no_extra_schema",
+      "rc": 0,
+      "stdoutSha256": "e6b1ff30886fe11cee590eb6299a117ca090ca36003a16b2d5ef128f2a80f816",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::schema14_replay_rejects_missing_or_divergent_inherited_projection",
+      "rc": 0,
+      "stdoutSha256": "0015d8801dfebdc5074e26f6ff8922dad47346b6ef2bf4078c85b6c2000fb6a3",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::format13_rejects_modern_markers_and_approve_capability",
+      "rc": 0,
+      "stdoutSha256": "aabc6e0f240d98fdf44b45eeaf6556e786918b8c4a6d3631965fca96e7611b4c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::prepared_format13_backup_resumes_without_rewriting_then_installs_once",
+      "rc": 0,
+      "stdoutSha256": "c7ae5b922785c3cc49dbdd2262709aad64484ea4317a09b1d2cdd15600cc09b9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::binding_marker_dispatch_uses_the_closed_record_and_exact_envelope",
+      "rc": 0,
+      "stdoutSha256": "4f3e68aae1ffe5c8df1182f29077940dea8d577c1ebec4e503b725937a3dcc4c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::converted14_rechecks_inherited_replay_and_real_backup_before_retry",
+      "rc": 0,
+      "stdoutSha256": "0c63c1c37f7ecd510ea0ccdcc7d5aa6cf959938c2cba03385a19959c25f28db4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::exhausted_audit_refuses_conversion_and_preserves_the_new_backup",
+      "rc": 0,
+      "stdoutSha256": "f3dba67b65330be2bca2ea17279f67dd7f7da21642d75b1f8e71537860b9de5b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::review_format14::tests::preopened13_identity_retry_and_projection_refuse_after_real14_commit",
+      "rc": 0,
+      "stdoutSha256": "f614b83845bb2c9f9315012cce22d2100af682f8e245447f26ac3b7335a7a049",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::control::projection14_tests::format14_replays_nonempty_worker_workload_relay_and_shared_kubernetes_quota",
+      "rc": 0,
+      "stdoutSha256": "d8a3cf9e413873e11ed48c8807d029b1a463630169c046b223ea841d15b27674",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "audit::control::projection14_tests::format14_nonempty_history_keeps_legacy_reads_and_identical_retries_fenced",
+      "rc": 0,
+      "stdoutSha256": "c444b24b0fdd323aef146267801591c781420fc8eadc59b518d9c4278b2d62f9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "allTargets": "PASS",
+  "postExport": {
+    "sha256": "64e8c121e11a1c9727404ca960f33179cd675045c3a1e34f8256d7bb3b615cad",
+    "bytes": 29880320,
+    "regularFiles": 2579,
+    "directories": 350,
+    "allPayloadsAndModesExact": true,
+    "hostExtraction": false,
+    "overflowBytes": 0
+  },
+  "rawManifest": {
+    "sha256": "bcecb559fb1a8c5c974604cb1bcfdaccb3fbbe231d6da02520b0310251410d6c",
+    "records": 290
+  },
+  "staticManifest": {
+    "sha256": "ef4248dfd510c8255d18e595f3e34b5d7554b8d5bdc7303fb76fbd49ec5d8610",
+    "records": 2604
+  },
+  "rootResultsReceiptSha256": "d78ebe960e7a196faf1d0776dbfed89899d5086948360e9c52d751f3b495703a",
+  "sourceReviewSha256": "e9e1c637a435eec112b634046bc2bfe5b7d7d9378cee61926030a464555e4a0c",
+  "closedPrimaryAuditFindings": [],
+  "concurrentOpenerCanary": "BLOCKED/NOT_RUN; no retry",
+  "ready": false,
+  "modernStartup": false,
+  "productionQualified": false
+}

@@ -383,7 +383,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     if version < 11 {
         return conflict(!present);
     }
-    require_schema(db)?;
+    require_replay_schema(db)?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],

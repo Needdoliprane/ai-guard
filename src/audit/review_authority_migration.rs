@@ -27,7 +27,7 @@ fn physical(
     token.check()?;
     // Refuse a foreign connection before interpreting its writer/namespace
     // state as facts about this retained source.
-    authority::verify_connection_main(&store.backing, tx)?;
+    storage::verify_connection_main(&store.backing, tx)?;
     writer(tx)?;
     let descriptor = token.descriptor();
     let (path, identity) = store.backing.identity_key();
@@ -57,6 +57,16 @@ fn verify13(store: &Store, db: &Connection, head: &(i64, String)) -> anyhow::Res
     require(checked.valid && audit_head(db)? == *head)?;
     Ok(checked.event_count)
 }
+fn verify14(store: &Store, db: &Connection) -> anyhow::Result<authority::AuthoritySnapshot> {
+    let format: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    require(format == 14)?;
+    validate_schema(db, false)?;
+    Store::validate_metadata(db, store.tenant_id())?;
+    control::validate(db)?;
+    super::review_format14::validate(db)?;
+    require(Store::check_integrity(db)?.valid)?;
+    authority::replay(db)
+}
 struct VerifiedBackup {
     source_binding: (std::path::PathBuf, crate::control_fs::PrivateEntryIdentity),
     source_head: (i64, String),
@@ -71,17 +81,17 @@ impl VerifiedBackup {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(std::time::Duration::ZERO)?;
-        authority::verify_connection_main(&self.backing, &db)?;
+        storage::verify_connection_main(&self.backing, &db)?;
         require(verify13(store, &db, &self.source_head)? == self.event_count)?;
         let quick: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
         require(quick == "ok")?;
-        authority::verify_connection_main(&self.backing, &db)?;
+        storage::verify_connection_main(&self.backing, &db)?;
         db.close().map_err(|(_, e)| e)?;
         self.backing.verify_names()
     }
     fn revalidate(&self, store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
         writer(tx)?;
-        authority::verify_connection_main(&store.backing, tx)?;
+        storage::verify_connection_main(&store.backing, tx)?;
         require(audit_head(tx)? == self.source_head)?;
         self.verify_bytes(store)
     }
@@ -92,7 +102,7 @@ fn copy_verified_backup(
     path: &Path,
 ) -> anyhow::Result<VerifiedBackup> {
     writer(tx)?;
-    authority::verify_connection_main(&store.backing, tx)?;
+    storage::verify_connection_main(&store.backing, tx)?;
     let prefix = audit_head(tx)?;
     let count = verify13(store, tx, &prefix)?;
     let path = crate::control_fs::absolute_path(path)?;
@@ -116,7 +126,7 @@ fn copy_verified_backup(
     )?;
     destination.busy_timeout(std::time::Duration::ZERO)?;
     destination.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL;")?;
-    authority::verify_connection_main(&backing, &destination)?;
+    storage::verify_connection_main(&backing, &destination)?;
     // A separate VFS reader sees the committed prefix while this source's
     // Immediate writer blocks all old writers. No raw main/SHM FD is opened.
     let reader = Connection::open_with_flags(
@@ -124,13 +134,13 @@ fn copy_verified_backup(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     reader.busy_timeout(std::time::Duration::ZERO)?;
-    authority::verify_connection_main(&store.backing, &reader)?;
+    storage::verify_connection_main(&store.backing, &reader)?;
     require(verify13(store, &reader, &prefix)? == count)?;
     {
         let backup = rusqlite::backup::Backup::new(&reader, &mut destination)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            authority::verify_connection_main(&store.backing, tx)?;
+            storage::verify_connection_main(&store.backing, tx)?;
             backing.verify_names()?;
             match backup.step(256)? {
                 rusqlite::backup::StepResult::Done => break,
@@ -142,9 +152,9 @@ fn copy_verified_backup(
         }
     }
     require(verify13(store, &reader, &prefix)? == count)?;
-    authority::verify_connection_main(&store.backing, &reader)?;
+    storage::verify_connection_main(&store.backing, &reader)?;
     reader.close().map_err(|(_, e)| e)?;
-    authority::verify_connection_main(&backing, &destination)?;
+    storage::verify_connection_main(&backing, &destination)?;
     require(verify13(store, &destination, &prefix)? == count)?;
     let quick: String = destination.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     require(quick == "ok")?;
@@ -165,6 +175,24 @@ fn copy_verified_backup(
 pub(crate) struct VerifiedReviewSourceBackup<'a> {
     token: &'a HumanMaintenanceSourceToken,
     backup: VerifiedBackup,
+}
+impl VerifiedReviewSourceBackup<'_> {
+    /// Descriptive journal fields. Reuse still requires the real token, writer
+    /// and backup verification; these values cannot reconstruct this proof.
+    pub(crate) fn migration_id(&self) -> uuid::Uuid {
+        self.token.migration_id()
+    }
+    pub(crate) fn backup_binding(
+        &self,
+    ) -> (std::path::PathBuf, crate::control_fs::PrivateEntryIdentity) {
+        self.backup.backing.identity_key()
+    }
+    pub(crate) fn prefix(&self) -> &(i64, String) {
+        &self.backup.source_head
+    }
+    pub(crate) fn event_count(&self) -> u64 {
+        self.backup.event_count
+    }
 }
 impl std::fmt::Debug for VerifiedReviewSourceBackup<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -187,7 +215,7 @@ fn match_anchor(
     token: &HumanMaintenanceSourceToken,
 ) -> anyhow::Result<AuthorityReceiptV1> {
     physical(store, tx, token)?;
-    let snapshot = authority::replay(tx)?;
+    let snapshot = verify14(store, tx)?;
     let expected = token.descriptor();
     require(
         snapshot.anchor.migration_id == token.migration_id()
@@ -197,7 +225,7 @@ fn match_anchor(
             && snapshot.anchor.tenant_id == store.tenant_id()
             && snapshot.anchor.durable_namespace_id == expected.durable_namespace_id,
     )?;
-    token.check()?;
+    physical(store, tx, token)?;
     Ok(snapshot.anchor_receipt)
 }
 impl Store {
@@ -209,7 +237,7 @@ impl Store {
     ) -> anyhow::Result<VerifiedReviewSourceBackup<'a>> {
         physical(self, tx, token)?;
         let backup = copy_verified_backup(self, tx, path)?;
-        token.check()?;
+        physical(self, tx, token)?;
         Ok(VerifiedReviewSourceBackup { token, backup })
     }
     /// Resume reads the actual backup into a retained proof; it never recreates
@@ -221,15 +249,27 @@ impl Store {
         path: &Path,
     ) -> anyhow::Result<VerifiedReviewSourceBackup<'a>> {
         physical(self, tx, token)?;
-        let snapshot = authority::replay(tx)?;
-        match_anchor(self, tx, token)?;
+        let format: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let prefix = match format {
+            13 => {
+                let prefix = audit_head(tx)?;
+                verify13(self, tx, &prefix)?;
+                prefix
+            }
+            14 => {
+                match_anchor(self, tx, token)?;
+                let snapshot = verify14(self, tx)?;
+                (snapshot.anchor.previous_seq, snapshot.anchor.previous_hash)
+            }
+            _ => return Err(ReviewAuthorityFailure::Mismatch.into()),
+        };
         let (backing, _guard) = StoreStorage::open_existing(path)?;
-        let prefix = (snapshot.anchor.previous_seq, snapshot.anchor.previous_hash);
         let db = Connection::open_with_flags(
             backing.path(),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
-        authority::verify_connection_main(&backing, &db)?;
+        db.busy_timeout(std::time::Duration::ZERO)?;
+        storage::verify_connection_main(&backing, &db)?;
         let count = verify13(self, &db, &prefix)?;
         db.close().map_err(|(_, e)| e)?;
         let backup = VerifiedBackup {
@@ -239,7 +279,7 @@ impl Store {
             backing,
         };
         backup.verify_bytes(self)?;
-        token.check()?;
+        physical(self, tx, token)?;
         Ok(VerifiedReviewSourceBackup { token, backup })
     }
     pub(crate) fn inspect_review_source_migration(
@@ -263,7 +303,7 @@ impl Store {
             },
             _ => return Err(ReviewAuthorityFailure::Mismatch.into()),
         };
-        token.check()?;
+        physical(self, tx, token)?;
         Ok(result)
     }
     /// Appends only inside the caller's real writer transaction. The returned
@@ -286,6 +326,7 @@ impl Store {
                 (snapshot.anchor.previous_seq, snapshot.anchor.previous_hash)
                     == backup.backup.source_head,
             )?;
+            physical(self, tx, token)?;
             return Ok(receipt);
         }
         require(format == 13)?;
@@ -298,9 +339,9 @@ impl Store {
         {
             tx.execute_batch(sql)?;
         }
-        // Other format14 projections, if any, must already have been created by
-        // Root in this same transaction. Exact global schema checking below
-        // refuses an incomplete composition; no arbitrary schema acceptance.
+        // This private14 profile is exactly13 plus authority and binding.
+        // Any future additions require an explicit new closed profile before
+        // activation, never arbitrary acceptance of extra schema objects.
         tx.pragma_update(None, "user_version", 14)?;
         let record = SourceAnchorV1 {
             version: 1,
@@ -324,12 +365,7 @@ impl Store {
             AuthorityRecordV1::SourceAnchor(record),
             None,
         )?;
-        validate_schema(tx, false)?;
-        Self::validate_metadata(tx, &self.tenant_id)?;
-        control::validate(tx)?;
-        super::review_binding::validate(tx, &self.tenant_id)?;
-        authority::validate(tx)?;
-        require(Self::check_integrity(tx)?.valid)?;
+        verify14(self, tx)?;
         physical(self, tx, token)?;
         token.check()?;
         Ok(receipt)

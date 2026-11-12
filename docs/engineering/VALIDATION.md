@@ -1,5 +1,13 @@
 # Validation courante
 
+## 12 novembre — profil fermé tenant14 : onze parents et check toutes cibles PASS
+
+Source 4184cf827918d49a34ee6777451fc81cc6cbcaa212ee775af362ae3126bff988 (2579 fichiers), build lib/liste 0,11 parents exacts PASS/0 ignoré, check toutes cibles 0. Export vivant64e8c121…/29880320 octets entièrement comparé ;290 empreintes runtime, 2604 statiques, fermeture0/OOM0, pic 6416056320/9663676416 octets. [Sélecteurs, RED conservées, revue et limites](evidence/2026-11-12/tenant14-storage/README.md). Les nouveaux openers, l’union de sources et le canari de concurrence bloqué restent NOT_RUN dans cette campagne. Aucun résultat runtime/fournisseur ou gate global n’est déduit.
+
+## 12 novembre — deux consommateurs relais sur c173086 + Full3 privé : PASS ciblé
+
+Une compilation lib offline, liste réelle, deux parents exacts et check toutes cibles RC0 sur source 0a0d7a73… (2643 fichiers). Export vivant bc621555…/31631360 octets, tous contenus/modes identiques,171 pièces runtime vérifiées, fermeture0/OOM0, pic compilation7475396608/9663676416 octets. [Commandes, noms, reçus et portée](evidence/2026-11-12/relay-current-composition/README.md). Cette preuve n’est pas transférée au seul code public ni à tout le comportement des134 fichiers. L’édition postrun de HANDOFF invalide uniquement sa ligne du manifeste statique conservé ; cet écart est explicitement documenté, sans relance ni reconstruction. Les compilations indépendantes ont réellement tourné en parallèle ; aucune mesure de latence produit n’est déduite.
+
 ## 12 novembre — candidat AuthLedger5 corrigé : 17 parents et toutes cibles PASS
 
 Sur source `4d071fbd7c43787072a2440239b826eaad70504ae738812fc08957644cd01f88`, build lib/listing RC 0, 17 parents uniques PASS (zéro échec/ignoré), puis check toutes cibles RC 0. Export vivant `a942de27…` de 29 767 680 octets : 2 571 chemins/contenus/modes identiques. Root vérifie 365 pièces runtime ; fermeture exacte RC 0, aucun OOM, pic compilation 6 472 175 616 / 9 663 676 416 octets. [Sélecteurs, reproductions, revues et limites](evidence/2026-11-12/authledger5-storage/README.md).

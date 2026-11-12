@@ -315,7 +315,7 @@ pub(super) fn validate_control_time_floor(
     before_seq: Option<i64>,
 ) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
         return Ok(());
     }
     let at = canonical_control_time(at)?;
@@ -980,7 +980,7 @@ fn sql_int(value: u64) -> anyhow::Result<rusqlite::types::Value> {
 }
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(

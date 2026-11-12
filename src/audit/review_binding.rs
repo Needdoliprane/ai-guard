@@ -246,8 +246,7 @@ impl Projection {
     }
 }
 
-fn record(stored: &StoredEvent, tenant: &str) -> anyhow::Result<BindingRecordV1> {
-    let event = &stored.event;
+fn decode(event: &Event, tenant: &str) -> anyhow::Result<BindingRecordV1> {
     require(
         [PROVISION_KIND, REVOKE_KIND].contains(&event.kind.as_str())
             && event.source == "gateway"
@@ -270,6 +269,16 @@ fn record(stored: &StoredEvent, tenant: &str) -> anyhow::Result<BindingRecordV1>
     record.validate(tenant)?;
     require(event.id == record.change.operation_id() && event.kind == record.change.kind())?;
     Ok(record)
+}
+
+/// Strict descriptive dispatch for the parent control replay. Recognizing this
+/// closed marker never constructs a runner identity or source authority.
+pub(super) fn marker(event: &Event, tenant: &str) -> anyhow::Result<()> {
+    decode(event, tenant).map(|_| ())
+}
+
+fn record(stored: &StoredEvent, tenant: &str) -> anyhow::Result<BindingRecordV1> {
+    decode(&stored.event, tenant)
 }
 
 type SqlRow = Vec<rusqlite::types::Value>;

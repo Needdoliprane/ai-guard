@@ -95,7 +95,7 @@ pub(super) fn validate_recovery_marker(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        schema == 13 && count == 1,
+        matches!(schema, 13 | 14) && count == 1,
         "invalid schema13 recovery marker count"
     );
     let stored = unique_marker(db, RECOVERY_GENESIS_KIND)?;

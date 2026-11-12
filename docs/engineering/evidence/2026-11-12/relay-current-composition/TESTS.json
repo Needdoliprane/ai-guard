@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "date": "2026-11-12",
+  "scope": "two relay consumers on private Full3/current public composition",
+  "base": "c173086e53f734e3e1988e5468725858ee90720b",
+  "sourceSha256": "0a0d7a73d29a25e33d8f8677704537fc8ad07cefbcda030a073161cb935bc9dd",
+  "sourceFiles": 2643,
+  "sourceBytes": 31447040,
+  "parents": [
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::lost_reserve_ack_without_local_snapshot_retires_from_confirmed_reserved",
+      "rc": 0,
+      "stdoutSha256": "6de02c21292160744884408a70884c112f43e14dab3c1ae9bb897ff15148ae6c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "name": "broker::relay_owner::registry::retirement::history_tests::lost_claim_ack_with_reserved_local_snapshot_retires_from_confirmed_acceptance",
+      "rc": 0,
+      "stdoutSha256": "8833b16fc5e93d0d821a1222e09226b4dd5768797cd4820a9ccc8e797ae15515",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "allTargets": "PASS",
+  "postExport": {
+    "sha256": "bc6215556757255a7e83b10f07537274a3965b6c43f2572a64d08bdca2570d9f",
+    "bytes": 31631360,
+    "regularFiles": 2643,
+    "directories": 355,
+    "allPayloadsAndModesExact": true,
+    "hostExtraction": false,
+    "overflowBytes": 0
+  },
+  "rawManifest": {
+    "sha256": "a3e0ae67998215fd4294a0671f3376188a29cba94f13e66621b25342093b2b0f",
+    "records": 171
+  },
+  "rootResultsReceiptSha256": "ad53c0c107ebde117ee66693dbdb0270807b5ce94dbaf29645a927b50ab754df",
+  "staticEvidence": {
+    "preRunRootVerifiedSha256": "385d3340e6743b16e0b7f2031fc55c9adfdf6c6f205184fee0c1f94f5624cba4",
+    "records": 35,
+    "currentMismatch": [
+      {
+        "path": "HANDOFF.md",
+        "before": "6420d02615bef4d6d3896894d10ff25f20873694d947be427bd8a7d6810b7780",
+        "after": "78c8b8d92ee7db456237bb5e20c2d258fdbf182905b921b1abf202b228ae282e"
+      }
+    ],
+    "status": "ONE_POSTRUN_HANDOFF_REPORT_MUTATION; source, harness and input hashes unchanged; original static manifest preserved"
+  },
+  "closure": {
+    "rc": 0,
+    "freshExactPsEmpty": true,
+    "oom": false,
+    "holderExitCode137AfterControlledStop": true
+  },
+  "limitations": [
+    "two selected software consumers; full134 source compiles but full behavior not qualified",
+    "real runtime/fencing/multi-host/Kubernetes/100workers not run",
+    "native enforcer and audit_namespace_guard operations excluded without retry"
+  ],
+  "applicationPublished": false,
+  "productionQualified": false
+}

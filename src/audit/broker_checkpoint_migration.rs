@@ -65,7 +65,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::ensure!(
-        matches!(schema, 12 | 13) && rows.len() == 1,
+        matches!(schema, 12 | 13 | 14) && rows.len() == 1,
         "invalid schema12 genesis count"
     );
     let stored = &rows[0];
