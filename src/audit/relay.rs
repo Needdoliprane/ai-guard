@@ -6,6 +6,9 @@ use chrono::{DateTime, Duration, Utc};
 
 mod retention;
 
+#[cfg(test)]
+mod history_compat_tests;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (
         "table",
@@ -1139,7 +1142,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         |r| r.get(0),
     )?;
     let mut stmt = db.prepare(
-        "SELECT seq,payload,received_at FROM events WHERE kind LIKE 'control.relay.%' ORDER BY seq",
+        "SELECT seq,payload,received_at FROM events WHERE kind GLOB 'control.relay.*' ORDER BY seq",
     )?;
     let events = stmt
         .query_map([], |r| {

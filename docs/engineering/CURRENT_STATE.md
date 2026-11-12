@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 12 novembre, 21:24 UTC — lecteur historique des événements : correction ciblée vérifiée
+
+Sur Git `702f35b` plus les deux postimages lecteur/test, le gel `94e6e30d…` (2 605 fichiers) passe treize parents uniques et le check toutes cibles. Les neuf parents d’admission sont réexécutés dans ces treize. Le sélecteur `GLOB` conserve les anciens noms ordinaires sans promotion, normalisation ni réécriture après réouverture saine ; le canari canonique inconnu reste refusé avec rollback réel, sans COMMIT invalide. [Preuves EN/FR, oracles et limites](evidence/2026-11-12/event-kind-history/README.md). Couverture logicielle ciblée D4/RC-P6-R06 vérifiée, sans clôture globale ni gate de production fermé ; pannes, reprise opérateur et runtimes restent hors périmètre. Les preuves antérieures de namespace gardent leur date et leur source.
+
 ## 12 novembre — namespaces d'événements : admission validée, lecteur historique encore ouvert
 
 Neuf parents exacts d'admission et le check toutes cibles passent sur un gel public77 corrigé : refus des namespaces réservés sans tenir compte de la casse ASCII à la racine/frontière point, deux alias HTTP conservés et noms ordinaires non normalisés. Un autre gel de tests reproduit séparément le défaut du lecteur historique : canari canonique/rollback PASS, puis noms ordinaires réellement committés et réouverture non saine (`EXPECTED_RED`, RC 101). [Sources, sélecteurs et limites](evidence/2026-11-12/event-kind-namespace/README.md). Le candidat `LIKE`→`GLOB` a une revue indépendante GO_SOURCE, empreinte JSON `9e957100…`, sans GREEN dans ces preuves ; admission et historique ne forment pas onze PASS. GREEN lecteur, vérification finale du gel intégré et D4/RC-P6-R06 restent ouverts. Aucun worker, moteur, fournisseur, IdP/SSO ou gate de production n'est qualifié par ce lot.

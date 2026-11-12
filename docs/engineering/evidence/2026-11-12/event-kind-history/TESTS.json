@@ -1,0 +1,294 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-12",
+  "reportedAtUtc": "2026-11-12T21:24:33.400Z",
+  "status": "TARGETED_HISTORY_SOFTWARE_CORRECTION_VERIFIED",
+  "evidenceKind": "sanitized transcription of verified receipt identities; no new execution for documentation",
+  "source": {
+    "base": "702f35ba205d0e67cfb3c5b6d5dc8fcc77eacb6b",
+    "baseTree": "296759ee72839df4aaa4f60de44000fa2ed7621f",
+    "sha256": "94e6e30dc9e57d646ccaf41cb7e9d568148bc9181044f180656889751be7e24b",
+    "files": 2605,
+    "bytes": 30341120,
+    "baseFiles": 2604,
+    "unchangedGitPayloads": 2603,
+    "postimages": [
+      {
+        "path": "src/audit/relay.rs",
+        "sha256": "71cf8042ff937d1b51d99379cac25e604b88af0cff420180d4856d1b6a9d24d9",
+        "new": false
+      },
+      {
+        "path": "src/audit/relay/history_compat_tests.rs",
+        "sha256": "af4824bdb0e36fb60057b2b2753f8dbc41718c8be2157088a19e1399140bccd5",
+        "new": true
+      }
+    ],
+    "construction": "exact frozen Git base plus these two postimages only; no additional SSO/new Claude/diagnostic overlays"
+  },
+  "results": {
+    "uniqueParents": 13,
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0,
+    "groups": {
+      "history": 2,
+      "namespaceAndD5RelayCanaries": 9,
+      "typedRelayNeighbors": 2
+    },
+    "earlierNineIncludedAndRerunWithinThirteen": true,
+    "priorResultsAddedToCurrentCount": false,
+    "actualArtifacts": 4,
+    "allTargetsCheck": {
+      "status": "PASS",
+      "rc": 0
+    }
+  },
+  "parents": [
+    {
+      "parent": "parent-01",
+      "target": "lib",
+      "selector": "audit::relay::history_compat_tests::canonical_unknown_relay_names_refuse_validation_and_rollback_without_history_change",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-02",
+      "target": "lib",
+      "selector": "audit::relay::history_compat_tests::historical_mixed_case_ordinary_relay_names_remain_unpromoted_and_unchanged",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-03",
+      "target": "event_kind_ingest",
+      "selector": "both_ingestion_aliases_preserve_ordinary_mixed_case_kinds",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-04",
+      "target": "event_kind_ingest",
+      "selector": "both_ingestion_aliases_refuse_reserved_case_variants_before_audit_write",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-05",
+      "target": "event_kind_ingest",
+      "selector": "ordinary_store_append_refuses_control_case_variants_before_audit_write",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-06",
+      "target": "event_kind_ingest",
+      "selector": "ordinary_store_mixed_case_kinds_keep_their_bytes_after_reopen",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-07",
+      "target": "lib",
+      "selector": "model::tests::event_namespace_matches_ascii_case_and_dot_descendants",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-08",
+      "target": "lib",
+      "selector": "model::tests::event_namespace_preserves_other_names_and_unicode_boundaries",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-09",
+      "target": "d5_control_audit",
+      "selector": "d5_facts_require_authenticated_control_delivery_and_a_closed_kind_set",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-10",
+      "target": "d5_control_audit",
+      "selector": "retirement_resume::retirement_resume_fact_uses_durable_control_reserve_without_ordinary_promotion",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-11",
+      "target": "worker_relay_api",
+      "selector": "relay_admission_cases::relay_admission_guards_roles_tenant_and_reserved_namespace",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-12",
+      "target": "lib",
+      "selector": "audit::relay::scoped_tests::migrated_directed_relay_revocation_is_durable_and_idempotent_without_reactivating_workers",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    },
+    {
+      "parent": "parent-13",
+      "target": "lib",
+      "selector": "audit::relay::tests::grant_canonical_time_rejects_collapsed_interval_before_write_and_reopens_valid_next_ms",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "freshListMatches": 1,
+      "result": "PASS"
+    }
+  ],
+  "commands": {
+    "build": "cargo test --frozen --offline --lib --test event_kind_ingest --test d5_control_audit --test worker_relay_api --no-run --message-format=json",
+    "check": "cargo check --frozen --offline --all-targets --message-format=json",
+    "actualArtifactPolicy": "Cargo JSON target name/kind/profile.test verified; four unique actual executables",
+    "parentPolicy": "fresh --list before each exact selector, --nocapture --test-threads=1; one PASS/zero FAIL/zero ignored",
+    "parentTimeoutSeconds": 90,
+    "listTimeoutSeconds": 8
+  },
+  "oracles": {
+    "canonical": {
+      "en": "Real validator rejects unknown x/X in an uncommitted checked transaction; actual rollback, unchanged snapshots and healthy reopen. No invalid canonical COMMIT.",
+      "fr": "Vrai validateur : refus des suffixes inconnus x/X dans une transaction checked non committée ; rollback réel, snapshots inchangés et réouverture saine. Aucun COMMIT canonique invalide."
+    },
+    "historical": {
+      "en": "Four real ordinary commits; direct reader succeeds; healthy existing-Store reopen and valid integrity; head, eleven raw columns and three empty projection counts unchanged.",
+      "fr": "Quatre commits ordinaires réels ; lecteur direct réussi, Store existant rouvert sain et intégrité valide ; tête, onze colonnes brutes et comptes des trois projections vides inchangés."
+    }
+  },
+  "verification": {
+    "receiptSha256": "8d6ffa2cc423f2cdf5df454d10420577a9876e18e1450d6d9b7fd5aec7a873e9",
+    "rawRecords": 471,
+    "rawManifestSha256": "ed965ca923652381e6d7d46a2147a8fb604797831bcc4cc4321b069859fba06b",
+    "staticRecords": 44,
+    "staticManifestSha256": "9be176759f4da15b3beae18ffde8207b99b1505ec0830f43f99b962940cd3503",
+    "postSource": {
+      "sha256": "d3cce5ad480f697788023754e8a470b75a58d28b2a7728fbd85bd249c06a203d",
+      "bytes": 30525440,
+      "files": 2605,
+      "allPayloadsAndModesExact": true
+    },
+    "orchestrationRc": 0,
+    "closureRc": 0,
+    "exactContainerRemoved": true,
+    "oomKilled": false,
+    "oomEvents": 0,
+    "peakCgroupMemoryBytes": 7346417664,
+    "measurementScope": "compilation and QA, not worker usage",
+    "holderExitCode": 137,
+    "holder137Cause": "NOT_ESTABLISHED"
+  },
+  "environment": {
+    "scope": "isolated Linux ARM64 software QA",
+    "cpu": 4,
+    "memoryBytes": 9663676416,
+    "swapBytes": 0,
+    "network": "none",
+    "noRealWorkerRuntimeQualification": true
+  },
+  "separateEvidence": {
+    "historyRed": {
+      "receiptSha256": "dbf9d2346f58c466b6be69be84123d84c85ee3eb3c2f3de7736210f1537e5e72",
+      "sourceSha256": "3feb3bcb863619753730e6247eac9faeff651e2ba03e41c0b83e412f2be17d5c",
+      "canonical": "PASS",
+      "historical": "EXPECTED_RED RC101 at final assertion163",
+      "observed": {
+        "directError": "unknown authoritative relay event",
+        "reopenedHealthy": false,
+        "integrityError": "unknown authoritative relay event"
+      },
+      "transferred": false
+    },
+    "earlierNamespaceNine": {
+      "receiptSha256": "890d1746cef7a770bb8b2094635c1b94f2902466af8f0f5d8af7f5491c6631c0",
+      "sourceSha256": "8c1b9e0c84078dbc62666c5f242f3690fed59087943f749bbaaf9438a2a947a0",
+      "parents": 9,
+      "allTargets": "PASS",
+      "addedToCurrentCount": false
+    },
+    "independentReview": {
+      "sha256": "9e9571002beda9fa78705e9f432aa692b3539dc05a7d0c4be365b14e1ce0225e",
+      "verdict": "GO_SOURCE",
+      "scope": "one-literal historical reader correction and unchanged protected test bytes; source-only verdict"
+    }
+  },
+  "audit": {
+    "run2Finding": "D4",
+    "riskId": "RC-P6-R06",
+    "fingerprint": "audit-ingest-reserved-kind-case-bypass-relay-validator-latch",
+    "targetedSoftwareCoverage": "VERIFIED",
+    "globalClosureClaimed": false,
+    "gatesClosed": [],
+    "historicalReportResultsRewritten": false
+  },
+  "notQualified": [
+    "arbitrary corruption repair",
+    "operator recovery",
+    "power or storage faults",
+    "other platforms",
+    "real workers/engines",
+    "real IdP/providers/models",
+    "network confinement",
+    "load",
+    "Clippy strict",
+    "complete test suite",
+    "production release"
+  ],
+  "documentationTask": {
+    "newBuildOrTestExecuted": false,
+    "applicationCodeChanged": false,
+    "checkoutMutated": false,
+    "integrationOrPushClaimed": false
+  }
+}

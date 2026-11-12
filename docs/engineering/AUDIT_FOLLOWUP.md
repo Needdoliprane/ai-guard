@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 12 novembre, 21:24 UTC — D4 / RC-P6-R06 : couverture logicielle du lecteur vérifiée
+
+Le fingerprint `audit-ingest-reserved-kind-case-bypass-relay-validator-latch` dispose d’une correction logicielle ciblée vérifiée sur `94e6e30d…` : sélecteur `LIKE` remplacé par `GLOB`, anciens kinds ordinaires intègres et non promus après réouverture saine, inconnus canoniques refusés puis rollbackés sans COMMIT invalide. Les treize parents uniques incluent neuf régressions d’admission réexécutées ; check toutes cibles PASS. [Preuves EN/FR, source et limites](evidence/2026-11-12/event-kind-history/README.md).
+
+La clôture globale D4/RC-P6-R06 n’est pas prononcée. Les résultats et classifications historiques des rapports, la RED du lecteur et les anciennes preuves namespace restent conservés sur leurs sources. Pannes, réparation arbitraire, reprise opérateur et runtimes ne sont pas qualifiés ; aucun autre constat ni gate n’est fermé par assimilation. Le registre des risques garde son suivi distinct.
+
 ## 12 novembre — run-2 D4 / RC-P6-R06 : admission corrigée, compatibilité historique ouverte
 
 Le fingerprint `audit-ingest-reserved-kind-case-bypass-relay-validator-latch` reste **OUVERT**. Neuf parents d'admission et le check toutes cibles passent sur leur gel ; une reproduction distincte confirme encore la promotion erronée de noms ordinaires historiques par le lecteur `LIKE`, avec réouverture non saine. Le canari canonique inconnu est refusé et rollbacké, sans ligne invalide durable. [Preuves, sources et limites](evidence/2026-11-12/event-kind-namespace/README.md). La revue source indépendante du candidat minimal `GLOB` est GO_SOURCE (`9e957100…`), sans GREEN acquis dans ces preuves ; GREEN lecteur et vérification finale du gel intégré restent requis. Le rapprochement RC-P6-R06 conserve sa classification historique propre ; aucun autre constat ni gate n'est fermé ou requalifié par assimilation. Les pièces primaires privées restent privées et leurs résultats datés sont conservés.

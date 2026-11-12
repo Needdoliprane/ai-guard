@@ -3443,7 +3443,7 @@
       "conditionalPriority": false,
       "lot": "LOT-H",
       "mergedInto": null,
-      "currentSourceStatus": "TO_REVALIDATE",
+      "currentSourceStatus": "PARTIAL_TARGETED_SOFTWARE_FIX_VERIFIED",
       "comparison": {
         "scope": "file blobs only; no semantic or runtime conclusion",
         "files": [
@@ -3490,9 +3490,34 @@
         ]
       },
       "tests": "NOT_RUN",
-      "owner": null,
+      "owner": "Root orchestration",
       "closureEvidence": null,
-      "reportedPriorityCondition": null
+      "reportedPriorityCondition": null,
+      "remediationEvidence": {
+        "at": "2026-11-12T21:28:55.733Z",
+        "status": "PARTIAL_TARGETED_SOFTWARE_FIX_VERIFIED",
+        "fullClosure": false,
+        "admissionCommit": "702f35ba205d0e67cfb3c5b6d5dc8fcc77eacb6b",
+        "readerSourceBase": "702f35ba205d0e67cfb3c5b6d5dc8fcc77eacb6b",
+        "readerSourceArchiveSha256": "94e6e30dc9e57d646ccaf41cb7e9d568148bc9181044f180656889751be7e24b",
+        "readme": "docs/engineering/evidence/2026-11-12/event-kind-history/README.md",
+        "testsRecord": "docs/engineering/evidence/2026-11-12/event-kind-history/TESTS.json",
+        "targetedParents": {
+          "passed": 13,
+          "failed": 0,
+          "ignored": 0,
+          "includesNineAdmissionCanaries": true
+        },
+        "allTargetsCheck": "PASS",
+        "readerReviewSha256": "9e9571002beda9fa78705e9f432aa692b3539dc05a7d0c4be365b14e1ce0225e",
+        "qualification": "isolated Linux ARM64 software QA only; no real worker/runtime qualification",
+        "limits": [
+          "Original report tests=NOT_RUN and dated file-blob comparison are preserved.",
+          "Historical mixed-case ordinary relay kinds remain unpromoted; no rewriting or arbitrary corruption repair.",
+          "Admission and historical reader have targeted evidence; the broader risk record remains open pending complete revalidation.",
+          "No new Claude lot, SSO composition, provider call, network mediation or production gate is qualified."
+        ]
+      }
     },
     {
       "id": "RC-P6-R07",
