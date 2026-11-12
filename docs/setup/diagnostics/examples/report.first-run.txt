@@ -1,0 +1,161 @@
+ai-guard-diagnose PACKAGE_VERSION - report version 1
+mode       offline; nothing written; no file named as a credential was read; no network
+read       no file content
+inspected  config directory "<config>" (default; no target was given)
+result     ERROR - 1 error, 0 unknown, 0 warning; 7 not checked, 12 not available
+
+LAYOUT
+  config directory "<config>"  absent
+  [error] layout.target_absent
+          No target was given and the default directory .agentsandbox does not exist in the current
+          directory.
+          scope    input config_dir
+          basis    observed
+          action   If an installation exists elsewhere, pass it with --config-dir DIR or
+                   --installation-dir DIR. To create one here: for a local installation run
+                   agentsandbox init --config-dir "<config>"; for an SSO installation run
+                   agentsandbox setup prepare --input MANIFEST --output-dir NEW_DIR. If a
+                   preparation was interrupted, pass the retained staging directory that setup
+                   prepare printed as --installation-dir DIR.
+
+NOT CHECKED
+  [not_checked] topology.gateway_arguments_not_persisted
+          The arguments of the gateway and of the dashboard are not stored in the installation:
+          listening addresses, policy file and event bound are not checked.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read them in the command line or the Compose file of the launcher.
+  [not_checked] topology.running_services_not_checked
+          This tool starts nothing and contacts nothing: whether the gateway, the dashboard or a
+          worker is running is not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox healthcheck --url URL
+          action   Ask a running service with agentsandbox healthcheck --url URL.
+  [not_checked] identity.sso_not_inspected
+          No OIDC file was given, so single sign-on was not inspected. SSO is optional and is
+          enabled only by a gateway option; a historical config directory alone says nothing about
+          it.
+          scope    host
+          basis    observed
+          requires  --oidc-config FILE or --installation-dir DIR
+          action   Pass --oidc-config FILE or --installation-dir DIR to inspect an OIDC file.
+  [not_checked] provider.not_inspected
+          The config directory could not be inspected, so the AI client profiles were not inspected.
+          scope    input config_dir
+          basis    observed
+          requires  --config-dir DIR or --providers-file FILE
+          action   Correct what the layout axis reports for the config directory, or pass
+                   --providers-file FILE.
+  [not_checked] inference.decision_engine_selection_not_persisted
+          The decision engine is selected by gateway options and variables that are not stored in
+          the installation: the selection is not checked. For a backend that calls an engine, the
+          gateway requires its URL and its model, and a key file for the TypeSafe backend; it
+          refuses an incomplete or mixed set of decision-engine options.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read the gateway launcher: the option --jev-backend, then the variable named
+                   JEV_BACKEND, then a legacy URL option; with none of them no decision engine is
+                   used.
+  [not_checked] engine.program_not_inspected
+          No engine was named, so no engine program was inspected.
+          scope    host
+          basis    observed
+          requires  --runtime docker or --runtime podman
+          action   Pass --runtime docker or --runtime podman.
+  [not_checked] engine.state_not_checked
+          This tool never executes the engine: whether it runs, its version and its rootless mode
+          are not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman
+          action   Run agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman;
+                   that command executes the engine.
+
+
+NOT AVAILABLE IN THIS BUILD
+  [not_available] identity.local_named_accounts_not_available
+          Local named accounts and memberships live in the tenant stores, which this build cannot
+          inspect offline.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] inference.local_model_backend_not_available
+          This build has no offline inspection of a local model backend: image, weights, memory
+          budget and readiness are not examined.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline. The local-AI guide describes how to
+                   build and verify the backend.
+  [not_available] inference.model_tls_outputs_not_available
+          This build has no reader for the outputs of model TLS provisioning.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] provider.qualified_versions_not_available
+          This build contains no list of qualified client versions.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Record the client versions you build into the worker image; this tool cannot
+                   confirm them.
+  [not_available] provider.client_presence_not_available
+          Whether Codex CLI or Claude Code is present is probed only inside the worker when it
+          starts. This build has no check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an absent client from
+                   the worker.
+  [not_available] provider.client_version_not_available
+          The version of a client is probed only inside the worker when it starts. This build has no
+          check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an incompatible version
+                   from the worker.
+  [not_available] provider.account_validity_not_available
+          Whether a provider account or a subscription is valid can only be established by the
+          provider. This tool makes no provider call.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. A launch is the first use of the account.
+  [not_available] identity.arbitrary_oidc_provider_not_qualified
+          The product accepts one exact signed OIDC profile. Compatibility with a given identity
+          provider is not presumed and is not qualified by this tool.
+          scope    build
+          basis    observed
+          action   Follow the SSO guide and qualify your identity provider with a real sign-in.
+  [not_available] inference.internal_profile_not_available
+          This build has no managed internal-inference profile for Codex CLI or Claude Code: a
+          provider profile carries no URL, no format and no CA field.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. The enterprise guide states what is delivered.
+  [not_available] topology.kubernetes_launch_not_available
+          Worker launch through the Kubernetes adapter is not available in this build; its
+          diagnostics do not enable admission.
+          scope    build
+          basis    observed
+          action   Use Docker or Podman for workers. To inspect an authority without admitting
+                   workers, use agentsandbox kubernetes doctor.
+  [not_available] layout.sibling_staging_not_inspected
+          This tool looks only inside the directories it is given. A setup staging directory left
+          beside a published installation is not searched for.
+          scope    build
+          basis    observed
+          action   If a preparation was interrupted, pass the retained staging directory that setup
+                   prepare printed as --installation-dir DIR.
+  [not_available] tool.linux_macos_posture_policy_only
+          Private-directory and private-file checks follow the product policy for local Linux and
+          macOS file systems. A network or FUSE file system is refused by that policy, not examined.
+          scope    build
+          basis    observed
+          action   Keep the installation on a supported local file system.
+
+exit 3

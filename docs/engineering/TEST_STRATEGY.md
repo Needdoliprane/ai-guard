@@ -1,5 +1,13 @@
 # Stratégie de qualification
 
+## Diagnostic opérateur E — ciblage du 12 novembre
+
+La validation du diagnostic distingue le miroir de configuration du binaire et le parcours CLI réel sur des fichiers synthétiques. Construire lib, `--bin agentsandbox` et `--test diagnose_cli`, résoudre leurs vrais artefacts et listes, puis exécuter les neuf sélecteurs `gateway_config::diagnostics_parity_tests::…` dans le libtest du **binaire**, chacun en `--exact`. La parité inclut la politique de rétention du relais (absente/null/valide/refusée), les enveloppes et validateurs OIDC, les références/AC et la règle d’authentification. Le contenu des tokens et stores reste hors du périmètre passif restitué.
+
+La suite normale `diagnose_cli --nocapture --test-threads=1` couvre fichiers/dispositions et refus, absence de mutation/réseau par défaut, masquage et bornes, JSON/catalogue, choix fournisseur sans repli d’abonnement vers API, découverte OIDC explicitement demandée sur loopback et cohérence des guides/exemples. Exiger les identités réelles et leurs oracles, pas seulement le RC : au gel final, 85 PASS, zéro FAIL/filtré, un exporteur manuel nommé ignoré et `NOT_RUN`. Les neuf parités et le check toutes cibles passent aussi. [Gel, commandes et résultats](evidence/2026-11-12/operator-diagnostics/README.md).
+
+La régénération d’exemples est une opération distincte, explicitement admise : l’exporteur ignoré écrit dans un nouveau TMPDIR privé, jamais dans les sources ; Root vérifie les 19 membres capturés et leurs contenus avant de promouvoir les neuf normalisés. Une nouvelle composition doit ensuite passer `first_run_states`, `fresh_historical_directory_is_explained`, `documented_examples_are_the_real_output` et `guides_follow_the_binary`. Ils passent sur le gel final du 12 novembre ; leurs anciens `NOT_RUN`, comme le `FAIL_HARNESS` r1 de tableau vide Bash 3.2, restent conservés. Pas de régénération répétée sans changement utile. Les peers loopback, fichiers synthétiques et choix déclarés ne qualifient ni IdP/fournisseur réel, moteur, image, macOS natif ou parcours complet.
+
 ## Reprise du publisher de présence
 
 Choisir le module `--lib broker::presence::http_tests::` et la cible

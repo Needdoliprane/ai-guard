@@ -1,5 +1,16 @@
 # Gates de qualification production
 
+Diagnostic opérateur E du 12 novembre : neuf parités binaires et 85 cas CLI
+normaux PASS sur le gel composé `c2b907a8…`, check toutes cibles RC 0,
+export vivant exact et fermeture RC 0/OOM 0. L’exporteur manuel ignoré reste
+`NOT_RUN` dans cette campagne ; sa régénération séparée et la promotion des
+neuf exemples ont leurs propres preuves. [Sources et limites](evidence/2026-11-12/operator-diagnostics/README.md).
+Ce diagnostic passif, avec découverte OIDC explicitement demandée testée sur
+loopback seulement, améliore les procédures opérateur sans qualifier leur
+exécution réelle : moteurs, fournisseurs, IdP réel, macOS natif, image/release,
+Clippy strict et suite complète restent hors de ce lot. Aucun gate G01–G12
+fermé ; G09 conserve son FAIL et G12 reste BLOCKED.
+
 Récupération centrale S2 du 9 novembre : 50 parents ciblés PASS sur leurs deux
 gels et check toutes cibles RC0, revues traitées et sources composées vérifiées.
 [Preuves et limites](evidence/2026-11-08/gateway-session-recovery/README.md#targeted-green-and-integration).

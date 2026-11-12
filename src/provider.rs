@@ -306,6 +306,15 @@ pub fn load_config_source(source: &PrivateFile) -> Result<ProviderConfigV1> {
     selection::load_config_source(source)
 }
 
+/// Pure profile choice for operator inspection. Validates the configuration and
+/// the requested model exactly as `prepare` does, and opens no credential.
+pub fn choose_profile<'a>(
+    config: &'a ProviderConfigV1,
+    selection: &ProviderSelection,
+) -> Result<(&'a ProviderProfileV1, ChoiceSource)> {
+    selection::choose_profile(config, selection)
+}
+
 pub fn prepare(
     config: &ProviderConfigV1,
     selection: &ProviderSelection,

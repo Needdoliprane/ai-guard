@@ -1,0 +1,337 @@
+ai-guard-diagnose PACKAGE_VERSION - report version 1
+mode       offline; nothing written; no file named as a credential was read; no network
+read       tenant registry, oidc file
+inspected  installation directory "<installation>" (from --installation-dir)
+result     OK - 0 error, 0 unknown, 1 warning; 12 not checked, 14 not available
+
+LAYOUT
+  installation directory "<installation>"  prepared installation
+          preparation complete; OIDC file version 2
+  [info] layout.legacy_commands_do_not_read_this_layout
+          The commands init, up, down, run, worker-status, worker-resume, worker-stop,
+          export-workspace and providers read a historical config directory. The default
+          verify-audit path also reads that layout; an explicit viewer file can select a prepared
+          tenant for its online audit check.
+          scope    input installation_dir
+          basis    inferred
+          action   Use a separate historical config directory for those legacy commands. For a
+                   prepared tenant, agentsandbox verify-audit --viewer-token-file FILE --gateway URL
+                   reads the explicit viewer file. The gateway reads the installation through its
+                   registry and its OIDC file.
+  [info] layout.prepared_installation
+          This directory has the layout published by agentsandbox setup prepare: a tenant registry,
+          an OIDC file and one private directory per tenant.
+          scope    input installation_dir
+          basis    observed
+          action   No action is needed for the layout. The gateway reads this installation through
+                   its registry and its OIDC file.
+
+TOPOLOGY
+  tenant model  registry; 1 tenant
+  [info] topology.registry_tenants
+          The tenant registry declares the tenants counted in this report. Each tenant has its own
+          store and its own technical keys.
+          scope    file tenant_registry
+          basis    declared from tenants.json (tenants)
+          applies  agentsandbox gateway
+          action   No action is needed.
+
+IDENTITY
+  technical key references  2 present, 0 absent, 0 unknown
+  OIDC file version  2
+  issuer  "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo"
+  provider label  "Keycloak DEMO"
+  web origin  "http://127.0.0.1:4000"
+  web client  "ai-guard-demo-web"
+  CLI client  "ai-guard-demo-cli"
+  API audience  "ai-guard-demo-api"
+  authorization endpoint  "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/auth"
+  token endpoint  "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/token"
+  keys endpoint  "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/certs"
+  end session endpoint  "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/logout"
+  web redirect  "http://127.0.0.1:4000/auth/oidc/callback"
+  CLI callback path  "/oidc/callback"
+  transport  isolated_demo_http
+  claim mapping  revision "keycloak-demo-policy-1"; 1 rule
+  CA bundle  not declared
+  identity provider  not contacted
+  [warning] identity.sso_demonstration_transport
+          The OIDC file declares the isolated demonstration transport: sign-in talks to the identity
+          provider in plain HTTP. The product limits this transport to a literal loopback issuer and
+          to the distributed demonstration issuer.
+          scope    file oidc_file
+          basis    declared from oidc.json (gateway.provider.transport)
+          applies  agentsandbox gateway
+          action   Keep such an installation for trials. For a normal installation use the
+                   https_only transport with an HTTPS issuer.
+  [ok] identity.sso_file_valid_offline
+          The structure and the policies of the OIDC file pass the offline rules of the gateway
+          loader, restated in this tool. The verdict is drawn from the file alone.
+          scope    file oidc_file
+          basis    inferred from oidc.json
+          applies  agentsandbox gateway
+          action   No action is needed for the file. Read the items listed as not checked before
+                   relying on it.
+
+TENANTS
+  registry  1 tenant  "ai-guard-demo"
+  capacity plan  1 tenant  "ai-guard-demo"
+  correspondence  match
+  [ok] registry.offline_rules_passed
+          The structure and the policies of the tenant registry pass the offline rules of the
+          gateway loader, restated in this tool. Token content is not checked.
+          scope    file tenant_registry
+          basis    inferred from tenants.json
+          applies  agentsandbox gateway
+          action   No action is needed for the file. Read the items listed as not checked before
+                   relying on it.
+  [ok] tenants.plan_matches_registry
+          The capacity plan and the tenant registry name exactly the same tenants.
+          scope    input installation_dir
+          basis    inferred from tenants.json (tenants[].tenant_id) and oidc.json
+                   (authentication_audit.capacity_plan.tenants[].tenant_id)
+          applies  agentsandbox gateway
+          action   No action is needed for the files. The comparison with the durable plan is listed
+                   separately.
+
+CREDENTIAL REFERENCES
+  setup material of installation  "<installation>/secret-material.json"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader setup recovery; content not read
+  setup material of installation  "<installation>/preparation.json"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader setup recovery; content not read
+  setup material of installation  "<installation>/completion.json"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader setup recovery; content not read
+  setup material of installation  "<installation>/authentication-creation.json"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader setup recovery; content not read
+  setup material of installation  "<installation>/authentication-origin.json"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader setup recovery; content not read
+  runner of tenant "ai-guard-demo"  "<installation>/tenants/ai-guard-demo/runner"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader gateway token reader; content not read
+  viewer of tenant "ai-guard-demo"  "<installation>/tenants/ai-guard-demo/viewer"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule not evaluated; reader gateway token reader; content not read
+  [info] reference.setup_secret_material_present
+          The setup recovery record that holds the generated tokens is present. It is never
+          displayed and was not opened.
+          scope    input installation_dir
+          basis    observed
+          applies  agentsandbox setup resume
+          action   Keep it private with the installation; setup recovery needs it.
+
+DATA
+  authentication audit of installation  "<installation>/authentication.sqlite"
+          present; no sidecar; content not read
+  tenant store of tenant "ai-guard-demo"  "<installation>/tenants/ai-guard-demo/audit.sqlite"
+          present; no sidecar; content not read
+
+NOT CHECKED
+  [not_checked] topology.gateway_arguments_not_persisted
+          The arguments of the gateway and of the dashboard are not stored in the installation:
+          listening addresses, policy file and event bound are not checked.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read them in the command line or the Compose file of the launcher.
+  [not_checked] topology.running_services_not_checked
+          This tool starts nothing and contacts nothing: whether the gateway, the dashboard or a
+          worker is running is not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox healthcheck --url URL
+          action   Ask a running service with agentsandbox healthcheck --url URL.
+  [not_checked] identity.idp_reachability_not_checked
+          The identity provider was not contacted: this tool opens no connection unless an active
+          check is asked for. The gateway contacts the provider when a sign-in starts.
+          scope    file oidc_file
+          basis    observed
+          requires  --active oidc-discovery, with an OIDC file that passes the offline rules
+          action   To ask the provider for its discovery document and its keys from where this tool
+                   runs, pass --active oidc-discovery. Two requests are sent, and no credential.
+  [not_checked] identity.sso_gateway_enablement_not_persisted
+          A valid OIDC file does not prove that the gateway is started with it: SSO is enabled only
+          by the gateway option --oidc-config.
+          scope    file oidc_file
+          basis    observed from oidc.json
+          applies  agentsandbox gateway
+          requires  the command line of the gateway launcher
+          action   Check the command line of the gateway launcher.
+  [not_checked] oidc.loader_acceptance_not_checked
+          Whether the gateway accepts this OIDC file when it starts is not checked: it also compares
+          the file with the durable authentication state.
+          scope    file oidc_file
+          basis    observed from oidc.json
+          applies  agentsandbox gateway
+          requires  the gateway checks the stores and the durable authentication state when it
+                    starts
+          action   Start the gateway; it refuses to start when the durable state and the file
+                   disagree.
+  [not_checked] registry.loader_acceptance_not_checked
+          Whether the gateway accepts this registry when it starts is not checked: it also reads
+          every key file, requires distinct keys and opens every store.
+          scope    file tenant_registry
+          basis    observed from tenants.json
+          applies  agentsandbox gateway
+          requires  the gateway checks token content, token uniqueness and the stores when it starts
+          action   Start the gateway; it refuses to start when a key file or a store is unusable.
+  [not_checked] reference.content_not_checked
+          This tool opens no file that the inspected files name as a key file, a token file or a
+          credential file. Whether each file holds a well-formed and distinct value is not checked.
+          scope    host
+          basis    observed
+          requires  the consuming command checks the content when it starts
+          action   The consuming command validates the content when it starts.
+  [not_checked] provider.not_inspected
+          No provider location was given, so the AI client profiles were not inspected.
+          scope    host
+          basis    observed
+          requires  --config-dir DIR or --providers-file FILE
+          action   Pass --config-dir DIR or --providers-file FILE.
+  [not_checked] inference.decision_engine_selection_not_persisted
+          The decision engine is selected by gateway options and variables that are not stored in
+          the installation: the selection is not checked. For a backend that calls an engine, the
+          gateway requires its URL and its model, and a key file for the TypeSafe backend; it
+          refuses an incomplete or mixed set of decision-engine options.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read the gateway launcher: the option --jev-backend, then the variable named
+                   JEV_BACKEND, then a legacy URL option; with none of them no decision engine is
+                   used.
+  [not_checked] engine.program_not_inspected
+          No engine was named, so no engine program was inspected.
+          scope    host
+          basis    observed
+          requires  --runtime docker or --runtime podman
+          action   Pass --runtime docker or --runtime podman.
+  [not_checked] engine.state_not_checked
+          This tool never executes the engine: whether it runs, its version and its rootless mode
+          are not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman
+          action   Run agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman;
+                   that command executes the engine.
+  [not_checked] data.signed_checkpoint_not_checked
+          Signed tenant checkpoints and independent rollback continuity were not verified by this
+          diagnostic.
+          scope    input installation_dir
+          basis    observed
+          applies  ai-guard-audit-checkpoint
+          requires  explicit ai-guard-audit-checkpoint verify with tenant checkpoint evidence and an
+                    independently held trust anchor
+          action   Use ai-guard-audit-checkpoint verify as a separate, deliberate offline operation
+                   with tenant checkpoint evidence and an independently held trust anchor. Follow
+                   the signed-checkpoint guide for optional database comparison and its sidecar
+                   effects.
+
+
+NOT AVAILABLE IN THIS BUILD
+  [not_available] identity.local_named_accounts_not_available
+          Local named accounts and memberships live in the tenant stores, which this build cannot
+          inspect offline.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] tenants.durable_plan_comparison_not_available
+          The gateway also compares the capacity plan with the plan stored in the authentication
+          audit. This build cannot read that store offline.
+          scope    input installation_dir
+          basis    observed from tenants.json (tenants[].tenant_id) and oidc.json
+                   (authentication_audit.capacity_plan)
+          applies  agentsandbox gateway
+          action   Nothing in this build covers it offline. The gateway makes the comparison when it
+                   starts and refuses to start on a difference.
+  [not_available] inference.local_model_backend_not_available
+          This build has no offline inspection of a local model backend: image, weights, memory
+          budget and readiness are not examined.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline. The local-AI guide describes how to
+                   build and verify the backend.
+  [not_available] inference.model_tls_outputs_not_available
+          This build has no reader for the outputs of model TLS provisioning.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] data.offline_inspection_not_available
+          This diagnostic never opens SQLite connections to tenant stores or authentication audits:
+          schema, tenant binding, audit format and integrity are not examined here. The gateway
+          validates its stores when it starts. For a tenant local-chain check, agentsandbox
+          verify-audit --viewer-token-file FILE --gateway URL reads an explicit viewer file; it does
+          not establish independent rollback continuity.
+          scope    input installation_dir
+          basis    observed
+          action   For tenant audit evidence, use the signed-checkpoint guide as a separate explicit
+                   operation. A gateway local-chain check and independently anchored rollback
+                   verification are different operations.
+  [not_available] provider.qualified_versions_not_available
+          This build contains no list of qualified client versions.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Record the client versions you build into the worker image; this tool cannot
+                   confirm them.
+  [not_available] provider.client_presence_not_available
+          Whether Codex CLI or Claude Code is present is probed only inside the worker when it
+          starts. This build has no check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an absent client from
+                   the worker.
+  [not_available] provider.client_version_not_available
+          The version of a client is probed only inside the worker when it starts. This build has no
+          check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an incompatible version
+                   from the worker.
+  [not_available] provider.account_validity_not_available
+          Whether a provider account or a subscription is valid can only be established by the
+          provider. This tool makes no provider call.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. A launch is the first use of the account.
+  [not_available] identity.arbitrary_oidc_provider_not_qualified
+          The product accepts one exact signed OIDC profile. Compatibility with a given identity
+          provider is not presumed and is not qualified by this tool.
+          scope    build
+          basis    observed
+          action   Follow the SSO guide and qualify your identity provider with a real sign-in.
+  [not_available] inference.internal_profile_not_available
+          This build has no managed internal-inference profile for Codex CLI or Claude Code: a
+          provider profile carries no URL, no format and no CA field.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. The enterprise guide states what is delivered.
+  [not_available] topology.kubernetes_launch_not_available
+          Worker launch through the Kubernetes adapter is not available in this build; its
+          diagnostics do not enable admission.
+          scope    build
+          basis    observed
+          action   Use Docker or Podman for workers. To inspect an authority without admitting
+                   workers, use agentsandbox kubernetes doctor.
+  [not_available] layout.sibling_staging_not_inspected
+          This tool looks only inside the directories it is given. A setup staging directory left
+          beside a published installation is not searched for.
+          scope    build
+          basis    observed
+          action   If a preparation was interrupted, pass the retained staging directory that setup
+                   prepare printed as --installation-dir DIR.
+  [not_available] tool.linux_macos_posture_policy_only
+          Private-directory and private-file checks follow the product policy for local Linux and
+          macOS file systems. A network or FUSE file system is refused by that policy, not examined.
+          scope    build
+          basis    observed
+          action   Keep the installation on a supported local file system.
+
+exit 0

@@ -24,6 +24,8 @@ Start with the [configuration index](docs/setup/README.md): it explains which co
 
 For the Docker Desktop Kubernetes target, see [authority and inspection](docs/setup/kubernetes/README.md). Worker launch through this adapter remains unavailable; its diagnostics do not enable admission.
 
+To understand an installation before a launch, see [operator diagnostics](docs/setup/diagnostics/README.md): `ai-guard-diagnose` reports its layout, tenants, credential references and provider selection, offline by default and read-only, without opening a file that the inspected files name as a credential, and a report without error qualifies nothing.
+
 ## First local start
 
 From the repository root, with the Rust toolchain in `rust-toolchain.toml`, a running Docker engine and Compose:

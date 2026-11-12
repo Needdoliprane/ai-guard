@@ -1,0 +1,307 @@
+ai-guard-diagnose PACKAGE_VERSION - report version 1
+mode       offline; nothing written; no file named as a credential was read; no network
+read       provider profiles
+inspected  config directory "<config>" (from --config-dir)
+inspected  provider profiles "<providers-file>" (from --providers-file)
+given      requested client claude-code (from --client)
+given      requested authentication mode subscription (from --auth-mode)
+result     OK - 0 error, 0 unknown, 1 warning; 11 not checked, 13 not available
+
+LAYOUT
+  config directory "<config>"  historical config dir
+  [info] layout.historical_config_dir
+          This directory has the historical layout created by agentsandbox init: private key
+          sources, their read-only projections, sessions and pending operations.
+          scope    input config_dir
+          basis    observed
+          action   No action is needed. The commands init, up, down, run, worker-status,
+                   worker-resume, worker-stop, export-workspace, verify-audit and providers read
+                   this layout.
+
+TOPOLOGY
+  tenant model  single local; 1 tenant
+  [info] topology.single_local_tenant
+          A gateway started without a tenant registry serves one tenant, named local.
+          scope    input config_dir
+          basis    inferred
+          applies  agentsandbox gateway
+          action   No action is needed. For several tenants, start the gateway with a tenant
+                   registry.
+
+IDENTITY
+  technical key references  2 present, 0 absent, 0 unknown
+
+CREDENTIAL REFERENCES
+  provider of profile "codex-subscription"
+          "provider reference #4 (codex_auth_file, inside the directory of the profile file)"
+          absent; private rule not evaluated; reader private file reader; content not read
+  runner of installation  "<config>/secrets/runner"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule satisfied; reader private file reader; content not read
+  viewer of installation  "<config>/secrets/viewer"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule satisfied; reader private file reader; content not read
+  projection of installation  "<config>/mounted-secrets/runner"
+          present; regular file; mode 0444; owned by the inspecting account; single link; private
+          rule not evaluated; reader compose projection; content not read
+  projection of installation  "<config>/mounted-secrets/viewer"
+          present; regular file; mode 0444; owned by the inspecting account; single link; private
+          rule not evaluated; reader compose projection; content not read
+  provider of profile "claude-api"
+          "provider reference #1 (api_env_file, inside the directory of the profile file)"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule satisfied; reader private file reader; content not read
+  provider of profile "claude-subscription"
+          "provider reference #2 (claude_oauth_env_file, inside the directory of the profile file)"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule satisfied; reader private file reader; content not read
+  provider of profile "codex-api"
+          "provider reference #3 (api_env_file, inside the directory of the profile file)"
+          present; regular file; mode 0600; owned by the inspecting account; single link; private
+          rule satisfied; reader private file reader; content not read
+
+PROVIDERS
+  profile file  "<providers-file>"  loaded
+  automatic priority  "codex-subscription" "claude-subscription" "codex-api" "claude-api"
+  profile "claude-api"
+          revision 1; client claude_code; mode api; model not declared; source api_env_file;
+          variable name "ANTHROPIC_API_KEY"
+  profile "claude-subscription"
+          revision 1; client claude_code; mode subscription; model not declared; source
+          claude_oauth_env_file
+  profile "codex-api"
+          revision 1; client codex; mode api; model not declared; source api_env_file; variable name
+          "OPENAI_API_KEY"
+  profile "codex-subscription"
+          revision 1; client codex; mode subscription; model not declared; source codex_auth_file
+  selection of a managed launch
+          requested client explicit; mode explicit; profile auto; model auto
+          resolved profile "claude-subscription"; revision 1; client claude_code; mode subscription;
+          model not declared; chosen by auto
+  [ok] provider.configuration_valid
+          The provider profile file is accepted by the product validator, which reads that file
+          alone.
+          scope    file provider_profiles
+          basis    observed from provider profile file
+          applies  agentsandbox run
+          action   No action is needed for the file. Read the items listed as not checked before a
+                   launch.
+  [info] provider.launch_requires_observe_and_bridge
+          A managed launch with provider credentials requires the options --profile observe and
+          --network bridge; it changes neither by itself.
+          scope    provider profiles
+          basis    inferred
+          applies  agentsandbox run
+          action   Pass both options to agentsandbox run for a managed client.
+  [ok] provider.selection_resolved
+          The requested selection resolves to one profile. The choice is made by the product
+          function that a managed launch uses, for the selection options given to this tool; that
+          function reads no credential file. The product rule is: an explicit profile; then the
+          default profile among the candidates; then a single candidate; then auto_priority; under
+          automatic authentication mode, subscription candidates exclude API candidates.
+          provider profiles  1 in total "claude-subscription"
+          scope    provider profiles
+          basis    observed
+          applies  agentsandbox run
+          action   No action is needed for the selection. Give this tool the options --client,
+                   --auth-mode, --client-profile and --model exactly as agentsandbox run receives
+                   them; an option left out is resolved automatically.
+  [warning] provider.unselected_profile_reference_absent
+          The credential file of a declared profile does not exist. The requested selection does not
+          resolve this profile; a launch that selects it refuses.
+          a launch would refuse with  login_required
+          provider profiles  1 in total "codex-subscription"
+          scope    provider profiles
+          basis    inferred from provider profile file (profiles[].credential.path)
+          applies  agentsandbox run
+          action   Restore the file or remove the profile. Rerun with --show-paths to see the
+                   recorded path.
+
+NOT CHECKED
+  [not_checked] topology.gateway_arguments_not_persisted
+          The arguments of the gateway and of the dashboard are not stored in the installation:
+          listening addresses, policy file and event bound are not checked.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read them in the command line or the Compose file of the launcher.
+  [not_checked] topology.running_services_not_checked
+          This tool starts nothing and contacts nothing: whether the gateway, the dashboard or a
+          worker is running is not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox healthcheck --url URL
+          action   Ask a running service with agentsandbox healthcheck --url URL.
+  [not_checked] identity.sso_not_inspected
+          No OIDC file was given, so single sign-on was not inspected. SSO is optional and is
+          enabled only by a gateway option; a historical config directory alone says nothing about
+          it.
+          scope    host
+          basis    observed
+          requires  --oidc-config FILE or --installation-dir DIR
+          action   Pass --oidc-config FILE or --installation-dir DIR to inspect an OIDC file.
+  [not_checked] reference.content_not_checked
+          This tool opens no file that the inspected files name as a key file, a token file or a
+          credential file. Whether each file holds a well-formed and distinct value is not checked.
+          scope    host
+          basis    observed
+          requires  the consuming command checks the content when it starts
+          action   The consuming command validates the content when it starts.
+  [not_checked] provider.credential_content_not_checked
+          This tool opens no file that the profile file names as a provider credential, so the
+          content of the credentials and the validity of the account are not checked.
+          scope    provider profiles
+          basis    observed
+          applies  agentsandbox run
+          requires  agentsandbox run validates the selected credential before authorization
+          action   A launch validates the selected credential before authorization.
+  [not_checked] provider.manual_launch_path_not_checked
+          The manual launch path, with the options --provider and --secret-env-file and an explicit
+          command, does not use the profile file and is not checked.
+          scope    host
+          basis    observed
+          applies  agentsandbox run
+          requires  agentsandbox run
+          action   A launch applies its own rules to that path, including the rule on env file names
+                   inside the project.
+  [not_checked] inference.decision_engine_selection_not_persisted
+          The decision engine is selected by gateway options and variables that are not stored in
+          the installation: the selection is not checked. For a backend that calls an engine, the
+          gateway requires its URL and its model, and a key file for the TypeSafe backend; it
+          refuses an incomplete or mixed set of decision-engine options.
+          scope    host
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read the gateway launcher: the option --jev-backend, then the variable named
+                   JEV_BACKEND, then a legacy URL option; with none of them no decision engine is
+                   used.
+  [not_checked] engine.program_not_inspected
+          No engine was named, so no engine program was inspected.
+          scope    host
+          basis    observed
+          requires  --runtime docker or --runtime podman
+          action   Pass --runtime docker or --runtime podman.
+  [not_checked] engine.state_not_checked
+          This tool never executes the engine: whether it runs, its version and its rootless mode
+          are not checked.
+          scope    host
+          basis    observed
+          requires  agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman
+          action   Run agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman;
+                   that command executes the engine.
+  [not_checked] data.location_not_persisted
+          The store path of a historical config directory is a gateway option that is not stored in
+          the installation: no store was located.
+          scope    input config_dir
+          basis    observed
+          applies  agentsandbox gateway
+          requires  the command line or the Compose file of the launcher
+          action   Read the gateway launcher: the option --data, or the Compose volume.
+  [not_checked] data.signed_checkpoint_not_checked
+          Signed tenant checkpoints and independent rollback continuity were not verified by this
+          diagnostic.
+          scope    input config_dir
+          basis    observed
+          applies  ai-guard-audit-checkpoint
+          requires  explicit ai-guard-audit-checkpoint verify with tenant checkpoint evidence and an
+                    independently held trust anchor
+          action   Use ai-guard-audit-checkpoint verify as a separate, deliberate offline operation
+                   with tenant checkpoint evidence and an independently held trust anchor. Follow
+                   the signed-checkpoint guide for optional database comparison and its sidecar
+                   effects.
+
+
+NOT AVAILABLE IN THIS BUILD
+  [not_available] identity.local_named_accounts_not_available
+          Local named accounts and memberships live in the tenant stores, which this build cannot
+          inspect offline.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] inference.local_model_backend_not_available
+          This build has no offline inspection of a local model backend: image, weights, memory
+          budget and readiness are not examined.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline. The local-AI guide describes how to
+                   build and verify the backend.
+  [not_available] inference.model_tls_outputs_not_available
+          This build has no reader for the outputs of model TLS provisioning.
+          scope    host
+          basis    observed
+          action   Nothing in this build covers it offline.
+  [not_available] data.offline_inspection_not_available
+          This diagnostic never opens SQLite connections to tenant stores or authentication audits:
+          schema, tenant binding, audit format and integrity are not examined here. The online
+          command agentsandbox verify-audit --config-dir DIR --gateway URL asks the running gateway
+          for its local hash-chain check and reads the viewer file.
+          scope    input config_dir
+          basis    observed
+          action   For tenant audit evidence, use the signed-checkpoint guide as a separate explicit
+                   operation. A gateway local-chain check and independently anchored rollback
+                   verification are different operations.
+  [not_available] provider.qualified_versions_not_available
+          This build contains no list of qualified client versions.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Record the client versions you build into the worker image; this tool cannot
+                   confirm them.
+  [not_available] provider.client_presence_not_available
+          Whether Codex CLI or Claude Code is present is probed only inside the worker when it
+          starts. This build has no check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an absent client from
+                   the worker.
+  [not_available] provider.client_version_not_available
+          The version of a client is probed only inside the worker when it starts. This build has no
+          check on the control side.
+          scope    build
+          basis    observed
+          applies  agentsandbox run
+          action   Nothing in this build covers it offline. A launch reports an incompatible version
+                   from the worker.
+  [not_available] provider.account_validity_not_available
+          Whether a provider account or a subscription is valid can only be established by the
+          provider. This tool makes no provider call.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. A launch is the first use of the account.
+  [not_available] identity.arbitrary_oidc_provider_not_qualified
+          The product accepts one exact signed OIDC profile. Compatibility with a given identity
+          provider is not presumed and is not qualified by this tool.
+          scope    build
+          basis    observed
+          action   Follow the SSO guide and qualify your identity provider with a real sign-in.
+  [not_available] inference.internal_profile_not_available
+          This build has no managed internal-inference profile for Codex CLI or Claude Code: a
+          provider profile carries no URL, no format and no CA field.
+          scope    build
+          basis    observed
+          action   Nothing in this build covers it. The enterprise guide states what is delivered.
+  [not_available] topology.kubernetes_launch_not_available
+          Worker launch through the Kubernetes adapter is not available in this build; its
+          diagnostics do not enable admission.
+          scope    build
+          basis    observed
+          action   Use Docker or Podman for workers. To inspect an authority without admitting
+                   workers, use agentsandbox kubernetes doctor.
+  [not_available] layout.sibling_staging_not_inspected
+          This tool looks only inside the directories it is given. A setup staging directory left
+          beside a published installation is not searched for.
+          scope    build
+          basis    observed
+          action   If a preparation was interrupted, pass the retained staging directory that setup
+                   prepare printed as --installation-dir DIR.
+  [not_available] tool.linux_macos_posture_policy_only
+          Private-directory and private-file checks follow the product policy for local Linux and
+          macOS file systems. A network or FUSE file system is refused by that policy, not examined.
+          scope    build
+          basis    observed
+          action   Keep the installation on a supported local file system.
+
+exit 0

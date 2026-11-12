@@ -1,0 +1,982 @@
+{
+  "schema": "ai-guard-diagnose-report",
+  "version": 1,
+  "tool": {
+    "name": "ai-guard-diagnose",
+    "package_version": "PACKAGE_VERSION"
+  },
+  "mode": {
+    "network": "none",
+    "mutation": "none",
+    "credential_contents_read": "none",
+    "files_read_for_content": [
+      "tenant_registry",
+      "oidc_file"
+    ],
+    "active_checks_executed": []
+  },
+  "summary": {
+    "status": "ok",
+    "exit_code": 0,
+    "counts": {
+      "ok": 3,
+      "info": 4,
+      "warning": 1,
+      "error": 0,
+      "unknown": 0,
+      "not_checked": 12,
+      "not_available": 14
+    },
+    "truncated": false,
+    "omitted": {
+      "reference_entries": 0,
+      "data_entries": 0,
+      "tenant_ids": 0
+    }
+  },
+  "inputs": [
+    {
+      "name": "installation_dir",
+      "origin": "cli",
+      "display": "<installation>"
+    }
+  ],
+  "layouts": [
+    {
+      "input": "installation_dir",
+      "kind": "prepared_installation",
+      "preparation": "complete",
+      "oidc_file_version": 2
+    }
+  ],
+  "topology": {
+    "tenant_model": "registry",
+    "tenant_count": 1
+  },
+  "identity": {
+    "technical_key_references": {
+      "present": 2,
+      "absent": 0,
+      "unknown": 0
+    },
+    "sso": {
+      "file_version": 2,
+      "issuer": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo",
+      "transport": "isolated_demo_http",
+      "provider_label": "Keycloak DEMO",
+      "web_origin": "http://127.0.0.1:4000",
+      "web_client_id": "ai-guard-demo-web",
+      "cli_client_id": "ai-guard-demo-cli",
+      "api_audience": "ai-guard-demo-api",
+      "authorization_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/auth",
+      "token_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/token",
+      "jwks_uri": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/certs",
+      "end_session_endpoint": "http://keycloak.ai-guard.test:18080/realms/ai-guard-demo/protocol/openid-connect/logout",
+      "web_redirect_uri": "http://127.0.0.1:4000/auth/oidc/callback",
+      "cli_callback_path": "/oidc/callback",
+      "mapping": {
+        "revision": "keycloak-demo-policy-1",
+        "rule_count": 1
+      },
+      "ca_bundle_declared": false,
+      "idp_contacted": false
+    }
+  },
+  "tenants": {
+    "registry": [
+      {
+        "id": "ai-guard-demo",
+        "masked": false
+      }
+    ],
+    "plan": [
+      {
+        "id": "ai-guard-demo",
+        "masked": false
+      }
+    ],
+    "registry_total": 1,
+    "plan_total": 1,
+    "correspondence": "match"
+  },
+  "credential_references": [
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "setup_material",
+      "consumer": "setup_recovery",
+      "location": "inside_root",
+      "display": "<installation>/secret-material.json",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "setup_material",
+      "consumer": "setup_recovery",
+      "location": "inside_root",
+      "display": "<installation>/preparation.json",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "setup_material",
+      "consumer": "setup_recovery",
+      "location": "inside_root",
+      "display": "<installation>/completion.json",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "setup_material",
+      "consumer": "setup_recovery",
+      "location": "inside_root",
+      "display": "<installation>/authentication-creation.json",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "setup_material",
+      "consumer": "setup_recovery",
+      "location": "inside_root",
+      "display": "<installation>/authentication-origin.json",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "tenant",
+        "id": "ai-guard-demo",
+        "masked": false
+      },
+      "role": "runner",
+      "consumer": "gateway_token_reader",
+      "location": "inside_root",
+      "display": "<installation>/tenants/ai-guard-demo/runner",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "tenant",
+        "id": "ai-guard-demo",
+        "masked": false
+      },
+      "role": "viewer",
+      "consumer": "gateway_token_reader",
+      "location": "inside_root",
+      "display": "<installation>/tenants/ai-guard-demo/viewer",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    }
+  ],
+  "providers": null,
+  "inference": {
+    "decision_engine_transport": null
+  },
+  "trust": [],
+  "engine": null,
+  "data": [
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "authentication_audit",
+      "location": "inside_root",
+      "display": "<installation>/authentication.sqlite",
+      "presence": "present",
+      "sidecars": [],
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "tenant",
+        "id": "ai-guard-demo",
+        "masked": false
+      },
+      "role": "tenant_store",
+      "location": "inside_root",
+      "display": "<installation>/tenants/ai-guard-demo/audit.sqlite",
+      "presence": "present",
+      "sidecars": [],
+      "content": "not_read"
+    }
+  ],
+  "findings": [
+    {
+      "code": "layout.legacy_commands_do_not_read_this_layout",
+      "axis": "layout",
+      "status": "info",
+      "basis": "inferred",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "The commands init, up, down, run, worker-status, worker-resume, worker-stop, export-workspace and providers read a historical config directory. The default verify-audit path also reads that layout; an explicit viewer file can select a prepared tenant for its online audit check.",
+      "action": "Use a separate historical config directory for those legacy commands. For a prepared tenant, agentsandbox verify-audit --viewer-token-file FILE --gateway URL reads the explicit viewer file. The gateway reads the installation through its registry and its OIDC file.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "layout.prepared_installation",
+      "axis": "layout",
+      "status": "info",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This directory has the layout published by agentsandbox setup prepare: a tenant registry, an OIDC file and one private directory per tenant.",
+      "action": "No action is needed for the layout. The gateway reads this installation through its registry and its OIDC file.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.gateway_arguments_not_persisted",
+      "axis": "topology",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The arguments of the gateway and of the dashboard are not stored in the installation: listening addresses, policy file and event bound are not checked.",
+      "action": "Read them in the command line or the Compose file of the launcher.",
+      "requires": "the command line or the Compose file of the launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.registry_tenants",
+      "axis": "topology",
+      "status": "info",
+      "basis": "declared",
+      "scope": {
+        "kind": "file",
+        "file": "tenant_registry"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "tenants.json",
+            "field": "tenants"
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The tenant registry declares the tenants counted in this report. Each tenant has its own store and its own technical keys.",
+      "action": "No action is needed.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.running_services_not_checked",
+      "axis": "topology",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool starts nothing and contacts nothing: whether the gateway, the dashboard or a worker is running is not checked.",
+      "action": "Ask a running service with agentsandbox healthcheck --url URL.",
+      "requires": "agentsandbox healthcheck --url URL",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.idp_reachability_not_checked",
+      "axis": "identity",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "file",
+        "file": "oidc_file"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "The identity provider was not contacted: this tool opens no connection unless an active check is asked for. The gateway contacts the provider when a sign-in starts.",
+      "action": "To ask the provider for its discovery document and its keys from where this tool runs, pass --active oidc-discovery. Two requests are sent, and no credential.",
+      "requires": "--active oidc-discovery, with an OIDC file that passes the offline rules",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.local_named_accounts_not_available",
+      "axis": "identity",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Local named accounts and memberships live in the tenant stores, which this build cannot inspect offline.",
+      "action": "Nothing in this build covers it offline.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.sso_demonstration_transport",
+      "axis": "identity",
+      "status": "warning",
+      "basis": "declared",
+      "scope": {
+        "kind": "file",
+        "file": "oidc_file"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "oidc.json",
+            "field": "gateway.provider.transport"
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The OIDC file declares the isolated demonstration transport: sign-in talks to the identity provider in plain HTTP. The product limits this transport to a literal loopback issuer and to the distributed demonstration issuer.",
+      "action": "Keep such an installation for trials. For a normal installation use the https_only transport with an HTTPS issuer.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.sso_file_valid_offline",
+      "axis": "identity",
+      "status": "ok",
+      "basis": "inferred",
+      "scope": {
+        "kind": "file",
+        "file": "oidc_file"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "oidc.json",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The structure and the policies of the OIDC file pass the offline rules of the gateway loader, restated in this tool. The verdict is drawn from the file alone.",
+      "action": "No action is needed for the file. Read the items listed as not checked before relying on it.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.sso_gateway_enablement_not_persisted",
+      "axis": "identity",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "file",
+        "file": "oidc_file"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "oidc.json",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "A valid OIDC file does not prove that the gateway is started with it: SSO is enabled only by the gateway option --oidc-config.",
+      "action": "Check the command line of the gateway launcher.",
+      "requires": "the command line of the gateway launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "oidc.loader_acceptance_not_checked",
+      "axis": "identity",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "file",
+        "file": "oidc_file"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "oidc.json",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "Whether the gateway accepts this OIDC file when it starts is not checked: it also compares the file with the durable authentication state.",
+      "action": "Start the gateway; it refuses to start when the durable state and the file disagree.",
+      "requires": "the gateway checks the stores and the durable authentication state when it starts",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "registry.loader_acceptance_not_checked",
+      "axis": "tenants",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "file",
+        "file": "tenant_registry"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "tenants.json",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "Whether the gateway accepts this registry when it starts is not checked: it also reads every key file, requires distinct keys and opens every store.",
+      "action": "Start the gateway; it refuses to start when a key file or a store is unusable.",
+      "requires": "the gateway checks token content, token uniqueness and the stores when it starts",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "registry.offline_rules_passed",
+      "axis": "tenants",
+      "status": "ok",
+      "basis": "inferred",
+      "scope": {
+        "kind": "file",
+        "file": "tenant_registry"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "tenants.json",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The structure and the policies of the tenant registry pass the offline rules of the gateway loader, restated in this tool. Token content is not checked.",
+      "action": "No action is needed for the file. Read the items listed as not checked before relying on it.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "tenants.durable_plan_comparison_not_available",
+      "axis": "tenants",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "tenants.json",
+            "field": "tenants[].tenant_id"
+          },
+          {
+            "file": "oidc.json",
+            "field": "authentication_audit.capacity_plan"
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The gateway also compares the capacity plan with the plan stored in the authentication audit. This build cannot read that store offline.",
+      "action": "Nothing in this build covers it offline. The gateway makes the comparison when it starts and refuses to start on a difference.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "tenants.plan_matches_registry",
+      "axis": "tenants",
+      "status": "ok",
+      "basis": "inferred",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "tenants.json",
+            "field": "tenants[].tenant_id"
+          },
+          {
+            "file": "oidc.json",
+            "field": "authentication_audit.capacity_plan.tenants[].tenant_id"
+          }
+        ],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The capacity plan and the tenant registry name exactly the same tenants.",
+      "action": "No action is needed for the files. The comparison with the durable plan is listed separately.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "reference.content_not_checked",
+      "axis": "credential_references",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool opens no file that the inspected files name as a key file, a token file or a credential file. Whether each file holds a well-formed and distinct value is not checked.",
+      "action": "The consuming command validates the content when it starts.",
+      "requires": "the consuming command checks the content when it starts",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "reference.setup_secret_material_present",
+      "axis": "credential_references",
+      "status": "info",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox setup resume",
+        "assumes": []
+      },
+      "message": "The setup recovery record that holds the generated tokens is present. It is never displayed and was not opened.",
+      "action": "Keep it private with the installation; setup recovery needs it.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.not_inspected",
+      "axis": "providers",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "No provider location was given, so the AI client profiles were not inspected.",
+      "action": "Pass --config-dir DIR or --providers-file FILE.",
+      "requires": "--config-dir DIR or --providers-file FILE",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.decision_engine_selection_not_persisted",
+      "axis": "inference",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The decision engine is selected by gateway options and variables that are not stored in the installation: the selection is not checked. For a backend that calls an engine, the gateway requires its URL and its model, and a key file for the TypeSafe backend; it refuses an incomplete or mixed set of decision-engine options.",
+      "action": "Read the gateway launcher: the option --jev-backend, then the variable named JEV_BACKEND, then a legacy URL option; with none of them no decision engine is used.",
+      "requires": "the command line or the Compose file of the launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.local_model_backend_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no offline inspection of a local model backend: image, weights, memory budget and readiness are not examined.",
+      "action": "Nothing in this build covers it offline. The local-AI guide describes how to build and verify the backend.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.model_tls_outputs_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no reader for the outputs of model TLS provisioning.",
+      "action": "Nothing in this build covers it offline.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "engine.program_not_inspected",
+      "axis": "engine",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "No engine was named, so no engine program was inspected.",
+      "action": "Pass --runtime docker or --runtime podman.",
+      "requires": "--runtime docker or --runtime podman",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "engine.state_not_checked",
+      "axis": "engine",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool never executes the engine: whether it runs, its version and its rootless mode are not checked.",
+      "action": "Run agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman; that command executes the engine.",
+      "requires": "agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "data.offline_inspection_not_available",
+      "axis": "data",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This diagnostic never opens SQLite connections to tenant stores or authentication audits: schema, tenant binding, audit format and integrity are not examined here. The gateway validates its stores when it starts. For a tenant local-chain check, agentsandbox verify-audit --viewer-token-file FILE --gateway URL reads an explicit viewer file; it does not establish independent rollback continuity.",
+      "action": "For tenant audit evidence, use the signed-checkpoint guide as a separate explicit operation. A gateway local-chain check and independently anchored rollback verification are different operations.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "data.signed_checkpoint_not_checked",
+      "axis": "data",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "installation_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "ai-guard-audit-checkpoint",
+        "assumes": []
+      },
+      "message": "Signed tenant checkpoints and independent rollback continuity were not verified by this diagnostic.",
+      "action": "Use ai-guard-audit-checkpoint verify as a separate, deliberate offline operation with tenant checkpoint evidence and an independently held trust anchor. Follow the signed-checkpoint guide for optional database comparison and its sidecar effects.",
+      "requires": "explicit ai-guard-audit-checkpoint verify with tenant checkpoint evidence and an independently held trust anchor",
+      "subjects": null,
+      "details": null
+    }
+  ],
+  "limits": [
+    {
+      "code": "provider.qualified_versions_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "This build contains no list of qualified client versions.",
+      "action": "Record the client versions you build into the worker image; this tool cannot confirm them.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.client_presence_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "Whether Codex CLI or Claude Code is present is probed only inside the worker when it starts. This build has no check on the control side.",
+      "action": "Nothing in this build covers it offline. A launch reports an absent client from the worker.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.client_version_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The version of a client is probed only inside the worker when it starts. This build has no check on the control side.",
+      "action": "Nothing in this build covers it offline. A launch reports an incompatible version from the worker.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.account_validity_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Whether a provider account or a subscription is valid can only be established by the provider. This tool makes no provider call.",
+      "action": "Nothing in this build covers it. A launch is the first use of the account.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.arbitrary_oidc_provider_not_qualified",
+      "axis": "identity",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "The product accepts one exact signed OIDC profile. Compatibility with a given identity provider is not presumed and is not qualified by this tool.",
+      "action": "Follow the SSO guide and qualify your identity provider with a real sign-in.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.internal_profile_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no managed internal-inference profile for Codex CLI or Claude Code: a provider profile carries no URL, no format and no CA field.",
+      "action": "Nothing in this build covers it. The enterprise guide states what is delivered.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.kubernetes_launch_not_available",
+      "axis": "topology",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Worker launch through the Kubernetes adapter is not available in this build; its diagnostics do not enable admission.",
+      "action": "Use Docker or Podman for workers. To inspect an authority without admitting workers, use agentsandbox kubernetes doctor.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "layout.sibling_staging_not_inspected",
+      "axis": "layout",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool looks only inside the directories it is given. A setup staging directory left beside a published installation is not searched for.",
+      "action": "If a preparation was interrupted, pass the retained staging directory that setup prepare printed as --installation-dir DIR.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "tool.linux_macos_posture_policy_only",
+      "axis": "layout",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Private-directory and private-file checks follow the product policy for local Linux and macOS file systems. A network or FUSE file system is refused by that policy, not examined.",
+      "action": "Keep the installation on a supported local file system.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    }
+  ]
+}

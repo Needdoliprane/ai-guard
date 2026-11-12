@@ -429,6 +429,10 @@ mod policy_tests;
 mod capacity_tests;
 
 #[cfg(test)]
+#[path = "gateway_config_diagnostics_parity_tests.rs"]
+mod diagnostics_parity_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;

@@ -9,7 +9,7 @@ FROM rust:1.99.1-bookworm AS rust-build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src/ ./src/
-RUN cargo build --release --locked --bin agentsandbox --bin ai-guard-audit-checkpoint
+RUN cargo build --release --locked --bin agentsandbox --bin ai-guard-audit-checkpoint --bin ai-guard-diagnose
 
 FROM debian:bookworm-slim
 RUN apt-get update \
@@ -22,6 +22,7 @@ RUN apt-get update \
     && chmod 0700 /data /run/secrets
 COPY --from=rust-build /build/target/release/agentsandbox /usr/local/bin/agentsandbox
 COPY --from=rust-build /build/target/release/ai-guard-audit-checkpoint /usr/local/bin/ai-guard-audit-checkpoint
+COPY --from=rust-build /build/target/release/ai-guard-diagnose /usr/local/bin/ai-guard-diagnose
 COPY --from=front-build /build/front/dist/ /app/front/
 COPY policies/ /app/policies/
 COPY LICENSE /usr/share/licenses/ai-guard/LICENSE

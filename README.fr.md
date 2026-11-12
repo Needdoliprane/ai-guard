@@ -24,6 +24,8 @@ Commencer par l'[index de configuration](docs/setup/README.fr.md) : composant qu
 
 Pour la cible Kubernetes Docker Desktop, voir [autorité et inspection](docs/setup/kubernetes/README.fr.md). Le lancement de workers par cet adaptateur reste indisponible ; son diagnostic n'active pas l'admission.
 
+Pour comprendre une installation avant un lancement, voir le [diagnostic opérateur](docs/setup/diagnostics/README.fr.md) : `ai-guard-diagnose` rapporte sa disposition, ses tenants, ses références de credentials et la sélection fournisseur, hors ligne par défaut et en lecture seule, sans ouvrir aucun fichier que les fichiers inspectés désignent comme credential, et un rapport sans erreur ne qualifie rien.
+
 ## Premier démarrage local
 
 Depuis la racine du dépôt, avec la toolchain de `rust-toolchain.toml`, un moteur Docker démarré et Compose :

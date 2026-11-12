@@ -201,6 +201,15 @@ fn choose<'a>(
     bail!("ambiguous_configuration: several provider profiles match without an explicit priority")
 }
 
+pub(super) fn choose_profile<'a>(
+    config: &'a ProviderConfigV1,
+    selection: &ProviderSelection,
+) -> Result<(&'a ProviderProfileV1, ChoiceSource)> {
+    config.validate()?;
+    validate_model(selection.model.as_deref())?;
+    choose(config, selection)
+}
+
 pub(super) fn prepare(
     config: &ProviderConfigV1,
     selection: &ProviderSelection,

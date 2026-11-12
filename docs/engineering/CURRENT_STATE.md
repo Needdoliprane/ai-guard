@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre, 03:04 UTC — diagnostic opérateur E : validation logicielle composée
+
+Le gel public `862e182fe3f9ff6a6028b2b2060bf36f83ba3cab` + 45 postimages E passe neuf parités du binaire et les 85 cas automatiques de la suite CLI normale ; l’exporteur manuel ignoré reste `NOT_RUN` dans cette campagne. Build et check toutes cibles RC 0. Source `c2b907a8…`, 2 552 fichiers `0644` ; export vivant exact `8a96898a…`, fermeture RC 0/OOM 0, vérification indépendante des 301 pièces brutes et des contenus/modes. [Sources, commandes et limites](evidence/2026-11-12/operator-diagnostics/README.md).
+
+`ai-guard-diagnose` décrit les fichiers explicitement désignés, les dispositions d’installation, politiques et références, le choix fournisseur et les points non contrôlés, en texte ou JSON v1. Il reste passif par défaut ; la découverte OIDC est un opt-in testé uniquement contre des peers synthétiques loopback. Le helper de sélection conserve le refus d’un abonnement sans repli API. Les corrections CEIR-01/02/03, les raccords D/E et neuf exemples réellement régénérés sont composés ; leurs anciens résultats et l’échec de harnais de régénération r1 restent distincts. Aucun moteur, fournisseur, IdP réel, macOS natif, image de contrôle/release, Clippy strict ou suite complète qualifiés ; aucun gate global fermé.
+
 ## 12 novembre, 00:12 UTC — ApproveLaunch préparatoire : quatre parents logiciels PASS
 
 Sur la base publique `711ba1378672f5c66099b2dd78daee2b5e35019f` et trois postimages gelées, le build lib, quatre parents lib exacts et `cargo check --all-targets --frozen --offline` passent. Source QA `0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe` : 2 513 fichiers `0644`; export vivant vérifié `fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc`, 326 répertoires; fermeture RC 0, aucun OOM. Linux ARM64 épinglé, réseau absent, racine RO, UID 1000, 4 CPU et 9 Gio maximum. [Preuves et limites](evidence/2026-11-12/human-approval-capability/README.md).

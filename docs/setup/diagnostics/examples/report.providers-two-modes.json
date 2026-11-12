@@ -1,0 +1,944 @@
+{
+  "schema": "ai-guard-diagnose-report",
+  "version": 1,
+  "tool": {
+    "name": "ai-guard-diagnose",
+    "package_version": "PACKAGE_VERSION"
+  },
+  "mode": {
+    "network": "none",
+    "mutation": "none",
+    "credential_contents_read": "none",
+    "files_read_for_content": [
+      "provider_profiles"
+    ],
+    "active_checks_executed": []
+  },
+  "summary": {
+    "status": "error",
+    "exit_code": 3,
+    "counts": {
+      "ok": 2,
+      "info": 4,
+      "warning": 0,
+      "error": 1,
+      "unknown": 0,
+      "not_checked": 11,
+      "not_available": 13
+    },
+    "truncated": false,
+    "omitted": {
+      "reference_entries": 0,
+      "data_entries": 0,
+      "tenant_ids": 0
+    }
+  },
+  "inputs": [
+    {
+      "name": "config_dir",
+      "origin": "cli",
+      "display": "<config>"
+    },
+    {
+      "name": "providers_file",
+      "origin": "cli",
+      "display": "<providers-file>"
+    }
+  ],
+  "layouts": [
+    {
+      "input": "config_dir",
+      "kind": "historical_config_dir",
+      "preparation": null,
+      "oidc_file_version": null
+    }
+  ],
+  "topology": {
+    "tenant_model": "single_local",
+    "tenant_count": 1
+  },
+  "identity": {
+    "technical_key_references": {
+      "present": 2,
+      "absent": 0,
+      "unknown": 0
+    },
+    "sso": null
+  },
+  "tenants": null,
+  "credential_references": [
+    {
+      "owner": {
+        "kind": "provider_profile",
+        "id": "codex-subscription",
+        "masked": false
+      },
+      "role": "provider",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "provider reference #4 (codex_auth_file, inside the directory of the profile file)",
+      "presence": "absent",
+      "entry_kind": null,
+      "mode": null,
+      "owner_is_inspector": null,
+      "single_link": null,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "runner",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "<config>/secrets/runner",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "satisfied",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "viewer",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "<config>/secrets/viewer",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "satisfied",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "projection",
+      "consumer": "compose_projection",
+      "location": "inside_root",
+      "display": "<config>/mounted-secrets/runner",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0444",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "installation",
+        "id": null,
+        "masked": false
+      },
+      "role": "projection",
+      "consumer": "compose_projection",
+      "location": "inside_root",
+      "display": "<config>/mounted-secrets/viewer",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0444",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "not_evaluated",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "provider_profile",
+        "id": "claude-api",
+        "masked": false
+      },
+      "role": "provider",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "provider reference #1 (api_env_file, inside the directory of the profile file)",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "satisfied",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "provider_profile",
+        "id": "claude-subscription",
+        "masked": false
+      },
+      "role": "provider",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "provider reference #2 (claude_oauth_env_file, inside the directory of the profile file)",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "satisfied",
+      "content": "not_read"
+    },
+    {
+      "owner": {
+        "kind": "provider_profile",
+        "id": "codex-api",
+        "masked": false
+      },
+      "role": "provider",
+      "consumer": "private_file_reader",
+      "location": "inside_root",
+      "display": "provider reference #3 (api_env_file, inside the directory of the profile file)",
+      "presence": "present",
+      "entry_kind": "regular_file",
+      "mode": "0600",
+      "owner_is_inspector": true,
+      "single_link": true,
+      "private_rule": "satisfied",
+      "content": "not_read"
+    }
+  ],
+  "providers": {
+    "file": {
+      "state": "loaded",
+      "display": "<providers-file>"
+    },
+    "default_profile": null,
+    "auto_priority": [
+      {
+        "id": "codex-subscription",
+        "masked": false
+      },
+      {
+        "id": "claude-subscription",
+        "masked": false
+      },
+      {
+        "id": "codex-api",
+        "masked": false
+      },
+      {
+        "id": "claude-api",
+        "masked": false
+      }
+    ],
+    "profiles": [
+      {
+        "profile": {
+          "id": "claude-api",
+          "masked": false
+        },
+        "revision": 1,
+        "client": "claude_code",
+        "auth_mode": "api",
+        "model": null,
+        "source_kind": "api_env_file",
+        "variable_name": "ANTHROPIC_API_KEY"
+      },
+      {
+        "profile": {
+          "id": "claude-subscription",
+          "masked": false
+        },
+        "revision": 1,
+        "client": "claude_code",
+        "auth_mode": "subscription",
+        "model": null,
+        "source_kind": "claude_oauth_env_file",
+        "variable_name": null
+      },
+      {
+        "profile": {
+          "id": "codex-api",
+          "masked": false
+        },
+        "revision": 1,
+        "client": "codex",
+        "auth_mode": "api",
+        "model": null,
+        "source_kind": "api_env_file",
+        "variable_name": "OPENAI_API_KEY"
+      },
+      {
+        "profile": {
+          "id": "codex-subscription",
+          "masked": false
+        },
+        "revision": 1,
+        "client": "codex",
+        "auth_mode": "subscription",
+        "model": null,
+        "source_kind": "codex_auth_file",
+        "variable_name": null
+      }
+    ],
+    "selection": {
+      "requested": {
+        "client": "auto",
+        "auth_mode": "auto",
+        "profile": "auto",
+        "model": "auto"
+      },
+      "resolved": {
+        "profile": {
+          "id": "codex-subscription",
+          "masked": false
+        },
+        "revision": 1,
+        "client": "codex",
+        "auth_mode": "subscription",
+        "model": null,
+        "chosen_by": "auto"
+      }
+    }
+  },
+  "inference": {
+    "decision_engine_transport": null
+  },
+  "trust": [],
+  "engine": null,
+  "data": [],
+  "findings": [
+    {
+      "code": "layout.historical_config_dir",
+      "axis": "layout",
+      "status": "info",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "config_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This directory has the historical layout created by agentsandbox init: private key sources, their read-only projections, sessions and pending operations.",
+      "action": "No action is needed. The commands init, up, down, run, worker-status, worker-resume, worker-stop, export-workspace, verify-audit and providers read this layout.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.gateway_arguments_not_persisted",
+      "axis": "topology",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The arguments of the gateway and of the dashboard are not stored in the installation: listening addresses, policy file and event bound are not checked.",
+      "action": "Read them in the command line or the Compose file of the launcher.",
+      "requires": "the command line or the Compose file of the launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.running_services_not_checked",
+      "axis": "topology",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool starts nothing and contacts nothing: whether the gateway, the dashboard or a worker is running is not checked.",
+      "action": "Ask a running service with agentsandbox healthcheck --url URL.",
+      "requires": "agentsandbox healthcheck --url URL",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.single_local_tenant",
+      "axis": "topology",
+      "status": "info",
+      "basis": "inferred",
+      "scope": {
+        "kind": "input",
+        "input": "config_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "A gateway started without a tenant registry serves one tenant, named local.",
+      "action": "No action is needed. For several tenants, start the gateway with a tenant registry.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.local_named_accounts_not_available",
+      "axis": "identity",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Local named accounts and memberships live in the tenant stores, which this build cannot inspect offline.",
+      "action": "Nothing in this build covers it offline.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.sso_not_inspected",
+      "axis": "identity",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "No OIDC file was given, so single sign-on was not inspected. SSO is optional and is enabled only by a gateway option; a historical config directory alone says nothing about it.",
+      "action": "Pass --oidc-config FILE or --installation-dir DIR to inspect an OIDC file.",
+      "requires": "--oidc-config FILE or --installation-dir DIR",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "reference.content_not_checked",
+      "axis": "credential_references",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool opens no file that the inspected files name as a key file, a token file or a credential file. Whether each file holds a well-formed and distinct value is not checked.",
+      "action": "The consuming command validates the content when it starts.",
+      "requires": "the consuming command checks the content when it starts",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.configuration_valid",
+      "axis": "providers",
+      "status": "ok",
+      "basis": "observed",
+      "scope": {
+        "kind": "file",
+        "file": "provider_profiles"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "provider profile file",
+            "field": null
+          }
+        ],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The provider profile file is accepted by the product validator, which reads that file alone.",
+      "action": "No action is needed for the file. Read the items listed as not checked before a launch.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.credential_content_not_checked",
+      "axis": "providers",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "provider_profiles"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "This tool opens no file that the profile file names as a provider credential, so the content of the credentials and the validity of the account are not checked.",
+      "action": "A launch validates the selected credential before authorization.",
+      "requires": "agentsandbox run validates the selected credential before authorization",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.launch_requires_observe_and_bridge",
+      "axis": "providers",
+      "status": "info",
+      "basis": "inferred",
+      "scope": {
+        "kind": "provider_profiles"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "A managed launch with provider credentials requires the options --profile observe and --network bridge; it changes neither by itself.",
+      "action": "Pass both options to agentsandbox run for a managed client.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.login_required",
+      "axis": "providers",
+      "status": "error",
+      "basis": "inferred",
+      "scope": {
+        "kind": "provider_profiles"
+      },
+      "origin": {
+        "sources": [
+          {
+            "file": "provider profile file",
+            "field": "profiles[].credential.path"
+          }
+        ],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The profile that the requested selection resolves is a subscription profile and its credential file does not exist. A managed launch with this selection refuses with login_required and never tries an API profile.",
+      "action": "Sign in with the client into its dedicated store, as the provider guide describes, then check that the profile references that file. No API profile is used in its place.",
+      "requires": null,
+      "subjects": {
+        "kind": "provider_profiles",
+        "total": 1,
+        "ids": [
+          {
+            "id": "codex-subscription",
+            "masked": false
+          }
+        ],
+        "omitted": 0
+      },
+      "details": null
+    },
+    {
+      "code": "provider.manual_launch_path_not_checked",
+      "axis": "providers",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The manual launch path, with the options --provider and --secret-env-file and an explicit command, does not use the profile file and is not checked.",
+      "action": "A launch applies its own rules to that path, including the rule on env file names inside the project.",
+      "requires": "agentsandbox run",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.selection_resolved",
+      "axis": "providers",
+      "status": "ok",
+      "basis": "observed",
+      "scope": {
+        "kind": "provider_profiles"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The requested selection resolves to one profile. The choice is made by the product function that a managed launch uses, for the selection options given to this tool; that function reads no credential file. The product rule is: an explicit profile; then the default profile among the candidates; then a single candidate; then auto_priority; under automatic authentication mode, subscription candidates exclude API candidates.",
+      "action": "No action is needed for the selection. Give this tool the options --client, --auth-mode, --client-profile and --model exactly as agentsandbox run receives them; an option left out is resolved automatically.",
+      "requires": null,
+      "subjects": {
+        "kind": "provider_profiles",
+        "total": 1,
+        "ids": [
+          {
+            "id": "codex-subscription",
+            "masked": false
+          }
+        ],
+        "omitted": 0
+      },
+      "details": null
+    },
+    {
+      "code": "provider.subscription_never_falls_back_to_api",
+      "axis": "providers",
+      "status": "info",
+      "basis": "inferred",
+      "scope": {
+        "kind": "provider_profiles"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The requested selection resolves to a subscription profile whose credential file is absent or unsafe, so a managed launch with this selection refuses. The profile file also declares API profiles: none of them was tried. The product never replaces a subscription by an API profile.",
+      "action": "Sign in for the resolved subscription profile, or correct its credential reference, as the finding on that profile says. No API profile is used in its place. Under automatic authentication mode an API profile can be resolved when no subscription profile matches the requested client; a request made with --auth-mode subscription never resolves to an API profile.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.decision_engine_selection_not_persisted",
+      "axis": "inference",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The decision engine is selected by gateway options and variables that are not stored in the installation: the selection is not checked. For a backend that calls an engine, the gateway requires its URL and its model, and a key file for the TypeSafe backend; it refuses an incomplete or mixed set of decision-engine options.",
+      "action": "Read the gateway launcher: the option --jev-backend, then the variable named JEV_BACKEND, then a legacy URL option; with none of them no decision engine is used.",
+      "requires": "the command line or the Compose file of the launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.local_model_backend_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no offline inspection of a local model backend: image, weights, memory budget and readiness are not examined.",
+      "action": "Nothing in this build covers it offline. The local-AI guide describes how to build and verify the backend.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.model_tls_outputs_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no reader for the outputs of model TLS provisioning.",
+      "action": "Nothing in this build covers it offline.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "engine.program_not_inspected",
+      "axis": "engine",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "No engine was named, so no engine program was inspected.",
+      "action": "Pass --runtime docker or --runtime podman.",
+      "requires": "--runtime docker or --runtime podman",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "engine.state_not_checked",
+      "axis": "engine",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "host"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool never executes the engine: whether it runs, its version and its rootless mode are not checked.",
+      "action": "Run agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman; that command executes the engine.",
+      "requires": "agentsandbox doctor --runtime docker or agentsandbox doctor --runtime podman",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "data.location_not_persisted",
+      "axis": "data",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "config_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox gateway",
+        "assumes": []
+      },
+      "message": "The store path of a historical config directory is a gateway option that is not stored in the installation: no store was located.",
+      "action": "Read the gateway launcher: the option --data, or the Compose volume.",
+      "requires": "the command line or the Compose file of the launcher",
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "data.offline_inspection_not_available",
+      "axis": "data",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "config_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This diagnostic never opens SQLite connections to tenant stores or authentication audits: schema, tenant binding, audit format and integrity are not examined here. The online command agentsandbox verify-audit --config-dir DIR --gateway URL asks the running gateway for its local hash-chain check and reads the viewer file.",
+      "action": "For tenant audit evidence, use the signed-checkpoint guide as a separate explicit operation. A gateway local-chain check and independently anchored rollback verification are different operations.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "data.signed_checkpoint_not_checked",
+      "axis": "data",
+      "status": "not_checked",
+      "basis": "observed",
+      "scope": {
+        "kind": "input",
+        "input": "config_dir"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "ai-guard-audit-checkpoint",
+        "assumes": []
+      },
+      "message": "Signed tenant checkpoints and independent rollback continuity were not verified by this diagnostic.",
+      "action": "Use ai-guard-audit-checkpoint verify as a separate, deliberate offline operation with tenant checkpoint evidence and an independently held trust anchor. Follow the signed-checkpoint guide for optional database comparison and its sidecar effects.",
+      "requires": "explicit ai-guard-audit-checkpoint verify with tenant checkpoint evidence and an independently held trust anchor",
+      "subjects": null,
+      "details": null
+    }
+  ],
+  "limits": [
+    {
+      "code": "provider.qualified_versions_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "This build contains no list of qualified client versions.",
+      "action": "Record the client versions you build into the worker image; this tool cannot confirm them.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.client_presence_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "Whether Codex CLI or Claude Code is present is probed only inside the worker when it starts. This build has no check on the control side.",
+      "action": "Nothing in this build covers it offline. A launch reports an absent client from the worker.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.client_version_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": "agentsandbox run",
+        "assumes": []
+      },
+      "message": "The version of a client is probed only inside the worker when it starts. This build has no check on the control side.",
+      "action": "Nothing in this build covers it offline. A launch reports an incompatible version from the worker.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "provider.account_validity_not_available",
+      "axis": "providers",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Whether a provider account or a subscription is valid can only be established by the provider. This tool makes no provider call.",
+      "action": "Nothing in this build covers it. A launch is the first use of the account.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "identity.arbitrary_oidc_provider_not_qualified",
+      "axis": "identity",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "The product accepts one exact signed OIDC profile. Compatibility with a given identity provider is not presumed and is not qualified by this tool.",
+      "action": "Follow the SSO guide and qualify your identity provider with a real sign-in.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "inference.internal_profile_not_available",
+      "axis": "inference",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This build has no managed internal-inference profile for Codex CLI or Claude Code: a provider profile carries no URL, no format and no CA field.",
+      "action": "Nothing in this build covers it. The enterprise guide states what is delivered.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "topology.kubernetes_launch_not_available",
+      "axis": "topology",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Worker launch through the Kubernetes adapter is not available in this build; its diagnostics do not enable admission.",
+      "action": "Use Docker or Podman for workers. To inspect an authority without admitting workers, use agentsandbox kubernetes doctor.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "layout.sibling_staging_not_inspected",
+      "axis": "layout",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "This tool looks only inside the directories it is given. A setup staging directory left beside a published installation is not searched for.",
+      "action": "If a preparation was interrupted, pass the retained staging directory that setup prepare printed as --installation-dir DIR.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    },
+    {
+      "code": "tool.linux_macos_posture_policy_only",
+      "axis": "layout",
+      "status": "not_available",
+      "basis": "observed",
+      "scope": {
+        "kind": "build"
+      },
+      "origin": {
+        "sources": [],
+        "consumer": null,
+        "assumes": []
+      },
+      "message": "Private-directory and private-file checks follow the product policy for local Linux and macOS file systems. A network or FUSE file system is refused by that policy, not examined.",
+      "action": "Keep the installation on a supported local file system.",
+      "requires": null,
+      "subjects": null,
+      "details": null
+    }
+  ]
+}

@@ -20,6 +20,7 @@ This manual describes the complete product contract. The implementation and qual
 | [Enterprise](enterprise/README.md) | Shared control services, tenant boundaries, private CAs, internal inference and operations. |
 | [Kubernetes authority and inspection](kubernetes/README.md) | Explicit HTTPS trust and read-only Rust diagnostics for the Docker Desktop target; worker admission remains unavailable. |
 | [Signed audit checkpoints](audit-signatures/README.md) | Offline `ai-guard-audit-checkpoint` command: Ed25519 signing key, signed checkpoints of a tenant audit chain, independently held trust anchor, rollback detection, key rotation, proof export and diagnosis. Host-path control only; the Compose volume is not served. |
+| [Operator diagnostics](diagnostics/README.md) | `ai-guard-diagnose`, a read-only report before launch, offline by default: layouts, tenants and capacity plan, credential references by metadata, provider selection, CA bundles, and what was not examined. It opens no file that the inspected files name as a credential, and qualifies nothing. |
 
 Each guide contains prerequisites, configuration, startup, expected endpoints, diagnosis, stopping and data preservation. English/French versions and configuration examples change together when a contract changes.
 

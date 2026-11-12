@@ -1,5 +1,15 @@
 # Validation courante
 
+## 12 novembre, 03:04 UTC — diagnostic opérateur E : 9 parités et 85 cas CLI PASS
+
+Sur le nouveau gel `c2b907a8d19cab26b49337a58f30de2e78966fbad9bc7a9a48ae32a8cd9362c5` (public `862e182` + 45 postimages, 2 552 fichiers), build offline lib/bin/diagnose et trois listes réelles RC 0. Les neuf parents de parité du **binaire** exécutent chacun exactement un PASS ; la suite CLI normale série rend `85 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out` en 84,07 s. Ses 86 identités distinctes sont vérifiées ; l’unique ignoré, `regenerate_documented_examples_into_tmpdir`, reste `NOT_RUN` dans ce gel. Les quatre parents d’exemples/guides auparavant retenus passent ici après promotion ; aucun PASS antérieur n’est transféré.
+
+Check `cargo check --frozen --offline --all-targets --message-format=json` RC 0, objet Cargo final réussi sans erreur de compilation. Export vivant réel de 29 399 040 octets SHA `8a96898abef49150418d8ff86765b6d2971c2573664cb0a6bea333474120ec4b` : mêmes 2 552 contenus/modes que l’entrée. RUN et fermeture du CID exact RC 0 ; état final arrêté, sortie conteneur 137 avec `OOMKilled=false`, compteurs OOM à zéro. Pic cgroup 7 221 514 240 / 9 663 676 416 octets : mesure de compilation/QA, pas d’usage worker.
+
+La régénération r2 séparée a exécuté neuf parités et l’exporteur normalement ignoré sur `a710fcab…` : 19 membres capturés (9 bruts, 9 normalisés et manifeste), lecteur à liste fermée, vérification Root et revue de contenu avant promotion des neuf sorties. Seule la version du paquet est normalisée ; les deux comptes EN/FR sont alignés. r1 reste `FAIL_HARNESS` avant les parents (tableau vide Bash 3.2), sans échec produit ni PASS reconstruit. Les preuves Claude restent historiques sur leur source.
+
+Linux ARM64 épinglé, hors ligne, 4 CPU/9 Gio ; découverte OIDC contre des peers loopback synthétiques seulement. [Commandes, oracles, empreintes et périmètres NOT_RUN](evidence/2026-11-12/operator-diagnostics/README.md). Ni fournisseur/IdP réel, moteur, cluster, macOS natif, image/release, Clippy strict ou suite complète exécutés dans ce lot ; aucun gate global fermé.
+
 ## 12 novembre, 00:12 UTC — QA ciblée ApproveLaunch : PASS borné
 
 Sur le seul gel source `0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe`, build `cargo test --lib --no-run`, quatre parents exacts et `cargo check --all-targets --frozen --offline` RC 0. Chaque parent donne un PASS unique, zéro échec/ignoré, aucun panic. Vérification source post-run réussie; export vivant `fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc` (27 863 040 octets), fermeture du CID exact RC 0 et aucun OOM. Pic cgroup 6 233 681 920 octets / 9 663 676 416. [Quatre oracles et empreintes](evidence/2026-11-12/human-approval-capability/TESTS.json).
