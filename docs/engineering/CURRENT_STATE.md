@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre — sources humaines : cinq compléments physiques et temporels PASS
+
+Les trois nouveaux parents vérifient une substitution physique Auth4, une configuration byte-identique sur autre inode et la collecte des trois floors durables, avec vraie reprise après un maximum Auth submilliseconde. Deux voisins de migration/reprise et le check toutes cibles passent aussi. Root vérifie 207 pièces de phases, 2 621 statiques et 2 591 postimages/modes exacts. [Source, oracles et limites](evidence/2026-11-12/human-source-coverage/README.md). Le premier essai a échoué dans le harnais avant les tests ; sa preuve est conservée et le raccord des hashes a été corrigé hors ligne.
+
+La suite inclut les ports business runner et leurs gardes de version, en plus des mutateurs humains/OIDC/RAM/offline : les callers legacy actuels restent fermés au format 14. Aucun Ready ou parcours humain complet n’est activé. Les substitutions concurrentes, autre main Store, horloge réellement reculée et runtimes restent non qualifiés ; tous les gates globaux restent ouverts.
+
 ## 12 novembre — union A+B+Auth : 17 régressions de migration et démarrage PASS
 
 Les openers privés et le coordinateur de maintenance passent 17 parents exacts sur de vrais fichiers SQLite, puis le check toutes cibles. Les deux getters retiennent le head observé ; une première migration refuse les backups main/sidecars occupés avant intent ; la reprise après commit partiel conserve plan et anchor. Deux oracles de fixture ont été corrigés sans changer les contrôles métier. Root vérifie 363 pièces runtime, 2 615 pièces statiques et 2 589 contenus/modes postrun. [Source, reproductions, résultats et limites](evidence/2026-11-12/human-source-migration/README.md).

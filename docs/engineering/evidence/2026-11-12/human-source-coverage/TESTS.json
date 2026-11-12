@@ -1,0 +1,168 @@
+{
+  "version": 1,
+  "status": "PASS_SCOPED_SOFTWARE",
+  "date": "2026-11-12",
+  "source": {
+    "publicBase": "ad0e034943f2f9c6719c6a0a2bcd844d9bf0497e",
+    "sha256": "a9e13097ecfb9c4909aee454f947cab04c32c10b4cdaa79b81bffa544e2b8c20",
+    "bytes": 30085120,
+    "files": 2591,
+    "applicationPostimages": [
+      {
+        "path": "src/human_authority/migration/tests.rs",
+        "preSha256": "f80a0e226a174a2f142ecf3a947425c6b1516c4d976b1f3fb35ad000e0a20813",
+        "postSha256": "59a7f3dd45f8a8faa709966bfbce95741297d219bfaa941f5d512fb76bfed7a0",
+        "mode": 420
+      },
+      {
+        "path": "src/human_authority/migration.rs",
+        "preSha256": "2b2a1ab6cdbb8f107b66c1abbb7f0e312c32d46027e0e20cdd92b09ab341ce37",
+        "postSha256": "2ba1bb26b58c044c1e869964c5fd64a62cbd0d64fb939a7680de43c505f93d0f",
+        "mode": 420
+      }
+    ],
+    "other2589PublicBlobsAndModesExact": true,
+    "productionTextWithoutCfgTestObserversByteIdentical": true,
+    "priorF80TestFileByteExactPrefix": true
+  },
+  "commands": {
+    "build": "cargo test --frozen --offline --lib --no-run --message-format=json",
+    "list": "compiled lib test executable --list",
+    "tests": "compiled lib test executable <exact-selector> --exact --nocapture --test-threads=1",
+    "check": "cargo check --frozen --offline --all-targets --message-format=json",
+    "buildRc": 0,
+    "checkRc": 0,
+    "selectedBoundsSeconds": [
+      60,
+      60,
+      60,
+      30,
+      30
+    ],
+    "onlyFiveParentsExecuted": true
+  },
+  "parents": [
+    {
+      "number": 1,
+      "name": "human_authority::migration::tests::physical_authentication_source_substitution_refuses_before_any_backup_or_intent",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "f81f30d2acd39b3795703567bdbd00185a4bc848f5c3dc1eed7c4ae2b2b683b4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 2,
+      "name": "human_authority::migration::tests::physical_configuration_substitution_refuses_before_any_backup_or_intent",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "14bfa1186c0d9e7b023c4c6619f3eec856b8ffbe9af89e29ee7e13b05cfb6949",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 3,
+      "name": "human_authority::migration::tests::startup_collects_three_real_durable_floors_and_preserves_submillisecond_maximum",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "3473010e8d2263ecbc5557f6c7dcc3d446126f9890384eefed3ba41c71e714e4",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 4,
+      "name": "human_authority::migration::tests::real_migration_a_b_auth_is_owned_and_scoped_after_reopen",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "bb87d1cfdcbdcd9a2d37af7af42aca1df56621a1e920a5ef92db1f650a182673",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 5,
+      "name": "human_authority::migration::tests::partial_first_commit_resumes_same_plan_without_new_anchor",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "013564f46bc2517eb610bbcf2347dfd3a72102c503441b22f796e8f8605472af",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "verification": {
+    "rootReceiptSha256": "606adc280177641c0a61ca1fb4e0decb13ae8e7a2e395080b8c77bfd2d0fc127",
+    "runtimePhaseFiles": 207,
+    "runtimeManifestSha256": "b8a49fe274bba482fef2d775900f0d102ea57ac5fcacfcdfb93cab61b86d13cb",
+    "runtimeReportsExcludedFromPhaseManifest": 3,
+    "staticFiles": 2621,
+    "staticManifestSha256": "66acebd814fac9a5b05e01bdea6fbca46f0d1cea41502582af74d0f90a1cf943",
+    "postArchiveSha256": "6479ec0ce2627e314bfefcfca33e165ad82b83ee1a9fa6fa7c73d0e094a7e34f",
+    "postArchiveBytes": 30095360,
+    "postFilesAndModesExact": 2591,
+    "overflowBytes": 0,
+    "closureRc": 0,
+    "exactContainerRemoved": true,
+    "observedHolderExitCode": 137,
+    "oomKilled": false,
+    "cgroupOom": 0,
+    "cgroupOomKill": 0,
+    "holder137Cause": "Not established from these observations; project tests/check all exited0.",
+    "peakMemoryBytes": 6409289728,
+    "memoryLimitBytes": 9663676416
+  },
+  "review": {
+    "mode": "SOURCE_ONLY",
+    "verdict": "GO_SOURCE_BOUNDED",
+    "mdSha256": "1d5f2ebc74a1a7566ab348008dae3e553b6a6cce600c12b28157b51bb4c5731c",
+    "jsonSha256": "1578152cb4f6690f8eaec4817665ad59fa68152a9e297be4f07d9c379ce55edb"
+  },
+  "format": {
+    "rc": 0,
+    "files": 2,
+    "proofSha256": "2126ffa80c34a50f98d4de785f3eb30aafc9b9b348ad32187481464fcd3a92ba",
+    "scope": "trusted host formatter only, separate from207runtime phase files; no native project execution"
+  },
+  "previousAttempt": {
+    "status": "FAIL_HARNESS_SELECTOR",
+    "sourceByteIdentical": true,
+    "rootReceiptSha256": "36ec27c918b8e1192ed87c0a007d29afa3ae79f5a4b85181b8d2eb5430e618ea",
+    "parentsExecuted": 0,
+    "parentsPassed": 0,
+    "allTargets": "NOT_RUN",
+    "correction": "Final SELECTORS.json digest wired into RUN; four hash relations and five exact names checked offline before new build. No guard removed."
+  },
+  "environment": {
+    "platform": "LinuxARM64",
+    "rust": "1.99.1",
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "uid": 1000,
+    "network": "none",
+    "rootReadOnly": true,
+    "readOnlyBinds": 2,
+    "cpus": 4,
+    "memoryBytes": 9663676416,
+    "swapBytes": 0,
+    "pids": 128,
+    "scratchGiB": 4,
+    "capabilities": "ALL dropped",
+    "noNewPrivileges": true,
+    "seccomp": 2
+  },
+  "notRun": [
+    "Store main or parent directory substitution",
+    "concurrent substitutions or old executable",
+    "actual host clock rollback",
+    "complete gateway/CLI/human approval/launch",
+    "real runtimes/providers/SSO/multi-process restore/100worker load",
+    "prior specifically blocked legacy-opener canary, not retried",
+    "all17prior parents on this new source; only2 selected neighbors rerun",
+    "injected panic to dynamically exercise TLS observer cleanup"
+  ],
+  "globalProductionGatesClosed": 0,
+  "historicalAuditFingerprintsClosed": 0,
+  "full3PrivatePostimagesPreserved": 134
+}

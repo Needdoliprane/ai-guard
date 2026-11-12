@@ -938,3 +938,314 @@ fn fresh_migration_refuses_preexisting_backup_sidecars_before_intent() {
         }
     }
 }
+
+#[derive(Clone, PartialEq, Eq)]
+struct FixtureFileSnapshot {
+    identity: (u64, u64),
+    mode: u32,
+    bytes: Vec<u8>,
+}
+
+fn fixture_file_snapshot(path: &Path) -> Option<FixtureFileSnapshot> {
+    let parent = Directory::open_existing(path.parent().unwrap()).unwrap();
+    let name = path.file_name().unwrap();
+    let identity = parent.private_entry(name).unwrap()?;
+    let mode = std::fs::symlink_metadata(path)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o7777;
+    let bytes = std::fs::read(path).unwrap();
+    assert!(parent.private_entry(name).unwrap() == Some(identity));
+    Some(FixtureFileSnapshot {
+        identity: identity.physical_identity(),
+        mode,
+        bytes,
+    })
+}
+
+fn fixture_input_snapshots(
+    plan: &HumanSourcesMaintenancePlanV1,
+    request: &HumanSourcesMigrationRequest,
+) -> BTreeMap<PathBuf, Option<FixtureFileSnapshot>> {
+    let mut paths = Vec::new();
+    for source in &plan.target.sources {
+        let path = source.storage_binding.path();
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = path.file_name().unwrap().to_os_string();
+            name.push(suffix);
+            paths.push(path.parent().unwrap().join(name));
+        }
+    }
+    paths.push(request.plan_file.path().to_owned());
+    paths.extend(
+        request
+            .activation_files
+            .iter()
+            .map(|(_, file)| file.path().to_owned()),
+    );
+    paths
+        .into_iter()
+        .map(|path| {
+            let snapshot = fixture_file_snapshot(&path);
+            (path, snapshot)
+        })
+        .collect()
+}
+
+fn assert_physical_substitution_refused(
+    request: HumanSourcesMigrationRequest,
+    expected: BTreeMap<PathBuf, Option<FixtureFileSnapshot>>,
+) {
+    let journal = request.journal_directory.clone();
+    let backups = request.backup_paths.clone();
+    assert!(journal.persistent_entries(16).unwrap().is_empty());
+    assert_eq!(
+        migrate_human_sources(request).err(),
+        Some(HumanSourcesMigrationFailure::MaintenanceRefused)
+    );
+    assert!(journal.persistent_entries(16).unwrap().is_empty());
+    for path in backups.values() {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let mut name = path.file_name().unwrap().to_os_string();
+            name.push(suffix);
+            assert!(fixture_file_snapshot(&path.parent().unwrap().join(name)).is_none());
+        }
+    }
+    for (path, snapshot) in expected {
+        assert!(
+            fixture_file_snapshot(&path) == snapshot,
+            "fixture input changed after refusal: {}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn physical_authentication_source_substitution_refuses_before_any_backup_or_intent() {
+    let fixture = Fixture::new();
+    let source = fixture.source(3).clone();
+    let original = source.storage_binding.path();
+    let parent = Directory::open_existing(original.parent().unwrap()).unwrap();
+    let root = Directory::open_existing(fixture._temporary.path()).unwrap();
+    let material = private_child(&root, "source-substitution-material");
+    let replacement = material.path().join("replacement.sqlite");
+    // The replacement is a real independent Auth4 backup at the same verified
+    // logical prefix, not a changed source ID or a hand-built modern database.
+    let before = fixture.legacy_auth.verify().unwrap();
+    assert_eq!(
+        fixture.legacy_auth.backup_new(&replacement).unwrap(),
+        before
+    );
+    let request = fixture.request();
+    // Close all SQLite handles before raw byte snapshots or pathname changes.
+    drop(fixture.legacy);
+    drop(fixture.legacy_auth);
+    let mut expected = fixture_input_snapshots(&fixture.plan, &request);
+    let original_snapshot = expected.get(&original).unwrap().clone().unwrap();
+    let replacement_snapshot = fixture_file_snapshot(&replacement).unwrap();
+    assert_eq!(
+        original_snapshot.identity,
+        (
+            source.storage_binding.source_device,
+            source.storage_binding.source_inode
+        )
+    );
+    assert_ne!(original_snapshot.identity, replacement_snapshot.identity);
+    let retained = parent.path().join("retained-authentication.sqlite");
+    assert!(fixture_file_snapshot(&retained).is_none());
+    std::fs::rename(&original, &retained).unwrap();
+    std::fs::rename(&replacement, &original).unwrap();
+    assert!(fixture_file_snapshot(&retained) == Some(original_snapshot.clone()));
+    assert!(fixture_file_snapshot(&original) == Some(replacement_snapshot.clone()));
+    assert!(fixture_file_snapshot(&replacement).is_none());
+    expected.insert(retained, Some(original_snapshot));
+    expected.insert(original, Some(replacement_snapshot));
+    assert_physical_substitution_refused(request, expected);
+}
+
+#[test]
+fn physical_configuration_substitution_refuses_before_any_backup_or_intent() {
+    let fixture = Fixture::new();
+    let request = fixture.request();
+    let original = request.activation_files[0].1.path().to_owned();
+    let parent = Directory::open_existing(original.parent().unwrap()).unwrap();
+    // Keeping the exact bytes isolates physical substitution from semantic
+    // configuration changes. The request retains the original checked file.
+    let replacement = parent
+        .persistent_create(
+            "replacement-config.json",
+            request.activation_files[0].1.bytes(),
+        )
+        .unwrap();
+    drop(fixture.legacy);
+    drop(fixture.legacy_auth);
+    let mut expected = fixture_input_snapshots(&fixture.plan, &request);
+    let original_snapshot = expected.get(&original).unwrap().clone().unwrap();
+    let replacement_snapshot = fixture_file_snapshot(replacement.path()).unwrap();
+    assert!(original_snapshot.bytes == replacement_snapshot.bytes);
+    assert_ne!(original_snapshot.identity, replacement_snapshot.identity);
+    let retained = parent.path().join("retained-config.json");
+    assert!(fixture_file_snapshot(&retained).is_none());
+    std::fs::rename(&original, &retained).unwrap();
+    std::fs::rename(replacement.path(), &original).unwrap();
+    assert!(fixture_file_snapshot(&retained) == Some(original_snapshot.clone()));
+    assert!(fixture_file_snapshot(&original) == Some(replacement_snapshot.clone()));
+    assert!(
+        request.activation_files[0]
+            .1
+            .persistent_revalidate()
+            .is_err()
+    );
+    request.plan_file.persistent_revalidate().unwrap();
+    expected.insert(retained, Some(original_snapshot));
+    expected.insert(original, Some(replacement_snapshot));
+    assert_physical_substitution_refused(request, expected);
+}
+
+fn independently_read_durable_floor(source: &HumanMaintenanceSourceV1) -> DateTime<Utc> {
+    let db = read(&source.storage_binding.path());
+    let (history_sql, projection_sql) = match source.kind {
+        HumanSourceKindV1::TenantStore => (
+            "SELECT received_at FROM events ORDER BY seq",
+            "SELECT max_received_at FROM audit_time_floors ORDER BY event_seq DESC LIMIT 1",
+        ),
+        HumanSourceKindV1::AuthenticationLedger => (
+            "SELECT received_at FROM authentication_entries ORDER BY seq",
+            "SELECT wall_floor FROM authentication_source_authority WHERE singleton=1",
+        ),
+    };
+    let mut query = db.prepare(history_sql).unwrap();
+    let history: Vec<String> = query
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let maximum = history
+        .iter()
+        .map(|value| {
+            DateTime::parse_from_rfc3339(value)
+                .unwrap()
+                .with_timezone(&Utc)
+        })
+        .max()
+        .unwrap();
+    let projected: String = db.query_row(projection_sql, [], |row| row.get(0)).unwrap();
+    assert_eq!(
+        DateTime::parse_from_rfc3339(&projected)
+            .unwrap()
+            .with_timezone(&Utc),
+        maximum
+    );
+    maximum
+}
+
+struct StartupFloorsObserverReset;
+impl Drop for StartupFloorsObserverReset {
+    fn drop(&mut self) {
+        STARTUP_FLOORS_OBSERVER.with(|observer| {
+            observer.borrow_mut().take();
+        });
+    }
+}
+
+#[test]
+fn startup_collects_three_real_durable_floors_and_preserves_submillisecond_maximum() {
+    let fixture = Fixture::new();
+    let sources = fixture.plan.target.sources.clone();
+    let observations = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let captured = std::rc::Rc::clone(&observations);
+    let observed_sources = sources.clone();
+    let _reset = StartupFloorsObserverReset;
+    STARTUP_FLOORS_OBSERVER.with(|observer| {
+        assert!(observer.borrow().is_none());
+        *observer.borrow_mut() = Some(Box::new(move |floors, maximum| {
+            assert_eq!(floors.len(), 3);
+            assert_eq!(
+                floors.iter().map(|(id, _)| *id).collect::<BTreeSet<_>>(),
+                BTreeSet::from([Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)])
+            );
+            let durable: BTreeMap<_, _> = observed_sources
+                .iter()
+                .map(|source| (source.source_id, independently_read_durable_floor(source)))
+                .collect();
+            assert_eq!(floors.iter().copied().collect::<BTreeMap<_, _>>(), durable);
+            assert_eq!(maximum, *durable.values().max().unwrap());
+            captured.borrow_mut().push((durable, maximum));
+        }));
+    });
+
+    // First startup and all positive modern sources use the real coordinator's
+    // backups, conversions and commits. The observer cannot supply a floor.
+    let first = migrate_human_sources(fixture.request()).unwrap();
+    assert_eq!(observations.borrow().len(), 1);
+    let store_maximum = sources
+        .iter()
+        .filter(|source| source.kind == HumanSourceKindV1::TenantStore)
+        .map(independently_read_durable_floor)
+        .max()
+        .unwrap();
+    let auth_source = fixture.source(3);
+    let auth_token = first.owner().source_token(auth_source.source_id).unwrap();
+    let mut fractional_maximum = None;
+    // At most four genuine pending initials, within the fixture's unscoped
+    // capacity. A coarse clock is an explicit unmet fixture precondition; no
+    // synthetic DateTime, SQL UPDATE or clock hook creates the precision case.
+    for _ in 0..4 {
+        let operation_id = Uuid::new_v4();
+        let epoch = first.owner().try_write_epoch().unwrap();
+        let inserted = first
+            .authentication()
+            .unwrap()
+            .begin_verified_initial_owned(
+                &epoch,
+                &auth_token,
+                AuthenticationRecordV1 {
+                    operation_id,
+                    action: AuthenticationActionV1::Login,
+                    phase: AuthenticationPhaseV1::Intention,
+                    issuer: fixture.policy.approved_clients[0].issuer.clone(),
+                    client_id: fixture.policy.approved_clients[0].client_id.clone(),
+                    principal: None,
+                    transaction_id: Some(operation_id),
+                    session_id: Some(Uuid::new_v4()),
+                    causal: None,
+                },
+                PrincipalRefV1::HumanOidc {
+                    issuer: fixture.policy.approved_clients[0].issuer.clone(),
+                    subject: "synthetic-durable-floor-subject".into(),
+                },
+                AuthenticationTokenFingerprintV1::access_token(&format!(
+                    "synthetic-durable-floor-{operation_id}"
+                )),
+            )
+            .unwrap();
+        assert!(inserted.inserted);
+        drop(epoch);
+        let floor = independently_read_durable_floor(auth_source);
+        if floor > store_maximum && floor.timestamp_subsec_nanos() % 1_000_000 != 0 {
+            fractional_maximum = Some(floor);
+            break;
+        }
+    }
+    let fractional_maximum = fractional_maximum
+        .expect("fixture did not obtain a durable submillisecond Auth maximum in four real writes");
+    let before_resume: BTreeMap<_, _> = sources
+        .iter()
+        .map(|source| (source.source_id, independently_read_durable_floor(source)))
+        .collect();
+    assert_eq!(
+        before_resume.values().copied().max().unwrap(),
+        fractional_maximum
+    );
+    drop(auth_token);
+    drop(first);
+
+    let resumed = migrate_human_sources(fixture.request()).unwrap();
+    assert_eq!(resumed.owner().closure().sources.len(), 3);
+    let observed = observations.borrow();
+    assert_eq!(observed.len(), 2);
+    assert_eq!(observed[1].0, before_resume);
+    assert_eq!(observed[1].1, fractional_maximum);
+    assert_ne!(observed[1].1.timestamp_subsec_nanos() % 1_000_000, 0);
+}

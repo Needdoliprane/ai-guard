@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 12 novembre — compléments de preuve, sans activation de l’approbation
+
+Une campagne distincte de cinq parents passe les substitutions physiques Auth/configuration et les trois floors durables avec reprise réelle et précision submilliseconde, ainsi que deux voisins et le check toutes cibles. [Sources, résultats, historique et limites](evidence/2026-11-12/human-source-coverage/README.md). Elle complète précisément deux limites de la campagne antérieure, sans lui transférer les nouveaux résultats. Les gardes legacy au format 14 restent fermées ; les ports business runner, les mutateurs humains et le parcours d’approbation restent à raccorder. Aucun fingerprint historique ni gate global n’est clôturé par assimilation.
+
 ## 12 novembre — prérequis de l’approbation humaine : migration interne vérifiée
 
 Les ports de maintenance/startup et la migration réelle A+B+Auth passent 17 parents ciblés et le check toutes cibles sur un gel identifié. Le suivi conserve les reproductions et les échecs d’oracle, les corrections relues et les limites : [preuves du lot](evidence/2026-11-12/human-source-migration/README.md). Il s’agit d’un prérequis interne ; aucune approbation nominative ou exécution humaine n’est activée, aucun fingerprint historique ni gate global n’est clôturé par assimilation. Les pièces privées des audits et leurs conclusions datées restent distinctes.

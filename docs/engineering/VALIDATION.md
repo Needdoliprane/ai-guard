@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — compléments sources : cinq parents exacts et check PASS
+
+Source a9e13097ecfb9c4909aee454f947cab04c32c10b4cdaa79b81bffa544e2b8c20, public ad0 + deux postimages cfg(test), 2 591 fichiers. Trois nouveaux parents physiques/floors et deux voisins de migration passent (1 PASS / 0 FAIL / 0 ignored chacun), build/list et check toutes cibles RC 0, formatage ciblé RC 0. Root vérifie 207 pièces de phases et 2 621 statiques, export 6479ec0… / 30 095 360 octets et 2 591 contenus/modes exacts, fermeture RC 0, aucun OOM. [Preuves et échec antérieur du harnais](evidence/2026-11-12/human-source-coverage/README.md), [sélecteurs/RC/hashes](evidence/2026-11-12/human-source-coverage/TESTS.json).
+
+Le r1 est FAIL_HARNESS_SELECTOR 82 après build/liste : zéro test et check NOT_RUN. Le r2 garde la même source, vérifie les références croisées des hashes avant build puis termine les cinq tests. Les 17 PASS du gel précédent ne sont pas transférés ni additionnés en une suite unique. Aucun gate global fermé.
+
 ## 12 novembre — migration humaine composée : validation bornée de 17 tests
 
 Sur e507619 + 11 postimages applicatifs, gel 9e7d14f25ea80634132d24d89f080ac1d92465814de0360b2bacd337fca96b0e / 2 589 fichiers : build lib frozen/offline, listing compilé, 17 parents exacts (1 PASS / 0 FAIL / 0 ignored chacun) et cargo check --all-targets RC 0. Formatage ciblé des 11 fichiers Rust RC 0. Vérification Root : 363 pièces runtime, 2 615 pièces statiques, 2 589 postimages/modes exacts ; fermeture RC 0 et aucun OOM. [Preuve publique et historique des échecs](evidence/2026-11-12/human-source-migration/README.md), [oracles et empreintes](evidence/2026-11-12/human-source-migration/TESTS.json).

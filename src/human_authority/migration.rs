@@ -499,6 +499,16 @@ fn startup_complete_union(
         .map(|(_, _, _, floor)| *floor)
         .max()
         .ok_or(HumanSourcesMigrationFailure::StartupRefused)?;
+    #[cfg(test)]
+    STARTUP_FLOORS_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow().as_ref() {
+            let floors: Vec<_> = startup
+                .iter()
+                .map(|(source_id, _, _, floor)| (*source_id, *floor))
+                .collect();
+            observer(&floors, maximum);
+        }
+    });
     check_maximum_floor(Utc::now(), maximum)?;
     let mut stores = BTreeMap::new();
     let mut authentication = None;
@@ -562,6 +572,13 @@ fn fail_after_commit(index: usize) -> Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+type StartupFloorsObserver = dyn Fn(&[(Uuid, DateTime<Utc>)], DateTime<Utc>);
+#[cfg(test)]
+thread_local! {
+    static STARTUP_FLOORS_OBSERVER: std::cell::RefCell<Option<Box<StartupFloorsObserver>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

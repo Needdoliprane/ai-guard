@@ -1,5 +1,7 @@
 # Migration des sources humaines — preuve logicielle du 12 novembre 2026
 
+**Complément daté du même jour :** une [campagne distincte de cinq parents](../human-source-coverage/README.md) vérifie depuis les scénarios Auth/configuration physiquement substitués et les trois floors durables dans le périmètre qu’elle précise. Les résultats et les limites ci-dessous restent ceux du gel des 17 parents ; leur TESTS.json n’est pas modifié rétroactivement.
+
 **PASS borné : 17 parents Rust exacts, build lib et check toutes cibles.** Ce lot livre des ports internes de maintenance et de démarrage ainsi qu’un coordinateur A+B+Auth ; il n’active ni commande utilisateur de migration, ni Ready, ni approbation ou lancement humain. Aucun gate global ni fingerprint d’audit historique n’est fermé. [Sélecteurs, RC et empreintes](TESTS.json).
 
 ## Comportement vérifié
