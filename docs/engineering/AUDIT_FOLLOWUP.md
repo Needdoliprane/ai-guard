@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 12 novembre — run-2 D4 / RC-P6-R06 : admission corrigée, compatibilité historique ouverte
+
+Le fingerprint `audit-ingest-reserved-kind-case-bypass-relay-validator-latch` reste **OUVERT**. Neuf parents d'admission et le check toutes cibles passent sur leur gel ; une reproduction distincte confirme encore la promotion erronée de noms ordinaires historiques par le lecteur `LIKE`, avec réouverture non saine. Le canari canonique inconnu est refusé et rollbacké, sans ligne invalide durable. [Preuves, sources et limites](evidence/2026-11-12/event-kind-namespace/README.md). La revue source indépendante du candidat minimal `GLOB` est GO_SOURCE (`9e957100…`), sans GREEN acquis dans ces preuves ; GREEN lecteur et vérification finale du gel intégré restent requis. Le rapprochement RC-P6-R06 conserve sa classification historique propre ; aucun autre constat ni gate n'est fermé ou requalifié par assimilation. Les pièces primaires privées restent privées et leurs résultats datés sont conservés.
+
 ## 12 novembre — analyse indépendante de couverture reçue et archivée
 
 Le rapport final `ai-guard-risk-coverage-2026-11-12` est désormais une entrée obligatoire distincte de run-1/run-2 : [registre et règles de reprise](RISK_COVERAGE_20261112.md), [95 entrées et comparaison initiale des blobs](RISK_COVERAGE_20261112.json). Les34 fichiers sont conservés en privé sous `.claude/audit/` ignoré ; les33 empreintes du manifeste et chaque copie correspondent aux originaux. Source auditée711ba13, comparaison publique initiale6699a13, changements privés exclus.

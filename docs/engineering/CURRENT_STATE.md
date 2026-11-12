@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 12 novembre — namespaces d'événements : admission validée, lecteur historique encore ouvert
+
+Neuf parents exacts d'admission et le check toutes cibles passent sur un gel public77 corrigé : refus des namespaces réservés sans tenir compte de la casse ASCII à la racine/frontière point, deux alias HTTP conservés et noms ordinaires non normalisés. Un autre gel de tests reproduit séparément le défaut du lecteur historique : canari canonique/rollback PASS, puis noms ordinaires réellement committés et réouverture non saine (`EXPECTED_RED`, RC 101). [Sources, sélecteurs et limites](evidence/2026-11-12/event-kind-namespace/README.md). Le candidat `LIKE`→`GLOB` a une revue indépendante GO_SOURCE, empreinte JSON `9e957100…`, sans GREEN dans ces preuves ; admission et historique ne forment pas onze PASS. GREEN lecteur, vérification finale du gel intégré et D4/RC-P6-R06 restent ouverts. Aucun worker, moteur, fournisseur, IdP/SSO ou gate de production n'est qualifié par ce lot.
+
 ## 12 novembre — rapport de couverture final reçu, suivi obligatoire créé
 
 L’analyse Claude de risques est livrée et archivée ; son ancien statut en cours devient historique. [Registre durable](RISK_COVERAGE_20261112.md) :34 fichiers privés byte-identiques et33 empreintes vérifiées,95 identifiants/fingerprints conservés, source711ba13 rapprochée au niveau des fichiers de la source publique6699a13. Les80 risques retenus et les conditions P0/P1 restent à revalider individuellement ; les cinq décisions et la vague0 sont tracées. Aucun essai cible exécuté par ce rapport, aucune qualification transférée.

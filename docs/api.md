@@ -1110,6 +1110,25 @@ Le schéma d'ingestion est dans `schemas/event.schema.json`. Les champs optionne
 
 `POST /api/events` and `/api/v1/events` share an ingestion budget of **200 writes per one-second window per tenant**. `POST /api/v1/control/events`, decisions and control mutations use a separate **200-write window per tenant**. The route selects the budget; worker-controlled `kind`, `source` or `provenance` values in `/events` cannot promote a request to the control budget. These rate budgets reserve neither durable audit space nor availability under load.
 
+#### Namespaces réservés / Reserved namespaces
+
+On both ordinary ingestion aliases, reserved namespace checks ignore **ASCII case** and match only the namespace root or a descendant separated by `.`. An otherwise valid event such as `Control.relay.x`, `SECURITY.decision` or `Relay_Channel.v1` is refused with `403` before an audit write. Authentication, event validation and rate limits still apply.
+
+Sur les deux alias d'ingestion ordinaire, la comparaison des namespaces réservés ignore la **casse ASCII** et reconnaît uniquement la racine ou un descendant séparé par `.`. Un événement par ailleurs valide tel que `Control.relay.x`, `SECURITY.decision` ou `Relay_Channel.v1` reçoit `403` avant écriture dans l'audit. L'authentification, la validation de l'événement et les limites de débit restent applicables.
+
+| Frontière / Boundary | Namespaces réservés / Reserved namespaces |
+|---|---|
+| `POST /api/events`, `POST /api/v1/events` | `security.decision`, `control`, `worker`, `usage.allocation`, `relay_channel` |
+| Écriture générique interne / Internal generic `Store::append` | `control`, `relay_channel` |
+
+The Store guard is deliberately narrower than the API guard: it does not copy the API's deny-list onto internal security, worker or usage writers. Separately, ordinary HTTP ingestion rejects the four exact D5 kinds listed below, while `Store::append` retains its exact `broker.retirement.resume.requested` guard. These literal checks remain case-sensitive; namespace matching alone ignores ASCII case. The closed kind list on `/api/v1/control/events` remains exact; a similar name grants no control authority.
+
+La garde du Store est volontairement plus étroite que celle de l'API : elle n'applique pas la liste de refus HTTP aux écrivains internes de sécurité, workers ou usage. Séparément, l'ingestion HTTP ordinaire refuse les quatre littéraux D5 exacts ci-dessous, tandis que `Store::append` conserve sa garde exacte `broker.retirement.resume.requested`. Ces comparaisons littérales restent sensibles à la casse ; seule la comparaison des namespaces ignore la casse ASCII. La liste fermée de `/api/v1/control/events` exige toujours un nom exact ; une ressemblance ne confère aucune autorité du contrôle.
+
+This comparison never normalizes `Event.kind`. Ordinary names such as `Fixture.MixedCase`, `ControlPlane.relay.x` and `Security.decision_reported` retain their bytes and case, subject to the existing event contract. The dot boundary leaves `control_extra` and `control-other` outside the `control` namespace. This adds no route, configuration flag or tenant access. It governs admission of new events; historical-reader compatibility is a separate check and performs no implicit history rewrite or repair. [Evidence and open limits](engineering/evidence/2026-11-12/event-kind-namespace/README.md).
+
+Cette comparaison ne normalise jamais `Event.kind`. Les noms ordinaires tels que `Fixture.MixedCase`, `ControlPlane.relay.x` et `Security.decision_reported` conservent leurs octets et leur casse, selon le contrat existant. La frontière `.` laisse `control_extra` et `control-other` hors du namespace `control`. Aucune route, option de configuration ou autorisation de tenant n'est ajoutée. Cette garde porte sur l'admission des nouveaux événements ; la compatibilité du lecteur historique se vérifie séparément, sans réécriture ni réparation implicite de l'historique. [Preuves et limites ouvertes](engineering/evidence/2026-11-12/event-kind-namespace/README.md).
+
 La route `/api/v1/control/events` exige `runner` **avant la lecture du JSON** : viewer → `403`, credential absent/invalide ou workload worker → `401`. Le tenant vient de cette identité, jamais des métadonnées de session. Le corps suit le même schéma `Event` et le succès renvoie le même `StoredEvent` que l'ingestion. Le `kind` doit appartenir exactement à la liste suivante ; tout autre genre donne `403`. Cette écriture descriptive n'accorde aucun droit de lancement et ne remplace pas les mutations typées de décision/worker/usage.
 
 `/api/v1/control/events` requires `runner` **before parsing JSON**: viewers receive `403`; absent, invalid or worker-workload credentials receive `401`. The authenticated identity selects the tenant. It accepts the same `Event` schema and returns the same `StoredEvent` receipt as ingestion. Only the exact kinds below are accepted; other kinds receive `403`. This descriptive write grants no launch authority and does not replace typed decision, worker or usage mutations.
@@ -1122,9 +1141,9 @@ La route `/api/v1/control/events` exige `runner` **avant la lecture du JSON** : 
 | Scan | `workspace.scan.requested`, `workspace.scan.created`, `workspace.scan.started`, `workspace.scan.completed` |
 | Export | `workspace.export.requested`, `workspace.export.completed` |
 | Bilan / Summary | `workspace.diff.completed`, `observer.coverage` |
-| Retrait D5 / D5 retirement | `broker.abandon-before-claim.requested`, `broker.retirement.pending`, `broker.retirement.final` |
+| Retrait D5 / D5 retirement | `broker.abandon-before-claim.requested`, `broker.retirement.pending`, `broker.retirement.final`, `broker.retirement.resume.requested` |
 
-Les trois faits D5 sont refusés `403` sur l'ingestion ordinaire, même pour un runner.
+Les quatre faits D5 sont refusés `403` sur l'ingestion ordinaire, même pour un runner.
 Leur nom ne promeut aucun viewer/worker et leur reçu ne prouve pas le retrait.
 En schéma5–10, l'ingestion ordinaire préserve les réserves contrôle et identité ;
 les écritures de contrôle authentifiées et les mutations typées peuvent utiliser
@@ -1134,7 +1153,7 @@ même après réouverture ; le débit HTTP reste appliqué. Aucun reset ni migra
 de l'historique n'est implicite. Voir les [budgets EN](setup/identity/README.md#audit-budgets-and-stream-capacity)
 et [FR](setup/identity/README.fr.md#budgets-daudit-et-capacité-des-flux).
 
-The three D5 facts receive `403` on ordinary ingestion, including for a runner.
+The four D5 facts receive `403` on ordinary ingestion, including for a runner.
 Their names promote no viewer/worker and their receipt does not prove retirement.
 On schema5–10, ordinary ingestion preserves control and identity reserves;
 authenticated control writes and typed mutations may use the control share while

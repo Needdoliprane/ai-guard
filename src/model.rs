@@ -178,3 +178,55 @@ pub struct StoredEvent {
     #[serde(flatten)]
     pub event: Event,
 }
+
+/// Match an admission namespace without changing the stored event kind.
+/// A namespace includes its root and dot-separated descendants only.
+pub(crate) fn event_kind_in_namespace(kind: &str, namespace: &str) -> bool {
+    !namespace.is_empty()
+        && kind
+            .get(..namespace.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(namespace))
+        && (kind.len() == namespace.len() || kind.as_bytes().get(namespace.len()) == Some(&b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_kind_in_namespace;
+
+    #[test]
+    fn event_namespace_matches_ascii_case_and_dot_descendants() {
+        for (namespace, kind) in [
+            ("control", "control"),
+            ("control", "CONTROL"),
+            ("control", "Control.relay.x"),
+            ("control", "control.RELAY.x"),
+            ("security.decision", "SECURITY.decision"),
+            ("security.decision", "security.DECISION.extra"),
+            ("worker", "WORKER.start.claimed"),
+            ("usage.allocation", "USAGE.Allocation.terminal"),
+            ("relay_channel", "RELAY_CHANNEL"),
+            ("relay_channel", "Relay_Channel.v1"),
+        ] {
+            assert!(event_kind_in_namespace(kind, namespace), "{kind}");
+        }
+    }
+
+    #[test]
+    fn event_namespace_preserves_other_names_and_unicode_boundaries() {
+        for (namespace, kind) in [
+            ("control", "Fixture.MixedCase"),
+            ("control", "ControlPlane.relay.x"),
+            ("security.decision", "Security.decision_reported"),
+            ("control", "control_extra"),
+            ("control", "control-other"),
+            ("control", "control/relay"),
+            ("control", "contro"),
+            ("control", "cöntrol.relay.x"),
+            ("control", "controℓ.relay.x"),
+            ("relay_channel", "Relay_Channels.v1"),
+            ("", "control.relay.x"),
+        ] {
+            assert!(!event_kind_in_namespace(kind, namespace), "{kind}");
+        }
+    }
+}

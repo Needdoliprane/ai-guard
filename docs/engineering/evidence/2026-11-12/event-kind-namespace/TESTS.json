@@ -1,0 +1,281 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-12",
+  "status": "ADMISSION_GREEN_HISTORY_EXPECTED_RED_READER_GREEN_NOT_RUN",
+  "evidenceKind": "sanitized transcription of Root-verified receipts; documentation owner ran no target code",
+  "publicBase": "77f7edd6da9a2895a1277754c6144f893bcb8aea",
+  "aggregatePassCount": null,
+  "aggregatePassCountReason": "Separate source freezes; nine admission PASS and two historical parents (one PASS, one EXPECTED_RED) are not eleven PASS.",
+  "admission": {
+    "originQa": "qa-event-kind-admission-green-20261112-r1",
+    "receipt": {
+      "basename": "ROOT_RESULT_VERIFIED.json",
+      "sha256": "890d1746cef7a770bb8b2094635c1b94f2902466af8f0f5d8af7f5491c6631c0"
+    },
+    "status": "PASS_NINE_TARGETED_ADMISSION_PARENTS_AND_ALL_TARGETS",
+    "source": {
+      "sha256": "8c1b9e0c84078dbc62666c5f242f3690fed59087943f749bbaaf9438a2a947a0",
+      "files": 2602,
+      "bytes": 30300160,
+      "base": "77f7edd6da9a2895a1277754c6144f893bcb8aea",
+      "originArchive": "b130eab7b1042de414dbe15b5463ca2e1b91b8c44b692d9e2ee2d4c2230fa6cf"
+    },
+    "raw": {
+      "files": 371,
+      "manifestSha256": "8e92d1efcec89ba43c6482d3be0d2fd5f668c68ea43098e5929b69c03478d649"
+    },
+    "static": {
+      "files": 53,
+      "manifestSha256": "36fc452a7483eba54ccfc013a0bdfa7e9e02fb10325329928d6d62f8dbffe165"
+    },
+    "build": {
+      "rc": 0,
+      "realArtifacts": 4,
+      "allTargetKindsAndProfilesVerified": true
+    },
+    "parents": [
+      {
+        "target": "event_kind_ingest",
+        "selector": "both_ingestion_aliases_preserve_ordinary_mixed_case_kinds",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "event_kind_ingest",
+        "selector": "both_ingestion_aliases_refuse_reserved_case_variants_before_audit_write",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "event_kind_ingest",
+        "selector": "ordinary_store_append_refuses_control_case_variants_before_audit_write",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "event_kind_ingest",
+        "selector": "ordinary_store_mixed_case_kinds_keep_their_bytes_after_reopen",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "lib",
+        "selector": "model::tests::event_namespace_matches_ascii_case_and_dot_descendants",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "lib",
+        "selector": "model::tests::event_namespace_preserves_other_names_and_unicode_boundaries",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "d5_control_audit",
+        "selector": "d5_facts_require_authenticated_control_delivery_and_a_closed_kind_set",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "d5_control_audit",
+        "selector": "retirement_resume::retirement_resume_fact_uses_durable_control_reserve_without_ordinary_promotion",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      },
+      {
+        "target": "worker_relay_api",
+        "selector": "relay_admission_cases::relay_admission_guards_roles_tenant_and_reserved_namespace",
+        "timeout_seconds": 90,
+        "result": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exact": true,
+        "freshList": true
+      }
+    ],
+    "allTargets": {
+      "rc": 0,
+      "result": "PASS"
+    },
+    "postSource": {
+      "sha256": "3f51d9a864045d1e5503530389083debf586a1881d55ad64e5d356e593b630d8",
+      "bytes": 30484480,
+      "files": 2602,
+      "allPayloadsAndModesExact": true,
+      "overflowBytes": 0
+    },
+    "closure": {
+      "allCommandsRc0": true,
+      "exactQaRemoved": true,
+      "oomKilled": false,
+      "oomEvents": 0,
+      "holderExitCode": 137,
+      "holder137Cause": "not established"
+    },
+    "annotations": [
+      {
+        "field": "post-run source file count",
+        "textMarker": 2601,
+        "verifiedPayloadModeCount": 2602,
+        "resolution": "Root independently verified actual guards, manifest and archive; no rerun inferred"
+      },
+      {
+        "field": "source.sha256 manifest hash",
+        "authoritativeSha256": "f703715a592a27334ce4713f75a188db2ee5c5defed2dfd6c5f035ba5d2605de",
+        "resolution": "The source handoff's manifest hash is a typo; Root receipt is authoritative"
+      }
+    ]
+  },
+  "history": {
+    "originQa": "qa-event-kind-history-red-20261112-r1",
+    "receipt": {
+      "basename": "ROOT_RESULT_VERIFIED.json",
+      "sha256": "dbf9d2346f58c466b6be69be84123d84c85ee3eb3c2f3de7736210f1537e5e72"
+    },
+    "status": "EXPECTED_CURRENT_HISTORY_READER_RED_AFTER_CANARY_PASS",
+    "source": {
+      "sha256": "3feb3bcb863619753730e6247eac9faeff651e2ba03e41c0b83e412f2be17d5c",
+      "files": 2602,
+      "bytes": 30300160,
+      "base": "77f7edd6da9a2895a1277754c6144f893bcb8aea",
+      "testOnly": true,
+      "readerUnchanged": true
+    },
+    "raw": {
+      "files": 175,
+      "manifestSha256": "176713eaff3af250a483c52f96e226fcc721838d8463fe547b62eb47e2acd4f5"
+    },
+    "static": {
+      "files": 44,
+      "manifestSha256": "5b4a0772fe85f45fa1288c2c599b436d62c4c73e35ce798226fc0353a8d9cf63"
+    },
+    "build": {
+      "rc": 0,
+      "realLibTestArtifact": true
+    },
+    "parents": [
+      {
+        "selector": "audit::relay::history_compat_tests::canonical_unknown_relay_names_refuse_validation_and_rollback_without_history_change",
+        "result": "PASS",
+        "rc": 0,
+        "scope": "Canonicalx/X truevalidatorrefusal,rollback,rawunchanged,reopensain"
+      },
+      {
+        "selector": "audit::relay::history_compat_tests::historical_mixed_case_ordinary_relay_names_remain_unpromoted_and_unchanged",
+        "result": "EXPECTED_RED",
+        "rc": 101,
+        "location": "src/audit/relay/history_compat_tests.rs:163:5",
+        "observed": {
+          "directError": "unknown authoritative relay event",
+          "reopenedHealthy": false,
+          "integrityError": "unknown authoritative relay event"
+        },
+        "ordinaryRowsCommitted": true,
+        "headRaw11ColumnsAndRelayCountsPreservedBeforeFinalAssertion": true
+      }
+    ],
+    "allTargets": "NOT_RUN",
+    "postSource": {
+      "sha256": "50e5edd40cd68737a5acf44a9786ebb570ce880452647e914e512dae68fb076d",
+      "bytes": 30484480,
+      "files": 2602,
+      "allPayloadsAndModesExact": true,
+      "overflowBytes": 0
+    },
+    "closure": {
+      "allCommandsRc0": true,
+      "exactQaRemoved": true,
+      "oomKilled": false,
+      "oomEvents": 0,
+      "holderExitCode": 137,
+      "holder137Cause": "not established"
+    },
+    "compatibilityOracle": "Real ordinary rows committed under historical guards; head, all eleven raw event-column values and relay counts unchanged before final assertion; direct validator and reopened integrity report unknown authoritative relay event, reopened healthy is false.",
+    "canonicalCanaryLimit": "Unknown canonical x/X candidates were validated in open transactions, refused and rolled back; no invalid canonical row was committed."
+  },
+  "readerCandidate": {
+    "status": "SOURCE_ONLY_GREEN_NOT_RUN",
+    "productionDelta": {
+      "before": "kind LIKE 'control.relay.%'",
+      "after": "kind GLOB 'control.relay.*'"
+    },
+    "productionFile": "src/audit/relay.rs",
+    "historyTestSha256": "af4824bdb0e36fb60057b2b2753f8dbc41718c8be2157088a19e1399140bccd5",
+    "postimageSha256": "71cf8042ff937d1b51d99379cac25e604b88af0cff420180d4856d1b6a9d24d9",
+    "patchSha256": "d03e19170e885ed46d285f20956c7bb54287b70fa9e3efcac87d04d46a198fb1",
+    "integratedSourceVerification": "NOT_ESTABLISHED_BY_THE_RETAINED_RECEIPTS",
+    "sourceReview": {
+      "verdict": "GO_SOURCE",
+      "mode": "SOURCE_ONLY",
+      "scope": "Frozen one-literal historical relay reader correction only",
+      "reviewJsonSha256": "9e9571002beda9fa78705e9f432aa692b3539dc05a7d0c4be365b14e1ce0225e",
+      "reviewedPostimageSha256": "71cf8042ff937d1b51d99379cac25e604b88af0cff420180d4856d1b6a9d24d9",
+      "targetCodeExecutedByReviewer": false,
+      "greenAcquired": false
+    }
+  },
+  "followup": {
+    "run2Finding": "D4",
+    "fingerprint": "audit-ingest-reserved-kind-case-bypass-relay-validator-latch",
+    "relatedRisk": "RC-P6-R06",
+    "status": "OPEN",
+    "remaining": [
+      "reader GREEN from an exact verified receipt",
+      "verification of final integrated source"
+    ],
+    "otherAuditStatusesChanged": false,
+    "productionGatesClosed": 0
+  },
+  "notQualified": [
+    "real workers or engines",
+    "provider or model calls",
+    "real IdP or SSO",
+    "network confinement",
+    "multi-tenant load or 100-worker capacity",
+    "strict Clippy",
+    "complete software suite",
+    "image or release",
+    "whole audit finding or production gates"
+  ]
+}

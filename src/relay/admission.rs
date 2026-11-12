@@ -10,7 +10,7 @@ pub const CHANNEL_EVENT_KIND: &str = "relay_channel.v1";
 /// Reserved outside historical control-record parsers. No generic Event writer
 /// may manufacture a channel fact, including an unknown version of this prefix.
 pub(crate) fn reserved_kind(kind: &str) -> bool {
-    kind == "relay_channel" || kind.starts_with("relay_channel.")
+    crate::model::event_kind_in_namespace(kind, "relay_channel")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

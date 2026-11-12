@@ -926,13 +926,7 @@ async fn ingest(
                 || crate::relay::admission::reserved_kind(&event.kind)
                 || ["security.decision", "control", "worker", "usage.allocation"]
                     .iter()
-                    .any(|namespace| {
-                        event.kind == *namespace
-                            || event
-                                .kind
-                                .strip_prefix(namespace)
-                                .is_some_and(|suffix| suffix.starts_with('.'))
-                    })
+                    .any(|namespace| crate::model::event_kind_in_namespace(&event.kind, namespace))
             {
                 return Err(error(
                     StatusCode::FORBIDDEN,

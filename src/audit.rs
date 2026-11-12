@@ -1217,7 +1217,7 @@ impl Store {
     }
     pub fn append(&self, event: Event) -> anyhow::Result<StoredEvent> {
         anyhow::ensure!(
-            !event.kind.starts_with("control.")
+            !event_kind_in_namespace(&event.kind, "control")
                 && event.kind != RETIREMENT_RESUME_EVENT_KIND
                 && !crate::relay::admission::reserved_kind(&event.kind),
             "control events require typed mutation"
