@@ -9,6 +9,7 @@ pub(super) const LEGACY_VERSION: i64 = 1_000_001;
 pub(super) const VERIFIED_INITIAL_VERSION: i64 = 1_000_002;
 pub(super) const VERSION: i64 = 1_000_003;
 pub(super) const TENANT_CAPACITY_VERSION: i64 = 1_000_004;
+pub(super) const HUMAN_AUTHORITY_VERSION: i64 = 1_000_005;
 pub(super) const APPLICATION_ID: i64 = 0x4149_4741; // AIGA
 const PURPOSE: &str = "authentication_audit_v1";
 const MAX_PAYLOAD_BYTES: usize = 32_768;
@@ -55,6 +56,12 @@ pub(super) enum Entry {
     },
     CapacityPlan {
         plan: AuthenticationCapacityPlanV1,
+    },
+    SourceAnchor {
+        anchor: source_authority::SourceAnchor,
+    },
+    SourceIncarnation {
+        incarnation: source_authority::SourceIncarnation,
     },
     Charged {
         charge: budget::CapacityOwner,
@@ -121,7 +128,10 @@ impl Entry {
             Self::Authentication { record } | Self::VerifiedInitial { record, .. } => Some(record),
             Self::Session { mutation } => Some(mutation.record()),
             Self::Charged { entry, .. } => entry.record(),
-            Self::Genesis { .. } | Self::CapacityPlan { .. } => None,
+            Self::Genesis { .. }
+            | Self::CapacityPlan { .. }
+            | Self::SourceAnchor { .. }
+            | Self::SourceIncarnation { .. } => None,
         }
     }
 }
@@ -144,6 +154,9 @@ pub(super) struct Replay {
     native_logouts: BTreeMap<Uuid, NativeLogoutPromise>,
     pub budget: budget::BudgetReplay,
     bootstrap_receipt: Option<AuthenticationReceiptV1>,
+    pub authority: Option<source_authority::Snapshot>,
+    pub wall_floor: String,
+    pub incarnation_operations: BTreeSet<Uuid>,
 }
 
 struct NativeLogoutPromise {
@@ -396,7 +409,23 @@ pub(super) fn schema_version(db: &Connection) -> Result<i64> {
 }
 
 pub(super) fn validate_schema(db: &Connection) -> Result<()> {
-    schema_version(db)?;
+    validate_schema_mode(db, false)
+}
+fn schema_version_mode(db: &Connection, modern: bool) -> Result<i64> {
+    if modern {
+        let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let app: i64 = db.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        ensure!(
+            version == HUMAN_AUTHORITY_VERSION && app == APPLICATION_ID,
+            AuthenticationAuditFailureV1::Format
+        );
+        Ok(version)
+    } else {
+        schema_version(db)
+    }
+}
+fn validate_schema_mode(db: &Connection, modern: bool) -> Result<()> {
+    schema_version_mode(db, modern)?;
     let mut statement = db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema")?;
     let objects = statement
         .query_map([], |row| {
@@ -408,9 +437,16 @@ pub(super) fn validate_schema(db: &Connection) -> Result<()> {
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    ensure!(objects.len() == 5, AuthenticationAuditFailureV1::Format);
+    ensure!(
+        objects.len() == if modern { 6 } else { 5 },
+        AuthenticationAuditFailureV1::Format
+    );
     for (kind, name, table, sql) in objects {
-        if let Some((_, expected)) = SCHEMA.iter().find(|(expected, _)| *expected == name) {
+        if let Some((_, expected)) = SCHEMA
+            .iter()
+            .chain(modern.then_some(&source_authority::SCHEMA))
+            .find(|(expected, _)| *expected == name)
+        {
             ensure!(
                 kind == "table"
                     && table == name
@@ -680,7 +716,10 @@ impl Replay {
         ensure!(
             matches!(
                 self.version,
-                VERIFIED_INITIAL_VERSION | VERSION | TENANT_CAPACITY_VERSION
+                VERIFIED_INITIAL_VERSION
+                    | VERSION
+                    | TENANT_CAPACITY_VERSION
+                    | HUMAN_AUTHORITY_VERSION
             ),
             AuthenticationAuditFailureV1::Format
         );
@@ -884,7 +923,10 @@ impl Replay {
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
         ensure!(
-            matches!(self.version, VERSION | TENANT_CAPACITY_VERSION),
+            matches!(
+                self.version,
+                VERSION | TENANT_CAPACITY_VERSION | HUMAN_AUTHORITY_VERSION
+            ),
             AuthenticationAuditFailureV1::Format
         );
         validate_binding(binding, policy)?;
@@ -1473,7 +1515,10 @@ impl Replay {
         candidates: Option<&AuthenticationTenantCandidatesV1>,
         redactor: &Redactor,
     ) -> Result<Entry> {
-        if self.version != TENANT_CAPACITY_VERSION {
+        if !matches!(
+            self.version,
+            TENANT_CAPACITY_VERSION | HUMAN_AUTHORITY_VERSION
+        ) {
             ensure!(candidates.is_none(), AuthenticationAuditFailureV1::Format);
             return Ok(entry);
         }
@@ -1629,7 +1674,10 @@ impl Replay {
         policy: &AuthenticationAuditPolicyV1,
     ) -> Result<()> {
         ensure!(
-            self.version == TENANT_CAPACITY_VERSION,
+            matches!(
+                self.version,
+                TENANT_CAPACITY_VERSION | HUMAN_AUTHORITY_VERSION
+            ),
             AuthenticationAuditFailureV1::Format
         );
         self.budget.install(
@@ -1774,7 +1822,26 @@ pub(super) fn replay(
     redactor: &Redactor,
     floor: Option<&AuthenticationReceiptV1>,
 ) -> Result<Replay> {
-    validate_schema(db)?;
+    replay_mode(db, installation_id, policy, redactor, floor, false)
+}
+pub(super) fn replay_review(
+    db: &Connection,
+    installation_id: Uuid,
+    policy: &AuthenticationAuditPolicyV1,
+    redactor: &Redactor,
+    floor: Option<&AuthenticationReceiptV1>,
+) -> Result<Replay> {
+    replay_mode(db, installation_id, policy, redactor, floor, true)
+}
+fn replay_mode(
+    db: &Connection,
+    installation_id: Uuid,
+    policy: &AuthenticationAuditPolicyV1,
+    redactor: &Redactor,
+    floor: Option<&AuthenticationReceiptV1>,
+    modern: bool,
+) -> Result<Replay> {
+    validate_schema_mode(db, modern)?;
     let meta_count: i64 = db.query_row("SELECT count(*) FROM authentication_meta", [], |row| {
         row.get(0)
     })?;
@@ -1796,7 +1863,7 @@ pub(super) fn replay(
         AuthenticationAuditFailureV1::Format
     );
     let mut replay = Replay {
-        version: schema_version(db)?,
+        version: schema_version_mode(db, modern)?,
         verified: AuthenticationVerificationV1 {
             namespace_id,
             records: 0,
@@ -1818,6 +1885,9 @@ pub(super) fn replay(
         native_logouts: BTreeMap::new(),
         budget: budget::BudgetReplay::default(),
         bootstrap_receipt: None,
+        authority: None,
+        wall_floor: String::new(),
+        incarnation_operations: BTreeSet::new(),
     };
     let mut statement = db.prepare("SELECT seq,received_at,prev_hash,hash,length(CAST(payload AS BLOB)),payload,operation_id,phase,length(CAST(received_at AS BLOB)),length(CAST(prev_hash AS BLOB)),length(CAST(hash AS BLOB)),length(CAST(operation_id AS BLOB)),length(CAST(phase AS BLOB)) FROM authentication_entries ORDER BY seq")?;
     let mut rows = statement.query([])?;
@@ -1875,6 +1945,17 @@ pub(super) fn replay(
                 == received,
             AuthenticationAuditFailureV1::Integrity
         );
+        if !replay.wall_floor.is_empty() {
+            let prior = chrono::DateTime::parse_from_rfc3339(&replay.wall_floor)?;
+            if replay.authority.is_some() {
+                ensure!(time >= prior, AuthenticationAuditFailureV1::Integrity);
+            }
+            if time > prior {
+                replay.wall_floor = received.clone();
+            }
+        } else {
+            replay.wall_floor = received.clone();
+        }
         let entry: Entry =
             serde_json::from_str(&payload).map_err(|_| AuthenticationAuditFailureV1::Integrity)?;
         ensure!(
@@ -1891,14 +1972,22 @@ pub(super) fn replay(
         let (entry, charge) = match entry {
             Entry::Charged { charge, entry } => {
                 ensure!(
-                    replay.version == TENANT_CAPACITY_VERSION
-                        && replay.budget.plan.is_some()
+                    matches!(
+                        replay.version,
+                        TENANT_CAPACITY_VERSION | HUMAN_AUTHORITY_VERSION
+                    ) && replay.budget.plan.is_some()
                         && matches!(
                             entry.as_ref(),
                             Entry::Authentication { .. }
                                 | Entry::VerifiedInitial { .. }
                                 | Entry::Session { .. }
-                        ),
+                        )
+                        || (replay.version == HUMAN_AUTHORITY_VERSION
+                            && replay.budget.plan.is_some()
+                            && matches!(
+                                entry.as_ref(),
+                                Entry::SourceAnchor { .. } | Entry::SourceIncarnation { .. }
+                            )),
                     AuthenticationAuditFailureV1::Integrity
                 );
                 (*entry, Some(charge))
@@ -1912,6 +2001,41 @@ pub(super) fn replay(
             replay
                 .budget
                 .accept(&entry, charge.as_ref(), payload.len() as u64, &receipt)?;
+        }
+        if matches!(
+            &entry,
+            Entry::SourceAnchor { .. } | Entry::SourceIncarnation { .. }
+        ) {
+            ensure!(
+                modern
+                    && charge.as_ref() == Some(&budget::CapacityOwner::Unscoped)
+                    && projected_operation.is_none()
+                    && projected_phase.is_none(),
+                AuthenticationAuditFailureV1::Integrity
+            );
+            if let Entry::SourceIncarnation { incarnation } = &entry {
+                ensure!(
+                    replay
+                        .incarnation_operations
+                        .insert(incarnation.operation_id),
+                    AuthenticationAuditFailureV1::Integrity
+                );
+            }
+            replay
+                .budget
+                .accept_authority(charge.as_ref(), payload.len() as u64)?;
+            source_authority::Snapshot::apply(
+                &mut replay.authority,
+                &entry,
+                &receipt,
+                &previous,
+                installation_id,
+            )?;
+            // Anchor itself must also respect the maximum historical clock.
+            ensure!(
+                received == replay.wall_floor,
+                AuthenticationAuditFailureV1::Integrity
+            );
         }
         match entry {
             Entry::Genesis {
@@ -1956,7 +2080,10 @@ pub(super) fn replay(
                     seq > 1
                         && matches!(
                             replay.version,
-                            VERIFIED_INITIAL_VERSION | VERSION | TENANT_CAPACITY_VERSION
+                            VERIFIED_INITIAL_VERSION
+                                | VERSION
+                                | TENANT_CAPACITY_VERSION
+                                | HUMAN_AUTHORITY_VERSION
                         )
                         && projected_operation.as_deref()
                             == Some(record.operation_id.to_string().as_str())
@@ -1990,6 +2117,9 @@ pub(super) fn replay(
                 }
                 replay.receipts.insert(expected, receipt.clone());
             }
+            Entry::SourceAnchor { .. } | Entry::SourceIncarnation { .. } => {
+                replay.receipts.insert(expected, receipt.clone());
+            }
             Entry::Charged { .. } => return Err(AuthenticationAuditFailureV1::Integrity.into()),
         }
         replay.verified.records = expected;
@@ -1998,9 +2128,19 @@ pub(super) fn replay(
     }
     ensure!(
         replay.verified.records > 0
-            && ((replay.version == TENANT_CAPACITY_VERSION) == replay.budget.plan.is_some()),
+            && (matches!(
+                replay.version,
+                TENANT_CAPACITY_VERSION | HUMAN_AUTHORITY_VERSION
+            ) == replay.budget.plan.is_some()),
         AuthenticationAuditFailureV1::Integrity
     );
+    if modern {
+        replay
+            .authority
+            .as_ref()
+            .ok_or(AuthenticationAuditFailureV1::Integrity)?
+            .verify_projection(db, &replay.wall_floor, redactor)?;
+    }
     let quota_rows: i64 = db.query_row("SELECT count(*) FROM authentication_quota", [], |row| {
         row.get(0)
     })?;

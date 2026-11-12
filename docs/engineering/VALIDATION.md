@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — candidat AuthLedger5 corrigé : 17 parents et toutes cibles PASS
+
+Sur source `4d071fbd7c43787072a2440239b826eaad70504ae738812fc08957644cd01f88`, build lib/listing RC 0, 17 parents uniques PASS (zéro échec/ignoré), puis check toutes cibles RC 0. Export vivant `a942de27…` de 29 767 680 octets : 2 571 chemins/contenus/modes identiques. Root vérifie 365 pièces runtime ; fermeture exacte RC 0, aucun OOM, pic compilation 6 472 175 616 / 9 663 676 416 octets. [Sélecteurs, reproductions, revues et limites](evidence/2026-11-12/authledger5-storage/README.md).
+
+Les anciennes RED B1/B2 restent attachées à source f205332… : B1 brut confirmé malgré un classifieur hôte défaillant ; B2 séparé atteint seulement append. Le GREEN exécute les quatre branches. Cette preuve logicielle ne qualifie ni la fermeture complète des sources, ni une restauration OIDC Active/RAM, ni une migration opérateur, ni les runtimes réels. Le défaut d’ordre d’admission Root est conservé distinctement ; aucun code cible n’a démarré avant admission complète. Aucun gate fermé.
+
 ## 12 novembre, 07:07 UTC — composition publique + Core : 61 parents PASS
 
 Sur le gel `5e1189c150ed748e7297654cafd3c21e651304561321f4ecfb1440c6373b2d8f`, build lib/bin/human_access et trois listes réelles RC 0, 61 parents exacts PASS, zéro échec/ignoré ; check toutes cibles RC 0. Export vivant `8b23f187…` de 29 634 560 octets : 2 566 chemins/contenus/modes identiques. Root vérifie 956 empreintes brutes et2 600 pièces statiques ; exécution/fermeture RC 0, aucun OOM, CID exact retiré. [Noms et preuves](evidence/2026-11-12/human-core-public-composition/README.md).

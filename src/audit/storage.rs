@@ -277,3 +277,13 @@ mod tests {
         assert_eq!(std::fs::metadata(storage.path()).unwrap().len(), 0);
     }
 }
+
+/// Associate a connection with its retained physical main. This shared port
+/// returns no owner, epoch, identity or business permission. The implementation
+/// retains the reviewed exact-main/TEMP/backing checks and typed foreign error.
+pub(super) fn verify_connection_main(
+    backing: &StoreStorage,
+    db: &rusqlite::Connection,
+) -> anyhow::Result<()> {
+    super::review_authority::verify_connection_main(backing, db)
+}

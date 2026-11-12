@@ -240,6 +240,44 @@ impl BudgetReplay {
         Ok(())
     }
 
+    /// An authority fact spends only existing unscoped capacity. Outstanding
+    /// unscoped terminal promises stay reserved and no new ticket is created.
+    pub fn validate_authority(&self, owner: Option<&CapacityOwner>, bytes: u64) -> Result<()> {
+        ensure!(
+            owner == Some(&CapacityOwner::Unscoped),
+            AuthenticationAuditFailureV1::Format
+        );
+        let capacity = self.capacity(&CapacityOwner::Unscoped)?;
+        let used = self
+            .spent
+            .get(&CapacityOwner::Unscoped)
+            .copied()
+            .unwrap_or_default();
+        let reserved = self
+            .tickets
+            .values()
+            .filter(|t| t.owner.as_ref() == Some(&CapacityOwner::Unscoped))
+            .count() as u64;
+        ensure!(
+            plus(plus(used.0, 1)?, reserved)? <= capacity.max_records
+                && plus(
+                    plus(used.1, bytes)?,
+                    reserved
+                        .checked_mul(TERMINAL_BYTES)
+                        .ok_or(AuthenticationAuditFailureV1::Capacity)?
+                )? <= capacity.max_serialized_bytes,
+            AuthenticationAuditFailureV1::Capacity
+        );
+        Ok(())
+    }
+    pub fn accept_authority(&mut self, owner: Option<&CapacityOwner>, bytes: u64) -> Result<()> {
+        self.validate_authority(owner, bytes)?;
+        let used = self.spent.entry(CapacityOwner::Unscoped).or_default();
+        used.0 = plus(used.0, 1)?;
+        used.1 = plus(used.1, bytes)?;
+        Ok(())
+    }
+
     pub fn choose_initial(
         &self,
         entry: &format::Entry,

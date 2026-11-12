@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre — stockage AuthLedger5 : 17 régressions logicielles PASS
+
+Le candidat interne de stockage génération 5 passe 17 parents exacts, build lib et check toutes cibles. Deux défauts du développement ont été reproduits puis corrigés : sauvegarde confondue avec sa source, et acquittement neuf après expiration pendant le dernier contrôle physique. La régression corrigée couvre append/retry/read/backup tout en conservant le commit connu et un owner sain. Root vérifie 365 empreintes brutes et 2 571 contenus/modes post-exécution ; fermeture RC 0, aucun OOM. [Sources, historique et limites](evidence/2026-11-12/authledger5-storage/README.md).
+
+Ce stockage interne conserve plan 4 et réserves terminales, refuse les anciens handles après conversion et retient source/incarnation/epoch exacts. Le parcours complet A+B+Auth, le format 14 global, Ready et le lancement humain restent ouverts ; aucune base utilisateur n’est migrée par cette publication. Les candidats tenant/runtime restent séparés et privés. Aucun gate global fermé.
+
 ## 12 novembre, 07:07 UTC — socle humain/SQLite composé : 61 parents logiciels PASS
 
 Le code applicatif public `7170b866` + 17 postimages Core passe 47 parents du socle, neuf parités du binaire diagnostic et cinq cas human_access. Build ciblé et check toutes cibles RC 0 ; Root vérifie 956 empreintes brutes,2 600 pièces de préparation et les 2 566 contenus/modes après exécution. [Source, commandes, oracles et limites](evidence/2026-11-12/human-core-public-composition/README.md). Les quatre documents ajoutés par `3cc7694` ne changent pas cette base applicative.

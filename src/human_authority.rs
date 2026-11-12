@@ -940,3 +940,12 @@ fn check_open_deadline(deadline: Instant) -> Result<(), HumanAuthorityFailure> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+impl HumanSourcesWriteEpoch {
+    /// Observe the real lease boundary for deterministic final-check tests.
+    /// This cannot extend the lease, change its owner or create authority.
+    pub(crate) fn test_deadline(&self) -> std::time::Instant {
+        self.lease.deadline
+    }
+}

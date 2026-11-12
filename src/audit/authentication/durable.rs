@@ -13,22 +13,25 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct LiveState {
-    db: Connection,
-    floor: AuthenticationReceiptV1,
+pub(super) struct LiveState {
+    pub db: Connection,
+    pub floor: AuthenticationReceiptV1,
 }
 
 pub(super) struct DurableAuthenticationAudit {
-    backing: StoreStorage,
-    installation_id: Uuid,
-    namespace_id: Uuid,
-    policy: AuthenticationAuditPolicyV1,
-    redactor: Redactor,
-    state: Mutex<LiveState>,
+    pub(super) backing: StoreStorage,
+    pub(super) installation_id: Uuid,
+    pub(super) namespace_id: Uuid,
+    pub(super) policy: AuthenticationAuditPolicyV1,
+    pub(super) redactor: Redactor,
+    pub(super) state: Mutex<LiveState>,
     unhealthy: AtomicBool,
+    pub(super) review_source: Option<crate::human_authority::OwnedSourceToken>,
+    #[cfg(test)]
+    pub(super) postcommit_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
-fn connection(backing: &StoreStorage, read_only: bool) -> Result<Connection> {
+pub(super) fn connection(backing: &StoreStorage, read_only: bool) -> Result<Connection> {
     let db = Connection::open_with_flags(
         backing.path(),
         (if read_only {
@@ -43,7 +46,7 @@ fn connection(backing: &StoreStorage, read_only: bool) -> Result<Connection> {
     Ok(db)
 }
 
-fn durability(db: &Connection) -> Result<()> {
+pub(super) fn durability(db: &Connection) -> Result<()> {
     db.execute_batch(
         "PRAGMA synchronous=FULL; PRAGMA fullfsync=ON; PRAGMA checkpoint_fullfsync=ON;",
     )?;
@@ -266,10 +269,13 @@ impl DurableAuthenticationAudit {
                 floor: checked.head,
             }),
             unhealthy: AtomicBool::new(false),
+            review_source: None,
+            #[cfg(test)]
+            postcommit_hook: Mutex::new(None),
         })
     }
 
-    fn healthy(&self) -> Result<()> {
+    pub(super) fn healthy(&self) -> Result<()> {
         ensure!(
             !self.unhealthy.load(Ordering::Acquire),
             AuthenticationAuditFailureV1::Integrity
@@ -277,17 +283,93 @@ impl DurableAuthenticationAudit {
         Ok(())
     }
 
+    pub(super) fn from_review_connection(
+        backing: StoreStorage,
+        db: Connection,
+        installation_id: Uuid,
+        policy: AuthenticationAuditPolicyV1,
+        redactor: Redactor,
+        verified: AuthenticationVerificationV1,
+    ) -> Self {
+        Self {
+            backing,
+            installation_id,
+            namespace_id: verified.namespace_id,
+            policy,
+            redactor,
+            state: Mutex::new(LiveState {
+                db,
+                floor: verified.head,
+            }),
+            unhealthy: AtomicBool::new(false),
+            review_source: None,
+            #[cfg(test)]
+            postcommit_hook: Mutex::new(None),
+        }
+    }
+
+    fn validate_context(
+        &self,
+        db: &Connection,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+        write: bool,
+    ) -> Result<()> {
+        match access {
+            None => source_authority::require_legacy(db),
+            Some(access) => {
+                access.check(write)?;
+                ensure!(
+                    self.review_source
+                        .as_ref()
+                        .is_some_and(|retained| retained.same_owner_and_source(access.source())),
+                    source_authority::AuthenticationSourceFailure::Required
+                );
+                source_authority::physical(&self.backing, db, access.source())?;
+                access.check(write)
+            }
+        }
+    }
     fn inspect(&self, db: &Connection, floor: &AuthenticationReceiptV1) -> Result<format::Replay> {
+        self.inspect_access(db, floor, None, false)
+    }
+    fn inspect_access(
+        &self,
+        db: &Connection,
+        floor: &AuthenticationReceiptV1,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+        write: bool,
+    ) -> Result<format::Replay> {
+        // Refusals precede replay and never poison an otherwise valid source.
+        self.validate_context(db, access, write)?;
         let result = (|| {
             self.healthy()?;
             self.backing.verify(db)?;
-            let replay = format::replay(
-                db,
-                self.installation_id,
-                &self.policy,
-                &self.redactor,
-                Some(floor),
-            )?;
+            let replay = if access.is_some() {
+                format::replay_review(
+                    db,
+                    self.installation_id,
+                    &self.policy,
+                    &self.redactor,
+                    Some(floor),
+                )?
+            } else {
+                format::replay(
+                    db,
+                    self.installation_id,
+                    &self.policy,
+                    &self.redactor,
+                    Some(floor),
+                )?
+            };
+            if let Some(access) = access {
+                replay
+                    .authority
+                    .as_ref()
+                    .ok_or(source_authority::AuthenticationSourceFailure::Required)?
+                    .match_current(access.source())?;
+                source_authority::clock(&replay.wall_floor)?;
+                access.check(write)?;
+            }
             ensure!(
                 replay.verified.namespace_id == self.namespace_id,
                 AuthenticationAuditFailureV1::Integrity
@@ -295,7 +377,18 @@ impl DurableAuthenticationAudit {
             self.backing.verify(db)?;
             Ok(replay)
         })();
-        if result.is_err() {
+        if result.as_ref().is_err_and(|e| {
+            e.downcast_ref::<source_authority::AuthenticationSourceFailure>()
+                == Some(&source_authority::AuthenticationSourceFailure::Mismatch)
+        }) {
+            if let Some(access) = access {
+                access.source().invalidate_authority(crate::human_authority::HumanAuthorityInvalidationReason::DurableAuthorityMismatch);
+            }
+        }
+        if result.as_ref().is_err_and(|e| {
+            !source_authority::admission_refusal(e)
+                && !crate::audit::storage::descriptor_shortage(e)
+        }) {
             self.unhealthy.store(true, Ordering::Release);
         }
         result
@@ -303,10 +396,29 @@ impl DurableAuthenticationAudit {
 
     fn verify_backing(&self, db: &Connection) -> Result<()> {
         let result = self.backing.verify(db);
-        if result.is_err() {
+        if result
+            .as_ref()
+            .is_err_and(|e| !crate::audit::storage::descriptor_shortage(e))
+        {
             self.unhealthy.store(true, Ordering::Release);
         }
         result
+    }
+
+    /// Physical validation may consume the remaining epoch budget. Check the
+    /// retained access again after it completes, before publishing any result.
+    /// A simple deadline refusal does not pass through the corruption latch.
+    fn verify_backing_and_access(
+        &self,
+        db: &Connection,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+        write: bool,
+    ) -> Result<()> {
+        self.verify_backing(db)?;
+        if let Some(access) = access {
+            access.check(write)?;
+        }
+        Ok(())
     }
 
     pub fn append_typed(&self, record: AuthenticationRecordV1) -> Result<AuthenticationReceiptV1> {
@@ -346,6 +458,7 @@ impl DurableAuthenticationAudit {
         // This stable marker describes the V4 snapshot lane, not authorization.
         // Candidate changes on retries never change the logical entry bytes.
         self.append_entry_with_candidates(
+            None,
             format::Entry::VerifiedInitial {
                 record,
                 principal,
@@ -357,28 +470,37 @@ impl DurableAuthenticationAudit {
     }
 
     fn append_entry(&self, entry: format::Entry) -> Result<AuthenticationMutationV1> {
-        self.append_entry_with_candidates(entry, None)
+        self.append_entry_with_candidates(None, entry, None)
     }
 
-    fn append_entry_with_candidates(
+    pub(super) fn append_entry_with_candidates(
         &self,
+        access: Option<&AuthenticationSourceAccess<'_>>,
         entry: format::Entry,
         candidates: Option<AuthenticationTenantCandidatesV1>,
     ) -> Result<AuthenticationMutationV1> {
         self.healthy()?;
+        if let Some(access) = access {
+            access.check(true)?;
+        }
         // Never persist or alter an identity containing a redaction collision.
         format::checked_json(&entry, &self.redactor)?;
         let record = entry
             .record()
             .ok_or(AuthenticationAuditFailureV1::InvalidInput)?
             .clone();
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?;
+        let mut state = if access.is_some() {
+            self.state
+                .try_lock()
+                .map_err(|_| source_authority::AuthenticationSourceFailure::Busy)?
+        } else {
+            self.state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?
+        };
         let LiveState { db, floor } = &mut *state;
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let replay = self.inspect(&tx, floor)?;
+        let replay = self.inspect_access(&tx, floor, access, true)?;
         // This prefix was fully validated before any write in our transaction.
         // Remember it even when a later CAS/phase/capacity check refuses work.
         // A newly inserted, uncommitted receipt is never used as this witness.
@@ -387,9 +509,14 @@ impl DurableAuthenticationAudit {
             if let format::Entry::Session { mutation } = &entry {
                 replay.validate_mutation_replay(mutation, &receipt, &self.policy)?;
             }
+            self.validate_context(&tx, access, true)?;
             self.verify_backing(&tx)?;
             tx.commit()?;
-            self.verify_backing(db)?;
+            self.validate_context(db, access, true)?;
+            if access.is_some() {
+                source_authority::clock(&replay.wall_floor)?;
+            }
+            self.verify_backing_and_access(db, access, true)?;
             return Ok(AuthenticationMutationV1 {
                 receipt,
                 inserted: false,
@@ -446,7 +573,11 @@ impl DurableAuthenticationAudit {
         // the terminal allowance derived from it. No other corrected writer
         // can spend its record/bytes between provider admission and completion.
         replay.check_terminal_capacity(&entry, records, bytes, &self.policy)?;
-        let received = format::timestamp();
+        let received = if access.is_some() {
+            source_authority::clock(&replay.wall_floor)?
+        } else {
+            format::timestamp()
+        };
         let hash = format::digest(records, &received, &replay.verified.head.hash, &payload);
         let changed = tx.execute("INSERT INTO authentication_entries(seq,received_at,prev_hash,hash,payload,operation_id,phase) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![records as i64, received, replay.verified.head.hash, hash, payload, record.operation_id.to_string(), format::phase_key(record.phase).0])?;
         ensure!(changed == 1, AuthenticationAuditFailureV1::Integrity);
@@ -457,15 +588,37 @@ impl DurableAuthenticationAudit {
             sequence: records,
             hash,
         };
+        if access.is_some() {
+            replay
+                .authority
+                .as_ref()
+                .ok_or(source_authority::AuthenticationSourceFailure::Required)?
+                .write(&tx, &received, &self.redactor)?;
+        }
         // Verify what SQLite actually stored before committing/acknowledging.
-        let appended = self.inspect(&tx, floor)?;
+        let appended = self.inspect_access(&tx, floor, access, true)?;
         ensure!(
             appended.verified.head == receipt,
             AuthenticationAuditFailureV1::Integrity
         );
+        self.validate_context(&tx, access, true)?;
         tx.commit()?;
-        self.verify_backing(db)?;
+        // COMMIT is known: retain the prefix before any fallible postcommit check.
         *floor = receipt.clone();
+        #[cfg(test)]
+        if let Some(hook) = self
+            .postcommit_hook
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication test hook lock poisoned"))?
+            .take()
+        {
+            hook();
+        }
+        self.validate_context(db, access, true)?;
+        if access.is_some() {
+            source_authority::clock(&appended.wall_floor)?;
+        }
+        self.verify_backing_and_access(db, access, true)?;
         Ok(AuthenticationMutationV1 {
             receipt,
             inserted: true,
@@ -473,19 +626,39 @@ impl DurableAuthenticationAudit {
     }
 
     fn read_projection<T>(&self, read: impl FnOnce(&format::Replay) -> Result<T>) -> Result<T> {
+        self.read_projection_access(None, read)
+    }
+    pub(super) fn read_projection_access<T>(
+        &self,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+        read: impl FnOnce(&format::Replay) -> Result<T>,
+    ) -> Result<T> {
         self.healthy()?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?;
+        if let Some(access) = access {
+            access.check(false)?;
+        }
+        let mut state = if access.is_some() {
+            self.state
+                .try_lock()
+                .map_err(|_| source_authority::AuthenticationSourceFailure::Busy)?
+        } else {
+            self.state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?
+        };
         let LiveState { db, floor } = &mut *state;
         let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let replay = self.inspect(&tx, floor)?;
+        let replay = self.inspect_access(&tx, floor, access, false)?;
         *floor = replay.verified.head.clone();
         let result = read(&replay)?;
+        self.validate_context(&tx, access, false)?;
         self.verify_backing(&tx)?;
         tx.commit()?;
-        self.verify_backing(db)?;
+        self.validate_context(db, access, false)?;
+        if access.is_some() {
+            source_authority::clock(&replay.wall_floor)?;
+        }
+        self.verify_backing_and_access(db, access, false)?;
         Ok(result)
     }
 
@@ -628,27 +801,44 @@ impl DurableAuthenticationAudit {
             AuthenticationAuditFailureV1::Integrity
         );
         tx.commit()?;
-        self.verify_backing(db)?;
         *floor = appended.head.clone();
+        self.verify_backing(db)?;
         Ok(appended)
     }
 
     pub fn backup_new(&self, path: &Path) -> Result<AuthenticationVerificationV1> {
+        self.backup_new_access(None, path)
+    }
+    pub(super) fn backup_new_access(
+        &self,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+        path: &Path,
+    ) -> Result<AuthenticationVerificationV1> {
         self.healthy()?;
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?;
+        if let Some(access) = access {
+            access.check(false)?;
+        }
+        let mut state = if access.is_some() {
+            self.state
+                .try_lock()
+                .map_err(|_| source_authority::AuthenticationSourceFailure::Busy)?
+        } else {
+            self.state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))?
+        };
         let LiveState { db, floor } = &mut *state;
         // Keep one consistent source read snapshot through verification and
         // Backup, including when another legitimate handle appends in WAL.
         let source = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let expected = self.inspect(&source, floor)?.verified;
+        let expected = self.inspect_access(&source, floor, access, false)?.verified;
         *floor = expected.head.clone();
-        let restored = self.backup_snapshot(&source, path, &expected)?;
+        let restored = self.backup_snapshot_mode(&source, path, &expected, access)?;
         self.backing.verify(&source)?;
+        self.validate_context(&source, access, false)?;
         source.commit()?;
-        self.verify_backing(db)?;
+        self.validate_context(db, access, false)?;
+        self.verify_backing_and_access(db, access, false)?;
         Ok(restored)
     }
 
@@ -658,6 +848,16 @@ impl DurableAuthenticationAudit {
         path: &Path,
         expected: &AuthenticationVerificationV1,
     ) -> Result<AuthenticationVerificationV1> {
+        self.backup_snapshot_mode(source, path, expected, None)
+    }
+    fn backup_snapshot_mode(
+        &self,
+        source: &Connection,
+        path: &Path,
+        expected: &AuthenticationVerificationV1,
+        access: Option<&AuthenticationSourceAccess<'_>>,
+    ) -> Result<AuthenticationVerificationV1> {
+        let modern = access.is_some();
         let (backing, guard) = StoreStorage::create_new(path)?;
         durable_parent(&backing)?;
         ensure!(
@@ -665,6 +865,9 @@ impl DurableAuthenticationAudit {
             AuthenticationAuditFailureV1::Format
         );
         let mut destination = connection(&backing, false)?;
+        if modern {
+            destination.busy_timeout(Duration::from_millis(100))?;
+        }
         durability(&destination)?;
         {
             let backup = rusqlite::backup::Backup::new(source, &mut destination)?;
@@ -672,6 +875,10 @@ impl DurableAuthenticationAudit {
             loop {
                 backing.verify_names()?;
                 self.backing.verify(source)?;
+                if let Some(access) = access {
+                    access.check(false)?;
+                    self.validate_context(source, Some(access), false)?;
+                }
                 if backup.step(256)? == rusqlite::backup::StepResult::Done {
                     break;
                 }
@@ -683,13 +890,23 @@ impl DurableAuthenticationAudit {
             }
         }
         backing.verify(&destination)?;
-        let restored = format::replay(
-            &destination,
-            self.installation_id,
-            &self.policy,
-            &self.redactor,
-            Some(&expected.head),
-        )?
+        let restored = if modern {
+            format::replay_review(
+                &destination,
+                self.installation_id,
+                &self.policy,
+                &self.redactor,
+                Some(&expected.head),
+            )?
+        } else {
+            format::replay(
+                &destination,
+                self.installation_id,
+                &self.policy,
+                &self.redactor,
+                Some(&expected.head),
+            )?
+        }
         .verified;
         ensure!(
             restored == *expected,
@@ -767,6 +984,10 @@ impl DurableAuthenticationAudit {
 
     pub fn storage_identity(&self) -> Result<AuthenticationStorageIdentityV1> {
         self.healthy()?;
+        self.state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))
+            .and_then(|s| source_authority::require_legacy(&s.db))?;
         self.backing.verify_names()?;
         Ok(AuthenticationStorageIdentityV1(
             self.backing.identity_key().1,
@@ -775,6 +996,10 @@ impl DurableAuthenticationAudit {
 
     pub fn ensure_distinct_from_business(&self, store: &crate::audit::Store) -> Result<()> {
         self.healthy()?;
+        self.state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication audit lock poisoned"))
+            .and_then(|s| source_authority::require_legacy(&s.db))?;
         self.backing.verify_names()?;
         store.backing.verify_names()?;
         ensure!(

@@ -12,9 +12,16 @@ use uuid::Uuid;
 mod budget;
 mod durable;
 mod format;
+mod source_authority;
+mod source_authority_migration;
 pub(crate) use budget::AuthenticationTenantCandidatesV1;
 pub use budget::{
     AuthenticationCapacityPlanV1, AuthenticationCapacityV1, AuthenticationTenantCapacityV1,
+};
+pub(crate) use source_authority::AuthenticationSourceAccess;
+pub(crate) use source_authority_migration::{
+    AuthenticationMaintenanceWriter, AuthenticationReviewMaintenance, AuthenticationReviewStartup,
+    AuthenticationSourceMigrationState, VerifiedAuthenticationSourceBackup,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,3 +645,318 @@ impl AuthenticationAudit {
 #[cfg(all(test, unix))]
 #[path = "authentication/native_logout_tests.rs"]
 mod native_logout_tests;
+
+/// Private modern ports. Every mutation borrows the exact live WriteEpoch;
+/// capacity candidates remain accounting facts and cannot substitute for it.
+impl AuthenticationAudit {
+    pub(crate) fn append_typed_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .append_owned(
+                epoch,
+                source,
+                format::Entry::Authentication { record },
+                None,
+            )?
+            .receipt)
+    }
+    fn append_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        entry: format::Entry,
+        candidates: Option<AuthenticationTenantCandidatesV1>,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        let access = AuthenticationSourceAccess::write(epoch, source)?;
+        self.inner
+            .append_entry_with_candidates(Some(&access), entry, candidates)
+    }
+    pub(crate) fn begin_verified_initial_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        // Absence of a verified membership snapshot is explicitly unscoped.
+        // It may record verification/rejection but cannot admit a session.
+        let candidates =
+            AuthenticationTenantCandidatesV1::from_verified_memberships(principal.clone(), vec![])?;
+        self.append_owned(
+            epoch,
+            source,
+            format::Entry::VerifiedInitial {
+                record,
+                principal,
+                access_fingerprint,
+                membership_recovery: false,
+            },
+            Some(candidates),
+        )
+    }
+    pub(crate) fn begin_verified_initial_after_membership_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        // Absence of a verified membership snapshot is explicitly unscoped.
+        // It may record verification/rejection but cannot admit a session.
+        let candidates =
+            AuthenticationTenantCandidatesV1::from_verified_memberships(principal.clone(), vec![])?;
+        self.append_owned(
+            epoch,
+            source,
+            format::Entry::VerifiedInitial {
+                record,
+                principal,
+                access_fingerprint,
+                membership_recovery: true,
+            },
+            Some(candidates),
+        )
+    }
+    pub(crate) fn begin_verified_initial_with_candidates_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        principal: PrincipalRefV1,
+        access_fingerprint: AuthenticationTokenFingerprintV1,
+        candidates: AuthenticationTenantCandidatesV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.append_owned(
+            epoch,
+            source,
+            format::Entry::VerifiedInitial {
+                record,
+                principal,
+                access_fingerprint,
+                membership_recovery: true,
+            },
+            Some(candidates),
+        )
+    }
+    fn mutate_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        mutation: format::SessionMutation,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.append_owned(
+            epoch,
+            source,
+            format::Entry::Session {
+                mutation: Box::new(mutation),
+            },
+            None,
+        )
+    }
+    pub(crate) fn admit_session_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        binding: AuthenticationSessionBindingV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .mutate_owned(
+                epoch,
+                source,
+                format::SessionMutation::Admit { record, binding },
+            )?
+            .receipt)
+    }
+    pub(crate) fn refresh_pending_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        expected_generation: u32,
+        expected_access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationMutationV1> {
+        self.mutate_owned(
+            epoch,
+            source,
+            format::SessionMutation::RefreshPending {
+                record,
+                expected_generation,
+                expected_access_fingerprint,
+            },
+        )
+    }
+    pub(crate) fn rotate_session_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        binding: AuthenticationSessionBindingV1,
+        expected_generation: u32,
+        expected_access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .mutate_owned(
+                epoch,
+                source,
+                format::SessionMutation::Rotate {
+                    record,
+                    binding,
+                    expected_generation,
+                    expected_access_fingerprint,
+                },
+            )?
+            .receipt)
+    }
+    pub(crate) fn close_session_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        expected_generation: u32,
+        expected_access_fingerprint: AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .mutate_owned(
+                epoch,
+                source,
+                format::SessionMutation::Close {
+                    record,
+                    expected_generation,
+                    expected_access_fingerprint,
+                },
+            )?
+            .receipt)
+    }
+    pub(crate) fn begin_native_logout_during_refresh_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .mutate_owned(
+                epoch,
+                source,
+                format::SessionMutation::BeginNativeLogoutDuringRefresh {
+                    record,
+                    expected_binding,
+                    refresh_operation_id,
+                    refresh_intention,
+                },
+            )?
+            .receipt)
+    }
+    pub(crate) fn record_native_logout_after_refresh_closed_owned(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesWriteEpoch,
+        source: &crate::human_authority::OwnedSourceToken,
+        record: AuthenticationRecordV1,
+        expected_binding: AuthenticationSessionBindingV1,
+        refresh_operation_id: Uuid,
+        refresh_intention: AuthenticationReceiptV1,
+        refresh_result: AuthenticationReceiptV1,
+    ) -> anyhow::Result<AuthenticationReceiptV1> {
+        Ok(self
+            .mutate_owned(
+                epoch,
+                source,
+                format::SessionMutation::RecordNativeLogoutAfterRefreshClosed {
+                    record,
+                    expected_binding,
+                    refresh_operation_id,
+                    refresh_intention,
+                    refresh_result,
+                },
+            )?
+            .receipt)
+    }
+    pub(crate) fn session_current_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+        session_id: Uuid,
+    ) -> anyhow::Result<Option<AuthenticationSessionCurrentV1>> {
+        self.inner.read_projection_access(Some(access), |r| {
+            anyhow::ensure!(
+                !session_id.is_nil(),
+                AuthenticationAuditFailureV1::InvalidInput
+            );
+            Ok(r.session_current(session_id))
+        })
+    }
+    pub(crate) fn fingerprint_seen_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+        fingerprint: &AuthenticationTokenFingerprintV1,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .read_projection_access(Some(access), |r| Ok(r.fingerprint_seen(fingerprint)))
+    }
+    pub(crate) fn verify_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+    ) -> anyhow::Result<AuthenticationVerificationV1> {
+        self.inner
+            .read_projection_access(Some(access), |r| Ok(r.verified.clone()))
+    }
+    pub(crate) fn capacity_plan_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+    ) -> anyhow::Result<Option<AuthenticationCapacityPlanV1>> {
+        self.inner
+            .read_projection_access(Some(access), |r| Ok(r.budget.plan.clone()))
+    }
+    pub(crate) fn format_version_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+    ) -> anyhow::Result<u32> {
+        self.inner.read_projection_access(Some(access), |r| {
+            anyhow::ensure!(
+                r.version == format::HUMAN_AUTHORITY_VERSION,
+                AuthenticationAuditFailureV1::Format
+            );
+            Ok(5)
+        })
+    }
+    pub(crate) fn validate_capacity_tenants_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+        tenants: &std::collections::BTreeSet<String>,
+    ) -> anyhow::Result<()> {
+        self.inner.read_projection_access(Some(access), |r| {
+            let plan = r
+                .budget
+                .plan
+                .as_ref()
+                .ok_or(AuthenticationAuditFailureV1::Format)?;
+            let planned: std::collections::BTreeSet<_> =
+                plan.tenants.iter().map(|t| t.tenant_id.clone()).collect();
+            anyhow::ensure!(planned == *tenants, AuthenticationAuditFailureV1::Format);
+            Ok(())
+        })
+    }
+    pub(crate) fn durable_wall_floor_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+    ) -> anyhow::Result<chrono::DateTime<chrono::Utc>> {
+        self.inner.read_projection_access(Some(access), |r| {
+            Ok(chrono::DateTime::parse_from_rfc3339(&r.wall_floor)?.with_timezone(&chrono::Utc))
+        })
+    }
+    pub(crate) fn backup_new_owned(
+        &self,
+        access: &AuthenticationSourceAccess<'_>,
+        path: &Path,
+    ) -> anyhow::Result<AuthenticationVerificationV1> {
+        self.inner.backup_new_access(Some(access), path)
+    }
+}

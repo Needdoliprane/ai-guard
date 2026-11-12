@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "scope": "Internal AuthLedger5 storage; exact candidate only",
+  "status": "PASS_TARGETED_SOFTWARE",
+  "source_archive_sha256": "4d071fbd7c43787072a2440239b826eaad70504ae738812fc08957644cd01f88",
+  "source_files": 2571,
+  "public_parent": "da024611f2868b0d5ade8efb8000ad7917d74f76",
+  "base_archive_sha256": "5e1189c150ed748e7297654cafd3c21e651304561321f4ecfb1440c6373b2d8f",
+  "candidate_manifest_sha256": "0cb5c7d653b8a1377e25e9e302fc4ac33057f7c5edbc8ee15216fc90cd8cd1ec",
+  "root_results_receipt_sha256": "7a8ac1021ec46ae9d278dccefb10a0af7677136c125d876b06ab623614c38c8f",
+  "raw_manifest_sha256": "4f60f935fbd59bbd0024e05ee5776eff7504584010ada4b364a904ebdd40f7dd",
+  "raw_hashes_verified": 365,
+  "static_manifest_sha256": "0d1269b8165cb7d782a7898c60bcfe1695f90c565d242784dffcdd21ae96054f",
+  "static_records": 49,
+  "build": "PASS",
+  "all_targets_check": "PASS",
+  "tests": [
+    {
+      "index": 1,
+      "selector": "audit::authentication::source_authority::tests::anchor_rejects_sqlite_version_in_the_logical_format_field",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 2,
+      "selector": "audit::authentication::source_authority::tests::unknown_authority_fields_are_refused_by_the_typed_decoder",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 3,
+      "selector": "audit::authentication::source_authority_migration::tests::real_v4_to_v5_migration_preserves_plan_debts_and_receipts",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 4,
+      "selector": "audit::authentication::source_authority_migration::tests::preopened_v4_handle_refuses_append_retry_and_projection_after_v5",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 5,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_marker_charge_never_spends_tenant_or_terminal_reserve",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 6,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_replay_rejects_marker_projection_and_floor_divergence",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 7,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_requires_exact_source_epoch_and_current_incarnation",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 8,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_native_logout_and_refresh_keep_existing_capacity_contract",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 9,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_commit_floor_survives_late_ack_refusal",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 10,
+      "selector": "audit::authentication::source_authority_migration::tests::new_owner_requires_real_new_incarnation_before_retention",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 11,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_resume_refuses_a_changed_backup_and_keeps_the_anchor",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 12,
+      "selector": "audit::authentication::source_authority_migration::tests::v5_rejects_raw_generation_as_sqlite_user_version",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 13,
+      "selector": "audit::authentication::source_authority_migration::tests::authority_charge_preserves_existing_unscoped_terminal_promise",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 14,
+      "selector": "audit::authentication::source_authority_migration::tests::review_regressions::ordinary4_resume_refuses_its_own_source_before_conversion",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 15,
+      "selector": "audit::authentication::source_authority_migration::tests::review_regressions::expiry_inside_last_backing_check_refuses_append_retry_read_and_backup",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 16,
+      "selector": "audit::authentication::source_authority_migration::tests::review_regressions::ordinary4_resume_refuses_a_distinct_copy_in_the_source_parent",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    },
+    {
+      "index": 17,
+      "selector": "audit::authentication::source_authority_migration::tests::review_regressions::distinct4_backup_resumes_before_and_after_conversion",
+      "target": "lib",
+      "status": "PASS",
+      "ignored": 0,
+      "timeout_seconds": 30
+    }
+  ],
+  "postrun": {
+    "sha256": "a942de27aabfc0897eceb4d208b002045b48a9826503dee9b1bd765ede320544",
+    "bytes": 29767680,
+    "regular_files": 2571,
+    "paths_payloads_modes_exact": true
+  },
+  "closure": {
+    "rc": 0,
+    "exact_cid_removed": true,
+    "exact_ps_empty": true,
+    "stop_exit": 137,
+    "OOMKilled": false,
+    "oom_events": 0
+  },
+  "memory": {
+    "peak_bytes": 6472175616,
+    "cap_bytes": 9663676416,
+    "meaning": "Compilation/QA cgroup, not worker usage"
+  },
+  "reviews": {
+    "B1": "GO_SOURCE_BOUNDED",
+    "B2": "GO_SOURCE_BOUNDED",
+    "source_composition": "GO_SOURCE_BOUNDED"
+  },
+  "not_run": [
+    "A+B+Auth complete closure",
+    "Global tenant14/Ready/approval routes and user launch",
+    "Actual persisted Active to OIDC RAM startup scenario",
+    "Dedicated READ-epoch final-deadline parent",
+    "Real runtime/provider/IdP/native macOS/crash/restore qualification",
+    "Prior audit/gate closure"
+  ]
+}
