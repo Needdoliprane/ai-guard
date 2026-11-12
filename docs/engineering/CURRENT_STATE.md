@@ -1,5 +1,9 @@
 # État constaté — suivi du développement
 
+## 12 novembre — garanties opérateur : documentation corrigée, écarts produit conservés
+
+Six guides d’exploitation, de démarrage et fournisseurs ont été rapprochés du code public `ba17452`, avec les paires EN/FR synchronisées. Les événements non produits ne sont plus promis ; provenance déclarée, couverture de capture et observation indépendante restent distinctes. La décision de lancement ne prouve pas une médiation des actions imbriquées ou Web/MCP distantes. Contrôles documentaires seuls : 120 blocs de commandes inchangés et 12 nouveaux liens locaux vérifiés. Aucun code ni test produit modifié, aucun gate fermé ; RC-P6-R03 reste ouvert côté implémentation. Voir [exploitation](../operations.md#audit-sorties-et-couverture) et [guides fournisseurs](../setup/providers/README.md).
+
 ## 12 novembre, 21:24 UTC — lecteur historique des événements : correction ciblée vérifiée
 
 Sur Git `702f35b` plus les deux postimages lecteur/test, le gel `94e6e30d…` (2 605 fichiers) passe treize parents uniques et le check toutes cibles. Les neuf parents d’admission sont réexécutés dans ces treize. Le sélecteur `GLOB` conserve les anciens noms ordinaires sans promotion, normalisation ni réécriture après réouverture saine ; le canari canonique inconnu reste refusé avec rollback réel, sans COMMIT invalide. [Preuves EN/FR, oracles et limites](evidence/2026-11-12/event-kind-history/README.md). Couverture logicielle ciblée D4/RC-P6-R06 vérifiée, sans clôture globale ni gate de production fermé ; pannes, reprise opérateur et runtimes restent hors périmètre. Les preuves antérieures de namespace gardent leur date et leur source.

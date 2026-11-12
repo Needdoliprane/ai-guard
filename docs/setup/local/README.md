@@ -36,7 +36,7 @@ For Podman, use:
 "$AIGUARD_BIN" build --runtime podman --source .
 ```
 
-The normal requirement is a rootless engine. If you deliberately use Docker Desktop or another daemon that does not report rootless operation, add `--allow-rootful-runtime` to `doctor`, `build` and each `run`. This explicit exception is recorded as a runtime security downgrade; a VM does not establish equivalence to rootless isolation. Do not grant the application containers an engine socket or privileged mode.
+The normal requirement is a rootless engine. If you deliberately use Docker Desktop or another daemon that does not report rootless operation, add `--allow-rootful-runtime` to `doctor`, `build` and each `run`. This option explicitly permits a daemon that does not report rootless operation; a VM does not establish equivalence to rootless isolation. The [runtime diagnostic](../../../src/runtime.rs) reads that reported mode, but this path currently emits no `runtime.security_downgrade` event. Its dedicated durable audit evidence remains to be implemented and qualified. Do not grant the application containers an engine socket or privileged mode.
 
 The default worker image supports ordinary commands. For Codex or Claude Code, build the client versions described in the [provider guide](../providers/README.md) before starting an AI session.
 

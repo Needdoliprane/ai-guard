@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 12 novembre — RC-P6-R03 : surpromesses documentaires corrigées
+
+Les guides ne promettent plus `runtime.security_downgrade`, `network.unrestricted` ou `runtime.execution.error` comme événements de ces parcours lorsqu’aucun producteur correspondant n’est établi sur `ba17452`. Ils décrivent les champs réseau effectivement enregistrés et la tentative conditionnelle de transition Unknown, sans confondre demande et observation. Les paires EN/FR explicitent la provenance déclarée et les limites Web/MCP. [Exploitation et couverture](../operations.md#audit-sorties-et-couverture).
+
+Correction documentaire vérifiée et relue ; l’audit dédié de réduction de sûreté et la médiation par action restent des exigences produit ouvertes. Aucun correctif fonctionnel, test runtime ou clôture du risque n’est déduit de cette mise à jour. Les classifications et résultats historiques restent conservés.
+
 ## 12 novembre, 21:24 UTC — D4 / RC-P6-R06 : couverture logicielle du lecteur vérifiée
 
 Le fingerprint `audit-ingest-reserved-kind-case-bypass-relay-validator-latch` dispose d’une correction logicielle ciblée vérifiée sur `94e6e30d…` : sélecteur `LIKE` remplacé par `GLOB`, anciens kinds ordinaires intègres et non promus après réouverture saine, inconnus canoniques refusés puis rollbackés sans COMMIT invalide. Les treize parents uniques incluent neuf régressions d’admission réexécutées ; check toutes cibles PASS. [Preuves EN/FR, source et limites](evidence/2026-11-12/event-kind-history/README.md).

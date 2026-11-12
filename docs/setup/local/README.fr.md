@@ -36,7 +36,7 @@ Avec Podman :
 "$AIGUARD_BIN" build --runtime podman --source .
 ```
 
-Le fonctionnement normal exige un moteur rootless. Pour utiliser délibérément Docker Desktop ou un daemon qui ne déclare pas ce mode, ajouter `--allow-rootful-runtime` à `doctor`, `build` et à chaque `run`. Cette exception explicite est tracée comme une réduction de sûreté runtime ; une VM ne démontre pas une isolation équivalente à rootless. Ne pas fournir de socket moteur ni de mode privilégié aux conteneurs applicatifs.
+Le fonctionnement normal exige un moteur rootless. Pour utiliser délibérément Docker Desktop ou un daemon qui ne déclare pas ce mode, ajouter `--allow-rootful-runtime` à `doctor`, `build` et à chaque `run`. Cette option autorise explicitement un daemon qui ne déclare pas le mode rootless ; une VM ne démontre pas une isolation équivalente à rootless. Le [diagnostic runtime](../../../src/runtime.rs) lit ce mode déclaré, mais ce parcours ne produit actuellement aucun événement `runtime.security_downgrade`. Sa preuve d'audit durable dédiée reste à implémenter et qualifier. Ne pas fournir de socket moteur ni de mode privilégié aux conteneurs applicatifs.
 
 L'image worker par défaut permet les commandes ordinaires. Pour Codex ou Claude Code, construire les versions des clients décrites dans le [guide fournisseurs](../providers/README.fr.md) avant une session IA.
 

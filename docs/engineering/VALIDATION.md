@@ -1,5 +1,9 @@
 # Validation courante
 
+## 12 novembre — guides opérateur : vérification documentaire ciblée
+
+Base `ba17452`, six Markdown, patch `bf8f8c98b45dcf02992f6f6e63c7a41716680649e6f70c5852def16b217c7f49` : revue indépendante GO_DOCS_DIFF, 15 empreintes vérifiées, 120 blocs de commandes identiques et 12 liens ajoutés valides. Garanties de lancement, événements réellement produits et limites des déclarations fournisseur sont rapprochés du code. Aucun Cargo, application, test produit, runtime, fournisseur ou cluster exécuté pour ce lot documentaire. Ces contrôles ne ferment pas RC-P6-R03 ni une qualification de confinement.
+
 ## 12 novembre, 21:24 UTC — lecteur historique : treize parents uniques et check toutes cibles PASS
 
 Gel `94e6e30dc9e57d646ccaf41cb7e9d568148bc9181044f180656889751be7e24b`, Git `702f35b` + lecteur `71cf8042…` + test historique inchangé `af4824bd…` : build offline/frozen, quatre artefacts Cargo JSON réels, liste fraîche avant chaque parent exact à un thread. Treize PASS, zéro FAIL/ignoré, puis `cargo check --all-targets` RC 0. Les neuf parents d’admission sont inclus dans ces treize, sans addition d’une ancienne campagne. Root vérifie 471 pièces brutes, 44 statiques et 2 605 contenus/modes postrun ; export `d3cce5ad…`, fermeture RC 0, CID retiré et aucun OOM. [Sélecteurs, preuves EN/FR et limites](evidence/2026-11-12/event-kind-history/README.md).

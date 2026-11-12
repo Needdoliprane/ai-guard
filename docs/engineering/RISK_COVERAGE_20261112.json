@@ -3271,7 +3271,7 @@
       "conditionalPriority": false,
       "lot": "LOT-F",
       "mergedInto": null,
-      "currentSourceStatus": "TO_REVALIDATE",
+      "currentSourceStatus": "DOCUMENTARY_CORRECTION_VERIFIED_PRODUCT_REQUIREMENTS_OPEN",
       "comparison": {
         "scope": "file blobs only; no semantic or runtime conclusion",
         "files": [
@@ -3326,9 +3326,39 @@
         ]
       },
       "tests": "NOT_RUN",
-      "owner": null,
+      "owner": "Root orchestration",
       "closureEvidence": null,
-      "reportedPriorityCondition": null
+      "reportedPriorityCondition": null,
+      "remediationEvidence": {
+        "at": "2026-11-12T22:09:17.393Z",
+        "status": "DOCUMENTARY_CORRECTION_VERIFIED_PRODUCT_REQUIREMENTS_OPEN",
+        "fullClosure": false,
+        "sourceBase": "ba174523e6ac0fd59ebe5da874a8438f7b02a127",
+        "guideFiles": [
+          "docs/operations.md",
+          "docs/quickstart.md",
+          "docs/setup/local/README.md",
+          "docs/setup/local/README.fr.md",
+          "docs/setup/providers/README.md",
+          "docs/setup/providers/README.fr.md"
+        ],
+        "patchSha256": "bf8f8c98b45dcf02992f6f6e63c7a41716680649e6f70c5852def16b217c7f49",
+        "independentReview": "GO_DOCS_DIFF",
+        "staticChecks": {
+          "unchangedCommandBlocks": 120,
+          "addedLocalLinksVerified": 12,
+          "privatePacketHashesVerified": 15
+        },
+        "productTests": "NOT_RUN; documentation-only change",
+        "productRequirementsStillOpen": [
+          "Dedicated durable audit for the rootful runtime exception.",
+          "Per-action mediation and verified coverage of nested and remote Web/MCP operations."
+        ],
+        "limits": [
+          "Historical report classification, tests=NOT_RUN and file-blob comparisons remain unchanged.",
+          "No application behavior, runtime qualification or production gate is established by a documentary correction."
+        ]
+      }
     },
     {
       "id": "RC-P6-R04",
