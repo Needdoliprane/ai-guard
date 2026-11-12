@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre, 03:58 UTC — candidats privés : 47 parents Core et deux reprises du relais
+
+Le nouveau test SQLite reproduit le refus erroné d’une connexion main avec TEMP vide : `FAIL_EXPECTED_RED`, 0 PASS. Sur le gel privé corrigé `72ea2425…`, les 47 parents exacts et le check toutes cibles passent ; Root vérifie 761 empreintes brutes et les 2 525 contenus/modes exportés. Une campagne séparée du relais passe deux régressions de perte d’ACK et le check, sur son propre gel. [Sources, historique et limites](evidence/2026-11-12/private-control-candidates/README.md). Ces résultats ne sont pas transférés au code public ni fusionnés en un total : les deltas Core et les 134 dépendances Full3 restent privés. Le format 14 global, `AuthLedger5`, `Ready` et l’approbation complète restent fermés.
+
+Quatre worktrees livrés sont fermés normalement après sauvegarde vérifiée ; branches originales et commits/bundles de rétention conservés. Aucun volume/cache ni checkout principal touché. L’analyse de risque Claude reste en cours, sans rapport final reçu ; aucun brouillon n’a été lu. Aucun gate global fermé.
+
 ## 12 novembre, 03:04 UTC — diagnostic opérateur E : validation logicielle composée
 
 Le gel public `862e182fe3f9ff6a6028b2b2060bf36f83ba3cab` + 45 postimages E passe neuf parités du binaire et les 85 cas automatiques de la suite CLI normale ; l’exporteur manuel ignoré reste `NOT_RUN` dans cette campagne. Build et check toutes cibles RC 0. Source `c2b907a8…`, 2 552 fichiers `0644` ; export vivant exact `8a96898a…`, fermeture RC 0/OOM 0, vérification indépendante des 301 pièces brutes et des contenus/modes. [Sources, commandes et limites](evidence/2026-11-12/operator-diagnostics/README.md).

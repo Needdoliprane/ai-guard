@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — 47 parents Core privés et consommateurs de reprise, sources distinctes
+
+Tests-first `6d06a47d…` : un parent réel échoue après vérification de TEMP sans objet (`FAIL_EXPECTED_RED`, RC 101, 0 PASS). Candidat privé corrigé `72ea2425…` : 47 parents exacts PASS, build/list/check toutes cibles et fermeture RC 0 ; Root vérifie 761 pièces et 2 525 contenus/modes, sans OOM. Anciennes erreurs de build, fixture, prédicat et préflight conservées. Gel relais privé `94628626…` : deux pertes d’ACK PASS et check toutes cibles RC 0 ; Root vérifie 175 pièces et 2 583 contenus/modes. [Commandes, empreintes, revues et limites](evidence/2026-11-12/private-control-candidates/README.md).
+
+Ces campagnes portent sur des candidats privés séparés, pas sur la composition publique actuelle ; aucun moteur métier, fournisseur, IdP, panne runtime ou parcours d’approbation complet qualifié. Les quatre fermetures de worktree ont leurs reçus distincts, sans suppression de branches ou de preuves. Aucun gate fermé.
+
 ## 12 novembre — parcours opérateur README EN/FR
 
 Les deux entrées du produit décrivent le parcours configuration, construction depuis une source préparée, diagnostic, lancement autorisé, suivi, export dans une destination neuve, arrêt et reprise. La revue indépendante des deux langues vérifie 66 liens locaux, dont 10 ancres, les 14 fichiers sources qui déclarent les commandes, 15 occurrences de commande par langue et huit blocs shell identiques. Les commandes sont rapprochées des déclarations et guides du code public après intégration E ; aucune exécution runtime ni fournisseur n’est déduite de cette vérification documentaire. Les guides spécialisés et les limites restent accessibles depuis chaque entrée. [Périmètre et preuves](evidence/2026-11-12/readme-operator-journey/README.md).
