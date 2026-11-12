@@ -828,6 +828,14 @@ fn new_owner_requires_real_new_incarnation_before_retention() {
         &source,
     )
     .unwrap();
+    // A restart reads the real predecessor revision, without treating its
+    // previous owner incarnation as current execution authority.
+    assert_eq!(
+        startup
+            .current_incarnation_revision(&epoch, &source)
+            .unwrap(),
+        1
+    );
     let operation = Uuid::new_v4();
     let receipt = startup
         .append_incarnation(&epoch, &source, operation, 1)
@@ -837,6 +845,12 @@ fn new_owner_requires_real_new_incarnation_before_retention() {
             .append_incarnation(&epoch, &source, operation, 1)
             .unwrap(),
         receipt
+    );
+    assert_eq!(
+        startup
+            .current_incarnation_revision(&epoch, &source)
+            .unwrap(),
+        2
     );
     let audit = startup.retain(&epoch, &source).unwrap();
     let access = AuthenticationSourceAccess::write(&epoch, &source).unwrap();

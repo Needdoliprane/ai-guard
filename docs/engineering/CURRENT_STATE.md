@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre — union A+B+Auth : 17 régressions de migration et démarrage PASS
+
+Les openers privés et le coordinateur de maintenance passent 17 parents exacts sur de vrais fichiers SQLite, puis le check toutes cibles. Les deux getters retiennent le head observé ; une première migration refuse les backups main/sidecars occupés avant intent ; la reprise après commit partiel conserve plan et anchor. Deux oracles de fixture ont été corrigés sans changer les contrôles métier. Root vérifie 363 pièces runtime, 2 615 pièces statiques et 2 589 contenus/modes postrun. [Source, reproductions, résultats et limites](evidence/2026-11-12/human-source-migration/README.md).
+
+Ces ports internes ne fournissent ni commande utilisateur de migration, ni Ready, ni lancement humain. La suite prioritaire raccorde les mutateurs Store et les cycles OIDC/RAM/Drop aux vrais owners/sources/epochs, avant enregistrement runner et approbation nominative. Les 134 postimages Full3 restent privés ; les qualifications runtime et tous les gates globaux restent ouverts.
+
 ## 12 novembre — profil tenant14 : onze régressions de migration et replay PASS
 
 Le profil exact14, les replays hérités et le fencing legacy sont corrigés et relus. Une vraie migration avait échoué sur le profil global puis sur le nom d’index ; après correction, neuf parents de migration/historique et deux projections non vides passent, ainsi que le check toutes cibles. Root vérifie 290 pièces runtime, 2604 pièces statiques et 2579 contenus/modes postrun. [Sources, résultats et limites](evidence/2026-11-12/tenant14-storage/README.md). Le contrôle du format est aussi répété sous writer ; le canari spécifique de concurrence reste BLOCKED/NOT_RUN, sans clôture dynamique.

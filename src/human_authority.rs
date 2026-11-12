@@ -16,6 +16,7 @@
 mod manifest;
 pub use manifest::*;
 pub(crate) mod maintenance;
+pub(crate) mod migration;
 
 use crate::control_fs::{Directory, PrivateEntryIdentity, PrivateFile};
 use std::{

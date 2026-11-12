@@ -186,6 +186,40 @@ pub(super) struct AuthoritySnapshot {
     pub(super) anchor_receipt: AuthorityReceiptV1,
     incarnation: Option<(SourceIncarnationV1, AuthorityReceiptV1)>,
 }
+impl AuthoritySnapshot {
+    /// Descriptive history only; the snapshot is not retained source authority.
+    pub(super) fn incarnation_revision(&self) -> u64 {
+        self.incarnation
+            .as_ref()
+            .map_or(0, |(record, _)| record.revision)
+    }
+
+    pub(super) fn incarnation_receipt(&self) -> Option<&AuthorityReceiptV1> {
+        self.incarnation.as_ref().map(|(_, receipt)| receipt)
+    }
+
+    /// Startup precheck for an expected absent/previous owner incarnation.
+    /// Retention still independently verifies the full source and transaction.
+    pub(super) fn require_current_incarnation_for_startup(
+        &self,
+        source: &OwnedSourceToken,
+    ) -> anyhow::Result<()> {
+        let Some((incarnation, _)) = self.incarnation.as_ref() else {
+            return Err(ReviewAuthorityFailure::Required.into());
+        };
+        let closure = source.closure();
+        if incarnation.owner_incarnation != source.incarnation()
+            || incarnation.closure_id != closure.closure_id
+            || incarnation.closure_revision != closure.closure_revision
+            || incarnation.closure_digest != closure.closure_digest
+            || incarnation.control_config_public_digest
+                != closure.configuration.public_config_digest
+        {
+            return Err(ReviewAuthorityFailure::Required.into());
+        }
+        Ok(())
+    }
+}
 #[derive(Default)]
 struct AuthorityProjection {
     snapshot: Option<AuthoritySnapshot>,

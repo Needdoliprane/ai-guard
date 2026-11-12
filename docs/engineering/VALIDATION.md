@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — migration humaine composée : validation bornée de 17 tests
+
+Sur e507619 + 11 postimages applicatifs, gel 9e7d14f25ea80634132d24d89f080ac1d92465814de0360b2bacd337fca96b0e / 2 589 fichiers : build lib frozen/offline, listing compilé, 17 parents exacts (1 PASS / 0 FAIL / 0 ignored chacun) et cargo check --all-targets RC 0. Formatage ciblé des 11 fichiers Rust RC 0. Vérification Root : 363 pièces runtime, 2 615 pièces statiques, 2 589 postimages/modes exacts ; fermeture RC 0 et aucun OOM. [Preuve publique et historique des échecs](evidence/2026-11-12/human-source-migration/README.md), [oracles et empreintes](evidence/2026-11-12/human-source-migration/TESTS.json).
+
+Le RED getter, le RED backup main et les deux essais interrompus sur des fixtures incorrectes sont conservés séparément ; aucun PASS n’est transféré entre gels. Pas de Ready/API/CLI de migration ou d’approbation ; OIDC réel, workers, restauration multi-processus, Clippy strict et charge de 100 workers NOT_RUN. Le canari legacy spécifiquement bloqué reste BLOCKED/NOT_RUN, sans nouvelle tentative. Aucun gate global fermé.
+
 ## 12 novembre — profil fermé tenant14 : onze parents et check toutes cibles PASS
 
 Source 4184cf827918d49a34ee6777451fc81cc6cbcaa212ee775af362ae3126bff988 (2579 fichiers), build lib/liste 0,11 parents exacts PASS/0 ignoré, check toutes cibles 0. Export vivant64e8c121…/29880320 octets entièrement comparé ;290 empreintes runtime, 2604 statiques, fermeture0/OOM0, pic 6416056320/9663676416 octets. [Sélecteurs, RED conservées, revue et limites](evidence/2026-11-12/tenant14-storage/README.md). Les nouveaux openers, l’union de sources et le canari de concurrence bloqué restent NOT_RUN dans cette campagne. Aucun résultat runtime/fournisseur ou gate global n’est déduit.

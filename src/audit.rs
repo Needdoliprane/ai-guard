@@ -168,12 +168,20 @@ mod review_authority;
 mod review_authority_migration;
 mod review_binding;
 mod review_format14;
+mod review_startup;
 pub(crate) use kubernetes_admission::{
     ConfirmedKubernetesCreateResult, FreshKubernetesCreateClaimCommit,
     KubernetesCreateAuthorization, PreparedRecovery,
 };
 pub(crate) use metadata::MetadataLookup;
 pub(crate) use review_access::{HumanSourceAccess, StoreOperationClass};
+pub(crate) use review_authority::AuthorityReceiptV1;
+pub(crate) use review_authority_migration::{
+    ReviewSourceMigrationState, VerifiedReviewSourceBackup,
+};
+pub(crate) use review_startup::{
+    ReviewStoreMaintenance, ReviewStoreMaintenanceWriter, ReviewStoreStartup,
+};
 #[cfg(test)]
 pub(crate) mod kubernetes_admission_state_tests;
 #[cfg(test)]
@@ -263,6 +271,18 @@ struct SupervisionLease {
     active: bool,
     pending_activation: bool,
     invalidated: bool,
+}
+
+/// Verified connection state shared by legacy construction and the private
+/// review openers. This cache input never contains source/epoch authority.
+struct PreparedStoreState {
+    initial_valid: bool,
+    fresh_origin: bool,
+    validated_data_version: i64,
+    initial_head: (i64, String),
+    namespace: Option<String>,
+    capacity: capacity::Cache,
+    positive_bindings: metadata::PositiveBindings,
 }
 
 pub(crate) struct CheckedTransaction<'a> {
@@ -894,6 +914,41 @@ impl Store {
         if let Some(prefix) = capacity_prefix {
             capacity.publish(prefix);
         }
+        let fresh_origin = backing.created_here() && empty && initial_valid;
+        Ok(Self::from_prepared_connection(
+            backing,
+            db,
+            tenant_id,
+            redactor,
+            max_events,
+            PreparedStoreState {
+                initial_valid,
+                fresh_origin,
+                validated_data_version,
+                initial_head,
+                namespace,
+                capacity,
+                positive_bindings,
+            },
+        ))
+    }
+    fn from_prepared_connection(
+        backing: StoreStorage,
+        db: Connection,
+        tenant_id: &str,
+        redactor: Redactor,
+        max_events: u64,
+        state: PreparedStoreState,
+    ) -> Self {
+        let PreparedStoreState {
+            initial_valid,
+            fresh_origin,
+            validated_data_version,
+            initial_head,
+            namespace,
+            capacity,
+            positive_bindings,
+        } = state;
         let validated_total_changes = db.total_changes();
         let supervision_lease = Arc::new(SupervisionOrigin {
             capacity: Mutex::new(capacity),
@@ -903,7 +958,7 @@ impl Store {
                 namespace,
                 initial_head: initial_head.clone(),
                 floor: initial_head,
-                fresh_origin: backing.created_here() && empty && initial_valid,
+                fresh_origin,
                 active: false,
                 pending_activation: false,
                 invalidated: !initial_valid,
@@ -911,7 +966,7 @@ impl Store {
             invalidated: AtomicBool::new(!initial_valid),
             suspended: AtomicBool::new(false),
         });
-        Ok(Self {
+        Self {
             tenant_id: tenant_id.into(),
             db: Mutex::new(db),
             backing,
@@ -931,7 +986,7 @@ impl Store {
             review_authority: None,
             #[cfg(test)]
             read_test_observer: read_test_observer::ReadTestObserver::default(),
-        })
+        }
     }
     /// Another connection to this live origin; no caller-selected identity or path.
     /// An independent open remains maintenance-only even for this same pathname.

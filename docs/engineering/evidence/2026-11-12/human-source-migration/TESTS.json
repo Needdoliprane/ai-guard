@@ -1,0 +1,337 @@
+{
+  "version": 1,
+  "status": "PASS_SCOPED_SOFTWARE",
+  "date": "2026-11-12",
+  "publicBase": "e507619190fc6c12ddd4a5f1b49b5c4a2152ca61",
+  "source": {
+    "sha256": "9e7d14f25ea80634132d24d89f080ac1d92465814de0360b2bacd337fca96b0e",
+    "bytes": 30044160,
+    "regularFiles": 2589,
+    "mode": "0644",
+    "applicationPostimages": [
+      {
+        "path": "src/audit.rs",
+        "postSha256": "6f81cb8e1254728af728a5db614df438c6f273e44bbd5536d77781ea0cab66b0",
+        "mode": 420,
+        "new": false
+      },
+      {
+        "path": "src/audit/authentication/source_authority_migration.rs",
+        "postSha256": "42efa3609f0f973ef64ca784db8083210ba33f82fe9cf43c5a9beff779ab6d87",
+        "mode": 420,
+        "new": false
+      },
+      {
+        "path": "src/audit/authentication/source_authority_migration/tests.rs",
+        "postSha256": "05d066077daf4a788721225f628f0a9ee02f8d5d8a16f0102f145e88b7ab9311",
+        "mode": 420,
+        "new": false
+      },
+      {
+        "path": "src/audit/review_authority.rs",
+        "postSha256": "8a434b53309d9ab791f5dbee95fb202e6f94f0b794d8c9e232acc61a6bf045fa",
+        "mode": 420,
+        "new": false
+      },
+      {
+        "path": "src/audit/review_startup.rs",
+        "postSha256": "40a403c09d7e682ac0c2f010dd07358d59684d3d5bcb4eaad8967da93690ccee",
+        "mode": 420,
+        "new": true
+      },
+      {
+        "path": "src/audit/review_startup/tests.rs",
+        "postSha256": "4b96c455f013301ed8bbb1cfea8d24ebfdf15e0e608452efe3b8ae9d3374befc",
+        "mode": 420,
+        "new": true
+      },
+      {
+        "path": "src/human_authority.rs",
+        "postSha256": "c501aab07b4f71807065785a624d9e0d9c1b388dddf6a842cac5c627addc7af2",
+        "mode": 420,
+        "new": false
+      },
+      {
+        "path": "src/human_authority/migration.rs",
+        "postSha256": "2b2a1ab6cdbb8f107b66c1abbb7f0e312c32d46027e0e20cdd92b09ab341ce37",
+        "mode": 420,
+        "new": true
+      },
+      {
+        "path": "src/human_authority/migration/journal.rs",
+        "postSha256": "4e26b997572b4df0028c4e999474a90f04d7fb0704e6ce8f9feab4ea705c1241",
+        "mode": 420,
+        "new": true
+      },
+      {
+        "path": "src/human_authority/migration/sources.rs",
+        "postSha256": "05a6a669848d914dacda8cf9fc14bfe9f845719e5fae9c12b9f7830845e76948",
+        "mode": 420,
+        "new": true
+      },
+      {
+        "path": "src/human_authority/migration/tests.rs",
+        "postSha256": "f80a0e226a174a2f142ecf3a947425c6b1516c4d976b1f3fb35ad000e0a20813",
+        "mode": 420,
+        "new": true
+      }
+    ],
+    "otherPublicBlobsAndModesExact": 2578
+  },
+  "commands": {
+    "build": "cargo test --frozen --offline --lib --no-run --message-format=json",
+    "list": "compiled lib test executable --list",
+    "tests": "compiled lib test executable <exact-selector> --exact --nocapture --test-threads=1",
+    "check": "cargo check --frozen --offline --all-targets --message-format=json",
+    "buildRc": 0,
+    "checkRc": 0,
+    "selection": "17 exact parents; each30s; stop first failure; all-targets only afterall17PASS"
+  },
+  "parents": [
+    {
+      "number": 1,
+      "name": "audit::review_startup::tests::maintenance_reopens_real_migration_and_resumes_the_same_committed_anchor",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "af8df52544201a68515a414a501429c770aff39fda936067b3a6a6b366092124",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 2,
+      "name": "audit::review_startup::tests::maintenance_nested_writers_refuse_foreign_tokens_and_busy_union_without_effect",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "29691dbd80de763851c8c9da38bf1cbae3eba244e6ba12205c959ae2f927aebe",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 3,
+      "name": "audit::review_startup::tests::startup_requires_current_real_incarnation_before_retention_and_scoped_access",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "226526b380fc108b8c03717a55cc087c48f9121a1f75ece0d2af72cf69afd55f",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 4,
+      "name": "audit::review_startup::tests::startup_refuses_foreign_source_and_tenant_without_poisoning_exact_owner",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "45ae59addd96eac96f080b44ef3c5a1d32d2a7b37aa4befc8dd42f1e702d503c",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 5,
+      "name": "audit::review_startup::tests::startup_known_commit_floor_survives_late_epoch_expiry_without_ack",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "5ea51daee30e731b66df194a23adf1600e039981f32889da82c362cdf9e58066",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 6,
+      "name": "audit::review_startup::tests::startup_getters_retain_the_real_head_observed_after_another_wrapper_commits",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "b8be120480a26ec0fbefe681694ec41716e5d124d62a2120f871df62402fbf75",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 7,
+      "name": "audit::authentication::source_authority_migration::tests::new_owner_requires_real_new_incarnation_before_retention",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "98393ebc4b8e82142ac0173b87b4ecadadee05db1717bd5b820a9d99ff0c88ab",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 8,
+      "name": "human_authority::migration::tests::real_migration_a_b_auth_is_owned_and_scoped_after_reopen",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "ec85ea7f495969085f35c3dbd1ca4dedb7af95de92cbe65471707831530d4a98",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 9,
+      "name": "human_authority::migration::tests::last_source_writer_busy_mutates_nothing_and_keeps_backups_absent",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "7cdb9081e0571a681e3f1672a92a6cfba263edd353c3a81a0e8e30ccd84e0b8b",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 10,
+      "name": "human_authority::migration::tests::partial_first_commit_resumes_same_plan_without_new_anchor",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "5f0ef84321ad5b2af3c22359a97302d86b718303722c0cdfe1a8cef3f5c89922",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 11,
+      "name": "human_authority::migration::tests::only_b_migrated_never_returns_a_modern_source_bundle",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "4c62ebe6c4858ff2c9c41573d8afaf488bb00390ea1553b5bbb07c22793f7991",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 12,
+      "name": "human_authority::migration::tests::missing_extra_or_changed_migration_sources_refuse_without_backup",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "24ee970fa970003b112529730271bad69da3dc5969aba28c98a8ab5f836644dc",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 13,
+      "name": "human_authority::migration::tests::authentication_capacity_scope_must_match_complete_tenant_union",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "f5affd8615ad44f4f49cb3d7e30d898a5501acfdf81c330d2b0265eb2e34254f",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 14,
+      "name": "human_authority::migration::tests::maximum_floor_keeps_submillisecond_precision_and_never_defaults_to_zero",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "7d7c615fc9726a72b4e70271645d25a188afe062ef565d90659d874414f5ba0a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 15,
+      "name": "human_authority::migration::tests::changed_journal_plan_after_partial_commit_never_rewrites_backup_or_marker",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "e0a9436cb49393ddfbfcaef83b5bcda9a25c246e057e262be619a9ddc8a20911",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 16,
+      "name": "human_authority::migration::tests::fresh_migration_refuses_preexisting_exact_legacy_backup_before_intent",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "3f93392f91ab8da6f401808d83ca44325ed86946cc2a3b5d13c9322356722114",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "number": 17,
+      "name": "human_authority::migration::tests::fresh_migration_refuses_preexisting_backup_sidecars_before_intent",
+      "rc": 0,
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "stdoutSha256": "9caef253aa48e697a43740e01f0cc0f664e00bebfbd3dcf80e70140ffcab7445",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "verification": {
+    "rootReceiptSha256": "23361cd9c4626014be019fccfc95c93cf683d9019225c219dce123000d376941",
+    "runtimePieces": 363,
+    "runtimeManifestSha256": "3b34c9ab12addae31b59bdf64fc651bff2cf804a24515c47c824d2afdc8fa837",
+    "staticPieces": 2615,
+    "staticManifestSha256": "0c990eb9a53f606350afde21f05b1fb9ee13cca36b5eb17fae1311e474537863",
+    "postArchiveSha256": "fab83a6a75a81600d5b90e97db98a88019f93a717fdd0f72f818569f74f745d0",
+    "postArchiveBytes": 30054400,
+    "postFilesAndModesExact": 2589,
+    "overflowBytes": 0,
+    "closureRc": 0,
+    "exactContainerRemoved": true,
+    "holderExitCode": 137,
+    "oomKilled": false,
+    "cgroupOom": 0,
+    "peakMemoryBytes": 6339534848,
+    "memoryLimitBytes": 9663676416,
+    "interpretation": "Holder exit137 follows bounded stop; each selected project test/check exited0."
+  },
+  "environment": {
+    "platform": "LinuxARM64",
+    "rust": "1.99.1",
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "user": "1000:1000",
+    "network": "none",
+    "cpu": 4,
+    "memoryBytes": 9663676416,
+    "swapBytes": 0,
+    "pids": 128,
+    "rootReadOnly": true,
+    "readOnlyBinds": 2,
+    "scratchGiB": 4,
+    "capabilities": "ALL dropped",
+    "noNewPrivileges": true,
+    "seccomp": 2
+  },
+  "review": {
+    "f1": "GO_SOURCE_BOUNDED",
+    "expiryOracle": "TEST_ORACLE_ONLY GO_SOURCE_BOUNDED",
+    "u1r2": "GO_SOURCE_BOUNDED",
+    "authenticationOracle": "TEST_ORACLE_ONLY GO_SOURCE_BOUNDED",
+    "u1r2ReviewSha256": "717e4d54be1d41fbdd321b1519a4141e3e6f635f0f690dc2541807000e99231b",
+    "authenticationOracleReviewSha256": "934e56ad50599a36077edcbdac1fd6cbb223bedd36c98ef5235fd2ad6284919d"
+  },
+  "historicalEvidence": {
+    "f1RedReceipt": "6bc2024b35acbf190f1104c3e886bd04f2acb881f8f191e4fa8f33d718d75ceb",
+    "u1RedReceipt": "5f828594db8c7f8f51b2cb030769b846894c4ce08700ff3141428864c140eb61",
+    "firstGreen7Failure": "2c0446186719058d84959f7be585ded1dac1877ab7109117e19faad3745506b4",
+    "firstComposition17Failure": "5bc2140155a9fa85118b77a0e878918b61d4cd90c148724cc96d017429b992f0"
+  },
+  "notRun": [
+    "user migration command or API Ready activation",
+    "complete human approval and launch",
+    "real OIDC provider/CLI login",
+    "real workers or Docker/Podman/Kubernetes adapter qualification",
+    "multi-process restoration,100worker load,macOS native,strictClippy/fullrepo suite",
+    "previous specifically blocked legacy-opener canary, not retried",
+    "physical source/configuration substitution on this composed migration path",
+    "three distinct durable A/B/Auth floors exercised through the composed coordinator"
+  ],
+  "globalProductionGatesClosed": 0,
+  "historicalAuditFingerprintsClosed": 0,
+  "privateFull3PostimagesPreserved": 134,
+  "claim": "Internal migration/startup component only; no user migration command, Ready or human launch activated.",
+  "oracleLimits": {
+    "missing_extra_or_changed_migration_sources_refuse_without_backup": "Missing and extra request source keys only; no physical source/configuration replacement in this parent.",
+    "maximum_floor_keeps_submillisecond_precision_and_never_defaults_to_zero": "Unit DateTime comparison and maximum over values only; no three distinct durable A/B/Auth floors in this parent."
+  },
+  "format": {
+    "command": "rustfmt --edition 2024 --config skip_children=true --check <11 candidate Rust files>",
+    "rc": 0,
+    "proofSha256": "668d2bf9efac64146f380c62a463c1f8ea9a4d81eb259878d939b995c5a4abc5",
+    "scope": "trusted host formatter only; no project build/test execution on host; separate from363runtime pieces",
+    "files": 11
+  }
+}

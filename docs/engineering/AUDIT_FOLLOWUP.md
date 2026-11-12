@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 12 novembre — prérequis de l’approbation humaine : migration interne vérifiée
+
+Les ports de maintenance/startup et la migration réelle A+B+Auth passent 17 parents ciblés et le check toutes cibles sur un gel identifié. Le suivi conserve les reproductions et les échecs d’oracle, les corrections relues et les limites : [preuves du lot](evidence/2026-11-12/human-source-migration/README.md). Il s’agit d’un prérequis interne ; aucune approbation nominative ou exécution humaine n’est activée, aucun fingerprint historique ni gate global n’est clôturé par assimilation. Les pièces privées des audits et leurs conclusions datées restent distinctes.
+
 ## 12 novembre — capacité ApproveLaunch préparatoire, suivi borné
 
 La revue indépendante `GO_SOURCE_BOUNDED` et quatre parents logiciels PASS examinent une capacité personnelle préparatoire et sa barrière contre les anciens formats. Les assertions confirment que `ApproveLaunch` n’est pas une `ResourcePermissionV1` ni un rôle d’administration; les mutations concernées sont refusées avant écriture/replay pour les formats autres que 14. L’acceptation par le helper à 14 ne constitue pas une ouverture, migration ou activation.

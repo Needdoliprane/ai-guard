@@ -656,6 +656,57 @@ impl AuthenticationReviewStartup {
             .match_anchor(&self.source)?;
         Ok(chrono::DateTime::parse_from_rfc3339(&got.wall_floor)?.with_timezone(&chrono::Utc))
     }
+    /// Verified predecessor revision for startup CAS; never an execution capability.
+    /// This deliberately accepts a prior owner incarnation only as history.
+    pub(crate) fn current_incarnation_revision(
+        &self,
+        epoch: &HumanSourcesWriteEpoch,
+        source: &OwnedSourceToken,
+    ) -> Result<u64> {
+        epoch.validate_source(source)?;
+        ensure!(
+            self.source.same_owner_and_source(source),
+            AuthenticationSourceFailure::Required
+        );
+        let mut state = self
+            .audit
+            .state
+            .try_lock()
+            .map_err(|_| AuthenticationSourceFailure::Busy)?;
+        let LiveState { db, floor } = &mut *state;
+        authority::physical(&self.audit.backing, db, source)?;
+        epoch.validate_source(source)?;
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        authority::physical(&self.audit.backing, &tx, source)?;
+        epoch.validate_source(source)?;
+        let got = format::replay_review(
+            &tx,
+            self.audit.installation_id,
+            &self.audit.policy,
+            &self.audit.redactor,
+            Some(floor),
+        )?;
+        let snapshot = got
+            .authority
+            .as_ref()
+            .ok_or(AuthenticationSourceFailure::Required)?;
+        snapshot.match_anchor(source)?;
+        let revision = snapshot
+            .incarnation
+            .as_ref()
+            .map_or(0, |(incarnation, _)| incarnation.revision);
+        epoch.validate_source(source)?;
+        authority::physical(&self.audit.backing, &tx, source)?;
+        tx.commit()?;
+        // Retain a known verified head even if a later check refuses publication.
+        if got.verified.head.sequence > floor.sequence {
+            *floor = got.verified.head;
+        }
+        epoch.validate_source(source)?;
+        authority::physical(&self.audit.backing, db, source)?;
+        epoch.validate_source(source)?;
+        Ok(revision)
+    }
     pub(crate) fn append_incarnation(
         &self,
         epoch: &HumanSourcesWriteEpoch,
