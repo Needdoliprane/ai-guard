@@ -1,0 +1,30 @@
+# Scoped human-source Store ports — 12 November 2026
+
+This is a bounded software integration on public base `9550575cbc0e7b32c84f3d4d5947d5c8b69e2ee6`. It adds internal identity/human-read, supervision/relay and workload/broker-registry ports using the real retained source and borrowed Core epoch. Legacy access remains closed on schema14. The public read DTO and its JSON description accept versions1–14; that metadata cannot create start authority, Ready or a schema14 HTTP deployment.
+
+## Verified behavior
+
+The Store campaign uses real private SQLite fixtures and explicit migrations, not successful fake Store responses. Its 22 exact parents cover matching/mismatching source, expiry, accepted-epoch drainage versus new admission during Closing, credential/membership revision, metadata/content/export ACL, mandatory durable receipts, conservative lifecycle/revocation and idempotent directed relay revocation. A previously claimed helper can finish without reconstructing start authority. Three neighboring legacy workload/broker/relay tests are included. Build, fresh compiled listings and `cargo check --frozen --offline --all-targets` returned0.
+
+A separate contract campaign checks the delivered DTO/JSON structures, actual HTTP metadata for schemas2–12, and the real CLI schema13 metadata. It preserves the private11/12 active/inactive regression and changes its obsolete unsupported13 oracle to unsupported15. The new14 case validates representation only. The assertions compare the published JSON constraints directly; no third-party JSON Schema engine was run. The precise separate sources, selectors and outcomes are in [TESTS.json](TESTS.json); their counts must not be represented as one campaign on one gel.
+
+## Execution and evidence
+
+Only the isolated Linux ARM64 QA ran project builds/tests: pinned image, uid1000, no network, root and inputs read-only, empty allowlisted application environment, capabilities dropped, no-new-privileges, private namespaces, four CPUs,9GiB memory/no swap, PID128, file/FD/time bounds and4GiB scratch. Each parent has a fresh listing and an exact selector with one PASS/zero FAIL/zero ignored. Root independently checks hashes, return codes, Cargo artifacts, source payloads and modes after execution, bounded USTAR export and removal of the exact QA container. These are QA controls, not worker isolation qualification.
+
+The Store22 source is `436cfe76c8ea4cd2b820abb0ac8e8bf1676fca8382ae6005a6c8b5a679a47edd` (2,597 regular files); Root receipt `cd18712e01df961b0bdfc27fc43e021955178bb4c294714db0c7aa969cce8074`. It verifies692 raw files and27 static manifest entries. The postrun archive `e329fd86b357d6f897db34a98e628c756cb2025987ae58f6d73b605194eb121e` is30,197,760bytes, all2,597 payloads/modes exact. Peak memory6,443,487,232bytes. Closure0, OOMfalse; holder exit137 has no established cause.
+
+
+The separate five-parent contract source is `acc40251fb03beef0fd4d02aa8d40db0a5487867222451eda2a9a7732705862b` (30,020,608bytes/2,597files). All five exact parents passed, no ignored test; all-targets was NOT_RUN on this source. Root receipt `5cbee282b4239114cee76d2e4bff06099babbe269a733ff7729711b38cc07c12` verifies258 raw files and28 static entries. The postrun archive `a7b3548212219409f06f62c3e565491873ee04e455cee0c194a590d374074652` is30,208,000bytes with all2,597 payloads/modes exact. Peak memory4,856,610,816bytes, zero cgroup OOM/kill, closure0 and exact CID removed. Holder exit137 cause remains unknown. The earlier separate four-parent PASS retains its own source and receipt; it is not five additional tests on the Store22 source.
+
+The fifteen Store/application files stay byte-identical in the separate contract campaign. Two contract paths previously in a protected private composition are deliberately promoted, retaining their original snapshots and11/12 test coverage. The remaining private Full3 application paths remain unintegrated; the API document receives a separately tracked additive contract paragraph preserving its private text; no historical Full3 runtime proof transfers to this source.
+
+## Earlier failures and limits
+
+Before the DTO fix, one exact parent compiled/listed and failed `state.validate().is_ok()` on descriptive schema14; Root receipt `c0965c4446b232751453d3e0637eb5437cac487d50b85e05e4bfeea2231c9355`. A suspected string escaping defect was refuted by source bytes. The first Store campaign then stopped during libtest compilation (E0277: `unwrap_err` required Debug on a successful DTO); no parent ran. Only test Err extraction changed, preserving the exact Forbidden oracle; receipt `81f6d6892624d20de2cef1ca9f7b84814e81711a33d3eff6efb407f9d1b99ae8`. An independent review also corrected a test that mistakenly expected an already accepted epoch to stop draining at Closing; production admission rules were unchanged. Source reviews and these corrections remain distinct from dynamic evidence.
+
+Strict Clippy, the full repository suite, frontend/browser, real IdP, providers, workers, Docker/Podman/Kubernetes runtime isolation, multi-process crash/restore and100-worker capacity were NOT_RUN in this lot. The scoped methods still acquire a standard blocking Store mutex before the checked transaction; this lot does not establish a short upper bound for retaining an epoch under contention. That remains a separate follow-up before the API can claim bounded guards. Scoped ports do not connect all API callers, offline mutators or SSO/RAM owners, and do not provide human approval. No historical audit fingerprint or production gate is closed. Unrelated operations previously refused by tooling remain BLOCKED/NOT_RUN without retry or workaround.
+
+## Portée en français
+
+Les22 tests Store et la campagne distincte de contrat vérifient des ports internes sur de vraies bases de fixture et leurs migrations. L’owner, la source retenue et l’epoch emprunté sont vérifiés ; les chemins legacy restent fermés à14. La métadonnée1–14 ne fournit ni Ready, ni activation, ni lancement humain. Les traces historiques, les échecs et les limites restent liés à leur source exacte. Aucun gate global ni constat d’audit n’est clos par assimilation.

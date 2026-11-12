@@ -292,12 +292,12 @@ impl SupervisionStateV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         invalid(
             self.version == 1
-                && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&self.schema_version),
+                && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&self.schema_version),
         )?;
         if let Some(namespace) = &self.control_namespace_uuid {
             uuid(namespace)?;
         }
-        if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&self.schema_version) {
+        if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&self.schema_version) {
             invalid(
                 self.control_namespace_uuid.is_some()
                     && self.protocols == [SupervisionProtocolV1::BrokerSupervisionV1],
@@ -816,7 +816,7 @@ mod schema11_compatibility_tests {
 
     #[test]
     fn schema11_retains_supervision_v1_and_the_closed_schema_range() {
-        for schema_version in 3..=13 {
+        for schema_version in 3..=14 {
             let state = supervised(schema_version);
             assert!(state.validate().is_ok(), "schema {schema_version}");
         }
@@ -828,7 +828,7 @@ mod schema11_compatibility_tests {
             state.active = true;
             assert!(state.validate().is_err());
         }
-        for schema_version in [0, 14, u32::MAX] {
+        for schema_version in [0, 15, u32::MAX] {
             let mut state = supervised(schema_version);
             assert!(state.validate().is_err());
             // Unknown schemas cannot enter through the legacy inactive shape.
@@ -879,5 +879,51 @@ mod schema11_compatibility_tests {
         let mut wire = serde_json::to_value(&valid).unwrap();
         wire["session_authority"] = serde_json::json!(true);
         assert!(serde_json::from_value::<ControlProtocolV1>(wire).is_err());
+    }
+}
+
+#[cfg(test)]
+mod schema14_human_source_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn schema14_describes_supervision_without_creating_activation_or_authority() {
+        let state = SupervisionStateV1 {
+            version: 1,
+            schema_version: 14,
+            control_namespace_uuid: Some(Uuid::from_u128(1).to_string()),
+            protocols: vec![SupervisionProtocolV1::BrokerSupervisionV1],
+            active: false,
+        };
+        assert!(state.validate().is_ok());
+        assert!(!state.active);
+        let wire = ControlProtocolV1 {
+            version: state.version,
+            schema_version: state.schema_version,
+            control_namespace_uuid: state.control_namespace_uuid.clone(),
+            tenant_id: "A".into(),
+            role: "runner".into(),
+            protocols: state.protocols.clone(),
+            active: state.active,
+        };
+        assert!(wire.validate().is_ok());
+        assert!(!wire.active);
+        let mut missing_namespace = state.clone();
+        missing_namespace.control_namespace_uuid = None;
+        assert!(missing_namespace.validate().is_err());
+        let mut missing_protocol = state.clone();
+        missing_protocol.protocols.clear();
+        assert!(missing_protocol.validate().is_err());
+        let mut duplicate_protocol = state.clone();
+        duplicate_protocol
+            .protocols
+            .push(SupervisionProtocolV1::BrokerSupervisionV1);
+        assert!(duplicate_protocol.validate().is_err());
+        let mut worker = wire.clone();
+        worker.role = "worker".into();
+        assert!(worker.validate().is_err());
+        let mut unknown = state;
+        unknown.schema_version = 15;
+        assert!(unknown.validate().is_err());
     }
 }

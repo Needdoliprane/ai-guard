@@ -26,7 +26,7 @@ use crate::{
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::{ffi::OsStr, os::unix::fs::PermissionsExt, path::Path};
 
-struct Fixture {
+pub(crate) struct Fixture {
     _temporary: tempfile::TempDir,
     plan: HumanSourcesMaintenancePlanV1,
     plan_file: PrivateFile,
@@ -108,7 +108,7 @@ fn identity_projection(source: &HumanMaintenanceSourceV1) -> Vec<String> {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
@@ -338,6 +338,21 @@ impl Fixture {
             retry: retry.unwrap(),
         }
     }
+    /// Test-only, real full-union migration; no schema/authority is fabricated.
+    pub(crate) fn migrated(&self) -> MigratedHumanSources {
+        migrate_human_sources(self.request()).unwrap()
+    }
+    pub(crate) fn principal(&self) -> &PrincipalRefV1 {
+        &self.account
+    }
+    /// Prepare history through real legacy APIs before calling migrated().
+    pub(crate) fn legacy_store(&self, tenant: &str) -> &Store {
+        self.legacy
+            .iter()
+            .find(|store| store.tenant_id() == tenant)
+            .unwrap()
+    }
+
     fn actual(&self) -> HumanSourcesMaintenanceConfigurationV1 {
         HumanSourcesMaintenanceConfigurationV1::new(
             None,

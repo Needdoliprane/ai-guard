@@ -23,6 +23,28 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
+        self.human_events_recent_impl(None, scope, filter, upper, limit, transient)
+    }
+    pub(crate) fn human_events_recent_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
+        self.human_events_recent_impl(Some(access), scope, filter, upper, limit, transient)
+    }
+    fn human_events_recent_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
         anyhow::ensure!(
             (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit)
                 && upper.is_none_or(|bound| bound >= 0)
@@ -35,9 +57,14 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        identity::require_human_access(&tx)?;
-        let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        identity::require_human_read(&tx)?;
+        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         require_view(&current, filter)?;
         if let Some(resource) = &filter.resource {
             let grant: ResourceGrantV1 = identity::json_row(
@@ -158,7 +185,7 @@ impl Store {
                 oldest = seq;
             }
         }
-        let receipt = self.record_human_read(
+        let receipt = self.record_human_read_checked(
             &tx,
             current.principal(),
             Some(&current),

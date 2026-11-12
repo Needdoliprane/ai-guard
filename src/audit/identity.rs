@@ -12,6 +12,10 @@ pub(crate) struct AuthenticationMembershipSnapshotV1 {
 }
 
 #[cfg(all(test, unix))]
+#[path = "identity_scoped_read_tests.rs"]
+mod scoped_read_tests;
+
+#[cfg(all(test, unix))]
 #[path = "identity_authentication_metadata_tests.rs"]
 mod authentication_metadata_tests;
 
@@ -196,9 +200,9 @@ pub(super) fn require_identity(db: &Connection) -> anyhow::Result<()> {
         Err(IdentityFailureV1::MigrationRequired.into())
     }
 }
-// Only checked identity mutations use the modern projection. Their caller
-// proves the transaction's IdentityAuthority class before entering this gate;
-// legacy readers and mutators keep require_identity's historical formats.
+// Identity-authority mutations prove their class before using this projection.
+// Business readers enter through the separately checked read guards below;
+// the legacy Connection-only guards retain their historical formats.
 fn require_identity_projection(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
@@ -210,6 +214,36 @@ fn require_identity_projection(db: &Connection) -> anyhow::Result<()> {
 pub(super) fn require_human_access(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        Ok(())
+    } else {
+        Err(IdentityFailureV1::MigrationRequired.into())
+    }
+}
+
+/// Format 14 is usable only through an actual, live checked transaction that
+/// retains its borrowed source authority through commit. A header alone and
+/// the Connection-only legacy guards never acquire that authority.
+pub(super) fn identity_read_format(tx: &CheckedTransaction<'_>) -> anyhow::Result<bool> {
+    tx.require_business_access()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    Ok([4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)
+        || (version == 14 && tx.source_access.is_some()))
+}
+
+pub(super) fn require_identity_read(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
+    if identity_read_format(tx)? {
+        Ok(())
+    } else {
+        Err(IdentityFailureV1::MigrationRequired.into())
+    }
+}
+
+pub(super) fn require_human_read(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
+    tx.require_business_access()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if [5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version)
+        || (version == 14 && tx.source_access.is_some())
+    {
         Ok(())
     } else {
         Err(IdentityFailureV1::MigrationRequired.into())
@@ -1175,13 +1209,32 @@ impl Store {
         &self,
         principal: &PrincipalRefV1,
     ) -> anyhow::Result<Option<HumanAccountV1>> {
+        self.human_account_impl(None, principal)
+    }
+    pub(crate) fn human_account_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<Option<HumanAccountV1>> {
+        self.human_account_impl(Some(access), principal)
+    }
+    fn human_account_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<Option<HumanAccountV1>> {
         let key = principal.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let value = json_row::<HumanAccountV1>(
             &tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
@@ -1194,13 +1247,32 @@ impl Store {
         &self,
         principal: &PrincipalRefV1,
     ) -> anyhow::Result<AuthenticationMembershipSnapshotV1> {
+        self.authentication_membership_snapshot_impl(None, principal)
+    }
+    pub(crate) fn authentication_membership_snapshot_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<AuthenticationMembershipSnapshotV1> {
+        self.authentication_membership_snapshot_impl(Some(access), principal)
+    }
+    fn authentication_membership_snapshot_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<AuthenticationMembershipSnapshotV1> {
         let key = principal.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let account = json_row::<HumanAccountV1>(
             &tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
@@ -1245,13 +1317,32 @@ impl Store {
         &self,
         principal: &PrincipalRefV1,
     ) -> anyhow::Result<Vec<MembershipV1>> {
+        self.identity_memberships_impl(None, principal)
+    }
+    pub(crate) fn identity_memberships_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<Vec<MembershipV1>> {
+        self.identity_memberships_impl(Some(access), principal)
+    }
+    fn identity_memberships_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        principal: &PrincipalRefV1,
+    ) -> anyhow::Result<Vec<MembershipV1>> {
         let key = principal.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let result = {
             let mut statement = tx.prepare("SELECT payload_json FROM identity_memberships WHERE principal_key=?1 ORDER BY membership_id")?;
             statement
@@ -1266,13 +1357,32 @@ impl Store {
         &self,
         resource: &ResourceRefV1,
     ) -> anyhow::Result<Option<ResourceGrantV1>> {
+        self.identity_resource_grant_impl(None, resource)
+    }
+    pub(crate) fn identity_resource_grant_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        resource: &ResourceRefV1,
+    ) -> anyhow::Result<Option<ResourceGrantV1>> {
+        self.identity_resource_grant_impl(Some(access), resource)
+    }
+    fn identity_resource_grant_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        resource: &ResourceRefV1,
+    ) -> anyhow::Result<Option<ResourceGrantV1>> {
         let key = resource.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let result = json_row(
             &tx,
             "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
@@ -1289,13 +1399,44 @@ impl Store {
         expected_revision: u64,
         mode: ContextModeV1,
     ) -> anyhow::Result<AuthorizedScopeV1> {
+        self.authorize_human_context_impl(None, principal, membership_id, expected_revision, mode)
+    }
+    pub(crate) fn authorize_human_context_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        principal: &PrincipalRefV1,
+        membership_id: &str,
+        expected_revision: u64,
+        mode: ContextModeV1,
+    ) -> anyhow::Result<AuthorizedScopeV1> {
+        self.authorize_human_context_impl(
+            Some(access),
+            principal,
+            membership_id,
+            expected_revision,
+            mode,
+        )
+    }
+    fn authorize_human_context_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        principal: &PrincipalRefV1,
+        membership_id: &str,
+        expected_revision: u64,
+        mode: ContextModeV1,
+    ) -> anyhow::Result<AuthorizedScopeV1> {
         let key = principal.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let account: HumanAccountV1 = json_row(
             &tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
@@ -1328,13 +1469,36 @@ impl Store {
         resource: &ResourceRefV1,
         permission: ResourcePermissionV1,
     ) -> anyhow::Result<Option<ResourceGrantV1>> {
+        self.authorized_resource_grant_impl(None, scope, resource, permission)
+    }
+    pub(crate) fn authorized_resource_grant_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        resource: &ResourceRefV1,
+        permission: ResourcePermissionV1,
+    ) -> anyhow::Result<Option<ResourceGrantV1>> {
+        self.authorized_resource_grant_impl(Some(access), scope, resource, permission)
+    }
+    fn authorized_resource_grant_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        scope: &AuthorizedScopeV1,
+        resource: &ResourceRefV1,
+        permission: ResourcePermissionV1,
+    ) -> anyhow::Result<Option<ResourceGrantV1>> {
         let resource_key = resource.key()?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        let current = revalidate_scope(&tx, scope, &self.tenant_id)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        let current = revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         let result: Option<ResourceGrantV1> = json_row(
             &tx,
             "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
@@ -1345,12 +1509,29 @@ impl Store {
         Ok(result)
     }
     pub fn identity_authorization_revision(&self) -> anyhow::Result<u64> {
+        self.identity_authorization_revision_impl(None)
+    }
+    pub(crate) fn identity_authorization_revision_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+    ) -> anyhow::Result<u64> {
+        self.identity_authorization_revision_impl(Some(access))
+    }
+    fn identity_authorization_revision_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+    ) -> anyhow::Result<u64> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_identity(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_identity_read(&tx)?;
         let revision = authorization_revision(&tx)?;
         self.commit_checked(tx)?;
         Ok(revision)
@@ -1363,6 +1544,23 @@ pub(super) fn revalidate_scope(
     tenant: &str,
 ) -> anyhow::Result<AuthorizedScopeV1> {
     require_identity(db)?;
+    revalidate_scope_projection(db, scope, tenant)
+}
+
+pub(super) fn revalidate_scope_checked(
+    tx: &CheckedTransaction<'_>,
+    scope: &AuthorizedScopeV1,
+    tenant: &str,
+) -> anyhow::Result<AuthorizedScopeV1> {
+    require_identity_read(tx)?;
+    revalidate_scope_projection(tx, scope, tenant)
+}
+
+fn revalidate_scope_projection(
+    db: &Connection,
+    scope: &AuthorizedScopeV1,
+    tenant: &str,
+) -> anyhow::Result<AuthorizedScopeV1> {
     if scope.tenant_id() != tenant || authorization_revision(db)? != scope.authorization_revision()
     {
         return Err(IdentityFailureV1::ContextRevoked.into());

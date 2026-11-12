@@ -143,12 +143,39 @@ impl Store {
         &self,
         digest: &[u8; 32],
     ) -> anyhow::Result<Option<LocalCredentialV1>> {
+        self.local_credential_binding_impl(None, digest)
+    }
+    pub(crate) fn local_credential_binding_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<LocalCredentialV1>> {
+        self.local_credential_binding_impl(Some(access), digest)
+    }
+    fn local_credential_binding_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<LocalCredentialV1>> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        let binding = local_credential_binding(&tx, digest)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        let binding = if identity::identity_read_format(&tx)? {
+            identity::json_row(
+                &tx,
+                "SELECT payload_json FROM identity_credentials WHERE digest=?1",
+                &hex::encode(digest),
+            )?
+        } else {
+            None
+        };
         self.commit_checked(tx)?;
         Ok(binding)
     }
@@ -156,13 +183,31 @@ impl Store {
         &self,
         digest: &[u8; 32],
     ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
+        self.authenticate_local_digest_impl(None, digest)
+    }
+    pub(crate) fn authenticate_local_digest_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
+        self.authenticate_local_digest_impl(Some(access), digest)
+    }
+    fn authenticate_local_digest_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        if !identity::identity_read_format(&tx)? {
             self.commit_checked(tx)?;
             return Ok(None);
         }
@@ -175,7 +220,7 @@ impl Store {
             self.commit_checked(tx)?;
             return Ok(None);
         };
-        identity::require_human_access(&tx)?;
+        identity::require_human_read(&tx)?;
         binding.validate()?;
         if !binding.active {
             return Err(IdentityFailureV1::IdentityRevoked.into());
@@ -209,13 +254,33 @@ impl Store {
         principal: &PrincipalRefV1,
         transient: &Redactor,
     ) -> anyhow::Result<HumanProfileSnapshotV1> {
+        self.human_profile_impl(None, principal, transient)
+    }
+    pub(crate) fn human_profile_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        principal: &PrincipalRefV1,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanProfileSnapshotV1> {
+        self.human_profile_impl(Some(access), principal, transient)
+    }
+    fn human_profile_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        principal: &PrincipalRefV1,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanProfileSnapshotV1> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if ![4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        if !identity::identity_read_format(&tx)? {
             self.commit_checked(tx)?;
             return Ok(HumanProfileSnapshotV1 {
                 account: None,
@@ -238,7 +303,7 @@ impl Store {
                 authorization_revision: Some(revision),
             });
         };
-        identity::require_human_access(&tx)?;
+        identity::require_human_read(&tx)?;
         let members = {
             let mut stmt = tx.prepare("SELECT payload_json FROM identity_memberships WHERE principal_key=?1 AND active=1 ORDER BY membership_id LIMIT 257")?;
             stmt.query_map([&key], |r| r.get::<_, String>(0))?
@@ -246,7 +311,7 @@ impl Store {
                 .collect::<anyhow::Result<Vec<MembershipV1>>>()?
         };
         anyhow::ensure!(members.len() <= 256, "human membership capacity exceeded");
-        self.record_human_read(&tx, principal, None, "identity", 1, transient)?;
+        self.record_human_read_checked(&tx, principal, None, "identity", 1, transient)?;
         self.commit_checked(tx)?;
         Ok(HumanProfileSnapshotV1 {
             account: Some(account),
@@ -261,6 +326,26 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
+        self.human_resources_impl(None, scope, after, limit, transient)
+    }
+    pub(crate) fn human_resources_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        after: &str,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
+        self.human_resources_impl(Some(access), scope, after, limit, transient)
+    }
+    fn human_resources_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        scope: &AuthorizedScopeV1,
+        after: &str,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
         anyhow::ensure!(
             (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after.len() <= 64,
             "invalid human resource page"
@@ -269,9 +354,14 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        identity::require_human_access(&tx)?;
-        let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        identity::require_human_read(&tx)?;
+        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         require_view(
             &current,
             &HumanEventFilterV1 {
@@ -336,7 +426,7 @@ impl Store {
                 position = next;
             }
         }
-        let receipt = self.record_human_read(
+        let receipt = self.record_human_read_checked(
             &tx,
             current.principal(),
             Some(&current),
@@ -363,6 +453,30 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanEventPollV1> {
+        self.human_events_impl(None, scope, filter, after, upper, limit, transient)
+    }
+    pub(crate) fn human_events_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        after: i64,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanEventPollV1> {
+        self.human_events_impl(Some(access), scope, filter, after, upper, limit, transient)
+    }
+    fn human_events_impl(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        after: i64,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanEventPollV1> {
         anyhow::ensure!(
             (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after >= 0,
             "invalid human event page"
@@ -371,9 +485,14 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        identity::require_human_access(&tx)?;
-        let current = identity::revalidate_scope(&tx, scope, &self.tenant_id)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        identity::require_human_read(&tx)?;
+        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         require_view(&current, filter)?;
         if let Some(resource) = &filter.resource {
             let grant: ResourceGrantV1 = identity::json_row(
@@ -488,7 +607,7 @@ impl Store {
         } else {
             "events"
         };
-        let receipt = self.record_human_read(
+        let receipt = self.record_human_read_checked(
             &tx,
             current.principal(),
             Some(&current),
@@ -520,6 +639,29 @@ impl Store {
         transient: &Redactor,
     ) -> anyhow::Result<HumanReadReceiptV1> {
         identity::require_human_access(tx)?;
+        self.persist_human_read(tx, principal, scope, action, count, transient)
+    }
+    pub(super) fn record_human_read_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        principal: &PrincipalRefV1,
+        scope: Option<&AuthorizedScopeV1>,
+        action: &str,
+        count: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanReadReceiptV1> {
+        identity::require_human_read(tx)?;
+        self.persist_human_read(tx, principal, scope, action, count, transient)
+    }
+    fn persist_human_read(
+        &self,
+        tx: &Transaction<'_>,
+        principal: &PrincipalRefV1,
+        scope: Option<&AuthorizedScopeV1>,
+        action: &str,
+        count: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanReadReceiptV1> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let record = HumanReadAuditV1 {
             version: 1,

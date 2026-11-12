@@ -130,6 +130,10 @@ fn migrate_to(store: &Store, backup: &Path, version: u32) {
         8 => store.migrate_kubernetes_create_v8(backup).unwrap(),
         9 => store.migrate_kubernetes_policy_v9(backup).unwrap(),
         10 => store.migrate_human_workers_v10(backup).unwrap(),
+        11 => store
+            .migrate_kubernetes_session_reservations_v11(backup)
+            .unwrap(),
+        12 => store.migrate_broker_checkpoints_v12(backup).unwrap(),
         _ => panic!("unexpected migration target {version}"),
     };
     assert!(
@@ -349,4 +353,166 @@ async fn human_worker_feature_is_advertised_only_after_the_explicit10_migration(
     );
     assert!(store.integrity().unwrap().valid);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn schema11_and12_protocols_match_active_and_inactive_schema_constraints_and_reject15() {
+    // A delivered schema that rejects the real v11/v12 responses must fail
+    // here even when those DTOs satisfy the Rust contract. No schema validator
+    // dependency or fabricated Store/HTTP response replaces the real route.
+    let files = support::private_tempdir();
+    let database = files.path().join("tenant.sqlite");
+    let runner = "schema12-contract-runner".repeat(3);
+    let viewer = "schema12-contract-viewer".repeat(3);
+    let redactor = || Redactor::new(vec![runner.clone(), viewer.clone()]);
+    let router_for = |store: Arc<Store>| {
+        gateway_router(
+            GatewayState::for_tenants(
+                vec![TenantGateway {
+                    tenant_id: "schema-contract-tenant".into(),
+                    store,
+                    runner_token: runner.clone(),
+                    viewer_token: viewer.clone(),
+                }],
+                Policy::default(),
+                None,
+                redactor(),
+            )
+            .unwrap(),
+        )
+    };
+    let schema: Value = serde_json::from_str(CONTROL_PROTOCOL_SCHEMA).unwrap();
+    let mut failures = Vec::new();
+    let last_protocol = {
+        let store = Arc::new(
+            Store::open_for_tenant(&database, "schema-contract-tenant", redactor(), 10_000)
+                .unwrap(),
+        );
+        let router = router_for(Arc::clone(&store));
+        let mut last_protocol = None;
+        for version in 3..=12 {
+            migrate_to(
+                &store,
+                &files.path().join(format!("before{version}.sqlite")),
+                version,
+            );
+            if version >= 11 {
+                assert!(store.integrity().unwrap().valid);
+                let protocol = get_protocol(&router, &runner).await;
+                assert_eq!(protocol.schema_version, version);
+                assert!(protocol.active, "same fresh-origin lease stays active");
+                protocol.validate().unwrap();
+                check_protocol_and_schema(&protocol, &schema, version, true, &mut failures);
+                last_protocol = Some(protocol);
+            }
+        }
+        last_protocol.unwrap()
+        // Both the router and every live Store Arc drop before reopen below.
+    };
+    assert!(last_protocol.control_namespace_uuid.is_some());
+    for (version, path) in [
+        (11, files.path().join("before12.sqlite")),
+        (12, database.clone()),
+    ] {
+        let historical = Arc::new(
+            Store::open_existing_for_tenant(&path, "schema-contract-tenant", redactor(), 10_000)
+                .unwrap(),
+        );
+        assert!(historical.integrity().unwrap().valid);
+        let router = router_for(Arc::clone(&historical));
+        let protocol = get_protocol(&router, &runner).await;
+        assert_eq!(protocol.schema_version, version);
+        assert!(!protocol.active, "reopen cannot inherit the active origin");
+        assert_eq!(
+            protocol.control_namespace_uuid,
+            last_protocol.control_namespace_uuid
+        );
+        protocol.validate().unwrap();
+        check_protocol_and_schema(&protocol, &schema, version, false, &mut failures);
+    }
+
+    // This negative changes only the version/active fields of a valid served
+    // DTO. It tests public Rust validation, not a claim that Store serves v15.
+    for active in [false, true] {
+        let mut future = last_protocol.clone();
+        future.schema_version = 15;
+        future.active = active;
+        assert!(
+            future.validate().is_err(),
+            "schema15 must remain unsupported"
+        );
+    }
+    for pointer in [
+        "/properties/schema_version/enum",
+        "/allOf/0/then/properties/schema_version/enum",
+    ] {
+        let allowed = schema.pointer(pointer).and_then(Value::as_array).unwrap();
+        assert!(
+            !allowed.iter().any(|value| value.as_u64() == Some(15)),
+            "delivered schema must reject15 at {pointer}"
+        );
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn schema14_descriptive_dto_and_published_json_contract_agree() {
+    let schema: Value = serde_json::from_str(CONTROL_PROTOCOL_SCHEMA).unwrap();
+    let protocol = ControlProtocolV1 {
+        version: 1,
+        schema_version: 14,
+        control_namespace_uuid: Some("00000000-0000-0000-0000-000000000001".into()),
+        tenant_id: "schema-contract-tenant".into(),
+        role: "runner".into(),
+        protocols: vec![SupervisionProtocolV1::BrokerSupervisionV1],
+        active: false,
+    };
+    protocol.validate().unwrap();
+    assert!(!protocol.active);
+    assert_eq!(
+        schema["properties"]["schema_version"]["enum"],
+        serde_json::json!((1..=14).collect::<Vec<_>>())
+    );
+    let rules = schema["allOf"].as_array().unwrap();
+    let supervised = rules
+        .iter()
+        .find(|rule| {
+            rule["if"]["properties"]["schema_version"]["enum"]
+                == serde_json::json!((3..=14).collect::<Vec<_>>())
+        })
+        .expect("every supervised metadata generation has the same shape, even inactive");
+    assert_eq!(
+        supervised["then"]["properties"]["control_namespace_uuid"]["type"],
+        "string"
+    );
+    assert_eq!(
+        supervised["then"]["properties"]["protocols"]["const"],
+        serde_json::json!(["broker_supervision_v1"])
+    );
+    let legacy = rules
+        .iter()
+        .find(|rule| {
+            rule["if"]["properties"]["schema_version"]["enum"] == serde_json::json!([1, 2])
+        })
+        .unwrap();
+    assert_eq!(legacy["then"]["properties"]["active"]["const"], false);
+    assert_eq!(
+        legacy["then"]["properties"]["protocols"]["const"],
+        serde_json::json!([])
+    );
+    let mut missing_namespace = protocol.clone();
+    missing_namespace.control_namespace_uuid = None;
+    assert!(missing_namespace.validate().is_err());
+    let mut missing_protocol = protocol.clone();
+    missing_protocol.protocols.clear();
+    assert!(missing_protocol.validate().is_err());
+    let mut future = protocol;
+    future.schema_version = 15;
+    assert!(future.validate().is_err());
+    assert!(
+        !schema["properties"]["schema_version"]["enum"]
+            .as_array()
+            .unwrap()
+            .contains(&Value::from(15))
+    );
 }

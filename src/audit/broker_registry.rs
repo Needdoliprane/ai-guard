@@ -404,6 +404,16 @@ fn require_schema(db: &Connection) -> anyhow::Result<()> {
     }
 }
 
+fn require_checked_schema(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
+    tx.require_business_access()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 14 {
+        Ok(())
+    } else {
+        require_schema(tx)
+    }
+}
+
 pub(super) fn initialize(store: &Store, tx: &Transaction<'_>) -> anyhow::Result<()> {
     for (_, _, sql) in SCHEMA {
         tx.execute_batch(sql)?;
@@ -723,7 +733,8 @@ impl Store {
         heartbeat: &BrokerHeartbeatV1,
     ) -> anyhow::Result<String> {
         require(
-            view.version == 1 && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13),
+            view.version == 1
+                && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14),
         )?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [
@@ -766,6 +777,20 @@ impl Store {
             None,
         )
     }
+    pub(crate) fn mutate_broker_grant_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        mutation: &BrokerGrantMutationV1,
+    ) -> anyhow::Result<BrokerMutationResultV1> {
+        mutation.validate()?;
+        self.persist_broker_change_with_access(
+            Some(access),
+            Change::Grant {
+                mutation: mutation.clone(),
+            },
+            None,
+        )
+    }
     /// Revocation uses the private identity-maintenance capacity lane. The
     /// caller cannot select this lane through a kind, role string or heartbeat.
     pub fn revoke_broker(
@@ -774,6 +799,20 @@ impl Store {
     ) -> anyhow::Result<BrokerMutationResultV1> {
         mutation.validate()?;
         self.persist_broker_change(
+            Change::Revoke {
+                mutation: mutation.clone(),
+            },
+            None,
+        )
+    }
+    pub(crate) fn revoke_broker_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        mutation: &BrokerRevocationV1,
+    ) -> anyhow::Result<BrokerMutationResultV1> {
+        mutation.validate()?;
+        self.persist_broker_change_with_access(
+            Some(access),
             Change::Revoke {
                 mutation: mutation.clone(),
             },
@@ -794,8 +833,32 @@ impl Store {
             Some(identity),
         )
     }
+    pub(crate) fn broker_heartbeat_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &BrokerIdentityV1,
+        heartbeat: &BrokerHeartbeatV1,
+    ) -> anyhow::Result<BrokerMutationResultV1> {
+        heartbeat.validate()?;
+        self.persist_broker_change_with_access(
+            Some(access),
+            Change::Heartbeat {
+                identity: IdentityEvidence::capture(identity),
+                heartbeat: heartbeat.clone(),
+            },
+            Some(identity),
+        )
+    }
     fn persist_broker_change(
         &self,
+        change: Change,
+        identity: Option<&BrokerIdentityV1>,
+    ) -> anyhow::Result<BrokerMutationResultV1> {
+        self.persist_broker_change_with_access(None, change, identity)
+    }
+    fn persist_broker_change_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
         change: Change,
         identity: Option<&BrokerIdentityV1>,
     ) -> anyhow::Result<BrokerMutationResultV1> {
@@ -806,8 +869,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         if matches!(change, Change::Checkpoint { .. }) {
             checkpoint::require_schema12(&tx)?;
         }
@@ -816,7 +884,7 @@ impl Store {
         let received_at = format_time(now);
         if let Some(identity) = identity {
             permission(identity.tenant_id() == self.tenant_id)?;
-            super::workload::revalidate_broker_identity(&tx, identity, now)?;
+            super::workload::revalidate_broker_identity_checked(&tx, identity, now)?;
             let broker = load_broker(&tx, identity.broker_id())?
                 .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
             broker.require_current_grant(identity, &received_at)?;
@@ -885,13 +953,32 @@ impl Store {
         ))
     }
     pub fn broker(&self, id: &str) -> anyhow::Result<Option<BrokerViewV1>> {
+        self.broker_with_access(None, id)
+    }
+    pub(crate) fn broker_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        id: &str,
+    ) -> anyhow::Result<Option<BrokerViewV1>> {
+        self.broker_with_access(Some(access), id)
+    }
+    fn broker_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        id: &str,
+    ) -> anyhow::Result<Option<BrokerViewV1>> {
         registry_uuid(id)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let now = format_time(Utc::now());
         let broker = load_broker(&tx, id)?
             .map(|broker| broker.view_at(&now))
@@ -902,16 +989,35 @@ impl Store {
     /// Authenticated self metadata. The proof and snapshot share one checked
     /// transaction; reading it cannot refresh receipt liveness or runtime state.
     pub fn broker_for_identity(&self, identity: &BrokerIdentityV1) -> anyhow::Result<BrokerViewV1> {
+        self.broker_for_identity_with_access(None, identity)
+    }
+    pub(crate) fn broker_for_identity_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &BrokerIdentityV1,
+    ) -> anyhow::Result<BrokerViewV1> {
+        self.broker_for_identity_with_access(Some(access), identity)
+    }
+    fn broker_for_identity_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        identity: &BrokerIdentityV1,
+    ) -> anyhow::Result<BrokerViewV1> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         permission(identity.tenant_id() == self.tenant_id)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
-        super::workload::revalidate_broker_identity(&tx, identity, now)?;
+        super::workload::revalidate_broker_identity_checked(&tx, identity, now)?;
         let broker = load_broker(&tx, identity.broker_id())?
             .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
         broker.require_current_grant(identity, &format_time(now))?;
@@ -926,16 +1032,35 @@ impl Store {
         &self,
         identity: &BrokerIdentityV1,
     ) -> anyhow::Result<BrokerIdentityViewV1> {
+        self.broker_authenticated_identity_with_access(None, identity)
+    }
+    pub(crate) fn broker_authenticated_identity_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &BrokerIdentityV1,
+    ) -> anyhow::Result<BrokerIdentityViewV1> {
+        self.broker_authenticated_identity_with_access(Some(access), identity)
+    }
+    fn broker_authenticated_identity_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        identity: &BrokerIdentityV1,
+    ) -> anyhow::Result<BrokerIdentityViewV1> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
         permission(identity.tenant_id() == self.tenant_id)?;
-        super::workload::revalidate_broker_identity(&tx, identity, now)?;
+        super::workload::revalidate_broker_identity_checked(&tx, identity, now)?;
         let broker = load_broker(&tx, identity.broker_id())?
             .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
         broker.require_current_grant(identity, &format_time(now))?;
@@ -970,6 +1095,20 @@ impl Store {
     /// Immutable ownership is historical provenance, never execution permission.
     /// An authority removed from the current grant retains its original owner.
     pub fn broker_for_authority(&self, authority_id: &str) -> anyhow::Result<Option<BrokerViewV1>> {
+        self.broker_for_authority_with_access(None, authority_id)
+    }
+    pub(crate) fn broker_for_authority_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        authority_id: &str,
+    ) -> anyhow::Result<Option<BrokerViewV1>> {
+        self.broker_for_authority_with_access(Some(access), authority_id)
+    }
+    fn broker_for_authority_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        authority_id: &str,
+    ) -> anyhow::Result<Option<BrokerViewV1>> {
         require(
             !authority_id.is_empty()
                 && authority_id.len() <= 256
@@ -979,8 +1118,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let id = tx
             .query_row(
                 "SELECT broker_id FROM broker_registry_authorities WHERE authority_id=?1",
@@ -1004,6 +1148,22 @@ impl Store {
         cursor: Option<&str>,
         limit: u32,
     ) -> anyhow::Result<Vec<BrokerViewV1>> {
+        self.brokers_page_with_access(None, cursor, limit)
+    }
+    pub(crate) fn brokers_page_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<BrokerViewV1>> {
+        self.brokers_page_with_access(Some(access), cursor, limit)
+    }
+    fn brokers_page_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<BrokerViewV1>> {
         require((1..=100).contains(&limit))?;
         if let Some(cursor) = cursor {
             registry_uuid(cursor)?;
@@ -1012,8 +1172,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let now = format_time(Utc::now());
         let brokers = {
             let mut statement = tx.prepare("SELECT payload_json FROM broker_registry_brokers WHERE broker_id>?1 ORDER BY broker_id LIMIT ?2")?;

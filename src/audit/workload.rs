@@ -7,6 +7,10 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 
+#[cfg(test)]
+#[path = "workload_scoped_tests.rs"]
+mod scoped_tests;
+
 pub(super) const SCHEMA: [(&str, &str, &str); 9] = [
     (
         "table",
@@ -255,6 +259,18 @@ fn require_schema(db: &Connection) -> anyhow::Result<()> {
         Ok(())
     } else {
         Err(WorkloadFailureV1::MigrationRequired.into())
+    }
+}
+
+fn require_checked_schema(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
+    // Format14 is usable only through the actual transaction's borrowed
+    // source epoch, never because its version header alone looks modern.
+    tx.require_business_access()?;
+    let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version == 14 {
+        Ok(())
+    } else {
+        require_schema(tx)
     }
 }
 
@@ -559,6 +575,13 @@ fn workload_digest_binding(
         return Ok(None);
     }
     require_schema(db)?;
+    load_digest_binding(db, digest)
+}
+
+fn load_digest_binding(
+    db: &Connection,
+    digest: &[u8; 32],
+) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
     let owner = db.query_row("SELECT d.credential_id,b.payload_json FROM workload_digests d JOIN workload_bindings b ON b.credential_id=d.credential_id WHERE d.sha256_digest=?1", [hex::encode(digest)], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).optional()?;
     owner
         .map(
@@ -581,12 +604,37 @@ impl Store {
         &self,
         digest: &[u8; 32],
     ) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
+        self.workload_digest_binding_with_access(None, digest)
+    }
+    pub(crate) fn workload_digest_binding_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
+        self.workload_digest_binding_with_access(Some(access), digest)
+    }
+    fn workload_digest_binding_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<WorkloadDigestOwnerV1>> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        let owner = workload_digest_binding(&tx, digest)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        let owner = if version < 6 {
+            None
+        } else {
+            require_checked_schema(&tx)?;
+            load_digest_binding(&tx, digest)?
+        };
         self.commit_checked(tx)?;
         Ok(owner)
     }
@@ -604,20 +652,56 @@ impl Store {
         input: &WorkloadBindingIssueV1,
     ) -> anyhow::Result<WorkloadBindingReceiptV1> {
         input.validate()?;
-        self.persist_workload(Change::Issue {
-            input: input.clone(),
-        })
+        self.persist_workload(
+            None,
+            Change::Issue {
+                input: input.clone(),
+            },
+        )
+    }
+    pub(crate) fn issue_workload_binding_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        input: &WorkloadBindingIssueV1,
+    ) -> anyhow::Result<WorkloadBindingReceiptV1> {
+        input.validate()?;
+        self.persist_workload(
+            Some(access),
+            Change::Issue {
+                input: input.clone(),
+            },
+        )
     }
     pub fn revoke_workload_binding(
         &self,
         input: &WorkloadBindingRevocationV1,
     ) -> anyhow::Result<WorkloadBindingReceiptV1> {
         input.validate()?;
-        self.persist_workload(Change::Revoke {
-            input: input.clone(),
-        })
+        self.persist_workload(
+            None,
+            Change::Revoke {
+                input: input.clone(),
+            },
+        )
     }
-    fn persist_workload(&self, change: Change) -> anyhow::Result<WorkloadBindingReceiptV1> {
+    pub(crate) fn revoke_workload_binding_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        input: &WorkloadBindingRevocationV1,
+    ) -> anyhow::Result<WorkloadBindingReceiptV1> {
+        input.validate()?;
+        self.persist_workload(
+            Some(access),
+            Change::Revoke {
+                input: input.clone(),
+            },
+        )
+    }
+    fn persist_workload(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        change: Change,
+    ) -> anyhow::Result<WorkloadBindingReceiptV1> {
         change.validate()?;
         let value = serde_json::to_value(&change)?;
         workload_valid(self.redactor.value(&value) == value)?;
@@ -625,8 +709,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let mut tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let mut tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let clock = capture_control_time(&tx)?;
         if let Some(receipt) = replay(&tx, &change)? {
             self.commit_authorized(tx, &clock)?;
@@ -688,6 +777,20 @@ impl Store {
         &self,
         token: &str,
     ) -> anyhow::Result<Option<AuthenticatedWorkload>> {
+        self.authenticate_workload_token_with_access(None, token)
+    }
+    pub(crate) fn authenticate_workload_token_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        token: &str,
+    ) -> anyhow::Result<Option<AuthenticatedWorkload>> {
+        self.authenticate_workload_token_with_access(Some(access), token)
+    }
+    fn authenticate_workload_token_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        token: &str,
+    ) -> anyhow::Result<Option<AuthenticatedWorkload>> {
         workload_authorized(
             (32..=512).contains(&token.len()) && !token.chars().any(char::is_whitespace),
         )?;
@@ -696,8 +799,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_schema(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_checked_schema(&tx)?;
         let clock = capture_control_time(&tx)?;
         let now = clock.at();
         let json = tx
@@ -727,7 +835,7 @@ impl Store {
                     binding.revision,
                     broker.grant_revision,
                 )?;
-                revalidate_broker_identity(&tx, &identity, now)?;
+                revalidate_broker_identity_checked(&tx, &identity, now)?;
                 broker.require_current_grant(&identity, &format_time(now))?;
                 AuthenticatedWorkload::Broker(identity)
             }
@@ -901,6 +1009,23 @@ pub(super) fn revalidate_broker_identity(
     now: DateTime<Utc>,
 ) -> anyhow::Result<()> {
     require_schema(db)?;
+    revalidate_broker_identity_state(db, identity, now)
+}
+
+pub(super) fn revalidate_broker_identity_checked(
+    tx: &CheckedTransaction<'_>,
+    identity: &BrokerIdentityV1,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    require_checked_schema(tx)?;
+    revalidate_broker_identity_state(tx, identity, now)
+}
+
+fn revalidate_broker_identity_state(
+    db: &Connection,
+    identity: &BrokerIdentityV1,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
     validate_control_time_floor(db, now, None)?;
     tenant_matches(db, identity.tenant_id())?;
     let binding =

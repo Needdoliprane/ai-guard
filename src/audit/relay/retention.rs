@@ -395,12 +395,33 @@ impl Store {
     /// retained and the applied policy. It writes no audit event, returns no
     /// body and works while supervision is inactive, as after a restart.
     pub fn relay_retention_status(&self, limit: u32) -> anyhow::Result<RelayRetentionStatusV1> {
+        self.relay_retention_status_with_access(None, limit)
+    }
+
+    pub(crate) fn relay_retention_status_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        limit: u32,
+    ) -> anyhow::Result<RelayRetentionStatusV1> {
+        self.relay_retention_status_with_access(Some(access), limit)
+    }
+
+    fn relay_retention_status_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        limit: u32,
+    ) -> anyhow::Result<RelayRetentionStatusV1> {
         valid((1..=MAX_RETENTION_STATUS_ITEMS).contains(&limit))?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         // Expiry is classified at an instant checked against durable evidence.
         let clock = capture_control_time(&tx)?;

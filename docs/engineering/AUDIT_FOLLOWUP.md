@@ -1,5 +1,9 @@
 # Suivi des audits indépendants
 
+## 12 novembre — ports Store scoped : preuve de prérequis, pas clôture d’audit
+
+Les22 parents Store et5 parents de contrat ont leurs gels, vrais fichiers/migrations, oracles et reçus séparés : [preuves](evidence/2026-11-12/human-scoped-ports/README.md). Les contrôles de source/epoch/permissions, reçus atomiques et cycles conservateurs sont vérifiés dans ce périmètre ; aucun ancien correctif partiel n’est assimilé à la clôture d’un fingerprint. Ready, approbation nominative, raccord complet de tous les mutateurs et qualification runtime restent ouverts. La borne courte de contention du Mutex Store n’est pas établie. Les deux défauts ACK/keeper SSO reproduits sur un candidat distinct et sa reprise après fermeture ambiguë restent suivis séparément. Les pièces primaires privées et les audits successifs restent conservés dans leurs registres. Aucun gate global clos.
+
 ## 12 novembre — compléments de preuve, sans activation de l’approbation
 
 Une campagne distincte de cinq parents passe les substitutions physiques Auth/configuration et les trois floors durables avec reprise réelle et précision submilliseconde, ainsi que deux voisins et le check toutes cibles. [Sources, résultats, historique et limites](evidence/2026-11-12/human-source-coverage/README.md). Elle complète précisément deux limites de la campagne antérieure, sans lui transférer les nouveaux résultats. Les gardes legacy au format 14 restent fermées ; les ports business runner, les mutateurs humains et le parcours d’approbation restent à raccorder. Aucun fingerprint historique ni gate global n’est clôturé par assimilation.

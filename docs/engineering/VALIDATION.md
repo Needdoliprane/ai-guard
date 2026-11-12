@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — ports scoped et contrat : deux gels vérifiés
+
+Store : source436cfe76… /2 597 fichiers,22 parents exacts PASS (1 réussi/0 échec/0 ignoré chacun), build/list et check toutes cibles RC0 ;692 pièces runtime/27 statiques, export e329fd86… entièrement comparé, fermeture0/OOMfalse. Contrat séparé : source acc40251… /2 597 fichiers,5 parents exacts PASS, build/list RC0, all-targets NOT_RUN ;258 pièces runtime/28 statiques, export a7b35482… exact et fermeture0/OOMfalse. Les15 fichiers applicatifs Store sont identiques entre ces gels ; les comptes ne sont pas présentés comme une suite unique. [Commandes, sélecteurs, reçus et limites](evidence/2026-11-12/human-scoped-ports/README.md), [données vérifiables](evidence/2026-11-12/human-scoped-ports/TESTS.json).
+
+L’assertion DTO14 avait effectivement échoué avant correction. Le premier build Store a échoué sur une contrainte Debug du test, sans exécuter de parent ; seule l’extraction Err a changé. Le contrat conserve un PASS historique4 distinct et préserve le test11/12 privé en remplaçant l’oracle futur13 périmé par15. Clippy strict, suite complète, moteurs, fournisseurs, IdP et navigateur restent NOT_RUN dans ce lot. Aucun gate clos.
+
 ## 12 novembre — compléments sources : cinq parents exacts et check PASS
 
 Source a9e13097ecfb9c4909aee454f947cab04c32c10b4cdaa79b81bffa544e2b8c20, public ad0 + deux postimages cfg(test), 2 591 fichiers. Trois nouveaux parents physiques/floors et deux voisins de migration passent (1 PASS / 0 FAIL / 0 ignored chacun), build/list et check toutes cibles RC 0, formatage ciblé RC 0. Root vérifie 207 pièces de phases et 2 621 statiques, export 6479ec0… / 30 095 360 octets et 2 591 contenus/modes exacts, fermeture RC 0, aucun OOM. [Preuves et échec antérieur du harnais](evidence/2026-11-12/human-source-coverage/README.md), [sélecteurs/RC/hashes](evidence/2026-11-12/human-source-coverage/TESTS.json).

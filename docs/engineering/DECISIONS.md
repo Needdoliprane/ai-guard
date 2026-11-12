@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 12 novembre — ports business empruntant la source humaine retenue
+
+Dans la frontière Rust/SQLite existante, les nouvelles variantes privées des méthodes Store reçoivent le vrai accès retenu et l’epoch Core emprunté, puis réutilisent les transactions Business et les validations existantes. Le chemin legacy ne devient pas un repli du format14. Un epoch déjà admis peut drainer pendant Closing ; toute nouvelle admission est refusée. La représentation ControlProtocol1–14 reste descriptive, sans capacité de démarrage ni activation. La synchronisation du JSON conserve les contraintes de namespace/protocole aux formats3–14, même inactifs, et1/2 restent inactifs/sans protocole. [Preuves et limites](evidence/2026-11-12/human-scoped-ports/README.md).
+
+Aucun service, rôle, stockage ou contrat d’autorité public nouveau. Les callers et mutateurs RAM/OIDC/offline doivent encore être raccordés ; l’attente sur Mutex Store n’est pas qualifiée courte par ces tests. La couverture privée11/12 est conservée lors de la promotion des deux chemins de contrat, sans transfert de qualification Full3.
+
 ## 10 novembre — format interne AuthV4 et migration explicite
 
 La tranche retient le format4 du journal d'authentification SQLite existant

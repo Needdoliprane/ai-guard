@@ -560,6 +560,20 @@ impl Store {
     }
 
     pub fn relay_grant(&self, input: &RelayGrantV1) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_grant_with_access(None, input)
+    }
+    pub(crate) fn relay_grant_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        input: &RelayGrantV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_grant_with_access(Some(access), input)
+    }
+    fn relay_grant_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        input: &RelayGrantV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
         request(input.version, &input.operation_id)?;
         uuid(&input.grant_id)?;
         input.source.validate()?;
@@ -573,7 +587,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
@@ -592,6 +611,20 @@ impl Store {
     }
 
     pub fn relay_revoke(&self, input: &RelayRevokeV1) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_revoke_with_access(None, input)
+    }
+    pub(crate) fn relay_revoke_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        input: &RelayRevokeV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_revoke_with_access(Some(access), input)
+    }
+    fn relay_revoke_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        input: &RelayRevokeV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
         request(input.version, &input.operation_id)?;
         uuid(&input.grant_id)?;
         let hash = input_hash("revoke_grant", input)?;
@@ -599,7 +632,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         if let Some(receipt) = replay(&tx, &input.operation_id, &hash, "revoke_grant")? {
@@ -623,6 +661,22 @@ impl Store {
 
     pub fn relay_send(
         &self,
+        identity: &WorkerRelayIdentity,
+        input: &RelaySendV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_send_with_access(None, identity, input)
+    }
+    pub(crate) fn relay_send_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &WorkerRelayIdentity,
+        input: &RelaySendV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_send_with_access(Some(access), identity, input)
+    }
+    fn relay_send_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
         identity: &WorkerRelayIdentity,
         input: &RelaySendV1,
     ) -> anyhow::Result<RelayReceiptV1> {
@@ -654,7 +708,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let (source, grant) =
@@ -769,12 +828,35 @@ impl Store {
         after: Option<i64>,
         limit: u32,
     ) -> anyhow::Result<RelayInboxV1> {
+        self.relay_inbox_with_access(None, identity, after, limit)
+    }
+    pub(crate) fn relay_inbox_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &WorkerRelayIdentity,
+        after: Option<i64>,
+        limit: u32,
+    ) -> anyhow::Result<RelayInboxV1> {
+        self.relay_inbox_with_access(Some(access), identity, after, limit)
+    }
+    fn relay_inbox_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        identity: &WorkerRelayIdentity,
+        after: Option<i64>,
+        limit: u32,
+    ) -> anyhow::Result<RelayInboxV1> {
         valid(after.is_none_or(|v| v >= 0) && limit > 0 && limit <= 32)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
@@ -878,6 +960,22 @@ impl Store {
         identity: &WorkerRelayIdentity,
         input: &RelayAckV1,
     ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_ack_with_access(None, identity, input)
+    }
+    pub(crate) fn relay_ack_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        identity: &WorkerRelayIdentity,
+        input: &RelayAckV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_ack_with_access(Some(access), identity, input)
+    }
+    fn relay_ack_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        identity: &WorkerRelayIdentity,
+        input: &RelayAckV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
         request(input.version, &input.operation_id)?;
         uuid(&input.message_id)?;
         let hash = input_hash("ack", &(input, &identity.credential_id))?;
@@ -885,7 +983,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         let now = clock.at();
@@ -925,6 +1028,20 @@ impl Store {
     /// Remove one expired body atomically with metadata-only audit. Tombstones preserve idempotence.
     /// A caller retries the same operation/message pair; a different pair is a conflict.
     pub fn relay_prune(&self, input: &RelayPruneV1) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_prune_with_access(None, input)
+    }
+    pub(crate) fn relay_prune_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        input: &RelayPruneV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
+        self.relay_prune_with_access(Some(access), input)
+    }
+    fn relay_prune_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        input: &RelayPruneV1,
+    ) -> anyhow::Result<RelayReceiptV1> {
         request(input.version, &input.operation_id)?;
         uuid(&input.message_id)?;
         let hash = input_hash("prune", input)?;
@@ -932,7 +1049,12 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         require_relay(&tx)?;
         let clock = super::workload::capture_control_time(&tx)?;
         if let Some(receipt) = replay(&tx, &input.operation_id, &hash, "prune")? {
@@ -1272,6 +1394,10 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
 #[cfg(test)]
 #[path = "../relay/query_tests.rs"]
 mod query_tests;
+
+#[cfg(test)]
+#[path = "relay/scoped_tests.rs"]
+mod scoped_tests;
 
 #[cfg(test)]
 mod tests {

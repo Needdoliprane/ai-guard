@@ -1,4 +1,4 @@
-//! Audited supervision for exact schemas3–10. No automatic migration.
+//! Audited supervision on explicitly admitted Store transactions. No automatic migration.
 use super::*;
 
 pub(in crate::audit) const SCHEMA: [(&str, &str, &str); 6] = [
@@ -223,10 +223,15 @@ pub(in crate::audit) fn operation_receipt(
             .transpose(),
     }
 }
-fn require_v3(db: &Connection) -> anyhow::Result<()> {
+fn require_v3(
+    db: &CheckedTransaction<'_>,
+    access: Option<&HumanSourceAccess<'_>>,
+) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
+    } else if version == 14 && access.is_some() {
+        db.require_business_access()
     } else {
         Err(ControlFailure::MigrationRequired.into())
     }
@@ -931,12 +936,34 @@ impl Store {
         )
     }
     pub fn supervision_state(&self) -> anyhow::Result<SupervisionStateV1> {
+        self.supervision_state_with_access(None)
+    }
+    pub(crate) fn supervision_state_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+    ) -> anyhow::Result<SupervisionStateV1> {
+        self.supervision_state_with_access(Some(access))
+    }
+    fn supervision_state_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+    ) -> anyhow::Result<SupervisionStateV1> {
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
         let schema_version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        let supported = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema_version)
+            || (schema_version == 14 && access.is_some());
+        if schema_version == 14 && access.is_some() {
+            tx.require_business_access()?;
+        }
         let state = SupervisionStateV1 {
             version: 1,
             schema_version,
@@ -945,13 +972,12 @@ impl Store {
             } else {
                 None
             },
-            protocols: if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema_version) {
+            protocols: if supported {
                 vec![SupervisionProtocolV1::BrokerSupervisionV1]
             } else {
                 vec![]
             },
-            active: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema_version)
-                && tx.lease.active,
+            active: supported && tx.lease.active,
         };
         state.validate()?;
         self.commit_checked(tx)?;
@@ -1037,6 +1063,7 @@ impl Store {
     }
     fn persist_supervision_input(
         &self,
+        access: Option<&HumanSourceAccess<'_>>,
         input: Input,
         build: impl FnOnce(&Transaction<'_>) -> anyhow::Result<Option<ControlRecord>>,
     ) -> anyhow::Result<Persisted> {
@@ -1049,8 +1076,13 @@ impl Store {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_v3(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_v3(&tx, access)?;
         let namespace = namespace(&tx)?;
         if let Some((stored, record)) = load_record(&tx, input.operation_id())? {
             conflict(
@@ -1098,10 +1130,34 @@ impl Store {
         jev: Value,
         quota: &QuotaPolicyV1,
     ) -> anyhow::Result<AdmissionResultV1> {
+        self.admit_supervised_with_access(None, request, policy, fresh_decision, jev, quota)
+    }
+    pub(crate) fn admit_supervised_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &SupervisedAdmissionV1,
+        policy: &policy::Policy,
+        fresh_decision: Decision,
+        jev: Value,
+        quota: &QuotaPolicyV1,
+    ) -> anyhow::Result<AdmissionResultV1> {
+        self.admit_supervised_with_access(Some(access), request, policy, fresh_decision, jev, quota)
+    }
+    fn admit_supervised_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &SupervisedAdmissionV1,
+        policy: &policy::Policy,
+        fresh_decision: Decision,
+        jev: Value,
+        quota: &QuotaPolicyV1,
+    ) -> anyhow::Result<AdmissionResultV1> {
         request.validate()?;
         quota.validate()?;
-        let saved =
-            self.persist_supervision_input(Input::Admission(Box::new(request.clone())), |tx| {
+        let saved = self.persist_supervision_input(
+            access,
+            Input::Admission(Box::new(request.clone())),
+            |tx| {
                 Ok(Some(self.build_admission_record(
                     tx,
                     &request.admission,
@@ -1110,7 +1166,8 @@ impl Store {
                     jev,
                     quota,
                 )?))
-            })?;
+            },
+        )?;
         let legacy = saved
             .record
             .worker_record
@@ -1125,13 +1182,45 @@ impl Store {
         &self,
         request: &BindLegacyIntentV1,
     ) -> anyhow::Result<MutationReceiptV1> {
+        self.bind_legacy_intent_with_access(None, request)
+    }
+    pub(crate) fn bind_legacy_intent_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &BindLegacyIntentV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        self.bind_legacy_intent_with_access(Some(access), request)
+    }
+    fn bind_legacy_intent_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &BindLegacyIntentV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
         let saved =
-            self.persist_supervision_input(Input::Bind(Box::new(request.clone())), |_| Ok(None))?;
+            self.persist_supervision_input(access, Input::Bind(Box::new(request.clone())), |_| {
+                Ok(None)
+            })?;
         receipt_for(&saved.stored, &saved.record)
     }
     pub fn arm_execution(&self, request: &ArmV1) -> anyhow::Result<ArmResultV1> {
+        self.arm_execution_with_access(None, request)
+    }
+    pub(crate) fn arm_execution_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &ArmV1,
+    ) -> anyhow::Result<ArmResultV1> {
+        self.arm_execution_with_access(Some(access), request)
+    }
+    fn arm_execution_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &ArmV1,
+    ) -> anyhow::Result<ArmResultV1> {
         let saved =
-            self.persist_supervision_input(Input::Arm(Box::new(request.clone())), |_| Ok(None))?;
+            self.persist_supervision_input(access, Input::Arm(Box::new(request.clone())), |_| {
+                Ok(None)
+            })?;
         let Input::Arm(arm) = &saved.record.input else {
             return Err(ControlFailure::InvalidRequest.into());
         };
@@ -1151,13 +1240,32 @@ impl Store {
         })
     }
     pub fn execution_arm(&self, id: &str) -> anyhow::Result<Option<ArmResultV1>> {
+        self.execution_arm_with_access(None, id)
+    }
+    pub(crate) fn execution_arm_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        id: &str,
+    ) -> anyhow::Result<Option<ArmResultV1>> {
+        self.execution_arm_with_access(Some(access), id)
+    }
+    fn execution_arm_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        id: &str,
+    ) -> anyhow::Result<Option<ArmResultV1>> {
         uuid(id)?;
         let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("audit lock poisoned"))?;
-        let tx = self.begin_checked(&mut db)?;
-        require_v3(&tx)?;
+        let tx = match access {
+            Some(access) => {
+                self.begin_checked_scoped(&mut db, access, StoreOperationClass::Business)?
+            }
+            None => self.begin_checked(&mut db)?,
+        };
+        require_v3(&tx, access)?;
         let result = arm_entry(&tx, id)?.map(|entry| ArmResultV1 {
             replayed: true,
             arm: entry.request,
@@ -1170,8 +1278,24 @@ impl Store {
         &self,
         request: &ArmedStartClaimV1,
     ) -> anyhow::Result<MutationResultV1> {
-        let saved =
-            self.persist_supervision_input(Input::WorkerClaim(Box::new(request.clone())), |tx| {
+        self.claim_armed_start_with_access(None, request)
+    }
+    pub(crate) fn claim_armed_start_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &ArmedStartClaimV1,
+    ) -> anyhow::Result<MutationResultV1> {
+        self.claim_armed_start_with_access(Some(access), request)
+    }
+    fn claim_armed_start_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &ArmedStartClaimV1,
+    ) -> anyhow::Result<MutationResultV1> {
+        let saved = self.persist_supervision_input(
+            access,
+            Input::WorkerClaim(Box::new(request.clone())),
+            |tx| {
                 let mut worker =
                     load_worker(tx, &request.worker_id)?.ok_or(ControlFailure::NotFound)?;
                 conflict(
@@ -1202,7 +1326,8 @@ impl Store {
                     refusal: None,
                     admission_policy: None,
                 }))
-            })?;
+            },
+        )?;
         let worker = saved
             .record
             .worker_record
@@ -1223,10 +1348,25 @@ impl Store {
         &self,
         request: &HelperStartClaimV1,
     ) -> anyhow::Result<HelperClaimResultV1> {
-        let saved = self
-            .persist_supervision_input(Input::HelperClaim(Box::new(request.clone())), |_| {
-                Ok(None)
-            })?;
+        self.claim_helper_start_with_access(None, request)
+    }
+    pub(crate) fn claim_helper_start_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &HelperStartClaimV1,
+    ) -> anyhow::Result<HelperClaimResultV1> {
+        self.claim_helper_start_with_access(Some(access), request)
+    }
+    fn claim_helper_start_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &HelperStartClaimV1,
+    ) -> anyhow::Result<HelperClaimResultV1> {
+        let saved = self.persist_supervision_input(
+            access,
+            Input::HelperClaim(Box::new(request.clone())),
+            |_| Ok(None),
+        )?;
         Ok(HelperClaimResultV1 {
             receipt: receipt_for(&saved.stored, &saved.record)?,
             disposition: if saved.replayed {
@@ -1240,7 +1380,22 @@ impl Store {
         &self,
         request: &HelperObservationV1,
     ) -> anyhow::Result<MutationReceiptV1> {
+        self.observe_helper_with_access(None, request)
+    }
+    pub(crate) fn observe_helper_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &HelperObservationV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        self.observe_helper_with_access(Some(access), request)
+    }
+    fn observe_helper_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &HelperObservationV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
         let saved = self.persist_supervision_input(
+            access,
             Input::HelperObservation(Box::new(request.clone())),
             |_| Ok(None),
         )?;
@@ -1250,15 +1405,47 @@ impl Store {
         &self,
         request: &HelperCleanupV1,
     ) -> anyhow::Result<MutationReceiptV1> {
-        let saved = self
-            .persist_supervision_input(Input::HelperCleanup(Box::new(request.clone())), |_| {
-                Ok(None)
-            })?;
+        self.record_helper_cleanup_with_access(None, request)
+    }
+    pub(crate) fn record_helper_cleanup_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &HelperCleanupV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        self.record_helper_cleanup_with_access(Some(access), request)
+    }
+    fn record_helper_cleanup_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &HelperCleanupV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        let saved = self.persist_supervision_input(
+            access,
+            Input::HelperCleanup(Box::new(request.clone())),
+            |_| Ok(None),
+        )?;
         receipt_for(&saved.stored, &saved.record)
     }
     pub fn request_export(&self, request: &ExportRequestV1) -> anyhow::Result<MutationReceiptV1> {
-        let saved =
-            self.persist_supervision_input(Input::Export(Box::new(request.clone())), |_| Ok(None))?;
+        self.request_export_with_access(None, request)
+    }
+    pub(crate) fn request_export_scoped(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        request: &ExportRequestV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        self.request_export_with_access(Some(access), request)
+    }
+    fn request_export_with_access(
+        &self,
+        access: Option<&HumanSourceAccess<'_>>,
+        request: &ExportRequestV1,
+    ) -> anyhow::Result<MutationReceiptV1> {
+        let saved = self.persist_supervision_input(
+            access,
+            Input::Export(Box::new(request.clone())),
+            |_| Ok(None),
+        )?;
         receipt_for(&saved.stored, &saved.record)
     }
 }
@@ -1267,3 +1454,7 @@ pub(super) fn can_create(db: &Connection, worker: &WorkerV1) -> anyhow::Result<(
     let state = Replay::current(db)?;
     conflict(state.bindings.contains_key(&worker.worker_id) && state.import_verified(worker))
 }
+
+#[cfg(test)]
+#[path = "supervision/scoped_tests.rs"]
+mod scoped_tests;

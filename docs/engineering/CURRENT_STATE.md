@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre — ports Store retenus : 22 tests et contrat séparé de cinq tests PASS
+
+Les accès internes identité/lectures humaines, supervision/relais et workload/registre exigent la vraie source et l’epoch emprunté. Vingt-deux parents exacts passent sur le gel Store, puis le check toutes cibles ; cinq parents de contrat passent sur un gel distinct qui préserve aussi les parcours11/12 et la représentation14. Root vérifie contenus/modes vivants, oracles et fermeture de chaque QA. [Sources, échecs conservés et limites](evidence/2026-11-12/human-scoped-ports/README.md). Les appels legacy restent fermés au format14.
+
+Ce lot ne raccorde pas tous les handlers/RAM/OIDC/offline et n’active ni Ready ni approbation humaine. La contention du Mutex Store ne dispose pas encore d’une borne courte démontrée. Le candidat SSO a deux défauts effectivement reproduits sur son propre gel et un correctif distinct en revue ; ces ports ne le qualifient pas. Les intégrations Claude A–E conservent leurs preuves bornées ; l’analyse de risques Claude reste en cours, rapport final non reçu. Aucun gate global clos.
+
 ## 12 novembre — sources humaines : cinq compléments physiques et temporels PASS
 
 Les trois nouveaux parents vérifient une substitution physique Auth4, une configuration byte-identique sur autre inode et la collecte des trois floors durables, avec vraie reprise après un maximum Auth submilliseconde. Deux voisins de migration/reprise et le check toutes cibles passent aussi. Root vérifie 207 pièces de phases, 2 621 statiques et 2 591 postimages/modes exacts. [Source, oracles et limites](evidence/2026-11-12/human-source-coverage/README.md). Le premier essai a échoué dans le harnais avant les tests ; sa preuve est conservée et le raccord des hashes a été corrigé hors ligne.
