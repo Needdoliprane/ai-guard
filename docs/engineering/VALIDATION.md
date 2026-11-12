@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre — parcours opérateur README EN/FR
+
+Les deux entrées du produit décrivent le parcours configuration, construction depuis une source préparée, diagnostic, lancement autorisé, suivi, export dans une destination neuve, arrêt et reprise. La revue indépendante des deux langues vérifie 66 liens locaux, dont 10 ancres, les 14 fichiers sources qui déclarent les commandes, 15 occurrences de commande par langue et huit blocs shell identiques. Les commandes sont rapprochées des déclarations et guides du code public après intégration E ; aucune exécution runtime ni fournisseur n’est déduite de cette vérification documentaire. Les guides spécialisés et les limites restent accessibles depuis chaque entrée. [Périmètre et preuves](evidence/2026-11-12/readme-operator-journey/README.md).
+
+Vérifications statiques et `git diff --check` : PASS. Exécution des commandes de démarrage et recette runtime pour cette modification documentaire : NOT_RUN. Aucun contrat applicatif changé, aucune suite E2E relancée, aucun gate global fermé.
+
 ## 12 novembre, 03:04 UTC — diagnostic opérateur E : 9 parités et 85 cas CLI PASS
 
 Sur le nouveau gel `c2b907a8d19cab26b49337a58f30de2e78966fbad9bc7a9a48ae32a8cd9362c5` (public `862e182` + 45 postimages, 2 552 fichiers), build offline lib/bin/diagnose et trois listes réelles RC 0. Les neuf parents de parité du **binaire** exécutent chacun exactement un PASS ; la suite CLI normale série rend `85 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out` en 84,07 s. Ses 86 identités distinctes sont vérifiées ; l’unique ignoré, `regenerate_documented_examples_into_tmpdir`, reste `NOT_RUN` dans ce gel. Les quatre parents d’exemples/guides auparavant retenus passent ici après promotion ; aucun PASS antérieur n’est transféré.

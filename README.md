@@ -2,54 +2,114 @@
 
 [English](README.md) · [Français](README.fr.md)
 
-Run Codex, Claude Code and other AI agents in isolated workspaces. Decide what they may do, follow their activity in one dashboard, inspect changes and export results to a new destination.
+ai-guard is an open source, local-first control plane for running Codex, Claude Code and other commands in isolated project copies. Request policy authorization, follow activity in one dashboard, inspect changes and export results to a new destination.
 
-ai-guard combines a Rust control plane and execution broker, a static TypeScript dashboard, and Docker/Podman workers. Local use does not require a cloud account. Each tenant has its own authenticated scope and SQLite database; workers receive neither the container-engine socket nor the original project.
+The trusted Rust CLI and execution broker control Docker/Podman workers. A separate Rust gateway serves the API and audit; a containerized Rust dashboard serves the static TypeScript interface. Each tenant has its own authenticated scope and SQLite database. Workers receive neither the container-engine socket nor the original project mount.
 
-## Choose your installation
+Local use needs no ai-guard cloud account. You build and distribute images from the supplied Dockerfiles; no public prebuilt ai-guard image is required. The [manual index](docs/setup/README.md) covers the complete product contract; [implementation status and evidence](docs/engineering/CURRENT_STATE.md) identify what is delivered, qualified or still missing.
 
-The user manual describes the **complete product contract**. Implementation progress, qualification results and remaining gaps are recorded separately in [engineering](docs/engineering/CURRENT_STATE.md). A documented target is not a production certification.
+## Start locally
 
-| Context | Guide | Configuration example |
-|---|---|---|
-| Local workstation, Docker or Podman | [Local setup](docs/setup/local/README.md) | [.env.exemple.local](.env.exemple.local) |
-| Codex / Claude Code, subscription or API | [AI providers](docs/setup/providers/README.md) | [.env.exemple.providers](.env.exemple.providers) |
-| Local Keycloak, Web and CLI identity | [Keycloak and OIDC](docs/setup/keycloak/README.md) | [.env.exemple.local-keycloak](.env.exemple.local-keycloak) |
-| Small local model, offline inference | [Local AI](docs/setup/local-ai/README.md) | [.env.exemple.local-qwen](.env.exemple.local-qwen) |
-| Local judge over verified TLS | [TLS setup](docs/setup/local-ai/TLS.md) | [.env.exemple.local-qwen-tls-volumes](.env.exemple.local-qwen-tls-volumes) + published `volumes.env` |
-| Local Keycloak and Qwen together | [Combine contexts](docs/setup/README.md#combine-local-contexts) | [.env.exemple.local-keycloak-qwen](.env.exemple.local-keycloak-qwen) |
-| Managed installation, private CA and internal inference | [Enterprise configuration](docs/setup/enterprise/README.md) | [.env.exemple.entreprise](.env.exemple.entreprise) |
+You need Git, the Rust toolchain selected by [rust-toolchain.toml](rust-toolchain.toml), a running Docker engine with Compose, and a project directory to copy. Rootless is required by default. For a deliberate Docker Desktop or other rootful installation, add `--allow-rootful-runtime` to `doctor`, `build`, `up` and every `run`; this records a security downgrade. For Podman, follow the [local guide](docs/setup/local/README.md) with a rootless engine and a compatible Compose provider.
 
-Start with the [configuration index](docs/setup/README.md): it explains which component reads each file, how settings compose, where secrets belong and how to preserve an existing installation.
-
-For the Docker Desktop Kubernetes target, see [authority and inspection](docs/setup/kubernetes/README.md). Worker launch through this adapter remains unavailable; its diagnostics do not enable admission.
-
-To understand an installation before a launch, see [operator diagnostics](docs/setup/diagnostics/README.md): `ai-guard-diagnose` reports its layout, tenants, credential references and provider selection, offline by default and read-only, without opening a file that the inspected files name as a credential, and a report without error qualifies nothing.
-
-## First local start
-
-From the repository root, with the Rust toolchain in `rust-toolchain.toml`, a running Docker engine and Compose:
+Run from the source distribution's root. Replace `AIGUARD_PROJECT` with an existing absolute path. Keep the private configuration outside that project and this checkout. Prepare build dependencies and images before disconnecting an offline installation.
 
 ```sh
 cargo build --release --locked
-./target/release/agentsandbox init --config-dir "$HOME/.ai-guard"
-./target/release/agentsandbox doctor --runtime docker
-./target/release/agentsandbox build --runtime docker
-docker compose --env-file .env.exemple.local -f deploy/docker/compose.yaml up -d
-./target/release/agentsandbox healthcheck --url http://127.0.0.1:8787/healthz --url http://127.0.0.1:4000/healthz
+AIGUARD_BIN="$PWD/target/release/agentsandbox"
+AIGUARD_DIAGNOSE="$PWD/target/release/ai-guard-diagnose"
+AIGUARD_CONFIG="$HOME/.ai-guard"
+AIGUARD_PROJECT="/absolute/path/to/your/existing/project"
+AIGUARD_GATEWAY="http://127.0.0.1:8787"
+"$AIGUARD_BIN" init --config-dir "$AIGUARD_CONFIG"
+"$AIGUARD_BIN" doctor --runtime docker
+"$AIGUARD_BIN" build --runtime docker --source .
 ```
 
-Open `http://127.0.0.1:4000`. For the control-key local flow, use the private viewer credential created under `$HOME/.ai-guard/secrets/viewer`; keep the runner credential in the trusted control plane. The [local guide](docs/setup/local/README.md) covers the first command, policy refusal, workspace export, data, stopping and recovery.
+`init` creates technical runner/viewer credentials and preserves existing ones. Their private source files stay under `secrets/`; container projections are prepared separately. Keep the configuration directory, credentials and data private. A directory created by SSO `setup prepare` has a different layout: use its [SSO guide](docs/setup/sso/README.md) rather than initializing it with this flow.
 
-Rootless is the default requirement. Docker Desktop and other engines that do not report rootless require the operator's explicit `--allow-rootful-runtime` choice on relevant CLI commands. Follow the guide for Podman, custom engine paths, custom ports and this recorded security exception.
+`build`, `up` and `down` prepare bounded private copies of their selected source inputs before handing them to the engine. Retain the printed source digest and actual command result. The [prepared-source procedure](docs/setup/local/README.md#prepared-source) explains the fixed input set, temporary-directory requirements, refusals and retained copies after an unknown termination. This preparation does not establish reproducible images or runtime qualification.
 
-## Configuration and operations
+Before starting services, inspect the configuration:
 
-- Examples contain public values only. Copy a template to a **new** private file before editing; preserve existing credentials and data.
-- Compose reads `.env.exemple.*` through `--env-file`. The Rust CLI does not source dotenv; its flags and typed configuration files are documented per context.
-- Build the images from the supplied Dockerfiles. After preparing dependencies and images, local workflows can run offline.
-- Keep identity, AI-provider authentication, network permissions and tenant permissions separate. A provider subscription does not sign a user into ai-guard.
-- Resource allocation records are not CPU-consumption invoices. Model advice cannot override mandatory policy, audit or runtime restrictions.
+```sh
+"$AIGUARD_DIAGNOSE" --config-dir "$AIGUARD_CONFIG"
+```
+
+The [diagnostic](docs/setup/diagnostics/README.md) is read-only and offline by default: it launches nothing, reads credential references through metadata and reports what was not checked or is unavailable. It does not validate credential contents, account access, SQLite integrity or signed checkpoints. Resolve errors and unknowns and read the limits even when the report says `OK`. Add `--json` for the structured report.
+
+```sh
+"$AIGUARD_BIN" up --runtime docker --source . --config-dir "$AIGUARD_CONFIG"
+"$AIGUARD_BIN" healthcheck --url "$AIGUARD_GATEWAY/healthz" --url http://127.0.0.1:4000/healthz
+```
+
+Open `http://127.0.0.1:4000`. For this technical viewer flow, obtain the viewer value from `$AIGUARD_CONFIG/secrets/viewer` in a private editor and enter it only in the trusted connection form. Keep the runner credential in trusted control. Named personal access has its own [local identity](docs/setup/identity/README.md) or [SSO](docs/setup/sso/README.md) procedure.
+
+This CLI stack uses the fixed project name `agentsandbox` and the default loopback ports above. Keep the same engine account/context, configuration directory and source for its lifecycle. For custom ports, project names, Compose env files and logs, use the [local guide](docs/setup/local/README.md#cli-up-stack); do not mix commands for a different stack. A health response establishes service reachability only.
+
+## Run, follow and inspect a session
+
+Start with a small command that needs no provider account and has no worker network access. The trusted CLI uses its technical runner credential to request policy authorization before execution:
+
+```sh
+"$AIGUARD_BIN" run --project "$AIGUARD_PROJECT" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY" --runtime docker --profile strict --network none --timeout 30 -- /usr/bin/id
+```
+
+Keep the returned session UUID. In the dashboard, inspect its decision, runtime observations and file-change coverage. Admission, an observed start and completion are separate facts; a refused or unknown result needs diagnosis.
+
+```sh
+AIGUARD_SESSION="replace-with-the-returned-session-uuid"
+"$AIGUARD_BIN" worker-status --session "$AIGUARD_SESSION" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY"
+"$AIGUARD_BIN" verify-audit --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY"
+```
+
+`verify-audit` asks the gateway to check its local hash chain. [Signed checkpoints and independently anchored rollback checks](docs/setup/audit-signatures/README.md) are separate operations. For a deliberate file change in the copied workspace, follow the [local session examples](docs/setup/local/README.md#execute-a-first-command).
+
+For an interrupted monitor, preserve the session and its worker volume, keep the control services available and reconcile that recorded session:
+
+```sh
+"$AIGUARD_BIN" worker-resume --session "$AIGUARD_SESSION" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY" --wait-seconds 30
+```
+
+Resume does not grant a second use of a consumed start. Follow the [recovery procedure](docs/setup/local/README.md#reconcile-the-recorded-worker) when the result remains unknown; do not create another task to hide it.
+
+Export the selected session only to a **new** destination outside the original project, with an existing parent:
+
+```sh
+AIGUARD_EXPORT="$HOME/ai-guard-export-new"
+"$AIGUARD_BIN" export-workspace --session "$AIGUARD_SESSION" --output "$AIGUARD_EXPORT" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY"
+```
+
+Review the exported files and diff before applying changes yourself. Exported content remains untrusted; inspect it before opening tools that execute project configuration. ai-guard never rewrites the original project automatically.
+
+Before shutting down the control stack, request a stop for each active session and check its recorded runtime state:
+
+```sh
+"$AIGUARD_BIN" worker-stop --session "$AIGUARD_SESSION" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY"
+"$AIGUARD_BIN" worker-status --session "$AIGUARD_SESSION" --config-dir "$AIGUARD_CONFIG" --gateway "$AIGUARD_GATEWAY"
+"$AIGUARD_BIN" down --runtime docker --source . --config-dir "$AIGUARD_CONFIG"
+```
+
+A durable stop request alone is not proof that a worker stopped. Preserve unknown states for reconciliation. `down` retains named audit data; keep the configuration, session plans and worker volumes together. Restart with the same `up` command, then repeat health and session checks. Follow [operations and recovery](docs/setup/local/README.md#stop-preserve-data-and-restart) before backups or migrations; do not delete volumes to repair an error.
+
+## Choose identity, AI and deployment
+
+Use the [configuration index](docs/setup/README.md) for file consumers, public examples and combinations. Identity, provider authentication, decision engine and network permissions are independent choices.
+
+| Need | Guide |
+|---|---|
+| Docker/Podman, custom configuration, first session and recovery | [Local workstation](docs/setup/local/README.md) |
+| Diagnose a configuration before launch | [Operator diagnostics](docs/setup/diagnostics/README.md) |
+| Codex / Claude Code, subscription or API | [AI providers](docs/setup/providers/README.md) |
+| Named local accounts without an IdP | [Local identity](docs/setup/identity/README.md) |
+| ai-guard Web/CLI SSO and an opt-in local Keycloak DEMO | [SSO setup](docs/setup/sso/README.md) · [Keycloak provider](docs/setup/keycloak/README.md) |
+| Small local decision model and verified TLS | [Local AI](docs/setup/local-ai/README.md) · [TLS](docs/setup/local-ai/TLS.md) |
+| Managed tenants, private CAs, internal inference and cloud requirements | [Enterprise configuration](docs/setup/enterprise/README.md) |
+| Kubernetes authority and read-only inspection | [Kubernetes](docs/setup/kubernetes/README.md); worker launch remains unavailable |
+
+For an AI task, build the pinned client versions and prepare only the chosen provider credential through the provider guide. Select `--client`, `--auth-mode` and `--client-profile` deliberately. A subscription request never silently becomes a billed API request. Provider sign-in is separate from ai-guard sign-in; an IdP administrator has no implicit ai-guard permission. Internal coding-model integration and cloud topology have their own delivery limits in the enterprise guide.
+
+Examples contain public values only. Create a **new** private configuration file when adapting one, preserve existing credentials and data, and reference secrets by private path. Compose reads env examples through `--env-file`; the Rust CLI does not source dotenv. Never put a credential in argv, Git, screenshots or an exported workspace. Resource allocation records are not CPU-consumption invoices; model advice cannot override mandatory policy, audit or runtime restrictions.
 
 [Operations](docs/operations.md) · [API](docs/api.md) · [Security](docs/security.md) · [Architecture](docs/architecture.md) · [License](LICENSE)
 
