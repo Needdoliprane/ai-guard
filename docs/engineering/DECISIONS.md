@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 13 novembre — direction C egress autorisée pour code et tests locaux
+
+Le mainteneur accepte la [direction C et ses limites](EGRESS_CONTROL.md#décision-du-13-novembre-2026--code-et-tests-logiciels-locaux-autorisés) : réseau worker `none`, frontend loopback non fiable et sockets amont du broker Rust, après audit durable et admission egress distincte. L’accord couvre conception/code/tests logiciels locaux isolés ; aucune activation Internet, nouvelle campagne moteur, installation de capteur, MITM/PKI ou action cloud/cluster. Les anciens permis du relais ne deviennent pas des permis egress. Aucun nouveau service, stockage ni repli bridge n’est introduit par cette décision.
+
+Noyau de politique et protocole/frontend ont des propriétaires de fichiers séparés. L’intégrateur conserve les contrats transverses, Store/API/runtime et les preuves de composition. Ce découpage ne réduit pas la cible : audit avant connexion, révocation/expiration, interdictions contextuelles, visibilité des tentatives directes, limites HTTPS/Web/MCP et qualifications réelles restent obligatoires. Aucun gate global fermé.
+
 ## 12 novembre — ports business empruntant la source humaine retenue
 
 Dans la frontière Rust/SQLite existante, les nouvelles variantes privées des méthodes Store reçoivent le vrai accès retenu et l’epoch Core emprunté, puis réutilisent les transactions Business et les validations existantes. Le chemin legacy ne devient pas un repli du format14. Un epoch déjà admis peut drainer pendant Closing ; toute nouvelle admission est refusée. La représentation ControlProtocol1–14 reste descriptive, sans capacité de démarrage ni activation. La synchronisation du JSON conserve les contraintes de namespace/protocole aux formats3–14, même inactifs, et1/2 restent inactifs/sans protocole. [Preuves et limites](evidence/2026-11-12/human-scoped-ports/README.md).

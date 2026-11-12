@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 13 novembre — contrôle réseau : accord de développement, réalisation en cours
+
+La [direction C](EGRESS_CONTROL.md#décision-du-13-novembre-2026--code-et-tests-logiciels-locaux-autorisés) est autorisée pour le code Rust et les tests logiciels locaux isolés. Deux lots indépendants démarrent : politique de destinations et validation des adresses ; parsing CONNECT et protocole borné. Ils ne constituent pas encore un chemin réseau utilisable. Store/API, permis durable, binding runtime et raccord fournisseur restent à composer et vérifier.
+
+**NOT_RUN** : activation Internet de worker et qualifications Docker/Podman/Kubernetes de ce nouveau contrôle. Aucun capteur ou MITM installé ; aucune action cloud/cluster autorisée par cette décision. CONNECT opaque, couverture des tentatives directes et garde des clés fournisseur restent des limites distinctes. Les nouveaux travaux Claude en cours attendent toujours le go du mainteneur pour intégration. Aucun gate de production clos.
+
 ## 12 novembre — garanties opérateur : documentation corrigée, écarts produit conservés
 
 Six guides d’exploitation, de démarrage et fournisseurs ont été rapprochés du code public `ba17452`, avec les paires EN/FR synchronisées. Les événements non produits ne sont plus promis ; provenance déclarée, couverture de capture et observation indépendante restent distinctes. La décision de lancement ne prouve pas une médiation des actions imbriquées ou Web/MCP distantes. Contrôles documentaires seuls : 120 blocs de commandes inchangés et 12 nouveaux liens locaux vérifiés. Aucun code ni test produit modifié, aucun gate fermé ; RC-P6-R03 reste ouvert côté implémentation. Voir [exploitation](../operations.md#audit-sorties-et-couverture) et [guides fournisseurs](../setup/providers/README.md).

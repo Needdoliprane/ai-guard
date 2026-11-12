@@ -1,5 +1,13 @@
 # P1 — contrôle et supervision des sorties réseau
 
+## Décision du 13 novembre 2026 — code et tests logiciels locaux autorisés
+
+Le mainteneur a accepté la direction C présentée dans la [proposition figée au commit `b10c72ff`](https://github.com/Needdoliprane/ai-guard/blob/b10c72ff3b6b0642cf0bdb86af9e98a4ea014cf8/docs/engineering/EGRESS_CONTROL.md) : worker en réseau `none`, frontend Rust loopback non fiable, admission egress distincte et sockets amont possédés par le broker Rust après audit durable. L’accord couvre la conception, le code Rust et les tests logiciels locaux isolés. Les anciens statuts « en attente » ci-dessous décrivent les propositions à leur date.
+
+Cet accord ne couvre aucune activation Internet de worker, nouvelle campagne moteur, installation de capteur, MITM/PKI ni action cloud ou cluster. Il ne modifie pas les admissions du relais existant et ne lève pas l’attente du go pour les travaux Claude en cours. Le frontend ne reçoit aucun credential ai-guard. CONNECT reste un transport TCP opaque ; il ne prouve pas HTTPS effectif ni absence de tunnel. La protection des clés fournisseur reste un chantier distinct.
+
+La première implémentation est répartie entre noyau de politique et protocole/frontend, avec fichiers distincts ; les raccords Store/API/runtime restent sous la responsabilité de l’intégrateur. Aucun filtrage livré, test exécuté ou qualification runtime ne découle de cet accord. L’observation indépendante des tentatives directes, les quatre modes fournisseur et les preuves Docker/Podman/Kubernetes restent exigés ; G05/G07/G11 restent ouverts.
+
 ## Réexamen du 12 novembre 2026 — décision EN ATTENTE
 
 Ce réexamen prépare une seule décision motivée sur la direction C ; **aucun nouvel accord, code, filtrage ou résultat de test n'est annoncé**. La lecture actuelle porte sur le public `1e2b5e5a97db0a5df04946f716d11a92421cdc16`. La proposition et les résultats historiques du 6 novembre sont conservés intégralement ci-dessous, avec leurs sources, limites et statuts NOT_RUN.
