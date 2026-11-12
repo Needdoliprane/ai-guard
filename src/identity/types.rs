@@ -76,6 +76,10 @@ pub enum HumanCapabilityV1 {
     ManageGrants,
     ReadBrokerRegistry,
     ReadWorkerRegistry,
+    /// Explicit personal capability. A registered session's separate approval
+    /// ACL and current Content access are also required; ownership/admin alone
+    /// never confers approval. Persistence requires the modern source format.
+    ApproveLaunch,
 }
 
 impl HumanCapabilityV1 {

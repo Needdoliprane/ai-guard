@@ -1,0 +1,118 @@
+{
+  "formatVersion": 1,
+  "status": "PASS_ROOT_VERIFIED_BOUNDED_SOURCE_AND_TEST_COMPOSITION",
+  "publicBase": {
+    "commit": "711ba1378672f5c66099b2dd78daee2b5e35019f",
+    "regularFiles": 2512
+  },
+  "ownerSource": {
+    "package": "human-approval-capability-Root-20261111/r1",
+    "handoffSha256": "f63060d739a68252e658698901cdf94e70dca542c8007f5fb50f3afcadd2b84c",
+    "archive": {
+      "file": "SOURCES.ustar",
+      "sha256": "674c3df14b9c1a727a4bc95eadfbb666cda49f23ca5b4537cfd6410e58f6328f",
+      "bytes": 80896,
+      "regularMembers": 3
+    },
+    "manifestSha256": "8428c2fdbf7c22c6aae8933bb9b784809ea6130970160e1874937b6d71d181db",
+    "postimages": [
+      {
+        "path": "src/identity/types.rs",
+        "change": "modified",
+        "sha256": "a5f968f1e2a75178d0cd462eb33476290545463b7b3a0d5fc9062342a2f397da",
+        "mode": "0644",
+        "bytes": 11611
+      },
+      {
+        "path": "src/audit/identity.rs",
+        "change": "modified",
+        "sha256": "8ddb2c8af220123d90d9e0fca6e56c54d77ad7e5f75d20dc759bd63f973bce0d",
+        "mode": "0644",
+        "bytes": 59631
+      },
+      {
+        "path": "src/audit/identity_review_capability_tests.rs",
+        "change": "added",
+        "sha256": "3a900f72e9075b3e9b2e2a007f3220d6c8978d0fc75e387ff41c801036b8688f",
+        "mode": "0644",
+        "bytes": 6633
+      }
+    ],
+    "declaredSourceTests": "NOT_RUN before QA"
+  },
+  "independentReview": {
+    "verdict": "GO_SOURCE_BOUNDED",
+    "markdownSha256": "7d456d891f7315e48180cbed78f9d7ff578e6e45d59797d10dce078b2164e587",
+    "jsonSha256": "bb0a097653f22f75bac000ffd241787c0df4d07c361da677f4880c11ba0f19aa",
+    "scope": "frozen three-file source only; does not enable format14, approval, Ready, or runtime"
+  },
+  "composedCandidate": {
+    "qaRevision": "r3",
+    "sourceArchiveSha256": "0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe",
+    "files": 2513,
+    "regularModes": "0644",
+    "changedPaths": {
+      "modified": 2,
+      "added": 1,
+      "unchangedPublicBlobsAndModes": 2510
+    },
+    "sourcePathsManifestSha256": "e220362cd993cbdb9cab9b8b3997134b1dd73aa453c573cb0ec5de10f3ac91b5",
+    "sourceContentManifestSha256": "382a8609e5c4ab11d0ffa9061d727578e9ddf6aa243238c76d469f01a5bdc0e2",
+    "linuxModeManifestSha256": "42f4dbe0f93a7fac63783f04a3f069ab68d310eebba2b29ae0826daafc8c0a1d",
+    "modeFormat": "644 <relative path> NUL; actual USTAR permission bits remain 0644. All 2,513 records were verified individually against USTAR mode, source paths and SHA-256."
+  },
+  "testComposition": {
+    "sourceOwnerParents": 3,
+    "neighborRegressionFromBase": 1,
+    "selectors": [
+      "audit::identity::review_capability_tests::approval_capability_is_personal_and_not_a_legacy_resource_permission",
+      "audit::identity::review_capability_tests::approval_membership_requires_exact_format_fourteen_even_when_inactive",
+      "audit::identity::review_capability_tests::legacy_provision_and_idempotent_mutation_refuse_approval_before_any_write",
+      "audit::identity::tests::sqlite_full_during_identity_ddl_rolls_back_the_exact_schema_three"
+    ],
+    "result": "all four PASS in r3; details and raw oracle hashes in TESTS.json"
+  },
+  "qa": {
+    "runScriptSha256": "4fccf3f1882c1e0416983b9bfbefee1a50f11ee20198c46c97e9739bee8612d2",
+    "inputSourceSha256": "0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe",
+    "liveSourceExport": {
+      "sha256": "fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc",
+      "bytes": 27863040,
+      "regularFiles": 2513,
+      "regularMode": "0644",
+      "directories": 326
+    },
+    "closureRc": 0,
+    "oomKilled": false
+  },
+  "behavioralBoundary": {
+    "approveLaunchType": "personal HumanCapabilityV1; excluded from administration",
+    "resourcePermission": "unchanged; approve_launch remains invalid as ResourcePermissionV1",
+    "legacyFormatFence": "approval-bearing membership mutations are refused unless source format is exactly 14; inactive membership does not bypass the fence",
+    "writeOrdering": "legacy provision and same-operation-ID mutation replay are refused before write/replay outcome",
+    "availability": "reserved/preparatory capability only; no modern opener, migration, Ready, helper, route, or CLI activation"
+  },
+  "historicalAttempts": [
+    {
+      "revision": "r1",
+      "status": "invalid archive packaging; no product test result"
+    },
+    {
+      "revision": "r2",
+      "status": "FAIL preparation mode representation; Cargo not invoked; four selected tests NOT_RUN; aggregate closure_rc 1; cleanup component RCs 0"
+    },
+    {
+      "revision": "r3",
+      "status": "four targeted parents/build/check PASS; prior results not transferred"
+    }
+  ],
+  "evidenceFiles": {
+    "qaResult": "qa-human-approval-capability-20261112-r3/LUNA_RESULT.json",
+    "qaEvidenceManifest": "qa-human-approval-capability-20261112-r3/LUNA_EVIDENCE.sha256",
+    "rootPostManifestVerification": {
+      "path": "qa-human-approval-capability-20261112-r3/capture/ROOT_RESULTS_VERIFIED.json",
+      "sha256": "3f3fb8c8caf7a33fa523c0a4d00296be3a0ca1ad9fb37b396b50bc8c655d92b6",
+      "createdAfterLunaEvidenceManifest": true
+    }
+  }
+}

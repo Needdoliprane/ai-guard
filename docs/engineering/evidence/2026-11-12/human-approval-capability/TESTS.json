@@ -1,0 +1,181 @@
+{
+  "formatVersion": 1,
+  "status": "PASS_ROOT_VERIFIED_BOUNDED_SOFTWARE_QA",
+  "scope": "Personal ApproveLaunch capability enum and legacy format write fence; four exact lib tests, one build, one all-targets check. This is preparatory/reserved code, not an available approval flow.",
+  "provenance": {
+    "publicBaseCommit": "711ba1378672f5c66099b2dd78daee2b5e35019f",
+    "ownerFrozenSourceArchiveSha256": "674c3df14b9c1a727a4bc95eadfbb666cda49f23ca5b4537cfd6410e58f6328f",
+    "independentSourceReview": {
+      "verdict": "GO_SOURCE_BOUNDED",
+      "markdownSha256": "7d456d891f7315e48180cbed78f9d7ff578e6e45d59797d10dce078b2164e587",
+      "jsonSha256": "bb0a097653f22f75bac000ffd241787c0df4d07c361da677f4880c11ba0f19aa",
+      "scope": "three frozen source files; runtime/test not yet run"
+    },
+    "qaCandidateArchiveSha256": "0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe",
+    "qaPostrunExportSha256": "fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc"
+  },
+  "run": {
+    "command": "/bin/bash plan/RUN.sh 2b5c33c715e69edf8b0283e04b793d9f13fdfa1efcd5d047f7ba8ce68de0b289",
+    "cid": "2b5c33c715e69edf8b0283e04b793d9f13fdfa1efcd5d047f7ba8ce68de0b289",
+    "runScriptSha256": "4fccf3f1882c1e0416983b9bfbefee1a50f11ee20198c46c97e9739bee8612d2",
+    "exitCode": 0,
+    "closedUtc": "2026-11-12T00:12:42Z",
+    "experimentStatus": "HUMAN_APPROVAL_CAPABILITY_4_AUTOMATIC_GREEN_OBSERVED",
+    "aggregateClosureRc": 0
+  },
+  "cargo": [
+    {
+      "phase": "build-tests",
+      "command": "cargo test --frozen --offline --lib --no-run",
+      "rc": 0,
+      "buildFinishedSuccess": true,
+      "stdoutSha256": "25048d5ca849318662a054b445fa4e0f20b8d0fd83ecf1e4200ae7ea17274176",
+      "stderrSha256": "4889b82ea3365c26eb41224043c0b89b864b9eabb15cd2ef6285e4bc4e7e5455"
+    },
+    {
+      "phase": "check-all-targets",
+      "command": "cargo check --frozen --offline --all-targets",
+      "rc": 0,
+      "buildFinishedSuccess": true,
+      "stdoutSha256": "dd5bd832af2601b99b638f31d4f0ffb5854f401baccd5f46e6b65aaabdce5355",
+      "stderrSha256": "1c8887ab419dc29fbd6259b6e2c22a9fdb5fcfebc95122aa03be330b71b5ecc4"
+    }
+  ],
+  "selectors": [
+    {
+      "name": "audit::identity::review_capability_tests::approval_capability_is_personal_and_not_a_legacy_resource_permission",
+      "group": "new capability boundary",
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "df4e86633f9d80838ce33e7252134be037e0185786c79dbef5b9ca104b444675",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verdict": "One exact test passed; zero failed or ignored; no panic."
+    },
+    {
+      "name": "audit::identity::review_capability_tests::approval_membership_requires_exact_format_fourteen_even_when_inactive",
+      "group": "new format fence",
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "b5b12e409a216e27fb0f4492e1af2c89434b79e58d3fcbbc7191a376e5582439",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verdict": "One exact test passed; helper accepts only version 14 for approval membership, and inactive legacy membership is refused; this is not a migration/opening test."
+    },
+    {
+      "name": "audit::identity::review_capability_tests::legacy_provision_and_idempotent_mutation_refuse_approval_before_any_write",
+      "group": "new legacy write fence",
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "5bd802d1328797ab2e026e3338c0ec39d94fcbf6000bd22576f0a1ff42b46261",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verdict": "One exact test passed; refusal preserves the audit head and operation count; an old operation ID replay does not grant the forbidden receipt."
+    },
+    {
+      "name": "audit::identity::tests::sqlite_full_during_identity_ddl_rolls_back_the_exact_schema_three",
+      "group": "neighboring persistence regression",
+      "status": "PASS",
+      "rc": 0,
+      "stdoutSha256": "8df95916d574e3dc568c53b74d232e0d3c67e895835b960ccbc9410a25e6d7d1",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "verdict": "One exact test passed; injected SQLite FULL during schema-4 DDL rolls back the attempted schema change."
+    }
+  ],
+  "profile": {
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "platform": "Linux aarch64",
+    "uid": 1000,
+    "network": "none",
+    "readOnlyRoot": true,
+    "capabilities": "ALL dropped",
+    "noNewPrivileges": true,
+    "seccomp": 2,
+    "ipc": "private",
+    "cgroupns": "private",
+    "cpuLimit": 4,
+    "memoryLimitBytes": 9663676416,
+    "swapMaxBytes": 0,
+    "pidsLimit": 128,
+    "scratchTmpfsBytes": 4294967296,
+    "binds": "exactly two read-only: QA inputs and public cargo registry",
+    "rust": "1.99.1",
+    "cargoOfflineFrozen": true,
+    "jobs": 1,
+    "publicOfflineCachePins": 5,
+    "cargoTarget": "fresh private target"
+  },
+  "resourceUse": {
+    "memoryCurrentBytes": 1371721728,
+    "memoryPeakBytes": 6233681920,
+    "memoryEvents": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "oomKilled": false
+  },
+  "sourceExport": {
+    "sha256": "fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc",
+    "bytes": 27863040,
+    "regularFiles": 2513,
+    "regularMode": "0644",
+    "directories": 326,
+    "producerRc": 0,
+    "sinkRc": 0,
+    "overflowSentinelTriggered": false,
+    "postSourceVerificationRc": 0
+  },
+  "closure": {
+    "stopRc": 0,
+    "stoppedStateRc": 0,
+    "removeRc": 0,
+    "exactCidPsRc": 0,
+    "closureRc": 0,
+    "containerRemoved": true
+  },
+  "historicalAttempts": [
+    {
+      "revision": "r1",
+      "status": "INVALID_QA_PACKAGING_NOT_PRODUCT_RESULT",
+      "detail": "USTAR contained macOS PAX/AppleDouble entries; not admitted as a product test."
+    },
+    {
+      "revision": "r2",
+      "status": "FAIL_PREPARATION",
+      "preparationRc": 1,
+      "detail": "mode manifest used 0644 while Linux find %m produced 644; Cargo was not invoked; four parents NOT_RUN; aggregate closure_rc=1 although stop/stopped/remove/exact-ps component RCs were 0."
+    },
+    {
+      "revision": "r3",
+      "status": "PASS",
+      "detail": "same source archive and profile, corrected data representation only; no result transferred from r1/r2."
+    }
+  ],
+  "evidence": {
+    "lunaResultSha256": "75f35d7c9ed5f30a281d4b4afe557ea90d374e2d2e98a1260534c0456fa5f00c",
+    "lunaEvidenceManifestSha256": "85acf9d1fa20ad25c81b481fa4a82095678930fc0cf1eb16318acd05075b1d30",
+    "rootIndependentVerification": {
+      "path": "qa-human-approval-capability-20261112-r3/capture/ROOT_RESULTS_VERIFIED.json",
+      "sha256": "3f3fb8c8caf7a33fa523c0a4d00296be3a0ca1ad9fb37b396b50bc8c655d92b6",
+      "createdUtc": "2026-11-12T01:07:18.686Z",
+      "note": "Created after LUNA_EVIDENCE.sha256; its hash is listed separately and it is not claimed covered by that earlier manifest."
+    }
+  },
+  "notQualified": [
+    "human approval flow availability or authorization",
+    "format-14 opener, migration, startup, or Ready",
+    "CLI activation flag, approval helper, route, or schema change",
+    "Core epoch 7033",
+    "Claude E a710",
+    "CAF2 identity/binding/store wires",
+    "provider/model/worker/cluster/network/inference",
+    "global production or audit gates"
+  ],
+  "selectorBoundsSeconds": [
+    30,
+    30,
+    30,
+    60
+  ]
+}

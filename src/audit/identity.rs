@@ -15,6 +15,28 @@ pub(crate) struct AuthenticationMembershipSnapshotV1 {
 #[path = "identity_authentication_metadata_tests.rs"]
 mod authentication_metadata_tests;
 
+#[cfg(all(test, unix))]
+#[path = "identity_review_capability_tests.rs"]
+mod review_capability_tests;
+
+/// The new capability must not enter a legacy history, even through a retry of
+/// an existing operation. This is only a format fence, never approval authority.
+fn require_approval_capability_format(
+    mutation: &IdentityMutationV1,
+    version: i64,
+) -> anyhow::Result<()> {
+    if version != 14
+        && matches!(
+            &mutation.change,
+            IdentityChangeV1::Membership { membership, .. }
+                if membership.capabilities.contains(&HumanCapabilityV1::ApproveLaunch)
+        )
+    {
+        return Err(IdentityFailureV1::MigrationRequired.into());
+    }
+    Ok(())
+}
+
 pub(super) const SCHEMA: [(&str, &str, &str); 11] = [
     (
         "table",
@@ -729,6 +751,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         invalid(record.version == 1 && record.input_hash == record.mutation.input_hash()?)?;
         super::human_brokers::require_mutation_capability(&record.mutation, seen_broker_access)?;
         super::human_workers::require_mutation_capability(&record.mutation, seen_worker_access)?;
+        require_approval_capability_format(&record.mutation, version)?;
         projection.apply(&record.mutation, &tenant, stored.seq)?;
         ensure_resource_known(db, &record.mutation, stored.seq)?;
         invalid(record.authorization_revision == projection.revision)?;
@@ -993,6 +1016,7 @@ impl Store {
         // append, including the schema7 capability retained by schemas8–10 in its
         // third operation.
         for mutation in &provision.mutations {
+            require_approval_capability_format(mutation, version)?;
             super::human_brokers::require_mutation_capability(
                 mutation,
                 [7, 8, 9, 10, 11, 12, 13].contains(&version),
@@ -1025,6 +1049,7 @@ impl Store {
     ) -> anyhow::Result<IdentityReceiptV1> {
         mutation.validate()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        require_approval_capability_format(mutation, version)?;
         super::human_brokers::require_mutation_capability(
             mutation,
             [7, 8, 9, 10, 11, 12, 13].contains(&version),

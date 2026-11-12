@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 12 novembre — capacité ApproveLaunch préparatoire, suivi borné
+
+La revue indépendante `GO_SOURCE_BOUNDED` et quatre parents logiciels PASS examinent une capacité personnelle préparatoire et sa barrière contre les anciens formats. Les assertions confirment que `ApproveLaunch` n’est pas une `ResourcePermissionV1` ni un rôle d’administration; les mutations concernées sont refusées avant écriture/replay pour les formats autres que 14. L’acceptation par le helper à 14 ne constitue pas une ouverture, migration ou activation.
+
+Cette preuve n’ajoute aucun opener, migration, route, helper, `Ready` ou flag CLI. Le parcours d’approbation reste indisponible. ResourcePermission et schémas Identity inchangés. r1 (archive invalide) et r2 (préflight FAIL, tests `NOT_RUN`) restent documentés distinctement; seul r3 est PASS. [Source, quatre tests et limites](evidence/2026-11-12/human-approval-capability/README.md). Aucun fingerprint d’audit ni gate global n’est clôturé; Core epoch 7033, Claude E a710 et les wires CAF2 identity/binding/store ne sont pas couverts.
+
 ## 11 novembre — maintenance des sources humaines, correction bornée vérifiée
 
 Le [lot maintenance r4](evidence/2026-11-11/human-source-maintenance/README.md) ajoute un guard réel de l’union old/new et deux méthodes de token, après revue indépendante et 19 parents logiciels PASS. Cela prépare les corrections d’attribution/autorité ; aucun fingerprint n’est clôturé par ces primitives. Store14/AuthLedger5, writers/backup/migration, approbation nominative et Ready restent ouverts. Claude E est livré et en revue d’intégration distincte ; ses résultats historiques ne sont pas des PASS de composition.

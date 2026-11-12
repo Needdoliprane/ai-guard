@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 12 novembre, 00:12 UTC — ApproveLaunch préparatoire : quatre parents logiciels PASS
+
+Sur la base publique `711ba1378672f5c66099b2dd78daee2b5e35019f` et trois postimages gelées, le build lib, quatre parents lib exacts et `cargo check --all-targets --frozen --offline` passent. Source QA `0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe` : 2 513 fichiers `0644`; export vivant vérifié `fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc`, 326 répertoires; fermeture RC 0, aucun OOM. Linux ARM64 épinglé, réseau absent, racine RO, UID 1000, 4 CPU et 9 Gio maximum. [Preuves et limites](evidence/2026-11-12/human-approval-capability/README.md).
+
+La capacité `ApproveLaunch` est personnelle, distincte des permissions ressource et des rôles d’administration. La barrière refuse les mutations d’approbation dans les formats autres que 14, même inactives; ce lot n’ajoute aucun opener, migration, `Ready`, route, helper ni activation CLI. `ResourcePermissionV1` et les schémas Identity restent inchangés. Les incidents r1/r2 restent séparés : r1 archive invalide; r2 préflight modes RC 1, quatre parents `NOT_RUN`; aucun PASS transféré. Aucun gate global fermé.
+
 ## 11 novembre, 22:44 UTC — maintenance des sources : 19 parents logiciels PASS
 
 Sur public `103130d` plus cinq postimages owner r4, les 19 parents ciblés (12 maintenance, 2 token, 5 régressions), le build lib et le check toutes cibles passent. Source `5075a7f9…`, export vivant exact `bc4f91a9…`, 2 509 fichiers0644 ; fermeture RC0/OOM0. [Preuves et limites](evidence/2026-11-11/human-source-maintenance/README.md). Aucune activation Store14/AuthLedger5, migration, approbation ou Ready par ce lot.

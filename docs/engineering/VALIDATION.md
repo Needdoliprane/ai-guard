@@ -1,5 +1,11 @@
 # Validation courante
 
+## 12 novembre, 00:12 UTC — QA ciblée ApproveLaunch : PASS borné
+
+Sur le seul gel source `0b85b740279e59b285593e4730e4d983cacc43678aff1a370d96478c7c9cfdbe`, build `cargo test --lib --no-run`, quatre parents exacts et `cargo check --all-targets --frozen --offline` RC 0. Chaque parent donne un PASS unique, zéro échec/ignoré, aucun panic. Vérification source post-run réussie; export vivant `fdb85c4633229eac56725c58c7111e8ecd6c342dbe7b0479f0c909592f7bf5cc` (27 863 040 octets), fermeture du CID exact RC 0 et aucun OOM. Pic cgroup 6 233 681 920 octets / 9 663 676 416. [Quatre oracles et empreintes](evidence/2026-11-12/human-approval-capability/TESTS.json).
+
+Historique séparé : r1, empaquetage QA invalide; r2, préflight modes RC 1 avant Cargo, quatre parents `NOT_RUN`, fermeture agrégée RC 1 et opérations cleanup RC 0; r3 corrige seulement la représentation `source.modes0` (`644`, bits toujours `0644`). Le résultat r3 n’est pas rétroactif. QA locale ciblée seulement : aucune disponibilité/activation d’approbation, migration/open du format 14, Core epoch 7033, Claude E a710 ou gate global qualifiés.
+
 ## 11 novembre, 22:44 UTC — maintenance owner r4 : PASS ciblé
 
 Source `5075a7f9…` : build lib, liste réelle puis 19 oracles exacts et `cargo check --all-targets` passent. Aucun test ignoré compté PASS. Export vivant `bc4f91a9…` vérifié sur les 2 509 contenus/modes, fermeture RC0/OOM0. Incident administratif CREATE RC66 avant création conservé ; aucun changement de source/profil/oracle. [Commandes, noms et empreintes](evidence/2026-11-11/human-source-maintenance/SOURCE_MANIFEST.json). Les 34 PASS antérieurs restent propres à leur source ; qualifications runtime et verticale moderne NOT_RUN.
