@@ -1,6 +1,5 @@
-//! `GET /human/events/recent`: the newest authorized events first, plus a
-//! sealed position from which the existing stream route continues without
-//! replaying history.
+//! `GET /human/events/recent`: the newest authorized events first.
+//! Legacy retains its sealed stream start; owned metadata is snapshot-only.
 //!
 //! Additive read. It reuses the context, authorization, redaction, byte
 //! bounds and traversal budget of the other human pages, and the existing
@@ -29,10 +28,14 @@ pub(super) struct HumanRecentEventPageV1 {
     /// Older authorized events exist below this page.
     has_more: bool,
     next_cursor: Option<String>,
-    /// First page only: accepted by `/human/stream` with exactly the same
+    /// Legacy first page only: accepted by `/human/stream` with exactly the same
     /// `limit`, `view` and resource; the stream starts strictly after the
     /// snapshot bound of this page. No audit position is exposed.
     live_cursor: Option<String>,
+    /// The current owned metadata profile keeps content/detail/export/SSE
+    /// closed. This descriptive marker grants no permission. Legacy omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_mode: Option<&'static str>,
     read_receipt: HumanReadReceiptV1,
 }
 
@@ -57,7 +60,8 @@ fn recent_sync(
     query: &PageQuery,
 ) -> ApiResult<Json<HumanRecentEventPageV1>> {
     let (context, tenant, scope) = selected_context(state, proof, headers)?;
-    // The live position is bound to the key of the stream that will use it.
+    // The legacy live position is bound to the stream query. Merely deriving
+    // this query key creates no stream cursor or stream capability in owned.
     let stream_key = query.key(Traversal::Stream)?;
     let key = RecentKey {
         route: "human_events_recent_v1",
@@ -80,18 +84,43 @@ fn recent_sync(
         export: false,
         stream: false,
     };
-    let page = tenant
-        .store
-        .human_events_recent(
+    let owned_profile = state.owned_human.is_some();
+    let page = if let Some(owned) = &state.owned_human {
+        let HumanProofSource::Local(source) = &proof.source else {
+            return Err(super::super::human_sources::unavailable());
+        };
+        owned.recent(
+            *source,
+            &tenant.store,
             &scope,
             &filter,
             cursor.upper_event,
             key.limit,
             &proof.redactor,
-        )
-        .map_err(store_failure)?;
+        )?
+    } else {
+        tenant
+            .store
+            .human_events_recent(
+                &scope,
+                &filter,
+                cursor.upper_event,
+                key.limit,
+                &proof.redactor,
+            )
+            .map_err(store_failure)?
+    };
+    // The real read and its receipt committed, and OwnedHumanGateway::read
+    // released its epoch. Accepted usage/I/O permits still belong to run_human.
+    #[cfg(test)]
+    if owned_profile {
+        super::event_read_test_hook::pause(&state.human)?;
+    }
     reauthenticate(state, proof)?;
-    let live = if first {
+    if owned_profile {
+        selected_context(state, proof, headers)?;
+    }
+    let live = if first && !owned_profile {
         let mut live = context.start(&stream_key, None).map_err(state_failure)?;
         live.after_event = page.upper_event;
         live.upper_event = None;
@@ -113,6 +142,7 @@ fn recent_sync(
         // counted against the traversal budget before any cursor is sealed.
         next_cursor: page.has_more.then(placeholder).flatten(),
         live_cursor: live.as_ref().and_then(|_| placeholder()),
+        stream_mode: owned_profile.then_some("snapshot_only"),
         read_receipt: page.receipt,
     };
     let size = serde_json::to_vec(&body)

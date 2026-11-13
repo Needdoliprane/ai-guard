@@ -457,4 +457,104 @@ mod extended {
         }
         assert_eq!(events_receipts(&database), before);
     }
+    // Root composes the actual Journal cfg(test) hook. The recent handler
+    // pauses after the real read returns, before final proof/context checks.
+    mod publication_races {
+        use super::*;
+
+        async fn committed_race(revoke: bool) {
+            let fixture = Fixture::new_owned();
+            grant(&fixture, "B", "recent-postcommit-b", fixture.principal(), false);
+            append(&fixture, "B", "recent-postcommit-b");
+            let state = state(&fixture);
+            let router = gateway_router(state.clone());
+            let context = context(&router, "personal").await;
+            let database = connection(&state);
+            let before: i64 = database.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| row.get(0)).unwrap();
+            let (reached, release) = human::event_read_test_hook::install(&state);
+            let request = tokio::spawn(async move { get(&router, RECENT, Some(&context)).await });
+            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
+            let (audit_id, payload): (String, String) = database.query_row(
+                "SELECT id,payload FROM events WHERE seq>?1 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events'",
+                [before], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            let audit: Value = serde_json::from_str(&payload).unwrap();
+            assert_eq!(audit["data"]["result_count"], 1);
+            assert_eq!(audit["data"]["principal"], serde_json::to_value(fixture.principal()).unwrap());
+            let floor: bool = database.query_row(
+                "SELECT EXISTS(SELECT 1 FROM audit_time_floors f JOIN events e ON f.event_seq>=e.seq WHERE e.id=?1)",
+                [&audit_id], |row| row.get(0),
+            ).unwrap();
+            assert!(floor, "the pause must follow a real committed read receipt");
+            if revoke {
+                // Acquiring the write epoch also proves no read epoch is kept
+                // through the postcommit pause. This existing scoped writer
+                // is a test intervention, not an adopted public write route.
+                let owned = state.owned_human.as_ref().unwrap();
+                let epoch = owned.owner.try_write_epoch().unwrap();
+                let access = HumanSourceAccess::write(&epoch, &owned.sources[1]).unwrap();
+                let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
+                let mut binding = state.tenants[1].store.local_credential_binding_scoped(&access, &digest).unwrap().unwrap();
+                let expected_revision = binding.revision;
+                binding.revision += 1; binding.active = false;
+                state.tenants[1].store.mutate_identity_scoped(
+                    &epoch, &owned.sources[1], &change(IdentityChangeV1::Credential { expected_revision, binding }),
+                ).unwrap();
+                drop(epoch);
+            } else { state.human.close_contexts(); }
+            drop(release); // Journal guard also releases on panic/unwind.
+            let (status, refused) = tokio::time::timeout(Duration::from_secs(15), request).await.unwrap().unwrap();
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+            assert_eq!(refused["error"]["code"], "identity_unavailable");
+            for field in ["items", "read_receipt", "next_cursor", "live_cursor", "stream_mode"] {
+                assert!(refused.get(field).is_none(), "{field}");
+            }
+            let retained: String = database.query_row("SELECT payload FROM events WHERE id=?1", [&audit_id], |row| row.get(0)).unwrap();
+            assert_eq!(retained, payload, "the committed historical receipt is retained");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn owned_recent_real_commit_then_credential_revocation_refuses_publication() {
+            committed_race(true).await;
+        }
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn owned_recent_real_commit_then_context_close_refuses_publication() {
+            committed_race(false).await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn owned_recent_aborted_waiter_keeps_committed_work_usage_until_release_and_drain() {
+            let fixture = Fixture::new_owned();
+            grant(&fixture, "B", "recent-cancel-b", fixture.principal(), false);
+            append(&fixture, "B", "recent-cancel-b");
+            let state = state(&fixture);
+            let router = gateway_router(state.clone());
+            let context = context(&router, "personal").await;
+            let database = connection(&state);
+            let before = events_receipts(&database);
+            let owned = state.owned_human.as_ref().unwrap().clone();
+            let (reached, release) = human::event_read_test_hook::install(&state);
+            let request = tokio::spawn(async move { get(&router, RECENT, Some(&context)).await });
+            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
+            assert_eq!(events_receipts(&database), before + 1, "real receipt committed before waiter cancellation");
+            // The owned read epoch is already gone; usage and I/O ownership
+            // must nevertheless survive cancellation of the HTTP observer.
+            drop(owned.owner.try_write_epoch().unwrap());
+            request.abort();
+            assert!(request.await.unwrap_err().is_cancelled());
+            assert!(owned.usages.load(Ordering::Acquire) > 0);
+            let retiring = owned.clone();
+            let drain = tokio::spawn(async move { retiring.drain().await });
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while owned.coverage.load(Ordering::Acquire) != CLOSING {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            assert!(!drain.is_finished(), "accepted work still holds its usage while paused");
+            drop(release);
+            tokio::time::timeout(Duration::from_secs(15), drain).await.unwrap().unwrap().unwrap();
+            assert_eq!(owned.usages.load(Ordering::Acquire), CLOSED);
+            assert_eq!(events_receipts(&database), before + 1);
+        }
+    }
 }
