@@ -1,3 +1,4 @@
+mod egress_policy;
 use crate::{
     model::{CommandSpec, DecisionRequest},
     redaction::Redactor,

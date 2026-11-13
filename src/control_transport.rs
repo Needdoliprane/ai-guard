@@ -50,9 +50,11 @@ pub enum ControlRouteIdentity {
     WorkerRelay,
 }
 
-/// Exact reserved diagnostic selected by the gateway transport. This is only
-/// classification; authentication and the private transport marker are Rust
-/// gateway responsibilities, never values accepted from a client header.
+/// Exact reserved owned policy methods; classification alone grants no authority.
+pub(crate) fn owned_policy_route(method: &Method, path: &str) -> bool {
+    *method == Method::POST && matches!(path, "/api/v1/egress/policies/replace" | "/api/v1/egress/policies/revoke")
+}
+
 pub(crate) fn owned_protocol_route(method: &Method, path: &str) -> bool {
     *method == Method::GET && path == "/api/v1/control/protocol"
 }
@@ -166,6 +168,8 @@ pub fn control_route(method: &Method, path: &str) -> Option<ControlRouteIdentity
         (&Method::GET, ["control", "protocol"])
         | (&Method::GET, ["workers", _, "arms", _])
         | (&Method::POST, ["control", "events"])
+        | (&Method::POST, ["egress", "policies", "replace"])
+        | (&Method::POST, ["egress", "policies", "revoke"])
         | (&Method::POST, ["workers", "supervised-reservations"])
         | (&Method::POST, ["workers", _, "arms"])
         | (&Method::POST, ["workers", _, "armed-start-claims"])

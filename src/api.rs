@@ -47,6 +47,7 @@ pub use auth::{
 };
 mod brokers;
 mod control_transport;
+mod egress_policy;
 #[cfg(test)]
 mod held_policy_tests;
 mod human;
@@ -911,6 +912,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .clone()
                 .route("/control/events", post(ingest_control_event))
                 .merge(supervision::routes())
+                .merge(egress_policy::router())
                 .merge(workload::routes())
                 .merge(relay::routes())
                 .merge(relay_admission::routes())

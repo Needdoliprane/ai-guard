@@ -1,5 +1,5 @@
 //! Tenant-local durable policy registry. No resolver, socket or network permit.
-//! Staged private API: no HTTP route or new human mutation capability exists.
+//! Store authority stays private; owned operator HTTP delivery is separately gated.
 #![allow(dead_code)]
 use super::*;
 use crate::{
@@ -9,12 +9,13 @@ use crate::{
 };
 mod types;
 pub(crate) use types::Ceiling as EgressTenantCeilingV1;
-pub(super) use types::EgressStoreFailure;
+pub(crate) use types::EgressStoreFailure;
 use types::*;
 pub(crate) use types::{
-    EgressPolicyReceiptV1, EgressPolicySelectorV1, EgressPolicySnapshotV1, EgressPolicyStateV1,
+    EgressPolicySnapshotV1,
     EgressReplacePolicyV1, EgressRevokePolicyV1, EgressStoreLimitsV1,
 };
+pub use types::{EgressPolicyReceiptV1, EgressPolicySelectorV1, EgressPolicyStateV1};
 mod schema;
 pub(super) use schema::{AUTO_INDEX_COUNTS, SCHEMA};
 mod replay;
@@ -59,3 +60,6 @@ pub(super) fn protected_capacity(
             .ok_or(EgressStoreFailure::Capacity)?,
     })
 }
+
+#[cfg(all(test, unix))]
+mod a1_tests;

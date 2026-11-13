@@ -4,6 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod egress_policy;
 pub mod kubernetes_admission;
 #[cfg(test)]
 #[path = "control/kubernetes_admission_tests.rs"]

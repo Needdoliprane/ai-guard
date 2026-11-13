@@ -463,6 +463,8 @@ pub(super) mod tests;
 
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
+    ("/api/v1/egress/policies/replace", &["POST"]),
+    ("/api/v1/egress/policies/revoke", &["POST"]),
     ("/api/agents", &["GET", "HEAD"]),
     ("/api/decide", &["POST"]),
     ("/api/events", &["GET", "POST", "HEAD"]),
@@ -603,6 +605,7 @@ pub(super) async fn route_gate(
     let path = request.uri().path();
     let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
         || super::control_transport::owned_protocol_request(&request)
+        || super::control_transport::owned_policy_request(&request)
         || request.method() == "GET"
             && [
                 "/api/v1/human/identity",

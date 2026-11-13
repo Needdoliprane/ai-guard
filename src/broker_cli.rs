@@ -13,6 +13,8 @@ use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod policy;
+
 #[derive(Args)]
 pub struct BrokerArgs {
     #[command(subcommand)]
@@ -21,6 +23,11 @@ pub struct BrokerArgs {
 
 #[derive(Subcommand)]
 enum BrokerCommand {
+    /// Prepare and explicitly submit retained owned policy registry operations.
+    Policy {
+        #[command(subcommand)]
+        command: policy::PolicyCommand,
+    },
     /// Read authenticated control metadata without starting or activating a broker.
     ControlInfo {
         #[arg(long)]
@@ -301,6 +308,7 @@ async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()
 
 pub async fn execute(args: BrokerArgs) -> Result<()> {
     match args.command {
+        BrokerCommand::Policy { command } => policy::execute(command).await,
         BrokerCommand::ControlInfo {
             gateway,
             token_file,
