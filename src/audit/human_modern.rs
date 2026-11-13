@@ -36,11 +36,11 @@ impl Store {
     }
     #[cfg(test)]
     pub(crate) fn modern_test_abort_events_audit(
-        self: &Arc<Self>,
-    ) -> anyhow::Result<HumanEventsAuditAbortGuard> {
+        &self,
+    ) -> anyhow::Result<HumanEventsAuditAbortGuard<'_>> {
         let db = self.db.try_lock().map_err(|_| anyhow::anyhow!("fixture store busy"))?;
         db.execute_batch("CREATE TEMP TRIGGER fixture_owned_events_audit_abort BEFORE INSERT ON main.events WHEN NEW.kind='control.identity.access' AND json_extract(NEW.payload,'$.data.action')='events' BEGIN SELECT RAISE(ABORT,'synthetic owned events audit insertion failure'); END;")?;
-        Ok(HumanEventsAuditAbortGuard { store: Some(self.clone()) })
+        Ok(HumanEventsAuditAbortGuard { store: Some(self) })
     }
     #[cfg(test)]
     pub(crate) fn modern_test_human_usage(&self) -> Value {
@@ -179,11 +179,11 @@ impl Store {
 
 /// Temporary SQLite fixture state. Never present in a production build.
 #[cfg(test)]
-pub(crate) struct HumanEventsAuditAbortGuard {
-    store: Option<Arc<Store>>,
+pub(crate) struct HumanEventsAuditAbortGuard<'a> {
+    store: Option<&'a Store>,
 }
 #[cfg(test)]
-impl HumanEventsAuditAbortGuard {
+impl HumanEventsAuditAbortGuard<'_> {
     pub(crate) fn remove(mut self) -> anyhow::Result<()> {
         let store = self.store.as_ref().ok_or_else(|| anyhow::anyhow!("fixture trigger removed"))?;
         store.db.try_lock().map_err(|_| anyhow::anyhow!("fixture store busy"))?
@@ -193,7 +193,7 @@ impl HumanEventsAuditAbortGuard {
     }
 }
 #[cfg(test)]
-impl Drop for HumanEventsAuditAbortGuard {
+impl Drop for HumanEventsAuditAbortGuard<'_> {
     fn drop(&mut self) {
         if let Some(store) = self.store.take() {
             // Unwind cleanup never blocks behind a failed asynchronous test.
@@ -207,3 +207,5 @@ impl Drop for HumanEventsAuditAbortGuard {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod journal_tests;

@@ -4,6 +4,8 @@ use crate::{human_authority::migration::tests::Fixture, model::Event};
 use tower::ServiceExt;
 
 mod races;
+mod selection;
+mod dashboard;
 
 fn change(change: IdentityChangeV1) -> IdentityMutationV1 {
     IdentityMutationV1 {

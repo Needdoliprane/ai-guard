@@ -1,7 +1,7 @@
 //! R2 cases: actual committed receipt races and a real SQLite audit INSERT abort.
 use super::*;
 
-fn state(fixture: &Fixture) -> GatewayState {
+pub(super) fn state(fixture: &Fixture) -> GatewayState {
     let (bundle, credentials, tokens) = fixture.owned_startup();
     GatewayState::for_owned_human_sources(
         bundle,
@@ -14,7 +14,7 @@ fn state(fixture: &Fixture) -> GatewayState {
     .unwrap()
 }
 
-fn connection(state: &GatewayState) -> rusqlite::Connection {
+pub(super) fn connection(state: &GatewayState) -> rusqlite::Connection {
     rusqlite::Connection::open_with_flags(
         state.owned_human.as_ref().unwrap().sources[1]
             .descriptor()
@@ -25,7 +25,7 @@ fn connection(state: &GatewayState) -> rusqlite::Connection {
     .unwrap()
 }
 
-fn snapshot(connection: &rusqlite::Connection) -> (i64, String, i64, i64) {
+pub(super) fn snapshot(connection: &rusqlite::Connection) -> (i64, String, i64, i64) {
     connection
         .query_row(
             "SELECT COALESCE(MAX(seq),0),COALESCE((SELECT hash FROM events ORDER BY seq DESC LIMIT 1),''),COUNT(*),COALESCE(SUM(length(CAST(payload AS BLOB))),0) FROM events",
@@ -35,7 +35,7 @@ fn snapshot(connection: &rusqlite::Connection) -> (i64, String, i64, i64) {
         .unwrap()
 }
 
-async fn context(router: &Router) -> String {
+pub(super) async fn context(router: &Router) -> String {
     let (status, identity) = get(router, "/api/v1/human/identity", None).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
     identity["contexts"]
