@@ -187,9 +187,18 @@ async fn owned_events_metadata_real_audit_insert_abort_rolls_back_without_public
     assert!(!refused.to_string().contains("synthetic-private-journal-content"));
     assert_eq!(snapshot(&database), before);
     assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
+    assert!(!state.tenants[1].store.healthy());
+    // Removing fixture injection does not repair the permanently latched
+    // Store. A separate operator recovery procedure is not exercised here.
     trigger.remove().unwrap();
-    let (status, recovered) = get(&router, "/api/v1/human/events", Some(&context)).await;
-    assert_eq!(status, StatusCode::OK, "{recovered}");
-    assert_eq!(recovered["items"].as_array().unwrap().len(), 1);
-    assert_eq!(snapshot(&database).0, before.0 + 1);
+    assert!(!state.tenants[1].store.healthy());
+    let (status, latched) = get(&router, "/api/v1/human/events", Some(&context)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{latched}");
+    assert_eq!(latched["error"]["code"], "audit_unavailable");
+    assert!(latched.get("items").is_none());
+    assert!(latched.get("read_receipt").is_none());
+    assert!(latched.get("next_cursor").is_none());
+    assert_eq!(snapshot(&database), before);
+    assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
+    assert!(!state.tenants[1].store.healthy());
 }
