@@ -50,6 +50,13 @@ pub enum ControlRouteIdentity {
     WorkerRelay,
 }
 
+/// Exact reserved diagnostic selected by the gateway transport. This is only
+/// classification; authentication and the private transport marker are Rust
+/// gateway responsibilities, never values accepted from a client header.
+pub(crate) fn owned_protocol_route(method: &Method, path: &str) -> bool {
+    *method == Method::GET && path == "/api/v1/control/protocol"
+}
+
 /// The only query accepted by the control transport. Values are parsed without
 /// URL decoding; forwarding reconstructs this object rather than its input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -64,11 +64,11 @@ impl CandidateIndex {
 }
 
 pub(super) struct OwnedHumanGateway {
-    owner: OwnedHumanSources,
-    sources: Vec<OwnedSourceToken>,
-    discovery_generations: Vec<crate::audit::HumanDiscoveryGeneration>,
+    pub(super) owner: OwnedHumanSources,
+    pub(super) sources: Vec<OwnedSourceToken>,
+    pub(super) discovery_generations: Vec<crate::audit::HumanDiscoveryGeneration>,
     candidates: CandidateIndex,
-    _registry: Arc<auth::ReviewCredentialRegistry>,
+    pub(super) registry: Arc<auth::ReviewCredentialRegistry>,
     _authentication: Option<crate::audit::authentication::AuthenticationAudit>,
     oidc_selected: bool,
     coverage: AtomicUsize,
@@ -169,6 +169,15 @@ impl OwnedHumanGateway {
         self.candidates
             .local_source(digest)
             .map_err(|_| unavailable())
+    }
+    /// Complete startup collision coverage, not a substitute for the live
+    /// registry, source generation or transaction-bound runner binding.
+    pub(super) fn technical_candidate(&self, digest: &[u8; 32]) -> ApiResult<bool> {
+        self.check()?;
+        Ok(matches!(
+            self.candidates.entries.get(digest).map(Vec::as_slice),
+            Some([Candidate::Technical])
+        ))
     }
     fn read<T>(
         &self,
@@ -412,7 +421,7 @@ impl GatewayState {
             sources,
             discovery_generations,
             candidates,
-            _registry: registry,
+            registry,
             _authentication: bundle.authentication.take(),
             oidc_selected,
             coverage: AtomicUsize::new(COMPLETE),
@@ -434,6 +443,8 @@ impl GatewayState {
             io_scope: Arc::default(),
             control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
             owned_human: Some(owned),
+            #[cfg(test)]
+            owned_control_hook: Arc::default(),
         })
     }
 }
@@ -586,6 +597,7 @@ pub(super) async fn route_gate(
     }
     let path = request.uri().path();
     let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
+        || super::control_transport::owned_protocol_request(&request)
         || request.method() == "GET"
             && [
                 "/api/v1/human/identity",

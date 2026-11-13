@@ -356,7 +356,7 @@ async fn human_worker_feature_is_advertised_only_after_the_explicit10_migration(
 }
 
 #[tokio::test]
-async fn schema11_and12_protocols_match_active_and_inactive_schema_constraints_and_reject15() {
+async fn schema11_and12_protocols_match_active_and_inactive_schema_constraints_and_reject16() {
     // A delivered schema that rejects the real v11/v12 responses must fail
     // here even when those DTOs satisfy the Rust contract. No schema validator
     // dependency or fabricated Store/HTTP response replaces the real route.
@@ -432,14 +432,14 @@ async fn schema11_and12_protocols_match_active_and_inactive_schema_constraints_a
     }
 
     // This negative changes only the version/active fields of a valid served
-    // DTO. It tests public Rust validation, not a claim that Store serves v15.
+    // DTO. It tests public Rust validation, not a claim that Store serves v16.
     for active in [false, true] {
         let mut future = last_protocol.clone();
-        future.schema_version = 15;
+        future.schema_version = 16;
         future.active = active;
         assert!(
             future.validate().is_err(),
-            "schema15 must remain unsupported"
+            "schema16 must remain unsupported"
         );
     }
     for pointer in [
@@ -448,8 +448,8 @@ async fn schema11_and12_protocols_match_active_and_inactive_schema_constraints_a
     ] {
         let allowed = schema.pointer(pointer).and_then(Value::as_array).unwrap();
         assert!(
-            !allowed.iter().any(|value| value.as_u64() == Some(15)),
-            "delivered schema must reject15 at {pointer}"
+            !allowed.iter().any(|value| value.as_u64() == Some(16)),
+            "delivered schema must reject16 at {pointer}"
         );
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -471,14 +471,14 @@ fn schema14_descriptive_dto_and_published_json_contract_agree() {
     assert!(!protocol.active);
     assert_eq!(
         schema["properties"]["schema_version"]["enum"],
-        serde_json::json!((1..=14).collect::<Vec<_>>())
+        serde_json::json!((1..=15).collect::<Vec<_>>())
     );
     let rules = schema["allOf"].as_array().unwrap();
     let supervised = rules
         .iter()
         .find(|rule| {
             rule["if"]["properties"]["schema_version"]["enum"]
-                == serde_json::json!((3..=14).collect::<Vec<_>>())
+                == serde_json::json!((3..=15).collect::<Vec<_>>())
         })
         .expect("every supervised metadata generation has the same shape, even inactive");
     assert_eq!(
@@ -507,12 +507,44 @@ fn schema14_descriptive_dto_and_published_json_contract_agree() {
     missing_protocol.protocols.clear();
     assert!(missing_protocol.validate().is_err());
     let mut future = protocol;
-    future.schema_version = 15;
+    future.schema_version = 16;
     assert!(future.validate().is_err());
     assert!(
         !schema["properties"]["schema_version"]["enum"]
             .as_array()
             .unwrap()
-            .contains(&Value::from(15))
+            .contains(&Value::from(16))
     );
+}
+
+#[test]
+fn schema15_extends_the_descriptive_protocol_contract_without_lifecycle_authority() {
+    let schema: Value = serde_json::from_str(CONTROL_PROTOCOL_SCHEMA).unwrap();
+    let mut protocol = ControlProtocolV1 {
+        version: 1,
+        schema_version: 15,
+        control_namespace_uuid: Some("00000000-0000-0000-0000-000000000001".into()),
+        tenant_id: "schema-contract-tenant".into(),
+        role: "runner".into(),
+        protocols: vec![SupervisionProtocolV1::BrokerSupervisionV1],
+        active: false,
+    };
+    // These are descriptive DTOs, not Store activation or broker admission.
+    for active in [false, true] {
+        protocol.active = active;
+        protocol.validate().unwrap();
+        let wire = serde_json::to_value(&protocol).unwrap();
+        let decoded: ControlProtocolV1 = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.schema_version, 15);
+        assert_eq!(decoded.active, active);
+        for pointer in [
+            "/properties/schema_version/enum",
+            "/allOf/0/then/properties/schema_version/enum",
+            "/allOf/1/if/properties/schema_version/enum",
+        ] {
+            let allowed = schema.pointer(pointer).and_then(Value::as_array).unwrap();
+            assert!(allowed.contains(&Value::from(15)), "{pointer}");
+            assert!(!allowed.contains(&Value::from(16)), "{pointer}");
+        }
+    }
 }

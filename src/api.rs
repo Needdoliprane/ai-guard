@@ -241,6 +241,8 @@ pub struct GatewayState {
     io_scope: Arc<store_io::Scope>,
     control_recovery_epoch: Arc<auth::ControlRecoveryAuthEpochV2>,
     owned_human: Option<Arc<human_sources::OwnedHumanGateway>>,
+    #[cfg(test)]
+    owned_control_hook: Arc<auth::owned_control::test_hook::Hook>,
 }
 impl GatewayState {
     fn scoped(&self, scope: Arc<store_io::Scope>) -> Self {
@@ -482,6 +484,8 @@ impl GatewayState {
                     io_scope: Arc::default(),
                     control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
                     owned_human: None,
+                    #[cfg(test)]
+                    owned_control_hook: Arc::default(),
                 };
             }
         };
@@ -519,6 +523,8 @@ impl GatewayState {
             io_scope: Arc::default(),
             control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
             owned_human: None,
+            #[cfg(test)]
+            owned_control_hook: Arc::default(),
         }
     }
     pub fn for_tenants(
@@ -601,6 +607,8 @@ impl GatewayState {
             io_scope: Arc::default(),
             control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
             owned_human: None,
+            #[cfg(test)]
+            owned_control_hook: Arc::default(),
         })
     }
     fn control_binding(

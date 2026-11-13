@@ -1513,3 +1513,35 @@ impl Store {
         (namespace, active)
     }
 }
+
+// Exact retained-connection probes for A0 negative fixtures only.
+impl Store {
+    #[cfg(test)]
+    pub(crate) fn owned_control_set_busy_timeout_for_test(&self, milliseconds: u64) -> anyhow::Result<()> {
+        let db = self.db.lock().map_err(|_| anyhow::anyhow!("fixture Store mutex poisoned"))?;
+        db.busy_timeout(std::time::Duration::from_millis(milliseconds))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owned_control_busy_timeout_for_test(&self) -> anyhow::Result<i64> {
+        let db = self.db.lock().map_err(|_| anyhow::anyhow!("fixture Store mutex poisoned"))?;
+        Ok(db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?)
+    }
+}
+
+// Keep the real audit-private migration call inside its test-only module.
+impl Store {
+    #[cfg(test)]
+    pub(crate) fn owned_control_migrate_legacy_fixture_for_test(
+        &self,
+        backups: &std::path::Path,
+    ) -> anyhow::Result<()> {
+        for target in 3..=13 {
+            self.migrate_control_version(
+                &backups.join(format!("history-{target}.sqlite")), target - 1, target,
+            )?;
+        }
+        Ok(())
+    }
+}

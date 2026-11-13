@@ -958,17 +958,28 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let state = self.supervision_state_checked(&tx)?;
+        self.commit_checked(tx)?;
+        Ok(state)
+    }
+
+    /// Shared diagnostic reader. The actual checked transaction decides
+    /// whether modern Business access exists; a caller-supplied flag cannot.
+    pub(in crate::audit) fn supervision_state_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+    ) -> anyhow::Result<SupervisionStateV1> {
         let schema_version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let supported = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema_version)
-            || (matches!(schema_version, 14 | 15) && access.is_some());
-        if matches!(schema_version, 14 | 15) && access.is_some() {
+            || (matches!(schema_version, 14 | 15) && tx.source_access.is_some());
+        if matches!(schema_version, 14 | 15) && tx.source_access.is_some() {
             tx.require_business_access()?;
         }
         let state = SupervisionStateV1 {
             version: 1,
             schema_version,
             control_namespace_uuid: if schema_version >= 2 {
-                Some(namespace(&tx)?)
+                Some(namespace(tx)?)
             } else {
                 None
             },
@@ -980,7 +991,6 @@ impl Store {
             active: supported && tx.lease.active,
         };
         state.validate()?;
-        self.commit_checked(tx)?;
         Ok(state)
     }
     fn persist_supervision_record(

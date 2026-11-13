@@ -1,5 +1,6 @@
 //! HTTP bindings for the versioned, tenant-scoped supervision Store.
 use super::*;
+use axum::{extract::FromRequestParts, http::request::Parts};
 use crate::control::{
     AdmissionResultV1, ArmResultV1, ArmV1, ArmedStartClaimV1, ControlProtocolV1, ExportRequestV1,
     HelperClaimResultV1, HelperCleanupV1, HelperObservationV1, HelperStartClaimV1,
@@ -42,7 +43,37 @@ fn owned_arm(tenant: &TenantState, id: &str, arm_id: &str) -> ApiResult<ArmResul
         .ok_or_else(|| control_error(ControlFailure::NotFound.into()))
 }
 
-async fn protocol(ReadIdentity(tenant, role): ReadIdentity) -> ApiResult<Json<ControlProtocolV1>> {
+enum ProtocolIdentity {
+    Legacy(TenantState, &'static str),
+    Owned(Arc<auth::owned_control::OwnedProtocol>),
+}
+
+impl FromRequestParts<GatewayState> for ProtocolIdentity {
+    type Rejection = (StatusCode, Json<Value>);
+
+    async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> ApiResult<Self> {
+        if state.owned_human.is_some() {
+            // The private marker retains exact-target classification across
+            // the API router's normal prefix stripping, never a client claim.
+            if parts.method != axum::http::Method::GET
+                || parts.uri.query().is_some()
+                || parts.extensions.get::<control_transport::ReservedProtocol>().is_none()
+            {
+                return Err(human_sources::unavailable());
+            }
+            return parts.extensions.get::<Arc<auth::owned_control::OwnedProtocol>>()
+                .cloned().map(Self::Owned).ok_or_else(human_sources::unavailable);
+        }
+        let ReadIdentity(tenant, role) = ReadIdentity::from_request_parts(parts, state).await?;
+        Ok(Self::Legacy(tenant, role))
+    }
+}
+
+async fn protocol(identity: ProtocolIdentity) -> ApiResult<Json<ControlProtocolV1>> {
+    let (tenant, role) = match identity {
+        ProtocolIdentity::Owned(proof) => return proof.read().await,
+        ProtocolIdentity::Legacy(tenant, role) => (tenant, role),
+    };
     tenant
         .blocking(true, move |tenant| {
             let state = tenant.store.supervision_state().map_err(control_error)?;

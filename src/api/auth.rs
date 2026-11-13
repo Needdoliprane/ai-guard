@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 mod control_recovery;
+pub(super) mod owned_control;
 mod review_credentials;
 pub use control_recovery::GatewayControlRecoveryRetirementV2;
 #[cfg(test)]
