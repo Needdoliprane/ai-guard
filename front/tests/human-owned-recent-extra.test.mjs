@@ -158,3 +158,45 @@ test("an unmarked503 remains an error with no snapshot state stream retry or bac
     assert.equal(requests.length, 1);
   } finally { store.close(); api.close(); }
 });
+
+test("a transient503 withdraws snapshot data while retaining the same context restrictive profile", async () => {
+  let unavailable = false;
+  const { api, requests } = await client(() => unavailable ? refusal(503, "identity_unavailable", "retry") : Response.json(snapshot([eventOf(1, session)])));
+  const time = clock(); const store = new JournalStore(api, time, () => {});
+  try {
+    await store.open(); assert.equal(store.state.phase, "ready");
+    unavailable = true; await store.reload();
+    assert.equal(store.state.phase, "error");
+    assert.deepEqual(store.state.items, []);
+    assert.equal(store.state.receipt, null);
+    assert.equal(store.state.loadedAt, null);
+    assert.equal(store.state.hasOlder, false);
+    assert.equal(store.state.streamMode, "snapshot_only", "a transient failure must not reactivate Content/Export coverage");
+    assert.equal(store.state.live, "unavailable");
+    assert.equal(time.timers.size, 0);
+    unavailable = false; await store.reload();
+    assert.equal(store.state.phase, "ready");
+    assert.equal(store.state.items.length, 1);
+    assert.equal(requests.length, 3);
+    store.close(); assert.equal(store.state.streamMode, null);
+  } finally { store.close(); api.close(); }
+});
+
+test("an older page cannot silently change a snapshot traversal into an unmarked profile", async () => {
+  const { api, requests } = await client((path) => Response.json(path.includes("cursor=") ?
+    recentPage([eventOf(1, session)], { live_cursor: null }) :
+    snapshot([eventOf(2, session)], { has_more: true, next_cursor: "older-snapshot-opaque" })));
+  const time = clock(); const store = new JournalStore(api, time, () => {});
+  try {
+    await store.open(); assert.equal(store.state.phase, "ready");
+    await store.loadOlder();
+    assert.equal(store.state.phase, "error");
+    assert.deepEqual(store.state.items, []);
+    assert.equal(store.state.receipt, null);
+    assert.equal(store.state.streamMode, "snapshot_only");
+    assert.ok(store.state.error);
+    assert.equal(store.state.hasOlder, false);
+    assert.equal(requests.length, 2);
+    assert.equal(time.timers.size, 0);
+  } finally { store.close(); api.close(); }
+});

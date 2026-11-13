@@ -23,6 +23,8 @@ export interface JournalHost {
   onReviewAccess: () => void;
   /** Updates the host's existing read command while this view owns a page read. */
   onReadStateChange: () => void;
+  /** A positive page establishes the profile; false withdraws it after access loss. */
+  onProfileMode: (mode: "snapshot_only" | null, confirmed: boolean) => void;
   /** Opens the unified view filtered on the workers that declare this session, when the context grants the worker registry. */
   openWorkers: ((sessionId: string) => void) | null;
 }
@@ -42,7 +44,8 @@ function select<T extends string>(options: [T, string][], value: T, change: (val
   return node;
 }
 const liveLabel: Record<JournalState["live"], [string, string]> = { off: ["Direct arrêté", "amber"], connecting: ["Connexion au direct…", "neutral"], live: ["Direct connecté", "teal"],
-  retrying: ["Direct déconnecté · reconnexion", "amber"], suspended: ["Direct suspendu · onglet masqué", "neutral"], refused: ["Direct refusé", "amber"] };
+  retrying: ["Direct déconnecté · reconnexion", "amber"], suspended: ["Direct suspendu · onglet masqué", "neutral"], refused: ["Direct refusé", "amber"],
+  unavailable: ["Direct indisponible pour ce profil", "neutral"] };
 const decisionLabel = { allow: "Autorisé", deny: "Refusé", review: "À examiner" } as const;
 
 export class JournalView {
@@ -63,6 +66,9 @@ export class JournalView {
    */
   #asked = 0; #resultDue = false; #stateSpoken = false; #alerted = false;
   #sourcesBox = el("div", "sv-sources"); #errorsBox = el("div", "sv-errors");
+  #directHelp = el("p", "muted sv-auto");
+  #coverageHelp = el("p", "");
+  #caption = el("caption", "");
   // Like every control of this view that starts a read, it stays focusable while a read is in flight:
   // announced as unavailable, it ignores activation and keeps the focus.
   #reload = action("Relire depuis les plus récents", "jr-reload", () => { void this.#readAgain(); });
@@ -77,15 +83,14 @@ export class JournalView {
 
   constructor(host: JournalHost) {
     this.#host = host; this.#preferences = host.preferences;
-    this.#store = new JournalStore(host.reads, browserClock, () => { this.#render(); host.onReadStateChange(); }, this.#preferences.resource);
+    this.#store = new JournalStore(host.reads, browserClock, () => this.#changed(), this.#preferences.resource);
     this.#announce.setAttribute("role", "status"); this.#announce.setAttribute("aria-live", "polite");
     this.#summary.tabIndex = -1; this.#end.tabIndex = -1;
     this.#buildTools(); this.#buildTable();
-    this.#status.append(this.#announce, this.#sourcesBox, this.#errorsBox, el("div", "sv-controls", this.#reload,
-      el("p", "muted sv-auto", "Le direct part exactement après la page lue : il ne rejoue pas l’historique. Chaque page et chaque lot en direct laissent un reçu durable de lecture.")));
+    this.#status.append(this.#announce, this.#sourcesBox, this.#errorsBox, el("div", "sv-controls", this.#reload, this.#directHelp));
     this.#panel.append(el("div", "panel-heading", el("div", "", el("h2", "", "Événements autorisés, les plus récents d’abord"),
       el("p", "", "Métadonnées des événements rattachés aux ressources que ce contexte peut lire. Les reçus de lecture et les événements de ressources non accordées n’y figurent pas ; cette liste n’est ni l’audit complet ni un inventaire runtime."),
-      el("p", "", "Pour le contenu ou l’export d’une ressource précise, utilisez l’onglet Événements depuis Ressources."))),
+      this.#coverageHelp)),
       this.#tools, this.#limit, this.#summary, this.#body);
     this.element.append(this.#status, this.#panel);
     this.#render();
@@ -97,6 +102,18 @@ export class JournalView {
   suspend() { this.#store.suspend(); }
   resume() { this.#store.resume(); }
   close() { this.#closed = true; clearTimeout(this.#countTimer); clearTimeout(this.#resultTimer); this.#store.close(); this.element.replaceChildren(); }
+
+  #changed() {
+    if (this.#closed) return;
+    this.#render();
+    const state = this.#store.state;
+    if (!state.closed && (state.streamMode === "snapshot_only" || state.phase === "ready" && state.receipt !== null)) {
+      this.#host.onProfileMode(state.streamMode, true);
+    } else if (state.closed || state.phase === "forbidden") {
+      this.#host.onProfileMode(null, false);
+    }
+    this.#host.onReadStateChange();
+  }
 
   #buildTools() {
     const filter = this.#preferences.filter; const changed = () => { this.#preferences.rendered = JOURNAL_RENDER_STEP; this.#renderList(); this.#announceResult(); };
@@ -117,7 +134,7 @@ export class JournalView {
     this.#table.setAttribute("role", "table");
     const head = el("thead", "", el("tr", "", ...["Reçu par le contrôle", "Type et source", "Ressource", "Provenance et couverture", "Décision", "Action"].map((title) => { const th = el("th", "", title); th.scope = "col"; th.setAttribute("role", "columnheader"); return th; })));
     head.setAttribute("role", "rowgroup"); this.#rows.setAttribute("role", "rowgroup"); head.firstElementChild?.setAttribute("role", "row");
-    this.#table.append(el("caption", "", "Les plus récents en tête · les nouveaux événements s’ajoutent en haut de la liste"), head, this.#rows);
+    this.#table.append(this.#caption, head, this.#rows);
   }
   /**
    * Reads from the newest again, for the person. While a read is in flight this starts nothing: neither a
@@ -196,16 +213,30 @@ export class JournalView {
   }
   #renderStatus() {
     const state = this.#store.state; const [live, tone] = liveLabel[state.live];
+    const snapshot = state.streamMode === "snapshot_only";
+    const positive = state.phase === "ready" && state.receipt !== null;
+    setText(this.#reload, snapshot ? "Actualiser le Journal" : "Relire depuis les plus récents");
+    setText(this.#directHelp, snapshot ?
+      "Historique de métadonnées à l’heure de lecture. Actualiser relit les plus récents ; le retour dans l’onglet conserve une revalidation ponctuelle, sans flux ni actualisation périodique." :
+      positive ? "Le direct part exactement après la page lue : il ne rejoue pas l’historique. Chaque page et chaque lot en direct laissent un reçu durable de lecture." :
+        "Le mode de suivi est indiqué après une lecture réussie. Une lecture en échec ne signifie pas une absence d’activité.");
+    setText(this.#coverageHelp, snapshot ? "Métadonnées uniquement pour ce profil : contenu, détail d’événement et export indisponibles, même si les droits correspondants sont accordés." :
+      positive ? "Pour le contenu ou l’export d’une ressource précise, utilisez l’onglet Événements depuis Ressources." :
+        "La lecture précisera le profil disponible pour ce contexte. Les permissions restent vérifiées par le contrôle.");
+    setText(this.#caption, snapshot || !positive ? "Les plus récents en tête · historique à l’heure de lecture" :
+      "Les plus récents en tête · les nouveaux événements s’ajoutent en haut de la liste");
     const read = state.phase === "loading" ? "Lecture en cours…" : state.phase === "forbidden" ? "Lecture refusée" : state.phase === "unavailable" ? "Lecture récente indisponible" :
       state.phase === "refused" ? "Ressource non accordée" : state.phase === "error" ? state.error?.kind === "unreachable" ? "Contrôle injoignable" : "Données indisponibles" :
       state.phase === "idle" ? "Lecture requise" : state.stale ? "Données périmées · dernière lecture conservée" : state.busy ? "Lecture en cours…" : "Lecture réussie";
     const detail = state.live === "live" ? `${state.received} événement(s) reçu(s) depuis la dernière lecture` :
-      state.live === "refused" || state.live === "off" ? state.liveMessage :
+      state.live === "refused" || state.live === "off" || state.live === "unavailable" ? state.liveMessage :
       state.live === "retrying" ? `${state.liveMessage ? `${state.liveMessage} ` : ""}Les événements manquants seront repris à la reconnexion, sans doublon.` :
       state.live === "suspended" ? "Le retour sur l’onglet relit depuis les plus récents." : "";
     replaceIfChanged(this.#sourcesBox,
       el("span", "sv-source", el("strong", "", "Journal"), badge(read, state.error || state.stale || state.phase === "forbidden" ? "amber" : "neutral"),
-        el("span", "muted", state.loadedAt === null ? "Aucune lecture réussie" : `Lu le ${formatDate(new Date(state.loadedAt).toISOString(), true)}`)),
+        el("span", "muted", state.loadedAt === null ? snapshot ? "Aucune lecture réussie conservée" : "Aucune lecture réussie" :
+          `${snapshot ? "Dernière page lue le" : "Lu le"} ${formatDate(new Date(state.loadedAt).toISOString(), true)}`),
+        snapshot && state.receipt ? el("span", "muted", `Lecture auditée le ${formatDate(state.receipt.received_at, true)} · reçu ${state.receipt.audit_event_id}`) : null),
       el("span", "sv-source", el("strong", "", "Direct"), badge(live, tone), el("span", "muted", detail)));
     // An error line is created when its message appears or changes, never again while it lasts: it is an alert.
     const error = state.phase === "forbidden" ?
@@ -259,6 +290,7 @@ export class JournalView {
   }
   #renderList() {
     const state = this.#store.state; const resource = state.resource; const limited = !!resource;
+    const snapshot = state.streamMode === "snapshot_only";
     replaceIfChanged(this.#limit, resource ? el("p", "", "Limité côté serveur à ", el("strong", "", `${resourceKindLabel[resource.kind]} `), el("span", "mono sv-id", resource.resource_id), ".") :
       el("p", "muted", "Toutes les ressources autorisées. « Limiter » relit le journal d’une seule ressource côté serveur."),
       resource ? action("Retirer la limite", "jr-unlimit", () => this.#limitTo(null)) : null);
@@ -275,7 +307,9 @@ export class JournalView {
       state.phase === "refused" ? empty("Ressource non accordée", "Aucune ressource autorisée de ce contexte ne correspond à cette limite. Retirez la limite pour revenir à toute la sélection.") :
       state.phase === "error" ? empty("Événements inconnus", "La lecture a échoué. Une erreur n’est pas une absence d’activité.") :
       state.phase !== "ready" ? empty("Lecture des événements…", "La lecture doit réussir avant de conclure.") :
-      !state.items.length ? empty("Aucun événement autorisé à cette lecture", "Aucune trace reçue pour cette sélection autorisée. Les événements à venir apparaîtront ici tant que le direct est connecté.") :
+      !state.items.length ? empty("Aucun événement autorisé à cette lecture", snapshot ?
+        "Aucune trace reçue pour cette sélection à cette lecture. Actualisez explicitement pour relire l’historique." :
+        "Aucune trace reçue pour cette sélection autorisée. Les événements à venir apparaîtront ici tant que le direct est connecté.") :
       !filtered.length ? empty("Aucun événement chargé ne correspond", state.hasOlder ? "Des événements plus anciens existent au contrôle : élargissez les filtres ou chargez-en davantage." : "Modifiez la recherche ou les filtres.") : null;
     replaceIfChanged(this.#empty, notice);
     let reveal = false;
