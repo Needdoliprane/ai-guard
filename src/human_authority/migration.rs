@@ -6,6 +6,7 @@
 //! This module creates no session, Ready value, route, permission or worker.
 
 mod journal;
+pub mod operator;
 mod sources;
 
 use super::{
@@ -40,10 +41,14 @@ pub(crate) enum HumanMigrationSourceOptions {
     TenantStore {
         redactor: Redactor,
         max_events: u64,
+        capacity: crate::audit::AuditCapacityPolicyV1,
+        workload: crate::audit::WorkloadAuditPolicyV1,
+        retention: crate::relay::RelayRetentionPolicyV1,
     },
     AuthenticationLedger {
         redactor: Redactor,
         policy: AuthenticationAuditPolicyV1,
+        capacity_plan: crate::audit::authentication::AuthenticationCapacityPlanV1,
     },
 }
 
@@ -204,6 +209,23 @@ fn validate_request(
     );
     let mut backup_parents = BTreeSet::new();
     for source in &plan.target.sources {
+        match request.sources.get(&source.source_id) {
+            Some(HumanMigrationSourceOptions::TenantStore {
+                max_events,
+                capacity,
+                workload,
+                retention,
+                ..
+            }) => {
+                capacity.validate(*max_events)?;
+                workload.validate(*max_events, capacity)?;
+                retention.validate()?;
+            }
+            Some(HumanMigrationSourceOptions::AuthenticationLedger { capacity_plan, .. }) => {
+                capacity_plan.validate()?
+            }
+            None => anyhow::bail!("source options absent"),
+        }
         ensure!(
             source.required_format
                 == match source.kind {
@@ -341,7 +363,12 @@ fn migrate_under_maintenance(
         writers.visit(&mut |index, writer| {
             let token = &tokens[index];
             let state = writer.inspect()?;
-            writer.validate_tenant_closure(&tenants)?;
+            writer.validate_tenant_closure(
+                &tenants,
+                settings
+                    .get(&ordered[index].source_id)
+                    .ok_or_else(|| anyhow::anyhow!("source options absent"))?,
+            )?;
             if !journal.prepared() {
                 ensure!(state.anchor.is_none(), "conversion lacks prepared journal");
             }

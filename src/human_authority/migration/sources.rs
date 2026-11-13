@@ -48,7 +48,11 @@ fn auth_marker(receipt: AuthenticationReceiptV1) -> Result<HumanAuthorityMarkerR
 /// no constructor for a writer or backup here: the real wrappers provide both.
 pub(super) trait SourceWriter {
     fn inspect(&self) -> Result<ObservedSource>;
-    fn validate_tenant_closure(&self, tenants: &BTreeSet<String>) -> Result<()>;
+    fn validate_tenant_closure(
+        &self,
+        tenants: &BTreeSet<String>,
+        options: &HumanMigrationSourceOptions,
+    ) -> Result<()>;
     fn backup<'t>(
         &self,
         token: &'t HumanMaintenanceSourceToken,
@@ -59,7 +63,11 @@ pub(super) trait SourceWriter {
     fn commit(&mut self) -> Result<()>;
 }
 impl SourceWriter for ReviewStoreMaintenanceWriter<'_, '_> {
-    fn validate_tenant_closure(&self, _: &BTreeSet<String>) -> Result<()> {
+    fn validate_tenant_closure(
+        &self,
+        _: &BTreeSet<String>,
+        _: &HumanMigrationSourceOptions,
+    ) -> Result<()> {
         Ok(())
     }
     fn inspect(&self) -> Result<ObservedSource> {
@@ -104,10 +112,22 @@ impl SourceWriter for ReviewStoreMaintenanceWriter<'_, '_> {
     }
 }
 impl SourceWriter for AuthenticationMaintenanceWriter<'_, '_> {
-    fn validate_tenant_closure(&self, tenants: &BTreeSet<String>) -> Result<()> {
+    fn validate_tenant_closure(
+        &self,
+        tenants: &BTreeSet<String>,
+        options: &HumanMigrationSourceOptions,
+    ) -> Result<()> {
         let plan = self
             .capacity_plan()?
             .ok_or_else(|| anyhow::anyhow!("authentication capacity plan absent"))?;
+        let HumanMigrationSourceOptions::AuthenticationLedger { capacity_plan, .. } = options
+        else {
+            anyhow::bail!("authentication source options differ")
+        };
+        ensure!(
+            &plan == capacity_plan,
+            "authentication durable capacity plan differs"
+        );
         let planned: BTreeSet<_> = plan
             .tenants
             .into_iter()
@@ -168,6 +188,7 @@ impl MaintenanceSource {
                 HumanMigrationSourceOptions::TenantStore {
                     redactor,
                     max_events,
+                    ..
                 },
             ) => Self::Store(Store::open_review_maintenance_for_tenant(
                 &source.storage_binding.path(),
@@ -181,7 +202,9 @@ impl MaintenanceSource {
             )?),
             (
                 HumanSourceKindV1::AuthenticationLedger,
-                HumanMigrationSourceOptions::AuthenticationLedger { redactor, policy },
+                HumanMigrationSourceOptions::AuthenticationLedger {
+                    redactor, policy, ..
+                },
             ) => Self::Authentication(AuthenticationAudit::open_review_maintenance(
                 &source.storage_binding.path(),
                 source.installation_id,
@@ -302,27 +325,46 @@ impl StartupSource {
                 HumanMigrationSourceOptions::TenantStore {
                     redactor,
                     max_events,
+                    capacity,
+                    workload,
+                    retention,
                 },
-            ) => Self::Store(Store::open_review_startup_for_tenant(
-                &source.storage_binding.path(),
-                source
-                    .tenant_id
-                    .as_deref()
-                    .ok_or_else(|| anyhow::anyhow!("tenant absent"))?,
-                redactor.clone(),
-                *max_events,
-                token,
-            )?),
+            ) => {
+                let mut store = Store::open_review_startup_for_tenant(
+                    &source.storage_binding.path(),
+                    source
+                        .tenant_id
+                        .as_deref()
+                        .ok_or_else(|| anyhow::anyhow!("tenant absent"))?,
+                    redactor.clone(),
+                    *max_events,
+                    token,
+                )?;
+                store.configure_owned_read_policies(
+                    capacity.clone(),
+                    workload.clone(),
+                    retention.clone(),
+                )?;
+                Self::Store(store)
+            }
             (
                 HumanSourceKindV1::AuthenticationLedger,
-                HumanMigrationSourceOptions::AuthenticationLedger { redactor, policy },
-            ) => Self::Authentication(AuthenticationAudit::open_review_startup(
-                &source.storage_binding.path(),
-                source.installation_id,
-                policy.clone(),
-                redactor.clone(),
-                token,
-            )?),
+                HumanMigrationSourceOptions::AuthenticationLedger {
+                    redactor,
+                    policy,
+                    capacity_plan,
+                },
+            ) => {
+                let audit = AuthenticationAudit::open_review_startup(
+                    &source.storage_binding.path(),
+                    source.installation_id,
+                    policy.clone(),
+                    redactor.clone(),
+                    token,
+                )?;
+                audit.require_capacity_plan(capacity_plan)?;
+                Self::Authentication(audit)
+            }
             _ => anyhow::bail!("source options differ"),
         })
     }

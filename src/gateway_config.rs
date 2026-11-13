@@ -59,26 +59,28 @@ pub struct ConfiguredTenant {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OidcFile {
-    version: u32,
-    gateway: agentsandbox::api::OidcGatewayConfigV1,
-    authentication_audit: AuthenticationAuditFile,
-    ca_bundle_file: Option<PathBuf>,
+pub(crate) struct OidcFile {
+    pub(crate) version: u32,
+    pub(crate) gateway: agentsandbox::api::OidcGatewayConfigV1,
+    pub(crate) authentication_audit: AuthenticationAuditFile,
+    pub(crate) ca_bundle_file: Option<PathBuf>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AuthenticationAuditFile {
-    path: PathBuf,
-    installation_id: uuid::Uuid,
-    policy: agentsandbox::audit::authentication::AuthenticationAuditPolicyV1,
-    capacity_plan: Option<agentsandbox::audit::authentication::AuthenticationCapacityPlanV1>,
+pub(crate) struct AuthenticationAuditFile {
+    pub(crate) path: PathBuf,
+    pub(crate) installation_id: uuid::Uuid,
+    pub(crate) policy: agentsandbox::audit::authentication::AuthenticationAuditPolicyV1,
+    pub(crate) capacity_plan:
+        Option<agentsandbox::audit::authentication::AuthenticationCapacityPlanV1>,
 }
 
-struct PreparedOidcFile {
-    held: agentsandbox::control_fs::PrivateFile,
-    file: OidcFile,
-    audit_path: PathBuf,
-    ca_bundle_pem: Option<String>,
+pub(crate) struct PreparedOidcFile {
+    pub(crate) held: agentsandbox::control_fs::PrivateFile,
+    pub(crate) file: OidcFile,
+    pub(crate) audit_path: PathBuf,
+    pub(crate) ca_bundle_pem: Option<String>,
+    pub(crate) trust: Option<agentsandbox::control_fs::PrivateFile>,
 }
 
 /// Closed, private configuration and local references only. Provider validation
@@ -87,8 +89,21 @@ fn prepare_oidc_file(path: &Path) -> Result<PreparedOidcFile> {
     use agentsandbox::control_fs::{PrivateFile, absolute_path};
     let path = absolute_path(path)?;
     let held = PrivateFile::open(&path, 1_048_576)?;
-    let file: OidcFile =
-        serde_json::from_slice(held.bytes()).context("Invalid OIDC gateway file")?;
+    prepare_oidc_from_retained(held, |path| PrivateFile::open(path, 262_144))
+}
+
+pub(crate) fn prepare_oidc_from_retained(
+    held: agentsandbox::control_fs::PrivateFile,
+    mut load_ca: impl FnMut(&Path) -> Result<agentsandbox::control_fs::PrivateFile>,
+) -> Result<PreparedOidcFile> {
+    use agentsandbox::control_fs::absolute_path;
+    let path = held.path().to_owned();
+    let file: OidcFile = agentsandbox::human_authority::migration::operator::decode_closed(
+        held.bytes(),
+        1_048_576,
+        256,
+    )
+    .context("Invalid OIDC gateway file")?;
     anyhow::ensure!(
         matches!(
             (
@@ -112,11 +127,14 @@ fn prepare_oidc_file(path: &Path) -> Result<PreparedOidcFile> {
             parent.join(path)
         })
     };
-    let ca_bundle_pem = file
+    let trust = file
         .ca_bundle_file
         .as_ref()
-        .map(|path| -> Result<String> {
-            let ca = PrivateFile::open(&resolve(path.clone())?, 262_144)?;
+        .map(|path| load_ca(&resolve(path.clone())?))
+        .transpose()?;
+    let ca_bundle_pem = trust
+        .as_ref()
+        .map(|ca| -> Result<String> {
             let pem =
                 String::from_utf8(ca.bytes().to_vec()).context("Invalid public OIDC CA bundle")?;
             agentsandbox::oidc::OidcProvider::new_with_ca(
@@ -134,6 +152,7 @@ fn prepare_oidc_file(path: &Path) -> Result<PreparedOidcFile> {
         file,
         audit_path,
         ca_bundle_pem,
+        trust,
     })
 }
 
@@ -149,6 +168,7 @@ pub fn load_oidc(
         file,
         audit_path,
         ca_bundle_pem,
+        trust: _,
     } = prepare_oidc_file(path)?;
     let capacity_plan = file.authentication_audit.capacity_plan.clone();
     let audit = if initialize_new {
@@ -267,8 +287,27 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
         bytes.len() <= 1_048_576,
         "Registre de tenants trop volumineux"
     );
+    load_registry_bytes(path, &bytes, crate::read_token)
+}
+
+pub(crate) fn load_from_retained_registry(
+    file: &agentsandbox::control_fs::PrivateFile,
+    load_token: impl FnMut(&Path) -> Result<String>,
+) -> Result<Vec<ConfiguredTenant>> {
+    file.revalidate()?;
+    let result = load_registry_bytes(file.path(), file.bytes(), load_token)?;
+    file.revalidate()?;
+    Ok(result)
+}
+
+fn load_registry_bytes(
+    path: &Path,
+    bytes: &[u8],
+    mut load_token: impl FnMut(&Path) -> Result<String>,
+) -> Result<Vec<ConfiguredTenant>> {
     let registry: Registry =
-        serde_json::from_slice(&bytes).context("Registre de tenants invalide")?;
+        agentsandbox::human_authority::migration::operator::decode_closed(bytes, 1_048_576, 256)
+            .context("Registre de tenants invalide")?;
     anyhow::ensure!(
         registry.version == 1,
         "Version de registre de tenants inconnue"
@@ -327,8 +366,8 @@ pub fn load(path: &Path) -> Result<Vec<ConfiguredTenant>> {
         let data = resolve(tenant.data)?;
         let runner_token_file = resolve(tenant.runner_token_file)?;
         let viewer_token_file = resolve(tenant.viewer_token_file)?;
-        let runner_token = crate::read_token(&runner_token_file)?;
-        let viewer_token = crate::read_token(&viewer_token_file)?;
+        let runner_token = load_token(&runner_token_file)?;
+        let viewer_token = load_token(&viewer_token_file)?;
         for credential in [&runner_token, &viewer_token] {
             // Keep only hashes in the uniqueness index; raw credentials stay in
             // the configured identities and the redactor, never diagnostics.

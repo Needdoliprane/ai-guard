@@ -16,7 +16,7 @@
 mod manifest;
 pub use manifest::*;
 pub(crate) mod maintenance;
-pub(crate) mod migration;
+pub mod migration;
 pub mod startup;
 
 use crate::control_fs::{

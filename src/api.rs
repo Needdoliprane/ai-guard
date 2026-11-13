@@ -40,6 +40,11 @@ use std::{
 #[cfg(test)]
 mod audit_capacity_tests;
 mod auth;
+pub use auth::{
+    EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
+    TechnicalCredentialRoleV1, prepare_envelope_configuration,
+    validate_technical_credentials_configuration,
+};
 mod brokers;
 mod control_transport;
 #[cfg(test)]
