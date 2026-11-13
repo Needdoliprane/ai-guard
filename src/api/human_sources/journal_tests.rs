@@ -89,6 +89,24 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
             },
         }))
         .unwrap();
+    // A resource owner must also be an active member of the grant's
+    // organization. This adds no capability, credential or share to the reader.
+    fixture
+        .legacy_store("B")
+        .mutate_identity(&change(IdentityChangeV1::Membership {
+            expected_revision: 0,
+            membership: MembershipV1 {
+                version: 1,
+                membership_id: uuid::Uuid::new_v4().to_string(),
+                principal: other.clone(),
+                tenant_id: "B".into(),
+                organization_scope: "synthetic-org".into(),
+                revision: 1,
+                active: true,
+                capabilities: std::collections::BTreeSet::new(),
+            },
+        }))
+        .unwrap();
     let visible = seed_event(&fixture, "B", "owned-visible-b", fixture.principal());
     let hidden = seed_event(&fixture, "B", "owned-hidden-b", &other);
     let foreign = seed_event(&fixture, "A", "owned-foreign-a", fixture.principal());
