@@ -4,7 +4,7 @@
 // has not itself been executed merely by being committed.
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, constants } from "node:fs";
+import { closeSync, createReadStream, constants, fsyncSync, ftruncateSync, openSync, writeSync } from "node:fs";
 import { access, chmod, lstat, open, readdir, realpath, rename, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -23,6 +23,7 @@ const shaFile = async (path) => { const hash = createHash("sha256"); for await (
 const exists = async (path) => access(path).then(() => true, (error) => { if (error.code === "ENOENT") return false; throw error; });
 const below = (root, path) => { const part = relative(root, path); return part !== "" && part !== ".." && !part.startsWith("../") && !isAbsolute(part); };
 let stage = "preconditions", child, childDone, browser, context, page, ready, bearer = "", interrupted = false;
+let interruptionSignal = null, terminalResult = null, terminalResultFd;
 let sequence = 0, fixtureStarted = false, fixtureExit = null, interactionDeadline = 0, artifactsAdmitted = false;
 const commands = [], requests = [], wires = [], pendingWires = [], captures = [], pageErrors = [], external = [];
 const observed = {}, output = { stdout: { bytes: 0, hash: createHash("sha256") }, stderr: { bytes: 0, hash: createHash("sha256") } };
@@ -84,6 +85,23 @@ async function save(name, value) {
   must(!bearer || !bytes.includes(Buffer.from(bearer)), "SECRET_IN_ARTIFACT_REFUSED");
   await writeFile(join(artifacts, name), bytes, { mode: 0o600, flag: "wx" });
 }
+function publishTerminalResult() {
+  terminalResult.status = interrupted ? "FAIL_NOT_QUALIFIED" : !fixtureStarted ? "BLOCKED_NOT_RUN" : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS";
+  terminalResult.interrupted = interrupted;
+  terminalResult.interruption = interrupted ? { code: "INTERRUPTED", signal: interruptionSignal } : null;
+  const bytes = Buffer.from(JSON.stringify(terminalResult, null, 2) + "\n");
+  must(!bearer || !bytes.includes(Buffer.from(bearer)), "SECRET_IN_ARTIFACT_REFUSED");
+  // Retain only this exclusively created result FD. A signal handled during or
+  // after publication rewrites it to failure without reopening a mutable path.
+  terminalResultFd ??= openSync(join(artifacts, "RESULT.json"), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  ftruncateSync(terminalResultFd, 0);
+  for (let offset = 0; offset < bytes.length;) {
+    const written = writeSync(terminalResultFd, bytes, offset, bytes.length - offset, offset);
+    must(written > 0, "RESULT_WRITE_INCOMPLETE"); offset += written;
+  }
+  fsyncSync(terminalResultFd);
+}
+process.once("exit", () => { if (terminalResultFd !== undefined) { try { closeSync(terminalResultFd); } catch {} } });
 async function finishWireCaptures() {
   const settled = await bounded(Promise.allSettled(pendingWires), 10000, "WIRE_CAPTURE_DEADLINE");
   must(settled.every((item) => item.status === "fulfilled"), "WIRE_CAPTURE_FAILED");
@@ -123,6 +141,15 @@ function validateReady(value) {
   return value;
 }
 const recentPath = (path) => new URL(path, "http://fixture.invalid").pathname === "/api/v1/human/events/recent";
+const pageAction = (path) => ({ "/api/v1/human/resources": "resources", "/api/v1/human/events": "events", "/api/v1/human/events/recent": "events" })[new URL(path, "http://fixture.invalid").pathname] ?? null;
+function requiredReceipt(body) {
+  must(object(body), "PAGE_BODY_REQUIRED");
+  const receipt = body.read_receipt;
+  closed(receipt, ["request_id", "audit_event_id", "received_at"], "PAGE_RECEIPT_REQUIRED");
+  const uuid = (value) => typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+  must(uuid(receipt.request_id) && uuid(receipt.audit_event_id) && typeof receipt.received_at === "string" && /^\d{4}-\d\d-\d\dT.+(?:Z|[+-]\d\d:\d\d)$/.test(receipt.received_at) && Number.isFinite(Date.parse(receipt.received_at)), "PAGE_RECEIPT_TYPES");
+  return receipt;
+}
 const countRecent = (from) => requests.slice(from).filter((row) => recentPath(row.path)).length;
 const streamRequests = (from) => requests.slice(from).filter((row) => row.path.startsWith("/api/v1/human/stream"));
 const button = (name) => page.getByRole("button", { name, exact: true });
@@ -142,13 +169,24 @@ async function captureResponse(response) {
   let body; try { body = JSON.parse(bytes.toString("utf8")); } catch { throw new Error("WIRE_RESPONSE_NOT_JSON"); }
   wires.push({ method: response.request().method(), path: new URL(response.url()).pathname + new URL(response.url()).search,
     status: response.status(), bytes: bytes.length, sha256: digest(bytes), body });
+  if (response.status() === 200 && pageAction(path) !== null) requiredReceipt(body);
 }
 async function readByAction(pathname, status, action) {
   const response = page.waitForResponse((item) => new URL(item.url()).pathname === pathname && item.request().method() === "GET", { timeout: remaining() });
   response.catch(() => {}); // An action failure must not leave an unhandled waiter.
   await action(); const actual = await response; must(actual.status() === status, "UNEXPECTED_REAL_HTTP_STATUS");
   const bytes = await actual.body(); must(bytes.length <= 262144 && !bytes.includes(Buffer.from(bearer)) && !bytes.includes(Buffer.from(PRIVATE_CONTENT)), "ACTION_WIRE_PRIVACY_OR_SIZE");
-  return JSON.parse(bytes.toString("utf8"));
+  const body = JSON.parse(bytes.toString("utf8"));
+  if (status === 200 && pageAction(pathname) !== null) requiredReceipt(body);
+  return body;
+}
+async function resourcesVisible(body) {
+  const receipt = requiredReceipt(body), panel = page.locator(".human-resource-panel");
+  await heading("Ressources autorisées.").waitFor({ timeout: remaining() });
+  await panel.locator(".control-status").getByText("Lecture réussie", { exact: true }).waitFor({ timeout: remaining() });
+  await panel.getByText(ready.resource.resource_id, { exact: true }).waitFor({ timeout: remaining() });
+  const stamped = await page.evaluate((date) => new Intl.DateTimeFormat("fr-FR", { dateStyle: "medium", timeStyle: "medium" }).format(new Date(date)), receipt.received_at);
+  await panel.getByText(`Reçu du contrôle : ${stamped}`, { exact: true }).waitFor({ timeout: remaining() });
 }
 async function snapshotVisible(body) {
   must(body.version === 1 && body.view === "metadata" && body.order === "newest_first" && body.coverage === "authorized_selection" && body.stream_mode === "snapshot_only" && body.live_cursor === null, "REAL_SNAPSHOT_PROFILE");
@@ -225,7 +263,14 @@ try {
     output[name].bytes += bytes.length; output[name].hash.update(bytes);
     if (output[name].bytes > 1048576) { cleanupFailure ??= "FIXTURE_OUTPUT_LIMIT"; if (fixtureExit === null) child.kill("SIGTERM"); }
   });
-  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => { interrupted = true; void page?.close().catch(() => {}); });
+  for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, () => {
+    interrupted = true; interruptionSignal ??= signal; process.exitCode = 1;
+    if (terminalResult) {
+      try { publishTerminalResult(); } catch { cleanupFailure ??= "INTERRUPTED_RESULT_PERSISTENCE_FAILED"; }
+      console.log("browser_owned_snapshot FAIL INTERRUPTED");
+    }
+    void page?.close().catch(() => {});
+  });
   const readyFile = await waitJson(join(control, "READY.json"), 8192, Date.now() + remaining(90000));
   ready = validateReady(readyFile.value); bearer = ready.bearer_b;
   observed.ready_sha256 = readyFile.sha256; observed.ready_public = { ...ready }; delete observed.ready_public.bearer_b;
@@ -250,6 +295,7 @@ try {
   await page.getByLabel("Credential personnel local").fill(bearer); await button("Ouvrir mon espace").click();
   await heading("Choisir un contexte.").waitFor({ timeout: remaining() });
   const initialResources = await readByAction("/api/v1/human/resources", 200, () => button("Ouvrir personnel · B").click());
+  await resourcesVisible(initialResources);
   const grant = initialResources.items.find((item) => item.resource.kind === ready.resource.kind && item.resource.resource_id === ready.resource.resource_id);
   must(grant?.permissions.metadata === true && grant.permissions.content === true && grant.permissions.export === true, "REAL_RESOURCE_GRANTS_REQUIRED");
   observed.initial_unknown_profile_stream_attempts = streamRequests(0).length;
@@ -268,6 +314,7 @@ try {
   const navigationStart = requests.length;
   await button("Ressources").focus();
   const resources = await readByAction("/api/v1/human/resources", 200, () => button("Ressources").press("Enter"));
+  await resourcesVisible(resources);
   const actualGrant = resources.items.find((item) => item.resource.resource_id === ready.resource.resource_id);
   must(actualGrant?.permissions.content === true && actualGrant.permissions.export === true, "RESOURCE_RIGHTS_MUST_NOT_BE_MUTATED");
   must(await page.locator('[data-focus-key="resource-content-0"]').isDisabled(), "CONTENT_CONTROL_NOT_DISABLED");
@@ -325,13 +372,15 @@ finally {
       for (const record of receipts.records) { closed(record, ["audit_event_id", "request_id", "action", "received_at"], "RECEIPT_RECORD"); must(["identity", "resources", "events"].includes(record.action) && typeof record.audit_event_id === "string" && typeof record.request_id === "string" && typeof record.received_at === "string", "RECEIPT_RECORD_TYPES"); byId.set(record.audit_event_id, record); }
       must(byId.size === receipts.records.length, "DUPLICATE_DURABLE_RECEIPT_ID");
       await finishWireCaptures(); let compared = 0;
-      for (const wire of wires) if (wire.status === 200 && object(wire.body.read_receipt)) {
-        const receipt = wire.body.read_receipt, row = byId.get(receipt.audit_event_id);
-        const action = new URL(wire.path, "http://fixture.invalid").pathname === "/api/v1/human/resources" ? "resources" : "events";
+      // Identity has no page receipt. Every200 on these three page endpoints
+      // requires one; malformed/missing receipts are failures, never skipped.
+      const successfulPages = wires.filter((wire) => wire.status === 200 && pageAction(wire.path) !== null);
+      for (const wire of successfulPages) {
+        const receipt = requiredReceipt(wire.body), row = byId.get(receipt.audit_event_id);
+        const action = pageAction(wire.path);
         must(row && row.request_id === receipt.request_id && row.received_at === receipt.received_at && row.action === action, "WIRE_RECEIPT_NOT_IN_REAL_SQLITE_EXPORT"); compared++;
       }
-      must(failure !== null || compared >= 6, "INSUFFICIENT_REAL_RECEIPT_COMPARISONS");
-      observed.compared_receipts = compared; observed.receipts_sha256 = exported.sha256; observed.closed_sha256 = ending.sha256;
+      observed.successful_page_responses = successfulPages.length; observed.compared_receipts = compared; observed.receipts_sha256 = exported.sha256; observed.closed_sha256 = ending.sha256;
       await save("RECEIPTS.json", receipts); await save("CLOSED.json", closedFixture);
       const exit = await bounded(childDone, 15000, "LIBTEST_EXIT_DEADLINE"); must(exit?.code === 0 && exit.signal === null, "LIBTEST_EXIT_NOT_ZERO");
     } catch (error) { cleanupFailure ??= redact(error.message); }
@@ -348,12 +397,13 @@ finally {
     const childOutput = Object.fromEntries(Object.entries(output).map(([name, value]) => [name, { bytes: value.bytes, sha256: value.hash.copy().digest("hex"), retained_payload: false, stream_closed: !fixtureStarted || fixtureExit !== null }]));
     try {
       await save("WIRE_RESULTS.json", { version: 1, requests, responses: wires });
-      await save("RESULT.json", { version: 1, status: !fixtureStarted ? "BLOCKED_NOT_RUN" : failure || cleanupFailure ? "FAIL_NOT_QUALIFIED" : "PASS_THREE_BOUNDED_OWNED_SCENARIOS", failure, cleanup_failure: cleanupFailure,
+      terminalResult = { version: 1, failure, cleanup_failure: cleanupFailure,
         observed, captures, commands, page_errors: pageErrors, external_destinations: external, fixture_exit: fixtureExit, child_output: childOutput,
-        limits: "Real owned local software/browser scenarios only. No runtime/provider/SSO/cloud/100-worker/production qualification. Root OS/network/source/admission and terminal review remain required." });
+        limits: "Real owned local software/browser scenarios only. No runtime/provider/SSO/cloud/100-worker/production qualification. Root OS/network/source/admission and terminal review remain required." };
+      publishTerminalResult();
     } catch { cleanupFailure ??= "PRIVATE_ARTIFACT_PERSISTENCE_FAILED"; }
   }
 }
 // No source path, bearer, response body or child diagnostic is printed.
-console.log(!fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN" : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained" : "browser_owned_snapshot PASS scenarios=3");
-process.exitCode = !fixtureStarted ? 2 : failure || cleanupFailure ? 1 : 0;
+console.log(interrupted ? "browser_owned_snapshot FAIL INTERRUPTED" : !fixtureStarted ? "browser_owned_snapshot BLOCKED NOT_RUN" : failure || cleanupFailure ? "browser_owned_snapshot FAIL; private result retained" : "browser_owned_snapshot PASS scenarios=3");
+process.exitCode = interrupted ? 1 : !fixtureStarted ? 2 : failure || cleanupFailure ? 1 : 0;
