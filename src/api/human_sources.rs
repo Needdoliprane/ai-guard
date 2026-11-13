@@ -64,6 +64,7 @@ impl CandidateIndex {
 pub(super) struct OwnedHumanGateway {
     owner: OwnedHumanSources,
     sources: Vec<OwnedSourceToken>,
+    discovery_generations: Vec<crate::audit::HumanDiscoveryGeneration>,
     candidates: CandidateIndex,
     _registry: Arc<auth::ReviewCredentialRegistry>,
     _authentication: Option<crate::audit::authentication::AuthenticationAudit>,
@@ -187,7 +188,27 @@ impl OwnedHumanGateway {
             unavailable()
         })?;
         let access = HumanSourceAccess::read(&epoch, source).map_err(|_| unavailable())?;
+        let expected = self
+            .discovery_generations
+            .get(index)
+            .ok_or_else(unavailable)?;
+        if store
+            .modern_discovery_generation(&access)
+            .map_err(human::store_failure)?
+            != *expected
+        {
+            self.require_rebuild();
+            return Err(unavailable());
+        }
         let result = work(&access).map_err(human::store_failure)?;
+        if store
+            .modern_discovery_generation(&access)
+            .map_err(human::store_failure)?
+            != *expected
+        {
+            self.require_rebuild();
+            return Err(unavailable());
+        }
         epoch.check().map_err(|_| unavailable())?;
         self.check()?;
         let _ = store; // Store is retained by the caller's genuine TenantState.
@@ -335,10 +356,11 @@ impl GatewayState {
             &tenants,
         )?);
         let mut candidates = CandidateIndex::default();
+        let mut discovery_generations = Vec::new();
         for (i, tenant) in tenants.iter().enumerate() {
             let epoch = bundle.owner.try_read_epoch()?;
             let access = HumanSourceAccess::read(&epoch, &sources[i])?;
-            tenant
+            let revision = tenant
                 .store
                 .modern_visit_candidates(&access, |digest, workload| {
                     candidates.insert(
@@ -350,6 +372,7 @@ impl GatewayState {
                         },
                     )
                 })?;
+            discovery_generations.push(revision);
             epoch.check()?;
         }
         for digest in index.digests() {
@@ -363,6 +386,7 @@ impl GatewayState {
         let owned = Arc::new(OwnedHumanGateway {
             owner: bundle.owner.clone(),
             sources,
+            discovery_generations,
             candidates,
             _registry: registry,
             _authentication: bundle.authentication.take(),

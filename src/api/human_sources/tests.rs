@@ -22,6 +22,81 @@ fn state_from_fixture(fixture: &Fixture) -> GatewayState {
 }
 
 #[tokio::test]
+async fn same_incarnation_identity_or_workload_change_requires_rebuild_without_neighbor_sql() {
+    for workload_change in [false, true] {
+        let (_fixture, state) = fixture();
+        let owned = state.owned_human.as_ref().unwrap();
+        let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+        let incarnation = owned.owner.incarnation();
+        let source = &owned.sources[1];
+        let epoch = owned.owner.try_write_epoch().unwrap();
+        let access = HumanSourceAccess::write(&epoch, source).unwrap();
+        let store = &state.tenants[1].store;
+        if workload_change {
+            store
+                .issue_workload_binding_scoped(
+                    &access,
+                    &crate::workload::WorkloadBindingIssueV1 {
+                        version: 1,
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        credential_id: uuid::Uuid::new_v4().to_string(),
+                        expected_revision: 0,
+                        subject: crate::workload::WorkloadSubjectV1::Broker {
+                            broker_id: uuid::Uuid::new_v4().to_string(),
+                            incarnation_id: uuid::Uuid::new_v4().to_string(),
+                        },
+                        sha256_digest: "73".repeat(32),
+                        expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5))
+                            .to_rfc3339(),
+                    },
+                )
+                .unwrap();
+        } else {
+            let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
+            let mut binding = store
+                .local_credential_binding_scoped(&access, &digest)
+                .unwrap()
+                .unwrap();
+            binding.revision += 1;
+            store
+                .mutate_identity_scoped(
+                    &epoch,
+                    source,
+                    &IdentityMutationV1 {
+                        version: 1,
+                        operation_id: uuid::Uuid::new_v4().to_string(),
+                        actor: PrincipalRefV1::LegacyControl {
+                            credential_id: "synthetic-offline-control".into(),
+                            role: LegacyControlRoleV1::Runner,
+                        },
+                        change: IdentityChangeV1::Credential {
+                            expected_revision: 1,
+                            binding,
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        drop(epoch);
+        assert_eq!(owned.owner.incarnation(), incarnation);
+        let (status, body) = get(
+            &gateway_router(state.clone()),
+            "/api/v1/human/identity",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"]["code"], "identity_unavailable");
+        assert_eq!(owned.coverage.load(Ordering::Acquire), REBUILD_REQUIRED);
+        assert!(
+            owned.owner.admission_available(),
+            "projection-generation mismatch must not invent global source invalidation"
+        );
+        assert!(observed_a.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
 async fn live_read_epoch_a_does_not_require_global_write_for_b() {
     let (_fixture, state) = fixture();
     let owned = state.owned_human.as_ref().unwrap();

@@ -3,6 +3,23 @@
 use super::*;
 use crate::identity::*;
 
+/// Existing durable projection markers; coverage metadata, never identity.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HumanDiscoveryGeneration {
+    authorization_revision: u64,
+    workload_history_event: Option<i64>,
+}
+fn discovery_generation(tx: &CheckedTransaction<'_>) -> anyhow::Result<HumanDiscoveryGeneration> {
+    Ok(HumanDiscoveryGeneration {
+        authorization_revision: identity::authorization_revision(tx)?,
+        workload_history_event: tx.query_row(
+            "SELECT MAX(event_seq) FROM workload_binding_history",
+            [],
+            |row| row.get(0),
+        )?,
+    })
+}
+
 impl Store {
     pub(crate) fn owned_redaction_covers(&self, redactor: &Redactor) -> bool {
         self.redactor.covers(redactor)
@@ -115,7 +132,7 @@ impl Store {
         &self,
         access: &HumanSourceAccess<'_>,
         mut visit: impl FnMut([u8; 32], bool) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HumanDiscoveryGeneration> {
         self.with_modern_read(access, |tx| {
             let mut statement = tx.prepare("SELECT digest,0 FROM identity_credentials UNION ALL SELECT sha256_digest,1 FROM workload_digests ORDER BY 1,2 LIMIT 65537")?;
             let mut rows = statement.query([])?;
@@ -133,8 +150,15 @@ impl Store {
                 hex::decode_to_slice(value, &mut digest)?;
                 visit(digest, row.get::<_, bool>(1)?)?;
             }
-            Ok(())
+            discovery_generation(tx)
         })
+    }
+    /// Coverage-generation observation only, never a principal or permission.
+    pub(crate) fn modern_discovery_generation(
+        &self,
+        access: &HumanSourceAccess<'_>,
+    ) -> anyhow::Result<HumanDiscoveryGeneration> {
+        self.with_modern_read(access, discovery_generation)
     }
 }
 

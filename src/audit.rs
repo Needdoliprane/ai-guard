@@ -160,6 +160,7 @@ pub(crate) mod egress;
 mod human;
 mod human_brokers;
 mod human_modern;
+pub(crate) use human_modern::HumanDiscoveryGeneration;
 mod human_workers;
 mod identity;
 mod kubernetes_admission;
