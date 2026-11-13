@@ -1,4 +1,4 @@
-//! Diagnostic only, in the same checked Business transaction as its binding.
+//! Control diagnostic and source/format admission; neither is writer authority.
 use super::*;
 use crate::{api::AuthenticatedReviewRunnerCredential, control::SupervisionStateV1};
 
