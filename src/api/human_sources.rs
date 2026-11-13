@@ -14,6 +14,9 @@ use tokio::sync::Notify;
 
 mod recent;
 
+#[cfg(test)]
+mod owned_policy_cli_tests;
+
 const MAX_CANDIDATES: usize = 65_536;
 const MAX_CANDIDATE_BYTES: usize = 16 * 1024 * 1024;
 const CLOSED: usize = 1usize << (usize::BITS - 1);
