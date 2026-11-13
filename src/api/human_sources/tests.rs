@@ -906,3 +906,7 @@ async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
 
 #[path = "recent_tests.rs"]
 mod recent_contract_tests;
+
+#[path = "browser_fixture.rs"]
+#[cfg(test)]
+mod owned_browser_fixture;
