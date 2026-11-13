@@ -45,6 +45,10 @@ mod control_transport;
 #[cfg(test)]
 mod held_policy_tests;
 mod human;
+mod human_sources;
+pub use human_sources::GatewayHumanRetirement;
+#[cfg(test)]
+pub(crate) use human_sources::tests::fixture as owned_human_fixture_for_test;
 mod human_state;
 mod human_streams;
 mod kubernetes;
@@ -231,6 +235,7 @@ pub struct GatewayState {
     io: Arc<store_io::Gate>,
     io_scope: Arc<store_io::Scope>,
     control_recovery_epoch: Arc<auth::ControlRecoveryAuthEpochV2>,
+    owned_human: Option<Arc<human_sources::OwnedHumanGateway>>,
 }
 impl GatewayState {
     fn scoped(&self, scope: Arc<store_io::Scope>) -> Self {
@@ -246,17 +251,29 @@ impl GatewayState {
         T: Send + 'static,
         F: FnOnce(GatewayState) -> ApiResult<T> + Send + 'static,
     {
+        let usage = self
+            .owned_human
+            .as_ref()
+            .map(|owned| owned.admit())
+            .transpose()?;
         let state = self.scoped(Arc::default());
         store_io::run(
             Arc::clone(&self.io),
             None,
             store_io::Lane::Discovery,
             false,
-            move || operation(state),
+            move || {
+                let _usage = usage;
+                operation(state)
+            },
         )
         .await
     }
     pub fn with_oidc(mut self, oidc: OidcGateway) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            self.owned_human.is_none(),
+            "owned human OIDC handlers are not adopted"
+        );
         for tenant in self.tenants.iter() {
             oidc.audit.ensure_distinct_from_business(&tenant.store)?;
         }
@@ -459,6 +476,7 @@ impl GatewayState {
                     io,
                     io_scope: Arc::default(),
                     control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
+                    owned_human: None,
                 };
             }
         };
@@ -495,6 +513,7 @@ impl GatewayState {
             io,
             io_scope: Arc::default(),
             control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
+            owned_human: None,
         }
     }
     pub fn for_tenants(
@@ -576,6 +595,7 @@ impl GatewayState {
             io,
             io_scope: Arc::default(),
             control_recovery_epoch: Arc::new(auth::ControlRecoveryAuthEpochV2::new()),
+            owned_human: None,
         })
     }
     fn control_binding(
@@ -887,6 +907,10 @@ fn gateway_base_router(state: GatewayState) -> Router {
                 .merge(human::routes()),
         )
         .nest("/api", routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            human_sources::route_gate,
+        ))
         .layer(DefaultBodyLimit::max(262_144))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -899,6 +923,11 @@ async fn gateway_health(State(state): State<GatewayState>) -> (StatusCode, Json<
     let available = state.valid_credentials
         && !state.tenants.is_empty()
         && state.tenants.iter().all(|tenant| tenant.store.healthy());
+    let available = available
+        && state
+            .owned_human
+            .as_ref()
+            .is_none_or(|owned| owned.healthy());
     if available {
         (
             StatusCode::OK,
@@ -1484,6 +1513,7 @@ struct DashboardState {
     viewer_token: Option<String>,
     client: reqwest::Client,
     oidc_web_origin: Option<String>,
+    owned_sources: bool,
 }
 pub fn dashboard_router(
     upstream: &str,
@@ -1513,6 +1543,22 @@ pub fn dashboard_router_with_oidc(
     front: PathBuf,
     oidc_web_origin: Option<String>,
 ) -> anyhow::Result<Router> {
+    dashboard_router_with_human_mode(upstream, viewer_token, front, oidc_web_origin, false)
+}
+
+/// Trusted presentation configuration. The gateway independently enforces
+/// the same route closure; this option never grants identity or permissions.
+pub fn dashboard_router_with_human_mode(
+    upstream: &str,
+    viewer_token: Option<String>,
+    front: PathBuf,
+    oidc_web_origin: Option<String>,
+    owned_sources: bool,
+) -> anyhow::Result<Router> {
+    anyhow::ensure!(
+        !owned_sources || viewer_token.is_none(),
+        "owned human dashboard requires shared presentation without viewer fallback"
+    );
     if let Some(origin) = &oidc_web_origin {
         let parsed = reqwest::Url::parse(origin)?;
         anyhow::ensure!(
@@ -1545,6 +1591,7 @@ pub fn dashboard_router_with_oidc(
         upstream,
         viewer_token,
         oidc_web_origin,
+        owned_sources,
         client: reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .redirect(reqwest::redirect::Policy::none())
@@ -1610,6 +1657,34 @@ async fn dashboard_oidc_proxy(
     State(state): State<DashboardState>,
     request: Request,
 ) -> ApiResult<Response> {
+    if state.owned_sources {
+        let allowed = request.method() == "GET"
+            && state.oidc_web_origin.is_none()
+            && ["/auth/oidc/status", "/auth/oidc/cli-profile"].contains(&request.uri().path());
+        if !allowed {
+            return Err(human_sources::unavailable());
+        }
+        let mut destination = state.upstream.clone();
+        destination.set_path(request.uri().path());
+        let response = state
+            .client
+            .get(destination)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|_| human_sources::unavailable())?;
+        let status = response.status();
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| human_sources::unavailable())?;
+            if chunk.len() > 16_384 - bytes.len() {
+                return Err(human_sources::unavailable());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok((status, [(header::CONTENT_TYPE, "application/json")], bytes).into_response());
+    }
     let enabled = state.oidc_web_origin.as_ref().ok_or_else(|| {
         human::failure(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1737,6 +1812,13 @@ async fn dashboard_oidc_proxy(
     Ok(response)
 }
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
+    if s.owned_sources
+        && (request.method() != "GET"
+            || !["/api/v1/human/identity", "/api/v1/human/resources"]
+                .contains(&request.uri().path()))
+    {
+        return Err(human_sources::unavailable());
+    }
     let canonical_path = request
         .uri()
         .path()
@@ -1795,7 +1877,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     {
         return Err(error(StatusCode::NOT_FOUND, "Route de lecture inconnue."));
     }
-    if human_path {
+    if s.owned_sources {
+        // No viewer fallback or legacy verification request precedes the
+        // gateway's own modern authentication and context checks.
+    } else if human_path {
         if canonical_path != "/api/human/identity" {
             verify_dashboard_human(&s, &token).await?;
         }
@@ -1805,7 +1890,10 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
     let mut url = s.upstream.clone();
     url.set_path(request.uri().path());
     url.set_query(request.uri().query());
-    let mut call = s.client.get(url).bearer_auth(&token);
+    let mut call = s
+        .client
+        .request(request.method().clone(), url)
+        .bearer_auth(&token);
     if human_path {
         call = call.timeout(Duration::from_secs(
             if canonical_path == "/api/human/stream" {

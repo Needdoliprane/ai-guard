@@ -79,7 +79,7 @@ pub(super) fn failure(
         Json(json!({"error":{"code":code,"message":message,"retry_action":retry}})),
     )
 }
-fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
+pub(super) fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
     if let Some(response) = super::audit_capacity_failure(&error) {
         return response;
     }
@@ -175,6 +175,7 @@ struct VerifiedHuman {
     source: HumanProofSource,
     digest: [u8; 32],
     redactor: Redactor,
+    _owned_usage: Option<Arc<super::human_sources::HumanOwnedUsage>>,
 }
 #[derive(Clone)]
 struct HumanAuthenticationProof {
@@ -234,6 +235,36 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
             "authenticate",
         )
     })?;
+    if let Some(owned) = &state.owned_human {
+        if !crate::identity::local_credential_format(token) {
+            return Err(super::human_sources::unavailable());
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let source = owned.source(&digest)?.ok_or_else(|| {
+            failure(
+                StatusCode::UNAUTHORIZED,
+                "credential_invalid",
+                "The credential is not a local human credential.",
+                "authenticate",
+            )
+        })?;
+        let usage = owned.admit()?;
+        let credential = owned
+            .authenticate(source, &state.tenants[source].store, &digest)?
+            .ok_or_else(super::human_sources::unavailable)?;
+        return Ok(VerifiedHuman {
+            credential: HumanAuthenticationProof {
+                principal: credential.principal,
+                credential_id: credential.credential_id,
+                revision: credential.revision,
+                expires_at: credential.expires_at,
+            },
+            source: HumanProofSource::Local(source),
+            digest,
+            redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
+            _owned_usage: Some(usage),
+        });
+    }
     if !crate::identity::local_credential_format(token) {
         let oidc = state.oidc.as_ref().ok_or_else(|| {
             failure(
@@ -267,6 +298,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
             digest: proof.digest,
             source: HumanProofSource::Oidc(proof),
             redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
+            _owned_usage: None,
         });
     }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
@@ -338,6 +370,7 @@ fn authenticate(state: &GatewayState, headers: &HeaderMap) -> ApiResult<Verified
         source: HumanProofSource::Local(source),
         digest,
         redactor: state.redactor.union(&Redactor::new(vec![token.to_owned()])),
+        _owned_usage: None,
     })
 }
 // Unavailable metadata is not an absent binding. A neighboring failure may be
@@ -380,6 +413,9 @@ pub(super) fn reject_control_collision(
     token: &str,
     own: Option<(usize, store_io::Lane)>,
 ) -> ApiResult<()> {
+    if state.owned_human.is_some() {
+        return Err(super::human_sources::unavailable());
+    }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
         let lane = own
@@ -411,6 +447,22 @@ pub(super) fn reject_control_collision(
     Ok(())
 }
 fn reauthenticate(state: &GatewayState, proof: &VerifiedHuman) -> ApiResult<()> {
+    if let Some(owned) = &state.owned_human {
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        let verified = owned
+            .authenticate(source, &state.tenants[source].store, &proof.digest)?
+            .ok_or_else(super::human_sources::unavailable)?;
+        if verified.principal != proof.credential.principal
+            || verified.credential_id != proof.credential.credential_id
+            || verified.revision != proof.credential.revision
+        {
+            owned.require_rebuild();
+            return Err(super::human_sources::unavailable());
+        }
+        return Ok(());
+    }
     let source = match &proof.source {
         HumanProofSource::Oidc(oidc_proof) => {
             state
@@ -531,15 +583,32 @@ fn selected_context(
 ) -> ApiResult<(Arc<RegisteredContext>, TenantState, AuthorizedScopeV1)> {
     let (context, tenant) = registered_context(state, proof, headers)?;
     let binding = &context.binding;
-    let mut scope = tenant
-        .store
-        .authorize_human_context(
+    let mut scope = if let Some(owned) = &state.owned_human {
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        if tenant.tenant_id != state.tenants[source].tenant_id {
+            return Err(super::human_sources::unavailable());
+        }
+        owned.authorize(
+            source,
+            &tenant.store,
             &proof.credential.principal,
             &binding.membership_id,
             binding.membership_revision,
             binding.mode,
-        )
-        .map_err(store_failure)?;
+        )?
+    } else {
+        tenant
+            .store
+            .authorize_human_context(
+                &proof.credential.principal,
+                &binding.membership_id,
+                binding.membership_revision,
+                binding.mode,
+            )
+            .map_err(store_failure)?
+    };
     if let Some(ceiling) = proof.ceiling() {
         scope = scope
             .restrict_capabilities(ceiling.clone())
@@ -570,6 +639,11 @@ where
     T: Send + 'static,
     F: FnOnce(GatewayState, VerifiedHuman) -> ApiResult<T> + Send + 'static,
 {
+    let usage = state
+        .owned_human
+        .as_ref()
+        .map(|owned| owned.admit())
+        .transpose()?;
     // Header/context lookup is memory-only. It cannot select an arbitrary
     // tenant: the registry binds this selection to the authenticated proof.
     let mut scope = store_io::Scope::default();
@@ -591,6 +665,7 @@ where
         store_io::Lane::Read,
         true,
         move || {
+            let _usage = usage;
             reauthenticate(&state, &proof)?;
             operation(state, proof)
         },
@@ -775,34 +850,50 @@ fn identity_sync(
         remaining = remaining.min(oidc.deadline.saturating_duration_since(Instant::now()));
     }
     for (index, tenant) in state.tenants.iter().enumerate() {
-        let snapshot = match state.io_scope.with_store(
-            tenant,
-            store_io::Lane::Read,
-            true,
-            |store| store.human_profile(&proof.credential.principal, &proof.redactor),
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) if matches!(proof.source, HumanProofSource::Local(source) if source == index) =>
-            {
-                return Err(error);
-            }
-            Err(_) => {
-                contexts_complete = false;
-                continue;
-            }
-        };
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
-            {
-                return Err(store_failure(error));
-            }
-            Err(_) => {
-                // Do not reconcile an unreadable profile as an empty one: its
-                // existing contexts remain unknown and are revalidated against
-                // their own store before any use.
-                contexts_complete = false;
-                continue;
+        if state.owned_human.is_some()
+            && !matches!(proof.source,HumanProofSource::Local(source) if source==index)
+        {
+            contexts_complete = false;
+            continue;
+        }
+        let snapshot = if let Some(owned) = &state.owned_human {
+            // Preserve typed API status/code/retry action from the real own
+            // source, especially cumulative audit-budget refusals.
+            state
+                .io_scope
+                .with_store(tenant, store_io::Lane::Read, true, |store| {
+                    owned.profile(index, store, &proof.credential.principal, &proof.redactor)
+                })??
+        } else {
+            let snapshot = match state.io_scope.with_store(
+                tenant,
+                store_io::Lane::Read,
+                true,
+                |store| store.human_profile(&proof.credential.principal, &proof.redactor),
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) if matches!(proof.source, HumanProofSource::Local(source) if source == index) =>
+                {
+                    return Err(error);
+                }
+                Err(_) => {
+                    contexts_complete = false;
+                    continue;
+                }
+            };
+            match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
+                {
+                    return Err(store_failure(error));
+                }
+                Err(_) => {
+                    // Do not reconcile an unreadable profile as an empty one: its
+                    // existing contexts remain unknown and are revalidated against
+                    // their own store before any use.
+                    contexts_complete = false;
+                    continue;
+                }
             }
         };
         state
@@ -976,12 +1067,29 @@ fn resources_sync(
     let mut cursor = context
         .start(&key, query.cursor.as_deref())
         .map_err(state_failure)?;
-    let page = tenant
-        .store
-        .human_resources(&scope, &cursor.after_resource, key.limit, &proof.redactor)
-        .map_err(store_failure)?;
+    let page = if let Some(owned) = &state.owned_human {
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        owned.resources(
+            source,
+            &tenant.store,
+            &scope,
+            &cursor.after_resource,
+            key.limit,
+            &proof.redactor,
+        )?
+    } else {
+        tenant
+            .store
+            .human_resources(&scope, &cursor.after_resource, key.limit, &proof.redactor)
+            .map_err(store_failure)?
+    };
     reauthenticate(&state, &proof)?;
     cursor.after_resource = page.after_resource.clone();
+    if state.owned_human.is_some() {
+        selected_context(&state, &proof, &headers)?;
+    }
     let page = envelope(&context, page, None, false);
     finish_page(&context, &key, cursor, page)
 }

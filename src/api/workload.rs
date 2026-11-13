@@ -159,6 +159,9 @@ pub(super) async fn request_guard(request: Request, next: Next) -> Response {
 }
 
 fn resolve_sync(state: &GatewayState, token: &str) -> ApiResult<(usize, AuthenticatedWorkload)> {
+    if state.owned_human.is_some() {
+        return Err(super::human_sources::unavailable());
+    }
     if !state.valid_credentials {
         return Err(ambiguous());
     }
@@ -396,6 +399,9 @@ pub(super) fn reject_control_collision(
     token: &str,
     own: Option<(usize, store_io::Lane)>,
 ) -> ApiResult<()> {
+    if state.owned_human.is_some() {
+        return Err(super::human_sources::unavailable());
+    }
     let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
     for (index, tenant) in state.tenants.iter().enumerate() {
         let lookup = if let Some((_, lane)) = own.filter(|(source, _)| *source == index) {
@@ -431,6 +437,11 @@ pub(super) fn reject_human_collision(
     digest: &[u8; 32],
     own_source: Option<usize>,
 ) -> ApiResult<()> {
+    // W0 uses its own checked source/candidate path. A nonadopted technical
+    // caller cannot fall through into legacy neighboring SQLite discovery.
+    if state.owned_human.is_some() {
+        return Err(super::human_sources::unavailable());
+    }
     let unavailable_identity = || {
         human::failure(
             StatusCode::SERVICE_UNAVAILABLE,

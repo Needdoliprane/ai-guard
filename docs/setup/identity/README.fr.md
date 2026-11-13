@@ -1,5 +1,7 @@
 # Accès local nominatif
 
+Le [profil sources possédées](OWNED_SOURCES.fr.md) facultatif adopte identité/ressources locales sur Stores14/15 existants avec ownership complet retenu. Ses autres routes modernes sont explicitement fermées ; le bootstrap opérateur hors ligne reste à livrer et la validation logicielle de ce changement est NOT_RUN. Les procédures legacy ci-dessous gardent leurs propres limites de format/qualification.
+
 [English](README.md) · [Configuration](../README.fr.md) · [Poste local](../local/README.fr.md) · [OIDC](../keycloak/README.fr.md)
 
 Un compte local nominatif permet de consulter les ressources explicitement autorisées sans fournisseur d'identité. Son credential est distinct des clés techniques runner/viewer et de l'authentification Codex ou Claude. Appartenir à un tenant ne donne pas accès à toutes ses sessions. Ce guide couvre la maintenance du compte, la consultation et l'export ; le [registre d'ingénierie](../../engineering/CURRENT_STATE.md) distingue implémentation et qualification.

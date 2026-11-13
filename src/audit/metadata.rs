@@ -107,6 +107,9 @@ impl Store {
         &self,
         read: impl FnOnce(&Connection) -> anyhow::Result<Option<T>>,
     ) -> MetadataLookup<T> {
+        #[cfg(test)]
+        self.read_test_observer
+            .record(read_test_observer::Call::Metadata);
         let result = (|| -> anyhow::Result<Option<T>> {
             let mut db = self
                 .db

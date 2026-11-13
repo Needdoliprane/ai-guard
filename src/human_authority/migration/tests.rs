@@ -32,6 +32,7 @@ pub(crate) struct Fixture {
     plan_file: PrivateFile,
     files: Vec<(HumanConfigurationFileKindV1, PrivateFile)>,
     policy: AuthenticationAuditPolicyV1,
+    capacity: AuthenticationCapacityPlanV1,
     backup_paths: BTreeMap<Uuid, PathBuf>,
     journal: Directory,
     closure_id: Uuid,
@@ -109,12 +110,28 @@ fn identity_projection(source: &HumanMaintenanceSourceV1) -> Vec<String> {
 
 impl Fixture {
     pub(crate) fn new() -> Self {
+        Self::new_configured(false, true)
+    }
+    pub(crate) fn new_owned() -> Self {
+        Self::new_configured(true, true)
+    }
+    pub(crate) fn new_owned_local() -> Self {
+        Self::new_configured(true, false)
+    }
+    pub(crate) fn bearer(tenant: &str) -> String {
+        format!(
+            "aigh1_{}",
+            if tenant == "A" { "11" } else { "22" }.repeat(32)
+        )
+    }
+    fn new_configured(owned: bool, oidc: bool) -> Self {
         let temporary = tempfile::Builder::new()
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
             .unwrap();
         let root = Directory::open_existing(temporary.path()).unwrap();
         let installation = Uuid::new_v4();
+        let closure_id = Uuid::new_v4();
         let account = PrincipalRefV1::HumanLocal {
             installation_id: installation.to_string(),
             account_id: Uuid::new_v4().to_string(),
@@ -175,7 +192,12 @@ impl Fixture {
                         version: 1,
                         credential_id: Uuid::new_v4().to_string(),
                         principal: account.clone(),
-                        sha256_digest: "ad".repeat(32),
+                        sha256_digest: if owned {
+                            use sha2::Digest;
+                            hex::encode(sha2::Sha256::digest(Self::bearer(tenant).as_bytes()))
+                        } else {
+                            "ad".repeat(32)
+                        },
                         revision: 1,
                         active: true,
                         expires_at: None,
@@ -248,19 +270,21 @@ impl Fixture {
             &auth_parent.path().join("authentication.sqlite"),
             installation,
             policy.clone(),
-            capacity,
+            capacity.clone(),
             Redactor::new(vec![]),
         )
         .unwrap();
-        descriptors.push(HumanMaintenanceSourceV1 {
-            source_id: Uuid::from_u128(3),
-            kind: HumanSourceKindV1::AuthenticationLedger,
-            installation_id: installation,
-            durable_namespace_id: legacy_auth.verify().unwrap().namespace_id,
-            tenant_id: None,
-            storage_binding: binding(&auth_parent, "authentication.sqlite"),
-            required_format: 5,
-        });
+        if oidc {
+            descriptors.push(HumanMaintenanceSourceV1 {
+                source_id: Uuid::from_u128(3),
+                kind: HumanSourceKindV1::AuthenticationLedger,
+                installation_id: installation,
+                durable_namespace_id: legacy_auth.verify().unwrap().namespace_id,
+                tenant_id: None,
+                storage_binding: binding(&auth_parent, "authentication.sqlite"),
+                required_format: 5,
+            });
+        }
         let configuration_parent = private_child(&root, "configuration");
         let mut files = Vec::new();
         let mut config_descriptors = Vec::new();
@@ -273,11 +297,26 @@ impl Fixture {
         .into_iter()
         .enumerate()
         {
+            if !oidc
+                && matches!(
+                    kind,
+                    HumanConfigurationFileKindV1::OidcConfiguration
+                        | HumanConfigurationFileKindV1::OidcTrustBundle
+                )
+            {
+                continue;
+            }
             let name = format!("config-{index}.json");
+            let bytes = if owned && kind == HumanConfigurationFileKindV1::TechnicalCredentials {
+                let entries=["A","B"].into_iter().flat_map(|tenant|["runner","viewer"].into_iter().map(move |role|serde_json::json!({"tenant_id":tenant,"role":role,"credential_id":Uuid::new_v4(),"generation":1,"token":format!("synthetic-{tenant}-{role}-credential-long-enough")}))).collect::<Vec<_>>();
+                serde_json::to_vec(&serde_json::json!({"version":1,"installation_id":installation,"closure_id":closure_id,"closure_revision":1,"control_config_public_digest":"ab".repeat(32),"entries":entries})).unwrap()
+            } else {
+                b"private synthetic resolved configuration".to_vec()
+            };
             files.push((
                 kind,
                 configuration_parent
-                    .persistent_create(&name, b"private synthetic resolved configuration")
+                    .persistent_create(&name, &bytes)
                     .unwrap(),
             ));
             config_descriptors.push(HumanConfigurationFileV1 {
@@ -288,10 +327,14 @@ impl Fixture {
         let configuration = HumanAuthorityConfigurationV1 {
             control_config_revision: 1,
             public_config_digest: "ab".repeat(32),
-            oidc: Some(HumanOidcConfigurationV1 {
-                public_config_digest: "cd".repeat(32),
-                mapping_revision: 1,
-            }),
+            oidc: if oidc {
+                Some(HumanOidcConfigurationV1 {
+                    public_config_digest: "cd".repeat(32),
+                    mapping_revision: 1,
+                })
+            } else {
+                None
+            },
             files: config_descriptors,
         };
         let plan = HumanSourcesMaintenancePlanV1 {
@@ -329,9 +372,10 @@ impl Fixture {
             plan_file,
             files,
             policy,
+            capacity,
             backup_paths,
             journal,
-            closure_id: Uuid::new_v4(),
+            closure_id,
             legacy,
             legacy_auth,
             account,
@@ -341,6 +385,102 @@ impl Fixture {
     /// Test-only, real full-union migration; no schema/authority is fabricated.
     pub(crate) fn migrated(&self) -> MigratedHumanSources {
         migrate_human_sources(self.request()).unwrap()
+    }
+    pub(crate) fn owned_startup(
+        &self,
+    ) -> (
+        crate::human_authority::startup::HumanOwnedStartupBundle,
+        PrivateFile,
+        Vec<(String, String, String)>,
+    ) {
+        let (request, credentials, tokens) = self.owned_request();
+        (
+            crate::human_authority::startup::HumanOwnedStartupBundle::open(request).unwrap(),
+            credentials,
+            tokens,
+        )
+    }
+    pub(crate) fn owned_request(
+        &self,
+    ) -> (
+        crate::human_authority::startup::HumanOwnedStartupRequest,
+        PrivateFile,
+        Vec<(String, String, String)>,
+    ) {
+        use crate::human_authority::startup::*;
+        let migrated = self.migrated();
+        let manifest = migrated.manifest().clone();
+        let closure = migrated.owner().closure().clone();
+        drop(migrated);
+        let configuration = HumanSourcesConfigurationV1::new(
+            closure.sources.clone(),
+            closure.configuration.clone(),
+            self.files.clone(),
+        )
+        .unwrap();
+        let redactor = Redactor::new(
+            ["A", "B"]
+                .into_iter()
+                .flat_map(|tenant| {
+                    ["runner", "viewer"].into_iter().map(move |role| {
+                        format!("synthetic-{tenant}-{role}-credential-long-enough")
+                    })
+                })
+                .collect(),
+        );
+        let sources = closure
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    source.source_id,
+                    match source.kind {
+                        HumanSourceKindV1::TenantStore => {
+                            let capacity = crate::audit::AuditCapacityPolicyV1::resolved(10_000);
+                            HumanOwnedSourceOptions::TenantStore {
+                                redactor: redactor.clone(),
+                                max_events: 10_000,
+                                workload: crate::audit::WorkloadAuditPolicyV1::resolved(
+                                    10_000, &capacity,
+                                ),
+                                capacity,
+                                retention: crate::relay::RelayRetentionPolicyV1::default(),
+                            }
+                        }
+                        HumanSourceKindV1::AuthenticationLedger => {
+                            HumanOwnedSourceOptions::AuthenticationLedger {
+                                redactor: redactor.clone(),
+                                policy: self.policy.clone(),
+                                capacity_plan: self.capacity.clone(),
+                            }
+                        }
+                    },
+                )
+            })
+            .collect();
+        let request = HumanOwnedStartupRequest {
+            manifest,
+            configuration,
+            sources,
+        };
+        let credentials = self
+            .files
+            .iter()
+            .find(|(kind, _)| *kind == HumanConfigurationFileKindV1::TechnicalCredentials)
+            .unwrap()
+            .1
+            .clone();
+        let tokens = ["A", "B"]
+            .into_iter()
+            .map(|tenant| {
+                (
+                    tenant.to_owned(),
+                    format!("synthetic-{tenant}-runner-credential-long-enough"),
+                    format!("synthetic-{tenant}-viewer-credential-long-enough"),
+                )
+            })
+            .collect();
+        (request, credentials, tokens)
     }
     pub(crate) fn principal(&self) -> &PrincipalRefV1 {
         &self.account

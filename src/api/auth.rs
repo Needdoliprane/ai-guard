@@ -20,6 +20,7 @@ pub(crate) use control_recovery::with_control_recovery_auth_pair_for_test;
 pub(crate) use control_recovery::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
 pub(super) use control_recovery::{ControlRecoveryAuthEpochV2, VerifiedControlRecoveryRunnerV2};
 pub(crate) use review_credentials::AuthenticatedReviewRunnerCredential;
+pub(super) use review_credentials::ReviewCredentialRegistry;
 #[cfg(test)]
 pub(crate) use review_credentials::authenticate_review_runner_fixture;
 
@@ -69,6 +70,9 @@ pub(super) struct CredentialIndex {
 }
 
 impl CredentialIndex {
+    pub(super) fn digests(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.entries.keys()
+    }
     pub(super) fn for_tenants(tenants: &[TenantGateway]) -> anyhow::Result<Self> {
         let mut index = Self::default();
         for (tenant_index, tenant) in tenants.iter().enumerate() {
