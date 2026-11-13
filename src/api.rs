@@ -62,6 +62,8 @@ mod workload;
 pub(crate) use auth::AuthenticatedReviewRunnerCredential;
 pub use auth::GatewayControlRecoveryRetirementV2;
 #[cfg(test)]
+pub(crate) use auth::authenticate_review_runner_fixture;
+#[cfg(test)]
 pub(crate) use auth::with_authenticated_control_recovery_for_test;
 #[cfg(test)]
 pub(crate) use auth::with_control_recovery_auth_pair_for_test;

@@ -388,7 +388,7 @@ fn write_projection(db: &Connection, snapshot: &AuthoritySnapshot) -> anyhow::Re
 }
 pub(super) fn replay(db: &Connection) -> anyhow::Result<AuthoritySnapshot> {
     let format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    exact(format == i64::from(FORMAT))?;
+    exact(matches!(format, 14 | 15))?;
     let snapshot = replay_events(db)?
         .snapshot
         .ok_or(ReviewAuthorityFailure::Mismatch)?;
@@ -429,7 +429,7 @@ pub(super) fn append_record(
 ) -> anyhow::Result<AuthorityReceiptV1> {
     id(operation_id)?;
     let format: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    exact(format == 14)?;
+    exact(matches!(format, 14 | 15))?;
     if let AuthorityRecordV1::SourceAnchor(anchor) = &record {
         exact(anchor.migration_id == operation_id)?;
     }
@@ -549,11 +549,13 @@ pub(super) fn verify_connection_main(
 fn physical(store: &Store, db: &Connection, source: &OwnedSourceToken) -> anyhow::Result<()> {
     source.revalidate_authority()?;
     let descriptor = source.descriptor();
+    let format: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let (path, identity) = store.backing.identity_key();
     exact(
         descriptor.kind == HumanSourceKindV1::TenantStore
             && descriptor.tenant_id.as_deref() == Some(store.tenant_id())
-            && descriptor.required_format == FORMAT
+            && matches!(format, 14 | 15)
+            && descriptor.required_format == format
             && path == descriptor.storage_binding.path()
             && identity.physical_identity()
                 == (

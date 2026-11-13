@@ -230,7 +230,7 @@ fn require_v3(
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
     if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&version) {
         Ok(())
-    } else if version == 14 && access.is_some() {
+    } else if matches!(version, 14 | 15) && access.is_some() {
         db.require_business_access()
     } else {
         Err(ControlFailure::MigrationRequired.into())
@@ -378,7 +378,7 @@ impl Replay {
     }
     pub(super) fn new(db: &Connection, version: i64, namespace: String) -> anyhow::Result<Self> {
         let (genesis_seq, genesis_hash) =
-            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+            if [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
                 let row: (i64, String) = db.query_row(
                     "SELECT genesis_seq,genesis_hash FROM supervision_meta WHERE singleton=1",
                     [],
@@ -960,8 +960,8 @@ impl Store {
         };
         let schema_version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let supported = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13].contains(&schema_version)
-            || (schema_version == 14 && access.is_some());
-        if schema_version == 14 && access.is_some() {
+            || (matches!(schema_version, 14 | 15) && access.is_some());
+        if matches!(schema_version, 14 | 15) && access.is_some() {
             tx.require_business_access()?;
         }
         let state = SupervisionStateV1 {

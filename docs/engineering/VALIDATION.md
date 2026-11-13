@@ -7269,3 +7269,27 @@ Commande réelle : `CARGO_INCREMENTAL=0 cargo test --offline --test demo_pki -- 
 Quatre FAIL101 conservés : stub ; parent TempDir0755 refusé avant génération ; oracle d'expiration ne lisant que stderr ; s_server LibreSSL refusant la forme host:port avant TLS. Diagnostics directs et corrections de harnais sont distincts, aucun contrôle produit assoupli. [Synthèse et historique](evidence/2026-11-01/demo-pki/README.md), pas de défaut bloquant restant dans ce périmètre. Les instruments et logs restent locaux après retrait du suivi à la demande du mainteneur.
 
 163 contenus avant/après vérifiés, seule différence intentionnelle Cargo.lock. Le reviewer constate aussi163 métadonnées AppleDouble dans les tar originaux privés : ne pas confondre contenus source validés et inventaire physique complet. Archive portable distincte vérifiée indépendamment :163 membres réguliers uniques, mêmes noms et hashes, sans AppleDouble/PAX/liens, SHA `02a13540baa87c0a32a5ffb3e014198a31bfaebbf3be8f3d083d02a00817f56b`. Originaux conservés ; clés, certificats générés et archives restent hors Git. FS exact **NOT_RECORDED**, hôte macOS27.2/Darwin27.2 arm64/Rust1.99.1. Le [guide d'utilisation](../demo-pki.md) ne configure aucune confiance, DNS ou HTTPS de service. **G11 reste BLOCKED, G09 FAIL, D5 ouvert et0/12 gates clos.**
+
+
+## 13 novembre — Store egress15, campagnes composées R5 et R7
+
+[Relevé EN](evidence/2026-11-13/egress-policy-store/README.md),
+[FR](evidence/2026-11-13/egress-policy-store/README.fr.md) et
+[TESTS.json](evidence/2026-11-13/egress-policy-store/TESTS.json).
+R5 `430965df…` : build lib-test PASS, 14 parents exacts PASS, puis parent15
+FAIL101 à l'ouverture d'une fixture ne garantissant pas sa création privée ;
+mode/UID effectifs non capturés. Les 12 sélections restantes/check sont NOT_RUN.
+Reçu `ef0b8870…4858`. R6 ne change que ce parent : création neuve0700,
+assertion du mode, contrôles positifs, motif exact et snapshot inchangé ; revue
+indépendante `b5426626…eaa6`, APP/helpers/14 premiers corps inchangés.
+
+R7 `dd5f66a9…` : parent15 corrigé, quatre autres E1 et huit canaris humains,
+13 PASS sans échec/ignoré ; check toutes cibles RC0, zéro erreur/320 avertissements.
+Reçu `cca283a3…6296`, export source `6c766232…85fb`, 2630 fichiers/modes vérifiés,
+468 pièces brutes privées, fermeture exacte RC0/OOM0. Les 14 PASS R5 restent
+séparés ; aucun «27 PASS R7». SQLite, sauvegardes/migrations13→14→15,
+replay/CAS, Session/plafonds, réserve terminale, rollback FULL, redaction,
+OwnerContended exact et négatif SourceB sont exercés. Pas de saturation physique
+en octets, panne commit/WAL/I/O, expiration Store en temps réel, Clippy strict,
+suite complète, build release, capacité100, HTTP/UI ou runtime qualifiés.
+Aucune sortie Internet activée ; bridge non médié, G05/G07/G11 ouverts.

@@ -215,7 +215,7 @@ impl AuthenticatedReviewRunnerCredential {
         let entry = self.entry();
         let descriptor = self.source.descriptor();
         if descriptor.kind != HumanSourceKindV1::TenantStore
-            || descriptor.required_format != 14
+            || !matches!(descriptor.required_format, 14 | 15)
             || descriptor.tenant_id.as_deref() != Some(entry.tenant_id.as_str())
             || descriptor.source_id != entry.source_id
             || descriptor.durable_namespace_id != entry.namespace
@@ -229,6 +229,53 @@ impl AuthenticatedReviewRunnerCredential {
 
 fn credential_digest(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
+}
+
+/// Real retained-file/index path for offline sibling-module integration tests.
+/// This bridge creates no proof from UUID fields: normal envelope validation,
+/// owner/source capabilities, private-file checks and bearer lookup all run.
+#[cfg(test)]
+pub(crate) fn authenticate_review_runner_fixture(
+    file: PrivateFile,
+    owner: OwnedHumanSources,
+    tenant_stores: Vec<(String, Arc<crate::audit::Store>)>,
+    bearer: &str,
+) -> anyhow::Result<AuthenticatedReviewRunnerCredential> {
+    let envelope: EnvelopeV1 = serde_json::from_slice(file.bytes())?;
+    let gateways = tenant_stores
+        .into_iter()
+        .map(|(tenant_id, store)| {
+            let token = |role: CredentialRole| -> anyhow::Result<String> {
+                let mut entries = envelope
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.tenant_id == tenant_id && entry.role.role() == role);
+                let entry = entries
+                    .next()
+                    .ok_or(ReviewCredentialFailure::InvalidConfiguration)?;
+                if entries.next().is_some() {
+                    return Err(ReviewCredentialFailure::InvalidConfiguration.into());
+                }
+                Ok(entry.token.clone())
+            };
+            Ok(crate::api::TenantGateway {
+                runner_token: token(CredentialRole::Runner)?,
+                viewer_token: token(CredentialRole::Viewer)?,
+                tenant_id,
+                store,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let expected = CredentialIndex::for_tenants(&gateways)?;
+    let shared = Arc::new(crate::api::store_io::Gate::new(true));
+    let tenants = gateways
+        .into_iter()
+        .map(|gateway| TenantState::from_gateway(gateway, Arc::clone(&shared)))
+        .collect::<Vec<_>>();
+    let registry = Arc::new(ReviewCredentialRegistry::from_private_file(
+        file, owner, &expected, &tenants,
+    )?);
+    registry.authenticate(bearer)
 }
 
 fn resolve_envelope(
@@ -269,7 +316,7 @@ fn resolve_envelope(
     for source in &closure.sources {
         if source.kind == HumanSourceKindV1::TenantStore {
             let tenant = source.tenant_id.as_deref().ok_or(invalid)?;
-            if source.required_format != 14
+            if !matches!(source.required_format, 14 | 15)
                 || !tenant_indices.contains_key(tenant)
                 || sources.insert(tenant, source).is_some()
             {

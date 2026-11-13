@@ -20,6 +20,8 @@ pub(crate) use control_recovery::with_control_recovery_auth_pair_for_test;
 pub(crate) use control_recovery::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
 pub(super) use control_recovery::{ControlRecoveryAuthEpochV2, VerifiedControlRecoveryRunnerV2};
 pub(crate) use review_credentials::AuthenticatedReviewRunnerCredential;
+#[cfg(test)]
+pub(crate) use review_credentials::authenticate_review_runner_fixture;
 
 const MAX_CREDENTIAL_BYTES: usize = 4096;
 

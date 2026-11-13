@@ -267,7 +267,7 @@ fn require_checked_schema(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
     // source epoch, never because its version header alone looks modern.
     tx.require_business_access()?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 14 {
+    if matches!(version, 14 | 15) {
         Ok(())
     } else {
         require_schema(tx)
@@ -331,7 +331,7 @@ pub(super) fn validate_control_time_floor(
     before_seq: Option<i64>,
 ) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
         return Ok(());
     }
     let at = canonical_control_time(at)?;
@@ -1105,7 +1105,7 @@ fn sql_int(value: u64) -> anyhow::Result<rusqlite::types::Value> {
 }
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(

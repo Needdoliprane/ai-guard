@@ -2675,3 +2675,24 @@ La [refonte demandée](evidence/2026-10-30/editorial-ui/README.md) est réelleme
 Image active `agentsandbox-control:qa-20261030-editorial-fs-6f4d8b02`, ID `sha256:d8179e589f7104072f2b237860d809a254acaf474a7593b380f0a91cdf52ca7f`, gateway/dashboard/ingress healthy. Compose courant `/tmp/ai-guard-registry-qa.40IImn/compose-editorial-fs.yaml`. Audit512 identique avant/après remplacement ; après essais589événements, head `a1a2d354f4d9a712d4792474b39abf583e6c0882e56e3ad25ba9752150a71bb4`, valide. Volumes, données et anciennes images conservés. Docker Desktop/macOS ARM64 rootful explicitement choisi : confinement release11,84s, refus ACK terminal10,02s et smoke déployé42,04s PASS ; aucun compte fournisseur réel.
 
 **Prochain P0 : SQLite/WAL/SHM/backup.** La nouvelle primitive n'y est pas encore appliquée. Puis supervision autonome, réconciliation/fencing, relais et recette A1/A2/B1, quotas disque/logs, capacité100 et cloud/Kubernetes restent obligatoires. Les19 verdicts de l'audit figé restent inchangés ; le produit n'est pas globalement qualifié production.
+
+
+## 13 novembre — registre de politiques egress, Store15 logiciel
+
+Le registre Rust interne conserve dans la SQLite du tenant révisions immuables,
+heads CAS, reçus exacts et réserves terminales logiques. La maintenance explicite
+13→14→15 exige sauvegarde vérifiée, consommateurs arrêtés, commit et réouverture ;
+le format14/legacy reste fail-closed. L'acteur est un contrôle machine authentifié,
+sans approbation humaine déduite du propriétaire du binding. Aucun projet utilisateur
+migré, nouvelle CLI/route HTTP, permis de connexion ou effet réseau runtime.
+
+[Preuves EN](evidence/2026-11-13/egress-policy-store/README.md),
+[FR](evidence/2026-11-13/egress-policy-store/README.fr.md) et
+[guide](EGRESS_POLICY_STORE.fr.md) : 14 parents E1 PASS sur R5, puis 13 sélections
+restantes PASS et check toutes cibles RC0 sur R7, 320 avertissements. Sources
+composées distinctes, 2630 fichiers vérifiés chacune, closure0/OOM0 ; les 14 premiers
+corps inchangés ne sont pas rejoués. Les anciens NO_GO, compilation11 erreurs,
+appel d'intégrité legacy et prérequis privé de fixture restent consignés.
+Les réserves ne préallouent pas le disque. DNS/socket, permis, révocation appliquée,
+UI, capteur et qualifications Docker/Podman/Kubernetes restent ouverts ; bridge
+reste non médié, G05/G07/G11 et tous les gates globaux restent ouverts.

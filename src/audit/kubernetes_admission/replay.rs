@@ -339,7 +339,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         conflict(events.is_empty())?;
         return Ok(());
     }
-    conflict([8, 9, 10, 11, 12, 13, 14].contains(&version))?;
+    conflict([8, 9, 10, 11, 12, 13, 14, 15].contains(&version))?;
     migration::validate_recovery_marker(db)?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
@@ -372,7 +372,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::POLICY_GENESIS_KIND {
-            conflict([9, 10, 11, 12, 13, 14].contains(&version) && !policy_seen)?;
+            conflict([9, 10, 11, 12, 13, 14, 15].contains(&version) && !policy_seen)?;
             let (genesis_seq, genesis_hash) = create_genesis
                 .as_ref()
                 .ok_or(KubernetesCreateFailureV1::Conflict)?;
@@ -381,7 +381,7 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
             continue;
         }
         if stored.event.kind == migration::RECOVERY_GENESIS_KIND {
-            conflict(matches!(version, 13 | 14) && policy_seen && !recovery_seen)?;
+            conflict(matches!(version, 13 | 14 | 15) && policy_seen && !recovery_seen)?;
             migration::recovery_event(&stored.event)?;
             recovery_seen = true;
             continue;
@@ -436,8 +436,8 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     }
     conflict(
         create_genesis.is_some()
-            && policy_seen == ([9, 10, 11, 12, 13, 14].contains(&version))
-            && recovery_seen == matches!(version, 13 | 14),
+            && policy_seen == ([9, 10, 11, 12, 13, 14, 15].contains(&version))
+            && recovery_seen == matches!(version, 13 | 14 | 15),
     )?;
     let mut statement = db.prepare(&format!("{SELECT_ROW} ORDER BY create_id"))?;
     let actual = statement

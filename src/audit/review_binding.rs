@@ -35,7 +35,7 @@ const REVOKE_KIND: &str = "control.review_binding.revoked";
 
 fn require_modern(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 14 {
+    if matches!(version, 14 | 15) {
         Ok(())
     } else {
         Err(ReviewBindingFailureV1::MigrationRequired.into())
@@ -417,7 +417,7 @@ fn source_matches(
             && descriptor.tenant_id.as_deref() == Some(store.tenant_id())
             && binding.tenant_id == store.tenant_id()
             && descriptor.durable_namespace_id.to_string() == binding.control_namespace_uuid
-            && descriptor.required_format == 14
+            && matches!(descriptor.required_format, 14 | 15)
             && closure.closure_id.to_string() == binding.closure_id
             && closure.closure_revision == binding.closure_revision
             && closure.closure_digest == binding.closure_digest,

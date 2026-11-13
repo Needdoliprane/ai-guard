@@ -267,6 +267,7 @@ pub(super) enum Class<'a> {
     OrdinaryWrite,
     ControlWrite,
     IdentityMaintenance,
+    EgressTerminal(&'a super::egress::TerminalReservation<'a>),
     Workload(WorkloadAuditPrincipalV1),
 }
 
@@ -419,7 +420,7 @@ impl Cache {
             Class::Workload(_) => {
                 anyhow::bail!("workload audit requires its private admission policy")
             }
-            Class::IdentityMaintenance => Ok(()),
+            Class::IdentityMaintenance | Class::EgressTerminal(_) => Ok(()),
             Class::OrdinaryWrite => {
                 anyhow::ensure!(
                     next.within(

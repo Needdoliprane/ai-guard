@@ -59,7 +59,7 @@ impl OpeningAuthority<'_> {
         // A foreign argument is an admission refusal, never proof that the
         // correctly retained owner's durable source has become corrupt.
         if kind != HumanSourceKindV1::TenantStore
-            || required_format != 14
+            || !matches!(required_format, 14 | 15)
             || expected_tenant != Some(tenant)
             || path != binding.path()
             || identity.physical_identity() != (binding.source_device, binding.source_inode)
@@ -73,8 +73,15 @@ impl OpeningAuthority<'_> {
         self.physical(backing, db, tenant)?;
         let format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
         require(match self {
-            Self::Maintenance(_) => matches!(format, 13 | 14),
-            Self::Startup(_) => format == 14,
+            Self::Maintenance(token) => match token.descriptor().required_format {
+                14 => matches!(format, 13 | 14),
+                15 => matches!(format, 14 | 15),
+                _ => false,
+            },
+            Self::Startup(source) => {
+                matches!(format, 14 | 15)
+                    && u32::try_from(format).ok() == Some(source.descriptor().required_format)
+            }
         })?;
         validate_schema(db, false)?;
         Store::validate_metadata(db, tenant)?;
@@ -85,16 +92,20 @@ impl OpeningAuthority<'_> {
             Self::Maintenance(token) => {
                 let d = token.descriptor();
                 require(namespace == d.durable_namespace_id)?;
-                if format == 14 {
+                if matches!(format, 14 | 15) {
                     let snapshot = authority::replay(db)?;
                     require(
-                        snapshot.anchor.migration_id == token.migration_id()
+                        (d.required_format == 15
+                            || snapshot.anchor.migration_id == token.migration_id())
                             && snapshot.anchor.installation_id == d.installation_id
                             && snapshot.anchor.source_id == d.source_id
                             && snapshot.anchor.kind == d.kind
                             && snapshot.anchor.tenant_id == tenant
                             && snapshot.anchor.durable_namespace_id == d.durable_namespace_id,
                     )?;
+                    if d.required_format == 15 {
+                        egress::validate_maintenance_identity(db, token)?;
+                    }
                 }
             }
             Self::Startup(source) => {
@@ -240,6 +251,40 @@ impl ReviewStoreMaintenance {
 }
 
 impl<'a, 'db> ReviewStoreMaintenanceWriter<'a, 'db> {
+    pub(crate) fn prepare_egress_backup<'t>(
+        &self,
+        token: &'t HumanMaintenanceSourceToken,
+        path: &Path,
+    ) -> anyhow::Result<egress::VerifiedEgressSourceBackup<'t>> {
+        self.same_token(token)?;
+        egress::prepare_backup(self.store, self.transaction()?, token, path)
+    }
+
+    pub(crate) fn resume_egress_backup<'t>(
+        &self,
+        token: &'t HumanMaintenanceSourceToken,
+        path: &Path,
+    ) -> anyhow::Result<egress::VerifiedEgressSourceBackup<'t>> {
+        self.same_token(token)?;
+        egress::resume_backup(self.store, self.transaction()?, token, path)
+    }
+
+    /// Pending until explicit commit and source reopen/replay. A real backup
+    /// proof and stopped-consumer maintenance token are mandatory arguments.
+    pub(crate) fn install_egress_format15(
+        &mut self,
+        token: &HumanMaintenanceSourceToken,
+        backup: &egress::VerifiedEgressSourceBackup<'_>,
+        limits: &egress::EgressStoreLimitsV1,
+    ) -> anyhow::Result<AuthorityReceiptV1> {
+        self.same_token(token)?;
+        let result =
+            egress::install_format15(self.store, self.transaction()?, token, backup, limits);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result
+    }
     fn transaction(&self) -> anyhow::Result<&Transaction<'db>> {
         if self.failed {
             return Err(ReviewAuthorityFailure::Required.into());

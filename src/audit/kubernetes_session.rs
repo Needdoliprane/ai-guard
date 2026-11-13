@@ -67,7 +67,7 @@ fn require_schema(db: &Connection) -> anyhow::Result<()> {
 // Mutations continue using require_schema and do not gain modern authority.
 fn require_replay_schema(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if [11, 12, 13, 14].contains(&version) {
+    if [11, 12, 13, 14, 15].contains(&version) {
         Ok(())
     } else {
         Err(Failure::MigrationRequired.into())

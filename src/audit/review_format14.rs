@@ -30,7 +30,9 @@ fn exact(value: bool) -> anyhow::Result<()> {
 /// Exact SQLite DDL and every inherited replay remain the parent's job.
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    exact(format == 14)?;
+    // Exact15 inherits these unchanged14 source/binding facts; its additional
+    // five objects and replay are separately closed by the parent and egress.
+    exact(matches!(format, 14 | 15))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],

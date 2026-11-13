@@ -1250,3 +1250,27 @@ Après ce rapprochement, les correctifs de développement capture/masquage et co
 4. Qualifier stockage/logs et contention/drainage ; poursuivre la recette trois workers, relais et cibles runtime/cloud. Aucune de ces exigences n'est rendue facultative.
 
 Les corrections sont soumises à la même méthode : comportement reproduit si possible, test correctif, second regard, vérifications intégrées et preuves adaptées à la portée. Un refus d'exécuter une probe d'audit sans sandbox conforme demeure un manque de preuve ; il ne devient ni un rejet du candidat, ni une qualification du produit.
+
+
+## 13 novembre — suivi borné E1 Store15
+
+[Preuves publiques expurgées](evidence/2026-11-13/egress-policy-store/README.fr.md)
+et [relevé typé](evidence/2026-11-13/egress-policy-store/TESTS.json).
+La revue source R1 NO_GO_SOURCE reste conservée : fermeture de casse egress15,
+oracles de saturation et de propriétaire actif à corriger. R2 reçoit GO_SOURCE
+borné sur ces points et C1/C2 ; ses 11 erreurs de compilation fixture restent FAIL,
+sans RED comportementale. R3 build PASS puis premier parent FAIL sur l'intégrité
+legacy, après installation réussie : lire le reçu avec sa correction causale ;
+aucune expiration d'époque démontrée. R4 emploie une vraie intégrité scoped et
+préserve refus exacts legacy/SourceB et état inchangé.
+
+R5 conserve 14 PASS puis un FAIL de prérequis privé de fixture avant la boucle
+réservée, sans mode/UID effectifs capturés. Revue R6 GO_SOURCE limitée au parent15,
+création neuve0700/assertion/contrôles positifs/motif exact/snapshot ; APP et
+14 corps inchangés. R7 exécute uniquement les 13 sélections restantes PASS et
+check toutes cibles PASS avec320 avertissements, sources/fermeture vérifiées.
+Ces résultats restent attachés aux deux gels distincts. Ils ne clôturent aucun
+fingerprint des audits antérieurs, aucun gate ni qualification production.
+Les rapports/traces privés restent hors Git. Réserves logiques sans disque
+préalloué ; contrôle DNS/socket, permis, révocation appliquée, observation directe,
+Web/MCP distant, quatre modes fournisseur et moteurs réels restent ouverts.

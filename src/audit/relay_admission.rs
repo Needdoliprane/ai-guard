@@ -448,7 +448,7 @@ fn reconstruct(db: &Connection) -> anyhow::Result<Projection> {
         return Ok(Projection::default());
     }
     let schema: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    allowed([6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema))?;
+    allowed([6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema))?;
     let tenant: String = db.query_row(
         "SELECT tenant_id FROM tenant_binding WHERE singleton=1",
         [],

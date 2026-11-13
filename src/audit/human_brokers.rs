@@ -127,7 +127,7 @@ pub(super) fn genesis(db: &Connection) -> anyhow::Result<(StoredEvent, u64)> {
     Ok((stored, marker.authorization_revision))
 }
 pub(super) fn validate_capability(db: &Connection, version: i64) -> anyhow::Result<()> {
-    if [7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+    if [7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
         genesis(db)?;
     } else {
         let forbidden: bool = db.query_row(

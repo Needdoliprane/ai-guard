@@ -1,0 +1,1165 @@
+{
+  "schema_version": 1,
+  "document_kind": "redacted_software_evidence",
+  "date_utc": "2026-11-13",
+  "scope": "E1 tenant-local policy Store and explicit SQLite format15 maintenance; offline software tests only",
+  "base_commit": "ceb7b1f1c298a0f31044eca20a09cb2101c4d7c2",
+  "separately_published_human_corrections_commit": "328f3bc5cc042ebf7f8924c54d4e717d1de94acb",
+  "published_tree_equality_asserted": false,
+  "source_artifacts": [
+    {
+      "artifact_id": "e1-r6-manifest",
+      "sha256": "a8e87d5348df7863b96a96c57ddbcd55fd45536c04c49f1467c5614ad76ae5a6",
+      "role": "29 E1 owned source postimages",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "e1-r6-source-archive",
+      "sha256": "1701aa01ac3de09354953c186018b6590027984531a12fa1ba1995322ae30fd2",
+      "role": "private source postimages; not publicly distributed",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "review-r1",
+      "sha256": "7d7e2b84ad85df773b33e7afa83c6ce9cafde09290b7b37e1a648ff44c11a698",
+      "role": "historical NO_GO_SOURCE",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "review-r2",
+      "sha256": "6f4e67018f2a3d79aacb009d7a4c9041a018475f8b012f7918f60e1310ca8030",
+      "role": "scoped GO_SOURCE for R1/R2/R3/C1/C2",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "review-r3",
+      "sha256": "3c7ed6c1c60cc86048e22dbcc50ea51bfc1886b46f9c3661406e61d38a01e5ea",
+      "role": "fixture compiler correction only",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "review-r4",
+      "sha256": "e4c79a5a3d4b153871960a74cd52e193c34461f55b6cde5c3388c0bf63d5a18c",
+      "role": "scoped integrity fixture correction only",
+      "public_payload_included": false
+    },
+    {
+      "artifact_id": "review-r6",
+      "sha256": "b542662689630be40064e6101f61709e5a02c188a5433919f27e0b591a32eaa6",
+      "role": "parent15 fixture correction and unchanged-code review",
+      "public_payload_included": false
+    }
+  ],
+  "source_relationship": {
+    "r5_to_r7_changed_paths": [
+      "src/audit/egress/tests.rs"
+    ],
+    "changed_parent_body": 15,
+    "other_composed_files_unchanged": 2629,
+    "application_helpers_human4_unchanged": true,
+    "r5_first14_bodies_unchanged": true,
+    "independent_review_sha256": "b542662689630be40064e6101f61709e5a02c188a5433919f27e0b591a32eaa6",
+    "r7_is_not_a_27_parent_run": true
+  },
+  "environment": {
+    "os": "Linux",
+    "architecture": "aarch64",
+    "kernel": "7.0.14-linuxkit",
+    "selected_rust_toolchain": "1.99.1",
+    "image_id": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "network": "none",
+    "read_only_rootfs": true,
+    "privileged": false,
+    "ipc": "private",
+    "cgroup_namespace": "private",
+    "capabilities_dropped": "ALL",
+    "no_new_privileges": true,
+    "cpu_limit": 4,
+    "memory_limit_bytes": 9663676416,
+    "memory_plus_swap_limit_bytes": 9663676416,
+    "pids_limit": 128,
+    "scratch_tmpfs_limit_bytes": 4294967296,
+    "scratch_tmpfs_inode_limit": 131072,
+    "read_only_input_binds": 2,
+    "cargo_build_jobs": 1,
+    "cargo_incremental": false,
+    "dev_and_test_debug_info": 0,
+    "cargo_network_offline": true,
+    "native_project_execution": false,
+    "target_executor": "Luna",
+    "receipt_and_closure_verifier": "Root"
+  },
+  "execution_policy": {
+    "fresh_exact_list_before_each_reached_parent": true,
+    "invocations_per_reached_parent": 1,
+    "stop_on_first_error": true,
+    "retries": 0,
+    "all_targets_check_only_after_all_scheduled_parents_pass": true,
+    "zero_selected_tests_is_pass": false
+  },
+  "historical_records": [
+    {
+      "id": "R1",
+      "kind": "source_review",
+      "verdict": "NO_GO_SOURCE",
+      "review_sha256": "7d7e2b84ad85df773b33e7afa83c6ce9cafde09290b7b37e1a648ff44c11a698",
+      "tests": "NOT_RUN",
+      "retained": true,
+      "findings": [
+        "format15 reserved-family case handling",
+        "saturation refusal oracle",
+        "active-owner maintenance refusal oracle"
+      ]
+    },
+    {
+      "id": "R2",
+      "kind": "isolated_all_targets_compile",
+      "status": "FAIL",
+      "exit_code": 101,
+      "error_diagnostics": 11,
+      "affected_source_files": [
+        "src/audit/egress/fixtures.rs"
+      ],
+      "tests": "NOT_RUN",
+      "behavioral_red": false,
+      "source_archive_sha256": "bb4c79b48764bb6cc0eb916bbb8e451ebd3df2108caf182bb64e1ba9471f6e34",
+      "verified_receipt_sha256": "9d303493652b79ac13b9e82a3d1349ed52af556a8f5e2bee620c0a4025cfb47e",
+      "compiler_errors_sha256": "d31d413fc609ea415a75eae9cf0b812cc50c2ad9ce4a4315b771a74fdd67c713"
+    },
+    {
+      "id": "R3",
+      "kind": "first_parent_fixture_failure",
+      "lib_test_build": "PASS",
+      "first_parent": "FAIL",
+      "first_parent_exit_code": 101,
+      "remaining_e1_parents_not_run": 18,
+      "all_targets_check": "NOT_RUN",
+      "source_archive_sha256": "163dc9f70e2b3548c508eb656c151a47654bb24da52429075f69c34068969a7e",
+      "original_receipt_sha256": "dd76d5f55feb3599c2b11bffbb26e8e33cf05037a57f826da3e258e0a4b6b03a",
+      "causal_correction_sha256": "0b3100d432aa5f43cc348ed1da78c84043d938466983503185fbfe91fb76b418",
+      "read_original_with_correction": true,
+      "corrected_operation": "reopened.integrity().unwrap() at tests.rs:24:34",
+      "install_and_genuine_source_reopen_completed": true,
+      "cause": "Legacy integrity entrypoint correctly refuses format15; fixture chose the wrong read API",
+      "epoch_expiry_established": false,
+      "corrected_in": "R4 real scoped integrity read; exact legacy and SourceB refusal canaries preserved"
+    },
+    {
+      "id": "R6",
+      "kind": "test_only_source_correction",
+      "review_verdict": "GO_SOURCE",
+      "review_sha256": "b542662689630be40064e6101f61709e5a02c188a5433919f27e0b591a32eaa6",
+      "changed_source_files": 1,
+      "changed_parent_bodies": [
+        15
+      ],
+      "unchanged_other_e1_files": 28,
+      "application_and_helpers_unchanged": true,
+      "first14_bodies_unchanged": true,
+      "same_e1_parent_names": 19,
+      "new_directory_requested_mode_octal": "0700",
+      "effective_mode_asserted": true,
+      "existing_paths_repaired": false,
+      "global_umask_changed": false,
+      "production_guards_changed": false,
+      "strengthened_oracles": [
+        "positive ordinary append and integrity before and after",
+        "exact reserved-kind refusal for each original case",
+        "unchanged canonical format/head/hash/count/quota/no-egress-schema snapshot"
+      ],
+      "execution_by_source_reviewer": "NOT_RUN"
+    }
+  ],
+  "runs": [
+    {
+      "id": "R5",
+      "scope": "frozen_offline_software_QA",
+      "verified_result_at_utc": "2026-11-13T04:16:44.804Z",
+      "verified_receipt_sha256": "ef0b8870361e8652a3cb134978013991a4f61e9b3289e1cec24b58d7b23b4858",
+      "input_source": {
+        "archive_sha256": "430965dfc57ac5002cde906187224840276eeddce42fcaba6721aec9cf2e5fe9",
+        "files": 2630,
+        "composition": "public base +29 E1 R4 postimages +4 reviewed human postimages"
+      },
+      "lib_test_build": {
+        "status": "PASS",
+        "exit_code": 0,
+        "argv": [
+          "/usr/local/cargo/bin/cargo",
+          "test",
+          "--frozen",
+          "--offline",
+          "--lib",
+          "--no-run",
+          "--message-format=json"
+        ]
+      },
+      "parent_results": {
+        "passed": 14,
+        "failed": 1,
+        "ignored": 0,
+        "not_run": 12,
+        "parents": [
+          {
+            "position": 1,
+            "selector": "audit::egress::tests::tenant_policy_survives_reopen_and_isolated_other_tenant_remains_empty",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::tenant_policy_survives_reopen_and_isolated_other_tenant_remains_empty",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::tenant_policy_survives_reopen_and_isolated_other_tenant_remains_empty",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 2,
+            "selector": "audit::egress::tests::exact_retry_is_byte_identical_and_foreign_source_is_refused_before_replay",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::exact_retry_is_byte_identical_and_foreign_source_is_refused_before_replay",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::exact_retry_is_byte_identical_and_foreign_source_is_refused_before_replay",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 3,
+            "selector": "audit::egress::tests::revoke_is_requested_once_and_exact_retry_never_claims_runtime_application",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::revoke_is_requested_once_and_exact_retry_never_claims_runtime_application",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::revoke_is_requested_once_and_exact_retry_never_claims_runtime_application",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 4,
+            "selector": "audit::egress::tests::retained_entry_ceiling_holds_exact_terminal_slot_and_revoke_consumes_it",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 60,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::retained_entry_ceiling_holds_exact_terminal_slot_and_revoke_consumes_it",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::retained_entry_ceiling_holds_exact_terminal_slot_and_revoke_consumes_it",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 5,
+            "selector": "audit::egress::tests::ordinary_control_and_identity_writes_preserve_terminal_audit_reservation",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 180,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::ordinary_control_and_identity_writes_preserve_terminal_audit_reservation",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::ordinary_control_and_identity_writes_preserve_terminal_audit_reservation",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 6,
+            "selector": "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 7,
+            "selector": "audit::egress::tests::capacity_and_sqlite_full_leave_policy_operation_and_reserve_unchanged",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::capacity_and_sqlite_full_leave_policy_operation_and_reserve_unchanged",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::capacity_and_sqlite_full_leave_policy_operation_and_reserve_unchanged",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 8,
+            "selector": "audit::egress::tests::reopen_rejects_projection_and_limits_tampering_and_redaction_collision",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 120,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::reopen_rejects_projection_and_limits_tampering_and_redaction_collision",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::reopen_rejects_projection_and_limits_tampering_and_redaction_collision",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 9,
+            "selector": "audit::egress::tests::maintenance_migration_is_explicit_backed_up_and_format14_remains_closed",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::maintenance_migration_is_explicit_backed_up_and_format14_remains_closed",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::maintenance_migration_is_explicit_backed_up_and_format14_remains_closed",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 10,
+            "selector": "audit::egress::tests::format15_replay_refuses_noncanonical_reserved_family_without_projection_mutation",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 120,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::format15_replay_refuses_noncanonical_reserved_family_without_projection_mutation",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::format15_replay_refuses_noncanonical_reserved_family_without_projection_mutation",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 11,
+            "selector": "audit::egress::tests::inherited_noncanonical_ordinary_history_stays_ordinary_in_format15",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 60,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::inherited_noncanonical_ordinary_history_stays_ordinary_in_format15",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::inherited_noncanonical_ordinary_history_stays_ordinary_in_format15",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 12,
+            "selector": "audit::egress::tests::saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_classification",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_classification",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::saturation_helper_propagates_real_source_refusal_and_rejects_clock_error_classification",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 13,
+            "selector": "audit::egress::tests::maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::maintenance_active_owner_refusal_is_typed_at_acquisition_and_effect_free",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 14,
+            "selector": "audit::egress::tests::format15_genesis_predecessor_must_include_the_original_format14_anchor",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 60,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::format15_genesis_predecessor_must_include_the_original_format14_anchor",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::format15_genesis_predecessor_must_include_the_original_format14_anchor",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 15,
+            "selector": "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+            "status": "FAIL",
+            "exit_code": 101,
+            "passed": 0,
+            "failed": 1,
+            "ignored": 0,
+            "timeout_seconds": 30,
+            "list_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-composed-r5/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 16,
+            "selector": "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 60,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 17,
+            "selector": "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 90,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 18,
+            "selector": "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 60,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 19,
+            "selector": "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 30,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 20,
+            "selector": "human_authority::tests::source_mount_validation_keeps_exact_parent_and_entry_bindings",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 21,
+            "selector": "human_authority::tests::an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 22,
+            "selector": "human_authority::tests::source_mount_failures_keep_parent_unavailable_and_entry_binding_categories",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 23,
+            "selector": "human_authority::tests::initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 24,
+            "selector": "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 25,
+            "selector": "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 26,
+            "selector": "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          },
+          {
+            "position": 27,
+            "selector": "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+            "status": "NOT_RUN",
+            "exit_code": null,
+            "passed": null,
+            "failed": null,
+            "ignored": null,
+            "timeout_seconds": 45,
+            "list_argv": null,
+            "executed_argv": null
+          }
+        ]
+      },
+      "all_targets_check": {
+        "status": "NOT_RUN",
+        "exit_code": null,
+        "error_diagnostics": null,
+        "warning_diagnostics": null,
+        "executed_argv": null
+      },
+      "closure": {
+        "status": "PASS",
+        "exit_code": 0,
+        "experiment_exit_code": 101,
+        "final_exit_code": 101,
+        "source_content_and_modes_match_input": true,
+        "post_source_files": 2630,
+        "post_source_archive_bytes": 30863360,
+        "post_source_archive_sha256": "a369d569db2668c0b7dc0650f923d04c527d619badf6724b61848709c45d0839",
+        "private_raw_files": 518,
+        "private_raw_manifest_sha256": "f995d4d918ad50067422ab58bb992198810cf7154f4aca509494aa4b1fb7e831",
+        "container_stopped": true,
+        "container_removed": true,
+        "holder_exit_code": 137,
+        "holder_exit_is_not_test_exit": true
+      },
+      "memory": {
+        "limit_bytes": 9663676416,
+        "peak_observed_cgroup_bytes": 6530342912,
+        "oom": 0,
+        "oom_kill": 0,
+        "container_oom_killed": false
+      },
+      "fixture_failure": {
+        "selector": "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+        "location": "src/audit/egress/tests.rs:414:6",
+        "phase": "Store open before case-variant loop",
+        "cause": "Private directory creation precondition was not guaranteed by the test fixture",
+        "effective_numeric_mode": null,
+        "effective_uid": null,
+        "is_network_policy_behavioral_red": false,
+        "corrected_in": "E1 R6 parent15 only"
+      }
+    },
+    {
+      "id": "R7",
+      "scope": "frozen_offline_software_QA",
+      "verified_result_at_utc": "2026-11-13T04:43:34.044Z",
+      "verified_receipt_sha256": "cca283a376daa86709e1b0f540c98b606051db3385e79f9cb7b8be6a6bf56296",
+      "input_source": {
+        "archive_sha256": "dd5f66a927e7ce61727530f0774eb4a4dc79e024dd316d91ff92fc58df8385ae",
+        "files": 2630,
+        "composition": "R5 composition with only reviewed E1 R6 parent15 body changed"
+      },
+      "lib_test_build": {
+        "status": "PASS",
+        "exit_code": 0,
+        "argv": [
+          "/usr/local/cargo/bin/cargo",
+          "test",
+          "--frozen",
+          "--offline",
+          "--lib",
+          "--no-run",
+          "--message-format=json"
+        ]
+      },
+      "parent_results": {
+        "passed": 13,
+        "failed": 0,
+        "ignored": 0,
+        "not_run": 0,
+        "parents": [
+          {
+            "position": 1,
+            "selector": "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 30,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::untrusted_case_variants_are_reserved_even_before_egress_migration",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 2,
+            "selector": "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 60,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::revoked_live_binding_cannot_replay_retained_machine_receipt",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 3,
+            "selector": "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 90,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::durable_clock_regression_refuses_new_mutation_and_exact_replay",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 4,
+            "selector": "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 60,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 5,
+            "selector": "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 30,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "audit::egress::tests::invalid_limits_and_sqlite_integer_overflow_refuse_before_storage",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 6,
+            "selector": "human_authority::tests::source_mount_validation_keeps_exact_parent_and_entry_bindings",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::source_mount_validation_keeps_exact_parent_and_entry_bindings",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::source_mount_validation_keeps_exact_parent_and_entry_bindings",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 7,
+            "selector": "human_authority::tests::an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 8,
+            "selector": "human_authority::tests::source_mount_failures_keep_parent_unavailable_and_entry_binding_categories",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::source_mount_failures_keep_parent_unavailable_and_entry_binding_categories",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::source_mount_failures_keep_parent_unavailable_and_entry_binding_categories",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 9,
+            "selector": "human_authority::tests::initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 10,
+            "selector": "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 11,
+            "selector": "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 12,
+            "selector": "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          },
+          {
+            "position": 13,
+            "selector": "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+            "status": "PASS",
+            "exit_code": 0,
+            "passed": 1,
+            "failed": 0,
+            "ignored": 0,
+            "timeout_seconds": 45,
+            "list_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+              "--exact",
+              "--list"
+            ],
+            "executed_argv": [
+              "/scratch/target-egress-human-remaining-r7/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+              "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+              "--exact",
+              "--nocapture",
+              "--test-threads=1"
+            ]
+          }
+        ]
+      },
+      "all_targets_check": {
+        "status": "PASS",
+        "exit_code": 0,
+        "error_diagnostics": 0,
+        "warning_diagnostics": 320,
+        "executed_argv": [
+          "/usr/local/cargo/bin/cargo",
+          "check",
+          "--frozen",
+          "--offline",
+          "--all-targets",
+          "--message-format=json"
+        ]
+      },
+      "closure": {
+        "status": "PASS",
+        "exit_code": 0,
+        "experiment_exit_code": 0,
+        "final_exit_code": 0,
+        "source_content_and_modes_match_input": true,
+        "post_source_files": 2630,
+        "post_source_archive_bytes": 30873600,
+        "post_source_archive_sha256": "6c766232b3d7c6f2899ee64367976e9cd79b7238dc77e9d93555c9a154b085fb",
+        "private_raw_files": 468,
+        "private_raw_manifest_sha256": "49d31a23923b5abdf726bf880c2e8019951fa37ffb004f0e68a83f054edc5708",
+        "container_stopped": true,
+        "container_removed": true,
+        "holder_exit_code": 137,
+        "holder_exit_is_not_test_exit": true
+      },
+      "memory": {
+        "limit_bytes": 9663676416,
+        "peak_observed_cgroup_bytes": 6482698240,
+        "oom": 0,
+        "oom_kill": 0,
+        "container_oom_killed": false
+      },
+      "prior_r5_passes": {
+        "passed": 14,
+        "reexecuted_in_this_run": false,
+        "receipt_sha256": "ef0b8870361e8652a3cb134978013991a4f61e9b3289e1cec24b58d7b23b4858",
+        "source_review_sha256": "b542662689630be40064e6101f61709e5a02c188a5433919f27e0b591a32eaa6"
+      }
+    }
+  ],
+  "acceptance_scope": {
+    "real_private_sqlite_fixtures": true,
+    "real_backups_and_migrations": "13→14→15",
+    "real_source_owner_epochs_and_binding_validation": true,
+    "machine_actor_authenticated": true,
+    "human_owner_is_approver": false,
+    "source_b_negative_and_unchanged_snapshot": true,
+    "logical_terminal_reservation": true,
+    "physical_disk_preallocated": false,
+    "event_count_saturation_and_byte_quota_agreement": true,
+    "physical_byte_saturation_measured": false,
+    "sqlite_full_rollback_exercised": true,
+    "active_owner_refusal_exact": "OwnerContended",
+    "user_projects_or_existing_user_databases_migrated": false
+  },
+  "not_run_in_these_campaigns": [
+    "strict Clippy",
+    "full software suite",
+    "release build",
+    "native-host qualification",
+    "elapsed-time expired-policy Store path",
+    "commit/WAL/I/O fault recovery",
+    "physical byte saturation",
+    "100-worker capacity",
+    "HTTP/UI policy delivery",
+    "human network permission",
+    "durable connection permits",
+    "DNS/socket mediation",
+    "applied runtime revocation",
+    "common-channel/bootstrap integration",
+    "independent direct-attempt sensor",
+    "remote Web/MCP mediation",
+    "four real provider modes",
+    "Docker/Podman/Kubernetes worker acceptance"
+  ],
+  "invariants_and_limits": {
+    "format14_legacy_access_remains_fail_closed": true,
+    "format15_migration_explicit": true,
+    "automatic_migration": false,
+    "migration_cli_delivered": false,
+    "new_http_route": false,
+    "connection_or_runtime_network_activation": false,
+    "bridge_remains_unmediated": true,
+    "revoke_requested_is_applied_revocation": false,
+    "logical_reserve_guarantees_storage_availability": false,
+    "global_gates_closed": 0,
+    "gates_kept_open": [
+      "G05",
+      "G07",
+      "G11"
+    ],
+    "historical_audit_findings_closed": false,
+    "raw_logs_private": true,
+    "private_source_archives_distributed": false
+  }
+}

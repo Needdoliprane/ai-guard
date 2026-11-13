@@ -407,7 +407,7 @@ fn require_schema(db: &Connection) -> anyhow::Result<()> {
 fn require_checked_schema(tx: &CheckedTransaction<'_>) -> anyhow::Result<()> {
     tx.require_business_access()?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 14 {
+    if matches!(version, 14 | 15) {
         Ok(())
     } else {
         require_schema(tx)
@@ -468,7 +468,7 @@ fn runtime_name(kind: BrokerRuntimeKindV1) -> anyhow::Result<String> {
 
 pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
-    if ![6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+    if ![6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
         return Ok(());
     }
     let tenant: String = db.query_row(
@@ -514,7 +514,8 @@ pub(super) fn validate(db: &Connection) -> anyhow::Result<()> {
         require(seen_genesis)?;
         let record: Record = serde_json::from_value(stored.event.data.clone())?;
         require(
-            !matches!(record.change, Change::Checkpoint { .. }) || matches!(version, 12 | 13 | 14),
+            !matches!(record.change, Change::Checkpoint { .. })
+                || matches!(version, 12 | 13 | 14 | 15),
         )?;
         require(
             stored.event.kind == record.change.kind()
@@ -734,7 +735,10 @@ impl Store {
     ) -> anyhow::Result<String> {
         require(
             view.version == 1
-                && matches!(view.schema_version, 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14),
+                && matches!(
+                    view.schema_version,
+                    6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15
+                ),
         )?;
         crate::tenancy::validate_tenant_id(&view.tenant_id)?;
         for id in [

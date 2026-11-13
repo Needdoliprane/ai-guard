@@ -156,6 +156,7 @@ mod capacity_tests;
 #[cfg(test)]
 mod collision_isolation_tests;
 mod control;
+pub(crate) mod egress;
 mod human;
 mod human_brokers;
 mod human_workers;
@@ -422,9 +423,14 @@ fn schema_objects(
 ) -> impl Iterator<Item = &'static (&'static str, &'static str, &'static str)> {
     // Format14 inherits the complete, closed13 profile. Its extensions are
     // explicit; no future version can inherit it by a range comparison.
-    let inherited = if version == 14 { 13 } else { version };
+    let inherited = if matches!(version, 14 | 15) {
+        13
+    } else {
+        version
+    };
     inherited_schema_objects(inherited)
-        .chain(review_format14::schema_objects().filter(move |_| version == 14))
+        .chain(review_format14::schema_objects().filter(move |_| matches!(version, 14 | 15)))
+        .chain(egress::SCHEMA.iter().filter(move |_| version == 15))
 }
 
 fn inherited_schema_objects(
@@ -501,7 +507,7 @@ fn normalized_schema(sql: &str) -> String {
 fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     anyhow::ensure!(
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version)
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version)
             || (allow_legacy && version == 0),
         "unsupported audit schema version"
     );
@@ -523,7 +529,11 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         );
         return Ok(true);
     }
-    let inherited = if version == 14 { 13 } else { version };
+    let inherited = if matches!(version, 14 | 15) {
+        13
+    } else {
+        version
+    };
     let automatic = AUTO_INDEX_COUNTS
         .iter()
         .chain(
@@ -563,7 +573,12 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
         } else {
             [].iter()
         })
-        .chain(review_format14::auto_index_counts().filter(move |_| version == 14))
+        .chain(review_format14::auto_index_counts().filter(move |_| matches!(version, 14 | 15)))
+        .chain(
+            egress::AUTO_INDEX_COUNTS
+                .iter()
+                .filter(move |_| version == 15),
+        )
         .filter(|(table, _)| {
             if *table == "events" {
                 true
@@ -665,11 +680,16 @@ fn validate_schema(db: &Connection, allow_legacy: bool) -> anyhow::Result<bool> 
             "internal audit schema index is missing"
         );
     }
-    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&version) {
+    if [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&version) {
         identity::validate_human_access_capability(db, version)?;
     }
     human_brokers::validate_capability(db, version)?;
     human_workers::validate_capability(db, version)?;
+    // Old profiles, including audit-only1, must never contain a future
+    // reserved egress family. Exact15's complete replay runs under control.
+    if version != 15 {
+        egress::validate(db)?;
+    }
     Ok(false)
 }
 
@@ -813,7 +833,7 @@ impl Store {
         // Descriptive format14 validation is also used by maintenance. A
         // legacy opener must not thereby acquire access or alter its journal.
         let prepared_format: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if prepared_format == 14 {
+        if matches!(prepared_format, 14 | 15) {
             review_access::require_legacy(&db)?;
         }
         // Unknown schemas are inspected without even changing journal mode.
@@ -829,7 +849,7 @@ impl Store {
         // A maintenance writer can commit format14 after the initial probe.
         // Recheck inside this writer before any binding or projection access.
         // Format0 still follows the ordinary empty-database initialization.
-        if initial_version == 14 {
+        if matches!(initial_version, 14 | 15) {
             review_access::require_legacy(&tx)?;
         }
         let empty = validate_schema(&tx, allow_initialization)?;
@@ -1614,35 +1634,54 @@ impl Store {
             .optional()?
             .unwrap_or((0, "0".repeat(64)));
         let count = u64::try_from(last).context("invalid audit event count")?;
+        if let capacity::Class::EgressTerminal(reservation) = &class {
+            reservation.validate(tx, &event)?;
+        }
+        // All appenders, including control and identity maintenance, leave
+        // every other active head's durable terminal reservation untouched.
+        let available = egress::protected_capacity(
+            tx,
+            AuditCapacityV1 {
+                events: self.max_events,
+                bytes: capacity::PHYSICAL_BYTES,
+            },
+        )?;
+        if available.events < self.max_events && count >= available.events {
+            return Err(egress::EgressStoreFailure::AuditReservationExhausted.into());
+        }
         anyhow::ensure!(
-            count < self.max_events,
+            count < available.events,
             "audit capacity exhausted; preserve audit and contact operator"
         );
         let used: i64 = tx.query_row("SELECT bytes FROM quota WHERE id=1", [], |r| r.get(0))?;
         let used_bytes = u64::try_from(used).context("invalid audit byte usage")?;
         let payload_bytes = u64::try_from(payload.len()).context("audit payload too large")?;
+        if available.bytes < capacity::PHYSICAL_BYTES
+            && used_bytes
+                .checked_add(payload_bytes)
+                .is_none_or(|next| next > available.bytes)
+        {
+            return Err(egress::EgressStoreFailure::AuditReservationExhausted.into());
+        }
         anyhow::ensure!(
             used_bytes
                 .checked_add(payload_bytes)
-                .is_some_and(|next| next <= capacity::PHYSICAL_BYTES),
+                .is_some_and(|next| next <= available.bytes),
             "audit byte capacity exhausted"
         );
         let schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         // During the explicit5→6 migration the projection is created/seeded
         // before its genesis events, while user_version still correctly is5.
-        let project_time = [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema)
+        let project_time = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema)
             || (schema == 5 && workload::time_floors_present(tx)?);
-        if [5, 6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
+        if [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema) {
             let mut cache = self
                 .supervision_lease
                 .capacity
                 .lock()
                 .map_err(|_| anyhow::anyhow!("audit capacity cache lock poisoned"))?;
             let pending = cache.prepare(tx)?;
-            let physical = AuditCapacityV1 {
-                events: self.max_events,
-                bytes: capacity::PHYSICAL_BYTES,
-            };
+            let physical = available;
             let total = AuditCapacityV1 {
                 events: count,
                 bytes: used_bytes,
@@ -1653,7 +1692,7 @@ impl Store {
             };
             if let capacity::Class::Workload(principal) = &class {
                 anyhow::ensure!(
-                    [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema),
+                    [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema),
                     "workload audit requires schema6"
                 );
                 let event_principal = capacity::workload_identity(&event)?
@@ -1675,10 +1714,7 @@ impl Store {
                 cache.admit(
                     &pending,
                     &self.capacity_policy,
-                    AuditCapacityV1 {
-                        events: self.max_events,
-                        bytes: capacity::PHYSICAL_BYTES,
-                    },
+                    available,
                     AuditCapacityV1 {
                         events: count,
                         bytes: used_bytes,
@@ -2016,7 +2052,7 @@ impl Store {
     }
     fn check_integrity(db: &Connection) -> anyhow::Result<Integrity> {
         let schema: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        let query = if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
+        let query = if [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema) {
             "SELECT e.seq,e.received_at,e.prev_hash,e.hash,e.payload,e.id,e.kind,e.agent_id,e.sandbox_id,e.project_id,e.decision,f.max_received_at FROM events e LEFT JOIN audit_time_floors f ON f.event_seq=e.seq ORDER BY e.seq"
         } else {
             "SELECT seq,received_at,prev_hash,hash,payload,id,kind,agent_id,sandbox_id,project_id,decision FROM events ORDER BY seq"
@@ -2051,7 +2087,7 @@ impl Store {
             } else {
                 false
             };
-            let time_valid = if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
+            let time_valid = if [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema) {
                 let received = workload::canonical_control_time(
                     crate::broker_registry::parse_time(&received)?,
                 )?;
@@ -2078,7 +2114,7 @@ impl Store {
             prev = hash;
             count += 1;
         }
-        if [6, 7, 8, 9, 10, 11, 12, 13, 14].contains(&schema) {
+        if [6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&schema) {
             let floors: i64 =
                 db.query_row("SELECT COUNT(*) FROM audit_time_floors", [], |row| {
                     row.get(0)
