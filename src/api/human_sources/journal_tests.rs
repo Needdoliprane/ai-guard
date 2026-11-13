@@ -175,13 +175,14 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
         record["membership_revision"].as_u64().unwrap().to_string(),
         context["membership_revision"].as_str().unwrap()
     );
-    let authorization_revision: u64 = connection
+    let authorization_revision: i64 = connection
         .query_row(
             "SELECT authorization_revision FROM identity_meta WHERE singleton=1",
             [],
             |row| row.get(0),
         )
         .unwrap();
+    let authorization_revision = u64::try_from(authorization_revision).unwrap();
     assert_eq!(record["authorization_revision"], authorization_revision);
     let floor: bool = connection
         .query_row(
