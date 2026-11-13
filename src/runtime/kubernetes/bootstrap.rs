@@ -1,6 +1,13 @@
 //! V2 waiting-bootstrap preamble, using the relay's four-byte BE envelope.
 //! Attach identity is NOT established by an echo. There is no Release/Start,
 //! credential handoff or command execution in this stage of the protocol.
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "V2 waiting-bootstrap preamble without a production caller until stage S2b (Root decisions Q1 and Q6)"
+    )
+)]
 use super::session::SessionBootstrapBindingV2;
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};

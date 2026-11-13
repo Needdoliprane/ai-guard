@@ -7313,3 +7313,12 @@ relais, confinement inter-tenant, Docker/Podman/Kubernetes, capacité100 ou pann
 physique. Clippy strict/suite complète/release NOT_RUN dans ce lot. Le1PASS
 prewire sur autre source et les5NOT_RUN privés du cadre historique ne sont pas
 transférés. Aucun gate ni fingerprint fermé.
+
+
+## 13 novembre — composition des livraisons Claude Kubernetes V2 et release
+
+Mise à jour distincte des états historiques : [preuves EN/FR](evidence/2026-11-13/claude-composition/README.fr.md) et [résultats typés](evidence/2026-11-13/claude-composition/TESTS.json). Source testée immuable `f12a46af…`, 2738 fichiers : 27 groupes uniques, 272 parents actifs PASS (144 Kubernetes, 123 release, 5 broker), zéro échec, deux helpers ignorés NOT_RUN. Compilation PASS/275 avertissements ; check toutes cibles PASS/286 avertissements ; Clippy NOT_RUN. **Global RC99 : aucun PASS global**, sous-cas `it-manifest` parent0700 autre UID NOT_RUN faute de second compte. Les parents PASS ne prouvent pas la couverture de tous leurs sous-cas.
+
+Contenus/modes post-run exacts, six collectes et fermeture RC0, conteneur QA exact retiré, OOM0 et temporaire vide ; fixtures privées hors publication. Les composants A `356312ff…`/24 chemins et B `5e8e1811…`/22 chemins sont identifiés dans les preuves. La source broker `223b699e959964bef4460f34857516cb8cdd37c8` diffère du public Root `6cc6b3a25f4dd1fea4ead3180cde1d58fb912001` sur huit chemins de documentation/preuves seulement. Séparément, la source jointe testée `f12a46af435a09c754084f3a1eb3db9f650f800f` contient les 46 postimages A/B livrées et diffère de Root sur 54 chemins, dont 40 hors docs. La publication prévue compose Root avec ces 46 postimages A/B et les 15 payloads documentaires revus ; Root doit vérifier indépendamment la composition hors documentation après staging, avant commit. Aucune égalité d’arbre complet entre source testée et publication future n’est affirmée. Manifest/verify W1–W3 sont livrés ; PW1/PW2/PW3/PW6/PW8 restent proposés, labels `declared`, sans signature ni preuve de build reproductible.
+
+Aucun vrai runtime métier, fournisseur, IdP, cloud/cluster, macOS natif, charge100, image produit ou build release qualifié. L’image outil QA seule a été inspectée. S5 production reste fermé ; S2b attach est actif chez Claude, non intégré. Les questions historiques Q1/Q6 restent distinctes du nouveau dispatch. Aucun gate ni fingerprint des audits antérieurs clos ; les preuves du 12 novembre restent intactes et datées.

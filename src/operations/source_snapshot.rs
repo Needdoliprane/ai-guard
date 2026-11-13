@@ -18,6 +18,7 @@
 //! storage and engine administrators remain trusted.
 mod capture;
 mod interrupt;
+mod release_metadata;
 #[cfg(test)]
 mod tests;
 
@@ -68,6 +69,12 @@ pub(super) async fn prepare_build(source: &Path) -> Result<PreparedSource> {
 /// Prepares exactly `deploy/<kind>/compose.yaml` and an empty environment file.
 pub(super) async fn prepare_compose(source: &Path, kind: RuntimeKind) -> Result<PreparedSource> {
     prepare(source, Scope::Compose(kind)).await
+}
+
+/// One `release` operator command, on a build source prepared as `build`
+/// prepares it. It starts no engine command.
+pub(super) async fn release(command: super::ReleaseCommand) -> Result<()> {
+    release_metadata::execute(command).await
 }
 
 async fn prepare(source: &Path, scope: Scope) -> Result<PreparedSource> {
@@ -482,13 +489,16 @@ fn unknown(subject: &str, end: &UnknownEnd, root: &Path) -> String {
     )
 }
 
-/// `Build`, `Up` and `Down` hold a prepared source across engine commands and
-/// run inside one interruption scope; a command already inside one does not
-/// open another.
+/// `Build`, `Up` and `Down` hold a prepared source across engine commands, and
+/// `Release` holds one while it reads and hashes; all run inside one
+/// interruption scope; a command already inside one does not open another.
 pub(super) fn needs_interrupt_scope(command: &OperatorCommand) -> bool {
     matches!(
         command,
-        OperatorCommand::Build { .. } | OperatorCommand::Up { .. } | OperatorCommand::Down { .. }
+        OperatorCommand::Build { .. }
+            | OperatorCommand::Up { .. }
+            | OperatorCommand::Down { .. }
+            | OperatorCommand::Release { .. }
     ) && !interrupt::active()
 }
 

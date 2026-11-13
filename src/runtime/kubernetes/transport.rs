@@ -13,6 +13,8 @@ use tokio::sync::Semaphore;
 
 #[path = "prerequisites_transport.rs"]
 mod prerequisites;
+#[path = "session_transport.rs"]
+mod session;
 
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_PREFLIGHT_REQUEST_BYTES: usize = 64 * 1024;

@@ -333,3 +333,41 @@ fn held_response_rejects_mutation_execution_duplicate_keys_and_unbounded_input()
         );
     }
 }
+
+#[test]
+fn v1_quantity_helpers_keep_the_v1_forms() {
+    // Literal forms of the former inline V1 renderer, not helper output.
+    for (millis, expected) in [
+        (500, "500m"),
+        (1000, "1"),
+        (1500, "1500m"),
+        (2000, "2"),
+        (200_000, "200"),
+    ] {
+        assert_eq!(cpu_quantity(millis), expected, "{millis}");
+    }
+    for (value, expected) in [
+        (8, "8Mi"),
+        (64, "64Mi"),
+        (768, "768Mi"),
+        (1024, "1Gi"),
+        (1536, "1536Mi"),
+        (2048, "2Gi"),
+    ] {
+        assert_eq!(mib(value), expected, "{value}");
+    }
+    // The independent golden request keeps these exact forms (bytes unchanged).
+    let prepared = prepare(&intent()).unwrap();
+    assert_eq!(
+        prepared.pod_bytes(),
+        serde_json::to_vec(&golden_pod()).unwrap()
+    );
+    let pod: Value = serde_json::from_slice(prepared.pod_bytes()).unwrap();
+    let limits = &pod["spec"]["containers"][0]["resources"]["limits"];
+    assert_eq!(limits["cpu"], json!(cpu_quantity(2000)));
+    assert_eq!(limits["memory"], json!(mib(1024)));
+    assert_eq!(
+        pod["spec"]["volumes"][0]["emptyDir"]["sizeLimit"],
+        json!(mib(128))
+    );
+}

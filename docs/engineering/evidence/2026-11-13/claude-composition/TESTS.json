@@ -1,0 +1,306 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "scope": "Source-specific software validation; parent passes with explicit subcase gap; no global PASS",
+  "source": {
+    "commit": "f12a46af435a09c754084f3a1eb3db9f650f800f",
+    "tree": "787590a570920a742996559a7ea395ec6737fb49",
+    "sha256": "3056861835293268fe182b266b62eafce90a705eb304b0325359adb04e1a941d",
+    "files": 2738,
+    "bytes": 33635840,
+    "modes0600": 18,
+    "post_sha256": "66c70f708e3741fe685d6f1c4eda1b9fe41b94e2b1f82eeb10ca4b148521b41c",
+    "post_bytes": 33832960,
+    "post_files": 2738,
+    "all_payloads_and_modes_exact": true
+  },
+  "components": {
+    "kubernetes_commit": "356312ff1f52d231f980c412643b96e73ab245f2",
+    "release_commit": "5e8e1811cf7828b12b8a7f94820070606f19f332",
+    "root_reference": "6cc6b3a25f4dd1fea4ead3180cde1d58fb912001",
+    "relationship": "Broker source 223b699e959964bef4460f34857516cb8cdd37c8 versus public Root6cc6b3a25f4dd1fea4ead3180cde1d58fb912001 differs on eight documentation/evidence paths only. Separately, tested joint f12a46af435a09c754084f3a1eb3db9f650f800f includes 46 A/B delivered postimages and differs from Root on 54 paths, including 40 outside docs. Intended publication is Root plus 46 A/B postimages and 15 reviewed documentation payloads; Root independently verifies the staged non-document composition before commit. No tested/future-publication whole-tree equality is claimed."
+  },
+  "receipt_sha256": "572cdb995aaffa89229b0bce188fc4f29e9348cd1619414a22da79b18c3c1058",
+  "global_harness_rc": 99,
+  "global_harness_status": "TARGETED_AND_ALL_TARGETS_WITH_SUBCASE_GAPS_NOT_ESTABLISHED",
+  "build": {
+    "status": "PASS",
+    "rc": 0,
+    "compiler_errors": 0,
+    "warnings": 275
+  },
+  "tests": {
+    "status": "PARENT_TESTS_PASS_SUBCASE_COVERAGE_PARTIAL",
+    "groups": 27,
+    "active_passed": 272,
+    "failed": 0,
+    "ignored": 2,
+    "components": {
+      "kubernetes": 144,
+      "release": 123,
+      "broker": 5
+    },
+    "actual_summary_records": [
+      {
+        "id": "core-session",
+        "component": "kubernetes",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "core-session_lifecycle",
+        "component": "kubernetes",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "core-session_effect",
+        "component": "kubernetes",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "core-session_pod",
+        "component": "kubernetes",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "core-session_instance",
+        "component": "kubernetes",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "core-session-runtime",
+        "component": "kubernetes",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_adapter",
+        "component": "kubernetes",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_transport",
+        "component": "kubernetes",
+        "passed": 13,
+        "failed": 0,
+        "ignored": 1,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_transport_lifetime",
+        "component": "kubernetes",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_cli",
+        "component": "kubernetes",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_preflight",
+        "component": "kubernetes",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_preflight_cli",
+        "component": "kubernetes",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_session_control_recovery",
+        "component": "kubernetes",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-kubernetes_held_create_recovery_api",
+        "component": "kubernetes",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-admission",
+        "component": "kubernetes",
+        "passed": 40,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-prerequisites",
+        "component": "kubernetes",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-bootstrap",
+        "component": "kubernetes",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "unit-source-snapshot",
+        "component": "release",
+        "passed": 51,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "it-manifest",
+        "component": "release",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "it-verify",
+        "component": "release",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-runtime-program",
+        "component": "release",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "nb-source-lifecycle",
+        "component": "release",
+        "passed": 42,
+        "failed": 0,
+        "ignored": 1,
+        "summary_count": 1
+      },
+      {
+        "id": "broker-01",
+        "component": "broker",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "broker-02",
+        "component": "broker",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "broker-03",
+        "component": "broker",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "broker-04",
+        "component": "broker",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      },
+      {
+        "id": "broker-05",
+        "component": "broker",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "summary_count": 1
+      }
+    ],
+    "freshlist_and_group_verdict_rcs": 54,
+    "all_zero": true,
+    "subcase_gap": {
+      "group": "it-manifest",
+      "status": "NOT_RUN",
+      "reason": "a0700parentownedbyanotherUIDrequiressecondaccountnotcreatedbytest"
+    },
+    "no_complete_subcase_claim": true
+  },
+  "all_targets": {
+    "status": "PASS",
+    "rc": 0,
+    "compiler_errors": 0,
+    "warnings": 286
+  },
+  "raw_results": {
+    "records": 950,
+    "manifest_sha256": "f0a35767e2bc46157e961c225cde80aedcf7edf2964bb7574262e593862f1098"
+  },
+  "collections": {
+    "count": 6,
+    "all_rc0": true
+  },
+  "closure": {
+    "status": "PASS",
+    "rc": 0,
+    "exact_container_absent": true,
+    "oom": 0,
+    "tmp_remaining": 0
+  },
+  "environment": "Single Linux ARM64 QA tool container; not a product control/worker image",
+  "not_run": [
+    "Clippy",
+    "full repository suite",
+    "release build",
+    "product control/worker image build or inspection",
+    "real Docker/Podman/Kubernetes workloads",
+    "real provider or IdP",
+    "native macOS",
+    "100 workers load",
+    "S2b attach (Claude active, not integrated)",
+    "S5 production effects",
+    "full broker fencing and runtime relay"
+  ],
+  "production_gates_closed": []
+}

@@ -89,3 +89,8 @@ The CLI `up/down` workflow uses its own fixed project/default ports. Use the dir
 Generate legacy local ai-guard credentials with `init`, or prepare a new SSO installation with `setup prepare` as its guide specifies; do not initialize over an existing prepared volume. Obtain enterprise identity and AI credentials through the chosen operator/provider flow. A Keycloak administrator is not automatically an ai-guard administrator. Each tenant and permission mapping is administered by the control plane. A model backend may be shared only through distinct authenticated scopes, permissions and quotas.
 
 For local certificate preparation, see [the Rust CA generator](../demo-pki.md). Keep CA private keys in the trusted control environment; clients receive only the appropriate public CA chain. Configure SAN/issuer names consistently and preserve TLS verification. The local HTTP examples use public demonstration accounts and are not enterprise transport settings.
+
+## Additional guides
+
+- [Kubernetes V2 runtime: software mechanics, closed product effects and real-cluster qualification plan](kubernetes-runtime/README.md).
+- [Release metadata: offline manifest/verify, declared provenance and qualification limits](release/README.md).

@@ -12,6 +12,7 @@ COPY src/ ./src/
 RUN cargo build --release --locked --bin agentsandbox --bin ai-guard-audit-checkpoint --bin ai-guard-diagnose
 
 FROM debian:bookworm-slim
+LABEL ai-guard.image.recipe="images/control.Dockerfile"
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates libgcc-s1 \
     && rm -rf /var/lib/apt/lists/* \

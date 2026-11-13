@@ -89,3 +89,8 @@ Le parcours CLI `up/down` possède son propre projet et ses ports par défaut. U
 Créer les anciens credentials locaux ai-guard avec `init`, ou préparer une installation SSO neuve avec `setup prepare` selon son guide ; ne pas initialiser par-dessus un volume déjà préparé. Obtenir identité d'entreprise et credentials IA par les parcours opérateur/fournisseur choisis. Un administrateur Keycloak n'est pas automatiquement administrateur ai-guard. Le contrôle administre chaque rattachement tenant et permission. Un backend modèle partagé conserve des périmètres authentifiés, permissions et quotas distincts.
 
 Pour préparer les certificats locaux, consulter le [générateur Rust d'AC](../demo-pki.fr.md). Garder les clés privées d'AC dans le contrôle de confiance ; transmettre uniquement la chaîne publique utile aux clients. Configurer SAN/issuer de façon cohérente et conserver la vérification TLS. Les exemples HTTP locaux utilisent des comptes publics de découverte ; ce ne sont pas des réglages de transport d'entreprise.
+
+## Guides complémentaires
+
+- [Runtime Kubernetes V2 : mécanismes logiciels, effets produit fermés et plan de qualification cluster réel](kubernetes-runtime/README.fr.md).
+- [Métadonnées release : manifest/verify hors ligne, provenance déclarée et limites de qualification](release/README.fr.md).

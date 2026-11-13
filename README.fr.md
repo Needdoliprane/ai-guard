@@ -118,3 +118,8 @@ Les exemples ne contiennent que des valeurs publiques. Créer un **nouveau** fic
 Le code applicatif hors frontend est en Rust. [AGENTS.md](AGENTS.md) précise architecture, règles et vérifications ciblées. Un changement de comportement met à jour les guides anglais/français et les exemples dans le même lot. Les essais auxiliaires Keycloak, Qwen et AC de test restent locaux et ignorés ; les régressions de sécurité et de runtime du produit restent dans le dépôt.
 
 Apache-2.0. Le canal privé de signalement des vulnérabilités doit être établi avant publication.
+
+## Guides complémentaires
+
+- [Runtime Kubernetes V2 : mécanismes logiciels, effets produit fermés et plan de qualification cluster réel](docs/setup/kubernetes-runtime/README.fr.md).
+- [Métadonnées release : manifest/verify hors ligne, provenance déclarée et limites de qualification](docs/setup/release/README.fr.md).
