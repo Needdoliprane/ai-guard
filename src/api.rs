@@ -1819,8 +1819,12 @@ async fn dashboard_oidc_proxy(
 async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> ApiResult<Response> {
     if s.owned_sources
         && (request.method() != "GET"
-            || !["/api/v1/human/identity", "/api/v1/human/resources"]
-                .contains(&request.uri().path()))
+            || ![
+                "/api/v1/human/identity",
+                "/api/v1/human/resources",
+                "/api/v1/human/events",
+            ]
+            .contains(&request.uri().path()))
     {
         return Err(human_sources::unavailable());
     }

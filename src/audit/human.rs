@@ -521,6 +521,24 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let result = self.human_events_checked(&tx, scope, filter, after, upper, limit, transient)?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    pub(super) fn human_events_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        after: i64,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanEventPollV1> {
+        anyhow::ensure!(
+            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after >= 0,
+            "invalid human event page"
+        );
         identity::require_human_read(&tx)?;
         let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         require_view(&current, filter)?;
@@ -622,7 +640,6 @@ impl Store {
             }
         }
         if filter.stream && items.is_empty() {
-            self.commit_checked(tx)?;
             return Ok(HumanEventPollV1 {
                 page: None,
                 after_event: upper,
@@ -645,7 +662,6 @@ impl Store {
             items.len(),
             transient,
         )?;
-        self.commit_checked(tx)?;
         let after_event = if has_more { position } else { upper };
         Ok(HumanEventPollV1 {
             after_event,

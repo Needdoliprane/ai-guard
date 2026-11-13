@@ -424,7 +424,12 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
     for (path, methods) in REGISTERED_ROUTES {
         for method in *methods {
             if *method == "GET"
-                && ["/api/v1/human/identity", "/api/v1/human/resources"].contains(path)
+                && [
+                    "/api/v1/human/identity",
+                    "/api/v1/human/resources",
+                    "/api/v1/human/events",
+                ]
+                .contains(path)
                 || *path == "/healthz"
             {
                 continue;
