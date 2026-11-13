@@ -1,6 +1,6 @@
 {
   "schema_version": 4,
-  "status": "PRIVATE_PUBLICATION_DRAFT_R4_TARGETED_CURRENT_011_GREEN_OBSERVED",
+  "status": "PUBLISHED_SCOPED_A0_SOFTWARE_EVIDENCE_011_NOT_PRODUCTION",
   "recorded_date": "2026-11-13",
   "base_public_commit": "1cdda0f7c0734b5466baa227f3f611c45ba2a884",
   "candidate_source": {
@@ -548,7 +548,7 @@
       "capacity_100_workers": true
     }
   },
-  "publication_status": "ROOT_PENDING_FINAL_DOCUMENT_REVIEW_APPLICATION_AND_PUBLICATION_DECISION",
+  "publication_status": "INTEGRATED_PUSHED_VERIFIED_92569D4_NO_PRODUCTION_GATE_CLOSED",
   "post_change_attempt_r1": {
     "qa_reference": "qa-owned-control-a0-green-20261113-r1",
     "source_commit": "452d1e8e3fbbf3c24ba3c390a485c2e568ba322b",
@@ -733,5 +733,18 @@
     "not_proven": "Running relay authentication, worker/runtime start, or provider activity.",
     "regression_status": "PASS_TARGETED_CURRENT_SOURCE"
   },
-  "counting_rule": "This campaign has 37 unique parent PASS on 011 only. Do not add the earlier 14 PASS on 452d, before-fix assertions, published 85 Rust / 33 frontend counts, or repeated 17-file formatter checks. Formatting is not a test result."
+  "counting_rule": "This campaign has 37 unique parent PASS on 011 only. Do not add the earlier 14 PASS on 452d, before-fix assertions, published 85 Rust / 33 frontend counts, or repeated 17-file formatter checks. Formatting is not a test result.",
+  "integration": {
+    "public_branch": "codex/human-brokers-validation-20261104",
+    "integrated_and_pushed_commit": "92569d48053fda11c596b71d0eb26e9f57f0d5ad",
+    "validated_code_source": "011401344a96f45d4490934a3e8d9c0e608bb011",
+    "remote_reference_verified": true,
+    "root_receipt_sha256": "2fe023ec556222d5ab8742cfa25b76ff40610308def624c8c47c4fc371a30c11",
+    "document_review_sha256": "72b92772a8ebe92d632a8391299104a4bddc03cf6755b920d040c41cee8c9f9c",
+    "four_own_worktrees_normally_closed": true,
+    "worktree_closure_sha256": "de83b1e22edcc454a227cd5992cfe8135c3ddf11c1e03aae546ad39d182bd006",
+    "code_changed_after_validation": false,
+    "claude_worktrees_preserved": true,
+    "production": false
+  }
 }
