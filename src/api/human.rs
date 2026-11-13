@@ -14,12 +14,16 @@ use serde::{Deserialize, Serialize};
 mod brokers;
 mod recent;
 mod workers;
+#[cfg(test)]
+pub(super) mod event_read_test_hook;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
 pub(super) struct HumanAccessState {
     contexts: ContextRegistry,
     #[cfg(test)]
     broker_publication_pause: std::sync::Mutex<Option<BrokerPublicationPause>>,
+    #[cfg(test)]
+    event_publication_pause: std::sync::Mutex<Option<event_read_test_hook::Pause>>,
 }
 #[cfg(test)]
 struct BrokerPublicationPause {
@@ -43,6 +47,8 @@ impl HumanAccessState {
             contexts,
             #[cfg(test)]
             broker_publication_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            event_publication_pause: std::sync::Mutex::new(None),
         }
     }
     #[cfg(test)]
@@ -1187,6 +1193,8 @@ fn event_page_sync(
         )
         .map_err(store_failure)?;
     let page = poll.page.ok_or_else(invalid_request)?;
+    #[cfg(test)]
+    event_read_test_hook::pause(&state.human)?;
     if id.is_some() && page.items.is_empty() {
         return Err(failure(
             StatusCode::NOT_FOUND,

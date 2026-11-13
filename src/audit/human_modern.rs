@@ -34,6 +34,19 @@ impl Store {
         ready.send(()).unwrap();
         release.recv().unwrap();
     }
+    #[cfg(test)]
+    pub(crate) fn modern_test_abort_events_audit(
+        self: &Arc<Self>,
+    ) -> anyhow::Result<HumanEventsAuditAbortGuard> {
+        let db = self.db.try_lock().map_err(|_| anyhow::anyhow!("fixture store busy"))?;
+        db.execute_batch("CREATE TEMP TRIGGER fixture_owned_events_audit_abort BEFORE INSERT ON main.events WHEN NEW.kind='control.identity.access' AND json_extract(NEW.payload,'$.data.action')='events' BEGIN SELECT RAISE(ABORT,'synthetic owned events audit insertion failure'); END;")?;
+        Ok(HumanEventsAuditAbortGuard { store: Some(self.clone()) })
+    }
+    #[cfg(test)]
+    pub(crate) fn modern_test_human_usage(&self) -> Value {
+        let capacity = self.supervision_lease.capacity.lock().unwrap();
+        json!({"tenant":capacity.tenant,"principals":capacity.principals})
+    }
     fn with_modern_read<T>(
         &self,
         access: &HumanSourceAccess<'_>,
@@ -161,6 +174,34 @@ impl Store {
         access: &HumanSourceAccess<'_>,
     ) -> anyhow::Result<HumanDiscoveryGeneration> {
         self.with_modern_read(access, discovery_generation)
+    }
+}
+
+/// Temporary SQLite fixture state. Never present in a production build.
+#[cfg(test)]
+pub(crate) struct HumanEventsAuditAbortGuard {
+    store: Option<Arc<Store>>,
+}
+#[cfg(test)]
+impl HumanEventsAuditAbortGuard {
+    pub(crate) fn remove(mut self) -> anyhow::Result<()> {
+        let store = self.store.as_ref().ok_or_else(|| anyhow::anyhow!("fixture trigger removed"))?;
+        store.db.try_lock().map_err(|_| anyhow::anyhow!("fixture store busy"))?
+            .execute_batch("DROP TRIGGER temp.fixture_owned_events_audit_abort;")?;
+        self.store = None;
+        Ok(())
+    }
+}
+#[cfg(test)]
+impl Drop for HumanEventsAuditAbortGuard {
+    fn drop(&mut self) {
+        if let Some(store) = self.store.take() {
+            // Unwind cleanup never blocks behind a failed asynchronous test.
+            // In the normal path remove() above verifies exact removal.
+            if let Ok(db) = store.db.try_lock() {
+                let _ = db.execute_batch("DROP TRIGGER IF EXISTS temp.fixture_owned_events_audit_abort;");
+            }
+        }
     }
 }
 
