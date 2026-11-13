@@ -409,11 +409,23 @@ impl CursorCipher {
 
 pub(super) struct ContextRegistry {
     entries: Mutex<HashMap<String, Arc<RegisteredContext>>>,
+    closed: AtomicBool,
     // Only trusted gateway configuration creates this closed, bounded table.
     // Idle shares are not lent: an active context is never evicted for a peer.
     tenant_limits: BTreeMap<String, usize>,
 }
 impl ContextRegistry {
+    pub(super) fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut entries = match self.entries.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for context in entries.values() {
+            context.active.store(false, Ordering::Release);
+        }
+        entries.clear();
+    }
     pub fn for_tenants<'a>(tenants: impl IntoIterator<Item = &'a str>) -> anyhow::Result<Self> {
         let mut identities = BTreeSet::new();
         for tenant in tenants {
@@ -437,6 +449,7 @@ impl ContextRegistry {
             .collect();
         Ok(Self {
             entries: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
             tenant_limits,
         })
     }
@@ -445,6 +458,7 @@ impl ContextRegistry {
     pub fn disabled() -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(true),
             tenant_limits: BTreeMap::new(),
         }
     }
@@ -475,6 +489,9 @@ impl ContextRegistry {
             return Err(StateFailure::InvalidContext);
         }
         let mut entries = self.entries.lock().map_err(|_| StateFailure::Unavailable)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(StateFailure::Unavailable);
+        }
         Self::purge_expired(&mut entries);
         entries.retain(|_, entry| {
             let binding = &entry.binding;
@@ -520,6 +537,9 @@ impl ContextRegistry {
             .get(&binding.tenant_id)
             .ok_or(StateFailure::InvalidContext)?;
         let mut entries = self.entries.lock().map_err(|_| StateFailure::Unavailable)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(StateFailure::Unavailable);
+        }
         Self::purge_expired(&mut entries);
         if let Some(entry) = entries.values().find(|entry| entry.binding == binding) {
             entry.ensure_valid()?;
@@ -594,6 +614,9 @@ impl ContextRegistry {
             return Err(StateFailure::InvalidContext);
         }
         let entries = self.entries.lock().map_err(|_| StateFailure::Unavailable)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(StateFailure::Unavailable);
+        }
         let entry = entries.get(id).ok_or(StateFailure::InvalidContext)?;
         entry.ensure_valid()?;
         let binding = &entry.binding;

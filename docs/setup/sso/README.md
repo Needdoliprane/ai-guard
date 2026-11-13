@@ -1,5 +1,7 @@
 # Configure and use ai-guard SSO
 
+With the explicit [owned human source profile](../identity/OWNED_SOURCES.md), selected OIDC configuration and AuthLedger5 are retained, while modern OIDC bearers and handlers remain closed. The profile never reports selected OIDC as disabled. The legacy SSO procedure below does not qualify or activate that modern path.
+
 [Français](README.fr.md) · [Setup index](../README.md) · [Keycloak provider](../keycloak/README.md) · [Named local access](../identity/README.md)
 
 This guide describes the Rust OIDC configuration, the Web sign-in and the foreground human CLI. Use it with the matching ai-guard binary and built frontend. It does not configure Codex or Claude authentication: choose their subscription, API key or approved inference endpoint separately in the [provider guide](../providers/README.md).

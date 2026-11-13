@@ -128,7 +128,7 @@ pub struct WorkloadAuditPolicyV1 {
 impl WorkloadAuditPolicyV1 {
     /// Automatic defaults fit the operator's existing C+I reserves. A very
     /// small remainder disables workload admission without invalidating F1.
-    pub(super) fn resolved(max_events: u64, control: &AuditCapacityPolicyV1) -> Self {
+    pub fn resolved(max_events: u64, control: &AuditCapacityPolicyV1) -> Self {
         let physical = AuditCapacityV1 {
             events: max_events,
             bytes: PHYSICAL_BYTES,

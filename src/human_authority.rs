@@ -17,6 +17,7 @@ mod manifest;
 pub use manifest::*;
 pub(crate) mod maintenance;
 pub(crate) mod migration;
+pub mod startup;
 
 use crate::control_fs::{
     Directory, InitialParentObservationFailure, PrivateEntryIdentity, PrivateFile,
@@ -280,6 +281,9 @@ opaque_debug!(
 );
 
 impl OwnedHumanSources {
+    pub(crate) fn admission_available(&self) -> bool {
+        self.owner.check_admission().is_ok()
+    }
     /// One nonblocking attempt in canonical physical parent order. No SQLite
     /// descriptor is opened here. Existing locks are never replaced or removed.
     /// File-only mounts and unobservable mount domains refuse through the

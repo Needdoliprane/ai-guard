@@ -4,7 +4,7 @@
 //! retires authentication synchronously and asks that supervisor to stop both
 //! acceptors. The supervisor retains the serving futures and blocking-usage
 //! drain until they finish; dropping a caller never aborts a serving sibling.
-use crate::api::GatewayControlRecoveryRetirementV2;
+use crate::api::{GatewayControlRecoveryRetirementV2, GatewayHumanRetirement};
 use anyhow::{Context, Result};
 use axum::Router;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
@@ -16,7 +16,7 @@ use hyper_util::{
 use std::{future::Future, net::SocketAddr, pin::Pin, sync::Arc, time::Duration};
 use tokio::{
     net::TcpListener,
-    sync::watch,
+    sync::{oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -29,6 +29,8 @@ pub struct GatewayServer {
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
     stop: watch::Sender<bool>,
     task: Option<JoinHandle<Result<()>>>,
+    human: Option<Arc<GatewayHumanRetirement>>,
+    handoff: Option<oneshot::Sender<ServingOwner>>,
 }
 
 impl GatewayServer {
@@ -38,7 +40,51 @@ impl GatewayServer {
             retirement: Arc::new(retirement),
             stop,
             task: None,
+            human: None,
+            handoff: None,
         }
+    }
+
+    /// Reserve the genuine cleanup supervisor before any fallible builder or
+    /// listener. No runtime means a fallible refusal before task transfer.
+    pub fn new_owned(
+        retirement: GatewayControlRecoveryRetirementV2,
+        human: GatewayHumanRetirement,
+    ) -> Result<Self> {
+        let runtime =
+            tokio::runtime::Handle::try_current().context("human cleanup runtime unavailable")?;
+        let retirement = Arc::new(retirement);
+        let human = Arc::new(human);
+        let (stop, _) = watch::channel(false);
+        let (handoff, receiver) = oneshot::channel::<ServingOwner>();
+        let cleanup_human = human.clone();
+        let cleanup_retirement = retirement.clone();
+        let cleanup_stop = stop.clone();
+        let task = runtime.spawn(async move {
+            let result = match receiver.await {
+                Ok(serve) => serve.await,
+                Err(_) => Err(anyhow::anyhow!("gateway startup was cancelled")),
+            };
+            cleanup_human.retire();
+            cleanup_retirement.retire();
+            cleanup_stop.send_replace(true);
+            wait_for_usage_drain(&cleanup_retirement).await;
+            let drained = cleanup_human.drain().await;
+            match (result, drained) {
+                (Err(primary), Err(error)) => {
+                    Err(primary.context(format!("human source drain not established: {error:#}")))
+                }
+                (Ok(()), Err(error)) => Err(error.context("human source drain not established")),
+                (result, Ok(())) => result,
+            }
+        });
+        Ok(Self {
+            retirement,
+            stop,
+            task: Some(task),
+            human: Some(human),
+            handoff: Some(handoff),
+        })
     }
 
     /// Bind all configured surfaces before polling any server. A successful
@@ -53,11 +99,13 @@ impl GatewayServer {
     ) -> Result<()> {
         let retirement = Arc::clone(&self.retirement);
         let stop = self.stop.clone();
-        self.task = Some(tokio::spawn(async move {
+        let human = self.human.clone();
+        let serving: ServingOwner = Box::pin(async move {
             let mut bound = BoundOwners {
                 retirement,
                 stop,
                 owners: FuturesUnordered::new(),
+                human,
             };
             let result = async {
                 let public_address = bound.bind(public).await?;
@@ -72,6 +120,7 @@ impl GatewayServer {
                     shutdown,
                     Arc::clone(&bound.retirement),
                     bound.stop.clone(),
+                    bound.human.clone(),
                 )
                 .await
             }
@@ -82,7 +131,14 @@ impl GatewayServer {
             bound.owners.clear();
             wait_for_usage_drain(&bound.retirement).await;
             result
-        }));
+        });
+        if let Some(handoff) = self.handoff.take() {
+            handoff
+                .send(serving)
+                .map_err(|_| anyhow::anyhow!("gateway cleanup owner unavailable"))?;
+        } else {
+            self.task = Some(tokio::spawn(serving));
+        }
         self.task
             .as_mut()
             .context("gateway serving owner is unavailable")?
@@ -93,6 +149,9 @@ impl GatewayServer {
 
 impl Drop for GatewayServer {
     fn drop(&mut self) {
+        if let Some(human) = &self.human {
+            human.retire();
+        }
         self.retirement.retire();
         self.stop.send_replace(true);
         // Do not abort the supervisor: it owns the remaining graceful shutdown
@@ -105,10 +164,14 @@ struct BoundOwners {
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
     stop: watch::Sender<bool>,
     owners: FuturesUnordered<ServingOwner>,
+    human: Option<Arc<GatewayHumanRetirement>>,
 }
 
 impl BoundOwners {
     fn retire_and_stop(&self) {
+        if let Some(human) = &self.human {
+            human.retire();
+        }
         self.retirement.retire();
         self.stop.send_replace(true);
     }
@@ -235,6 +298,7 @@ async fn supervise_owners(
     shutdown: impl Future<Output = ()> + Send,
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
     stop: watch::Sender<bool>,
+    human: Option<Arc<GatewayHumanRetirement>>,
 ) -> Result<()> {
     tokio::pin!(shutdown);
     let caller_stop = wait_for_stop(stop.subscribe());
@@ -247,6 +311,9 @@ async fn supervise_owners(
     // This order is essential: no sibling future is cancelled or gracefully
     // drained while its epoch can still issue a new usage lease.
     retirement.retire();
+    if let Some(human) = &human {
+        human.retire();
+    }
     stop.send_replace(true);
     let mut failure = first.and_then(Result::err);
     while let Some(result) = owners.next().await {

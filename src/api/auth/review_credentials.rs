@@ -87,7 +87,7 @@ struct ReviewCredentialEntry {
 
 /// Installation only, before serving requests. Its constructor never performs
 /// a Store lookup, accepts a credential UUID from HTTP, or mutates authority.
-pub(super) struct ReviewCredentialRegistry {
+pub(in crate::api) struct ReviewCredentialRegistry {
     file: PrivateFile,
     owner: OwnedHumanSources,
     entries: HashMap<[u8; 32], ReviewCredentialEntry>,
@@ -113,7 +113,7 @@ impl fmt::Debug for AuthenticatedReviewRunnerCredential {
 }
 
 impl ReviewCredentialRegistry {
-    pub(super) fn from_private_file(
+    pub(in crate::api) fn from_private_file(
         file: PrivateFile,
         owner: OwnedHumanSources,
         expected: &CredentialIndex,

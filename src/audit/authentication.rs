@@ -154,7 +154,7 @@ impl std::fmt::Debug for AuthenticationAuditPolicyV1 {
 
 impl AuthenticationAuditPolicyV1 {
     /// Offline operator preflight, identical to initialization's policy checks.
-    pub(crate) fn validate_for_installation(
+    pub fn validate_for_installation(
         &self,
         installation_id: Uuid,
         redactor: &Redactor,

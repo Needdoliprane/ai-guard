@@ -123,6 +123,21 @@ enum Command {
 }
 #[derive(Args)]
 struct GatewayArgs {
+    /// Explicit human source protocol; legacy preserves the existing gateway.
+    #[arg(long,value_parser=["legacy","owned_sources"])]
+    human_source_mode: Option<String>,
+    /// Existing private closure manifest; never creates or migrates a source.
+    #[arg(long, requires = "tenants_file")]
+    human_sources_manifest: Option<PathBuf>,
+    /// Existing private technical credential envelope, matching tenant tokens.
+    #[arg(long, requires = "human_sources_manifest")]
+    human_credentials_envelope: Option<PathBuf>,
+    /// Independent positive revision of the retained public control configuration.
+    #[arg(long, requires = "human_sources_manifest")]
+    human_control_config_revision: Option<u64>,
+    /// Independent positive closure revision; distinct from OIDC mapping.revision String.
+    #[arg(long,requires_all=["human_sources_manifest","oidc_config"])]
+    human_oidc_mapping_revision: Option<u64>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
     /// Private gateway-root control listener; /control also remains on --listen.
@@ -296,6 +311,9 @@ fn preflight_jev(args: &GatewayArgs, selected: SelectedJev) -> Result<JevTrust> 
 }
 #[derive(Args)]
 struct DashboardArgs {
+    /// Trusted presentation profile; the gateway enforces authority separately.
+    #[arg(long,default_value="legacy",value_parser=["legacy","owned_sources"])]
+    human_source_mode: String,
     #[arg(long, default_value = "127.0.0.1:4000")]
     listen: SocketAddr,
     #[arg(long)]
@@ -525,6 +543,85 @@ struct GatewaySessionPolicies {
     )>,
 }
 
+async fn serve_owned_human_gateway(
+    args: &GatewayArgs,
+    tenants: Vec<gateway_config::ConfiguredTenant>,
+    policy: Policy,
+    jev: Option<JevBackend>,
+    redactor: Redactor,
+) -> Result<()> {
+    let prepared = gateway_config::load_owned_sources(
+        args.human_sources_manifest
+            .as_deref()
+            .context("owned human manifest required")?,
+        args.human_credentials_envelope
+            .as_deref()
+            .context("owned human credential envelope required")?,
+        args.tenants_file
+            .as_deref()
+            .context("owned human tenant configuration required")?,
+        args.oidc_config.as_deref(),
+        &tenants,
+        args.max_events,
+        args.human_control_config_revision
+            .context("explicit owned human control configuration revision required")?,
+        args.human_oidc_mapping_revision,
+        redactor.clone(),
+    )?;
+    let policies = GatewaySessionPolicies::from_tenants(&tenants);
+    let tokens = tenants
+        .iter()
+        .map(|tenant| {
+            (
+                tenant.tenant_id.clone(),
+                tenant.runner_token.clone(),
+                tenant.viewer_token.clone(),
+            )
+        })
+        .collect();
+    let mut state = GatewayState::for_owned_human_sources(
+        prepared.bundle,
+        prepared.credentials,
+        tokens,
+        policy,
+        jev,
+        redactor,
+    )?;
+    // Construction reserves cleanup before any later fallible builder/bind.
+    let server = GatewayServer::new_owned(
+        state.control_recovery_retirement(),
+        state
+            .human_retirement()
+            .context("owned human cleanup handle required")?,
+    )?;
+    let quotas = tenants
+        .iter()
+        .map(|tenant| (tenant.tenant_id.clone(), tenant.worker_quota.clone()))
+        .collect();
+    let held = tenants
+        .iter()
+        .filter_map(|tenant| {
+            tenant
+                .held_create_policy
+                .clone()
+                .map(|policy| (tenant.tenant_id.clone(), policy))
+        })
+        .collect();
+    state = policies.apply(
+        state
+            .with_worker_quotas(quotas)?
+            .with_kubernetes_held_create_policies(held)?,
+    )?;
+    let control = args
+        .control_listen
+        .map(|address| (address, api::gateway_control_router(state.clone())));
+    let router = api::gateway_router(state);
+    server.serve((args.listen,router),control,shutdown_signal()?,|listen,_|{
+        eprintln!("Gateway {} — owned human sources; identity/resources adopted; remaining modern routes closed",listen);
+        Ok(())
+    }).await
+}
+
 impl GatewaySessionPolicies {
     fn from_tenants(tenants: &[gateway_config::ConfiguredTenant]) -> Self {
         let mut policies = Self::default();
@@ -572,6 +669,14 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("model TLS import refused"))?,
         Command::Gateway(args) => {
             let args = *args;
+            gateway_config::validate_human_mode(
+                args.human_source_mode.as_deref().unwrap_or("legacy"),
+                args.human_sources_manifest.as_deref(),
+                args.human_credentials_envelope.as_deref(),
+                args.tenants_file.as_deref(),
+                args.initialize_supervised_stores.is_some(),
+                args.initialize_oidc_audit,
+            )?;
             validate_bind(args.listen, args.container_listen)?;
             if let Some(control) = args.control_listen {
                 validate_bind(control, args.container_listen)?;
@@ -592,7 +697,11 @@ async fn main() -> Result<()> {
             let selected_jev = select_jev(&args, backend_environment.as_deref())?;
             let jev_trust = preflight_jev(&args, selected_jev)?;
             let tenants = if let Some(path) = &args.tenants_file {
-                gateway_config::load(path)?
+                if args.human_source_mode.as_deref() == Some("owned_sources") {
+                    gateway_config::load_owned_tenants(path)?
+                } else {
+                    gateway_config::load(path)?
+                }
             } else {
                 vec![configured_local_tenant(&args)?]
             };
@@ -668,6 +777,9 @@ async fn main() -> Result<()> {
             // Validate the complete registry before preparing backups or any
             // fresh origin: a later tenant must not strand an earlier one.
             gateway_config::validate_policies(&tenants, args.max_events)?;
+            if args.human_source_mode.as_deref() == Some("owned_sources") {
+                return serve_owned_human_gateway(&args, tenants, policy, jev, redactor).await;
+            }
             let session_policies = GatewaySessionPolicies::from_tenants(&tenants);
             let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
                 let mut credential_files: Vec<&Path> = tenants
@@ -928,25 +1040,31 @@ async fn main() -> Result<()> {
         Command::Dashboard(args) => {
             validate_bind(args.listen, args.container_listen)?;
             anyhow::ensure!(
+                args.human_source_mode != "owned_sources" || args.shared_tenants,
+                "owned human dashboard requires --shared-tenants; no viewer fallback"
+            );
+            anyhow::ensure!(
                 args.front_dir.join("index.html").is_file(),
                 "Front absent : exécuter npm ci && npm run build dans front/"
             );
             let router = if args.shared_tenants {
-                api::dashboard_router_with_oidc(
+                api::dashboard_router_with_human_mode(
                     &args.upstream,
                     None,
                     args.front_dir,
                     args.oidc_web_origin,
+                    args.human_source_mode == "owned_sources",
                 )?
             } else {
                 let token_path = args
                     .viewer_token_file
                     .unwrap_or_else(|| PathBuf::from(".agentsandbox/secrets/viewer"));
-                api::dashboard_router_with_oidc(
+                api::dashboard_router_with_human_mode(
                     &args.upstream,
                     Some(read_token(&token_path)?),
                     args.front_dir,
                     args.oidc_web_origin,
+                    args.human_source_mode == "owned_sources",
                 )?
             };
             let shutdown = shutdown_signal()?;

@@ -3,7 +3,9 @@ use agentsandbox::control::kubernetes_session::{
     KubernetesSessionControlRecoveryPolicyV2, KubernetesSessionRecoveryPolicyV2,
     KubernetesSessionReservationPolicyV2,
 };
+pub(crate) mod human_sources;
 use anyhow::{Context, Result};
+pub use human_sources::{load_owned_sources, load_owned_tenants, validate_human_mode};
 use serde::Deserialize;
 use std::{
     collections::BTreeSet,

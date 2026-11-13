@@ -637,6 +637,21 @@ pub(crate) struct AuthenticationReviewStartup {
 }
 impl AuthenticationReviewStartup {
     pub(crate) fn durable_wall_floor(&self) -> Result<chrono::DateTime<chrono::Utc>> {
+        Ok(self.floor_and_capacity_plan()?.0)
+    }
+    pub(crate) fn require_capacity_plan(
+        &self,
+        expected: &AuthenticationCapacityPlanV1,
+    ) -> Result<()> {
+        expected.validate()?;
+        authority::exact(self.floor_and_capacity_plan()?.1.as_ref() == Some(expected))
+    }
+    fn floor_and_capacity_plan(
+        &self,
+    ) -> Result<(
+        chrono::DateTime<chrono::Utc>,
+        Option<AuthenticationCapacityPlanV1>,
+    )> {
         let state = self
             .audit
             .state
@@ -654,7 +669,10 @@ impl AuthenticationReviewStartup {
             .as_ref()
             .ok_or(AuthenticationSourceFailure::Required)?
             .match_anchor(&self.source)?;
-        Ok(chrono::DateTime::parse_from_rfc3339(&got.wall_floor)?.with_timezone(&chrono::Utc))
+        Ok((
+            chrono::DateTime::parse_from_rfc3339(&got.wall_floor)?.with_timezone(&chrono::Utc),
+            got.budget.plan,
+        ))
     }
     /// Verified predecessor revision for startup CAS; never an execution capability.
     /// This deliberately accepts a prior owner incarnation only as history.

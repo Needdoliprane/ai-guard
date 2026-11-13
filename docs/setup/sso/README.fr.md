@@ -1,5 +1,7 @@
 # Configurer et utiliser le SSO ai-guard
 
+Avec le [profil explicite de sources humaines possédées](../identity/OWNED_SOURCES.fr.md), configuration OIDC choisie et AuthLedger5 sont retenus, tandis que bearers/handlers OIDC modernes restent fermés. Le profil n'annonce jamais désactivé un OIDC sélectionné. La procédure SSO legacy ci-dessous ne qualifie ni n'active cette voie moderne.
+
 [English](README.md) · [Index d’installation](../README.fr.md) · [Fournisseur Keycloak](../keycloak/README.fr.md) · [Accès local nominatif](../identity/README.fr.md)
 
 Ce guide décrit la configuration OIDC Rust, la connexion Web et le CLI humain au premier plan. Utilisez-le avec le binaire ai-guard correspondant et le frontend compilé. Il ne configure pas l’authentification Codex ou Claude : choisissez séparément leur abonnement, clé API ou endpoint d’inférence approuvé dans le [guide fournisseurs](../providers/README.fr.md).
