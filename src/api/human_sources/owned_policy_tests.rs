@@ -311,8 +311,8 @@ async fn policy_scope_body_and_method_failures_keep_existing_boundaries() {
     let (_fixture,state) = policy_state(15);
     let original = policy_body(&state);
     let before = policy_snapshot(&state);
-    for token in ["synthetic-A-viewer","synthetic-unknown-control"] {
-        assert!(matches!(policy_call(&state,"POST",REPLACE,token,original.clone()).await.0,401|403|503));
+    for (token,status) in [("synthetic-A-viewer",403),("synthetic-unknown-control",401)] {
+        assert_eq!(policy_call(&state,"POST",REPLACE,token,original.clone()).await.0,status);
         assert_eq!(policy_snapshot(&state),before);
     }
     for scope in [None,Some(json!(null)),Some(json!({"tenant_id":"A"}))] {
@@ -331,6 +331,40 @@ async fn policy_scope_body_and_method_failures_keep_existing_boundaries() {
     assert_eq!(status,409);
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_migration_required");
     policy_drain(&state).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn policy_role_format_and_declared_size_refuse_before_body_polling() {
+    use std::sync::atomic::AtomicUsize;
+    use tower::ServiceExt;
+    for (format,token,length,expected_status) in [
+        (15,"synthetic-A-viewer",None,403),
+        (15,"synthetic-unknown-control",None,401),
+        (14,RUNNER,None,409),
+        (15,RUNNER,Some("65537"),413),
+    ] {
+        let (_fixture,state) = policy_state(format);
+        let b = state.tenants.iter().position(|t|t.tenant_id=="B").unwrap();
+        let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        // An actual untrusted request stream witnesses ordering: polling it
+        // would return an IO error, rather than a fabricated HTTP response.
+        let body = axum::body::Body::from_stream(futures_util::stream::poll_fn(move |_| {
+            observed.fetch_add(1,Ordering::SeqCst);
+            std::task::Poll::Ready(Some(Err::<axum::body::Bytes,_>(std::io::Error::other("synthetic body must remain unpolled"))))
+        }));
+        let mut request = axum::http::Request::builder().method("POST").uri(REPLACE)
+            .header("authorization",format!("Bearer {token}"))
+            .header("content-type","application/json");
+        if let Some(length) = length { request = request.header("content-length",length); }
+        let request = request.body(body).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(120),gateway_router(state.clone()).oneshot(request)).await.unwrap().unwrap();
+        assert_eq!(response.status().as_u16(),expected_status);
+        assert_eq!(polls.load(Ordering::SeqCst),0,"rejected admission polled the request body");
+        assert!(neighbor.try_recv().is_err());
+        policy_drain(&state).await;
+    }
 }
 
 #[tokio::test(flavor="multi_thread",worker_threads=2)]
