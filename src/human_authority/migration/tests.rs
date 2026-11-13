@@ -519,12 +519,19 @@ impl Fixture {
                             HumanMigrationSourceOptions::TenantStore {
                                 redactor: Redactor::new(vec![]),
                                 max_events: 10_000,
+                                capacity: crate::audit::AuditCapacityPolicyV1::resolved(10_000),
+                                workload: crate::audit::WorkloadAuditPolicyV1::resolved(
+                                    10_000,
+                                    &crate::audit::AuditCapacityPolicyV1::resolved(10_000),
+                                ),
+                                retention: crate::relay::RelayRetentionPolicyV1::default(),
                             }
                         }
                         HumanSourceKindV1::AuthenticationLedger => {
                             HumanMigrationSourceOptions::AuthenticationLedger {
                                 redactor: Redactor::new(vec![]),
                                 policy: self.policy.clone(),
+                                capacity_plan: self.capacity.clone(),
                             }
                         }
                     },
@@ -894,6 +901,12 @@ fn missing_extra_or_changed_migration_sources_refuse_without_backup() {
         HumanMigrationSourceOptions::TenantStore {
             redactor: Redactor::new(vec![]),
             max_events: 10_000,
+            capacity: crate::audit::AuditCapacityPolicyV1::resolved(10_000),
+            workload: crate::audit::WorkloadAuditPolicyV1::resolved(
+                10_000,
+                &crate::audit::AuditCapacityPolicyV1::resolved(10_000),
+            ),
+            retention: crate::relay::RelayRetentionPolicyV1::default(),
         },
     );
     assert_eq!(

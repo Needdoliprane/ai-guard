@@ -612,7 +612,7 @@ impl<'de> Visitor<'de> for JsonSeed {
         let mut values = Vec::new();
         loop {
             if values.len() == self.max_sequence {
-                seq.next_element_seed(RejectExtraElement)?;
+                let _ = seq.next_element_seed(RejectExtraElement)?;
                 break;
             }
             let Some(value) = seq.next_element_seed(self.child())? else {

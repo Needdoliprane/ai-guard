@@ -248,6 +248,44 @@ pub struct PreparedOwnedSources {
     pub credentials: PrivateFile,
 }
 
+/// Pure shared resolution from the retained private OIDC configuration and its
+/// actual trust bundle. No authentication ledger, HTTP discovery or owner.
+pub(crate) fn resolved_oidc(
+    prepared: &super::PreparedOidcFile,
+    mapping_revision: u64,
+    redactor: &Redactor,
+) -> Result<ResolvedHumanOidcPublicV1> {
+    prepared
+        .file
+        .authentication_audit
+        .policy
+        .validate_for_installation(prepared.file.authentication_audit.installation_id, redactor)?;
+    anyhow::ensure!(
+        prepared.file.version == 2 && mapping_revision > 0,
+        "owned OIDC requires explicit mapping revision and version2 capacity configuration"
+    );
+    let trust = prepared
+        .trust
+        .as_ref()
+        .context("owned OIDC requires an explicit retained public trust bundle")?;
+    trust.revalidate()?;
+    let public = ResolvedHumanOidcPublicV1 {
+        gateway: prepared.file.gateway.clone(),
+        authentication_policy: prepared.file.authentication_audit.policy.clone(),
+        capacity_plan: prepared
+            .file
+            .authentication_audit
+            .capacity_plan
+            .clone()
+            .context("owned OIDC capacity plan required")?,
+        mapping_revision,
+        trust_bundle_sha256: trust.digest().to_owned(),
+    };
+    public_oidc_digest_v1(&public)?;
+    prepared.held.revalidate()?;
+    Ok(public)
+}
+
 /// No ordinary Store/AuthLedger opener occurs here. Expected binding snapshots
 /// are rechecked by acquire and the actual floor/CAS/retain source protocol.
 #[allow(clippy::too_many_arguments)]
@@ -304,51 +342,14 @@ pub fn load_owned_sources(
             }
             Some(path) => {
                 let prepared = super::prepare_oidc_file(path)?;
-                prepared
-                    .file
-                    .authentication_audit
-                    .policy
-                    .validate_for_installation(
-                        prepared.file.authentication_audit.installation_id,
-                        &redactor,
-                    )?;
-                anyhow::ensure!(
-                    prepared.file.version == 2,
-                    "owned OIDC requires configurationV2/capacity and existing Auth5; explicit offline migration required"
-                );
                 let revision = mapping_revision
                     .filter(|revision| *revision > 0)
                     .context("explicit OIDC mapping closure revision required")?;
-                let trust_path = prepared
-                    .file
-                    .ca_bundle_file
-                    .as_ref()
-                    .context("owned OIDC requires an explicit retained public trust bundle")?;
-                let parent = prepared
-                    .held
-                    .path()
-                    .parent()
-                    .context("OIDC configuration parent absent")?;
-                let trust = PrivateFile::open(
-                    &absolute_path(&if trust_path.is_absolute() {
-                        trust_path.clone()
-                    } else {
-                        parent.join(trust_path)
-                    })?,
-                    262_144,
-                )?;
-                let public = ResolvedHumanOidcPublicV1 {
-                    gateway: prepared.file.gateway,
-                    authentication_policy: prepared.file.authentication_audit.policy.clone(),
-                    capacity_plan: prepared
-                        .file
-                        .authentication_audit
-                        .capacity_plan
-                        .context("owned OIDC capacity plan required")?,
-                    mapping_revision: revision,
-                    trust_bundle_sha256: hex::encode(Sha256::digest(trust.bytes())),
-                };
-                public_oidc_digest_v1(&public)?;
+                let public = resolved_oidc(&prepared, revision, &redactor)?;
+                let trust = prepared
+                    .trust
+                    .clone()
+                    .context("owned OIDC trust bundle required")?;
                 let capacity_tenants = public
                     .capacity_plan
                     .tenants
