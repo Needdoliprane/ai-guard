@@ -1,0 +1,9 @@
+# Candidat de démarrage humain possédé
+
+Base : `6cc6b3a25f4dd1fea4ead3180cde1d58fb912001`. Ce changement réalise la verticale W0 R2 relue : startup réel complet, découverte de candidats bornée, identité/ressources locales sur la propre source, fermeture explicite des autres routes modernes et ownership serveur jusqu'aux travaux acceptés/en queue et à leur cleanup.
+
+Les nouvelles régressions sont dans `api/human_sources/tests.rs`, `audit/human_modern/tests.rs`, `human_authority/startup/tests.rs` et les tests de digest public sous `gateway_config/human_sources/`. Elles utilisent de vrais SQLite privés migrés par le coordinator existant ; aucun UUID, candidat ou flag de disponibilité ne remplace une preuve de source. Les tests A/B gardent mutex ou `BEGIN IMMEDIATE` A jusqu'à identité B authentifiée, contexte opaque et reçu/floor de ressources observés durablement par connexion indépendante. L'observateur Store voisin doit rester vide. Busy propre et restauration du timeout ont leurs tests distincts.
+
+Exécution : **NOT_RUN**. Cet agent n'a exécuté ni Cargo/rustc/binaire projet, ni moteur, fournisseur, IdP ou cluster. Rustfmt de confiance ciblé et `git diff --check` sont seulement des vérifications statiques. Compilation, assertions logicielles, revue indépendante, Docker/Podman/Kubernetes et qualification production restent à établir sur un gel identifié. Aucun PASS historique n'est transféré, aucun fingerprint d'audit ni gate G01–G12 n'est clos.
+
+Modes legacy et dispatch Full3 sont conservés. Le nouveau mode ne réalise ni provisionnement hors ligne manifeste/enveloppe, ni découverte fraîche cross-source, ni sessions/révocation OIDC modernes, ni approbation/lancement humain, ni permission egress ou filtrage réseau. Le [guide opérateur synchronisé](../../../../setup/identity/OWNED_SOURCES.fr.md) décrit les vrais flags et les refus/reprises. Revue source/conception et éventuelles preuves d'exécution restent distinctes.
