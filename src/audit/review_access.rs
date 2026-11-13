@@ -165,6 +165,36 @@ impl CheckedTransaction<'_> {
 }
 
 impl Store {
+    /// One retained connection guard covers zero-wait entry, rollback/commit
+    /// and exact timeout restoration. The callback owns its checked commit;
+    /// this helper never substitutes a Business commit for an E1 clock commit.
+    pub(super) fn with_scoped_nowait<T>(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        class: StoreOperationClass,
+        work: impl FnOnce(&mut Connection) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        access.check(class)?;
+        let mut db = self.db.try_lock().map_err(|_| ReviewAccessFailure::Busy)?;
+        let prior: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        let prior = u64::try_from(prior).context("invalid negative SQLite busy timeout")?;
+        db.busy_timeout(std::time::Duration::ZERO)?;
+        let result = work(&mut db);
+        // All transactions created by work have ended before restoration.
+        // A restoration error refuses even a result from a known COMMIT.
+        db.busy_timeout(std::time::Duration::from_millis(prior))?;
+        let restored: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        anyhow::ensure!(u64::try_from(restored)? == prior, "human source timeout restoration failed");
+        result.map_err(|error| {
+            let busy = error.chain().any(|cause| matches!(
+                cause.downcast_ref::<rusqlite::Error>(),
+                Some(rusqlite::Error::SqliteFailure(code, _))
+                    if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            ));
+            if busy { error.context(ReviewAccessFailure::Busy) } else { error }
+        })
+    }
+
     pub(super) fn lock_access_lease(
         &self,
         access: Option<&HumanSourceAccess<'_>>,
