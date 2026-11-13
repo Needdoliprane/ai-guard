@@ -292,7 +292,8 @@ impl SupervisionStateV1 {
     pub fn validate(&self) -> anyhow::Result<()> {
         invalid(
             self.version == 1
-                && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15].contains(&self.schema_version),
+                && [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+                    .contains(&self.schema_version),
         )?;
         if let Some(namespace) = &self.control_namespace_uuid {
             uuid(namespace)?;

@@ -23,7 +23,10 @@ pub(super) fn owned_protocol_request(request: &Request) -> bool {
     request.method() == axum::http::Method::GET
         && request.uri().query().is_none()
         && request.extensions().get::<ReservedProtocol>().is_some()
-        && request.extensions().get::<Arc<auth::owned_control::OwnedProtocol>>().is_some()
+        && request
+            .extensions()
+            .get::<Arc<auth::owned_control::OwnedProtocol>>()
+            .is_some()
 }
 
 pub(super) struct ControlCapacity {
@@ -164,7 +167,8 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     let semaphore = match identity {
         ControlRouteIdentity::Runner => {
             if state.owned_human.is_some() {
-                let identity = match auth::owned_control::authenticate(&state, &parts.headers).await {
+                let identity = match auth::owned_control::authenticate(&state, &parts.headers).await
+                {
                     Ok(identity) => identity,
                     Err(rejection) => return rejection.into_response(),
                 };
@@ -213,7 +217,9 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     };
     let _operation = if let Some(identity) = owned_identity {
         parts.extensions.insert(ReservedProtocol(()));
-        parts.extensions.insert(Arc::new(identity.accept(operation)));
+        parts
+            .extensions
+            .insert(Arc::new(identity.accept(operation)));
         None
     } else {
         Some(operation)

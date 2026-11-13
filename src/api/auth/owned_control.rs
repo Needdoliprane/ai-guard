@@ -77,12 +77,20 @@ pub(in crate::api) async fn authenticate(
             if !owned.technical_candidate(&digest)? {
                 return Err(human_sources::unavailable());
             }
-            let epoch = owned.owner.try_read_epoch()
+            let epoch = owned
+                .owner
+                .try_read_epoch()
                 .map_err(|_| human_sources::unavailable())?;
-            let source = owned.sources.get(binding.tenant_index)
+            let source = owned
+                .sources
+                .get(binding.tenant_index)
                 .ok_or_else(human_sources::unavailable)?;
-            epoch.validate_source(source).map_err(|_| human_sources::unavailable())?;
-            let credential = owned.registry.authenticate(&token)
+            epoch
+                .validate_source(source)
+                .map_err(|_| human_sources::unavailable())?;
+            let credential = owned
+                .registry
+                .authenticate(&token)
                 .map_err(|_| human_sources::unavailable())?;
             if credential.tenant_id() != tenant.tenant_id
                 || credential.control_namespace_uuid() != source.descriptor().durable_namespace_id
@@ -101,7 +109,8 @@ pub(in crate::api) async fn authenticate(
                 _usage: usage,
             })
         },
-    ).await
+    )
+    .await
 }
 
 impl OwnedProtocol {
@@ -121,17 +130,31 @@ impl OwnedProtocol {
                 if !identity.owned.technical_candidate(&identity.digest)? {
                     return Err(human_sources::unavailable());
                 }
-                identity.credential.revalidate().map_err(|_| human_sources::unavailable())?;
-                let epoch = identity.owned.owner.try_read_epoch()
+                identity
+                    .credential
+                    .revalidate()
                     .map_err(|_| human_sources::unavailable())?;
-                let source = identity.owned.sources.get(identity.index)
+                let epoch = identity
+                    .owned
+                    .owner
+                    .try_read_epoch()
+                    .map_err(|_| human_sources::unavailable())?;
+                let source = identity
+                    .owned
+                    .sources
+                    .get(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
-                let access = HumanSourceAccess::read(&epoch, source).map_err(|_| human_sources::unavailable())?;
-                let expected = *identity.owned.discovery_generations.get(identity.index)
+                let access = HumanSourceAccess::read(&epoch, source)
+                    .map_err(|_| human_sources::unavailable())?;
+                let expected = *identity
+                    .owned
+                    .discovery_generations
+                    .get(identity.index)
                     .ok_or_else(human_sources::unavailable)?;
-                let snapshot = tenant.store.modern_control_protocol(
-                    &access, &identity.credential, expected,
-                ).map_err(super::super::human::store_failure)?;
+                let snapshot = tenant
+                    .store
+                    .modern_control_protocol(&access, &identity.credential, expected)
+                    .map_err(super::super::human::store_failure)?;
                 let Some(snapshot) = snapshot else {
                     identity.owned.require_rebuild();
                     return Err(human_sources::unavailable());
@@ -140,8 +163,13 @@ impl OwnedProtocol {
                 // released the connection mutex before this test-only seam.
                 #[cfg(test)]
                 test_hook::pause(&state)?;
-                identity.credential.revalidate().map_err(|_| human_sources::unavailable())?;
-                epoch.validate_source(source).map_err(|_| human_sources::unavailable())?;
+                identity
+                    .credential
+                    .revalidate()
+                    .map_err(|_| human_sources::unavailable())?;
+                epoch
+                    .validate_source(source)
+                    .map_err(|_| human_sources::unavailable())?;
                 epoch.check().map_err(|_| human_sources::unavailable())?;
                 if !identity.owned.technical_candidate(&identity.digest)? {
                     return Err(human_sources::unavailable());
@@ -155,10 +183,13 @@ impl OwnedProtocol {
                     protocols: snapshot.protocols,
                     active: snapshot.active,
                 };
-                protocol.validate().map_err(|_| human_sources::unavailable())?;
+                protocol
+                    .validate()
+                    .map_err(|_| human_sources::unavailable())?;
                 Ok(Json(protocol))
             },
-        ).await?;
+        )
+        .await?;
         // Memory-only closing/admission check; no filesystem/SQLite on Tokio.
         if !owned.healthy() {
             return Err(human_sources::unavailable());
@@ -200,15 +231,25 @@ pub(in crate::api) mod test_hook {
         let (release, waiter) = mpsc::channel();
         let mut next = state.owned_control_hook.next.lock().unwrap();
         assert!(next.is_none(), "owned diagnostic hook already installed");
-        *next = Some(Pause { reached, release: waiter });
+        *next = Some(Pause {
+            reached,
+            release: waiter,
+        });
         (observer, Release(Some(release)))
     }
     pub(super) fn pause(state: &GatewayState) -> ApiResult<()> {
-        let next = state.owned_control_hook.next.lock()
-            .map_err(|_| human_sources::unavailable())?.take();
+        let next = state
+            .owned_control_hook
+            .next
+            .lock()
+            .map_err(|_| human_sources::unavailable())?
+            .take();
         if let Some(next) = next {
-            next.reached.send(()).map_err(|_| human_sources::unavailable())?;
-            next.release.recv_timeout(std::time::Duration::from_secs(15))
+            next.reached
+                .send(())
+                .map_err(|_| human_sources::unavailable())?;
+            next.release
+                .recv_timeout(std::time::Duration::from_secs(15))
                 .map_err(|_| human_sources::unavailable())?;
         }
         Ok(())

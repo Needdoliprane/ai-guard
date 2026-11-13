@@ -22,22 +22,31 @@ fn control_semaphore(gate: &Arc<store_io::Gate>) -> Arc<Semaphore> {
 /// slot for that job and keep all other slots occupied until its return.
 fn leave_one(semaphore: &Arc<Semaphore>) -> (usize, OwnedSemaphorePermit) {
     let capacity = semaphore.available_permits();
-    assert!(capacity > 0, "fresh fixture must have an available real slot");
+    assert!(
+        capacity > 0,
+        "fresh fixture must have an available real slot"
+    );
     let remaining = u32::try_from(capacity - 1).unwrap();
-    let reserved = Arc::clone(semaphore).try_acquire_many_owned(remaining).unwrap();
+    let reserved = Arc::clone(semaphore)
+        .try_acquire_many_owned(remaining)
+        .unwrap();
     assert_eq!(semaphore.available_permits(), 1);
     (capacity, reserved)
 }
 
 struct AbortOnDrop(tokio::task::AbortHandle);
 impl Drop for AbortOnDrop {
-    fn drop(&mut self) { self.0.abort(); }
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct RouterFutureDropped(Option<oneshot::Sender<()>>);
 impl Drop for RouterFutureDropped {
     fn drop(&mut self) {
-        if let Some(sender) = self.0.take() { let _ = sender.send(()); }
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
     }
 }
 
@@ -46,35 +55,68 @@ async fn aborted_router_keeps_owned_usage_and_real_permits_until_postcommit_rele
     let mut fixture = Store::owned_control_fixture_for_test(14);
     let (bundle, credentials, tokens) = fixture.take_startup();
     let state = GatewayState::for_owned_human_sources(
-        bundle, credentials, tokens, Policy::default(), None, Redactor::new(vec![]),
-    ).unwrap();
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
     let owned = state.owned_human.as_ref().unwrap();
-    let a = state.tenants.iter().position(|tenant| tenant.tenant_id == "A").unwrap();
-    let namespace = owned.sources[a].descriptor().durable_namespace_id.to_string();
+    let a = state
+        .tenants
+        .iter()
+        .position(|tenant| tenant.tenant_id == "A")
+        .unwrap();
+    let namespace = owned.sources[a]
+        .descriptor()
+        .durable_namespace_id
+        .to_string();
     let router = gateway_router(state.clone());
-    let request = || axum::http::Request::builder().method("GET").uri(RESERVED_PROTOCOL)
-        .header(axum::http::header::AUTHORIZATION, format!("Bearer {RUNNER}"))
-        .body(Body::empty()).unwrap();
+    let request = || {
+        axum::http::Request::builder()
+            .method("GET")
+            .uri(RESERVED_PROTOCOL)
+            .header(
+                axum::http::header::AUTHORIZATION,
+                format!("Bearer {RUNNER}"),
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
 
     // This genuine200 witness refuses broken setup as a cancellation success.
     // The same migration/startup, retained registry, middleware and Store will
     // handle the request paused below. No response or actor proof is mocked.
     let response = tokio::time::timeout(OBSERVATION_BUDGET, router.clone().oneshot(request()))
-        .await.unwrap().unwrap();
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     let protocol: ControlProtocolV1 = serde_json::from_slice(&bytes).unwrap();
     protocol.validate().unwrap();
     assert_eq!(protocol.schema_version, 14);
     assert_eq!(protocol.tenant_id, "A");
     assert_eq!(protocol.role, "runner");
-    assert_eq!(protocol.control_namespace_uuid.as_deref(), Some(namespace.as_str()));
-    assert!(!protocol.active, "diagnostic acceptance must not activate a lease");
+    assert_eq!(
+        protocol.control_namespace_uuid.as_deref(),
+        Some(namespace.as_str())
+    );
+    assert!(
+        !protocol.active,
+        "diagnostic acceptance must not activate a lease"
+    );
     assert_eq!(owned.usages.load(Ordering::Acquire), 0);
 
     let shared_io = control_semaphore(&state.io);
     let tenant_io = control_semaphore(&state.tenants[a].io);
-    let operation = state.tenants[a].control_capacity.runner_semaphore_for_test();
+    let operation = state.tenants[a]
+        .control_capacity
+        .runner_semaphore_for_test();
     assert!(!Arc::ptr_eq(&shared_io, &tenant_io));
     let (shared_capacity, shared_reserved) = leave_one(&shared_io);
     let (tenant_capacity, tenant_reserved) = leave_one(&tenant_io);
@@ -89,10 +131,16 @@ async fn aborted_router_keeps_owned_usage_and_real_permits_until_postcommit_rele
         router.oneshot(actual_request).await
     });
     let _abort_on_failure = AbortOnDrop(handler.abort_handle());
-    let reached = tokio::time::timeout(OBSERVATION_BUDGET, tokio::task::spawn_blocking(move || {
-        reached.recv_timeout(OBSERVATION_BUDGET).unwrap();
-        reached
-    })).await.unwrap().unwrap();
+    let reached = tokio::time::timeout(
+        OBSERVATION_BUDGET,
+        tokio::task::spawn_blocking(move || {
+            reached.recv_timeout(OBSERVATION_BUDGET).unwrap();
+            reached
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     // Reached is emitted only after the actual checked Business read committed
     // and released SQLite, while its usage and operation/IO permits are held.
     assert_eq!(owned.usages.load(Ordering::Acquire), 1);
@@ -102,9 +150,15 @@ async fn aborted_router_keeps_owned_usage_and_real_permits_until_postcommit_rele
 
     handler.abort();
     assert!(handler.await.unwrap_err().is_cancelled());
-    tokio::time::timeout(OBSERVATION_BUDGET, drop_observed).await.unwrap().unwrap();
-    assert_eq!(owned.usages.load(Ordering::Acquire), 1,
-        "dropping the Router observer must not release accepted running work");
+    tokio::time::timeout(OBSERVATION_BUDGET, drop_observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        owned.usages.load(Ordering::Acquire),
+        1,
+        "dropping the Router observer must not release accepted running work"
+    );
 
     let shared_return = Arc::clone(&shared_io).acquire_owned();
     let tenant_return = Arc::clone(&tenant_io).acquire_owned();
@@ -119,22 +173,35 @@ async fn aborted_router_keeps_owned_usage_and_real_permits_until_postcommit_rele
     let drained = retirement.drain();
     tokio::pin!(drained);
     assert!(futures_util::poll!(drained.as_mut()).is_pending());
-    assert_eq!(owned.usages.load(Ordering::Acquire), super::super::CLOSED | 1);
-    assert!(matches!(reached.try_recv(), Err(mpsc::TryRecvError::Empty)),
-        "the one-shot postcommit rendez-vous must still be held before release");
+    assert_eq!(
+        owned.usages.load(Ordering::Acquire),
+        super::super::CLOSED | 1
+    );
+    assert!(
+        matches!(reached.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "the one-shot postcommit rendez-vous must still be held before release"
+    );
 
     // No sleep and no assumption that the retained2s epoch is still fresh.
     // This observer was already dropped, so no successful response is expected.
     release.release();
     let returned = tokio::time::timeout(OBSERVATION_BUDGET, async {
         let (shared, tenant, operation, drained) = tokio::join!(
-            shared_return.as_mut(), tenant_return.as_mut(), operation_return.as_mut(), drained.as_mut(),
+            shared_return.as_mut(),
+            tenant_return.as_mut(),
+            operation_return.as_mut(),
+            drained.as_mut(),
         );
         drained.unwrap();
         (shared.unwrap(), tenant.unwrap(), operation.unwrap())
-    }).await.expect("actual work, permits and owner must finish within the QA observation budget");
+    })
+    .await
+    .expect("actual work, permits and owner must finish within the QA observation budget");
     assert_eq!(owned.usages.load(Ordering::Acquire), super::super::CLOSED);
-    assert!(matches!(reached.try_recv(), Err(mpsc::TryRecvError::Disconnected)));
+    assert!(matches!(
+        reached.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
     drop(returned);
     drop((shared_reserved, tenant_reserved, operation_reserved));
     assert_eq!(shared_io.available_permits(), shared_capacity);

@@ -451,10 +451,10 @@ impl GatewayState {
 
 #[cfg(test)]
 mod journal_tests;
-#[cfg(test)]
-pub(super) mod tests;
 #[cfg(all(test, unix))]
 mod owned_control_tests;
+#[cfg(test)]
+pub(super) mod tests;
 
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[

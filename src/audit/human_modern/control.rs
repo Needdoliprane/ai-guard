@@ -26,9 +26,8 @@ impl Store {
             );
         };
         let result = self.with_modern_read(access, |tx| {
-            let binding = self.verify_review_binding_in_transaction(
-                tx, epoch, source, credential,
-            )?;
+            let binding =
+                self.verify_review_binding_in_transaction(tx, epoch, source, credential)?;
             if discovery_generation(tx)? != expected {
                 return Err(StaleControlDiscovery.into());
             }
