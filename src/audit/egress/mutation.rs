@@ -9,12 +9,12 @@ fn check_policy_context(
     generation: HumanDiscoveryGeneration,
 ) -> anyhow::Result<()> {
     tx.require_identity_authority()?;
+    if discovery_generation(tx)? != generation {
+        return Err(EgressStoreFailure::DiscoveryStale.into());
+    }
     if store.tenant_id() != expected.tenant_id()
         || crate::audit::supervision::namespace(tx)? != expected.control_namespace_uuid() {
         return Err(EgressStoreFailure::ScopeConflict.into());
-    }
-    if discovery_generation(tx)? != generation {
-        return Err(EgressStoreFailure::DiscoveryStale.into());
     }
     Ok(())
 }
