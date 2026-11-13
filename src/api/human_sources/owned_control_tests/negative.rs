@@ -2,8 +2,13 @@
 //! These tests do not participate in the frozen two-parent a47 baseline.
 use super::*;
 use crate::{
-    control::{ControlProtocolV1, review_binding::*},
+    control::{
+        AdmissionV1, ControlProtocolV1, DecisionPhaseV1, DecisionReceiptV1, LaunchSpecV1,
+        NetworkV1, QuotaPolicyV1, RestartPolicyV1, RuntimeKindV1, SecurityPresetV1,
+        SupervisedAdmissionV1, WorkerStateV1, WorkerV1, review_binding::*,
+    },
     human_authority::startup::HumanOwnedStartupBundle,
+    model::{CommandSpec, DecisionRequest, Outcome},
     workload::{WorkloadBindingIssueV1, WorkloadSubjectV1},
 };
 use axum::http::{HeaderMap, Method, Request as HttpRequest, header};
@@ -12,7 +17,7 @@ use tower::ServiceExt;
 
 const OBSERVE: Duration = Duration::from_secs(120);
 const HUMAN: &str = "synthetic-A0-local-human";
-const WORKER: &str = "synthetic-A0-workload-worker";
+const WORKER: &str = "synthetic-A0-workload-worker-token-00000000";
 const B_RUNNER: &str = "synthetic-B-runner";
 
 fn gateway(
@@ -290,9 +295,115 @@ async fn drain_invalid_owner(state: &GatewayState) {
     );
 }
 
+// Same real decision/admission sequence as tests/support/relay_admission_fixture.rs.
+// It reserves durable quota/IDs only; no runtime or Running relay is asserted.
+fn reserve_workload_fixture_worker(store: &Store) -> WorkerV1 {
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let request = DecisionRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        profile: "strict".into(),
+        command: CommandSpec {
+            argv: vec!["/usr/bin/id".into()],
+            cwd: "/workspace".into(),
+        },
+        project_id: None,
+        sandbox_id: None,
+        agent_id: None,
+        session_id: Some(session_id.clone()),
+        correlation_id: None,
+        trace_id: None,
+        human_approved: false,
+        approval_hash: None,
+        execution_mode: None,
+        provider_resolution: None,
+    };
+    let policy = Policy::default();
+    let decision = crate::policy::evaluate(&policy, &request);
+    assert_eq!(decision.outcome, Outcome::Allow);
+    let stored = store
+        .decision(&request, Some((decision, json!(null))))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.event.decision.as_ref().unwrap().outcome,
+        Outcome::Allow
+    );
+    let admission = SupervisedAdmissionV1 {
+        version: 1,
+        protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+        intent_hash: "ab".repeat(32),
+        admission: AdmissionV1 {
+            version: 1,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            receipt: DecisionReceiptV1 {
+                version: 1,
+                request_id: request.request_id.clone(),
+                request_hash: crate::policy::request_hash(&request),
+                phase: DecisionPhaseV1::Initial,
+                audit_seq: stored.seq,
+                audit_hash: stored.hash.clone(),
+            },
+            launch: LaunchSpecV1 {
+                version: 1,
+                session_id,
+                command: request.command.clone(),
+                profile: request.profile.clone(),
+                runtime_kind: RuntimeKindV1::Docker,
+                authority_id: uuid::Uuid::new_v4().to_string(),
+                image_ref: "worker:fixture".into(),
+                image_id: format!("sha256:{}", "aa".repeat(32)),
+                network: NetworkV1::None,
+                cpu_millis: 2000,
+                memory_bytes: 1_073_741_824,
+                pids_limit: 256,
+                timeout_seconds: 600,
+                security_preset: SecurityPresetV1::FixedSandboxV2,
+                restart_policy: RestartPolicyV1::No,
+                workspace_manifest_digest: "bb".repeat(32),
+                workspace_import_policy_version: 1,
+                provider: "generic".into(),
+                capture_output: false,
+                credential_binding_id: None,
+                credential_names: vec![],
+                provider_resolution: None,
+            },
+            decision_request: request,
+        },
+    };
+    let result = store
+        .admit_supervised(
+            &admission,
+            &policy,
+            crate::policy::evaluate(&policy, &admission.admission.decision_request),
+            json!(null),
+            &QuotaPolicyV1::default(),
+        )
+        .unwrap();
+    assert!(result.accepted);
+    assert!(!result.replayed);
+    assert!(result.refusal.is_none());
+    assert!(result.receipt.audit_seq > stored.seq);
+    let worker = result.worker.expect("actual admission must reserve a worker");
+    let persisted = store.worker(&worker.worker_id).unwrap().unwrap();
+    assert_eq!(persisted.worker_id, worker.worker_id);
+    assert_eq!(persisted.attempt.attempt_id, worker.attempt.attempt_id);
+    assert!(persisted.quota_held);
+    assert_eq!(persisted.state, WorkerStateV1::Reserved);
+    assert!(persisted.attempt.container_id.is_none());
+    persisted
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_store() {
-    let mut fixture = Store::owned_control_fixture_for_test(14);
+    let mut reserved = None;
+    let mut fixture = Store::owned_control_fixture_with_legacy_setup_for_test(14, |legacy| {
+        reserved = Some(reserve_workload_fixture_worker(legacy));
+    });
+    let worker = reserved.expect("real pre-migration worker reservation must complete");
+    assert!(worker.quota_held);
+    assert_eq!(worker.state, WorkerStateV1::Reserved);
+    assert!((32..=512).contains(&WORKER.len()));
+    assert!(!WORKER.chars().any(char::is_whitespace));
     let (bundle, credentials, tokens) = fixture.take_startup();
     local_credential(&bundle, "A", HUMAN, true);
     {
@@ -307,29 +418,48 @@ async fn owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_stor
         let source = bundle.owner.source_token(source_id).unwrap();
         let epoch = bundle.owner.try_write_epoch().unwrap();
         let access = HumanSourceAccess::write(&epoch, &source).unwrap();
-        let result = bundle
-            .stores
-            .get(&source_id)
-            .unwrap()
+        let store = bundle.stores.get(&source_id).unwrap();
+        let credential_id = uuid::Uuid::new_v4().to_string();
+        let subject = WorkloadSubjectV1::Worker {
+            worker_id: worker.worker_id.clone(),
+            attempt_id: worker.attempt.attempt_id.clone(),
+            generation: 1,
+        };
+        let result = store
             .issue_workload_binding_scoped(
                 &access,
                 &WorkloadBindingIssueV1 {
                     version: 1,
                     operation_id: uuid::Uuid::new_v4().to_string(),
-                    credential_id: uuid::Uuid::new_v4().to_string(),
+                    credential_id: credential_id.clone(),
                     expected_revision: 0,
-                    subject: WorkloadSubjectV1::Worker {
-                        worker_id: uuid::Uuid::new_v4().to_string(),
-                        attempt_id: uuid::Uuid::new_v4().to_string(),
-                        generation: 1,
-                    },
+                    subject: subject.clone(),
                     sha256_digest: hex::encode(Sha256::digest(WORKER.as_bytes())),
                     expires_at: (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
                 },
             )
             .unwrap();
         assert_eq!(result.revision, 1);
+        assert_eq!(result.credential_id, credential_id);
+        assert!(!result.replayed);
+        assert!(result.audit_seq > 0);
+        epoch.check().unwrap();
+        drop(access);
+        drop(epoch);
+        let epoch = bundle.owner.try_read_epoch().unwrap();
+        let access = HumanSourceAccess::read(&epoch, &source).unwrap();
+        let digest: [u8; 32] = Sha256::digest(WORKER.as_bytes()).into();
+        let owner = store
+            .workload_digest_binding_scoped(&access, &digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.credential_id, credential_id);
+        assert_eq!(owner.subject, subject);
+        epoch.check().unwrap();
     }
+    // Actual issuance and checked historical ownership, not a Running relay
+    // authentication: the owned lease remains inactive and no runtime ran.
+    println!("A0_WORKER_FIXTURE_RESERVED_BOUND_NOT_RELAY_RUNNING");
     let state = gateway(bundle, credentials, tokens);
     let router = gateway_router(state.clone());
     require_protocol(&router, RUNNER, "A").await;

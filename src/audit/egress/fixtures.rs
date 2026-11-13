@@ -1398,11 +1398,21 @@ impl OwnedControlFixture {
 }
 impl Store {
     pub(crate) fn owned_control_fixture_for_test(format: u32) -> OwnedControlFixture {
+        Self::owned_control_fixture_with_legacy_setup_for_test(format, |_| {})
+    }
+
+    pub(crate) fn owned_control_fixture_with_legacy_setup_for_test(
+        format: u32,
+        setup: impl FnOnce(&Store),
+    ) -> OwnedControlFixture {
         use crate::human_authority::startup::{
             HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest,
         };
         assert!(matches!(format, 14 | 15));
         let base = BaseFixture::new(&["A", "B"]);
+        // Test-only causal setup on the actual live legacy A Store, before
+        // owned migration/startup deliberately reopen an inactive lease.
+        setup(&base.stores[0]);
         let anchors = base.migrate_all();
         if format == 15 {
             migrate15(&base, &EgressStoreLimitsV1::default());
