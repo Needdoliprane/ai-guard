@@ -8,9 +8,23 @@ use super::{Directory, Identity, PrivateEntryIdentity, check_directory, child_na
 use anyhow::{Context, Result, ensure};
 use std::{
     ffi::{CStr, OsStr},
+    fmt,
     fs::File,
     os::fd::{AsRawFd, RawFd},
 };
+
+/// Internal phase only. The context carries no private data and keeps the
+/// original error chain available for structured descriptor-shortage checks.
+#[derive(Debug)]
+pub(crate) struct InitialParentObservationFailure;
+
+impl fmt::Display for InitialParentObservationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("private source initial parent observation failed")
+    }
+}
+
+impl std::error::Error for InitialParentObservationFailure {}
 
 impl PrivateEntryIdentity {
     /// Physical identity of the entry inspected by the existing private guard.
@@ -39,16 +53,30 @@ impl Directory {
     /// No descriptor to the entry (including SQLite main/SHM) is opened here.
     /// Missing, unsupported and incomplete native observations all refuse.
     pub(crate) fn private_entry_same_mount(&self, name: &OsStr) -> Result<PrivateEntryIdentity> {
+        self.private_entry_same_mount_with_parent(name)
+            .map(|(_, entry)| entry)
+    }
+
+    /// The parent and entry are observations of this same compound inspection,
+    /// allowing the caller to compare both with its exact storage binding.
+    pub(crate) fn private_entry_same_mount_with_parent(
+        &self,
+        name: &OsStr,
+    ) -> Result<((u64, u64), PrivateEntryIdentity)> {
         let encoded = child_name(name)?;
-        let parent = self.physical_identity()?;
+        let parent = self
+            .physical_identity()
+            .context(InitialParentObservationFailure)?;
+        // physical_identity ends with a full path revalidation. Inspect the
+        // entry immediately, without repeating that same walk between helpers.
         let entry = self
-            .private_entry(name)?
+            .private_entry_after_parent_revalidation(name)?
             .context("private source entry is absent")?;
         let before = observe_same_mount(&self.0.file, &encoded, parent, entry.physical_identity())?;
 
-        self.revalidate()?;
         ensure!(
-            self.physical_identity()? == parent && self.private_entry(name)? == Some(entry),
+            self.physical_identity()? == parent
+                && self.private_entry_after_parent_revalidation(name)? == Some(entry),
             "private source identity changed during mount inspection"
         );
         let after = observe_same_mount(&self.0.file, &encoded, parent, entry.physical_identity())?;
@@ -57,11 +85,12 @@ impl Directory {
             "private source mount domain changed during inspection"
         );
         ensure!(
-            self.physical_identity()? == parent && self.private_entry(name)? == Some(entry),
+            self.physical_identity()? == parent
+                && self.private_entry_after_parent_revalidation(name)? == Some(entry),
             "private source identity changed after mount inspection"
         );
         self.revalidate()?;
-        Ok(entry)
+        Ok((parent, entry))
     }
 }
 

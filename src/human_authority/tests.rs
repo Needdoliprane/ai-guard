@@ -296,6 +296,92 @@ fn replacement_configuration_and_source_inode_are_detected() {
 }
 
 #[test]
+fn source_mount_validation_keeps_exact_parent_and_entry_bindings() {
+    // Comparing only the source inode, or only the retained parent, must not
+    // admit a binding whose other physical identity differs from observation.
+    let fixture = Fixture::new(2);
+    let expected = &fixture.sources[0].storage_binding;
+    let other = &fixture.sources[1].storage_binding;
+    let parent = Directory::open_existing(&expected.parent_path).unwrap();
+
+    let mut wrong_parent = expected.clone();
+    wrong_parent.parent_device = other.parent_device;
+    wrong_parent.parent_inode = other.parent_inode;
+    let mut wrong_entry = expected.clone();
+    wrong_entry.source_device = other.source_device;
+    wrong_entry.source_inode = other.source_inode;
+    for binding in [wrong_parent, wrong_entry] {
+        assert!(matches!(
+            bound_source_entry(&parent, &binding),
+            Err(OwnerFilesystemFailure::Permanent(
+                HumanAuthorityFailure::StorageBindingMismatch
+            ))
+        ));
+    }
+}
+
+#[test]
+fn source_mount_failures_keep_parent_unavailable_and_entry_binding_categories() {
+    // R1: the first parent observation used to map through unavailable in
+    // bound_entry. A later private-entry failure must still map through binding.
+    let fixture = Fixture::new(1);
+    let binding = &fixture.sources[0].storage_binding;
+    let parent = Directory::open_existing(&binding.parent_path).unwrap();
+    std::fs::set_permissions(&binding.parent_path, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let parent_failure = bound_source_entry(&parent, binding).unwrap_err();
+    std::fs::set_permissions(&binding.parent_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        HumanAuthorityFailure::from(parent_failure),
+        HumanAuthorityFailure::StorageUnavailable
+    );
+
+    std::fs::set_permissions(binding.path(), std::fs::Permissions::from_mode(0o640)).unwrap();
+    let entry_failure = bound_source_entry(&parent, binding).unwrap_err();
+    assert_eq!(
+        HumanAuthorityFailure::from(entry_failure),
+        HumanAuthorityFailure::StorageBindingMismatch
+    );
+}
+
+#[test]
+fn an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check() {
+    // A successful check cannot authorize a later use of the same epoch/token
+    // after another source's parent has been physically substituted.
+    let fixture = Fixture::new(2);
+    let owner = fixture.acquire().unwrap();
+    let token = owner.source_token(fixture.sources[0].source_id).unwrap();
+    let epoch = owner.try_read_epoch().unwrap();
+    epoch.validate_source(&token).unwrap();
+
+    let original = &fixture.sources[1].storage_binding.parent_path;
+    let retained = original.with_extension("retained");
+    let replacement = original.with_extension("replacement");
+    std::fs::rename(original, &retained).unwrap();
+    let substituted = fixture.root.child(original.file_name().unwrap()).unwrap();
+    substituted
+        .persistent_create("tenant.sqlite", b"filesystem fixture only")
+        .unwrap();
+    assert_eq!(
+        epoch.validate_source(&token),
+        Err(HumanAuthorityFailure::OwnerInvalid)
+    );
+
+    // Restoring the original name cannot undo the proven invalidation, and
+    // neither the failed check nor restoration releases the retained locks.
+    std::fs::rename(original, &replacement).unwrap();
+    std::fs::rename(&retained, original).unwrap();
+    assert_eq!(epoch.check(), Err(HumanAuthorityFailure::OwnerInvalid));
+    assert!(matches!(
+        owner.try_read_epoch(),
+        Err(HumanAuthorityFailure::OwnerInvalid)
+    ));
+    assert!(matches!(
+        fixture.acquire(),
+        Err(HumanAuthorityFailure::OwnerContended)
+    ));
+}
+
+#[test]
 fn exact_closure_domains_and_foreign_source_tokens_are_rejected() {
     // A token with equal source UUID from another owner is not membership.
     let first = Fixture::new(1);
@@ -798,6 +884,25 @@ fn contextual_io_failure(errno: i32) -> anyhow::Error {
     anyhow::Error::new(std::io::Error::from_raw_os_error(errno))
         .context("inner private observation")
         .context("outer private observation secret-canary-do-not-log")
+}
+
+#[test]
+fn initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes() {
+    // The typed context must preserve the original IO chain so that this
+    // phase still refuses without turning EMFILE/ENFILE into a permanent fault.
+    for errno in [libc::EMFILE, libc::ENFILE] {
+        let failure = contextual_io_failure(errno)
+            .context(crate::control_fs::InitialParentObservationFailure);
+        assert!(failure.chain().any(|cause| {
+            cause
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.raw_os_error() == Some(errno))
+        }));
+        assert!(matches!(
+            OwnerFilesystemFailure::source_binding(failure),
+            OwnerFilesystemFailure::DescriptorShortage
+        ));
+    }
 }
 
 #[test]

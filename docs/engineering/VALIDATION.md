@@ -1,5 +1,15 @@
 # Validation courante
 
+## 13 novembre — sources humaines : coût privé, RED/GREEN distincts et huit canaris publics
+
+**PASS ciblé public**, gel `8c97f261f299922123ff161f1b4938e916e1a17b6751e318650dcb81708c9769` /2622 fichiers, base `ceb7b1f` plus quatre postimages : huit parents exacts, chacun 1 PASS/0 FAIL/0 ignoré, puis check toutes cibles RC 0, `build-finished=true`, zéro erreur et 353 diagnostics d’avertissement. Post-run : 2622 contenus/modes identiques, export `6c308d09…`, 337 pièces brutes hachées, collecte/fermeture RC 0, OOMfalse et conteneur exact absent ; holder 137 séparé. La sélection comprend quatre nouveaux canaris R1/R2, deux canaris source_owner et deux voisins epoch/token existants.
+
+Trois preuves privées restent séparées : diagnostic `9dfe8a38…` à HTTP503 /2301.7 ms avec 9498 revalidations de fichier, 131556 de répertoire et 19 entrées `BeginChecked` ; baseline `866a0e55…`, vrai GET503 et assertion RC101 ; correction `3de3abe4…`, même parent figé GET200, neuf PASS dont huit canaris et check toutes cibles. Les spans du diagnostic sont inclusifs et non sommables ; ses compteurs ne sont pas des commits ou des objets distincts. Le zéro de l’orchestration baseline ne vaut pas PASS. Le public ne contient ni les ports API owned privés ni ce parent GET. [Reçus SHA256, sources, sélection et limites EN/FR](evidence/2026-11-13/human-source-validation/README.fr.md).
+
+Le passage 14→7 parcours d’ancêtres est un fait du code relu, sans benchmark après correction, gain de latence garanti ou qualification de disponibilité globale. Échéance 2 s et contrôles conservés ; pénurie FD simulée par erreurs structurées, pas d’épuisement réel. Clippy, suite complète, SSO/IdP, fournisseurs et runtimes NOT_RUN dans ce lot ; aucun fingerprint ou gate clos.
+
+État Claude signalé à 03:31 UTC : GO du mainteneur limité à `89d352e` / `93557e9`, check toutes cibles PASS sur `d4c6dec2` / `fdc0c877`. Tests ciblés A/B NOT_RUN, première campagne B arrêtée au harnais avant le projet, intégration non faite. Prompt S2b prêt, dispatch non confirmé ; aucune nouvelle analyse d’un autre code Claude n’est déclarée.
+
 ## 13 novembre — composition egress : 34 parents et toutes cibles
 
 **PASS ciblé** sur source `8dddbb19e7f7253cffa28cdc8d877f06091d07faa8db3efbbea2c4a9c3c0d7cb`, 2618 fichiers, base publique `970636e` : 14 politique + 6 frontend + 11 protocole + 3 mapper existants rejoués. Tous les parents passent une fois, sans ignoré ; un check toutes cibles suit les 34 PASS. Aucun avertissement de compilation dans les nouveaux modules egress. Formatage épinglé effectué avant ce gel et son propre build.

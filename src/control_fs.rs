@@ -30,6 +30,7 @@ pub(crate) mod cost_probe;
 pub(crate) mod persistent;
 pub(crate) mod publication;
 mod source_owner;
+pub(crate) use source_owner::InitialParentObservationFailure;
 
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -183,6 +184,17 @@ impl Directory {
     /// that boundary. Absence is returned only for ENOENT, never for errors.
     pub(crate) fn private_entry(&self, name: &OsStr) -> Result<Option<PrivateEntryIdentity>> {
         self.revalidate()?;
+        self.private_entry_after_parent_revalidation(name)
+    }
+
+    /// Entry inspection within a synchronous compound validator whose
+    /// immediately preceding operation freshly revalidated this same parent.
+    /// This helper does not validate the path and must not retain or reuse a
+    /// successful parent check for a later operation, after a wait or failure.
+    fn private_entry_after_parent_revalidation(
+        &self,
+        name: &OsStr,
+    ) -> Result<Option<PrivateEntryIdentity>> {
         let encoded = child_name(name)?;
         let inspect = || -> Result<Option<PrivateEntryIdentity>> {
             let mut facts = std::mem::MaybeUninit::<libc::stat>::uninit();

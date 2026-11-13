@@ -1,5 +1,13 @@
 # Suivi des audits indépendants
 
+## 13 novembre — amplification des validations de source : preuve bornée, aucun fingerprint clos
+
+Le diagnostic privé HTTP503 /2301.7 ms a mesuré des appels répétés de revalidation ; les spans inclusifs ne fournissent ni décomposition complète du coût ni fréquence de panne. Le candidat relu supprime des parcours redondants 14→7 dans une validation composée, sans cache de succès, retry, hausse du délai 2 s ou retrait des contrôles liens/DAC/ACL/montage/identités/autorisation. La revue R2 ciblée corrige le classement de la première observation I/O du parent en indisponible, conserve le classement binding des entrées/montages et la chaîne EMFILE/ENFILE synthétique ; le NO_GO R1 historique reste conservé.
+
+La composition publique réduite `8c97f261…` /2622 fichiers passe ses huit canaris exacts et le check toutes cibles. Le RED503 puis GREEN200 du parent GET appartiennent à des arbres privés distincts ; aucun succès HTTP n’est transféré au public, où ce parent et les ports API owned sont absents. [Sources, reçus, contrôles et limites](evidence/2026-11-13/human-source-validation/README.fr.md).
+
+Ces preuves ne ferment aucun fingerprint de disponibilité, collision, audit ou reprise des rapports précédents, ni un gate global. Aucun épuisement réel des FD, panne physique, SSO/IdP, fournisseur ou runtime qualifié ; suite complète et Clippy NOT_RUN dans ce lot. Dans l’état signalé à 03:31 UTC, l’accord du mainteneur porte seulement sur les livraisons Claude `89d352e` / `93557e9`, avec compilation toutes cibles vérifiée mais tests ciblés A/B et intégration encore ouverts. Une préparation B échouée au harnais n’est pas une reproduction produit. Prompt S2b prêt, dispatch non confirmé ; aucun autre code Claude n’est requalifié par cette mention.
+
 ## 13 novembre — egress logiciel : preuves sans clôture du risque bridge
 
 Les [31 parents egress et 3 mapper rejoués](evidence/2026-11-13/egress-core-protocol/README.md) vérifient le noyau et le protocole purs, avec deux reproductions avant correction et relectures indépendantes. Le check toutes cibles passe sur leur composition propre. Les types de politique/résolution/acceptation ne sont pas des permis de connexion.

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-13",
+  "status": "PASS_TARGETED_SOFTWARE_ONLY",
+  "source": {
+    "base": "ceb7b1f1c298a0f31044eca20a09cb2101c4d7c2",
+    "archive_sha256": "8c97f261f299922123ff161f1b4938e916e1a17b6751e318650dcb81708c9769",
+    "regular_files": 2622,
+    "overlay": [
+      {
+        "path": "src/control_fs.rs",
+        "preimage": "4f17bde09cc92483c6ea0736e83004c7ec3bc9bf49093fca03f73b3add5122f3",
+        "postimage": "13f583213890b23d891c42f8eab6d561a886b2d3c94b336122fa1dde08601447"
+      },
+      {
+        "path": "src/control_fs/source_owner.rs",
+        "preimage": "9040a50d945621bc4b05e6741dac9fa049dfcc4548a7646fda235b06fbfb8197",
+        "postimage": "1d649dd776d81fc53b79a90b1df0507f57e214b37111dec10fc185d3707cb3f5"
+      },
+      {
+        "path": "src/human_authority.rs",
+        "preimage": "c501aab07b4f71807065785a624d9e0d9c1b388dddf6a842cac5c627addc7af2",
+        "postimage": "21474eb338b1444bb4c6af9aa792672a60d75ae6a933a96c3d3aedc0566ad3e2"
+      },
+      {
+        "path": "src/human_authority/tests.rs",
+        "preimage": "31094c3b48f5a477af1c5408f59a33f06ad8d11f1f052718007a5240a9585bbe",
+        "postimage": "2bfb62a0c960376cc6f29df38981321842e4af37e9a634b219208f29b5e0a139"
+      }
+    ],
+    "source_manifest_sha256": "426784b52a50a852731720723542c3b4f2af627e7d38735e6a99ebffc0e17f48"
+  },
+  "execution": {
+    "environment": "Linux ARM64, Rust1.99.1, isolated offline QA, UID1000, networknone, read-only root, private4GiB scratch, fixed9GiB memory cap,4CPU, no host checkout/credential/engine socket bind",
+    "image_sha256": "2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "test_runner": "Delegated Luna agent launches/polls the test RUN; Root creates/verifies the container and independently verifies results. Attribution receipt corrects stale quota wording in the legacy CREATED metadata.",
+    "commands": [
+      "cargo test --frozen --offline --lib --no-run --message-format=json",
+      "BIN_LIB SELECTOR --exact --list",
+      "BIN_LIB SELECTOR --exact --nocapture --test-threads=1",
+      "cargo check --frozen --offline --all-targets --message-format=json"
+    ],
+    "tests": [
+      {
+        "parent": "parent-01",
+        "selector": "human_authority::tests::source_mount_validation_keeps_exact_parent_and_entry_bindings",
+        "PASS": true
+      },
+      {
+        "parent": "parent-02",
+        "selector": "human_authority::tests::an_accepted_epoch_rejects_parent_substitution_after_a_successful_source_check",
+        "PASS": true
+      },
+      {
+        "parent": "parent-03",
+        "selector": "human_authority::tests::source_mount_failures_keep_parent_unavailable_and_entry_binding_categories",
+        "PASS": true
+      },
+      {
+        "parent": "parent-04",
+        "selector": "human_authority::tests::initial_parent_observation_phase_keeps_structured_descriptor_shortage_causes",
+        "PASS": true
+      },
+      {
+        "parent": "parent-05",
+        "selector": "control_fs::source_owner::tests::same_mount_private_source_exposes_actual_parent_and_entry_identities",
+        "PASS": true
+      },
+      {
+        "parent": "parent-06",
+        "selector": "control_fs::source_owner::tests::same_mount_source_keeps_private_entry_alias_and_permission_guards",
+        "PASS": true
+      },
+      {
+        "parent": "parent-07",
+        "selector": "human_authority::tests::an_expired_epoch_does_not_latch_unrelated_future_operations",
+        "PASS": true
+      },
+      {
+        "parent": "parent-08",
+        "selector": "human_authority::tests::retained_token_revalidates_under_an_existing_write_epoch_without_reacquiring_gate",
+        "PASS": true
+      }
+    ],
+    "passed": 8,
+    "failed": 0,
+    "ignored": 0,
+    "all_targets": {
+      "rc": 0,
+      "build_finished_success": true,
+      "error_diagnostics": 0,
+      "warning_diagnostics": 353
+    }
+  },
+  "evidence": {
+    "result_receipt_sha256": "3dda47fd774a11765e07d7ff5284af5ac8a86fc341814ca78ed0c21aa267a97f",
+    "source_review_sha256": "6623413665ce93105fb8161aa38a10aa321233446b83d244a78ab631c1e5319d",
+    "post_source_sha256": "6c308d094459e68d40860b109d43476d57e53abe266cf3788c99d92320ffac0f",
+    "post_source_payloads_and_modes_exact": true,
+    "raw_files_hashed": 337,
+    "closure_commands_rc": 0,
+    "OOM_observed": false,
+    "owned_container_absent": true,
+    "holder_exit_code": 137,
+    "holder_exit_not_test_rc": true,
+    "execution_attribution_receipt_sha256": "84bb655cdd4d95d3f60195c8a8468689fc44506d73b2d132e3935075e7bdb435"
+  },
+  "private_http_observations": {
+    "not_transferred_to_public_candidate": true,
+    "baseline": {
+      "source_sha256": "866a0e5527a34d55aa4766229abd51960ab18b7cd5f96e07c3c7c346f276cfd0",
+      "source_files": 2614,
+      "parent_rc": 101,
+      "http_status": 503,
+      "receipt_sha256": "6e6fadf10fa12d48869138b97c2ae747a4450f3c056c1606213c5bdb92876b43"
+    },
+    "corrected": {
+      "source_sha256": "3de3abe4c891c3a050d523cfe4545d6e375481eccdc3303f1b5f6a62b30e27a3",
+      "source_files": 2614,
+      "http_status": 200,
+      "parents_passed": 9,
+      "included_public_canaries": 8,
+      "all_targets_check": "PASS",
+      "receipt_sha256": "db786d559aed13a560c41f795c8765b2c62f8411a8058e0c6b1e16535ce3ed4d"
+    }
+  },
+  "limits": [
+    "14 to7 ancestor walks is a code fact, not measured latency improvement or general availability guarantee",
+    "EMFILE/ENFILE errors injected structurally; real descriptor exhaustion NOT_RUN",
+    "Public composition excludes private owned API and its GET parent",
+    "No credential or epoch deadline relaxation; no success cache",
+    "Full suite, Clippy, real IdP/SSO, provider/model, workers, Docker/Podman/Kubernetes runtime and production qualification NOT_RUN",
+    "No audit fingerprint or production gate closed"
+  ]
+}

@@ -18,7 +18,9 @@ pub use manifest::*;
 pub(crate) mod maintenance;
 pub(crate) mod migration;
 
-use crate::control_fs::{Directory, PrivateEntryIdentity, PrivateFile};
+use crate::control_fs::{
+    Directory, InitialParentObservationFailure, PrivateEntryIdentity, PrivateFile,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
@@ -117,6 +119,17 @@ impl OwnerFilesystemFailure {
 
     fn binding(error: anyhow::Error) -> Self {
         Self::classify(error, HumanAuthorityFailure::StorageBindingMismatch)
+    }
+
+    fn source_binding(error: anyhow::Error) -> Self {
+        // The original bound_entry classified its first parent observation as
+        // unavailable. Preserve that phase while all entry/mount checks retain
+        // binding classification; both paths inspect the original IO causes.
+        if error.is::<InitialParentObservationFailure>() {
+            Self::unavailable(error)
+        } else {
+            Self::binding(error)
+        }
     }
 }
 
@@ -861,11 +874,15 @@ fn bound_source_entry(
     parent: &Directory,
     binding: &SourceStorageBindingV1,
 ) -> Result<PrivateEntryIdentity, OwnerFilesystemFailure> {
-    let expected = bound_entry(parent, binding)?;
-    let observed = parent
-        .private_entry_same_mount(OsStr::new(&binding.file_name))
-        .map_err(OwnerFilesystemFailure::binding)?;
-    if expected != observed {
+    // The compound guard already inspects the parent and entry repeatedly.
+    // Compare both fresh observations to the exact binding instead of first
+    // repeating the same physical/private-entry checks through bound_entry.
+    let (observed_parent, observed) = parent
+        .private_entry_same_mount_with_parent(OsStr::new(&binding.file_name))
+        .map_err(OwnerFilesystemFailure::source_binding)?;
+    if observed_parent != binding.parent_identity()
+        || observed.physical_identity() != binding.source_identity()
+    {
         return Err(OwnerFilesystemFailure::Permanent(
             HumanAuthorityFailure::StorageBindingMismatch,
         ));

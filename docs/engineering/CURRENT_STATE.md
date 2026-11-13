@@ -1,5 +1,13 @@
 # État constaté — suivi du développement
 
+## 13 novembre — validation des sources humaines, composition publique réduite
+
+La candidate publique `ceb7b1f` plus quatre postimages relues passe huit canaris exacts et le check toutes cibles sur le gel `8c97f261…` /2622 fichiers. Les contrôles parent/entrée, liens, DAC/ACL et montage restent actifs, avec échéance d’epoch 2 s et autorisations inchangées. Le trajet relu passe de 14 à 7 parcours d’ancêtres par validation : un fait du code, pas une garantie de latence. L’observation initiale du parent garde son classement indisponible, les erreurs entrée/montage leur classement binding et les causes EMFILE/ENFILE restent structurées. [Preuves EN/FR, commandes et limites](evidence/2026-11-13/human-source-validation/README.fr.md).
+
+L’ancien diagnostic privé a réellement observé HTTP503 en 2301.7 ms, 9498 revalidations de fichier, 131556 de répertoire et 19 entrées `BeginChecked`, sans décomposition temporelle sommable. Sur un arbre privé distinct, le même parent GET a ensuite reproduit 503 puis passé 200 après correction, avec huit canaris et check. Le parent API privé est absent de la composition publique : son HTTP200 ne lui est pas transféré. Aucun gate ou fingerprint clos ; SSO/IdP, fournisseurs, runtimes, suite complète et Clippy NOT_RUN dans ce lot.
+
+État Claude signalé à 03:31 UTC : accord du mainteneur reçu pour les seules livraisons Claude `89d352e` et `93557e9`. Le check toutes cibles passe sur leurs codes figés `d4c6dec2` et `fdc0c877` ; leurs tests ciblés A/B restent NOT_RUN et l’intégration reste à faire. La première préparation de campagne ciblée B s’est arrêtée dans le harnais avant le projet ; ce n’est pas un RED produit. Le prompt S2b est préparé, son dispatch n’est pas confirmé ; aucun autre code Claude n’est présenté comme analysé ou approuvé.
+
 ## 13 novembre — noyau et protocole egress, tranche logicielle vérifiée
 
 Le module Rust `egress` livre autorités ASCII exactes, politiques tenant∩session, validation d’un ensemble d’IP fourni, parsing CONNECT emprunté et états de flux bornés. La composition formatée passe **34 parents purs** (31 egress et 3 mapper rejoués) ainsi que le check toutes cibles. Les deux défauts de revue ont été reproduits, corrigés et relus. [Preuves](evidence/2026-11-13/egress-core-protocol/README.md), [contrat FR](EGRESS_SOFTWARE.fr.md) et [EN](EGRESS_SOFTWARE.md).
@@ -16,7 +24,7 @@ La cause, la fréquence et le coût des expirations restent ouverts. Les ancienn
 
 La [direction C](EGRESS_CONTROL.md#décision-du-13-novembre-2026--code-et-tests-logiciels-locaux-autorisés) est autorisée pour le code Rust et les tests logiciels locaux isolés. Deux lots indépendants démarrent : politique de destinations et validation des adresses ; parsing CONNECT et protocole borné. Ils ne constituent pas encore un chemin réseau utilisable. Store/API, permis durable, binding runtime et raccord fournisseur restent à composer et vérifier.
 
-**NOT_RUN** : activation Internet de worker et qualifications Docker/Podman/Kubernetes de ce nouveau contrôle. Aucun capteur ou MITM installé ; aucune action cloud/cluster autorisée par cette décision. CONNECT opaque, couverture des tentatives directes et garde des clés fournisseur restent des limites distinctes. Les nouveaux travaux Claude en cours attendent toujours le go du mainteneur pour intégration. Aucun gate de production clos.
+**NOT_RUN** : activation Internet de worker et qualifications Docker/Podman/Kubernetes de ce nouveau contrôle. Aucun capteur ou MITM installé ; aucune action cloud/cluster autorisée par cette décision. CONNECT opaque, couverture des tentatives directes et garde des clés fournisseur restent des limites distinctes. L’accord du mainteneur est reçu pour les seules livraisons Claude `89d352e` et `93557e9`. Leurs compilations toutes cibles sont vérifiées sur les codes figés `d4c6dec2` et `fdc0c877` ; les campagnes ciblées sont lancées séparément, leurs résultats et l’intégration restent ouverts. Le prompt S2b est prêt, son dispatch non confirmé ; aucun autre code Claude n’est déclaré analysé. Aucun gate de production clos.
 
 ## 12 novembre — garanties opérateur : documentation corrigée, écarts produit conservés
 
