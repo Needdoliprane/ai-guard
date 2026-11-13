@@ -453,6 +453,8 @@ impl GatewayState {
 mod journal_tests;
 #[cfg(all(test, unix))]
 mod owned_control_tests;
+#[cfg(all(test, unix))]
+mod owned_policy_tests;
 #[cfg(test)]
 pub(super) mod tests;
 
