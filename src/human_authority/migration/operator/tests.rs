@@ -182,3 +182,322 @@ fn retained_input_resync_refuses_same_bytes_replacement_without_adopting_new_ino
     assert_eq!(fs::read(&path).unwrap(), bytes);
     assert_eq!(fs::read(&preserved).unwrap(), bytes);
 }
+
+type CasAuditRows = Vec<(i64, String, String, String, String)>;
+
+fn cas_audit_rows(db: &rusqlite::Connection, sql: &str) -> CasAuditRows {
+    let mut statement = db.prepare(sql).unwrap();
+    statement
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StoreCasObservation {
+    revision: i64,
+    projection: String,
+    projection_hash: String,
+    audit: CasAuditRows,
+    floors: Vec<(i64, String)>,
+}
+fn observe_store_cas(db: &rusqlite::Connection) -> StoreCasObservation {
+    let (revision,projection,projection_hash)=db.query_row("SELECT incarnation_revision,snapshot_json,snapshot_hash FROM review_authority_meta WHERE singleton=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    let audit = cas_audit_rows(
+        db,
+        "SELECT seq,received_at,prev_hash,hash,payload FROM events ORDER BY seq",
+    );
+    let mut statement = db
+        .prepare("SELECT event_seq,max_received_at FROM audit_time_floors ORDER BY event_seq")
+        .unwrap();
+    let floors = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    StoreCasObservation {
+        revision,
+        projection,
+        projection_hash,
+        audit,
+        floors,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AuthCasObservation {
+    projection: String,
+    projection_hash: String,
+    wall_floor: String,
+    audit: CasAuditRows,
+    quota: (i64, i64),
+}
+fn observe_auth_cas(db: &rusqlite::Connection) -> AuthCasObservation {
+    let (projection,projection_hash,wall_floor)=db.query_row("SELECT snapshot_json,snapshot_hash,wall_floor FROM authentication_source_authority WHERE singleton=1",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    let audit = cas_audit_rows(
+        db,
+        "SELECT seq,received_at,prev_hash,hash,payload FROM authentication_entries ORDER BY seq",
+    );
+    let quota = db
+        .query_row(
+            "SELECT records,bytes FROM authentication_quota WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    AuthCasObservation {
+        projection,
+        projection_hash,
+        wall_floor,
+        audit,
+        quota,
+    }
+}
+
+fn assert_cas_projection_current(
+    projection: &str,
+    owner: &crate::human_authority::OwnedHumanSources,
+    revision: u64,
+) {
+    let snapshot: serde_json::Value = serde_json::from_str(projection).unwrap();
+    assert_eq!(
+        snapshot["incarnation"][0]["owner_incarnation"],
+        serde_json::json!(owner.incarnation())
+    );
+    assert_eq!(
+        snapshot["incarnation"][0]["revision"],
+        serde_json::json!(revision)
+    );
+}
+
+#[tokio::test]
+async fn store14_startup_stale_cas_refuses_without_changing_revision_head_incarnation_or_floor() {
+    use crate::human_authority::{OwnedHumanSources, startup::HumanOwnedSourceOptions};
+    let fixture = super::super::tests::Fixture::new_owned_local();
+    // owned_request performs the real13->14 coordinator and returns its actual
+    // PrivateFile/closure. No test writes marker, receipt or incarnation SQL.
+    let (mut request, _, _) = fixture.owned_request();
+    let descriptor = request
+        .configuration
+        .sources
+        .iter()
+        .find(|source| source.kind == HumanSourceKindV1::TenantStore)
+        .unwrap()
+        .clone();
+    assert_eq!(descriptor.required_format, 14);
+    let HumanOwnedSourceOptions::TenantStore {
+        redactor,
+        max_events,
+        capacity,
+        workload,
+        retention,
+    } = request.sources.remove(&descriptor.source_id).unwrap()
+    else {
+        panic!("tenant fixture option required")
+    };
+    let owner = OwnedHumanSources::acquire(request.manifest, request.configuration).unwrap();
+    let source = owner.source_token(descriptor.source_id).unwrap();
+    let mut startup = Store::open_review_startup_for_tenant(
+        &descriptor.storage_binding.path(),
+        descriptor.tenant_id.as_deref().unwrap(),
+        redactor,
+        max_events,
+        &source,
+    )
+    .unwrap();
+    startup
+        .configure_owned_read_policies(capacity, workload, retention)
+        .unwrap();
+    let observer = rusqlite::Connection::open_with_flags(
+        descriptor.storage_binding.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let predecessor = {
+        let epoch = owner.try_write_epoch().unwrap();
+        startup.current_incarnation_revision(&epoch).unwrap()
+    };
+    let accepted = {
+        let epoch = owner.try_write_epoch().unwrap();
+        startup
+            .append_incarnation(&epoch, &source, Uuid::new_v4(), predecessor)
+            .unwrap()
+    };
+    let current = predecessor.checked_add(1).unwrap();
+    let before = observe_store_cas(&observer);
+    let floor = startup.durable_wall_floor().unwrap();
+    assert_eq!(u64::try_from(before.revision).unwrap(), current);
+    assert_eq!(
+        (
+            before.audit.last().unwrap().0,
+            before.audit.last().unwrap().3.as_str()
+        ),
+        (accepted.seq, accepted.hash.as_str())
+    );
+    assert_cas_projection_current(&before.projection, &owner, current);
+    let stale_operation = Uuid::new_v4();
+    {
+        let epoch = owner.try_write_epoch().unwrap();
+        epoch.validate_source(&source).unwrap();
+        assert_eq!(
+            startup.current_incarnation_revision(&epoch).unwrap(),
+            current
+        );
+        let refusal = startup
+            .append_incarnation(&epoch, &source, stale_operation, predecessor)
+            .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "human source authority differs from durable source"
+        );
+        assert!(
+            refusal
+                .downcast_ref::<crate::human_authority::HumanAuthorityFailure>()
+                .is_none()
+        );
+        epoch.validate_source(&source).unwrap();
+    }
+    assert_eq!(observe_store_cas(&observer), before);
+    assert_eq!(startup.durable_wall_floor().unwrap(), floor);
+    // Positive control with the SAME previously refused operation proves that
+    // owner/source/gate/operation are valid: only the CAS predecessor changes.
+    {
+        let epoch = owner.try_write_epoch().unwrap();
+        assert_eq!(
+            startup.current_incarnation_revision(&epoch).unwrap(),
+            current
+        );
+        let corrected = startup
+            .append_incarnation(&epoch, &source, stale_operation, current)
+            .unwrap();
+        assert!(corrected.seq > accepted.seq);
+        assert_eq!(
+            startup.current_incarnation_revision(&epoch).unwrap(),
+            current + 1
+        );
+    }
+    drop(startup);
+    drop(observer);
+    owner.begin_close();
+    owner.drain().await.unwrap();
+}
+
+#[tokio::test]
+async fn auth5_startup_stale_cas_refuses_without_changing_revision_head_incarnation_or_floor() {
+    use crate::human_authority::{OwnedHumanSources, startup::HumanOwnedSourceOptions};
+    let fixture = super::super::tests::Fixture::new_owned();
+    let (mut request, _, _) = fixture.owned_request();
+    let descriptor = request
+        .configuration
+        .sources
+        .iter()
+        .find(|source| source.kind == HumanSourceKindV1::AuthenticationLedger)
+        .unwrap()
+        .clone();
+    assert_eq!(descriptor.required_format, 5);
+    let HumanOwnedSourceOptions::AuthenticationLedger {
+        redactor,
+        policy,
+        capacity_plan,
+    } = request.sources.remove(&descriptor.source_id).unwrap()
+    else {
+        panic!("authentication fixture option required")
+    };
+    let owner = OwnedHumanSources::acquire(request.manifest, request.configuration).unwrap();
+    let source = owner.source_token(descriptor.source_id).unwrap();
+    let startup = AuthenticationAudit::open_review_startup(
+        &descriptor.storage_binding.path(),
+        descriptor.installation_id,
+        policy,
+        redactor,
+        &source,
+    )
+    .unwrap();
+    startup.require_capacity_plan(&capacity_plan).unwrap();
+    let observer = rusqlite::Connection::open_with_flags(
+        descriptor.storage_binding.path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let predecessor = {
+        let epoch = owner.try_write_epoch().unwrap();
+        startup
+            .current_incarnation_revision(&epoch, &source)
+            .unwrap()
+    };
+    let accepted = {
+        let epoch = owner.try_write_epoch().unwrap();
+        startup
+            .append_incarnation(&epoch, &source, Uuid::new_v4(), predecessor)
+            .unwrap()
+    };
+    let current = predecessor.checked_add(1).unwrap();
+    let before = observe_auth_cas(&observer);
+    let floor = startup.durable_wall_floor().unwrap();
+    assert_eq!(
+        (
+            u64::try_from(before.audit.last().unwrap().0).unwrap(),
+            before.audit.last().unwrap().3.as_str()
+        ),
+        (accepted.sequence, accepted.hash.as_str())
+    );
+    assert_cas_projection_current(&before.projection, &owner, current);
+    let stale_operation = Uuid::new_v4();
+    {
+        let epoch = owner.try_write_epoch().unwrap();
+        epoch.validate_source(&source).unwrap();
+        assert_eq!(
+            startup
+                .current_incarnation_revision(&epoch, &source)
+                .unwrap(),
+            current
+        );
+        let refusal = startup
+            .append_incarnation(&epoch, &source, stale_operation, predecessor)
+            .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "authentication source authority differs from durable source"
+        );
+        assert!(
+            refusal
+                .downcast_ref::<crate::human_authority::HumanAuthorityFailure>()
+                .is_none()
+        );
+        epoch.validate_source(&source).unwrap();
+    }
+    assert_eq!(observe_auth_cas(&observer), before);
+    assert_eq!(startup.durable_wall_floor().unwrap(), floor);
+    {
+        let epoch = owner.try_write_epoch().unwrap();
+        assert_eq!(
+            startup
+                .current_incarnation_revision(&epoch, &source)
+                .unwrap(),
+            current
+        );
+        let corrected = startup
+            .append_incarnation(&epoch, &source, stale_operation, current)
+            .unwrap();
+        assert!(corrected.sequence > accepted.sequence);
+        assert_eq!(
+            startup
+                .current_incarnation_revision(&epoch, &source)
+                .unwrap(),
+            current + 1
+        );
+    }
+    drop(startup);
+    drop(observer);
+    owner.begin_close();
+    owner.drain().await.unwrap();
+}

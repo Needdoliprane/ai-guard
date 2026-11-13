@@ -180,7 +180,7 @@ async fn activation_publication_interruptions_replay_coordinator_then_final_ack_
         db.query_row(
             "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
             [],
-            |r| r.get::<_, u64>(0),
+            |r| r.get::<_, i64>(0),
         )
         .unwrap()
     };
