@@ -1,7 +1,7 @@
 use super::*;
 use agentsandbox::human_authority::{
     HumanSourcesConfigurationV1,
-    startup::{HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest},
+    startup::{HumanOwnedSourceOptions, HumanOwnedStartupRequest},
 };
 use preparation::LoadedPreparation;
 
@@ -236,7 +236,8 @@ pub(super) async fn apply(path: &Path, resume_only: bool) -> Result<(&'static st
 
 pub(crate) struct LoadedHumanSourcesActivation {
     pub tenants: Vec<crate::gateway_config::ConfiguredTenant>,
-    pub prepared: crate::gateway_config::human_sources::PreparedOwnedSources,
+    pub request: HumanOwnedStartupRequest,
+    pub credentials: PrivateFile,
 }
 
 pub(crate) fn load_human_sources_activation(path: &Path) -> Result<LoadedHumanSourcesActivation> {
@@ -294,20 +295,19 @@ pub(crate) fn load_human_sources_activation(path: &Path) -> Result<LoadedHumanSo
                 Ok((source.source_id, options))
             })
             .collect::<Result<_>>()?;
-        // Every expected field above was independently reconstructed. Only this
-        // real startup can prove marker replay, floors, CAS and retained owner.
+        // Only independently reconstructed expectations and retained files
+        // escape this loader. Root opens the real startup after all other
+        // fallible configuration, immediately before authentic state/cleanup.
         loaded.inputs.budget.revalidate()?;
-        let bundle = HumanOwnedStartupBundle::open(HumanOwnedStartupRequest {
+        let request = HumanOwnedStartupRequest {
             manifest,
             configuration,
             sources,
-        })?;
+        };
         Ok(LoadedHumanSourcesActivation {
             tenants: loaded.inputs.tenants,
-            prepared: crate::gateway_config::human_sources::PreparedOwnedSources {
-                bundle,
-                credentials: loaded.envelope,
-            },
+            request,
+            credentials: loaded.envelope,
         })
     })();
     result.map_err(|_: anyhow::Error| {
