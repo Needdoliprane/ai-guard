@@ -1,4 +1,4 @@
-//! R2 cases: actual committed receipt races and a real SQLite audit INSERT abort.
+//! Actual committed receipt races and a real SQLite audit allocation refusal.
 use super::*;
 
 pub(super) fn state(fixture: &Fixture) -> GatewayState {
@@ -168,11 +168,13 @@ async fn owned_events_metadata_context_close_after_committed_read_refuses_public
 }
 
 #[tokio::test]
-async fn owned_events_metadata_real_audit_insert_abort_rolls_back_without_publication() {
+async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() {
     let fixture = Fixture::new_owned();
-    seed_event(&fixture, "B", "owned-audit-abort-b", fixture.principal());
+    seed_event(&fixture, "B", "owned-audit-full-b", fixture.principal());
     let state = state(&fixture);
     let router = gateway_router(state.clone());
+    // The identity/profile read happens once before the page limit. Each HTTP
+    // events request obtains fresh epochs through the real owned read path.
     let context = context(&router).await;
     let (status, positive) = get(&router, "/api/v1/human/events", Some(&context)).await;
     assert_eq!(status, StatusCode::OK, "{positive}");
@@ -186,42 +188,79 @@ async fn owned_events_metadata_real_audit_insert_abort_rolls_back_without_public
         )
         .unwrap();
     assert!(receipt_exists);
-    let trigger = state.tenants[1]
-        .store
-        .modern_test_abort_events_audit()
-        .unwrap();
-    let before = snapshot(&database);
-    let usage = state.tenants[1].store.modern_test_human_usage();
-    let (status, refused) = get(&router, "/api/v1/human/events", Some(&context)).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
-    assert_eq!(refused["error"]["code"], "audit_unavailable");
-    assert!(refused.get("items").is_none());
-    assert!(refused.get("read_receipt").is_none());
-    assert!(refused.get("next_cursor").is_none());
-    assert!(
-        !refused
-            .to_string()
-            .contains("synthetic owned events audit insertion failure")
-    );
-    assert!(
-        !refused
-            .to_string()
-            .contains("synthetic-private-journal-content")
-    );
-    assert_eq!(snapshot(&database), before);
-    assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
-    assert!(!state.tenants[1].store.healthy());
-    // Removing fixture injection does not repair the permanently latched
-    // Store. A separate operator recovery procedure is not exercised here.
-    trigger.remove().unwrap();
-    assert!(!state.tenants[1].store.healthy());
+    let store = &state.tenants[1].store;
+    assert!(store.healthy());
+    let quota = || {
+        database
+            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    let page_limit = store.modern_test_limit_audit_pages().unwrap();
+    let mut failed_state = None;
+    for _ in 0..128 {
+        let before = snapshot(&database);
+        let before_quota = quota();
+        let usage = store.modern_test_human_usage();
+        let (status, body) = get(&router, "/api/v1/human/events", Some(&context)).await;
+        if status == StatusCode::OK {
+            let items = body["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert!(items.iter().all(|item| item["content"].is_null()));
+            assert!(!body.to_string().contains("synthetic-private-journal-content"));
+            assert_eq!(snapshot(&database).0, before.0 + 1);
+            let receipt_exists: bool = database.query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE seq=?1 AND id=?2 AND received_at=?3 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events' AND json_extract(payload,'$.data.request_id')=?4 AND json_extract(payload,'$.data.result_count')=1)",
+                rusqlite::params![before.0 + 1, body["read_receipt"]["audit_event_id"].as_str().unwrap(), body["read_receipt"]["received_at"].as_str().unwrap(), body["read_receipt"]["request_id"].as_str().unwrap()],
+                |row| row.get(0),
+            ).unwrap();
+            assert!(receipt_exists, "successful HTTP read must have its committed receipt");
+            let after_quota = quota();
+            assert!(after_quota > before_quota);
+            let after_usage = store.modern_test_human_usage();
+            assert_eq!(
+                after_usage["tenant"]["events"].as_u64().unwrap(),
+                usage["tenant"]["events"].as_u64().unwrap() + 1
+            );
+            assert_eq!(
+                after_usage["tenant"]["bytes"].as_u64().unwrap(),
+                usage["tenant"]["bytes"].as_u64().unwrap()
+                    + u64::try_from(after_quota - before_quota).unwrap()
+            );
+            assert!(store.healthy());
+            continue;
+        }
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert_eq!(body["error"]["code"], "audit_unavailable");
+        assert!(body.get("items").is_none());
+        assert!(body.get("read_receipt").is_none());
+        assert!(body.get("next_cursor").is_none());
+        assert!(body.get("live_cursor").is_none());
+        let serialized = body.to_string();
+        assert!(!serialized.contains("database or disk is full"));
+        assert!(!serialized.contains("SQLITE_FULL"));
+        assert!(!serialized.contains("synthetic-private-journal-content"));
+        assert_eq!(snapshot(&database), before);
+        assert_eq!(quota(), before_quota);
+        assert_eq!(store.modern_test_human_usage(), usage);
+        assert!(!store.healthy());
+        failed_state = Some((before, before_quota, usage));
+        break;
+    }
+    let (before, before_quota, usage) = failed_state
+        .expect("bounded SQLite page cap did not reach a real allocation refusal");
+    // Restoring fixture capacity is cleanup, not a Store recovery procedure.
+    page_limit.restore().unwrap();
+    assert!(!store.healthy());
     let (status, latched) = get(&router, "/api/v1/human/events", Some(&context)).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{latched}");
     assert_eq!(latched["error"]["code"], "audit_unavailable");
     assert!(latched.get("items").is_none());
     assert!(latched.get("read_receipt").is_none());
     assert!(latched.get("next_cursor").is_none());
+    assert!(latched.get("live_cursor").is_none());
+    assert!(!latched.to_string().contains("synthetic-private-journal-content"));
     assert_eq!(snapshot(&database), before);
-    assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
-    assert!(!state.tenants[1].store.healthy());
+    assert_eq!(quota(), before_quota);
+    assert_eq!(store.modern_test_human_usage(), usage);
+    assert!(!store.healthy());
 }

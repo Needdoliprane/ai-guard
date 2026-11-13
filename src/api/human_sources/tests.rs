@@ -155,14 +155,25 @@ async fn real_exhausted_owned_profile_budget_preserves_429_without_publishing_co
 }
 
 #[tokio::test]
-async fn live_read_epoch_a_does_not_require_global_write_for_b() {
+async fn retained_read_gate_a_does_not_require_global_write_for_b() {
     let (_fixture, state) = fixture();
     let owned = state.owned_human.as_ref().unwrap();
     let epoch = owned.owner.try_read_epoch().unwrap();
     epoch.validate_source(&owned.sources[0]).unwrap();
+    assert!(matches!(
+        owned.owner.try_write_epoch(),
+        Err(crate::human_authority::HumanAuthorityFailure::GateBusy)
+    ));
+    // This is a concurrency oracle, not a latency test. Keep the real read
+    // guard across B requests; the production two-second authority deadline
+    // remains unchanged and need not stay valid across several requests.
     require_b_identity_resources(&state).await;
-    epoch.validate_source(&owned.sources[0]).unwrap();
+    assert!(matches!(
+        owned.owner.try_write_epoch(),
+        Err(crate::human_authority::HumanAuthorityFailure::GateBusy)
+    ));
     drop(epoch);
+    drop(owned.owner.try_write_epoch().unwrap());
 }
 
 #[tokio::test]
