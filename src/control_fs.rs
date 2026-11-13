@@ -27,9 +27,9 @@ macro_rules! measure_control_fs {
 
 #[cfg(test)]
 pub(crate) mod cost_probe;
+pub mod operation;
 pub(crate) mod persistent;
 pub(crate) mod publication;
-pub mod operation;
 mod source_owner;
 pub(crate) use source_owner::InitialParentObservationFailure;
 

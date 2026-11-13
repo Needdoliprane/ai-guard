@@ -43,24 +43,38 @@ impl std::fmt::Display for EgressStoreFailure {
 }
 impl std::error::Error for EgressStoreFailure {}
 impl EgressStoreFailure {
-    pub(crate) fn admin_error(error: &anyhow::Error) -> crate::control::egress_policy::EgressPolicyAdminErrorV1 {
+    pub(crate) fn admin_error(
+        error: &anyhow::Error,
+    ) -> crate::control::egress_policy::EgressPolicyAdminErrorV1 {
         use crate::control::egress_policy::EgressPolicyAdminErrorV1 as E;
         if let Some(kind) = error.downcast_ref::<Self>() {
             return match kind {
-                Self::Invalid => E::InvalidRequest, Self::Conflict => E::Conflict,
-                Self::ScopeConflict => E::ScopeConflict, Self::MigrationRequired => E::MigrationRequired,
+                Self::Invalid => E::InvalidRequest,
+                Self::Conflict => E::Conflict,
+                Self::ScopeConflict => E::ScopeConflict,
+                Self::MigrationRequired => E::MigrationRequired,
                 Self::Capacity | Self::AuditReservationExhausted => E::Capacity,
                 Self::DiscoveryStale | Self::Integrity | Self::Permission => E::Unavailable,
             };
         }
-        if error.downcast_ref::<review_access::ReviewAccessFailure>() == Some(&review_access::ReviewAccessFailure::Busy)
-            || error.downcast_ref::<crate::human_authority::HumanAuthorityFailure>() == Some(&crate::human_authority::HumanAuthorityFailure::GateBusy) {
+        if error.downcast_ref::<review_access::ReviewAccessFailure>()
+            == Some(&review_access::ReviewAccessFailure::Busy)
+            || error.downcast_ref::<crate::human_authority::HumanAuthorityFailure>()
+                == Some(&crate::human_authority::HumanAuthorityFailure::GateBusy)
+        {
             return E::Busy;
         }
-        if error.downcast_ref::<crate::workload::WorkloadFailureV1>() == Some(&crate::workload::WorkloadFailureV1::ClockRegression) {
+        if error.downcast_ref::<crate::workload::WorkloadFailureV1>()
+            == Some(&crate::workload::WorkloadFailureV1::ClockRegression)
+        {
             return E::Clock;
         }
-        if error.downcast_ref::<capacity::AuditCapacityFailureV1>().is_some() { return E::Capacity; }
+        if error
+            .downcast_ref::<capacity::AuditCapacityFailureV1>()
+            .is_some()
+        {
+            return E::Capacity;
+        }
         E::Unavailable
     }
 }
@@ -611,16 +625,36 @@ impl EgressPolicyReceiptV1 {
     pub fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
         Ok(bounded_json(self, RECEIPT_BYTES)?.into_bytes())
     }
-    pub fn version(&self) -> u32 { self.version }
-    pub fn operation_id(&self) -> uuid::Uuid { self.operation_id }
-    pub fn action(&self) -> &str { &self.action }
-    pub fn selector(&self) -> &EgressPolicySelectorV1 { &self.selector }
-    pub fn revision(&self) -> u64 { self.revision }
-    pub fn policy_digest(&self) -> &str { &self.policy_digest }
-    pub fn event_id(&self) -> &str { &self.event_id }
-    pub fn event_seq(&self) -> i64 { self.event_seq }
-    pub fn event_hash(&self) -> &str { &self.event_hash }
-    pub fn received_at(&self) -> &str { &self.received_at }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn operation_id(&self) -> uuid::Uuid {
+        self.operation_id
+    }
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+    pub fn selector(&self) -> &EgressPolicySelectorV1 {
+        &self.selector
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+    pub fn event_id(&self) -> &str {
+        &self.event_id
+    }
+    pub fn event_seq(&self) -> i64 {
+        self.event_seq
+    }
+    pub fn event_hash(&self) -> &str {
+        &self.event_hash
+    }
+    pub fn received_at(&self) -> &str {
+        &self.received_at
+    }
     pub(super) fn from_event(
         stored: &StoredEvent,
         record: &MutationRecord,

@@ -184,7 +184,10 @@ impl Store {
         // A restoration error refuses even a result from a known COMMIT.
         db.busy_timeout(std::time::Duration::from_millis(prior))?;
         let restored: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
-        anyhow::ensure!(u64::try_from(restored)? == prior, "human source timeout restoration failed");
+        anyhow::ensure!(
+            u64::try_from(restored)? == prior,
+            "human source timeout restoration failed"
+        );
         result.map_err(|error| {
             let busy = error.chain().any(|cause| matches!(
                 cause.downcast_ref::<rusqlite::Error>(),

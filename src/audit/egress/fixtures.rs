@@ -529,9 +529,17 @@ impl Fixture {
         let access = HumanSourceAccess::write(&epoch, source)?;
         let generation = self.stores[0].modern_discovery_generation(&access)?;
         let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
-            self.stores[0].tenant_id(), &source.descriptor().durable_namespace_id.to_string(),
+            self.stores[0].tenant_id(),
+            &source.descriptor().durable_namespace_id.to_string(),
         )?;
-        store.egress_replace_policy_scoped(&epoch, source, &self.credential, &expected, generation, request)
+        store.egress_replace_policy_scoped(
+            &epoch,
+            source,
+            &self.credential,
+            &expected,
+            generation,
+            request,
+        )
     }
     pub(super) fn install_with_other_credential(
         &self,
@@ -559,9 +567,20 @@ impl Fixture {
         let access = HumanSourceAccess::write(&epoch, &self.sources[0])?;
         let generation = self.stores[0].modern_discovery_generation(&access)?;
         let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
-            self.stores[0].tenant_id(), &self.sources[0].descriptor().durable_namespace_id.to_string(),
+            self.stores[0].tenant_id(),
+            &self.sources[0]
+                .descriptor()
+                .durable_namespace_id
+                .to_string(),
         )?;
-        self.stores[0].egress_replace_policy_scoped(&epoch, &self.sources[0], &credential, &expected, generation, request)
+        self.stores[0].egress_replace_policy_scoped(
+            &epoch,
+            &self.sources[0],
+            &credential,
+            &expected,
+            generation,
+            request,
+        )
     }
     pub(super) fn revoke_control_binding(&self) {
         use crate::control::review_binding::{
@@ -645,7 +664,11 @@ impl Fixture {
         let access = HumanSourceAccess::write(&epoch, &self.sources[0])?;
         let generation = self.stores[0].modern_discovery_generation(&access)?;
         let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
-            self.stores[0].tenant_id(), &self.sources[0].descriptor().durable_namespace_id.to_string(),
+            self.stores[0].tenant_id(),
+            &self.sources[0]
+                .descriptor()
+                .durable_namespace_id
+                .to_string(),
         )?;
         self.stores[0].egress_revoke_policy_scoped(
             &epoch,

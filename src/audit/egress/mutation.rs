@@ -13,7 +13,8 @@ fn check_policy_context(
         return Err(EgressStoreFailure::DiscoveryStale.into());
     }
     if store.tenant_id() != expected.tenant_id()
-        || crate::audit::supervision::namespace(tx)? != expected.control_namespace_uuid() {
+        || crate::audit::supervision::namespace(tx)? != expected.control_namespace_uuid()
+    {
         return Err(EgressStoreFailure::ScopeConflict.into());
     }
     Ok(())
@@ -76,7 +77,14 @@ impl Store {
         generation: HumanDiscoveryGeneration,
         request: &EgressReplacePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
-        self.mutate_egress_policy(epoch, source, credential, expected_scope, generation, request.change()?)
+        self.mutate_egress_policy(
+            epoch,
+            source,
+            credential,
+            expected_scope,
+            generation,
+            request.change()?,
+        )
     }
     pub(crate) fn egress_revoke_policy_scoped(
         &self,
@@ -87,7 +95,14 @@ impl Store {
         generation: HumanDiscoveryGeneration,
         request: &EgressRevokePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
-        self.mutate_egress_policy(epoch, source, credential, expected_scope, generation, request.change())
+        self.mutate_egress_policy(
+            epoch,
+            source,
+            credential,
+            expected_scope,
+            generation,
+            request.change(),
+        )
     }
     fn mutate_egress_policy(
         &self,
@@ -99,7 +114,9 @@ impl Store {
         change: Change,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
         change.validate()?;
-        expected_scope.validate().map_err(|_| EgressStoreFailure::Invalid)?;
+        expected_scope
+            .validate()
+            .map_err(|_| EgressStoreFailure::Invalid)?;
         epoch.validate_source(source)?;
         let access = HumanSourceAccess::write(epoch, source)?;
         self.with_scoped_nowait(&access, StoreOperationClass::IdentityAuthority, |db| {

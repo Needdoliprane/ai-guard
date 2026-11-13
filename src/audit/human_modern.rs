@@ -12,7 +12,9 @@ pub(crate) struct HumanDiscoveryGeneration {
     authorization_revision: u64,
     workload_history_event: Option<i64>,
 }
-pub(super) fn discovery_generation(tx: &CheckedTransaction<'_>) -> anyhow::Result<HumanDiscoveryGeneration> {
+pub(super) fn discovery_generation(
+    tx: &CheckedTransaction<'_>,
+) -> anyhow::Result<HumanDiscoveryGeneration> {
     Ok(HumanDiscoveryGeneration {
         authorization_revision: identity::authorization_revision(tx)?,
         workload_history_event: tx.query_row(
@@ -83,7 +85,8 @@ impl Store {
         read: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         self.with_scoped_nowait(access, StoreOperationClass::Business, |db| {
-            let tx = self.begin_checked_with_access(db, Some(access), StoreOperationClass::Business)?;
+            let tx =
+                self.begin_checked_with_access(db, Some(access), StoreOperationClass::Business)?;
             let result = read(&tx)?;
             self.commit_checked(tx)?;
             Ok(result)

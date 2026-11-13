@@ -11,7 +11,10 @@ use tokio::sync::OwnedSemaphorePermit;
 
 /// Private operation classifier, produced by the reserved Rust transport only.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(in crate::api) enum PolicyWriteAction { Replace, Revoke }
+pub(in crate::api) enum PolicyWriteAction {
+    Replace,
+    Revoke,
+}
 
 /// Header/source admission is not a writer and has no body-derived scope.
 pub(in crate::api) struct OwnedPolicyIdentity(OwnedProtocolIdentity);
@@ -21,37 +24,78 @@ pub(in crate::api) struct OwnedPolicyWriter {
     _operation: OwnedSemaphorePermit,
 }
 impl OwnedPolicyIdentity {
-    pub(in crate::api) fn tenant(&self) -> &TenantState { &self.0.tenant }
-    pub(in crate::api) fn accept(self, operation: OwnedSemaphorePermit, action: PolicyWriteAction) -> OwnedPolicyWriter {
-        OwnedPolicyWriter { identity: self.0, action, _operation: operation }
+    pub(in crate::api) fn tenant(&self) -> &TenantState {
+        &self.0.tenant
+    }
+    pub(in crate::api) fn accept(
+        self,
+        operation: OwnedSemaphorePermit,
+        action: PolicyWriteAction,
+    ) -> OwnedPolicyWriter {
+        OwnedPolicyWriter {
+            identity: self.0,
+            action,
+            _operation: operation,
+        }
     }
 }
 
 pub(in crate::api) async fn authenticate_policy(
-    state: &GatewayState, headers: &HeaderMap,
+    state: &GatewayState,
+    headers: &HeaderMap,
 ) -> ApiResult<OwnedPolicyIdentity> {
     let identity = authenticate(state, headers).await?;
     let shared = identity.state.io.clone();
     let tenant = identity.tenant.io.clone();
-    store_io::run(shared, Some(tenant), store_io::Lane::Control, false, move || {
-        let source = identity.owned.sources.get(identity.index).ok_or_else(human_sources::unavailable)?;
-        let epoch = identity.owned.owner.try_read_epoch().map_err(policy_authority_failure)?;
-        let access = HumanSourceAccess::read(&epoch, source).map_err(policy_authority_failure)?;
-        // Only actual source/format admission precedes body polling. This
-        // read epoch ends here; it never becomes the post-body WriteEpoch.
-        identity.tenant.store.modern_control_write_admission(&access).map_err(policy_store_failure)?;
-        epoch.check().map_err(policy_authority_failure)?;
-        drop(epoch);
-        Ok(OwnedPolicyIdentity(identity))
-    }).await
+    store_io::run(
+        shared,
+        Some(tenant),
+        store_io::Lane::Control,
+        false,
+        move || {
+            let source = identity
+                .owned
+                .sources
+                .get(identity.index)
+                .ok_or_else(human_sources::unavailable)?;
+            let epoch = identity
+                .owned
+                .owner
+                .try_read_epoch()
+                .map_err(policy_authority_failure)?;
+            let access =
+                HumanSourceAccess::read(&epoch, source).map_err(policy_authority_failure)?;
+            // Only actual source/format admission precedes body polling. This
+            // read epoch ends here; it never becomes the post-body WriteEpoch.
+            identity
+                .tenant
+                .store
+                .modern_control_write_admission(&access)
+                .map_err(policy_store_failure)?;
+            epoch.check().map_err(policy_authority_failure)?;
+            drop(epoch);
+            Ok(OwnedPolicyIdentity(identity))
+        },
+    )
+    .await
 }
 
-fn policy_authority_failure(error: crate::human_authority::HumanAuthorityFailure) -> (StatusCode, Json<Value>) {
+fn policy_authority_failure(
+    error: crate::human_authority::HumanAuthorityFailure,
+) -> (StatusCode, Json<Value>) {
     use crate::control::egress_policy::EgressPolicyAdminErrorV1 as E;
-    super::super::egress_policy::failure(if error == crate::human_authority::HumanAuthorityFailure::GateBusy { E::Busy } else { E::Unavailable })
+    super::super::egress_policy::failure(
+        if error == crate::human_authority::HumanAuthorityFailure::GateBusy {
+            E::Busy
+        } else {
+            E::Unavailable
+        },
+    )
 }
 fn policy_store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
-    super::super::egress_policy::failure(crate::audit::egress::EgressStoreFailure::admin_error(&error))
+    super::super::egress_policy::failure(crate::audit::egress::EgressStoreFailure::admin_error(
+        &error,
+    ))
 }
 
 enum PolicyMutation {
@@ -60,76 +104,150 @@ enum PolicyMutation {
 }
 impl PolicyMutation {
     fn scope(&self) -> &crate::control::egress_policy::EgressPolicyExpectedScopeV1 {
-        match self { Self::Replace(value) => value.expected_scope(), Self::Revoke(value) => value.expected_scope() }
+        match self {
+            Self::Replace(value) => value.expected_scope(),
+            Self::Revoke(value) => value.expected_scope(),
+        }
     }
 }
 impl OwnedPolicyWriter {
-    pub(in crate::api) fn action(&self) -> PolicyWriteAction { self.action }
-    pub(in crate::api) async fn replace(self: Arc<Self>, request: crate::control::egress_policy::EgressReplacePolicyRequestV1) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
-        if self.action != PolicyWriteAction::Replace { return Err(human_sources::unavailable()); }
+    pub(in crate::api) fn action(&self) -> PolicyWriteAction {
+        self.action
+    }
+    pub(in crate::api) async fn replace(
+        self: Arc<Self>,
+        request: crate::control::egress_policy::EgressReplacePolicyRequestV1,
+    ) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
+        if self.action != PolicyWriteAction::Replace {
+            return Err(human_sources::unavailable());
+        }
         self.write(PolicyMutation::Replace(request)).await
     }
-    pub(in crate::api) async fn revoke(self: Arc<Self>, request: crate::control::egress_policy::EgressRevokePolicyRequestV1) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
-        if self.action != PolicyWriteAction::Revoke { return Err(human_sources::unavailable()); }
+    pub(in crate::api) async fn revoke(
+        self: Arc<Self>,
+        request: crate::control::egress_policy::EgressRevokePolicyRequestV1,
+    ) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
+        if self.action != PolicyWriteAction::Revoke {
+            return Err(human_sources::unavailable());
+        }
         self.write(PolicyMutation::Revoke(request)).await
     }
-    async fn write(self: Arc<Self>, mutation: PolicyMutation) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
+    async fn write(
+        self: Arc<Self>,
+        mutation: PolicyMutation,
+    ) -> ApiResult<crate::audit::egress::EgressPolicyReceiptV1> {
         let owned = self.identity.owned.clone();
         let shared = self.identity.state.io.clone();
         let tenant_io = self.identity.tenant.io.clone();
-        let result = store_io::run(shared, Some(tenant_io), store_io::Lane::Control, false, move || {
-            let identity = &self.identity;
-            let owned = &identity.owned;
-            if !owned.technical_candidate(&identity.digest)? { return Err(human_sources::unavailable()); }
-            identity.credential.revalidate().map_err(policy_store_failure)?;
-            let source = owned.sources.get(identity.index).ok_or_else(human_sources::unavailable)?;
-            let expected = *owned.discovery_generations.get(identity.index).ok_or_else(human_sources::unavailable)?;
-            let scope = mutation.scope().clone();
-            let receipt = {
-                // Accepted work owns the usage/registry/source/operation and
-                // IO permits. An abandoned HTTP future cannot release them.
-                let epoch = owned.owner.try_write_epoch().map_err(policy_authority_failure)?;
-                let result = match &mutation {
-                    PolicyMutation::Replace(value) => {
-                        let request = value.store_request().map_err(policy_store_failure)?;
-                        identity.tenant.store.egress_replace_policy_scoped(&epoch, source, &identity.credential, &scope, expected, &request)
-                    }
-                    PolicyMutation::Revoke(value) => {
-                        let request = value.store_request().map_err(policy_store_failure)?;
-                        identity.tenant.store.egress_revoke_policy_scoped(&epoch, source, &identity.credential, &scope, expected, &request)
-                    }
-                };
-                if result.as_ref().err().is_some_and(|error| error.downcast_ref::<crate::audit::egress::EgressStoreFailure>() == Some(&crate::audit::egress::EgressStoreFailure::DiscoveryStale)) {
-                    owned.require_rebuild();
+        let result = store_io::run(
+            shared,
+            Some(tenant_io),
+            store_io::Lane::Control,
+            false,
+            move || {
+                let identity = &self.identity;
+                let owned = &identity.owned;
+                if !owned.technical_candidate(&identity.digest)? {
+                    return Err(human_sources::unavailable());
                 }
-                let receipt = result.map_err(policy_store_failure)?;
-                epoch.validate_source(source).map_err(policy_authority_failure)?;
-                receipt
-            }; // True E1 commit, SQLite restoration and WriteEpoch end first.
-            #[cfg(test)]
-            test_hook::pause(&identity.state)?;
-            // A fresh, short read revalidates current binding after the true
-            // commit. No test wait consumes or prolongs the write epoch.
-            identity.credential.revalidate().map_err(policy_store_failure)?;
-            let epoch = owned.owner.try_read_epoch().map_err(policy_authority_failure)?;
-            let access = HumanSourceAccess::read(&epoch, source).map_err(policy_authority_failure)?;
-            let current = identity.tenant.store.modern_control_protocol(&access, &identity.credential, expected)
-                .map_err(policy_store_failure)?;
-            let Some(current) = current else {
-                owned.require_rebuild();
-                return Err(human_sources::unavailable());
-            };
-            if current.schema_version != 15
-                || current.control_namespace_uuid.as_deref() != Some(scope.control_namespace_uuid())
-                || identity.tenant.tenant_id != scope.tenant_id()
-                || !owned.technical_candidate(&identity.digest)? {
-                return Err(human_sources::unavailable());
-            }
-            epoch.validate_source(source).map_err(policy_authority_failure)?;
-            epoch.check().map_err(policy_authority_failure)?;
-            Ok(receipt)
-        }).await?;
-        if !owned.healthy() { return Err(human_sources::unavailable()); }
+                identity
+                    .credential
+                    .revalidate()
+                    .map_err(policy_store_failure)?;
+                let source = owned
+                    .sources
+                    .get(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
+                let expected = *owned
+                    .discovery_generations
+                    .get(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
+                let scope = mutation.scope().clone();
+                let receipt = {
+                    // Accepted work owns the usage/registry/source/operation and
+                    // IO permits. An abandoned HTTP future cannot release them.
+                    let epoch = owned
+                        .owner
+                        .try_write_epoch()
+                        .map_err(policy_authority_failure)?;
+                    let result = match &mutation {
+                        PolicyMutation::Replace(value) => {
+                            let request = value.store_request().map_err(policy_store_failure)?;
+                            identity.tenant.store.egress_replace_policy_scoped(
+                                &epoch,
+                                source,
+                                &identity.credential,
+                                &scope,
+                                expected,
+                                &request,
+                            )
+                        }
+                        PolicyMutation::Revoke(value) => {
+                            let request = value.store_request().map_err(policy_store_failure)?;
+                            identity.tenant.store.egress_revoke_policy_scoped(
+                                &epoch,
+                                source,
+                                &identity.credential,
+                                &scope,
+                                expected,
+                                &request,
+                            )
+                        }
+                    };
+                    if result.as_ref().err().is_some_and(|error| {
+                        error.downcast_ref::<crate::audit::egress::EgressStoreFailure>()
+                            == Some(&crate::audit::egress::EgressStoreFailure::DiscoveryStale)
+                    }) {
+                        owned.require_rebuild();
+                    }
+                    let receipt = result.map_err(policy_store_failure)?;
+                    epoch
+                        .validate_source(source)
+                        .map_err(policy_authority_failure)?;
+                    receipt
+                }; // True E1 commit, SQLite restoration and WriteEpoch end first.
+                #[cfg(test)]
+                test_hook::pause(&identity.state)?;
+                // A fresh, short read revalidates current binding after the true
+                // commit. No test wait consumes or prolongs the write epoch.
+                identity
+                    .credential
+                    .revalidate()
+                    .map_err(policy_store_failure)?;
+                let epoch = owned
+                    .owner
+                    .try_read_epoch()
+                    .map_err(policy_authority_failure)?;
+                let access =
+                    HumanSourceAccess::read(&epoch, source).map_err(policy_authority_failure)?;
+                let current = identity
+                    .tenant
+                    .store
+                    .modern_control_protocol(&access, &identity.credential, expected)
+                    .map_err(policy_store_failure)?;
+                let Some(current) = current else {
+                    owned.require_rebuild();
+                    return Err(human_sources::unavailable());
+                };
+                if current.schema_version != 15
+                    || current.control_namespace_uuid.as_deref()
+                        != Some(scope.control_namespace_uuid())
+                    || identity.tenant.tenant_id != scope.tenant_id()
+                    || !owned.technical_candidate(&identity.digest)?
+                {
+                    return Err(human_sources::unavailable());
+                }
+                epoch
+                    .validate_source(source)
+                    .map_err(policy_authority_failure)?;
+                epoch.check().map_err(policy_authority_failure)?;
+                Ok(receipt)
+            },
+        )
+        .await?;
+        if !owned.healthy() {
+            return Err(human_sources::unavailable());
+        }
         Ok(result)
     }
 }
@@ -361,7 +479,9 @@ pub(in crate::api) mod test_hook {
         pub(crate) fn release(self) {
             drop(self);
         }
-        pub(crate) fn release_with_ack(mut self) -> Result<mpsc::Receiver<()>, mpsc::SendError<()>> {
+        pub(crate) fn release_with_ack(
+            mut self,
+        ) -> Result<mpsc::Receiver<()>, mpsc::SendError<()>> {
             self.sender.take().unwrap().send(())?;
             Ok(self.acknowledged.take().unwrap())
         }
@@ -378,9 +498,16 @@ pub(in crate::api) mod test_hook {
         let (release, waiter) = mpsc::channel();
         let (acknowledged, ack) = mpsc::channel();
         (
-            Pause { reached, release: waiter, acknowledged },
+            Pause {
+                reached,
+                release: waiter,
+                acknowledged,
+            },
             observer,
-            Release { sender: Some(release), acknowledged: Some(ack) },
+            Release {
+                sender: Some(release),
+                acknowledged: Some(ack),
+            },
         )
     }
     pub(crate) fn install(state: &GatewayState) -> (mpsc::Receiver<()>, Release) {
@@ -426,7 +553,10 @@ pub(in crate::api) mod test_hook {
         // oracle or changing the actual hook's fixed 15-second bound.
         assert!(waiter.wait_for_release(std::time::Duration::ZERO).is_err());
         assert!(reached.try_recv().is_ok());
-        assert!(matches!(release.acknowledged.as_ref().unwrap().try_recv(), Err(TryRecvError::Disconnected)));
+        assert!(matches!(
+            release.acknowledged.as_ref().unwrap().try_recv(),
+            Err(TryRecvError::Disconnected)
+        ));
         assert!(release.release_with_ack().is_err());
     }
 }

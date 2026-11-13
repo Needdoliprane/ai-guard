@@ -52,7 +52,11 @@ pub enum ControlRouteIdentity {
 
 /// Exact reserved owned policy methods; classification alone grants no authority.
 pub(crate) fn owned_policy_route(method: &Method, path: &str) -> bool {
-    *method == Method::POST && matches!(path, "/api/v1/egress/policies/replace" | "/api/v1/egress/policies/revoke")
+    *method == Method::POST
+        && matches!(
+            path,
+            "/api/v1/egress/policies/replace" | "/api/v1/egress/policies/revoke"
+        )
 }
 
 pub(crate) fn owned_protocol_route(method: &Method, path: &str) -> bool {

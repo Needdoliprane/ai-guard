@@ -23,7 +23,10 @@ pub(super) fn owned_policy_request(request: &Request) -> bool {
     request.method() == axum::http::Method::POST
         && request.uri().query().is_none()
         && request.extensions().get::<ReservedPolicy>().is_some()
-        && request.extensions().get::<Arc<auth::owned_control::OwnedPolicyWriter>>().is_some()
+        && request
+            .extensions()
+            .get::<Arc<auth::owned_control::OwnedPolicyWriter>>()
+            .is_some()
 }
 
 pub(super) fn owned_protocol_request(request: &Request) -> bool {
@@ -119,13 +122,22 @@ async fn read_body(body: Body, max_body: usize) -> Result<Vec<u8>, Response> {
 }
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
-    let policy_route = crate::control_transport::owned_policy_route(request.method(), request.uri().path());
+    let policy_route =
+        crate::control_transport::owned_policy_route(request.method(), request.uri().path());
     if policy_route && state.owned_human.is_none() {
-        return super::egress_policy::failure(crate::control::egress_policy::EgressPolicyAdminErrorV1::Unavailable).into_response();
+        return super::egress_policy::failure(
+            crate::control::egress_policy::EgressPolicyAdminErrorV1::Unavailable,
+        )
+        .into_response();
     }
-    let max_body = if policy_route { crate::control::egress_policy::REQUEST_BYTES } else { MAX_BODY };
+    let max_body = if policy_route {
+        crate::control::egress_policy::REQUEST_BYTES
+    } else {
+        MAX_BODY
+    };
     if state.owned_human.is_some()
-        && !(crate::control_transport::owned_protocol_route(request.method(), request.uri().path()) || policy_route)
+        && !(crate::control_transport::owned_protocol_route(request.method(), request.uri().path())
+            || policy_route)
     {
         let method = if request.method() == "HEAD" {
             &axum::http::Method::GET
@@ -182,10 +194,11 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     let semaphore = match identity {
         ControlRouteIdentity::Runner => {
             if state.owned_human.is_some() && policy_route {
-                let identity = match auth::owned_control::authenticate_policy(&state, &parts.headers).await {
-                    Ok(identity) => identity,
-                    Err(rejection) => return rejection.into_response(),
-                };
+                let identity =
+                    match auth::owned_control::authenticate_policy(&state, &parts.headers).await {
+                        Ok(identity) => identity,
+                        Err(rejection) => return rejection.into_response(),
+                    };
                 let capacity = identity.tenant().control_capacity.runner.clone();
                 owned_policy_identity = Some(identity);
                 capacity
@@ -245,7 +258,9 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
             _ => return super::human_sources::unavailable().into_response(),
         };
         parts.extensions.insert(ReservedPolicy(()));
-        parts.extensions.insert(Arc::new(identity.accept(operation, action)));
+        parts
+            .extensions
+            .insert(Arc::new(identity.accept(operation, action)));
         None
     } else if let Some(identity) = owned_identity {
         parts.extensions.insert(ReservedProtocol(()));

@@ -11,11 +11,10 @@ mod types;
 pub(crate) use types::Ceiling as EgressTenantCeilingV1;
 pub(crate) use types::EgressStoreFailure;
 use types::*;
-pub(crate) use types::{
-    EgressPolicySnapshotV1,
-    EgressReplacePolicyV1, EgressRevokePolicyV1, EgressStoreLimitsV1,
-};
 pub use types::{EgressPolicyReceiptV1, EgressPolicySelectorV1, EgressPolicyStateV1};
+pub(crate) use types::{
+    EgressPolicySnapshotV1, EgressReplacePolicyV1, EgressRevokePolicyV1, EgressStoreLimitsV1,
+};
 mod schema;
 pub(super) use schema::{AUTO_INDEX_COUNTS, SCHEMA};
 mod replay;
