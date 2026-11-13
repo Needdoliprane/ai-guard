@@ -186,6 +186,13 @@ mod extended {
                 }))
                 .unwrap();
         }
+        // Grants require an already observed resource in this tenant's audit.
+        let owned_old = append(&fixture, "B", "recent-owned-b");
+        let shared = append(&fixture, "B", "recent-shared-b");
+        let hidden_old = append(&fixture, "B", "recent-hidden-b");
+        let owned_new = append(&fixture, "B", "recent-owned-b");
+        let hidden_new = append(&fixture, "B", "recent-hidden-b");
+        let foreign = append(&fixture, "A", "recent-foreign-a");
         grant(&fixture, "B", "recent-owned-b", fixture.principal(), false);
         grant(&fixture, "B", "recent-shared-b", &other, true);
         grant(&fixture, "B", "recent-hidden-b", &other, false);
@@ -196,12 +203,6 @@ mod extended {
             fixture.principal(),
             false,
         );
-        let owned_old = append(&fixture, "B", "recent-owned-b");
-        let shared = append(&fixture, "B", "recent-shared-b");
-        let hidden_old = append(&fixture, "B", "recent-hidden-b");
-        let owned_new = append(&fixture, "B", "recent-owned-b");
-        let hidden_new = append(&fixture, "B", "recent-hidden-b");
-        let foreign = append(&fixture, "A", "recent-foreign-a");
         let visible = if administration {
             vec![hidden_new, owned_new, hidden_old, shared, owned_old]
         } else {
@@ -568,6 +569,7 @@ mod extended {
 
         async fn committed_race(revoke: bool) {
             let fixture = Fixture::new_owned();
+            append(&fixture, "B", "recent-postcommit-b");
             grant(
                 &fixture,
                 "B",
@@ -575,7 +577,6 @@ mod extended {
                 fixture.principal(),
                 false,
             );
-            append(&fixture, "B", "recent-postcommit-b");
             let state = state(&fixture);
             let router = gateway_router(state.clone());
             let context = context(&router, "personal").await;
@@ -678,8 +679,8 @@ mod extended {
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
         async fn owned_recent_aborted_waiter_keeps_committed_work_usage_until_release_and_drain() {
             let fixture = Fixture::new_owned();
-            grant(&fixture, "B", "recent-cancel-b", fixture.principal(), false);
             append(&fixture, "B", "recent-cancel-b");
+            grant(&fixture, "B", "recent-cancel-b", fixture.principal(), false);
             let state = state(&fixture);
             let router = gateway_router(state.clone());
             let context = context(&router, "personal").await;
