@@ -428,6 +428,7 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     "/api/v1/human/identity",
                     "/api/v1/human/resources",
                     "/api/v1/human/events",
+                    "/api/v1/human/events/recent",
                 ]
                 .contains(path)
                 || *path == "/healthz"
@@ -902,3 +903,6 @@ async fn every_existing_control_alias_and_head_closes_before_body_and_store() {
     assert!(observed_a.try_recv().is_err());
     assert!(observed_b.try_recv().is_err());
 }
+
+#[path = "recent_tests.rs"]
+mod recent_contract_tests;

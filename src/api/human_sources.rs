@@ -12,6 +12,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
+mod recent;
+
 const MAX_CANDIDATES: usize = 65_536;
 const MAX_CANDIDATE_BYTES: usize = 16 * 1024 * 1024;
 const CLOSED: usize = 1usize << (usize::BITS - 1);
@@ -587,6 +589,7 @@ pub(super) async fn route_gate(
                 "/api/v1/human/identity",
                 "/api/v1/human/resources",
                 "/api/v1/human/events",
+                "/api/v1/human/events/recent",
             ]
             .contains(&path)
         || request.method() == "GET"

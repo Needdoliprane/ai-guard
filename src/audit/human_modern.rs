@@ -2,6 +2,7 @@
 //! No neighboring connection, metadata snapshot or recovery participates here.
 use super::*;
 use crate::identity::*;
+mod recent;
 
 /// Existing durable projection markers; coverage metadata, never identity.
 #[derive(Clone, Copy, PartialEq, Eq)]

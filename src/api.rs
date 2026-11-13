@@ -1823,6 +1823,7 @@ async fn dashboard_proxy(State(s): State<DashboardState>, request: Request) -> A
                 "/api/v1/human/identity",
                 "/api/v1/human/resources",
                 "/api/v1/human/events",
+                "/api/v1/human/events/recent",
             ]
             .contains(&request.uri().path()))
     {
