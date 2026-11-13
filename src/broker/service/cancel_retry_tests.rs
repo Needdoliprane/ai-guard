@@ -33,19 +33,22 @@ use std::{
     path::PathBuf,
 };
 
+#[cfg(test)]
+#[path = "checkpoint_source_tests.rs"]
+mod checkpoint_source_tests;
 #[path = "cold_audit_tests.rs"]
 pub(super) mod cold_audit_tests;
 #[path = "stop_auth_tests.rs"]
 mod stop_auth_tests;
 
-/// Production aliases EnforcerClient directly. A probe-only Service cannot
+/// Production aliases ExecutionEnforcerV1 directly. A probe-only Service cannot
 /// access a native client: leaving the explicitly scoped seam is a test bug.
 pub(super) enum TestEnforcer {
-    Native(EnforcerClient),
+    Native(ExecutionEnforcerV1),
     CancelDeliveryProbe,
 }
 impl Deref for TestEnforcer {
-    type Target = EnforcerClient;
+    type Target = ExecutionEnforcerV1;
     fn deref(&self) -> &Self::Target {
         match self {
             Self::Native(client) => client,
@@ -334,7 +337,7 @@ impl Fixture {
             preparation: Arc::new(Semaphore::new(1)),
             execution: Arc::new(Semaphore::new(1)),
             stopping: Arc::new(AtomicBool::new(false)),
-            fenced: AtomicBool::new(false),
+            fenced: Arc::new(AtomicBool::new(false)),
         };
         Self {
             _temp: temp,

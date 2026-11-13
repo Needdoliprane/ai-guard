@@ -163,11 +163,28 @@ pub(super) async fn read_preface(
 enum LedgerReason3 {
     RecoveryTransportOnly,
 }
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 enum LedgerCoverage3 {
-    Unverified { reason: LedgerReason3 },
+    Unverified {
+        reason: LedgerReason3,
+    },
+    Complete {
+        head: crate::broker::retirement::LedgerHeadV1,
+    },
 }
+impl PartialEq for LedgerCoverage3 {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unverified { reason: a }, Self::Unverified { reason: b }) => a == b,
+            (Self::Complete { head: a }, Self::Complete { head: b }) => {
+                matches!((a.canonical_bytes(), b.canonical_bytes()), (Ok(a), Ok(b)) if a == b)
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for LedgerCoverage3 {}
 fn ledger3() -> LedgerCoverage3 {
     LedgerCoverage3::Unverified {
         reason: LedgerReason3::RecoveryTransportOnly,
@@ -812,7 +829,7 @@ pub(super) fn challenge_for(state: &RecoveryState) -> ChallengeV2 {
 }
 
 #[derive(Clone)]
-pub(super) struct Session3 {
+pub(in crate::broker::enforcer) struct Session3 {
     key: [u8; 32],
     id: Hash3,
     epoch: Uuid,
@@ -820,12 +837,396 @@ pub(super) struct Session3 {
     max_slots: u32,
 }
 
+use super::super::retirement::{FullCommand, FullReply};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FullRequest3 {
+    kind: String,
+    protocol: u32,
+    session_id: Hash3,
+    epoch: Uuid3,
+    request_id: Uuid3,
+    #[serde(deserialize_with = "deserialize_embedded3")]
+    command: FullCommand,
+    proof: Hash3,
+}
+impl FullRequest3 {
+    fn core(&self) -> impl Serialize + '_ {
+        (
+            &self.kind,
+            self.protocol,
+            &self.session_id,
+            self.epoch,
+            self.request_id,
+            &self.command,
+        )
+    }
+    fn new(session: &Session3, command: FullCommand) -> EnforcerResult<Self> {
+        let mut request = Self {
+            kind: "full_request_v3".into(),
+            protocol: 3,
+            session_id: session.id.clone(),
+            epoch: Uuid3(session.epoch),
+            request_id: Uuid3(Uuid::new_v4()),
+            command,
+            proof: empty_proof(),
+        };
+        let computed_proof = proof(
+            &session.key,
+            COMMAND3,
+            &(&session.id, RequestedRole::Full, request.core()),
+        )?;
+        request.proof = computed_proof;
+        Ok(request)
+    }
+    fn validate(&self, session: &Session3) -> EnforcerResult<()> {
+        if self.kind != "full_request_v3"
+            || self.protocol != 3
+            || self.session_id != session.id
+            || self.epoch.0 != session.epoch
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        verify(
+            &session.key,
+            COMMAND3,
+            &(&session.id, RequestedRole::Full, self.core()),
+            &self.proof,
+        )
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FullReply3 {
+    kind: String,
+    protocol: u32,
+    session_id: Hash3,
+    epoch: Uuid3,
+    request_id: Uuid3,
+    sequence: u64,
+    #[serde(deserialize_with = "deserialize_embedded3")]
+    result: FullReply,
+    proof: Hash3,
+}
+impl FullReply3 {
+    fn core(&self) -> impl Serialize + '_ {
+        (
+            &self.kind,
+            self.protocol,
+            &self.session_id,
+            self.epoch,
+            self.request_id,
+            self.sequence,
+            &self.result,
+        )
+    }
+    fn validate(
+        &self,
+        session: &Session3,
+        request: &FullRequest3,
+        sequence: u64,
+    ) -> EnforcerResult<()> {
+        if self.kind != "full_reply_v3"
+            || self.protocol != 3
+            || self.session_id != session.id
+            || self.epoch.0 != session.epoch
+            || self.request_id != request.request_id
+            || self.sequence != sequence
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        verify(
+            &session.key,
+            REPLY3,
+            &(
+                &session.id,
+                RequestedRole::Full,
+                request.core(),
+                self.core(),
+            ),
+            &self.proof,
+        )
+    }
+}
+
+async fn serve_full_command(
+    mut stream: UnixStream,
+    state: Arc<RecoveryState>,
+    session: Session3,
+) -> EnforcerResult<()> {
+    use tokio::io::AsyncReadExt;
+    let request: FullRequest3 = read_frame(&mut stream, MAX_FRAME, IO_TIMEOUT).await?;
+    request.validate(&session)?;
+    state.check_transport_v3().await?;
+    let full = state.full_owner()?.ok_or(EnforcerError::Unauthorized)?;
+    let watching = matches!(&request.command, FullCommand::Watch {});
+    let shutting_down = matches!(&request.command, FullCommand::ShutdownIfIdle {});
+    let (mut reader, mut writer) = stream.into_split();
+    let mut sequence = 0_u64;
+    loop {
+        let command = if watching {
+            FullCommand::Status {}
+        } else {
+            request.command.clone()
+        };
+        let wait = if matches!(&command, FullCommand::Register { .. }) {
+            REGISTER_TIMEOUT
+        } else {
+            IO_TIMEOUT
+        };
+        let mut extra = [0_u8; 1];
+        // This waits only for the IPC outcome. The retirement coordinator is
+        // separately owned by FullState and survives EOF and this deadline.
+        let result = tokio::select! {
+            received = reader.read(&mut extra) => {
+                let _ = received;
+                return Err(EnforcerError::Unavailable);
+            }
+            dispatched = tokio::time::timeout(wait,full.dispatch(command,state.progress.load(Ordering::SeqCst))) => {
+                match dispatched { Ok(Ok(result)) => result, Ok(Err(code)) => FullReply::Error {code},
+                    Err(_) => FullReply::Error {code:EnforcerError::Unavailable} }
+            }
+        };
+        let mut reply = FullReply3 {
+            kind: "full_reply_v3".into(),
+            protocol: 3,
+            session_id: session.id.clone(),
+            epoch: Uuid3(session.epoch),
+            request_id: request.request_id,
+            sequence,
+            result,
+            proof: empty_proof(),
+        };
+        let computed_proof = proof(
+            &session.key,
+            REPLY3,
+            &(
+                &session.id,
+                RequestedRole::Full,
+                request.core(),
+                reply.core(),
+            ),
+        )?;
+        reply.proof = computed_proof;
+        let mut extra = [0_u8; 1];
+        tokio::select! {
+            received = reader.read(&mut extra), if watching => {
+                let _ = received;
+                return Err(EnforcerError::Unauthorized);
+            }
+            sent = write_frame(&mut writer, &reply, MAX_FRAME, IO_TIMEOUT) => { sent?; }
+        }
+        if shutting_down && matches!(reply.result, FullReply::Acknowledged {}) {
+            state.shutdown_requested.store(true, Ordering::SeqCst);
+        }
+        if !watching {
+            return Ok(());
+        }
+        sequence = sequence.checked_add(1).ok_or(EnforcerError::Capacity)?;
+        tokio::time::sleep(POLL).await;
+        state.check_transport_v3().await?;
+    }
+}
+
+pub(in crate::broker::enforcer) async fn connect_full(
+    stream: &mut UnixStream,
+    key: &[u8; 32],
+    epoch: Uuid,
+    binding: &str,
+    max_slots: u32,
+) -> EnforcerResult<(Session3, crate::broker::retirement::LedgerIdentityV1)> {
+    let deadline = Instant::now() + HANDSHAKE_WINDOW;
+    let challenge = read_preface(stream, time_left(deadline)?).await?;
+    if challenge.protocol != 2
+        || challenge.role != "enforcer"
+        || challenge.epoch != epoch
+        || challenge.nonce.is_nil()
+        || challenge.root_binding != binding
+    {
+        return Err(EnforcerError::Unauthorized);
+    }
+    let (session, ledger) = client_handshake_checked(
+        stream,
+        &challenge,
+        key,
+        deadline,
+        RequestedRole::Full,
+        max_slots,
+    )
+    .await?;
+    Ok((session, ledger.ok_or(EnforcerError::Unauthorized)?))
+}
+
+pub(in crate::broker::enforcer) async fn request_full(
+    stream: &mut UnixStream,
+    session: &Session3,
+    command: FullCommand,
+    timeout: Duration,
+) -> EnforcerResult<FullReply> {
+    request_full_before_write(stream, session, command, timeout, || Ok(())).await
+}
+
+pub(in crate::broker::enforcer) async fn request_full_before_write<F>(
+    stream: &mut UnixStream,
+    session: &Session3,
+    command: FullCommand,
+    timeout: Duration,
+    before_write: F,
+) -> EnforcerResult<FullReply>
+where
+    F: FnOnce() -> EnforcerResult<()> + Send,
+{
+    if matches!(&command, FullCommand::Watch {}) {
+        return Err(EnforcerError::InvalidInput);
+    }
+    let request = FullRequest3::new(session, command)?;
+    // Construction/proof validation precede this synchronous transition. Once
+    // it succeeds, even frame encoding/write0/cancellation is SubmittedUnknown.
+    before_write()?;
+    write_frame(stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+    let response: FullReply3 = read_frame(stream, MAX_FRAME, timeout).await?;
+    response.validate(session, &request, 0)?;
+    Ok(response.result)
+}
+
+#[cfg(test)]
+pub(in crate::broker::enforcer) async fn send_full_request_only_for_test(
+    stream: &mut UnixStream,
+    session: &Session3,
+    command: FullCommand,
+) -> EnforcerResult<()> {
+    let request = FullRequest3::new(session, command)?;
+    write_frame(stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(in crate::broker::enforcer) async fn deliver_synthetic_stop_only_for_test(
+    root: &Directory,
+    registration: RegistrationV1,
+) -> EnforcerResult<StopSlotV1> {
+    // Synthetic closed audit/prefix data exercises authenticated guardian
+    // dispatch, not a central audit producer or an engine effect.
+    let head = RevisionRefV1::new(1, &"b".repeat(64)).map_err(|_| EnforcerError::InvalidInput)?;
+    let cancel = CancelReferenceV1 {
+        command_id: Uuid::new_v4(),
+        input_hash: "c".repeat(64),
+        confirmed_head: head.clone(),
+    };
+    let value = RestoreRequiredStopV1 {
+        version: 1,
+        request_id: Uuid::new_v4(),
+        registration_hash: registration.digest()?,
+        source: StopSourceV1 {
+            scope_hash: "d".repeat(64),
+            job_id: Uuid::new_v4(),
+            intent_hash: registration.arm.intent_hash.clone(),
+            confirmed_head: head,
+            arm_operation_index: 0,
+        },
+        registration,
+        cancel_generation: 1,
+        durable_cancel: Some(cancel.clone()),
+        cancel_prefix: vec![cancel],
+    };
+    let mut output = None;
+    for command in [
+        StopRequest::RestoreRequiredStop {
+            value: Box::new(value.clone()),
+        },
+        StopRequest::DeliverDurableStop {
+            value: Box::new(value),
+        },
+    ] {
+        let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
+        let endpoints = root
+            .persistent_child("endpoints", false)
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?
+            .ok_or(EnforcerError::UnsafeFilesystem)?;
+        let mut stream = endpoint.connect_checked(&endpoints).await?;
+        let deadline = Instant::now() + HANDSHAKE_WINDOW;
+        let challenge = read_preface(&mut stream, time_left(deadline)?).await?;
+        if challenge.epoch != endpoint.epoch()
+            || challenge.root_binding != recovery_root_binding(root, &endpoint)?
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        let session = client_handshake(
+            &mut stream,
+            &challenge,
+            &capability(root, false)?,
+            deadline,
+            RequestedRole::StopsOnly,
+            8,
+        )
+        .await?;
+        let mut connection = StopConnection {
+            stream,
+            epoch: challenge.epoch,
+            v3: Some(session),
+        };
+        match request(&mut connection, command).await? {
+            ReplyValue3::StopReserved { value, .. } | ReplyValue3::StopAccepted { value } => {
+                output = Some(value)
+            }
+            ReplyValue3::Error { code } => return Err(code),
+            _ => return Err(EnforcerError::Unauthorized),
+        }
+    }
+    output.ok_or(EnforcerError::Unavailable)
+}
+
+pub(in crate::broker::enforcer) struct FullWatchReader {
+    session: Session3,
+    request: FullRequest3,
+    sequence: u64,
+}
+impl FullWatchReader {
+    pub(in crate::broker::enforcer) async fn start(
+        stream: &mut UnixStream,
+        session: Session3,
+    ) -> EnforcerResult<Self> {
+        let request = FullRequest3::new(&session, FullCommand::Watch {})?;
+        write_frame(stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
+        Ok(Self {
+            session,
+            request,
+            sequence: 0,
+        })
+    }
+    pub(in crate::broker::enforcer) async fn read(
+        &mut self,
+        stream: &mut UnixStream,
+    ) -> EnforcerResult<FullReply> {
+        let reply: FullReply3 = read_frame(stream, MAX_FRAME, IO_TIMEOUT).await?;
+        reply.validate(&self.session, &self.request, self.sequence)?;
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(EnforcerError::Capacity)?;
+        Ok(reply.result)
+    }
+}
+
+#[cfg(test)]
 pub(super) async fn serve(
+    stream: UnixStream,
+    state: Arc<RecoveryState>,
+    challenge: ChallengeV2,
+    negotiate: Negotiate3,
+    deadline: Instant,
+) -> EnforcerResult<()> {
+    serve_admitted(stream, state, challenge, negotiate, deadline, None).await
+}
+
+pub(super) async fn serve_admitted(
     mut stream: UnixStream,
     state: Arc<RecoveryState>,
     challenge: ChallengeV2,
     negotiate: Negotiate3,
     deadline: Instant,
+    initial_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> EnforcerResult<()> {
     time_left(deadline)?;
     if negotiate.client_nonce.0 == challenge.nonce {
@@ -834,9 +1235,25 @@ pub(super) async fn serve(
     let bytes = serde_json::to_vec(&negotiate_core(&challenge, &negotiate))
         .map_err(|_| EnforcerError::InvalidInput)?;
     verify_bytes(&state.capability, N3, &bytes, &negotiate.proof)?;
+    let role_budget = match negotiate.requested_role {
+        RequestedRole::Full => &state.full_connections,
+        RequestedRole::StopsOnly => &state.stop_connections,
+    };
+    let _role_permit = Arc::clone(role_budget)
+        .try_acquire_owned()
+        .map_err(|_| EnforcerError::Unavailable)?;
+    drop(initial_permit);
     check_state(&state, deadline).await?;
     let server_nonce = fresh_nonce(&[challenge.nonce, negotiate.client_nonce.0]);
-    if negotiate.requested_role != RequestedRole::StopsOnly {
+    let full_head = if negotiate.requested_role == RequestedRole::Full {
+        match state.full_owner()? {
+            Some(full) => full.complete().await.ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+    if negotiate.requested_role == RequestedRole::Full && full_head.is_none() {
         let mut refused = Refusal3 {
             kind: "refused_v3".into(),
             protocol: 3,
@@ -870,11 +1287,14 @@ pub(super) async fn serve(
         role: "enforcer".into(),
         epoch: Uuid3(challenge.epoch),
         root_binding: Hash3(challenge.root_binding.clone()),
-        requested_role: RequestedRole::StopsOnly,
+        requested_role: negotiate.requested_role,
         client_nonce: negotiate.client_nonce,
         server_nonce,
-        offered_roles: vec![RequestedRole::StopsOnly],
-        ledger_state: ledger3(),
+        offered_roles: vec![negotiate.requested_role],
+        ledger_state: match full_head {
+            Some(head) => LedgerCoverage3::Complete { head },
+            None => ledger3(),
+        },
         session_id: empty_proof(),
         proof: empty_proof(),
     };
@@ -894,7 +1314,7 @@ pub(super) async fn serve(
         return Err(EnforcerError::Unauthorized);
     };
     if authentication.session_id != offered.session_id
-        || authentication.requested_role != RequestedRole::StopsOnly
+        || authentication.requested_role != negotiate.requested_role
         || authentication.epoch != offered.epoch
         || authentication.root_binding != offered.root_binding
         || authentication.client_nonce != offered.client_nonce
@@ -914,17 +1334,26 @@ pub(super) async fn serve(
         &authentication.proof,
     )?;
     check_state(&state, deadline).await?;
+    if negotiate.requested_role == RequestedRole::Full {
+        let full = state.full_owner()?.ok_or(EnforcerError::Unavailable)?;
+        let current = LedgerCoverage3::Complete {
+            head: full.complete().await?,
+        };
+        if current != offered.ledger_state {
+            return Err(EnforcerError::Conflict);
+        }
+    }
     let mut granted = Grant3 {
         kind: "granted_v3".into(),
         protocol: 3,
         session_id: offered.session_id.clone(),
-        granted_role: RequestedRole::StopsOnly,
+        granted_role: negotiate.requested_role,
         epoch: offered.epoch,
         root_binding: offered.root_binding.clone(),
         client_nonce: offered.client_nonce,
         server_nonce: offered.server_nonce,
-        ledger_state: ledger3(),
-        admission_available: false,
+        ledger_state: offered.ledger_state.clone(),
+        admission_available: negotiate.requested_role == RequestedRole::Full,
         proof: empty_proof(),
     };
     let computed_proof = proof(
@@ -947,7 +1376,11 @@ pub(super) async fn serve(
         root_binding: Hash3(state.root_binding.clone()),
         max_slots: state.max_slots,
     };
-    serve_command(stream, state, session).await
+    if negotiate.requested_role == RequestedRole::Full {
+        serve_full_command(stream, state, session).await
+    } else {
+        serve_command(stream, state, session).await
+    }
 }
 
 pub(super) async fn client_handshake(
@@ -958,6 +1391,22 @@ pub(super) async fn client_handshake(
     requested_role: RequestedRole,
     max_slots: u32,
 ) -> EnforcerResult<Session3> {
+    client_handshake_checked(stream, challenge, key, deadline, requested_role, max_slots)
+        .await
+        .map(|result| result.0)
+}
+
+async fn client_handshake_checked(
+    stream: &mut UnixStream,
+    challenge: &ChallengeV2,
+    key: &[u8; 32],
+    deadline: Instant,
+    requested_role: RequestedRole,
+    max_slots: u32,
+) -> EnforcerResult<(
+    Session3,
+    Option<crate::broker::retirement::LedgerIdentityV1>,
+)> {
     time_left(deadline)?;
     let mut negotiate = Negotiate3 {
         kind: "negotiate_v3".into(),
@@ -983,10 +1432,14 @@ pub(super) async fn client_handshake(
         || offered.client_nonce != negotiate.client_nonce
         || offered.server_nonce.0 == challenge.nonce
         || offered.server_nonce == negotiate.client_nonce
-        || offered.offered_roles != [RequestedRole::StopsOnly]
-        || offered.ledger_state != ledger3()
+        || offered.offered_roles != [requested_role]
+        || match requested_role {
+            RequestedRole::StopsOnly => offered.ledger_state != ledger3(),
+            RequestedRole::Full => {
+                !matches!(offered.ledger_state, LedgerCoverage3::Complete { .. })
+            }
+        }
         || offered.session_id != session_id(challenge, &negotiate, &offered)?
-        || requested_role != RequestedRole::StopsOnly
     {
         return Err(EnforcerError::Unauthorized);
     }
@@ -1045,7 +1498,7 @@ pub(super) async fn client_handshake(
         || granted.client_nonce != offered.client_nonce
         || granted.server_nonce != offered.server_nonce
         || granted.ledger_state != offered.ledger_state
-        || granted.admission_available
+        || granted.admission_available != (requested_role == RequestedRole::Full)
     {
         return Err(EnforcerError::Unauthorized);
     }
@@ -1062,13 +1515,20 @@ pub(super) async fn client_handshake(
         &granted.proof,
     )?;
     time_left(deadline)?;
-    Ok(Session3 {
-        key: *key,
-        id: granted.session_id,
-        epoch: granted.epoch.0,
-        root_binding: granted.root_binding,
-        max_slots,
-    })
+    let ledger = match granted.ledger_state {
+        LedgerCoverage3::Complete { head } => Some(head.ledger().clone()),
+        _ => None,
+    };
+    Ok((
+        Session3 {
+            key: *key,
+            id: granted.session_id,
+            epoch: granted.epoch.0,
+            root_binding: granted.root_binding,
+            max_slots,
+        },
+        ledger,
+    ))
 }
 fn validate_refusal(
     challenge: &ChallengeV2,
@@ -1421,6 +1881,21 @@ impl fmt::Debug for EnforcerStopClientV3 {
     }
 }
 impl EnforcerStopClientV3 {
+    pub async fn connect_or_spawn_existing_sealed(
+        root: &Directory,
+        executable: &Path,
+        max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        Ok(Self {
+            inner: EnforcerStopClient::connect_existing_sealed_protocol(
+                root,
+                executable,
+                max_slots,
+                StopProtocol::V3,
+            )
+            .await?,
+        })
+    }
     pub async fn connect_or_spawn_for_recovery(
         root: &Directory,
         executable: &Path,
@@ -1486,3 +1961,71 @@ impl EnforcerStopClientV3 {
 #[cfg(test)]
 #[path = "recovery_v3_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod full_core_invariance_tests {
+    use super::*;
+
+    #[test]
+    fn full_request_and_reply_core_hashes_do_not_change_when_proof_is_assigned() {
+        let session = Session3 {
+            key: [0x61; 32],
+            id: Hash3("a".repeat(64)),
+            epoch: Uuid::from_u128(1),
+            root_binding: Hash3("b".repeat(64)),
+            max_slots: 8,
+        };
+        let mut request = FullRequest3::new(&session, FullCommand::Status {}).unwrap();
+        let original_proof = std::mem::replace(&mut request.proof, empty_proof());
+        let request_before =
+            Sha256::digest(canonical(&(&session.id, RequestedRole::Full, request.core())).unwrap());
+        request.proof = original_proof;
+        let request_after =
+            Sha256::digest(canonical(&(&session.id, RequestedRole::Full, request.core())).unwrap());
+        assert_eq!(request_before, request_after);
+        request.validate(&session).unwrap();
+
+        let mut reply = FullReply3 {
+            kind: "full_reply_v3".into(),
+            protocol: 3,
+            session_id: session.id.clone(),
+            epoch: Uuid3(session.epoch),
+            request_id: request.request_id,
+            sequence: 0,
+            result: FullReply::Acknowledged {},
+            proof: empty_proof(),
+        };
+        let reply_before = Sha256::digest(
+            canonical(&(
+                &session.id,
+                RequestedRole::Full,
+                request.core(),
+                reply.core(),
+            ))
+            .unwrap(),
+        );
+        let computed_proof = proof(
+            &session.key,
+            REPLY3,
+            &(
+                &session.id,
+                RequestedRole::Full,
+                request.core(),
+                reply.core(),
+            ),
+        )
+        .unwrap();
+        reply.proof = computed_proof;
+        let reply_after = Sha256::digest(
+            canonical(&(
+                &session.id,
+                RequestedRole::Full,
+                request.core(),
+                reply.core(),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(reply_before, reply_after);
+        reply.validate(&session, &request, 0).unwrap();
+    }
+}

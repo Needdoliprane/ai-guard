@@ -21,8 +21,18 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 use uuid::Uuid;
+#[cfg(test)]
+mod canonical_tests;
 mod confirmed;
 pub mod recovery;
+pub(crate) mod retirement;
+#[cfg(all(test, unix))]
+pub(crate) mod retirement_live_fixture;
+#[cfg(all(test, unix))]
+mod retirement_live_tests;
+#[cfg(all(test, unix))]
+mod retirement_tests;
+pub(crate) mod status_projection;
 pub use recovery::{CancelStopProjectionV1, StopJobSnapshotV1, StopJournal};
 mod types;
 pub use types::*;
@@ -40,25 +50,440 @@ macro_rules! stage {
 const SMALL: u64 = 8 * 1024;
 const CHECKPOINT: u64 = 32 * 1024 * 1024;
 
-pub(crate) fn canonical(value: &impl Serialize) -> JournalResult<Vec<u8>> {
-    fn order(value: Value) -> Value {
-        match value {
-            Value::Object(fields) => Value::Object(
-                fields
-                    .into_iter()
-                    .map(|(k, v)| (k, order(v)))
-                    .collect::<std::collections::BTreeMap<_, _>>()
-                    .into_iter()
-                    .collect(),
-            ),
-            Value::Array(values) => Value::Array(values.into_iter().map(order).collect()),
-            other => other,
+/// Complement to the scoped filesystem probe, never present in production.
+/// Roots, operation IDs and client addresses select one private sample only.
+#[cfg(test)]
+pub(in crate::broker) mod cost_measurement {
+    use super::Journal;
+    use crate::control_fs::cost_probe::ProbeError;
+    use serde::Serialize;
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Arc, RwLock,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::Instant,
+    };
+    use uuid::Uuid;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(in crate::broker) enum WriterKind {
+        Load,
+        Status,
+    }
+    #[derive(Clone, Copy)]
+    pub(in crate::broker) enum InventoryKind {
+        Scope,
+        Jobs,
+        JobFiles,
+        Bindings,
+    }
+    enum Counter {
+        Attempted,
+        Sent,
+        Taken,
+        ReplyReady,
+        ActorErrors,
+        Received,
+        CallerErrors,
+        CallerAbandoned,
+        ActorAbandoned,
+        TakeSamples,
+        SubmitToTakeNs,
+        ActorNs,
+        CallerNs,
+    }
+    const WRITER_COUNTERS: usize = 13;
+    #[derive(Default)]
+    struct WriterCounters([AtomicU64; WRITER_COUNTERS]);
+    impl WriterCounters {
+        fn add(&self, counter: Counter, amount: u64) {
+            add(&self.0[counter as usize], amount);
+        }
+        fn snapshot(&self) -> [u64; WRITER_COUNTERS] {
+            std::array::from_fn(|index| self.0[index].load(Ordering::Relaxed))
         }
     }
-    serde_json::to_vec(&order(
-        serde_json::to_value(value).map_err(|_| JournalError::InvalidInput)?,
-    ))
-    .map_err(|_| JournalError::InvalidInput)
+    #[derive(Serialize)]
+    pub(in crate::broker) struct Snapshot {
+        usage_calls: u64,
+        inventories: [u64; 4],
+        entries_visited: [u64; 4],
+        loads_started: u64,
+        accepted_loads_completed: u64,
+        verified_revisions: u64,
+        verified_revision_bytes: u64,
+        writer_load: [u64; WRITER_COUNTERS],
+        writer_status: [u64; WRITER_COUNTERS],
+        pub(in crate::broker) caller_outstanding: u64,
+        pub(in crate::broker) actor_outstanding: u64,
+        pub(in crate::broker) context_conflicts: u64,
+        pub(in crate::broker) missed_hooks: u64,
+    }
+    #[derive(Serialize)]
+    pub(in crate::broker) struct Coverage {
+        caller: bool,
+        actor: bool,
+        usage: bool,
+        inventory: bool,
+        accepted_load: bool,
+        revisions: bool,
+    }
+    impl Coverage {
+        pub(in crate::broker) fn is_complete(&self) -> bool {
+            self.caller
+                && self.actor
+                && self.usage
+                && self.inventory
+                && self.accepted_load
+                && self.revisions
+        }
+    }
+    impl Snapshot {
+        pub(in crate::broker) fn writer_read_coverage(&self, kind: WriterKind) -> Coverage {
+            let writer = match kind {
+                WriterKind::Load => &self.writer_load,
+                WriterKind::Status => &self.writer_status,
+            };
+            Coverage {
+                caller: [Counter::Attempted, Counter::Sent, Counter::Received]
+                    .into_iter()
+                    .all(|counter| writer[counter as usize] > 0),
+                actor: [Counter::Taken, Counter::ReplyReady]
+                    .into_iter()
+                    .all(|counter| writer[counter as usize] > 0),
+                usage: self.usage_calls > 0,
+                inventory: [
+                    InventoryKind::Scope,
+                    InventoryKind::Jobs,
+                    InventoryKind::JobFiles,
+                ]
+                .into_iter()
+                .all(|kind| {
+                    self.inventories[kind as usize] > 0 && self.entries_visited[kind as usize] > 0
+                }),
+                accepted_load: self.loads_started > 0 && self.accepted_loads_completed > 0,
+                revisions: self.verified_revisions > 0 && self.verified_revision_bytes > 0,
+            }
+        }
+    }
+    struct Active {
+        token: u64,
+        root: PathBuf,
+        client: usize,
+        operation: Uuid,
+        kind: WriterKind,
+        started: Instant,
+        submit_at_ns: AtomicU64,
+        usage_calls: AtomicU64,
+        inventories: [AtomicU64; 4],
+        entries_visited: [AtomicU64; 4],
+        loads_started: AtomicU64,
+        accepted_loads_completed: AtomicU64,
+        verified_revisions: AtomicU64,
+        verified_revision_bytes: AtomicU64,
+        load: WriterCounters,
+        status: WriterCounters,
+        caller_outstanding: AtomicU64,
+        actor_outstanding: AtomicU64,
+        context_conflicts: AtomicU64,
+    }
+    static ACTIVE: RwLock<Option<Arc<Active>>> = RwLock::new(None);
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    static ACTIVE_TOKEN: AtomicU64 = AtomicU64::new(0);
+    static MISSED_HOOKS: AtomicU64 = AtomicU64::new(0);
+    fn add(counter: &AtomicU64, amount: u64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_add(amount))
+        });
+    }
+    fn decrement(counter: &AtomicU64) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            Some(value.saturating_sub(1))
+        });
+    }
+    fn elapsed(started: Instant) -> u64 {
+        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+    }
+    fn active() -> Option<Arc<Active>> {
+        // Hooks never wait for the test's lifecycle lock or EXCLUSIVE gate.
+        // A contended lifecycle selection is explicit missing coverage.
+        match ACTIVE.try_read() {
+            Ok(active) => active.as_ref().cloned(),
+            Err(_) => {
+                if ACTIVE_TOKEN.load(Ordering::Acquire) != 0 {
+                    add(&MISSED_HOOKS, 1);
+                }
+                None
+            }
+        }
+    }
+    fn selected(root: &Path) -> Option<Arc<Active>> {
+        active().filter(|value| root == value.root.as_path())
+    }
+    impl Active {
+        fn writer(&self, kind: WriterKind) -> &WriterCounters {
+            match kind {
+                WriterKind::Load => &self.load,
+                WriterKind::Status => &self.status,
+            }
+        }
+        fn snapshot(&self) -> Snapshot {
+            Snapshot {
+                usage_calls: self.usage_calls.load(Ordering::Relaxed),
+                inventories: std::array::from_fn(|i| self.inventories[i].load(Ordering::Relaxed)),
+                entries_visited: std::array::from_fn(|i| {
+                    self.entries_visited[i].load(Ordering::Relaxed)
+                }),
+                loads_started: self.loads_started.load(Ordering::Relaxed),
+                accepted_loads_completed: self.accepted_loads_completed.load(Ordering::Relaxed),
+                verified_revisions: self.verified_revisions.load(Ordering::Relaxed),
+                verified_revision_bytes: self.verified_revision_bytes.load(Ordering::Relaxed),
+                writer_load: self.load.snapshot(),
+                writer_status: self.status.snapshot(),
+                caller_outstanding: self.caller_outstanding.load(Ordering::Relaxed),
+                actor_outstanding: self.actor_outstanding.load(Ordering::Relaxed),
+                context_conflicts: self.context_conflicts.load(Ordering::Relaxed),
+                missed_hooks: MISSED_HOOKS.load(Ordering::Relaxed),
+            }
+        }
+    }
+    pub(in crate::broker) struct Measurement {
+        active: Arc<Active>,
+        finished: bool,
+    }
+    impl Measurement {
+        pub(in crate::broker) fn start(
+            journal: &Journal,
+            client: usize,
+            operation: Uuid,
+            kind: WriterKind,
+        ) -> Result<Self, ProbeError> {
+            // Derive the exact scope directory from the actual Journal.
+            // The fixture's outer temp directory is not a journal selector.
+            let root = journal.0.directory.path();
+            if !root.is_absolute() {
+                return Err(ProbeError::InvalidRoot);
+            }
+            let mut slot = ACTIVE.write().map_err(|_| ProbeError::Poisoned)?;
+            if slot.is_some() {
+                return Err(ProbeError::AlreadyActive);
+            }
+            let token = NEXT
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                    value.checked_add(1)
+                })
+                .map_err(|_| ProbeError::TokenExhausted)?;
+            let active = Arc::new(Active {
+                token,
+                root: root.to_owned(),
+                client,
+                operation,
+                kind,
+                started: Instant::now(),
+                submit_at_ns: AtomicU64::new(0),
+                usage_calls: AtomicU64::new(0),
+                inventories: Default::default(),
+                entries_visited: Default::default(),
+                loads_started: AtomicU64::new(0),
+                accepted_loads_completed: AtomicU64::new(0),
+                verified_revisions: AtomicU64::new(0),
+                verified_revision_bytes: AtomicU64::new(0),
+                load: WriterCounters::default(),
+                status: WriterCounters::default(),
+                caller_outstanding: AtomicU64::new(0),
+                actor_outstanding: AtomicU64::new(0),
+                context_conflicts: AtomicU64::new(0),
+            });
+            MISSED_HOOKS.store(0, Ordering::Relaxed);
+            *slot = Some(Arc::clone(&active));
+            ACTIVE_TOKEN.store(token, Ordering::Release);
+            Ok(Self {
+                active,
+                finished: false,
+            })
+        }
+        pub(in crate::broker) fn finish(mut self) -> Result<Snapshot, ProbeError> {
+            let mut slot = ACTIVE.write().map_err(|_| ProbeError::Poisoned)?;
+            if slot.as_ref().map(|value| value.token) != Some(self.active.token) {
+                return Err(ProbeError::ScopeLost);
+            }
+            ACTIVE_TOKEN.store(0, Ordering::Release);
+            slot.take();
+            self.finished = true;
+            Ok(self.active.snapshot())
+        }
+    }
+    impl Drop for Measurement {
+        fn drop(&mut self) {
+            if !self.finished
+                && let Ok(mut slot) = ACTIVE.write()
+                && slot.as_ref().map(|value| value.token) == Some(self.active.token)
+            {
+                ACTIVE_TOKEN.store(0, Ordering::Release);
+                slot.take();
+            }
+        }
+    }
+    pub(super) fn usage(root: &Path) {
+        if let Some(active) = selected(root) {
+            add(&active.usage_calls, 1);
+        }
+    }
+    pub(super) fn inventory(root: &Path, kind: InventoryKind, entry: bool) {
+        if let Some(active) = selected(root) {
+            if entry {
+                add(&active.entries_visited[kind as usize], 1);
+            } else {
+                add(&active.inventories[kind as usize], 1);
+            }
+        }
+    }
+    pub(super) fn load(root: &Path, operation: Uuid, completed: bool) {
+        if let Some(active) = selected(root) {
+            if active.operation != operation {
+                add(&active.context_conflicts, 1);
+                return;
+            }
+            if completed {
+                add(&active.accepted_loads_completed, 1);
+            } else {
+                add(&active.loads_started, 1);
+            }
+        }
+    }
+    pub(super) fn verified(root: &Path, bytes: usize) {
+        if let Some(active) = selected(root) {
+            add(&active.verified_revisions, 1);
+            add(
+                &active.verified_revision_bytes,
+                u64::try_from(bytes).unwrap_or(u64::MAX),
+            );
+        }
+    }
+    pub(in crate::broker) struct Caller {
+        active: Arc<Active>,
+        kind: WriterKind,
+        started: Instant,
+        finished: bool,
+    }
+    pub(in crate::broker) fn caller(
+        client: usize,
+        kind: WriterKind,
+        operation: Uuid,
+    ) -> Option<Caller> {
+        let active = active().filter(|value| value.client == client)?;
+        if active.operation != operation
+            || active.kind != kind
+            || active
+                .caller_outstanding
+                .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            add(&active.context_conflicts, 1);
+            return None;
+        }
+        let started = Instant::now();
+        active
+            .submit_at_ns
+            .store(elapsed(active.started).saturating_add(1), Ordering::Release);
+        active.writer(kind).add(Counter::Attempted, 1);
+        Some(Caller {
+            active,
+            kind,
+            started,
+            finished: false,
+        })
+    }
+    impl Caller {
+        pub(in crate::broker) fn sent(&self) {
+            self.active.writer(self.kind).add(Counter::Sent, 1);
+        }
+        pub(in crate::broker) fn finish(mut self, received: bool, succeeded: bool) {
+            let counters = self.active.writer(self.kind);
+            counters.add(Counter::Received, u64::from(received));
+            counters.add(Counter::CallerErrors, u64::from(!succeeded));
+            counters.add(Counter::CallerNs, elapsed(self.started));
+            decrement(&self.active.caller_outstanding);
+            self.finished = true;
+        }
+    }
+    impl Drop for Caller {
+        fn drop(&mut self) {
+            if !self.finished {
+                let counters = self.active.writer(self.kind);
+                counters.add(Counter::CallerAbandoned, 1);
+                counters.add(Counter::CallerNs, elapsed(self.started));
+                decrement(&self.active.caller_outstanding);
+            }
+        }
+    }
+    pub(in crate::broker) struct Actor {
+        active: Arc<Active>,
+        kind: WriterKind,
+        started: Instant,
+        finished: bool,
+    }
+    pub(in crate::broker) fn actor(
+        journal: &Journal,
+        kind: WriterKind,
+        operation: Uuid,
+    ) -> Option<Actor> {
+        let active = selected(journal.0.directory.path())?;
+        if active.operation != operation || active.kind != kind {
+            add(&active.context_conflicts, 1);
+            return None;
+        }
+        let counters = active.writer(kind);
+        counters.add(Counter::Taken, 1);
+        let submitted = active.submit_at_ns.load(Ordering::Acquire);
+        if submitted != 0 {
+            counters.add(Counter::TakeSamples, 1);
+            counters.add(
+                Counter::SubmitToTakeNs,
+                elapsed(active.started).saturating_sub(submitted - 1),
+            );
+        } else {
+            add(&active.context_conflicts, 1);
+        }
+        add(&active.actor_outstanding, 1);
+        Some(Actor {
+            active,
+            kind,
+            started: Instant::now(),
+            finished: false,
+        })
+    }
+    impl Actor {
+        /// Readiness immediately before send; reception is counted by Caller.
+        pub(in crate::broker) fn reply_ready(mut self, succeeded: bool) {
+            let counters = self.active.writer(self.kind);
+            counters.add(Counter::ReplyReady, 1);
+            counters.add(Counter::ActorErrors, u64::from(!succeeded));
+            counters.add(Counter::ActorNs, elapsed(self.started));
+            decrement(&self.active.actor_outstanding);
+            self.finished = true;
+        }
+    }
+    impl Drop for Actor {
+        fn drop(&mut self) {
+            if !self.finished {
+                let counters = self.active.writer(self.kind);
+                counters.add(Counter::ActorAbandoned, 1);
+                counters.add(Counter::ActorNs, elapsed(self.started));
+                decrement(&self.active.actor_outstanding);
+            }
+        }
+    }
+}
+
+pub(crate) fn canonical(value: &impl Serialize) -> JournalResult<Vec<u8>> {
+    let mut value = serde_json::to_value(value).map_err(|_| JournalError::InvalidInput)?;
+    // This preserves str/BTreeMap key ordering under either serde_json map
+    // backend, without rebuilding every already ordered object in the tree.
+    value.sort_all_objects();
+    serde_json::to_vec(&value).map_err(|_| JournalError::InvalidInput)
 }
 pub(super) fn digest(domain: &str, bytes: &[u8]) -> String {
     let mut hash = Sha256::new();
@@ -109,6 +534,15 @@ struct Inner {
     limits: JournalLimitsV1,
     control: ControlSecrets,
     writer: Mutex<Writer>,
+    budget_incomplete: std::sync::atomic::AtomicBool,
+    status_observation_failed: std::sync::atomic::AtomicBool,
+}
+fn note_status_read_failure<T>(core: &Inner, result: &JournalResult<T>) {
+    if matches!(result, Err(error) if !matches!(error, JournalError::InvalidInput | JournalError::Busy))
+    {
+        core.status_observation_failed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 #[derive(Default)]
 struct Writer {
@@ -200,6 +634,7 @@ record!(Checkpoint { version:u32, operation_id:Uuid, intent_hash:String, revisio
 record!(SupervisedCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV2 });
 record!(LifecycleCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV3 });
 record!(OutboxCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:BrokerCheckpointV4 });
+record!(RetirementCheckpoint { version:u32, operation_id:Uuid, intent_hash:String, revision:u64, previous:Option<RevisionRefV1>, payload:super::retirement_checkpoint::BrokerCheckpointV5 });
 record!(Rejected {
     version: u32,
     scope_hash: String,
@@ -330,11 +765,25 @@ fn encode_checkpoint(
         LoadedCheckpoint::V4(value) => {
             encode!(OutboxCheckpoint, 4, value, "ai-guard:broker-checkpoint:v4")
         }
+        LoadedCheckpoint::V5(value) => {
+            encode!(
+                RetirementCheckpoint,
+                5,
+                value,
+                "ai-guard:broker-checkpoint:v5"
+            )
+        }
     }
 }
 
-/// The sole filesystem publication algorithm. Both callers have already
-/// validated their typed transition and supplied a complete metadata budget.
+struct PublicationResources<'a> {
+    usage: Usage,
+    budget: retirement::PublicationBudget,
+    floors: &'a HashMap<Uuid, RevisionRefV1>,
+}
+
+/// The sole filesystem publication algorithm. Callers have already validated
+/// their typed transition and supplied a complete metadata budget.
 fn publish_revision(
     core: &Inner,
     operation_id: Uuid,
@@ -342,8 +791,13 @@ fn publish_revision(
     expected: &RevisionRefV1,
     head: &RevisionRefV1,
     bytes: &[u8],
-    mut usage: Usage,
+    resources: PublicationResources<'_>,
 ) -> JournalResult<()> {
+    let PublicationResources {
+        mut usage,
+        budget: publication,
+        floors,
+    } = resources;
     if head.revision >= u64::from(core.limits.revisions) {
         return Err(JournalError::LimitExceeded);
     }
@@ -371,6 +825,14 @@ fn publish_revision(
         2,
         true,
         &core.limits,
+    )?;
+    retirement::reserve_future(
+        core,
+        operation_id,
+        Some((head, bytes)),
+        &usage,
+        &publication,
+        floors,
     )?;
     let file = io(job.persistent_create(&revision_name(head.revision), bytes))?;
     stage!(RevisionWritten);
@@ -488,6 +950,8 @@ impl Journal {
             limits,
             control: control_secrets,
             writer: Mutex::new(Writer::default()),
+            budget_incomplete: std::sync::atomic::AtomicBool::new(false),
+            status_observation_failed: std::sync::atomic::AtomicBool::new(false),
         }));
         journal.usage(None)?;
         stage!(NamespaceDurable);
@@ -546,6 +1010,14 @@ impl Journal {
             .checked_add(1)
             .ok_or(JournalError::LimitExceeded)?;
         usage.add(bytes.len() as u64, 2, true, &self.0.limits)?;
+        retirement::reserve_future(
+            &self.0,
+            operation_id,
+            None,
+            &usage,
+            &retirement::PublicationBudget::NewAllocation,
+            &writer.floors,
+        )?;
         let job = fscheck(self.0.jobs.persistent_child(&name, true))?.ok_or(JournalError::Io)?;
         let file = io(job.persistent_create("reservation.json", &bytes))?;
         stage!(ReservationWritten);
@@ -607,7 +1079,12 @@ impl Journal {
             code,
         };
         let bytes = self.checked_record(&record, SMALL)?;
-        self.budget(&ticket.operation.to_string(), bytes.len() as u64, 1)?;
+        self.budget(
+            &ticket.operation.to_string(),
+            bytes.len() as u64,
+            1,
+            &writer,
+        )?;
         let file = io(job.persistent_create("rejected.json", &bytes))?;
         stage!(RejectedWritten);
         io(file.persistent_sync())?;
@@ -630,6 +1107,15 @@ impl Journal {
     }
 
     fn status_locked(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+    ) -> JournalResult<Option<JournalStatusV1>> {
+        let result = self.status_locked_inner(operation_id, writer);
+        self.note_status_failure(&result);
+        result
+    }
+    fn status_locked_inner(
         &self,
         operation_id: Uuid,
         writer: &mut Writer,
@@ -857,6 +1343,7 @@ impl Journal {
             &name,
             added_bytes + if launch.is_some() { 3 } else { 0 },
             5 + if binding_bytes.is_some() { 2 } else { 0 } + if launch.is_some() { 2 } else { 0 },
+            &writer,
         )?;
         if let Some(bytes) = binding_bytes {
             let directory =
@@ -914,6 +1401,11 @@ impl Journal {
     }
 
     pub fn list(&self, after: Option<Uuid>, limit: u32) -> JournalResult<JournalPageV1> {
+        let result = self.list_inner(after, limit);
+        self.note_status_failure(&result);
+        result
+    }
+    fn list_inner(&self, after: Option<Uuid>, limit: u32) -> JournalResult<JournalPageV1> {
         if !(1..=100).contains(&limit) || after.is_some_and(|id| id.is_nil()) {
             return Err(JournalError::InvalidInput);
         }
@@ -951,7 +1443,7 @@ impl Journal {
             let status = self
                 .status_locked(id, &mut writer)?
                 .ok_or(JournalError::Interrupted)?;
-            entries.push(Self::summary(id, status));
+            entries.push(Self::summary(id, &status));
         }
         let next_after = if selected.next().is_some() {
             entries.last().map(|entry| entry.operation_id)
@@ -964,13 +1456,25 @@ impl Journal {
         })
     }
 
-    fn summary(operation_id: Uuid, status: JournalStatusV1) -> JournalEntryV1 {
-        let kind = match &status {
-            JournalStatusV1::ReservedInProcess => JournalEntryKindV1::ReservedInProcess,
-            JournalStatusV1::Interrupted => JournalEntryKindV1::Interrupted,
-            JournalStatusV1::Rejected(_) => JournalEntryKindV1::Rejected,
-            JournalStatusV1::Accepted(_) => JournalEntryKindV1::Accepted,
+    fn summary(operation_id: Uuid, status: &JournalStatusV1) -> JournalEntryV1 {
+        let (kind, job) = match status {
+            JournalStatusV1::ReservedInProcess => (JournalEntryKindV1::ReservedInProcess, None),
+            JournalStatusV1::Interrupted => (JournalEntryKindV1::Interrupted, None),
+            JournalStatusV1::Rejected(_) => (JournalEntryKindV1::Rejected, None),
+            JournalStatusV1::Accepted(job) => (JournalEntryKindV1::Accepted, Some(job)),
         };
+        Self::summary_data(operation_id, kind, job)
+    }
+
+    fn accepted_summary(operation_id: Uuid, job: &AcceptedJobV1) -> JournalEntryV1 {
+        Self::summary_data(operation_id, JournalEntryKindV1::Accepted, Some(job))
+    }
+
+    fn summary_data(
+        operation_id: Uuid,
+        kind: JournalEntryKindV1,
+        job: Option<&AcceptedJobV1>,
+    ) -> JournalEntryV1 {
         let mut entry = JournalEntryV1 {
             operation_id,
             kind,
@@ -984,7 +1488,7 @@ impl Journal {
             runtime_status: None,
             last_observed_at: None,
         };
-        if let JournalStatusV1::Accepted(job) = status {
+        if let Some(job) = job {
             entry.head = Some(job.head().clone());
             if let Some(checkpoint) = job.broker_checkpoint_v2() {
                 entry.pending_rpc_count = Some(
@@ -1089,7 +1593,17 @@ impl Journal {
         expected: RevisionRefV1,
         next: &BrokerCheckpointV4,
     ) -> JournalResult<CheckpointReceiptV1> {
-        self.advance_checkpoint(operation_id, expected, LoadedCheckpoint::V4(next.clone()))
+        let mut writer = self.0.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        self.check_writer()?;
+        let loaded = self
+            .load_locked(operation_id, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        let next = match loaded.broker_checkpoint_v5() {
+            Some(current) => LoadedCheckpoint::V5(current.with_outbox(next.clone())?),
+            None => LoadedCheckpoint::V4(next.clone()),
+        };
+        valid_hash(&expected.hash)?;
+        self.advance_loaded_checkpoint(operation_id, expected, next, loaded, &mut writer)
     }
     /// Writer adaptation shares the mutation's strict preload and mutex. A V4
     /// writer update requires the current head even for an otherwise exact replay.
@@ -1109,7 +1623,15 @@ impl Journal {
             None | Some(JournalStatusV1::Rejected(_)) => return Err(JournalError::InvalidInput),
             Some(_) => return Err(JournalError::Interrupted),
         };
-        let next = if let Some(current) = loaded.broker_checkpoint_v4() {
+        let next = if let Some(current) = loaded.broker_checkpoint_v5() {
+            if loaded.head() != &expected {
+                return Err(JournalError::Conflict);
+            }
+            LoadedCheckpoint::V5(current.with_outbox(BrokerCheckpointV4::new(
+                next.clone(),
+                current.outbox().events().to_vec(),
+            )?)?)
+        } else if let Some(current) = loaded.broker_checkpoint_v4() {
             if loaded.head() != &expected {
                 return Err(JournalError::Conflict);
             }
@@ -1154,6 +1676,7 @@ impl Journal {
         if (matches!(next, LoadedCheckpoint::V1(_)) && loaded.broker_checkpoint_v2().is_some())
             || (next.lifecycle().is_none() && loaded.broker_checkpoint_v3().is_some())
             || (next.outbox().is_none() && loaded.broker_checkpoint_v4().is_some())
+            || (next.retirement().is_none() && loaded.broker_checkpoint_v5().is_some())
         {
             return Err(JournalError::Conflict);
         }
@@ -1199,7 +1722,11 @@ impl Journal {
             &expected,
             &head,
             &bytes,
-            usage,
+            PublicationResources {
+                usage,
+                budget: retirement::PublicationBudget::NewAllocation,
+                floors: &writer.floors,
+            },
         )?;
         // The CAS and directory barrier committed this head even when a later
         // business credential recheck fails. Preserve the conservative floor.
@@ -1412,6 +1939,17 @@ impl Journal {
         operation_id: Uuid,
         writer: &mut Writer,
     ) -> JournalResult<Option<AcceptedJobV1>> {
+        let result = self.load_locked_inner(operation_id, writer);
+        self.note_status_failure(&result);
+        result
+    }
+    fn load_locked_inner(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+    ) -> JournalResult<Option<AcceptedJobV1>> {
+        #[cfg(test)]
+        cost_measurement::load(self.0.directory.path(), operation_id, false);
         let name = operation_id.to_string();
         let Some(job) = fscheck(self.0.jobs.persistent_child(&name, false))? else {
             return if writer.observed_jobs.contains(&operation_id)
@@ -1523,6 +2061,8 @@ impl Journal {
                 .read_file(&job, &revision_name(revision), CHECKPOINT)?
                 .ok_or(JournalError::Interrupted)?;
             verifier.push(revision, file.bytes())?;
+            #[cfg(test)]
+            cost_measurement::verified(self.0.directory.path(), file.bytes().len());
             io(file.persistent_sync())?;
         }
         let confirmed::ConfirmedChainV1 {
@@ -1548,6 +2088,8 @@ impl Journal {
         io(self.0.directory.sync())?;
         writer.floors.insert(operation_id, current.head.clone());
         writer.observed_jobs.insert(operation_id);
+        #[cfg(test)]
+        cost_measurement::load(self.0.directory.path(), operation_id, true);
         Ok(Some(AcceptedJobV1(Box::new(AcceptedData {
             scope: self.0.scope.clone(),
             operation_id,
@@ -1568,6 +2110,24 @@ impl Journal {
         }))))
     }
     fn check_writer(&self) -> JournalResult<()> {
+        let result = self.check_writer_inner();
+        self.note_status_failure(&result);
+        result
+    }
+    pub(in crate::broker) fn status_projection_limits(&self) -> (u32, u64) {
+        (self.0.limits.jobs, self.0.limits.scope_bytes)
+    }
+    pub(in crate::broker) fn status_projection_failed(&self) -> bool {
+        self.0
+            .status_observation_failed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn note_status_failure<T>(&self, result: &JournalResult<T>) {
+        // Shared with the STOP reader's same retained core. This is not an
+        // expected mutation CAS conflict and grants no journal authority.
+        note_status_read_failure(&self.0, result);
+    }
+    fn check_writer_inner(&self) -> JournalResult<()> {
         fscheck(self.0.lock.persistent_revalidate())?;
         fscheck(self.0.directory.revalidate())?;
         let scope = self
@@ -1655,9 +2215,18 @@ impl Journal {
     ) -> JournalResult<()> {
         confirmed::check_transition(previous, next, legacy_managed_seen, last_cancel_operations)
     }
-    fn budget(&self, name: &str, bytes: u64, entries: u32) -> JournalResult<()> {
-        self.usage(Some(name))?
-            .add(bytes, entries, true, &self.0.limits)
+    fn budget(&self, name: &str, bytes: u64, entries: u32, writer: &Writer) -> JournalResult<()> {
+        let mut usage = self.usage(Some(name))?;
+        usage.add(bytes, entries, true, &self.0.limits)?;
+        let operation = Uuid::parse_str(name).map_err(|_| JournalError::InvalidInput)?;
+        retirement::reserve_future(
+            &self.0,
+            operation,
+            None,
+            &usage,
+            &retirement::PublicationBudget::NewAllocation,
+            &writer.floors,
+        )
     }
     fn check_observation_capacity(&self, operation_id: Uuid, writer: &Writer) -> JournalResult<()> {
         if !writer.observed_jobs.contains(&operation_id)
@@ -1668,12 +2237,26 @@ impl Journal {
         Ok(())
     }
     fn usage(&self, selected: Option<&str>) -> JournalResult<Usage> {
+        #[cfg(test)]
+        cost_measurement::usage(self.0.directory.path());
         let mut usage = Usage::default();
+        #[cfg(test)]
+        cost_measurement::inventory(
+            self.0.directory.path(),
+            cost_measurement::InventoryKind::Scope,
+            false,
+        );
         for entry in fscheck(
             self.0
                 .directory
                 .persistent_entries(self.0.limits.scope_entries),
         )? {
+            #[cfg(test)]
+            cost_measurement::inventory(
+                self.0.directory.path(),
+                cost_measurement::InventoryKind::Scope,
+                true,
+            );
             if !matches!(entry.name.as_str(), ".writer.lock" | "scope.json" | "jobs")
                 || entry.directory != (entry.name == "jobs")
             {
@@ -1681,7 +2264,19 @@ impl Journal {
             }
             usage.add(entry.bytes, 1, false, &self.0.limits)?;
         }
+        #[cfg(test)]
+        cost_measurement::inventory(
+            self.0.directory.path(),
+            cost_measurement::InventoryKind::Jobs,
+            false,
+        );
         for entry in fscheck(self.0.jobs.persistent_entries(self.0.limits.scope_entries))? {
+            #[cfg(test)]
+            cost_measurement::inventory(
+                self.0.directory.path(),
+                cost_measurement::InventoryKind::Jobs,
+                true,
+            );
             let id = Uuid::parse_str(&entry.name).map_err(|_| JournalError::Corrupt)?;
             if !entry.directory || id.is_nil() || id.to_string() != entry.name {
                 return Err(JournalError::Corrupt);
@@ -1694,7 +2289,19 @@ impl Journal {
             let mut bytes = 0u64;
             let mut count = 1u32;
             let mut revisions = 0u32;
+            #[cfg(test)]
+            cost_measurement::inventory(
+                self.0.directory.path(),
+                cost_measurement::InventoryKind::JobFiles,
+                false,
+            );
             for file in fscheck(directory.persistent_entries(self.0.limits.job_entries))? {
+                #[cfg(test)]
+                cost_measurement::inventory(
+                    self.0.directory.path(),
+                    cost_measurement::InventoryKind::JobFiles,
+                    true,
+                );
                 if file.directory {
                     if file.name != "bindings"
                         && file.name != crate::runtime::launch_profile::DIRECTORY
@@ -1703,8 +2310,20 @@ impl Journal {
                     }
                     let bindings = fscheck(directory.persistent_child(&file.name, false))?
                         .ok_or(JournalError::Corrupt)?;
+                    #[cfg(test)]
+                    cost_measurement::inventory(
+                        self.0.directory.path(),
+                        cost_measurement::InventoryKind::Bindings,
+                        false,
+                    );
                     for binding in fscheck(bindings.persistent_entries(self.0.limits.job_entries))?
                     {
+                        #[cfg(test)]
+                        cost_measurement::inventory(
+                            self.0.directory.path(),
+                            cost_measurement::InventoryKind::Bindings,
+                            true,
+                        );
                         if binding.directory
                             || !(if file.name == crate::runtime::launch_profile::DIRECTORY {
                                 binding.name == crate::runtime::launch_profile::FILE

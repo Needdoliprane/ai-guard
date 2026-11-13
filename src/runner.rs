@@ -20,6 +20,13 @@ mod cold_audit_http;
 pub(crate) use cold_audit_http::{ColdAuditBudget, ExactStoredEventReceipt};
 pub(crate) mod kubernetes_preflight;
 mod managed;
+/// DTO projection only; this does not authenticate a worker or authorize exec.
+pub(crate) fn relay_worker_inspection(
+    worker: &crate::control::WorkerV1,
+    observed: &crate::runtime::ContainerObservation,
+) -> anyhow::Result<crate::control::RuntimeInspectionV1> {
+    managed::inspection(worker, observed)
+}
 pub(crate) mod relay_admission;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, clap::Args)]

@@ -7293,3 +7293,23 @@ OwnerContended exact et négatif SourceB sont exercés. Pas de saturation physiq
 en octets, panne commit/WAL/I/O, expiration Store en temps réel, Clippy strict,
 suite complète, build release, capacité100, HTTP/UI ou runtime qualifiés.
 Aucune sortie Internet activée ; bridge non médié, G05/G07/G11 ouverts.
+
+
+## 13 novembre — cinq parents broker/Full3 sur la composition E1
+
+[Relevé EN](evidence/2026-11-13/broker-full3/README.md),
+[FR](evidence/2026-11-13/broker-full3/README.fr.md) et
+[TESTS.json](evidence/2026-11-13/broker-full3/TESTS.json).
+Reçu Root `2bc5dab9…3412` : cinq sélecteurs exacts PASS, zéro échec/ignoré,
+build lib-test RC0/35 avertissements puis check toutes cibles RC0/343.
+Source2707 `d662f5c7…abfe`, post `1df33e39…50c7`/32860160octets,
+contenus/modes exacts. Six collectes RC0,293 pièces brutes privées,
+96 fichiers de fixture/2117346octets utiles ; archive privée opaque0600
+2201600octets `23251f80…19dd`, non publiée. Fermeture CID exact RC0, OOM0.
+
+Programme métier non invoqué : acteur SyntheticReady, pas de moteur, modèle,
+fournisseur ou worker réel. Aucune preuve de fencing/reprise complète, transport
+relais, confinement inter-tenant, Docker/Podman/Kubernetes, capacité100 ou panne
+physique. Clippy strict/suite complète/release NOT_RUN dans ce lot. Le1PASS
+prewire sur autre source et les5NOT_RUN privés du cadre historique ne sont pas
+transférés. Aucun gate ni fingerprint fermé.

@@ -2696,3 +2696,20 @@ appel d'intégrité legacy et prérequis privé de fixture restent consignés.
 Les réserves ne préallouent pas le disque. DNS/socket, permis, révocation appliquée,
 UI, capteur et qualifications Docker/Podman/Kubernetes restent ouverts ; bridge
 reste non médié, G05/G07/G11 et tous les gates globaux restent ouverts.
+
+
+## 13 novembre — broker/Full3, settlement normal sur public+E1
+
+Le candidat `223b699e…` sur `4cd336c9…` compose le cadre broker de136 chemins
+avec les37 chemins E1 préservés. [Preuves EN](evidence/2026-11-13/broker-full3/README.md)
+et [FR](evidence/2026-11-13/broker-full3/README.fr.md) : cinq parents exacts de
+settlement normal PASS et check toutes cibles RC0 sur le gel2707 `d662f5c7…`.
+Build35 avertissements, check343 ; aucune qualification Clippy strict.
+
+Les cas conservent original/keeper, refusent l'autorité depuis Final public
+étranger ou simple absence de slot, et préservent génération/admission fermée
+après cleanup confirmé. Fixtures Journal/SQLite/IPC et acteur SyntheticReady,
+sans commande worker/moteur/fournisseur. Source post exacte, six collectes et
+fermeture RC0/OOM0. Le prewire historique1PASS et le cadre privé5NOT_RUN restent
+séparés. Fencing, reprise complète/froide, relais/runtime et confinement réel
+inter-tenant restent ouverts ; aucun gate ou constat historique fermé.

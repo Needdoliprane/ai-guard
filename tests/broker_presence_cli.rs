@@ -82,7 +82,7 @@ async fn refuse_temporary_heartbeat(
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
-    if request.uri().path() != "/api/v1/brokers/heartbeat" {
+    if request.uri().path() != "/control/api/v1/brokers/heartbeat" {
         return next.run(request).await;
     }
     let (parts, body) = request.into_parts();

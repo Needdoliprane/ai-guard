@@ -3,6 +3,8 @@
 //! this file. The child recovery module declares its synthetic engine fixture.
 #[path = "cancelled_recovery_tests.rs"]
 mod cancelled_recovery_tests;
+#[path = "export_retirement_tests.rs"]
+mod export_retirement_tests;
 use super::*;
 use crate::{
     api::{GatewayState, gateway_router},
@@ -10,6 +12,7 @@ use crate::{
     broker::{
         clock::NativeHostClock,
         discovery::load_endpoint,
+        enforcer::EnforcerClient,
         intent::ExecutionIntentV1,
         journal::{BindingInputs, ControlSecrets, FsExclusions, Journal, ReserveResult},
         outbox::{BrokerCheckpointV4, OutboxEventV1},
@@ -181,9 +184,17 @@ impl Fixture {
                         observed.fetch_add(1, Ordering::SeqCst);
                         eprintln!("cancelled_recovery_fixture phase=decision_http_enter");
                     }
+                    if worker_transition {
+                        eprintln!("cancelled_recovery_fixture phase=worker_transition_http_enter");
+                    }
                     let response = next.run(request).await;
                     if decision {
                         eprintln!("cancelled_recovery_fixture phase=decision_http_complete");
+                    }
+                    if worker_transition {
+                        eprintln!(
+                            "cancelled_recovery_fixture phase=worker_transition_http_complete"
+                        );
                     }
                     if worker_transition
                         && response.status().is_success()

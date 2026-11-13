@@ -2,8 +2,8 @@
 
 use super::{
     BindingInputs, ControlSecrets, FaultStage, FsExclusions, Journal, JournalError,
-    JournalLimitsV1, JournalResult, JournalScopeV1, RejectionCodeV1, RejectionPhaseV1,
-    ReserveResult,
+    JournalLimitsV1, JournalResult, JournalScopeV1, JournalStatusV1, RejectionCodeV1,
+    RejectionPhaseV1, ReserveResult, RevisionRefV1,
 };
 use crate::{
     broker::intent::ExecutionIntentV1, control_fs::Directory, runner::CheckpointPayloadV1,
@@ -462,27 +462,24 @@ fn submit() -> &'static [u8] {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "opt-in bounded Journal/Writer cost measurement; no runtime or provider"]
 async fn measure_durable_journal_cost_without_runtime() {
-    use crate::{
-        broker::{
-            checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
-            journal::{JournalStatusV1, RevisionRefV1},
-            lifecycle::BrokerCheckpointV3,
-            writer::WriterClient,
-        },
-        control_fs::cost_probe::Operation,
+    use crate::broker::{
+        checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
+        journal::cost_measurement::WriterKind,
+        lifecycle::BrokerCheckpointV3,
+        writer::WriterClient,
     };
 
     tokio::time::timeout(Duration::from_secs(600), async {
+        let mut output = StableCostOutput::default();
         let temporary = tempfile::Builder::new()
             .prefix("ai-guard-journal-cost-")
             .tempdir()
             .unwrap_or_else(|_| panic!("cost fixture private directory unavailable"));
-        // This entirely new private fixture survives a failed/unknown sample.
-        // Its path remains in memory and is never part of a diagnostic.
         let root = temporary
             .path()
             .canonicalize()
             .unwrap_or_else(|_| panic!("cost fixture root resolution failed"));
+        // A failed/unknown sample retains its new private fixture. Never print it.
         let _retained = temporary.keep();
         let journal = open(&root);
         let operation_id = operation();
@@ -494,6 +491,10 @@ async fn measure_durable_journal_cost_without_runtime() {
         let accepted = journal
             .accept(ticket, &intent, BindingInputs::None, &initial)
             .unwrap();
+        assert!(
+            accepted.operation_id() == operation_id,
+            "accepted operation changed"
+        );
         assert_eq!(accepted.head().revision(), 0);
         let mut head = accepted.head().clone();
         let lifecycle = BrokerCheckpointV3::new(
@@ -510,13 +511,12 @@ async fn measure_durable_journal_cost_without_runtime() {
             vec![],
         )
         .unwrap();
-        // Only this diagnostic fixture uses a 60-second caller wait. This does
-        // not cancel an accepted actor command; product defaults are intact.
+        // Only this diagnostic fixture uses this caller wait. Product defaults
+        // and the cooperative 600-second overall observation bound are intact.
         let writer = WriterClient::start(journal.clone(), 8, Duration::from_secs(60)).unwrap();
 
-        for (target, load_syncs, advance_syncs) in [(0, 6, 16), (8, 14, 32)] {
-            // Setup uses the normal writer path and actual acknowledged chain.
-            // It is outside every sample.
+        for target in [0, 8, 17] {
+            // Prepare the actual acknowledged chain outside every measurement.
             while head.revision() < target {
                 let receipt = writer
                     .advance_lifecycle(operation_id, head.clone(), lifecycle.clone())
@@ -530,83 +530,55 @@ async fn measure_durable_journal_cost_without_runtime() {
                 head = receipt.head().clone();
             }
             assert_eq!(head.revision(), target);
-
-            let (loaded, first) = measure_writer_cost(
-                &root,
-                "load_first",
-                target,
-                writer.load(operation_id),
-                |job| job.as_ref().map(|job| job.head().revision()),
-            )
-            .await;
-            let loaded = loaded.expect("accepted cost fixture must remain present");
-            assert!(loaded.head() == &head, "load must confirm the current head");
-            // The original RED observed zero calls here after a real load.
-            // The head-zero oracle remains six real file synchronizations.
-            assert_eq!(
-                first.metric(Operation::FileSync).calls,
-                load_syncs,
-                "real load must observe every file synchronization"
-            );
-            verify_cost_snapshot(&first, load_syncs, 3);
-
-            let (loaded, second) = measure_writer_cost(
-                &root,
-                "load_second",
-                target,
-                writer.load(operation_id),
-                |job| job.as_ref().map(|job| job.head().revision()),
-            )
-            .await;
-            assert!(
-                loaded.unwrap().head() == &head,
-                "repeated load changed head"
-            );
-            verify_cost_snapshot(&second, load_syncs, 3);
-
-            let (status, status_cost) = measure_writer_cost(
-                &root,
-                "status",
-                target,
-                writer.status(operation_id),
-                |status| match status {
-                    Some(JournalStatusV1::Accepted(job)) => Some(job.head().revision()),
-                    _ => None,
-                },
-            )
-            .await;
-            assert!(
-                matches!(status, Some(JournalStatusV1::Accepted(job)) if job.head() == &head),
-                "status must confirm the same accepted head"
-            );
-            verify_cost_snapshot(&status_cost, load_syncs, 3);
-
-            let before = head.clone();
-            let (receipt, advanced) = measure_writer_cost(
-                &root,
-                "advance_lifecycle",
-                target,
-                writer.advance_lifecycle(operation_id, before.clone(), lifecycle.clone()),
-                |receipt| Some(receipt.head().revision()),
-            )
-            .await;
-            assert!(
-                receipt.operation_id() == operation_id,
-                "receipt operation changed"
-            );
-            assert_eq!(receipt.head().revision(), target + 1);
-            verify_cost_snapshot(&advanced, advance_syncs, 9);
-            assert_eq!(advanced.metric(Operation::Create).calls, 2);
-            assert_eq!(advanced.metric(Operation::Publish).calls, 1);
-            head = receipt.head().clone();
-
-            // These functional checks are deliberately outside timed samples.
+            for stage in ["load_first", "load_second"] {
+                measure_stable_read_cost(
+                    &root,
+                    &journal,
+                    &writer,
+                    operation_id,
+                    &head,
+                    stage,
+                    WriterKind::Load,
+                    writer.load(operation_id),
+                    |job| {
+                        job.as_ref()
+                            .map(|job| (job.operation_id(), job.head().clone()))
+                    },
+                    &mut output,
+                )
+                .await;
+            }
+            for stage in ["status_first", "status_second"] {
+                measure_stable_read_cost(
+                    &root,
+                    &journal,
+                    &writer,
+                    operation_id,
+                    &head,
+                    stage,
+                    WriterKind::Status,
+                    writer.status(operation_id),
+                    |status| match status {
+                        Some(JournalStatusV1::Accepted(job)) => {
+                            Some((job.operation_id(), job.head().clone()))
+                        }
+                        _ => None,
+                    },
+                    &mut output,
+                )
+                .await;
+            }
+            // Independent functional confirmation remains outside samples.
             let confirmed = journal.load(operation_id).unwrap().unwrap();
             assert!(
-                confirmed.head() == &head,
-                "ACK must identify the strict confirmed head"
+                confirmed.operation_id() == operation_id,
+                "confirmed operation changed"
             );
-            assert!(confirmed.broker_checkpoint_v3().is_some());
+            assert!(
+                confirmed.head() == &head,
+                "stable reads changed the confirmed head"
+            );
+            assert!(target == 0 || confirmed.broker_checkpoint_v3().is_some());
             let mut wrong_hash = "f".repeat(64);
             if wrong_hash == head.hash() {
                 wrong_hash = "e".repeat(64);
@@ -619,7 +591,7 @@ async fn measure_durable_journal_cost_without_runtime() {
             assert!(
                 matches!(
                     writer
-                        .advance_lifecycle(operation_id, wrong_cas, lifecycle.clone(),)
+                        .advance_lifecycle(operation_id, wrong_cas, lifecycle.clone())
                         .await,
                     Err(JournalError::Conflict)
                 ),
@@ -633,6 +605,170 @@ async fn measure_durable_journal_cost_without_runtime() {
     })
     .await
     .expect("durable cost measurement exceeded its cooperative 600-second observation bound");
+}
+
+/// At most twelve complete sample lines, or a prefix plus an explicit marker.
+/// The entire output, including prefix/newlines/marker, is capped at 16 KiB.
+#[derive(Default)]
+struct StableCostOutput {
+    text: String,
+    recorded: u64,
+    omitted: u64,
+}
+impl StableCostOutput {
+    const LIMIT: usize = 16 * 1024;
+    const MARKER_RESERVE: usize = 256;
+    fn record(&mut self, sample: Value) {
+        let line = format!("durable_journal_cost {sample}\n");
+        if self.omitted != 0
+            || self.text.len().saturating_add(line.len()) > Self::LIMIT - Self::MARKER_RESERVE
+        {
+            self.omitted = self.omitted.saturating_add(1);
+        } else {
+            self.text.push_str(&line);
+            self.recorded = self.recorded.saturating_add(1);
+        }
+    }
+}
+impl Drop for StableCostOutput {
+    fn drop(&mut self) {
+        if self.omitted != 0 {
+            let marker = format!(
+                "durable_journal_cost {}\n",
+                json!({
+                    "truncated": true, "samples_recorded": self.recorded,
+                    "samples_omitted": self.omitted, "performance_qualified": false,
+                })
+            );
+            // Three bounded counts (at most 12) and fixed labels fit the
+            // reserved 256 bytes. No incomplete JSON line is ever emitted.
+            self.text.push_str(&marker);
+        }
+        eprint!("{}", self.text);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn measure_stable_read_cost<T>(
+    root: &Path,
+    selected_journal: &Journal,
+    writer: &crate::broker::writer::WriterClient,
+    operation: Uuid,
+    head: &RevisionRefV1,
+    stage: &'static str,
+    kind: super::cost_measurement::WriterKind,
+    call: impl std::future::Future<Output = JournalResult<T>>,
+    identity: impl FnOnce(&T) -> Option<(Uuid, RevisionRefV1)>,
+    output: &mut StableCostOutput,
+) {
+    use crate::control_fs::cost_probe::{Measurement, Operation};
+
+    let _exclusive = crate::control_fs::cost_probe::EXCLUSIVE.lock().await;
+    let filesystem = Measurement::start(root).unwrap();
+    let journal = super::cost_measurement::Measurement::start(
+        selected_journal,
+        writer.cost_context_for_test(),
+        operation,
+        kind,
+    )
+    .unwrap();
+    let started = Instant::now();
+    let result = call.await;
+    let caller_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    let journal = journal.finish().unwrap();
+    let filesystem = filesystem.finish().unwrap();
+    let coverage = journal.writer_read_coverage(kind);
+    let observed = result.as_ref().ok().and_then(identity);
+    // Retain complete fixed-schema lines only while the total budget allows.
+    // Truncation is explicit; array order is declared in the first row.
+    let fs_metrics: Vec<_> = [
+        Operation::Read,
+        Operation::ReadToEnd,
+        Operation::Revalidate,
+        Operation::ReadAt,
+        Operation::DirectoryRevalidate,
+        Operation::DirectorySync,
+        Operation::DirectorySyncAll,
+        Operation::FileSync,
+        Operation::FileSyncAll,
+        Operation::Create,
+        Operation::Publish,
+    ]
+    .into_iter()
+    .map(|operation| {
+        let metric = filesystem.metric(operation);
+        json!([
+            operation,
+            metric.calls,
+            metric.succeeded,
+            metric.failed,
+            metric.abandoned,
+            metric.bytes,
+            metric.elapsed_ns
+        ])
+    })
+    .collect();
+    let mut sample = json!({
+        "stage": stage, "head_before": head.revision(),
+        "head_after": observed.as_ref().map(|value| value.1.revision()),
+        "outcome": if result.is_ok() { "ok" } else { "error" },
+        "caller_ns": caller_ns, "performance_qualified": false,
+        "filesystem": fs_metrics, "filesystem_outstanding": filesystem.outstanding,
+        "journal": journal, "matched_hooks": coverage,
+    });
+    if output.recorded == 0 && output.omitted == 0 {
+        sample["schema"] = json!({
+            "filesystem": ["operation", "calls", "succeeded", "failed", "abandoned", "bytes", "elapsed_ns"],
+            "inventories": ["scope", "jobs", "job_files", "bindings"],
+            "writer": ["attempted", "sent", "taken", "reply_ready", "actor_errors", "received",
+                "caller_errors", "caller_abandoned", "actor_abandoned", "submit_to_take_samples",
+                "submit_to_take_ns", "actor_ns", "caller_ns"],
+            "reply_ready": "before_send_not_client_reception",
+            "durations": "inclusive_and_overlapping",
+        });
+    }
+    output.record(sample);
+    assert!(
+        coverage.is_complete(),
+        "selected writer/journal hooks were not observed"
+    );
+    assert_eq!(
+        filesystem.outstanding, 0,
+        "filesystem measurement is incomplete"
+    );
+    assert_eq!(
+        journal.caller_outstanding, 0,
+        "caller measurement is incomplete"
+    );
+    assert_eq!(
+        journal.actor_outstanding, 0,
+        "actor measurement is incomplete"
+    );
+    assert_eq!(journal.context_conflicts, 0, "measurement context changed");
+    assert_eq!(
+        journal.missed_hooks, 0,
+        "measurement hook coverage is incomplete"
+    );
+    assert_eq!(
+        filesystem.metric(Operation::Create).calls,
+        0,
+        "read created a durable record"
+    );
+    assert_eq!(
+        filesystem.metric(Operation::Publish).calls,
+        0,
+        "read published a durable record"
+    );
+    assert!(result.is_ok(), "stable read failed");
+    let (observed_operation, observed_head) = observed.expect("accepted stable read missing");
+    assert!(
+        observed_operation == operation,
+        "stable read operation changed"
+    );
+    assert!(
+        &observed_head == head,
+        "stable read changed the acknowledged head"
+    );
 }
 
 async fn measure_writer_cost<T>(

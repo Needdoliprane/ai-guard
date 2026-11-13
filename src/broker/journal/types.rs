@@ -432,14 +432,24 @@ pub(super) enum LoadedCheckpoint {
     V2(super::super::checkpoint::BrokerCheckpointV2),
     V3(BrokerCheckpointV3),
     V4(BrokerCheckpointV4),
+    V5(super::super::retirement_checkpoint::BrokerCheckpointV5),
 }
 impl LoadedCheckpoint {
+    pub(super) fn retirement(
+        &self,
+    ) -> Option<&super::super::retirement_checkpoint::BrokerCheckpointV5> {
+        match self {
+            Self::V5(value) => Some(value),
+            _ => None,
+        }
+    }
     pub(super) fn runner(&self) -> &CheckpointPayloadV1 {
         match self {
             Self::V1(value) => value,
             Self::V2(value) => value.runner(),
             Self::V3(value) => value.broker().runner(),
             Self::V4(value) => value.lifecycle().broker().runner(),
+            Self::V5(value) => value.outbox().lifecycle().broker().runner(),
         }
     }
     pub(super) fn supervised(&self) -> Option<&super::super::checkpoint::BrokerCheckpointV2> {
@@ -448,18 +458,21 @@ impl LoadedCheckpoint {
             Self::V2(value) => Some(value),
             Self::V3(value) => Some(value.broker()),
             Self::V4(value) => Some(value.lifecycle().broker()),
+            Self::V5(value) => Some(value.outbox().lifecycle().broker()),
         }
     }
     pub(super) fn lifecycle(&self) -> Option<&BrokerCheckpointV3> {
         match self {
             Self::V3(value) => Some(value),
             Self::V4(value) => Some(value.lifecycle()),
+            Self::V5(value) => Some(value.outbox().lifecycle()),
             _ => None,
         }
     }
     pub(super) fn outbox(&self) -> Option<&BrokerCheckpointV4> {
         match self {
             Self::V4(value) => Some(value),
+            Self::V5(value) => Some(value.outbox()),
             _ => None,
         }
     }
@@ -507,6 +520,11 @@ impl AcceptedJobV1 {
     }
     pub fn broker_checkpoint_v3(&self) -> Option<&BrokerCheckpointV3> {
         self.0.checkpoint.lifecycle()
+    }
+    pub(crate) fn broker_checkpoint_v5(
+        &self,
+    ) -> Option<&super::super::retirement_checkpoint::BrokerCheckpointV5> {
+        self.0.checkpoint.retirement()
     }
     pub fn broker_checkpoint_v4(&self) -> Option<&BrokerCheckpointV4> {
         self.0.checkpoint.outbox()
@@ -608,6 +626,7 @@ pub enum JournalEntryKindV1 {
     Rejected,
     Accepted,
 }
+#[derive(Clone)]
 pub struct JournalEntryV1 {
     pub(super) operation_id: Uuid,
     pub(super) kind: JournalEntryKindV1,

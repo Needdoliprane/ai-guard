@@ -45,6 +45,8 @@ async fn timed_out_inventory_keeps_one_permit_and_cannot_queue_a_series_before_c
         scope: writer.0.scope.clone(),
         timeout: Duration::from_secs(2),
         inventory_pending: Arc::clone(&writer.0.inventory_pending),
+        retirements: Arc::clone(&writer.0.retirements),
+        status_cache: Arc::clone(&writer.0.status_cache),
     }));
     let worker = std::thread::spawn(move || serve(journal, receiver));
     // This FIFO barrier is behind the timed-out inventory and Cancel. It

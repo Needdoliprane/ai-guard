@@ -719,6 +719,7 @@ fn isolated_client(root: &Directory, protocol: StopProtocol) -> EnforcerStopClie
         max_slots: 8,
         capability: [0x5a; 32],
         protocol,
+        affinity: StopAffinity::Legacy,
         cache: Mutex::new(StopCache::default()),
         changed: Arc::new(tokio::sync::Notify::new()),
         watch_failed: AtomicBool::new(false),

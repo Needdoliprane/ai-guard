@@ -18,8 +18,6 @@ use uuid::Uuid;
 
 mod actor;
 mod run_owner;
-#[cfg(test)]
-pub(in crate::broker) use http_tests::run_owner_tests::ServiceDiskBarrier;
 pub(crate) use run_owner::PresenceRunOwner;
 mod checkpoint_publisher;
 mod checkpoint_storage;
@@ -381,7 +379,7 @@ impl PreparedPresence {
         attempts: Arc<Semaphore>,
         io: Arc<Semaphore>,
     ) -> Result<PresenceRunOwner> {
-        if self.checkpoint_stream.is_some() {
+        if self.config.version != 1 || self.checkpoint_stream.is_some() {
             // Config V2 cannot silently run without its actual journal source.
             return Err(PresenceError::InvalidConfig);
         }
@@ -390,8 +388,8 @@ impl PreparedPresence {
     pub(crate) fn checkpoints_enabled(&self) -> bool {
         self.config.version == 2
     }
-    pub(crate) fn checkpoint_authority(&self) -> crate::broker_registry::BrokerAuthorityV1 {
-        crate::broker_registry::BrokerAuthorityV1 {
+    pub(crate) fn checkpoint_authority(&self) -> BrokerAuthorityV1 {
+        BrokerAuthorityV1 {
             authority_id: self.config.authority_id.clone(),
             runtime_kind: self.scope.runtime_kind,
         }

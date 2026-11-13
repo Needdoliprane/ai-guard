@@ -4,6 +4,7 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use std::{io::Write, path::PathBuf};
 
+pub(crate) mod broker_binding;
 mod http;
 mod manifest;
 mod storage;

@@ -8,7 +8,13 @@ use crate::{
     control::{ArmReceiptV1, ArmSubjectV1, ArmV1, WorkerTransitionV1},
     runtime::{OwnedContainerSnapshot, RuntimeAuthority},
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(all(test, unix))]
+#[path = "recovery_retirement_tests.rs"]
+mod retirement_owner_tests;
 
 pub struct StopRecoveryReaderV1 {
     scope: JournalScopeV1,
@@ -34,6 +40,7 @@ pub struct StopRecoveryReportV1 {
     observed_jobs: HashSet<Uuid>,
     rejected_floors: HashMap<Uuid, String>,
     actor_claimed: AtomicBool,
+    retained_core: OnceLock<Arc<Inner>>,
 }
 pub struct RecoveredJobV1 {
     operation_id: Uuid,
@@ -43,9 +50,11 @@ pub struct RecoveredJobV1 {
     stops: Vec<RecoveredStopV1>,
     chain: Vec<RevisionRefV1>,
     command_receipts: HashMap<Uuid, LocalCommandReceiptV1>,
+    outbox_receipts: HashMap<(Uuid, Option<i64>), OutboxReceiptV1>,
     cancel_boundaries: HashMap<Uuid, usize>,
     pending_arms: usize,
-    metadata: Option<StopMetadata>,
+    metadata: Option<Box<StopMetadata>>,
+    retirements: Vec<crate::broker::retirement_checkpoint::RetirementEntryV1>,
 }
 struct StopMetadata {
     intent: ExecutionIntentV1,
@@ -62,6 +71,8 @@ pub struct RecoveredStopV1 {
     owned: OwnedContainerSnapshot,
     cancel_after_arm: Option<Uuid>,
     birth_index: usize,
+    full3_binding: Option<crate::broker::retirement_checkpoint::Full3RegistrationBindingV1>,
+    retirement: Option<crate::broker::retirement_checkpoint::RetirementEntryV1>,
 }
 
 /// A verified, immutable cancellation prefix. Its retained reader shares the
@@ -101,6 +112,8 @@ pub struct StopJournal {
     scope_incomplete: bool,
 }
 pub struct StopJobSnapshotV1 {
+    // Original retained producer, not reconstructed from scope or contents.
+    origin: Arc<Inner>,
     reader: StopRecoveryReaderV1,
     operation_id: Uuid,
     head: RevisionRefV1,
@@ -108,6 +121,7 @@ pub struct StopJobSnapshotV1 {
     stops: Vec<RecoveredStopV1>,
     pending_arms: usize,
     incomplete: bool,
+    retirements: Vec<crate::broker::retirement_checkpoint::RetirementEntryV1>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StopRecoveryPhaseV1 {
@@ -142,6 +156,9 @@ pub(in crate::broker) mod cold_audit;
 pub mod inventory;
 
 impl StopJobSnapshotV1 {
+    pub(crate) fn retirements(&self) -> &[crate::broker::retirement_checkpoint::RetirementEntryV1] {
+        &self.retirements
+    }
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.reader.scope
     }
@@ -195,6 +212,10 @@ impl CancelStopProjectionV1 {
 }
 
 impl Journal {
+    pub(crate) fn matches_recovery_origin(&self, snapshot: &StopJobSnapshotV1) -> bool {
+        Arc::ptr_eq(&self.0, &snapshot.origin)
+    }
+
     /// Read STOP-only facts on the writer's bounded FS thread. In contrast to
     /// load/status/command_receipt, this never opens the credential blob.
     pub fn cancel_stop_projection(
@@ -255,6 +276,15 @@ impl StopJournal {
     }
 
     fn read_locked(
+        &self,
+        operation_id: Uuid,
+        writer: &mut Writer,
+    ) -> JournalResult<Option<StopRead>> {
+        let result = self.read_locked_inner(operation_id, writer);
+        super::note_status_read_failure(&self.core, &result);
+        result
+    }
+    fn read_locked_inner(
         &self,
         operation_id: Uuid,
         writer: &mut Writer,
@@ -333,13 +363,24 @@ impl StopJournal {
                                     .map_or(true, |id| id.is_nil() || id.to_string() != entry.name)
                         })
                 });
+        if scope_partial
+            || self.scope_incomplete
+            || self.core.budget_incomplete.load(Ordering::SeqCst)
+        {
+            self.core
+                .status_observation_failed
+                .store(true, Ordering::SeqCst);
+        }
         reader.check_shared()?;
         writer.floors.insert(operation_id, recovered.head.clone());
         writer.observed_jobs.insert(operation_id);
         Ok(Some((
             reader,
             recovered,
-            partial || scope_partial || self.scope_incomplete,
+            partial
+                || scope_partial
+                || self.scope_incomplete
+                || self.core.budget_incomplete.load(Ordering::SeqCst),
         )))
     }
 
@@ -377,8 +418,10 @@ impl StopJournal {
             })
             .collect::<JournalResult<Vec<_>>>()?;
         Ok(Some(StopJobSnapshotV1 {
+            origin: Arc::clone(&self.core),
             reader,
             operation_id,
+            retirements: recovered.retirements,
             head: recovered.head,
             cancel_receipts,
             stops: recovered.stops,
@@ -408,7 +451,8 @@ impl StopJournal {
         }
         let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
         let id = command_id.to_string();
-        if metadata.checkpoint.outbox().is_some_and(|cp| cp.events().iter().any(|event| event.event_id() == command_id))
+        if metadata.checkpoint.retirement().is_some_and(|cp| cp.retirements().iter().any(|entry| *entry.request().identity().retirement_id() == command_id || entry.request().intention_event_id() == command_id || entry.request().final_event_id() == command_id))
+            || metadata.checkpoint.outbox().is_some_and(|cp| cp.events().iter().any(|event| event.event_id() == command_id))
             || metadata.checkpoint.supervised().is_some_and(|cp| cp.supervision().operations().iter().any(|op| {
                 matches!(op, SupervisionOperationV1::Export { request, .. } if request.operation_id == id)
             }))
@@ -441,11 +485,18 @@ impl StopJournal {
             Ok,
         )?;
         let lifecycle = BrokerCheckpointV3::new(broker, commands)?;
-        let next = match metadata.checkpoint.outbox() {
-            Some(cp) => {
-                LoadedCheckpoint::V4(BrokerCheckpointV4::new(lifecycle, cp.events().to_vec())?)
+        let next = if let Some(cp) = metadata.checkpoint.retirement() {
+            LoadedCheckpoint::V5(cp.with_outbox(BrokerCheckpointV4::new(
+                lifecycle,
+                cp.outbox().events().to_vec(),
+            )?)?)
+        } else {
+            match metadata.checkpoint.outbox() {
+                Some(cp) => {
+                    LoadedCheckpoint::V4(BrokerCheckpointV4::new(lifecycle, cp.events().to_vec())?)
+                }
+                None => LoadedCheckpoint::V3(lifecycle),
             }
-            None => LoadedCheckpoint::V3(lifecycle),
         };
         // The only mutable field is the appended Cancel. Canonical inner data
         // comparisons make this restriction explicit, including opaque events.
@@ -497,7 +548,11 @@ impl StopJournal {
             &recovered.head,
             &head,
             &bytes,
-            usage,
+            PublicationResources {
+                usage,
+                budget: retirement::PublicationBudget::Cancel,
+                floors: &writer.floors,
+            },
         )?;
         writer.floors.insert(operation_id, head.clone());
         writer.observed_jobs.insert(operation_id);
@@ -512,6 +567,229 @@ impl StopJournal {
         #[cfg(test)]
         stop_before_ack()?;
         Ok(result)
+    }
+}
+
+impl StopJournal {
+    pub(crate) fn finalize_retirement(
+        &self,
+        verified: &crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
+    ) -> Result<CheckpointReceiptV1, super::retirement::RetirementMutationError> {
+        let identity = verified.identity().clone();
+        let operation = *identity.job_operation_id();
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        if writer.cold_audit.upgrade().is_some() {
+            return Err(super::retirement::RetirementMutationError::ColdReserved);
+        }
+        let (reader, recovered, _) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let current = metadata
+            .checkpoint
+            .retirement()
+            .ok_or(JournalError::Conflict)?;
+        let next = crate::broker::journal::retirement::finalized_checkpoint(
+            current,
+            &metadata.intent,
+            &identity,
+            verified.receipt().clone(),
+            verified.head().clone(),
+            verified.accepted().clone(),
+        )?;
+        if canonical(current)? == canonical(&next)? {
+            return Ok(CheckpointReceiptV1 {
+                operation_id: operation,
+                head: recovered.head,
+            });
+        }
+        let publication =
+            retirement::PublicationBudget::retirement_final(operation, current, &next, verified)?;
+        let next = LoadedCheckpoint::V5(next);
+        confirmed::context_checkpoint_with_launch(
+            &self.core.scope,
+            &self.core.control,
+            &next,
+            &metadata.intent,
+            &metadata.binding,
+            metadata.launch_binding.as_ref(),
+        )?;
+        confirmed::check_transition(
+            &metadata.checkpoint,
+            &next,
+            metadata.legacy_managed_seen,
+            metadata.last_cancel_operations,
+        )?;
+        let intent_hash = metadata
+            .intent
+            .intent_hash()
+            .map_err(|_| JournalError::Corrupt)?;
+        let (bytes, head) =
+            encode_checkpoint(&self.core, operation, &intent_hash, &recovered.head, &next)?;
+        let usage = stop_budget_usage(&self.core, operation)?;
+        reader.check_shared()?;
+        publish_revision(
+            &self.core,
+            operation,
+            &intent_hash,
+            &recovered.head,
+            &head,
+            &bytes,
+            PublicationResources {
+                usage,
+                budget: publication,
+                floors: &writer.floors,
+            },
+        )?;
+        writer.floors.insert(operation, head.clone());
+        writer.observed_jobs.insert(operation);
+        let (_, confirmed, _) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Corrupt)?;
+        if confirmed.head != head {
+            return Err(JournalError::Corrupt.into());
+        }
+        #[cfg(test)]
+        stop_before_ack()?;
+        Ok(CheckpointReceiptV1 {
+            operation_id: operation,
+            head,
+        })
+    }
+}
+
+impl StopJournal {
+    pub(crate) fn pending_retirement_events(
+        &self,
+        operation: Uuid,
+    ) -> JournalResult<Vec<crate::broker::outbox::OutboxEventV1>> {
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        let (_, recovered, _) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        let checkpoint = recovered
+            .metadata
+            .as_ref()
+            .and_then(|value| value.checkpoint.retirement())
+            .ok_or(JournalError::Conflict)?;
+        Ok(checkpoint
+            .outbox()
+            .events()
+            .iter()
+            .filter(|event| {
+                event.audit_seq().is_none()
+                    && checkpoint.retirements().iter().any(|entry| {
+                        entry.request().intention_event_id() == event.event_id()
+                            || (entry.finalized().is_some()
+                                && entry.request().final_event_id() == event.event_id())
+                    })
+            })
+            .cloned()
+            .collect())
+    }
+    pub(crate) fn acknowledge_retirement_events(
+        &self,
+        operation: Uuid,
+        acknowledgements: Vec<(Uuid, String, i64)>,
+    ) -> JournalResult<Vec<OutboxReceiptV1>> {
+        if operation.is_nil() || acknowledgements.is_empty() || acknowledgements.len() > 512 {
+            return Err(JournalError::InvalidInput);
+        }
+        let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
+        if writer.cold_audit.upgrade().is_some() {
+            return Err(JournalError::Busy);
+        }
+        let (reader, recovered, _) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::InvalidInput)?;
+        let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let current = metadata
+            .checkpoint
+            .retirement()
+            .ok_or(JournalError::Conflict)?;
+        let mut events = current.outbox().events().to_vec();
+        let mut ids = HashSet::new();
+        for (id, hash, seq) in &acknowledgements {
+            if !ids.insert(*id)
+                || *seq <= 0
+                || !current.retirements().iter().any(|entry| {
+                    entry.request().intention_event_id() == *id
+                        || (entry.finalized().is_some() && entry.request().final_event_id() == *id)
+                })
+            {
+                return Err(JournalError::Conflict);
+            }
+            let event = events
+                .iter_mut()
+                .find(|event| event.event_id() == *id)
+                .ok_or(JournalError::Conflict)?;
+            if event.input_hash() != hash {
+                return Err(JournalError::Conflict);
+            }
+            *event = event.acknowledged(*seq)?;
+        }
+        let next = current.with_outbox(BrokerCheckpointV4::new(
+            current.outbox().lifecycle().clone(),
+            events,
+        )?)?;
+        if canonical(current)? != canonical(&next)? {
+            let publication =
+                retirement::PublicationBudget::retirement_ack(operation, current, &next, &ids)?;
+            let next = LoadedCheckpoint::V5(next);
+            confirmed::context_checkpoint_with_launch(
+                &self.core.scope,
+                &self.core.control,
+                &next,
+                &metadata.intent,
+                &metadata.binding,
+                metadata.launch_binding.as_ref(),
+            )?;
+            confirmed::check_transition(
+                &metadata.checkpoint,
+                &next,
+                metadata.legacy_managed_seen,
+                metadata.last_cancel_operations,
+            )?;
+            let intent_hash = metadata
+                .intent
+                .intent_hash()
+                .map_err(|_| JournalError::Corrupt)?;
+            let (bytes, head) =
+                encode_checkpoint(&self.core, operation, &intent_hash, &recovered.head, &next)?;
+            let usage = stop_budget_usage(&self.core, operation)?;
+            reader.check_shared()?;
+            publish_revision(
+                &self.core,
+                operation,
+                &intent_hash,
+                &recovered.head,
+                &head,
+                &bytes,
+                PublicationResources {
+                    usage,
+                    budget: publication,
+                    floors: &writer.floors,
+                },
+            )?;
+            writer.floors.insert(operation, head);
+            writer.observed_jobs.insert(operation);
+        }
+        let (_, recovered, _) = self
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Corrupt)?;
+        let receipts = acknowledgements
+            .iter()
+            .map(|(id, _, seq)| {
+                recovered
+                    .outbox_receipts
+                    .get(&(*id, Some(*seq)))
+                    .cloned()
+                    .ok_or(JournalError::Corrupt)
+            })
+            .collect::<JournalResult<Vec<_>>>()?;
+        #[cfg(test)]
+        stop_before_ack()?;
+        Ok(receipts)
     }
 }
 
@@ -631,8 +909,8 @@ pub(super) fn admit_report(
     }
     let result = admit_claimed_report(report, force_stops);
     if result.is_err() {
-        // No core escaped failed admission. Success consumes this frame: a
-        // second factory cannot create another mutex/actor on the same FD.
+        // Failure permits retry of this retained frame, preserving its existing
+        // OnceLock/core/mutex. Success consumes the single actor factory.
         report.actor_claimed.store(false, Ordering::SeqCst);
     }
     result
@@ -642,35 +920,7 @@ fn admit_claimed_report(
     report: &StopRecoveryReportV1,
     force_stops: bool,
 ) -> JournalResult<ExistingProfileV1> {
-    let mut writer = Writer {
-        observed_jobs: report.observed_jobs.clone(),
-        rejected_floors: report.rejected_floors.clone(),
-        ..Writer::default()
-    };
-    for job in &report.jobs {
-        if writer
-            .floors
-            .insert(job.operation_id, job.head.clone())
-            .is_some()
-        {
-            return Err(JournalError::Corrupt);
-        }
-        writer.observed_jobs.insert(job.operation_id);
-    }
-    if writer.observed_jobs.len() > report.reader.limits.jobs as usize {
-        return Err(JournalError::LimitExceeded);
-    }
-    let core = Arc::new(Inner {
-        scope: report.reader.scope.clone(),
-        scope_hash: report.reader.scope_hash.clone(),
-        directory: report.reader.directory.clone(),
-        jobs: report.reader.jobs.clone(),
-        lock: report.reader.lock.clone(),
-        exclusions: report.reader.exclusions.clone(),
-        limits: report.reader.limits.clone(),
-        control: report.reader.control.clone(),
-        writer: Mutex::new(writer),
-    });
+    let core = Arc::clone(report.retained_core()?);
     let mut stops = StopJournal {
         core,
         scope_incomplete: report.incomplete,
@@ -704,6 +954,198 @@ fn admit_claimed_report(
 }
 
 impl StopRecoveryReportV1 {
+    #[cfg(test)]
+    pub(super) fn test_retained_core(&self) -> JournalResult<Arc<Inner>> {
+        self.retained_core().map(Arc::clone)
+    }
+    fn retained_core(&self) -> JournalResult<&Arc<Inner>> {
+        self.reader.check_shared()?;
+        if self.observed_jobs.len() > self.reader.limits.jobs as usize {
+            return Err(JournalError::LimitExceeded);
+        }
+        let mut seen = HashSet::new();
+        if self.jobs.iter().any(|job| !seen.insert(job.operation_id)) {
+            return Err(JournalError::Corrupt);
+        }
+        // All fallible anchor, cardinality and uniqueness validation precedes
+        // OnceLock initialization. The closure only clones retained owners and
+        // installs their single in-memory writer mutex; no open/flock or IO.
+        Ok(self.retained_core.get_or_init(|| {
+            let mut writer = Writer {
+                observed_jobs: self.observed_jobs.clone(),
+                rejected_floors: self.rejected_floors.clone(),
+                ..Writer::default()
+            };
+            for job in &self.jobs {
+                writer.floors.insert(job.operation_id, job.head.clone());
+                writer.observed_jobs.insert(job.operation_id);
+            }
+            Arc::new(Inner {
+                scope: self.reader.scope.clone(),
+                scope_hash: self.reader.scope_hash.clone(),
+                directory: self.reader.directory.clone(),
+                jobs: self.reader.jobs.clone(),
+                lock: self.reader.lock.clone(),
+                exclusions: self.reader.exclusions.clone(),
+                limits: self.reader.limits.clone(),
+                control: self.reader.control.clone(),
+                writer: Mutex::new(writer),
+                budget_incomplete: AtomicBool::new(self.incomplete),
+                status_observation_failed: AtomicBool::new(false),
+            })
+        }))
+    }
+    fn pre_factory_core(&self) -> JournalResult<Arc<Inner>> {
+        if self.actor_claimed.load(Ordering::SeqCst) {
+            return Err(JournalError::Busy);
+        }
+        self.retained_core().map(Arc::clone)
+    }
+    #[cfg(test)]
+    pub(crate) fn finalize_retirement(
+        &mut self,
+        verified: crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        self.finalize_retirement_retained(&verified)
+    }
+    pub(crate) fn retirement_factory_consumed(&self) -> bool {
+        self.actor_claimed.load(Ordering::Acquire)
+    }
+    pub(crate) fn finalize_retirement_retained(
+        &mut self,
+        verified: &crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        if self.actor_claimed.load(Ordering::SeqCst) {
+            return Err(JournalError::Busy);
+        }
+        let operation = *verified.identity().job_operation_id();
+        // A startup completion is restricted to the exact confirmed retirement
+        // already present in this frame. It cannot discover/introduce a new P.
+        let known = self
+            .jobs
+            .iter()
+            .find(|job| job.operation_id == operation)
+            .and_then(|job| {
+                job.retirements.iter().find(|entry| {
+                    entry.request().identity().retirement_id()
+                        == verified.identity().retirement_id()
+                })
+            })
+            .ok_or(JournalError::Conflict)?;
+        if canonical(known.request().identity())? != canonical(verified.identity())?
+            || known.request().audit_ack().is_none()
+        {
+            return Err(JournalError::Conflict);
+        }
+        let core = self.pre_factory_core()?;
+        let stops = StopJournal {
+            core,
+            scope_incomplete: self.incomplete,
+        };
+        let receipt = stops
+            .finalize_retirement(verified)
+            .map_err(JournalError::from)?;
+        let mut writer = stops
+            .core
+            .writer
+            .lock()
+            .map_err(|_| JournalError::Corrupt)?;
+        let (_, mut recovered, incomplete) = stops
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Corrupt)?;
+        recovered.metadata = None;
+        let slot = self
+            .jobs
+            .iter_mut()
+            .find(|job| job.operation_id == operation)
+            .ok_or(JournalError::Conflict)?;
+        *slot = recovered;
+        if incomplete {
+            self.incomplete = true;
+        }
+        Ok(receipt)
+    }
+
+    /// Resolve only an already committed Final after a retained IO ambiguity.
+    /// This shares the original reader/core/floors and never publishes a revision,
+    /// admits a writer actor, queries the guardian or recreates a live witness.
+    pub(crate) fn confirm_retirement_retained(
+        &mut self,
+        verified: &crate::broker::enforcer::retirement::VerifiedRetirementReceipt,
+    ) -> JournalResult<CheckpointReceiptV1> {
+        let operation = *verified.identity().job_operation_id();
+        let known = self
+            .jobs
+            .iter()
+            .find(|job| job.operation_id == operation)
+            .and_then(|job| {
+                job.retirements.iter().find(|entry| {
+                    entry.request().identity().retirement_id()
+                        == verified.identity().retirement_id()
+                })
+            })
+            .ok_or(JournalError::Conflict)?;
+        if canonical(known.request().identity())? != canonical(verified.identity())?
+            || known.request().audit_ack().is_none()
+        {
+            return Err(JournalError::Conflict);
+        }
+        let stops = StopJournal {
+            core: self.pre_factory_core()?,
+            scope_incomplete: self.incomplete,
+        };
+        let mut writer = stops
+            .core
+            .writer
+            .lock()
+            .map_err(|_| JournalError::Corrupt)?;
+        let (reader, mut recovered, incomplete) = stops
+            .read_locked(operation, &mut writer)?
+            .ok_or(JournalError::Conflict)?;
+        let metadata = recovered.metadata.as_ref().ok_or(JournalError::Corrupt)?;
+        let current = metadata
+            .checkpoint
+            .retirement()
+            .ok_or(JournalError::Conflict)?;
+        let entry = current
+            .retirements()
+            .iter()
+            .find(|entry| {
+                entry.request().identity().retirement_id() == verified.identity().retirement_id()
+            })
+            .ok_or(JournalError::Conflict)?;
+        // An absent F is never permission to try the mutation again. Compare
+        // the complete immutable P, then reuse the production Q/F checks.
+        if entry.finalized().is_none() || canonical(entry.request())? != canonical(known.request())?
+        {
+            return Err(JournalError::Conflict);
+        }
+        let exact = crate::broker::journal::retirement::finalized_checkpoint(
+            current,
+            &metadata.intent,
+            verified.identity(),
+            verified.receipt().clone(),
+            verified.head().clone(),
+            verified.accepted().clone(),
+        )?;
+        if canonical(current)? != canonical(&exact)? {
+            return Err(JournalError::Conflict);
+        }
+        reader.check_shared()?;
+        let receipt = CheckpointReceiptV1 {
+            operation_id: operation,
+            head: recovered.head.clone(),
+        };
+        recovered.metadata = None;
+        *self
+            .jobs
+            .iter_mut()
+            .find(|job| job.operation_id == operation)
+            .ok_or(JournalError::Conflict)? = recovered;
+        self.incomplete |= incomplete;
+        Ok(receipt)
+    }
+
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.reader.scope
     }
@@ -741,6 +1183,9 @@ impl StopRecoveryReportV1 {
     }
 }
 impl RecoveredJobV1 {
+    pub(crate) fn retirements(&self) -> &[crate::broker::retirement_checkpoint::RetirementEntryV1] {
+        &self.retirements
+    }
     pub(crate) fn cancel_prefix_for_stop(
         &self,
         index: usize,
@@ -809,6 +1254,16 @@ impl RecoveredJobV1 {
     }
 }
 impl RecoveredStopV1 {
+    pub(crate) fn full3_registration_binding(
+        &self,
+    ) -> Option<&crate::broker::retirement_checkpoint::Full3RegistrationBindingV1> {
+        self.full3_binding.as_ref()
+    }
+    pub(crate) fn retirement(
+        &self,
+    ) -> Option<&crate::broker::retirement_checkpoint::RetirementEntryV1> {
+        self.retirement.as_ref()
+    }
     pub(crate) fn birth_index(&self) -> usize {
         self.birth_index
     }
@@ -940,6 +1395,7 @@ impl StopRecoveryReaderV1 {
             observed_jobs: HashSet::new(),
             rejected_floors: HashMap::new(),
             actor_claimed: AtomicBool::new(false),
+            retained_core: OnceLock::new(),
         };
         if let Err(error) = report.reader.check_shared() {
             report.issue(None, StopRecoveryPhaseV1::SharedScope, error);
@@ -1432,6 +1888,31 @@ impl StopRecoveryReaderV1 {
                     }
                     None => None,
                 };
+                let retirement = confirmed
+                    .payload
+                    .retirement()
+                    .and_then(|value| {
+                        value.retirements().iter().find(|entry| {
+                            entry.request().identity().arm().operation_id == request.operation_id
+                        })
+                    })
+                    .cloned();
+                if retirement
+                    .as_ref()
+                    .is_some_and(|entry| entry.finalized().is_some())
+                {
+                    continue;
+                }
+                let full3_binding = confirmed
+                    .payload
+                    .retirement()
+                    .and_then(|value| {
+                        value
+                            .bindings()
+                            .iter()
+                            .find(|entry| entry.arm_id().to_string() == request.operation_id)
+                    })
+                    .cloned();
                 stops.push(RecoveredStopV1 {
                     arm: request.clone(),
                     receipt: response.receipt.clone(),
@@ -1439,6 +1920,8 @@ impl StopRecoveryReaderV1 {
                     owned: owned.clone(),
                     cancel_after_arm,
                     birth_index: index,
+                    full3_binding,
+                    retirement,
                 });
             }
         }
@@ -1458,16 +1941,21 @@ impl StopRecoveryReaderV1 {
                 stops,
                 chain: confirmed.chain,
                 command_receipts: confirmed.command_receipts,
+                outbox_receipts: confirmed.outbox_receipts,
                 cancel_boundaries: confirmed.cancel_boundaries,
                 pending_arms,
-                metadata: Some(StopMetadata {
+                retirements: confirmed
+                    .payload
+                    .retirement()
+                    .map_or_else(Vec::new, |value| value.retirements().to_vec()),
+                metadata: Some(Box::new(StopMetadata {
                     intent,
                     binding: bindings.binding,
                     launch_binding: bindings.docker_launch_profile,
                     checkpoint: confirmed.payload,
                     legacy_managed_seen: confirmed.legacy_managed_seen,
                     last_cancel_operations: confirmed.last_cancel_operations,
-                }),
+                })),
             }),
             None,
             partial,

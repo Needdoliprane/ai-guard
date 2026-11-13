@@ -1274,3 +1274,22 @@ fingerprint des audits antérieurs, aucun gate ni qualification production.
 Les rapports/traces privés restent hors Git. Réserves logiques sans disque
 préalloué ; contrôle DNS/socket, permis, révocation appliquée, observation directe,
 Web/MCP distant, quatre modes fournisseur et moteurs réels restent ouverts.
+
+
+## 13 novembre — preuve bornée broker/Full3 de settlement normal
+
+[Preuves publiques expurgées](evidence/2026-11-13/broker-full3/README.fr.md).
+La revue de composition `32dfd746…` reste bornée aux coutures, sans audit complet
+ou qualification. Le plan courant est revu indépendamment `b6b0e866…694e`.
+Reçu final `2bc5dab9…3412` : cinq parents de settlement normal et toutes cibles
+PASS sur le candidat public+E1 `223b699e…`, avec35/343 avertissements.
+Source2707 et six collectes/fermeture vérifiées par Root ; fixtures privées
+conservées opaques, sans diffusion de contenu.
+
+Le prewire1PASS reste attaché à sa source2668 ; le cadre136 historique conserve
+ses5settlement privés NOT_RUN. Les familles namespace/restauration et
+NativeResume exclues ne sont ni exécutées ni reconstituées. Aucun résultat
+manquant, identité d'owner, terminal worker ou permis n'est inféré d'un DTO,
+d'une absence de slot ou d'un exit. Reprise complète, fencing, transport relais,
+workers/moteurs/fournisseurs et confinement réseau réel restent non qualifiés.
+Aucun constat des audits antérieurs ni gate production n'est fermé.

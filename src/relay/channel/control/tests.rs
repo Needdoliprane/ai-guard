@@ -1,4 +1,5 @@
 //! Software seams only: retained authority is a test fixture, never a runtime permit.
+mod deadline_cause_tests;
 mod refusal_wire_tests;
 use super::*;
 use crate::relay::channel::ChannelLimitsV1;
@@ -91,6 +92,7 @@ impl FixtureContext {
             client: self.client.clone(),
             secrets: self.secrets.clone(),
             io,
+            authority: None,
             bytes: ByteBudget {
                 tenant: self.memory_tenant.clone(),
                 global: self.memory_global.clone(),
@@ -484,6 +486,27 @@ async fn stop_owner(
         .unwrap();
     result.unwrap();
     owner.io.join_pending().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_uds_channels_do_not_reserve_body_capacity_before_a_complete_prefix() {
+    let (_temporary, root) = private_root();
+    let context = FixtureContext::new("http://127.0.0.1:9", PROOF, endpoint());
+    let io = context.io(
+        Outbox::create(&root, &context.scope, &context.secrets).unwrap(),
+        Arc::new(RoleLease::acquire(&root).unwrap()),
+    );
+    let (mut first, _hello, first_stop, first_task) =
+        start_owner(context.owner(io.clone(), 1)).await;
+    let (second, _hello, second_stop, second_task) = start_owner(context.owner(io, 1)).await;
+    // Both Hello writes follow completed journal checks. An idle read may
+    // retain four prefix bytes, not a body allocation/reservation.
+    first.write_all(&[0]).await.unwrap();
+    tokio::task::yield_now().await;
+    assert_eq!(context.memory_tenant.available_permits(), 32 * 1024 * 1024);
+    assert_eq!(context.memory_global.available_permits(), 128 * 1024 * 1024);
+    stop_owner(first, first_stop, first_task).await;
+    stop_owner(second, second_stop, second_task).await;
 }
 
 #[tokio::test]

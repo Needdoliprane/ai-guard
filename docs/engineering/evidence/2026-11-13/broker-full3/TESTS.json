@@ -1,0 +1,397 @@
+{
+  "schema_version": 1,
+  "document_kind": "redacted_software_validation_evidence",
+  "date_utc": "2026-11-13",
+  "scope": "Five exact normal retirement-settlement library parents on the public+E1 broker/Full3 composition; not full recovery/fencing/runtime qualification",
+  "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+  "public_base": "4cd336c9dd51cc7fa8f81d50ab25788dc32b843f",
+  "verified_result_at_utc": "2026-11-13T05:35:12.343Z",
+  "verified_result_sha256": "2bc5dab9d4934fc98b34013554c11a45592c08faf572f73c4435706f85773412",
+  "source": {
+    "input_sha256": "d662f5c7f51b4ce8003614803ed87620484485933f39d251d7550b278136abfe",
+    "input_files": 2707,
+    "input_archive_bytes": 32675840,
+    "post_sha256": "1df33e3943dea9acf66e877a681fdff410576e0e5f787f11a04ef9246d7550c7",
+    "post_archive_bytes": 32860160,
+    "all_content_and_modes_exact": true,
+    "source_mode_counts": {
+      "0600": 18,
+      "0644": 2689
+    },
+    "frozen_broker_paths": 136,
+    "effective_broker_delta_paths": 134,
+    "unchanged_owned_paths": 2,
+    "E1_paths_preserved": 37,
+    "composition_metadata_sha256": "bae43fcd36ff29ee465c75ae6cc92db3216673043b57e94e242a6ae22eededc6",
+    "identity_not_behavior": true,
+    "later_publication_commit_equality_asserted": false
+  },
+  "reviews_and_history": {
+    "historical_136_path_frame": {
+      "receipt_sha256": "d4e4402a898cc6ad728c1bcf807bf69e05ae7e13175c7485a64affd04d0e1a37",
+      "at_utc": "2026-11-13T04:06:29.810Z",
+      "public_base_at_freeze": "328f3bc5cc042ebf7f8924c54d4e717d1de94acb",
+      "settlement_source": "ceda17d8c0ce02d2d2bed852a05f37d9175663bb22f10efee934b584b3a494bd",
+      "settlement_parents": 5,
+      "settlement_status_at_freeze": "NOT_RUN",
+      "status_preserved": true
+    },
+    "earlier_composition_review": {
+      "markdown_sha256": "32dfd746c74a0198fb9b471cab6a5db044136f42dd7bcd77de908c4a72ee622e",
+      "receipt_sha256": "0885cbaf3ebb3ebb4ce62aadeb84d03449f7f26e10e8029e92d0feee39e390e2",
+      "candidate": "9baa81c1856881a6f9f47d14e15bb67282150c13",
+      "verdict": "GO_COMPOSED_SOURCE",
+      "scope": "bounded composition/source seams, not a complete delta audit or runtime proof"
+    },
+    "current_plan_review": {
+      "receipt_sha256": "b6b0e8668c6f939e724e1c9d75ffc4d7347ec82fab91890fe9dea234dd3d694e",
+      "verdict": "GO_PLAN_FOR_LOCAL_SOFTWARE_QA",
+      "review_is_execution_result": false
+    },
+    "historical_prewire": {
+      "receipt_sha256": "d0e3584d95ea67777a129696b7d6393d2d44ce84587c90c3c576ed31b5486877",
+      "status": "PASS",
+      "passed": 1,
+      "selector": "runner::broker::executor::retirement_live_tests::real_consumer_retains_original_when_listener_exits_before_retirement_connect",
+      "source_sha256": "0d393fffbea6921bde4bd83b106bb104c3ebf17248a00db2b9fbffb5f9244725",
+      "source_files": 2668,
+      "compile": "PASS",
+      "counted_in_current_five": false,
+      "runtime_observation": "synthetic, no engine process",
+      "full_recovery_or_performance_qualified": false
+    },
+    "excluded_historical_operation_families": {
+      "names": [
+        "namespace replacement/restoration",
+        "NativeResume"
+      ],
+      "executed_in_current_run": false,
+      "missing_receipts_reconstructed": false
+    }
+  },
+  "environment": {
+    "os": "Linux",
+    "architecture": "aarch64",
+    "kernel": "7.0.14-linuxkit",
+    "selected_Rust_toolchain": "1.99.1",
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "process_uid_gid": "1000:1000",
+    "network": "none",
+    "root_readonly": true,
+    "capabilities_dropped": "ALL",
+    "no_new_privileges": true,
+    "private_IPC_cgroup": true,
+    "CPU": 4,
+    "memory_limit_bytes": 9663676416,
+    "memory_plus_swap_limit_bytes": 9663676416,
+    "PIDs": 128,
+    "scratch_bytes": 4294967296,
+    "tmpfs_count": 3,
+    "read_only_input_cache_binds": 2,
+    "Cargo_jobs": 1,
+    "Cargo_incremental": false,
+    "test_debug_info": 0,
+    "executor": "Luna one admitted run",
+    "result_source_capture_closure_verifier": "Root",
+    "QA_profile_is_worker_runtime_qualification": false
+  },
+  "commands": {
+    "compile": {
+      "status": "PASS",
+      "argv": [
+        "/usr/local/cargo/bin/cargo",
+        "test",
+        "--frozen",
+        "--offline",
+        "--lib",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "bound_seconds": 900,
+      "exit_code": 0,
+      "error_diagnostics": 0,
+      "warning_diagnostics": 35,
+      "build_finished_success_count": 1
+    },
+    "parents": [
+      {
+        "position": 1,
+        "selector": "broker::service::server::retirement_settlement_tests::same_original_submitted_final_settles_after_lost_q_without_new_final",
+        "status": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "list_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::same_original_submitted_final_settles_after_lost_q_without_new_final",
+          "--list",
+          "--exact"
+        ],
+        "executed_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::same_original_submitted_final_settles_after_lost_q_without_new_final",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "bound_seconds": 120,
+        "invocations": 1
+      },
+      {
+        "position": 2,
+        "selector": "broker::service::server::retirement_settlement_tests::same_public_final_from_foreign_core_cannot_query_or_clear_keeper",
+        "status": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "list_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::same_public_final_from_foreign_core_cannot_query_or_clear_keeper",
+          "--list",
+          "--exact"
+        ],
+        "executed_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::same_public_final_from_foreign_core_cannot_query_or_clear_keeper",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "bound_seconds": 120,
+        "invocations": 1
+      },
+      {
+        "position": 3,
+        "selector": "broker::service::server::retirement_settlement_tests::absent_local_slot_without_opaque_completion_keeps_original_keeper",
+        "status": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "list_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::absent_local_slot_without_opaque_completion_keeps_original_keeper",
+          "--list",
+          "--exact"
+        ],
+        "executed_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::absent_local_slot_without_opaque_completion_keeps_original_keeper",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "bound_seconds": 120,
+        "invocations": 1
+      },
+      {
+        "position": 4,
+        "selector": "broker::service::server::retirement_settlement_tests::actual_retained_verified_input_prevents_another_query_wrapper",
+        "status": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "list_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::actual_retained_verified_input_prevents_another_query_wrapper",
+          "--list",
+          "--exact"
+        ],
+        "executed_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::actual_retained_verified_input_prevents_another_query_wrapper",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "bound_seconds": 120,
+        "invocations": 1
+      },
+      {
+        "position": 5,
+        "selector": "broker::service::server::retirement_settlement_tests::confirmed_cleanup_after_cancel_preserves_generation_and_closed_admission",
+        "status": "PASS",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "exit_code": 0,
+        "list_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::confirmed_cleanup_after_cancel_preserves_generation_and_closed_admission",
+          "--list",
+          "--exact"
+        ],
+        "executed_argv": [
+          "/scratch/target-broker-public-e1-composed-20261113-r1/debug/deps/agentsandbox-fc32107d1e0ac2cc",
+          "broker::service::server::retirement_settlement_tests::confirmed_cleanup_after_cancel_preserves_generation_and_closed_admission",
+          "--exact",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "bound_seconds": 120,
+        "invocations": 1
+      }
+    ],
+    "all_targets": {
+      "status": "PASS",
+      "argv": [
+        "/usr/local/cargo/bin/cargo",
+        "check",
+        "--frozen",
+        "--offline",
+        "--all-targets",
+        "--message-format=json"
+      ],
+      "bound_seconds": 900,
+      "condition": "Only after all five exact parents PASS",
+      "exit_code": 0,
+      "error_diagnostics": 0,
+      "warning_diagnostics": 343,
+      "build_finished_success_count": 1,
+      "strict_Clippy_result": false
+    }
+  },
+  "totals_current_run": {
+    "passed": 5,
+    "failed": 0,
+    "ignored": 0,
+    "historical_prewire_added_to_total": false,
+    "unselected_parents_claimed_PASS": false
+  },
+  "fixture_scope": {
+    "real_private_Journal_SQLite_config_audit_files": true,
+    "owned_loopback_gateway": true,
+    "private_Unix_IPC": true,
+    "same_process_actor_joins": true,
+    "SyntheticReady_test_substitution_returns_before_business_runtime": true,
+    "worker_engine_provider_or_business_command_invocation": false,
+    "main_project_CLI_invoked": false,
+    "new_user_project_or_existing_database_migrated": false,
+    "public_final_data_is_original_owner_authority": false,
+    "absent_slot_is_opaque_completion_proof": false
+  },
+  "captures_and_closure": {
+    "collections": [
+      {
+        "phase": "post-source-verify",
+        "status": "PASS",
+        "exit_code": 0
+      },
+      {
+        "phase": "export-postrun-ustar",
+        "status": "PASS",
+        "exit_code": 0
+      },
+      {
+        "phase": "fixture-regular-inventory",
+        "status": "PASS",
+        "exit_code": 0
+      },
+      {
+        "phase": "export-private-fixtures",
+        "status": "PASS",
+        "exit_code": 0
+      },
+      {
+        "phase": "final-kernel",
+        "status": "PASS",
+        "exit_code": 0
+      },
+      {
+        "phase": "final-cgroup-memory",
+        "status": "PASS",
+        "exit_code": 0
+      }
+    ],
+    "private_fixture_statistics_from_Root_verified_receipt": {
+      "regular_files": 96,
+      "payload_bytes": 2117346,
+      "opaque_archive_bytes": 2201600,
+      "opaque_archive_sha256": "23251f802d3f06071ed7b6962df2472cff767008803596ce2bb8915092c319dd",
+      "opaque_archive_mode": "0600",
+      "archive_publicly_distributed": false,
+      "payloads_read_decoded_or_extracted_by_publication_writer": false
+    },
+    "source_and_fixture_archive_limit_bytes_each": 33554432,
+    "overflow_sentinel_checks_retained": true,
+    "private_raw_files": 293,
+    "private_raw_manifest_sha256": "db712410daaef48d3a4e67f94c793c43e77f5ff7e8ff8477eb30bf131934db08",
+    "all_six_collections_and_stop_remove_exit_code": 0,
+    "closure_exit_code": 0,
+    "container_removed": true,
+    "oom": 0,
+    "oom_kill": 0,
+    "container_OOMKilled": false,
+    "holder_exit_code": 137,
+    "holder_exit_is_not_parent_exit": true,
+    "provisional_runner_green_independently_verified": true
+  },
+  "contract_documents": [
+    {
+      "path": "docs/api.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "4db8abb3b73dacd1197e60ebf957cfd09fbebca09ba49f9b9d7ae0887c186942",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    },
+    {
+      "path": "docs/engineering/BROKER_SUPERVISION.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "be9392c91f707821345d979ed6cb8bc35176afa02ec62b03eaff25f8dc1fb217",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    },
+    {
+      "path": "docs/setup/broker/README.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "529577d367857d9019eba55122b0d90ee8318bea0e1c71b68650493f0c9ccaeb",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    },
+    {
+      "path": "docs/setup/broker/README.fr.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "cbde86dad41ff71a33556f2e5592603d10bf8f57c359f00e3079d35247b7b426",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    },
+    {
+      "path": "docs/setup/relay/BROKER_HANDOFF.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "f5f52d19d2bd0d21f259b8a213c45178d04a91c0a34e4f2fb5bbf9753580a2a8",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    },
+    {
+      "path": "docs/setup/relay/BROKER_HANDOFF.fr.md",
+      "candidate": "223b699e959964bef4460f34857516cb8cdd37c8",
+      "sha256": "d985a20ab40ee332b6a4004d2de967f5ac490a7e81f4e36dc1283d608a24540e",
+      "review_scope": "current status, retained authority/acknowledgement and remaining qualification sections",
+      "modified": false
+    }
+  ],
+  "not_qualified_by_this_run": [
+    "complete Full3 recovery",
+    "general fencing",
+    "cold restart and namespace restoration",
+    "NativeResume",
+    "relay transport and complete service/job wrapper",
+    "real business worker or runtime adapter",
+    "engine/model/provider invocation",
+    "inter-tenant network confinement",
+    "Docker/Podman/Kubernetes acceptance",
+    "physical I/O/WAL/power-loss recovery",
+    "capacity100",
+    "complete operator journey",
+    "strict Clippy",
+    "full test suite",
+    "release build",
+    "timing or availability SLO"
+  ],
+  "gate_or_historical_audit_finding_closed": false,
+  "guide_or_checkout_modified_by_publication_writer": false,
+  "publication_activity": "Read Git/metadata and write redacted draft only; no Cargo, Docker, native project or network execution"
+}

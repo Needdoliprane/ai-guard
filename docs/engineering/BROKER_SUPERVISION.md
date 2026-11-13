@@ -144,6 +144,23 @@ Le transport commun `broker::local_ipc` fournit `PrivateListener::bind_new`, un 
 
 Root possède les profils privés, découverte/leases, contexte fraîchement authentifié, IPC/CLI et `broker::writer::WriterClient`. Tous les accès Journal, même load/status/list, passent par un thread writer unique et une file bornée ; aucun RPC, copie/archive ou callback métier n'est exécuté dans ce thread. Méthodes utilisées par le batch : `load(operation_id)`, `advance_lifecycle(operation_id,expected,next)` et `append_command(operation_id,command_id,request)`. Le writer construit les hashes dans le vrai contexte du job et ne confirme qu'après le reçu durable. Les commandes IPC restent authentifiées avant profil/job/projet de la requête ; les paramètres de contrôle sont imposés par le profil. Une erreur, file pleine ou réponse perdue ne vaut jamais mutation refusée certaine ni ACK factice.
 
+Le port interne `LastConfirmedStatus` du candidat du9novembre est une projection
+mémoire de diagnostic, sans accès Journal hors de cet acteur. Status/RelayStatus
+conservent l'authentification courante et les wire V1 fermés ; ils peuvent lire
+la dernière projection issue du chemin strict et publiée avec son ACK acteur.
+Avant cet ACK, la tête précédente reste visible. Cache froid/hors capacité :
+lecture stricte, jamais absence inventée. Bornes : jobs du journal et au plus256,
+bytes du périmètre et au plus4Mio de données de projection comptées. Ce cache
+ne conserve ni AcceptedJob, bindings, historique ou permission ; décisions et
+mutations continuent leurs Full pré/post, CAS et audit. Échec strict d'intégrité,
+publication inconnue, fencing/arrêt ou perte de l'owner ferment le port jusqu'à
+nouveau propriétaire après contrôles stricts de reprise. Une couverture STOP
+partielle due à une Arm légitimement pending n'est pas une erreur d'intégrité :
+le statut confirmé conserve son attente explicite. Aucun changement du cache ledger Parsed/Tainted
+ou de PrivateFile ne découle de ce diagnostic. Les oracles d'acteur, de durabilité
+et le parcours Full3 doivent passer avant d'attribuer un résultat au candidat ;
+le FAIL F1 et la qualification D5 restent ouverts.
+
 La capacité `ProfileWriterCapabilities` retient une seule admission d'acteur par rapport de reprise et partage sa lease existante sans déverrouillage. `full()` est absent lorsque le profil n'admet que les arrêts. `stops()` fournit uniquement `append_cancel(CancelInputV1)`, `cancel_stop_projection` et `recovery_status`, sans conversion vers le chargement métier ou une permission de start. Le handler Cancel n'exige plus le blob fournisseur ni le writer complet ; il invalide d'abord la génération pour une nouvelle commande, publie durablement puis livre les cibles prouvées. Un retry inconnu conserve son identité et n'invalide pas à nouveau ; un replay confirmé ne crée aucune révision. Les budgets incomptables refusent une nouvelle mutation, sans retirer une annulation confirmée. Le reader métier garde ses vérifications strictes avant/après publication. Le RPC/CLI additif de diagnostic est documenté dans le [quick start](../quickstart.md) ; sa provenance journal n'est pas une observation moteur. [Décision et validation](DECISIONS.md#31-octobre--acteur-stop-restreint-et-diagnostic-de-reprise).
 
 Le core possède `runner::broker::executor::BatchExecutor`, ses builders privés dans runner et les seules coutures nécessaires de `runner/managed.rs`. `run(operation_id,context)` et `export(operation_id,target,context)` sont distincts. Le contexte non sérialisable lie le même AuditClient/credential présenté, scope réel, config retenue, runtime approuvé et génération de cancel ; l'export cible une destination neuve sous racine permise. Aucun wrapper de `execute_plan` legacy, `sessions.json`, monitor500ms, timer CLI ou argv helper libre. Le moteur suit Decision/Review, copie/archive, admission supervisée, Prepare, Import, ImportVerification, CreateIssued, worker, terminal central, FinalScan puis export explicitement demandé. Chaque requête naît pending avant son RPC, son ACK dans une révision suivante. Après conflit CAS, fusionner seulement la réponse du pending exact en préservant les commandes courantes ; ne pas refaire une action pour résoudre le conflit.

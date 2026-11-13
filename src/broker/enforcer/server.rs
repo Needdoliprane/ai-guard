@@ -16,7 +16,7 @@ use std::{
 use tokio::{net::UnixStream, sync::watch};
 
 #[path = "server_lifetime.rs"]
-mod lifetime;
+pub(super) mod lifetime;
 use lifetime::{ListenerOwner, NativeOwners};
 
 #[cfg(test)]

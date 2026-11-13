@@ -1,11 +1,9 @@
 //! Private control-side owner of an already supplied non-TTY byte stream.
 //!
-//! There is intentionally no production constructor or authority supplied by a
-//! caller/frame. `current_admission` refuses every production dispatch until the
-//! exact-runtime permit, current binding, RoleLease and mandatory audit gate are
-//! integrated. This source segment alone cannot open or authorize an exec.
-//! The software tests supply an explicitly synthetic admission, real OS sockets,
-//! the real HTTP client and durable private business files.
+//! The broker retains the concrete, fresh Core authority and original Arm
+//! deadline. A frame supplies no authority, proof or local user identity.
+//! Component tests use an explicitly synthetic admission; they do not qualify
+//! the broker/runtime handoff or a real engine.
 use super::{
     ChannelState, CloseReasonV1, CloseV1, ErrorCodeV1, FrameLimit, FrameV1, HandshakeV1,
     MAX_CONTROL_FRAME_BYTES, MAX_REQUEST_FRAME_BYTES, ReplyV1, RequestPayloadV1, RequestV1,
@@ -28,7 +26,184 @@ use tokio::{
 mod outbox;
 use outbox::Outbox;
 mod io_owner;
-use io_owner::{IoCommand, IoOwner};
+use io_owner::{IoCommand, IoOwner, IoReply};
+
+/// One retained journal/IO owner for an authenticated tenant scope. It provides
+/// no channel authority: only the broker's verified admission may bind a client.
+pub(crate) struct TenantRelayIo {
+    io: Arc<IoOwner>,
+    bytes: ByteBudget,
+}
+impl TenantRelayIo {
+    #[cfg(test)]
+    pub(crate) fn pause_next(
+        &self,
+        started: oneshot::Sender<()>,
+        finish: std::sync::mpsc::Receiver<()>,
+    ) {
+        self.io.pause_next(started, finish);
+    }
+    /// Synchronous filesystem admission; the broker must call this only inside
+    /// its bounded, retained blocking segment, never on an async worker thread.
+    pub(crate) fn open(
+        parent: &Directory,
+        scope: &crate::broker::journal::JournalScopeV1,
+        role: Arc<crate::broker::discovery::RoleLease>,
+        literals: Vec<String>,
+        tenant_bytes: Arc<Semaphore>,
+        tenant_io: Arc<Semaphore>,
+        global_bytes: Arc<Semaphore>,
+        global_io: Arc<Semaphore>,
+    ) -> Result<Arc<Self>, ControlError> {
+        let secrets = Secrets(literals);
+        let existing = parent
+            .persistent_child("relay_v1", false)
+            .map_err(|_| ControlError::Persistence)?;
+        let outbox = if existing.is_some() {
+            Outbox::open(parent, scope, &secrets)?
+        } else {
+            Outbox::create(parent, scope, &secrets)?
+        };
+        let channels =
+            crate::broker::relay_owner::journal::ChannelJournal::open(parent, scope, &secrets.0)
+                .map_err(|_| ControlError::Persistence)?;
+        Ok(Arc::new(Self {
+            io: IoOwner::open(outbox, Some(channels), role, tenant_io, global_io),
+            bytes: ByteBudget {
+                tenant: tenant_bytes,
+                global: global_bytes,
+            },
+        }))
+    }
+    pub(crate) async fn join_pending(&self) -> Result<(), ControlError> {
+        self.io.join_pending().await
+    }
+    pub(crate) async fn channel(
+        &self,
+        job: uuid::Uuid,
+    ) -> Result<Option<crate::broker::relay_owner::journal::ChannelFact>, ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self.io.run(IoCommand::ChannelGet(job), reservation).await? {
+            IoReply::Channel(fact) => Ok(fact),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+    pub(crate) async fn save_channel(
+        &self,
+        fact: crate::broker::relay_owner::journal::ChannelFact,
+        literals: Vec<String>,
+    ) -> Result<crate::broker::relay_owner::journal::ChannelFact, ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self
+            .io
+            .run(
+                IoCommand::ChannelSave(fact, Arc::new(Secrets(literals))),
+                reservation,
+            )
+            .await?
+        {
+            IoReply::Channel(Some(fact)) => Ok(fact),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+    /// Complete derived prefix, including intentions hidden by old V1 facts.
+    pub(crate) async fn channel_history(
+        &self,
+        job: uuid::Uuid,
+    ) -> Result<Option<crate::broker::relay_owner::journal::ChannelHistoryV2>, ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self
+            .io
+            .run(IoCommand::ChannelHistory(job), reservation)
+            .await?
+        {
+            IoReply::ChannelHistory(history) => Ok(history),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+    /// Uses the same retained IO owner and logical admission as all other
+    /// private journal changes; cancellation never discards its JoinHandle.
+    pub(crate) async fn save_channel_change(
+        &self,
+        job: uuid::Uuid,
+        change: crate::broker::relay_owner::journal::ChannelChangeV2,
+        literals: Vec<String>,
+    ) -> Result<crate::broker::relay_owner::journal::ChannelHistoryV2, ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self
+            .io
+            .run(
+                IoCommand::ChannelChange(job, change, Arc::new(Secrets(literals))),
+                reservation,
+            )
+            .await?
+        {
+            IoReply::ChannelHistory(Some(history)) => Ok(history),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+    pub(crate) async fn issued_binding(
+        &self,
+        path: std::path::PathBuf,
+        scope: crate::broker::journal::JournalScopeV1,
+    ) -> Result<Option<Arc<crate::workload_cli::broker_binding::RetainedWorkerBinding>>, ControlError>
+    {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self
+            .io
+            .run(IoCommand::LoadBinding(path, scope), reservation)
+            .await?
+        {
+            IoReply::Binding(binding) => Ok(Some(binding)),
+            IoReply::AwaitingBinding => Ok(None),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+    pub(crate) async fn check_binding(
+        &self,
+        binding: Arc<crate::workload_cli::broker_binding::RetainedWorkerBinding>,
+    ) -> Result<(), ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        self.io
+            .run(IoCommand::CheckBinding(binding), reservation)
+            .await
+            .map(|_| ())
+    }
+    // Exercise the existing IO/client path without minting a dispatch authority.
+    // Only the real authenticated context chooses the profile and scope.
+    #[cfg(test)]
+    pub(crate) async fn authenticated_binding_client_for_tls_test(
+        &self,
+        context: &crate::broker::service::AuthenticatedBatchContext,
+        binding: Arc<crate::workload_cli::broker_binding::RetainedWorkerBinding>,
+    ) -> Result<Arc<WorkerRelayClient>, ControlError> {
+        self.binding_client(
+            binding,
+            context.scope().clone(),
+            context.gateway_trust().clone(),
+        )
+        .await
+    }
+    async fn binding_client(
+        &self,
+        binding: Arc<crate::workload_cli::broker_binding::RetainedWorkerBinding>,
+        scope: crate::broker::journal::JournalScopeV1,
+        gateway_trust: crate::tls::ClientTrust,
+    ) -> Result<Arc<WorkerRelayClient>, ControlError> {
+        let reservation = Arc::new(self.bytes.reserve()?);
+        match self
+            .io
+            .run(
+                IoCommand::BindingClient(binding, scope, gateway_trust),
+                reservation,
+            )
+            .await?
+        {
+            IoReply::Client(client) => Ok(client),
+            _ => Err(ControlError::Protocol),
+        }
+    }
+}
 
 const FRAME_TIME: Duration = Duration::from_secs(5);
 const IDLE_TIME: Duration = Duration::from_secs(2);
@@ -36,7 +211,7 @@ const OPERATION_TIME: Duration = Duration::from_secs(45);
 const EXCHANGE_BYTES: u32 = 3 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ControlError {
+pub(crate) enum ControlError {
     InvalidRequest,
     Binding,
     Conflict,
@@ -44,6 +219,8 @@ enum ControlError {
     Capacity,
     Persistence,
     AuthorityUnavailable,
+    AuthorityClockUnavailable,
+    AuthorityCancelled,
     Protocol,
     Transport,
     Timeout,
@@ -62,10 +239,16 @@ struct Binding {
 
 /// This list remains in the control memory only. It is not exhaustive DLP.
 struct Secrets(Vec<String>);
+pub(crate) fn validate_private_record(
+    bytes: &[u8],
+    literals: &[String],
+) -> Result<(), ControlError> {
+    Secrets(literals.to_vec()).check(bytes)
+}
 impl Secrets {
     fn check(&self, bytes: &[u8]) -> Result<(), ControlError> {
         if self.0.is_empty()
-            || self.0.len() > 64
+            || self.0.len() > 512
             || self
                 .0
                 .iter()
@@ -73,6 +256,8 @@ impl Secrets {
         {
             return Err(ControlError::InvalidRequest);
         }
+        let value = validation::decode::<serde_json::Value>(bytes, None)
+            .map_err(|_| ControlError::InvalidRequest)?;
         for secret in &self.0 {
             if bytes
                 .windows(secret.len())
@@ -80,8 +265,24 @@ impl Secrets {
             {
                 return Err(ControlError::InvalidRequest);
             }
-            validation::decode::<serde_json::Value>(bytes, Some(secret))
-                .map_err(|_| ControlError::InvalidRequest)?;
+        }
+        // Decode once for the complete bounded known set, including escaped
+        // JSON keys/strings. This is literal screening, not exhaustive DLP.
+        fn contains(value: &serde_json::Value, secrets: &[String]) -> bool {
+            let text = |text: &str| secrets.iter().any(|secret| text.contains(secret));
+            match value {
+                serde_json::Value::String(value) => text(value),
+                serde_json::Value::Array(values) => {
+                    values.iter().any(|value| contains(value, secrets))
+                }
+                serde_json::Value::Object(values) => values
+                    .iter()
+                    .any(|(key, value)| text(key) || contains(value, secrets)),
+                _ => false,
+            }
+        }
+        if contains(&value, &self.0) {
+            return Err(ControlError::InvalidRequest);
         }
         Ok(())
     }
@@ -91,6 +292,7 @@ impl Secrets {
 /// replacements. The byte-denominated permits are logical admission units;
 /// decoded DTOs, JSON values and encoding copies can coexist above this size.
 /// Frame/DTO bounds remain separate. Total live memory/RSS is not measured here.
+#[derive(Clone)]
 struct ByteBudget {
     tenant: Arc<Semaphore>,
     global: Arc<Semaphore>,
@@ -120,20 +322,92 @@ impl ByteBudget {
 
 /// The future borrows a registry-retained owner. IO handles remain inside that
 /// retention after cancellation; a timeout cannot silently reopen the journal.
-/// Runtime child/stderr ownership is deliberately not supplied by this segment.
-struct ControlOwner {
+/// The broker retains the separate runtime child/stderr transport owner.
+pub(crate) struct ControlOwner {
     hello: HandshakeV1,
     binding: Arc<Binding>,
     client: Arc<WorkerRelayClient>,
     secrets: Arc<Secrets>,
     io: Arc<IoOwner>,
     bytes: ByteBudget,
+    authority: Option<Arc<crate::broker::relay_owner::DispatchAuthority>>,
+    #[cfg(test)]
     expires: Instant,
     #[cfg(test)]
     synthetic_admission: Arc<std::sync::atomic::AtomicBool>,
 }
+
+// Closed waiting sources; none grants admission or replaces current_admission.
+enum ControlDeadline {
+    Authority(Arc<crate::broker::relay_owner::DispatchAuthority>),
+    #[cfg(test)]
+    OriginalWorker(Arc<crate::broker::relay_owner::WorkerRelayDeadline>),
+    #[cfg(test)]
+    FixtureInstant(Instant),
+    #[cfg(not(test))]
+    Unavailable,
+}
+
 impl ControlOwner {
+    /// Only the broker's concrete SDK/current-binding authority can construct
+    /// a production owner. No caller-selected endpoint, proof or predicate.
+    pub(crate) async fn from_broker(
+        authority: Arc<crate::broker::relay_owner::DispatchAuthority>,
+        tenant: Arc<TenantRelayIo>,
+    ) -> Result<Self, ControlError> {
+        authority
+            .check()
+            .await
+            .map_err(|_| ControlError::AuthorityUnavailable)?;
+        let client = tenant
+            .binding_client(
+                authority.binding(),
+                authority.scope().clone(),
+                authority.gateway_trust().clone(),
+            )
+            .await?;
+        let admitted = authority.admission();
+        let hello = HandshakeV1 {
+            version: 1,
+            channel_id: admitted.channel_id.clone(),
+            epoch: admitted.epoch,
+            limits: super::ChannelLimitsV1::default(),
+            helper_version: 1,
+        };
+        let secrets = Arc::new(Secrets(
+            authority
+                .literals()
+                .map_err(|_| ControlError::AuthorityUnavailable)?,
+        ));
+        secrets.check(
+            &FrameV1::Hello(hello.clone())
+                .encode()
+                .map_err(|_| ControlError::Protocol)?,
+        )?;
+        Ok(Self {
+            hello,
+            binding: Arc::new(Binding {
+                endpoint: admitted.endpoint.clone(),
+                credential_id: admitted.credential_id.clone(),
+            }),
+            client,
+            secrets,
+            io: tenant.io.clone(),
+            bytes: tenant.bytes.clone(),
+            authority: Some(authority),
+            #[cfg(test)]
+            expires: Instant::now(),
+            #[cfg(test)]
+            synthetic_admission: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        })
+    }
     async fn current_admission(&self) -> Result<(), ControlError> {
+        if let Some(authority) = &self.authority {
+            return authority
+                .check()
+                .await
+                .map_err(|_| ControlError::AuthorityUnavailable);
+        }
         // This is a closed integration point, not a caller-provided predicate or
         // a conversion of a consumed start permit into an exec permission.
         #[cfg(test)]
@@ -146,17 +420,73 @@ impl ControlOwner {
         Err(ControlError::AuthorityUnavailable)
     }
 
-    async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    pub(crate) async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        &mut self,
+        input: R,
+        output: W,
+        shutdown: oneshot::Receiver<CloseReasonV1>,
+    ) -> Result<(), ControlError> {
+        let deadline = match self.authority.clone() {
+            Some(authority) => ControlDeadline::Authority(authority),
+            None => {
+                #[cfg(test)]
+                {
+                    ControlDeadline::FixtureInstant(self.expires)
+                }
+                #[cfg(not(test))]
+                {
+                    ControlDeadline::Unavailable
+                }
+            }
+        };
+        self.serve_with_deadline(input, output, shutdown, deadline)
+            .await
+    }
+
+    async fn serve_with_deadline<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         &mut self,
         mut input: R,
         mut output: W,
         mut shutdown: oneshot::Receiver<CloseReasonV1>,
+        deadline: ControlDeadline,
     ) -> Result<(), ControlError> {
-        let expires = self.expires;
+        let expiration = async move {
+            match deadline {
+                ControlDeadline::Authority(authority) => authority.wait_expiration().await,
+                #[cfg(test)]
+                ControlDeadline::OriginalWorker(deadline) => deadline.wait_expiration().await,
+                #[cfg(test)]
+                ControlDeadline::FixtureInstant(expires) => {
+                    tokio::time::sleep_until(expires).await;
+                    crate::broker::relay_owner::RelayOwnerError::Expired
+                }
+                #[cfg(not(test))]
+                ControlDeadline::Unavailable => {
+                    std::future::pending::<crate::broker::relay_owner::RelayOwnerError>().await
+                }
+            }
+        };
         let (result, reason) = tokio::select! {
             biased;
             reason = &mut shutdown => (Ok(()), reason.unwrap_or(CloseReasonV1::Shutdown)),
-            _ = tokio::time::sleep_until(expires) => (Err(ControlError::Timeout), CloseReasonV1::Expired),
+            error = expiration => match error {
+                crate::broker::relay_owner::RelayOwnerError::Clock => (
+                    Err(ControlError::AuthorityClockUnavailable), CloseReasonV1::Shutdown,
+                ),
+                crate::broker::relay_owner::RelayOwnerError::Cancelled => (
+                    Err(ControlError::AuthorityCancelled), CloseReasonV1::Revoked,
+                ),
+                crate::broker::relay_owner::RelayOwnerError::Expired => (
+                    Err(ControlError::Timeout), CloseReasonV1::Expired,
+                ),
+                crate::broker::relay_owner::RelayOwnerError::Unavailable
+                | crate::broker::relay_owner::RelayOwnerError::InvalidMaterial
+                | crate::broker::relay_owner::RelayOwnerError::Scope
+                | crate::broker::relay_owner::RelayOwnerError::Capacity
+                | crate::broker::relay_owner::RelayOwnerError::Unknown => (
+                    Err(ControlError::AuthorityUnavailable), CloseReasonV1::Shutdown,
+                ),
+            },
             result = self.run(&mut input, &mut output) => {
                 let reason = match result {
                     Ok(()) => CloseReasonV1::Shutdown,
@@ -164,6 +494,8 @@ impl ControlOwner {
                     Err(ControlError::Capacity) => CloseReasonV1::Capacity,
                     Err(ControlError::Persistence | ControlError::NeedsReconciliation) => CloseReasonV1::AuditUnavailable,
                     Err(ControlError::AuthorityUnavailable | ControlError::Binding) => CloseReasonV1::IdentityChanged,
+                    Err(ControlError::AuthorityClockUnavailable) => CloseReasonV1::Shutdown,
+                    Err(ControlError::AuthorityCancelled) => CloseReasonV1::Revoked,
                     Err(ControlError::Transport | ControlError::PeerClosed) => CloseReasonV1::Transport,
                     _ => CloseReasonV1::Protocol,
                 };
@@ -219,16 +551,24 @@ impl ControlOwner {
         state
             .accept_ready(&ready)
             .map_err(|_| ControlError::Binding)?;
+        if let Some(authority) = &self.authority {
+            authority
+                .ready()
+                .await
+                .map_err(|_| ControlError::AuthorityUnavailable)?;
+        }
         loop {
             state
                 .request_capacity()
                 .map_err(|_| ControlError::Capacity)?;
-            // Reserve before even reading the prefix. No body is read without
-            // capacity and the previous output having completed.
+            // Idle channels hold only a four-byte prefix. Body allocation and
+            // reads require shared capacity and completed previous output.
+            let Some((length, absolute)) = read_prefix(input, FrameLimit::Request).await? else {
+                return Ok(());
+            };
             let reservation = Arc::new(self.bytes.reserve()?);
-            let request = match read_frame(input, FrameLimit::Request).await? {
-                Some(FrameV1::Request(request)) => request,
-                None => return Ok(()),
+            let request = match read_body(input, length, absolute, FrameLimit::Request).await? {
+                FrameV1::Request(request) => request,
                 _ => return Err(ControlError::Protocol),
             };
             state
@@ -245,6 +585,7 @@ impl ControlOwner {
                 .accept_response(&response)
                 .map_err(|_| ControlError::Protocol)?;
             let response_frame = FrameV1::Response(response);
+            self.refresh_secrets()?;
             let mut prefix = [0_u8; 1];
             tokio::select! {
                 biased;
@@ -264,12 +605,18 @@ impl ControlOwner {
         reservation: Arc<Reservation>,
     ) -> Result<ResponseV1, ControlError> {
         self.current_admission().await?;
+        self.refresh_secrets()?;
         let mutation = !matches!(&request.payload, RequestPayloadV1::Inbox(_));
         if mutation {
             if let Err(error) = self
                 .io
                 .run(
-                    IoCommand::Prepare(request.payload.clone()),
+                    IoCommand::Prepare(
+                        request.payload.clone(),
+                        self.binding.clone(),
+                        self.client.clone(),
+                        self.secrets.clone(),
+                    ),
                     reservation.clone(),
                 )
                 .await
@@ -286,7 +633,11 @@ impl ControlOwner {
             // Durable intent and dispatch marker both precede the HTTP future.
             self.io
                 .run(
-                    IoCommand::Dispatched(request.payload.clone()),
+                    IoCommand::Dispatched(
+                        request.payload.clone(),
+                        self.binding.clone(),
+                        self.secrets.clone(),
+                    ),
                     reservation.clone(),
                 )
                 .await?;
@@ -301,7 +652,11 @@ impl ControlOwner {
             // A receipt must be valid and durable before local success delivery.
             self.io
                 .run(
-                    IoCommand::Confirmed(request.payload.clone(), receipt.clone()),
+                    IoCommand::Confirmed(
+                        request.payload.clone(),
+                        receipt.clone(),
+                        self.secrets.clone(),
+                    ),
                     reservation,
                 )
                 .await?;
@@ -320,6 +675,16 @@ impl ControlOwner {
                 },
             },
         ))
+    }
+    fn refresh_secrets(&mut self) -> Result<(), ControlError> {
+        if let Some(authority) = &self.authority {
+            self.secrets = Arc::new(Secrets(
+                authority
+                    .literals()
+                    .map_err(|_| ControlError::AuthorityUnavailable)?,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -388,6 +753,15 @@ async fn read_frame<R: AsyncRead + Unpin>(
     input: &mut R,
     limit: FrameLimit,
 ) -> Result<Option<FrameV1>, ControlError> {
+    let Some((length, absolute)) = read_prefix(input, limit).await? else {
+        return Ok(None);
+    };
+    read_body(input, length, absolute, limit).await.map(Some)
+}
+async fn read_prefix<R: AsyncRead + Unpin>(
+    input: &mut R,
+    limit: FrameLimit,
+) -> Result<Option<(usize, Instant)>, ControlError> {
     let mut prefix = [0_u8; 4];
     let count = input
         .read(&mut prefix[..1])
@@ -407,15 +781,21 @@ async fn read_frame<R: AsyncRead + Unpin>(
     if length == 0 || length > maximum {
         return Err(ControlError::Protocol);
     }
+    Ok(Some((length, absolute)))
+}
+async fn read_body<R: AsyncRead + Unpin>(
+    input: &mut R,
+    length: usize,
+    absolute: Instant,
+    limit: FrameLimit,
+) -> Result<FrameV1, ControlError> {
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
         .map_err(|_| ControlError::Capacity)?;
     bytes.resize(length, 0);
     read_exact(input, &mut bytes, absolute).await?;
-    FrameV1::decode(&bytes, limit)
-        .map(Some)
-        .map_err(|_| ControlError::Protocol)
+    FrameV1::decode(&bytes, limit).map_err(|_| ControlError::Protocol)
 }
 async fn read_exact<R: AsyncRead + Unpin>(
     input: &mut R,

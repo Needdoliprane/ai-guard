@@ -250,11 +250,27 @@ impl Drop for PublicFixture {
 }
 impl PublicFixture {
     fn new() -> Self {
-        let base = if cfg!(target_os = "macos") {
+        let configured = std::env::var_os("AI_GUARD_TEST_D5_IPC_ROOT").map(PathBuf::from);
+        let fallback = if cfg!(target_os = "macos") {
             "/private/tmp"
         } else {
             "/tmp"
         };
+        let requested = configured.as_deref().unwrap_or_else(|| Path::new(fallback));
+        assert!(
+            requested.is_absolute(),
+            "AI_GUARD_TEST_D5_IPC_ROOT must name an absolute directory"
+        );
+        let base = std::fs::canonicalize(requested)
+            .expect("AI_GUARD_TEST_D5_IPC_ROOT or the native fallback must exist");
+        assert!(base.is_dir(), "the D5 IPC fixture root must be a directory");
+        if configured.is_some() {
+            assert_eq!(
+                requested,
+                base.as_path(),
+                "AI_GUARD_TEST_D5_IPC_ROOT must already be canonical"
+            );
+        }
         let temp = tempfile::Builder::new()
             .prefix("aig-v3-")
             .permissions(std::fs::Permissions::from_mode(0o700))
@@ -750,5 +766,7 @@ async fn stop3_command_frames_remain_bounded_to_512_kib_before_body_allocation()
     assert!(matches!(joined, Err(EnforcerError::InvalidInput)));
 }
 
+#[path = "recovery_v3_idle_stop_tests.rs"]
+mod idle_stop_admission;
 #[path = "recovery_v3_review_tests.rs"]
 mod review_regressions;

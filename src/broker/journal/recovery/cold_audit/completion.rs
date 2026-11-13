@@ -190,7 +190,11 @@ fn complete_with_mode(
             }
         })
         .collect::<JournalResult<Vec<_>>>()?;
-    let next = LoadedCheckpoint::V4(BrokerCheckpointV4::new(outbox.lifecycle().clone(), events)?);
+    let outbox = BrokerCheckpointV4::new(outbox.lifecycle().clone(), events)?;
+    let next = match metadata.checkpoint.retirement() {
+        Some(retirement) => LoadedCheckpoint::V5(retirement.with_outbox(outbox)?),
+        None => LoadedCheckpoint::V4(outbox),
+    };
     confirmed::context_checkpoint_with_launch(
         &journal.core.scope,
         &journal.core.control,
@@ -227,7 +231,11 @@ fn complete_with_mode(
         &current.head,
         &target,
         &bytes,
-        usage,
+        PublicationResources {
+            usage,
+            budget: super::super::super::retirement::PublicationBudget::NewAllocation,
+            floors: &writer.floors,
+        },
     )?;
     writer.floors.insert(reserved.operation_id, target.clone());
     writer.observed_jobs.insert(reserved.operation_id);
@@ -383,6 +391,16 @@ fn validate_current(
         || canonical(&original.launch_binding)? != canonical(&metadata.launch_binding)?
     {
         return Err(JournalError::Conflict);
+    }
+    match (
+        original.checkpoint.retirement(),
+        metadata.checkpoint.retirement(),
+    ) {
+        (Some(before), Some(after))
+            if canonical(&before.bindings())? == canonical(&after.bindings())?
+                && canonical(&before.retirements())? == canonical(&after.retirements())? => {}
+        (None, None) => {}
+        _ => return Err(JournalError::Conflict),
     }
     let baseline = original
         .checkpoint
