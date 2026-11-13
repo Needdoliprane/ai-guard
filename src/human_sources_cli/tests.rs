@@ -236,6 +236,6 @@ fn check_preserves_main_sidecars_and_all_preparation_documents() {
     assert_eq!(
         snapshot(),
         before,
-        "check must neither open SQLite nor change/publish files"
+        "check must preserve source/sidecar bytes and must not change/publish files"
     );
 }
