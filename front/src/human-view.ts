@@ -83,6 +83,8 @@ export class HumanDashboard {
   #supervisionPreferences: SupervisionPreferences = defaultSupervisionPreferences();
   #journal: JournalView | null = null;
   #journalPreferences: JournalPreferences = defaultJournalPreferences();
+  /** Restrictive coverage observed on a real page, scoped to this exact context. */
+  #journalProfile: { contextId: string; authorizationVersion: string; streamMode: "snapshot_only" | null } | null = null;
   /** Set only after a context expiry or a session rotation; dropped by any other context change. */
   #resume: HumanResumeIntent | null = null;
   #resumeOffer: HumanContext | null = null;
@@ -307,7 +309,7 @@ export class HumanDashboard {
     this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort();
     clearTimeout(this.#refreshTimer); this.#refreshTimer = undefined;
-    this.#context = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
+    this.#context = null; this.#journalProfile = null; this.#selection = null; this.#resources = readState(); this.#events = readState();
     this.#closeSupervision(); this.#supervisionPreferences = defaultSupervisionPreferences();
     this.#closeJournal(); this.#journalPreferences = defaultJournalPreferences();
     this.#resume = null; this.#resumeOffer = null; this.#resumeAttempts = 0; clearTimeout(this.#resumeTimer);
@@ -362,17 +364,46 @@ export class HumanDashboard {
     if (confirmed && !this.#closed && generation === this.#generation && this.#context && view && view === this.#supervision) void view.reread();
   }
   #canJournal() { return supervisionAccess(this.#context).journal; }
-  #closeJournal() { this.#journal?.close(); this.#journal = null; }
+  #currentJournalProfile() {
+    return this.#journalProfile?.contextId === this.#context?.id &&
+      this.#journalProfile?.authorizationVersion === this.#context?.authorization_version ? this.#journalProfile : null;
+  }
+  #snapshotOnly() { return this.#currentJournalProfile()?.streamMode === "snapshot_only"; }
+  #journalStatus() {
+    return this.#snapshotOnly() ? "Journal · historique · direct indisponible pour ce profil" :
+      this.#currentJournalProfile() ? "Journal · récent d’abord, puis direct" : "Journal · lecture de l’historique";
+  }
+  #journalDescription() {
+    return this.#snapshotOnly() ?
+      "Historique des métadonnées autorisées, à l’heure de lecture. Direct, contenu, détail et export indisponibles pour ce profil. Actualiser effectue une nouvelle lecture." :
+      this.#currentJournalProfile() ?
+        "Tous les événements que ce contexte peut lire, les plus récents d’abord, puis en direct. L’onglet Événements reste la lecture d’une ressource choisie, avec son contenu et son export selon vos droits." :
+        "Les événements les plus récents que ce contexte peut lire. Le mode de suivi et la portée disponibles seront indiqués après une lecture réussie.";
+  }
+  #closeJournal() { const previous = this.#journal; this.#journal = null; previous?.close(); }
   #openJournal() {
     const context = this.#context; if (!context) return;
     this.#closeJournal();
-    this.#journal = new JournalView({ reads: this.#api, context, preferences: this.#journalPreferences, onReviewAccess: () => this.#openView("contexts"),
+    const generation = this.#generation;
+    const journal: JournalView = new JournalView({ reads: this.#api, context, preferences: this.#journalPreferences, onReviewAccess: () => this.#openView("contexts"),
       onReadStateChange: () => this.#updateRefreshState(),
+      onProfileMode: (mode, confirmed) => {
+        const current = this.#context;
+        if (this.#closed || this.#journal !== journal || generation !== this.#generation ||
+          !current || current.id !== context.id || current.authorization_version !== context.authorization_version) return;
+        this.#journalProfile = confirmed ? { contextId: context.id, authorizationVersion: context.authorization_version, streamMode: mode } : null;
+        if (this.#mode === "journal") {
+          this.#streamStatus = this.#journalStatus();
+          if (this.#streamLabel) this.#streamLabel.textContent = this.#streamStatus;
+          const description = this.#page?.querySelector(".page-description");
+          if (description) description.textContent = this.#journalDescription();
+        }
+      },
       openWorkers: this.#canWorkers() ? (sessionId) => {
         // Only the worker filter is replaced: the refresh period and the other choices of the person stay.
         this.#supervisionPreferences = { ...this.#supervisionPreferences, fleet: { ...defaultFleetFilter(), text: sessionId }, rendered: RENDER_STEP }; this.#openView("supervision");
       } : null });
-    this.#journal.start();
+    this.#journal = journal; journal.start();
   }
   #purgeFederation() {
     this.#federationGeneration++; this.#federationAbort.abort(); this.#federationAbort = new AbortController(); this.#federation = readState();
@@ -397,7 +428,7 @@ export class HumanDashboard {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
         this.#purgeBrokers(); this.#purgeWorkers(); this.#purgeFederation(); this.#mode = mode; this.#openJournal();
       } else void this.#journal.reload();
-      this.#streamStatus = "Journal · récent d’abord, puis direct";
+      this.#streamStatus = this.#journalStatus();
     } else if (mode === "supervision" && this.#canSupervise()) {
       if (this.#mode !== mode || !this.#supervision) {
         this.#stopViewReads(); this.#resources = readState(); this.#events = readState(); this.#selection = null;
@@ -504,7 +535,7 @@ export class HumanDashboard {
     heading.tabIndex = -1;
     const sections = [el("div", "page-heading", el("p", "eyebrow", this.#identity?.authentication.method === "oidc_access_token" ?
       "COMPTE OIDC / CONSULTATION NOMINATIVE" : "COMPTE LOCAL / CONSULTATION NOMINATIVE"), heading,
-      el("p", "page-description", this.#mode === "journal" ? "Tous les événements que ce contexte peut lire, les plus récents d’abord, puis en direct. L’onglet Événements reste la lecture d’une ressource choisie, avec son contenu et son export selon vos droits." :
+      el("p", "page-description", this.#mode === "journal" ? this.#journalDescription() :
         this.#mode === "supervision" ? (this.#context?.mode === "administration" ?
         "Brokers, workers et ressources que ce contexte d’administration peut lire, réunis sur une page. Chaque valeur vient d’une lecture autorisée par le contrôle ; ce qui n’a pas été lu reste inconnu." :
         "Les ressources que vous possédez ou qui vous sont partagées, et ce que ce contexte personnel ne permet pas de lire. Chaque valeur vient d’une lecture autorisée par le contrôle.") : this.#mode === "federation" ? "Vue d’administration autorisée par read_worker_registry et read_broker_registry. Workers et brokers enregistrés restent visibles dans deux pages indépendantes du même tenant." : this.#mode === "workers" ? "Workers de tout le tenant · autorisation read_worker_registry. États du contrôle et observations runtime restent distincts." : this.#mode === "brokers" ? "Infrastructure de tout le tenant · autorisation read_broker_registry. Les permissions et l’évaluation du registre proviennent du contrôle." :
@@ -910,6 +941,7 @@ export class HumanDashboard {
     const state = this.#resources;
     return el("section", "panel human-resource-panel", el("div", "panel-heading", el("div", "", el("h2", "", "Ressources de ce contexte"),
       el("p", "", "Source : registre des droits explicites du contrôle. Une page n’est pas un total du tenant et le journal n’est pas un inventaire runtime."))),
+      this.#snapshotOnly() ? el("p", "muted", "Contenu et export indisponibles pour ce profil : seules les métadonnées sont disponibles. Les droits accordés à vos ressources restent distincts de cette limite.") : null,
       this.#status(state), state.error ? this.#error(state.error, () => { void this.#loadResources(); }) : "",
       this.#streamError ? this.#error(this.#streamError, () => this.#startStream()) : "",
       !state.value ? empty(state.loading ? "Chargement des ressources…" : "Ressources inconnues", "La lecture doit réussir avant de conclure sur ce contexte.") :
@@ -920,12 +952,12 @@ export class HumanDashboard {
                 `Propriétaire OIDC : ${item.owner.subject} · ${item.owner.issuer}`), el("p", "mono", `Révision ${item.revision}`)),
             el("div", "human-resource-actions",
               action("Métadonnées", `resource-metadata-${index}`, () => this.#select(item, "metadata"), !item.permissions.metadata),
-              action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), !item.permissions.metadata || !item.permissions.content),
-              badge(item.permissions.export ? "Export autorisé selon la projection" : "Export non autorisé"))))),
+              action("Contenu", `resource-content-${index}`, () => this.#select(item, "content"), this.#snapshotOnly() || !item.permissions.metadata || !item.permissions.content),
+              badge(item.permissions.export ? this.#snapshotOnly() ? "Droit d’export accordé · indisponible pour ce profil" : "Export autorisé selon la projection" : "Export non autorisé"))))),
       this.#pagination(state, (next, previous) => { void this.#loadResources(next, previous); }));
   }
   #select(item: HumanResource, view: HumanView) {
-    if (!this.#canResources() || this.#mode !== "resources" || !item.permissions.metadata || view === "content" && !item.permissions.content) return;
+    if (!this.#canResources() || this.#mode !== "resources" || !item.permissions.metadata || view === "content" && (!item.permissions.content || this.#snapshotOnly())) return;
     this.#selectionGeneration++; this.#selectionAbort.abort(); this.#selectionAbort = new AbortController();
     this.#streamAbort.abort(); this.#exportAbort.abort(); this.#detailAbort.abort(); this.#dialog?.close(); this.#dialog?.remove(); this.#dialog = null;
     if (this.#downloadUrl) URL.revokeObjectURL(this.#downloadUrl); this.#downloadUrl = null;
@@ -966,6 +998,9 @@ export class HumanDashboard {
       el("p", "", "Portée : cette ressource, dans le contexte sélectionné. Les événements proviennent du journal autorisé ; aucune chaîne complète ni observation runtime n’est déduite."))),
       this.#status(state), this.#streamError ? this.#error(this.#streamError, () => this.#startStream()) : "",
       state.error ? this.#error(state.error, () => { void this.#loadEvents(); }) : "",
+      state.error && selection.view === "content" ? el("div", "", el("p", "muted", "Le contenu n’a pas été lu. Vous pouvez demander les métadonnées depuis Ressources."),
+        action("Revenir aux ressources", "human-content-resources", () => this.#openView("resources"))) : null,
+      this.#snapshotOnly() ? el("p", "muted", "Métadonnées uniquement pour ce profil. Détail d’événement, contenu et export indisponibles.") : null,
       !state.value ? empty(state.loading ? "Chargement des événements…" : "Événements inconnus", "Une lecture absente ou refusée ne constitue pas une absence d’activité.") :
         !state.value.items.length ? empty("Aucun événement sur cette page", "Aucune trace reçue pour cette sélection autorisée, à cette lecture.") :
           el("div", "human-event-list", ...state.value.items.map((item, index) => el("article", "human-event-row",
@@ -973,11 +1008,12 @@ export class HumanDashboard {
               el("p", "muted", `Source : ${item.metadata.source} · Reçu le ${formatDate(item.metadata.received_at, true)}`),
               el("div", "detail-badges", badge(`Provenance : ${item.metadata.provenance}`), badge(`Couverture : ${item.metadata.coverage}`),
                 item.metadata.decision ? badge(`Décision : ${item.metadata.decision}`) : badge("Décision non fournie"))),
-            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); })))),
+            action("Détails", `human-event-${index}`, () => { void this.#showEvent(item); }, this.#snapshotOnly())))),
       this.#pagination(state, (next, previous) => { void this.#loadEvents(next, previous); }), this.#renderExport());
   }
   #startStream() {
     this.#streamAbort.abort(); this.#streamAbort = new AbortController(); this.#streamError = "";
+    if (this.#snapshotOnly()) { this.#streamStatus = "Direct indisponible pour ce profil"; return; }
     if (!this.#canResources() || !["resources", "events"].includes(this.#mode) || this.#closed || this.#api.readBudgetStopped || document.visibilityState !== "visible") return;
     const generation = this.#generation; const selected = this.#selectionGeneration;
     const mode = this.#mode;
@@ -1009,6 +1045,7 @@ export class HumanDashboard {
     }, 1000);
   }
   async #showEvent(item: HumanEvent) {
+    if (this.#snapshotOnly()) return;
     const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || this.#api.readBudgetStopped) return;
     this.#detailAbort.abort(); this.#detailAbort = new AbortController(); const request = ++this.#detailGeneration;
     this.#dialog?.remove();
@@ -1041,16 +1078,18 @@ export class HumanDashboard {
   }
   #renderExport() {
     const permitted = !!this.#selection?.item.permissions.export;
+    const covered = !this.#snapshotOnly();
     const status = el("p", "human-export-status", this.#exporting ? `${this.#exportPages} page(s) reçue(s), ${this.#exportBytes} octets · export encore partiel, aucun téléchargement.` : this.#exportMessage);
     status.setAttribute("role", "status");
     return el("section", "human-export", el("h3", "", "Exporter cette sélection"),
       el("p", "muted", "JSON · ressource et projection affichées ci-dessus. Limites de cet onglet : 25 pages, 4 Mio, 60 secondes. Le fichier est proposé seulement à la fin de la sélection autorisée, avec ses reçus de lecture."),
-      action(`Exporter ${this.#selection?.view === "content" ? "le contenu" : "les métadonnées"}`, "human-export", () => { void this.#export(); }, !permitted || this.#exporting),
+      action(`Exporter ${this.#selection?.view === "content" ? "le contenu" : "les métadonnées"}`, "human-export", () => { void this.#export(); }, !covered || !permitted || this.#exporting),
       this.#exporting ? action("Annuler l’export", "human-export-cancel", () => this.#exportAbort.abort()) : null,
+      !covered ? el("p", "muted", "Export indisponible pour ce profil, même lorsque le droit d’export est accordé.") : null,
       !permitted ? el("p", "muted", "Le contrôle n’accorde pas le droit d’export pour cette ressource.") : null, status);
   }
   async #export() {
-    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#exporting || this.#api.readBudgetStopped) return;
+    const selection = this.#selection; if (!selection || this.#mode !== "events" || !this.#canResources() || !selection.item.permissions.export || this.#snapshotOnly() || this.#exporting || this.#api.readBudgetStopped) return;
     this.#exportAbort.abort(); this.#exportAbort = new AbortController(); const signal = this.#exportAbort.signal;
     const generation = this.#generation; const selected = this.#selectionGeneration;
     this.#exporting = true; this.#exportPages = 0; this.#exportBytes = 0; this.#exportMessage = ""; this.#render();

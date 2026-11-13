@@ -2,6 +2,7 @@
 // the page that was read. No DOM and no CSS. One store lives for one selected context.
 import { HumanApiError, HumanRecentUnavailable, HumanSuperseded } from "./human-api.ts";
 import { sourceError } from "./supervision-store.ts";
+import { HumanContractError } from "./human-model.ts";
 import type { HumanEvent, HumanEventPage, HumanRecentEventPage, HumanSelection, ReadReceipt, ResourceRef } from "./human-model.ts";
 import type { SourceError, SupervisionClock } from "./supervision-store.ts";
 
@@ -18,7 +19,7 @@ export const LIVE_RETRY_DELAYS = [1000, 2000, 4000, 8000, 16000, 30000] as const
 /** A stream that stayed connected this long was stable: its next refusal starts a new series of attempts. */
 export const LIVE_STABLE_MS = 60000;
 export type JournalPhase = "idle" | "loading" | "ready" | "error" | "forbidden" | "refused" | "unavailable";
-export type LiveState = "off" | "connecting" | "live" | "retrying" | "suspended" | "refused";
+export type LiveState = "off" | "connecting" | "live" | "retrying" | "suspended" | "refused" | "unavailable";
 export interface JournalState {
   phase: JournalPhase;
   /** Server-side restriction to one authorized resource, or null for the whole authorized selection. */
@@ -31,12 +32,14 @@ export interface JournalState {
   /** The window reached its bound: its oldest events left it and the older position was dropped. */
   trimmed: boolean;
   live: LiveState; liveMessage: string;
+  streamMode: "snapshot_only" | null;
   /** Events delivered by the live stream since the last read from the newest. */
   received: number;
   receipt: ReadReceipt | null;
   closed: boolean;
 }
 const contextCodes = ["context_required", "context_invalid", "context_expired", "context_revoked"];
+const SNAPSHOT_DIRECT = "Direct indisponible pour ce profil.";
 /**
  * One short sentence for assistive technology, or null while a read or a connection is in flight. It carries
  * neither a time nor a count: an unchanged state gives the same sentence, so a live batch announces nothing.
@@ -46,11 +49,11 @@ export function journalAnnouncement(state: JournalState): string | null {
   if (state.phase !== "ready") return state.phase === "forbidden" ? "Journal : lecture refusée, événements retirés." :
     state.phase === "unavailable" ? "Journal : lecture récente indisponible sur ce contrôle." :
     state.phase === "refused" ? "Journal : ressource non accordée." : "Journal : lecture en échec, contenu inconnu.";
-  const live = { off: "Direct arrêté.", live: "Direct connecté.", retrying: "Direct déconnecté, reconnexion en cours.", suspended: "Direct suspendu, onglet masqué.", refused: "Direct refusé." }[state.live];
+  const live = { off: "Direct arrêté.", live: "Direct connecté.", retrying: "Direct déconnecté, reconnexion en cours.", suspended: "Direct suspendu, onglet masqué.", refused: "Direct refusé.", unavailable: SNAPSHOT_DIRECT }[state.live];
   return `Journal : ${state.stale ? "données périmées, dernière lecture conservée" : "lecture réussie"}. ${live}`;
 }
 const initial = (resource: ResourceRef | null): JournalState => ({ phase: "idle", resource, items: [], loadedAt: null, stale: false, busy: false, error: null,
-  hasOlder: false, trimmed: false, live: "off", liveMessage: "", received: 0, receipt: null, closed: false });
+  hasOlder: false, trimmed: false, live: "off", liveMessage: "", streamMode: null, received: 0, receipt: null, closed: false });
 
 export class JournalStore {
   #reads: JournalReads; #clock: SupervisionClock; #onChange: () => void;
@@ -88,6 +91,14 @@ export class JournalStore {
     this.#liveSince = null;
     this.#state.live = state; this.#state.liveMessage = message;
   }
+  /** Withdraw data whose current access could not be revalidated. */
+  #withdraw(clearProfile = true) {
+    const state = this.#state;
+    const profile = clearProfile ? null : state.streamMode;
+    state.items = []; state.loadedAt = null; state.receipt = null; state.hasOlder = false;
+    state.streamMode = profile; state.received = 0; state.trimmed = false; state.stale = false; this.#older = null;
+    this.#stopStream(profile === "snapshot_only" ? "unavailable" : "off", profile === "snapshot_only" ? SNAPSHOT_DIRECT : "");
+  }
 
   /** Reads the newest page again and restarts the live stream right after it. */
   async reload(): Promise<void> {
@@ -97,7 +108,8 @@ export class JournalStore {
     // Reading from the newest in a visible tab ends a suspension, even when the host never called `resume`.
     if (this.#clock.visible()) this.#suspended = false;
     this.#abort.abort(); this.#abort = new AbortController();
-    this.#stopStream("off"); this.#retries = 0; this.#position = null;
+    this.#stopStream(state.streamMode === "snapshot_only" ? "unavailable" : "off", state.streamMode === "snapshot_only" ? SNAPSHOT_DIRECT : "");
+    this.#retries = 0; this.#position = null;
     state.busy = true; state.error = null;
     if (!state.items.length) state.phase = "loading";
     this.#publish();
@@ -106,8 +118,10 @@ export class JournalStore {
       if (generation !== this.#generation || state.closed) return;
       state.phase = "ready"; state.items = page.items; state.loadedAt = this.#clock.now(); state.stale = false; state.trimmed = false;
       state.received = 0; state.receipt = page.read_receipt; state.hasOlder = page.has_more; this.#older = page.next_cursor;
+      state.streamMode = page.stream_mode ?? null;
       state.busy = false;
-      this.#listen(page.live_cursor, generation);
+      if (state.streamMode === "snapshot_only") this.#stopStream("unavailable", SNAPSHOT_DIRECT);
+      else this.#listen(page.live_cursor, generation);
     } catch (error) {
       if (this.#settled(error, generation)) return;
       if (error instanceof HumanRecentUnavailable && error.ambiguous) {
@@ -123,12 +137,16 @@ export class JournalStore {
         }
       }
       state.busy = false;
+      // A snapshot has no live authorization signal. Failed revalidation
+      // withdraws rows, while a transient failure keeps the restrictive profile
+      // fact of this same context. A503 never creates or changes that fact.
+      if (state.streamMode === "snapshot_only") this.#withdraw(false);
       if (error instanceof HumanRecentUnavailable) {
         // Never open the stream without a start position: it would replay the whole authorized history.
         state.phase = "unavailable"; state.items = []; state.hasOlder = false; this.#older = null;
         state.error = { kind: "server", message: error.message };
       } else if (error instanceof HumanApiError && error.status === 403) {
-        state.phase = "forbidden"; state.items = []; state.loadedAt = null; state.hasOlder = false; state.receipt = null; this.#older = null;
+        this.#withdraw(); state.phase = "forbidden";
       } else if (error instanceof HumanApiError && error.code === "not_found") {
         state.phase = "refused"; state.items = []; state.hasOlder = false; this.#older = null;
         state.error = { kind: "server", message: "Aucune ressource autorisée de ce contexte ne correspond à cette limite. Le contrôle ne distingue pas une ressource absente d’une ressource non accordée." };
@@ -140,7 +158,7 @@ export class JournalStore {
   }
   #listen(cursor: string | null, generation: number) {
     const state = this.#state;
-    if (!cursor || state.closed) return;
+    if (!cursor || state.closed || state.streamMode === "snapshot_only") return;
     this.#position = cursor;
     if (this.#suspended || !this.#clock.visible()) { state.live = "suspended"; return; }
     if (this.#reads.readBudgetStopped) { state.live = "refused"; state.liveMessage = "Budget durable de lecture atteint : le direct est arrêté."; return; }
@@ -213,6 +231,7 @@ export class JournalStore {
     try {
       const page = await this.#reads.recentEvents(this.#selection(this.#older), this.#abort.signal);
       if (generation !== this.#generation || state.closed) return;
+      if ((page.stream_mode ?? null) !== state.streamMode) throw new HumanContractError();
       const known = new Set(state.items.map((item) => item.metadata.id));
       const merged = [...state.items, ...page.items.filter((item) => !known.has(item.metadata.id))];
       // Events cut off by the bound are a partial coverage even when this page was the last one of the control.
@@ -220,10 +239,14 @@ export class JournalStore {
       state.items = merged.slice(0, JOURNAL_MAX_EVENTS);
       this.#older = cut ? null : page.next_cursor; state.hasOlder = page.has_more && state.items.length < JOURNAL_MAX_EVENTS;
       state.trimmed = cut || page.has_more && state.items.length >= JOURNAL_MAX_EVENTS; state.error = null;
+      if (state.streamMode === "snapshot_only") { state.receipt = page.read_receipt; state.loadedAt = this.#clock.now(); }
     } catch (error) {
       if (this.#settled(error, generation)) return;
-      if (error instanceof HumanApiError && error.status === 403) { this.#stopStream("off"); state.phase = "forbidden"; state.items = []; state.hasOlder = false; this.#older = null; }
-      else state.error = sourceError(error);
+      if (error instanceof HumanApiError && error.status === 403) { this.#withdraw(); state.phase = "forbidden"; }
+      else {
+        if (state.streamMode === "snapshot_only") { this.#withdraw(false); state.phase = "error"; }
+        state.error = sourceError(error);
+      }
     } finally {
       if (generation === this.#generation) { state.busy = false; this.#publish(); }
     }
@@ -232,13 +255,17 @@ export class JournalStore {
   setResource(resource: ResourceRef | null): Promise<void> {
     if (this.#state.closed) return Promise.resolve();
     this.#state.resource = resource; this.#state.items = []; this.#state.hasOlder = false; this.#state.loadedAt = null; this.#older = null;
+    if (this.#state.streamMode === "snapshot_only") { this.#state.receipt = null; this.#state.received = 0; }
     return this.reload();
   }
   /** The tab is hidden: the stream is closed and nothing is read until `resume`. */
   suspend() {
     if (this.#state.closed) return;
     this.#suspended = true;
-    if (this.#state.phase === "ready") { this.#stopStream("suspended"); this.#publish(); }
+    if (this.#state.phase === "ready") {
+      this.#stopStream(this.#state.streamMode === "snapshot_only" ? "unavailable" : "suspended", this.#state.streamMode === "snapshot_only" ? SNAPSHOT_DIRECT : "");
+      this.#publish();
+    }
   }
   /**
    * Back in the foreground: events may have been missed, so the window restarts from the newest. Called on
@@ -250,12 +277,17 @@ export class JournalStore {
     if (!this.#clock.visible()) { this.#suspended = true; return; }
     this.#suspended = false;
     if (state.phase !== "ready") return;
-    if (this.#reads.readBudgetStopped) { this.#stopStream("refused", "Budget durable de lecture atteint : le direct est arrêté."); this.#publish(); }
+    if (this.#reads.readBudgetStopped) {
+      this.#stopStream(state.streamMode === "snapshot_only" ? "unavailable" : "refused", state.streamMode === "snapshot_only" ? `${SNAPSHOT_DIRECT} Budget durable de lecture atteint.` : "Budget durable de lecture atteint : le direct est arrêté.");
+      this.#publish();
+    }
     else void this.reload();
   }
   close() {
     if (this.#state.closed) return;
+    const snapshot = this.#state.streamMode === "snapshot_only";
     this.#generation++; this.#abort.abort(); this.#stopStream("off"); this.#older = null;
     this.#state = { ...initial(this.#state.resource), closed: true };
+    if (snapshot) this.#onChange();
   }
 }

@@ -188,24 +188,30 @@ export function humanUrl(endpoint: "resources" | "events" | "export" | "stream",
   return `/api/v1/human/${endpoint}?${query}`;
 }
 
-/** `GET /human/events/recent`: newest authorized events first. `live_cursor` exists on the first page only. */
+/** Newest-first read. The explicit owned metadata profile has no live cursor. */
 export interface HumanRecentEventPage {
   version: 1; context_id: string; authorization_version: string; view: HumanView; order: "newest_first"; coverage: "authorized_selection";
   items: HumanEvent[]; has_more: boolean; next_cursor: string | null; live_cursor: string | null; read_receipt: ReadReceipt;
+  /** Current owned metadata coverage, never a permission or a generic server capability. */
+  stream_mode?: "snapshot_only";
 }
 export function parseHumanRecentEventPage(value: unknown, first: boolean): HumanRecentEventPage {
-  closed(value, ["version", "context_id", "authorization_version", "view", "order", "coverage", "items", "has_more", "next_cursor", "live_cursor", "read_receipt"]);
+  const snapshot = object(value) && Object.hasOwn(value, "stream_mode");
+  closed(value, ["version", "context_id", "authorization_version", "view", "order", "coverage", "items", "has_more", "next_cursor", "live_cursor", "read_receipt", ...(snapshot ? ["stream_mode"] : [])]);
+  requireContract(!snapshot || value.stream_mode === "snapshot_only");
   requireContract(value.version === 1 && opaque(value.context_id) && authorizationVersion(value.authorization_version) &&
     ["metadata", "content"].includes(String(value.view)) && value.order === "newest_first" && value.coverage === "authorized_selection" &&
     Array.isArray(value.items) && value.items.length <= HUMAN_MAX_PAGE_LIMIT && typeof value.has_more === "boolean" &&
     (value.next_cursor === null || opaque(value.next_cursor)) && value.has_more === (value.next_cursor !== null) &&
-    (first ? opaque(value.live_cursor) && value.live_cursor !== value.next_cursor : value.live_cursor === null));
+    (snapshot ? value.view === "metadata" && value.live_cursor === null :
+      first ? opaque(value.live_cursor) && value.live_cursor !== value.next_cursor : value.live_cursor === null));
   closed(value.read_receipt, ["request_id", "audit_event_id", "received_at"]);
   requireContract(uuid(value.read_receipt.request_id) && uuid(value.read_receipt.audit_event_id) && timestamp(value.read_receipt.received_at));
   const view = value.view as HumanView;
   const items = value.items.map((item) => parseHumanEvent(item, view));
   requireContract(new Set(items.map((item) => item.metadata.id)).size === items.length);
   return { version: 1, context_id: value.context_id, authorization_version: value.authorization_version, view, order: "newest_first", coverage: "authorized_selection",
+    ...(snapshot ? { stream_mode: "snapshot_only" as const } : {}),
     items, has_more: value.has_more, next_cursor: value.next_cursor as string | null, live_cursor: value.live_cursor as string | null,
     read_receipt: { request_id: value.read_receipt.request_id, audit_event_id: value.read_receipt.audit_event_id, received_at: value.read_receipt.received_at } };
 }
