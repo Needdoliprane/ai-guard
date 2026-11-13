@@ -1,5 +1,7 @@
 # Adopt existing human sources
 
+[Français](README.fr.md) · [Setup index](../README.md) · [Named local access](../identity/README.md) · [SSO](../sso/README.md)
+
 This operator workflow adopts an existing local tenant union in place: each
 tenant Store must already be format13 and the optional authentication audit
 must already be Auth4. It prepares private files, runs the existing13→14/4→5
@@ -118,3 +120,15 @@ owned HTTP profile is described in [owned sources](../identity/OWNED_SOURCES.md)
 It retains `contexts_complete=false`; available identity/resources reads and
 their durable receipts do not qualify the remaining handlers, remote brokers,
 cloud, restart after physical power loss or production readiness.
+
+## Validation scope
+
+The [initial W0 implementation record](../../engineering/evidence/2026-11-13/human-owned-startup/README.md)
+describes its older source and scope, which lacked this operator producer. The
+[earlier source-validation evidence](../../engineering/evidence/2026-11-13/human-source-validation/README.md)
+also retains its identified sources and limited results. Neither report
+qualifies this bootstrap or transfers its results to the current checkout.
+The 55 bootstrap tests and the 76 W0 functional tests remain **NOT_RUN** for
+this source until dated execution evidence records otherwise; a W0 preflight
+does not execute those functional tests. This guide introduces no new result
+for an IdP, network filtering, container runtime, cloud or production gate.

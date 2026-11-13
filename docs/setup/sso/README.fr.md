@@ -1,6 +1,6 @@
 # Configurer et utiliser le SSO ai-guard
 
-Avec le [profil explicite de sources humaines possédées](../identity/OWNED_SOURCES.fr.md), configuration OIDC choisie et AuthLedger5 sont retenus, tandis que bearers/handlers OIDC modernes restent fermés. Le profil n'annonce jamais désactivé un OIDC sélectionné. La procédure SSO legacy ci-dessous ne qualifie ni n'active cette voie moderne.
+Avec le [profil explicite de sources humaines possédées](../identity/OWNED_SOURCES.fr.md), configuration OIDC choisie et AuthLedger5 sont retenus, tandis que bearers/handlers OIDC modernes restent fermés. Pour adopter une installation existante, le [parcours de sources hors ligne](../human-sources-maintenance/README.fr.md) exige Store13/Auth4, configurationV2, son plan fini exact de capacité des tenants et son bundle public d'AC explicite avant13→14/4→5. Il publie l'activation privée utilisée par `gateway --human-sources-activation` ; il ne crée ni personne ni credential et n'active aucun handler SSO. Le profil n'annonce jamais désactivé un OIDC sélectionné. La procédure SSO legacy ci-dessous ne qualifie ni n'active cette voie moderne.
 
 [English](README.md) · [Index d’installation](../README.fr.md) · [Fournisseur Keycloak](../keycloak/README.fr.md) · [Accès local nominatif](../identity/README.fr.md)
 

@@ -1,6 +1,6 @@
 # Accès local nominatif
 
-Le [profil sources possédées](OWNED_SOURCES.fr.md) facultatif adopte identité/ressources locales sur Stores14/15 existants avec ownership complet retenu. Ses autres routes modernes sont explicitement fermées ; le bootstrap opérateur hors ligne reste à livrer et la validation logicielle de ce changement est NOT_RUN. Les procédures legacy ci-dessous gardent leurs propres limites de format/qualification.
+Le [profil sources possédées](OWNED_SOURCES.fr.md) facultatif adopte identité/ressources locales sur Stores14/15 existants avec ownership complet retenu. Le [parcours d'adoption hors ligne](../human-sources-maintenance/README.fr.md) prépare désormais une union Store13/Auth4 existante, applique13→14/4→5 et publie `gateway --human-sources-activation`. Il ne crée ni personne ni credential : provisionner comptes nominatifs et grants avec les procédures legacy ci-dessous avant conversion, dans leurs formats pris en charge. Les autres handlers modernes, dont OIDC, restent fermés. Exécution bootstrap et validation fonctionnelle W0 restent NOT_RUN pour cette source ; les procédures legacy gardent leurs propres limites de format/qualification.
 
 [English](README.md) · [Configuration](../README.fr.md) · [Poste local](../local/README.fr.md) · [OIDC](../keycloak/README.fr.md)
 

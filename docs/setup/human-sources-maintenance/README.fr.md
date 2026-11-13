@@ -1,5 +1,7 @@
 # Adopter les sources humaines existantes
 
+[English](README.md) · [Index d'installation](../README.fr.md) · [Accès local nominatif](../identity/README.fr.md) · [SSO](../sso/README.fr.md)
+
 Ce parcours opérateur adopte sur place une union locale existante : chaque
 Store client doit déjà être au format13 et le ledger d'authentification
 facultatif en Auth4. Il prépare les fichiers privés, appelle le coordinateur
@@ -123,3 +125,16 @@ restent techniques. Le profil HTTP owned disponible est décrit dans
 `contexts_complete=false` ; lectures identity/resources et reçus durables ne
 qualifient ni les autres handlers, ni brokers distants, cloud, reprise après
 coupure physique ou préparation à la production.
+
+## Périmètre de validation
+
+Le [registre initial d'implémentation W0](../../engineering/evidence/2026-11-13/human-owned-startup/README.fr.md)
+décrit ses sources et son ancien périmètre, sans ce producteur opérateur. Les
+[preuves antérieures de validation des sources](../../engineering/evidence/2026-11-13/human-source-validation/README.fr.md)
+conservent aussi leurs sources identifiées et résultats limités. Aucun de ces
+rapports ne qualifie ce bootstrap ni ne transfère ses résultats au checkout
+courant. Les 55 tests bootstrap et les 76 tests fonctionnels W0 restent
+**NOT_RUN** pour cette source jusqu'à preuve d'exécution datée contraire ; un
+préflight W0 n'exécute pas ces tests fonctionnels. Ce guide n'apporte aucun
+nouveau résultat pour un IdP, filtrage réseau, moteur de conteneurs, cloud ou
+gate de production.

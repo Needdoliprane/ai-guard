@@ -1,6 +1,6 @@
 # Named local access
 
-The optional [owned source profile](OWNED_SOURCES.md) adopts local identity/resources on existing Store14/15 sources with complete retained ownership. Its other modern routes are explicitly closed; the offline operator bootstrap remains a delivery gap and software validation is NOT_RUN for this change. The legacy procedures below retain their own format and qualification limits.
+The optional [owned source profile](OWNED_SOURCES.md) adopts local identity/resources on existing Store14/15 sources with complete retained ownership. The [offline adoption workflow](../human-sources-maintenance/README.md) now prepares an existing Store13/Auth4 union, applies13→14/4→5 and publishes `gateway --human-sources-activation`. It creates no person or credential: provision named accounts and grants through the legacy procedures below before conversion, within their supported formats. Other modern handlers, including OIDC, remain closed. Bootstrap execution and W0 functional validation remain NOT_RUN for this source; legacy procedures retain their own format and qualification limits.
 
 [Français](README.fr.md) · [Setup index](../README.md) · [Local workstation](../local/README.md) · [OIDC](../keycloak/README.md)
 

@@ -1,6 +1,6 @@
 # Configure and use ai-guard SSO
 
-With the explicit [owned human source profile](../identity/OWNED_SOURCES.md), selected OIDC configuration and AuthLedger5 are retained, while modern OIDC bearers and handlers remain closed. The profile never reports selected OIDC as disabled. The legacy SSO procedure below does not qualify or activate that modern path.
+With the explicit [owned human source profile](../identity/OWNED_SOURCES.md), selected OIDC configuration and AuthLedger5 are retained, while modern OIDC bearers and handlers remain closed. To adopt an existing installation, the [offline source workflow](../human-sources-maintenance/README.md) requires Store13/Auth4, configurationV2, its exact finite tenant capacity plan and explicit public CA bundle before13→14/4→5. It publishes the private activation used by `gateway --human-sources-activation`; it creates no person or credential and enables no SSO handler. The profile never reports selected OIDC as disabled. The legacy SSO procedure below does not qualify or activate that modern path.
 
 [Français](README.fr.md) · [Setup index](../README.md) · [Keycloak provider](../keycloak/README.md) · [Named local access](../identity/README.md)
 

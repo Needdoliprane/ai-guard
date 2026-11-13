@@ -2,9 +2,17 @@
 
 This explicit gateway mode reopens an existing complete owned source union. The default remains `legacy`. Software validation of this change is **NOT_RUN** until the frozen source is admitted to QA; it does not qualify production, a container runtime or OIDC.
 
-The operator must already hold a real private closure manifest, matching technical credential envelope, the existing tenant registry, Store14/15 databases and, when selected, AuthLedger5 plus OIDC configurationV2 and its public trust bundle. This change does not supply the offline producer of that manifest/envelope. The existing public single-database migrations stop at Store13/Auth4. Do not hand-author receipts, initialize replacement databases, increase their accepted version or use test fixtures as an installation procedure. Provision named people and grants before conversion using the supported offline identity procedure; the complete owned bootstrap remains an explicit delivery gap.
+Use the [offline source adoption procedure](../human-sources-maintenance/README.md) to prepare the private metadata/envelope, migrate the union and publish the real closure manifest and gateway activation. Its five commands are `human-sources prepare`, `resume-prepare`, `apply`, `resume` and `check`. Adoption requires an existing tenant registry and Store13 databases, plus Auth4, OIDC configurationV2 and its explicit public trust bundle when OIDC is selected. The coordinator converts the complete union from Store13 to14 and Auth4 to5; ordinary single-database migrations still stop at Store13/Auth4. Provision named people, credentials and grants before conversion using the [legacy identity procedure](README.md); source adoption creates none of them. Do not hand-author receipts, initialize replacement databases, increase accepted versions or use test fixtures as an installation procedure.
 
-For an installation whose retained manifest/envelope were produced through the real owned migration protocol, add these options to its existing containerized gateway launch, retaining its actual policy, data mounts, event limit and other options:
+After `apply` or `resume` publishes the complete activation, use it for normal startup in the existing containerized gateway launch:
+
+```text
+gateway --human-sources-activation /control/human-preparation/activation.json
+```
+
+Retain the installation's actual HTTP binding, server TLS and decision settings. Do not combine activation with direct source, registry, credential, revision, capacity, initialization or OIDC options. The gateway reconstructs and replays the real source union on every startup; the activation files alone do not prove source readiness. Stop all consumers before preparation or migration: `--confirm-control-stopped` is a manual attestation, without legacy-process fencing. Preserve sources, private preparation, journal, backups and matching configuration in place after interruption, then use the matching resume step in the adoption guide. `check` validates files/metadata only, without checking SQLite, authentication or readiness.
+
+The direct options below remain available for an installation whose retained manifest/envelope were produced through the real owned migration protocol. Use them as an alternative to activation, retaining its actual policy, data mounts, event limit and other options:
 
 ```text
 gateway --human-source-mode owned_sources
@@ -35,4 +43,4 @@ Runtime compares the own source's real identity authorization revision and workl
 
 The server reserves a cleanup supervisor before fallible builders/binds. Shutdown and Drop close human/context admission, stop HTTP, observe real HTTP joins, and wait for accepted/queued blocking usages and epochs. A drain error reports failure, including any primary bind/serve error. An unestablished drain is never success; real remaining usage/epoch handles retain their owner and file descriptors. Runtime/process termination and host failure remain outside this in-process guarantee.
 
-Local browser `HumanApiClient.close()` clears the token, aborts requests and discards late responses. It does not revoke the durable credential. Modern credential mutation, fresh discovery of memberships from other sources, SSO sessions/revocation and the offline operator bootstrap remain mandatory open work. Stop consumers and retain configuration, databases, backups and evidence before operator reconciliation; never delete history to recover a green startup.
+Local browser `HumanApiClient.close()` clears the token, aborts requests and discards late responses. It does not revoke the durable credential. Modern credential mutation, fresh discovery of memberships from other sources and SSO sessions/revocation remain mandatory open work. The adoption workflow has its own unqualified execution status and [historical evidence boundaries](../human-sources-maintenance/README.md#validation-scope). Stop consumers and retain configuration, databases, backups and evidence before operator reconciliation; never delete history to recover a green startup.
