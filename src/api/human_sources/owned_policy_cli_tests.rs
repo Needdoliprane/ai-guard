@@ -48,11 +48,19 @@ impl Server {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
-        if let Some(task) = self.task.take() {
-            let joined = tokio::time::timeout(Duration::from_secs(30), task)
-                .await
-                .context("CLI acceptance server drain watchdog")?;
-            joined.context("CLI acceptance server task failed")??;
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(Duration::from_secs(30), &mut task).await {
+                Ok(joined) => joined.context("CLI acceptance server task failed")??,
+                Err(_) => {
+                    task.abort();
+                    if tokio::time::timeout(Duration::from_secs(30), &mut task).await.is_err() {
+                        // Keep the unfinished owner reachable by Drop; never
+                        // turn a cleanup timeout into successful acceptance.
+                        self.task = Some(task);
+                    }
+                    anyhow::bail!("CLI acceptance server drain watchdog elapsed");
+                }
+            }
         }
         Ok(())
     }
@@ -246,7 +254,7 @@ async fn actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_
                     && request.uri().path() == REVOKE);
                 if policy_post { posts.fetch_add(1, Ordering::AcqRel); }
                 let response = next.run(request).await;
-                if replace && response.status().is_success()
+                if replace && response.status() == axum::http::StatusCode::OK
                     && drop_first_receipt.swap(false, Ordering::AcqRel)
                 {
                     // Fault only the delivery AFTER the real gateway produced
@@ -376,6 +384,8 @@ async fn actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_
         ensure!(receipt["operation_id"] == id.to_string() && receipt["action"] == expected_action
             && receipt["event_seq"] == sequence && receipt["event_hash"] == hash
             && receipt["after_epoch"] == expected_epoch, "durable receipt correlation mismatch");
+        // This independent fixture knows the original policy. It does not add
+        // a digest-value expectation to the revoke SDK or CLI request.
         ensure!(receipt["policy_digest"] == hex::encode(policy.digest()), "policy receipt digest changed");
     }
     println!("A1_ACTUAL_CLI_LOST_RECEIPT_REPLAY_REVOKE_SQLITE_CORRELATED");
