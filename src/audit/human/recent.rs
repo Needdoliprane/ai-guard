@@ -45,14 +45,7 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
-        anyhow::ensure!(
-            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit)
-                && upper.is_none_or(|bound| bound >= 0)
-                && filter.event_id.is_none()
-                && !filter.export
-                && !filter.stream,
-            "invalid recent human event page"
-        );
+        Self::validate_human_events_recent(filter, upper, limit)?;
         let mut db = self
             .db
             .lock()
@@ -63,12 +56,44 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
-        identity::require_human_read(&tx)?;
-        let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
+        let page = self.human_events_recent_checked(&tx, scope, filter, upper, limit, transient)?;
+        self.commit_checked(tx)?;
+        Ok(page)
+    }
+
+    pub(in crate::audit) fn validate_human_events_recent(
+        filter: &HumanEventFilterV1,
+        upper: Option<i64>,
+        limit: usize,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit)
+                && upper.is_none_or(|bound| bound >= 0)
+                && filter.event_id.is_none()
+                && !filter.export
+                && !filter.stream,
+            "invalid recent human event page"
+        );
+        Ok(())
+    }
+
+    /// The caller validates the page and owns the checked entrance and commit.
+    /// Both legacy and modern reads use this one selector and receipt writer.
+    pub(in crate::audit) fn human_events_recent_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanEventItemV1>> {
+        identity::require_human_read(tx)?;
+        let current = identity::revalidate_scope_checked(tx, scope, &self.tenant_id)?;
         require_view(&current, filter)?;
         if let Some(resource) = &filter.resource {
             let grant: ResourceGrantV1 = identity::json_row(
-                &tx,
+                tx,
                 "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
                 &resource.key()?,
             )?
@@ -82,7 +107,7 @@ impl Store {
                 return Err(IdentityFailureV1::PermissionDenied.into());
             }
         }
-        let head = audit_head(&tx)?.0;
+        let head = audit_head(tx)?.0;
         let upper = upper.unwrap_or(head);
         anyhow::ensure!(upper <= head, "invalid recent human snapshot bound");
         let mut predicates = vec![allowed(&current, ResourcePermissionV1::Metadata)];
@@ -186,14 +211,13 @@ impl Store {
             }
         }
         let receipt = self.record_human_read_checked(
-            &tx,
+            tx,
             current.principal(),
             Some(&current),
             "events",
             items.len(),
             transient,
         )?;
-        self.commit_checked(tx)?;
         Ok(HumanStorePageV1 {
             items,
             after_resource: String::new(),
