@@ -2,7 +2,8 @@
 .human-toolbar { position: fixed; inset: var(--header-height) 0 auto; height: var(--dock-height); z-index: 35; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 16px var(--gutter); background: var(--nav); color: var(--nav-text); border-bottom: 1px solid var(--nav-line); }
 .human-toolbar .button { background: transparent; border-color: var(--nav-outline); color: var(--nav-text); }
 .human-toolbar .button:hover:enabled { background: var(--nav-hover); }
-.human-toolbar .button[aria-current] { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.human-toolbar .button[aria-current],
+.human-toolbar .button[aria-current]:enabled:not([aria-disabled="true"]):is(:hover, :focus-visible) { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .human-toolbar :focus-visible { outline-color: #fff; }
 .human-toolbar .button[aria-disabled="true"], .human-resume .button[aria-disabled="true"] { cursor: progress; opacity: .45; }
 .human-toolbar .button[aria-disabled="true"]:hover { background: transparent; }

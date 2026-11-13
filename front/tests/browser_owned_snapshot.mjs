@@ -211,10 +211,64 @@ async function refresh(status) {
   must(await page.evaluate(() => document.activeElement?.getAttribute("data-focus-key")) === "human-refresh", "REFRESH_FOCUS_LOST");
   return body;
 }
+function opaqueRgb(value) {
+  const match = /^(rgb|rgba)\(([^)]+)\)$/.exec(value);
+  must(match !== null, "CURRENT_NAVIGATION_COLOR_SYNTAX_UNSUPPORTED");
+  const parts = match[2].split(",").map((part) => part.trim());
+  must(parts.length === (match[1] === "rgba" ? 4 : 3) && parts.every((part) => /^(?:\d+(?:\.\d+)?|\.\d+)$/.test(part)), "CURRENT_NAVIGATION_COLOR_CHANNELS_UNSUPPORTED");
+  const channels = parts.map(Number);
+  must(channels.every(Number.isFinite) && channels.slice(0, 3).every((channel) => channel >= 0 && channel <= 255), "CURRENT_NAVIGATION_COLOR_RANGE");
+  must(channels.length === 3 || channels[3] === 1, "CURRENT_NAVIGATION_ALPHA_UNSUPPORTED");
+  return channels.slice(0, 3);
+}
+function relativeLuminance(channels) {
+  const linear = channels.map((channel) => {
+    const srgb = channel / 255;
+    return srgb <= 0.04045 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+}
+async function currentNavigationContrast(width, theme) {
+  const current = page.locator('.human-nav .button[aria-current="page"]');
+  must(await current.count() === 1 && await current.isEnabled() && await current.getAttribute("aria-disabled") !== "true", "CURRENT_NAVIGATION_MUST_BE_ENABLED");
+  await page.mouse.move(width - 1, 999);
+  await current.evaluate((element) => { if (document.activeElement === element) element.blur(); });
+  for (const state of ["normal", "hover"]) {
+    if (state === "hover") await current.hover({ timeout: remaining() });
+    const styles = await bounded(current.evaluate(async (element) => {
+      const targets = [];
+      for (let target = element; target; target = target.parentElement) targets.push(target);
+      const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+      await frame(); getComputedStyle(element).backgroundColor; await frame();
+      // Wait for real CSS transitions, including inherited ancestor effects.
+      // An unsupported or never-settling animation is a refusal, not a sample.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (!targets.every((target) => typeof target.getAnimations === "function")) throw new Error("CURRENT_NAVIGATION_ANIMATION_API_UNSUPPORTED");
+        const animations = targets.flatMap((target) => target.getAnimations());
+        if (animations.some((animation) => animation.playState === "paused")) throw new Error("CURRENT_NAVIGATION_PAUSED_ANIMATION_UNSUPPORTED");
+        const active = animations.filter((animation) => animation.pending || animation.playState === "running");
+        if (active.length) { await Promise.allSettled(active.map((animation) => animation.finished)); await frame(); continue; }
+        const computed = getComputedStyle(element);
+        return { color: computed.color, background: computed.backgroundColor, hovered: element.matches(":hover"),
+          enabled: element.matches(":enabled") && element.getAttribute("aria-disabled") !== "true",
+          opacities: targets.map((target) => getComputedStyle(target).opacity) };
+      }
+      throw new Error("CURRENT_NAVIGATION_TRANSITIONS_NOT_SETTLED");
+    }), remaining(10000), "CURRENT_NAVIGATION_TRANSITION_DEADLINE");
+    must(styles.enabled && styles.hovered === (state === "hover"), "CURRENT_NAVIGATION_STATE_NOT_ESTABLISHED");
+    must(styles.opacities.every((opacity) => Number.isFinite(Number(opacity)) && Number(opacity) === 1), "CURRENT_NAVIGATION_OPACITY_UNSUPPORTED");
+    const foreground = relativeLuminance(opaqueRgb(styles.color)), background = relativeLuminance(opaqueRgb(styles.background));
+    const ratio = (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+    observed.current_navigation_contrast ??= [];
+    observed.current_navigation_contrast.push({ width, theme, state, ...styles, ratio, minimum: 4.5 });
+    must(Number.isFinite(ratio) && ratio >= 4.5, "CURRENT_NAVIGATION_TEXT_CONTRAST_BELOW_4_5");
+  }
+}
 async function screenshot(width, theme) {
   await page.setViewportSize({ width, height: 1000 });
   if (await page.locator("html").getAttribute("data-theme") !== theme) await button(theme === "dark" ? "Activer le thème sombre" : "Activer le thème clair").click();
   await page.evaluate(() => window.scrollTo(0, 0)); await settle(); await noSecret();
+  await currentNavigationContrast(width, theme);
   const geometry = await page.evaluate(() => {
     const dock = document.querySelector(".human-toolbar").getBoundingClientRect();
     const row = document.querySelector(".human-nav"); const nav = row.getBoundingClientRect();
