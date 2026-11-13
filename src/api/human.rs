@@ -27,6 +27,9 @@ struct BrokerPublicationPause {
     resume: std::sync::mpsc::Receiver<()>,
 }
 impl HumanAccessState {
+    pub(super) fn close_contexts(&self) {
+        self.contexts.close();
+    }
     pub(super) fn for_tenants<'a>(
         tenants: impl IntoIterator<Item = &'a str>,
     ) -> anyhow::Result<Self> {

@@ -12,7 +12,7 @@ fn exact_union_is_required_before_any_new_incarnation() {
             .query_row(
                 "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
                 [],
-                |row| row.get::<_, u64>(0),
+                |row| row.get::<_, i64>(0),
             )
             .unwrap()
     };
@@ -29,7 +29,7 @@ fn later_source_busy_cannot_append_an_incarnation_in_first_source() {
     let first = request.configuration.sources[0].storage_binding.path();
     let second = request.configuration.sources[1].storage_binding.path();
     let first_db = rusqlite::Connection::open(first).unwrap();
-    let before: u64 = first_db
+    let before: i64 = first_db
         .query_row(
             "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
             [],
@@ -39,7 +39,7 @@ fn later_source_busy_cannot_append_an_incarnation_in_first_source() {
     let busy = rusqlite::Connection::open(second).unwrap();
     busy.execute_batch("BEGIN IMMEDIATE").unwrap();
     assert!(HumanOwnedStartupBundle::open(request).is_err());
-    let after: u64 = first_db
+    let after: i64 = first_db
         .query_row(
             "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
             [],
@@ -64,7 +64,7 @@ fn configured_auth_capacity_mismatch_refuses_before_first_incarnation() {
         .storage_binding
         .path();
     let db = rusqlite::Connection::open(first).unwrap();
-    let before: u64 = db
+    let before: i64 = db
         .query_row(
             "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
             [],
@@ -85,7 +85,7 @@ fn configured_auth_capacity_mismatch_refuses_before_first_incarnation() {
         capacity_plan.unscoped.max_records += 1;
     }
     assert!(HumanOwnedStartupBundle::open(request).is_err());
-    let after: u64 = db
+    let after: i64 = db
         .query_row(
             "SELECT incarnation_revision FROM review_authority_meta WHERE singleton=1",
             [],
