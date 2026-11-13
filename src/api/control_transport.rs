@@ -12,6 +12,20 @@ const MAX_BODY: usize = 262_144;
 const UPLOAD_TOTAL: Duration = Duration::from_secs(5);
 const UPLOAD_IDLE: Duration = Duration::from_secs(2);
 
+/// Constructor is private to this transport. Neither a wire field nor a
+/// client header can put this marker into request extensions.
+#[derive(Clone)]
+pub(super) struct ReservedProtocol(());
+
+pub(super) fn owned_protocol_request(request: &Request) -> bool {
+    // Nested routers may strip their prefix. Only this gate can produce the
+    // marker, after checking the complete exact reserved target below.
+    request.method() == axum::http::Method::GET
+        && request.uri().query().is_none()
+        && request.extensions().get::<ReservedProtocol>().is_some()
+        && request.extensions().get::<Arc<auth::owned_control::OwnedProtocol>>().is_some()
+}
+
 pub(super) struct ControlCapacity {
     runner: Arc<Semaphore>,
     presence: Arc<Semaphore>,
@@ -93,7 +107,9 @@ async fn read_body(body: Body) -> Result<Vec<u8>, Response> {
 }
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
-    if state.owned_human.is_some() {
+    if state.owned_human.is_some()
+        && !crate::control_transport::owned_protocol_route(request.method(), request.uri().path())
+    {
         let method = if request.method() == "HEAD" {
             &axum::http::Method::GET
         } else {
@@ -144,11 +160,22 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
         );
     };
     let (mut parts, body) = request.into_parts();
+    let mut owned_identity = None;
     let semaphore = match identity {
         ControlRouteIdentity::Runner => {
-            match RunnerIdentity::from_request_parts(&mut parts, &state).await {
-                Ok(RunnerIdentity(tenant)) => tenant.control_capacity.runner.clone(),
-                Err(rejection) => return rejection.into_response(),
+            if state.owned_human.is_some() {
+                let identity = match auth::owned_control::authenticate(&state, &parts.headers).await {
+                    Ok(identity) => identity,
+                    Err(rejection) => return rejection.into_response(),
+                };
+                let capacity = identity.tenant().control_capacity.runner.clone();
+                owned_identity = Some(identity);
+                capacity
+            } else {
+                match RunnerIdentity::from_request_parts(&mut parts, &state).await {
+                    Ok(RunnerIdentity(tenant)) => tenant.control_capacity.runner.clone(),
+                    Err(rejection) => return rejection.into_response(),
+                }
             }
         }
         ControlRouteIdentity::BrokerPresence => {
@@ -174,7 +201,7 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
             }
         }
     };
-    let _operation = match semaphore.try_acquire_owned() {
+    let operation = match semaphore.try_acquire_owned() {
         Ok(permit) => permit,
         Err(_) => {
             return refused(
@@ -183,6 +210,13 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
                 "This tenant's control operation capacity is occupied.",
             );
         }
+    };
+    let _operation = if let Some(identity) = owned_identity {
+        parts.extensions.insert(ReservedProtocol(()));
+        parts.extensions.insert(Arc::new(identity.accept(operation)));
+        None
+    } else {
+        Some(operation)
     };
     // Header/framing errors are screened after the required identity, without
     // letting a malformed declaration or over-limit stream reach a handler.
