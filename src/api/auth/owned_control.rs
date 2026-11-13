@@ -333,34 +333,62 @@ pub(in crate::api) mod test_hook {
     struct Pause {
         reached: mpsc::Sender<()>,
         release: mpsc::Receiver<()>,
+        acknowledged: mpsc::Sender<()>,
+    }
+    impl Pause {
+        fn wait_for_release(self, timeout: std::time::Duration) -> ApiResult<()> {
+            self.reached
+                .send(())
+                .map_err(|_| human_sources::unavailable())?;
+            self.release
+                .recv_timeout(timeout)
+                .map_err(|_| human_sources::unavailable())?;
+            // This witness is emitted by the actual job only after a
+            // successful receive. Cleanup-only callers may drop its receiver.
+            let _ = self.acknowledged.send(());
+            Ok(())
+        }
     }
     #[derive(Default)]
     pub(in crate::api) struct Hook {
         next: Mutex<Option<Pause>>,
     }
-    pub(crate) struct Release(Option<mpsc::Sender<()>>);
+    pub(crate) struct Release {
+        sender: Option<mpsc::Sender<()>>,
+        acknowledged: Option<mpsc::Receiver<()>>,
+    }
     impl Release {
         pub(crate) fn release(self) {
             drop(self);
         }
+        pub(crate) fn release_with_ack(mut self) -> Result<mpsc::Receiver<()>, mpsc::SendError<()>> {
+            self.sender.take().unwrap().send(())?;
+            Ok(self.acknowledged.take().unwrap())
+        }
     }
     impl Drop for Release {
         fn drop(&mut self) {
-            if let Some(sender) = self.0.take() {
+            if let Some(sender) = self.sender.take() {
                 let _ = sender.send(());
             }
         }
     }
-    pub(crate) fn install(state: &GatewayState) -> (mpsc::Receiver<()>, Release) {
+    fn rendezvous() -> (Pause, mpsc::Receiver<()>, Release) {
         let (reached, observer) = mpsc::channel();
         let (release, waiter) = mpsc::channel();
+        let (acknowledged, ack) = mpsc::channel();
+        (
+            Pause { reached, release: waiter, acknowledged },
+            observer,
+            Release { sender: Some(release), acknowledged: Some(ack) },
+        )
+    }
+    pub(crate) fn install(state: &GatewayState) -> (mpsc::Receiver<()>, Release) {
+        let (pause, observer, release) = rendezvous();
         let mut next = state.owned_control_hook.next.lock().unwrap();
         assert!(next.is_none(), "owned diagnostic hook already installed");
-        *next = Some(Pause {
-            reached,
-            release: waiter,
-        });
-        (observer, Release(Some(release)))
+        *next = Some(pause);
+        (observer, release)
     }
     pub(super) fn pause(state: &GatewayState) -> ApiResult<()> {
         let next = state
@@ -370,13 +398,35 @@ pub(in crate::api) mod test_hook {
             .map_err(|_| human_sources::unavailable())?
             .take();
         if let Some(next) = next {
-            next.reached
-                .send(())
-                .map_err(|_| human_sources::unavailable())?;
-            next.release
-                .recv_timeout(std::time::Duration::from_secs(15))
-                .map_err(|_| human_sources::unavailable())?;
+            next.wait_for_release(std::time::Duration::from_secs(15))?;
         }
         Ok(())
+    }
+
+    #[test]
+    fn release_ack_requires_successful_waiter_receive() {
+        use mpsc::TryRecvError;
+
+        let (waiter, reached, release) = rendezvous();
+        let ack = release.release_with_ack().unwrap();
+        assert!(matches!(ack.try_recv(), Err(TryRecvError::Empty)));
+        waiter.wait_for_release(std::time::Duration::ZERO).unwrap();
+        assert!(reached.try_recv().is_ok());
+        assert!(ack.try_recv().is_ok());
+
+        let (waiter, _reached, release) = rendezvous();
+        let ack = release.release_with_ack().unwrap();
+        // A successful send alone proves nothing about the waiter's receive.
+        assert!(matches!(ack.try_recv(), Err(TryRecvError::Empty)));
+        drop(waiter);
+        assert!(matches!(ack.try_recv(), Err(TryRecvError::Disconnected)));
+
+        let (waiter, reached, release) = rendezvous();
+        // Zero is an injected helper-only timeout, without an elapsed-time
+        // oracle or changing the actual hook's fixed 15-second bound.
+        assert!(waiter.wait_for_release(std::time::Duration::ZERO).is_err());
+        assert!(reached.try_recv().is_ok());
+        assert!(matches!(release.acknowledged.as_ref().unwrap().try_recv(), Err(TryRecvError::Disconnected)));
+        assert!(release.release_with_ack().is_err());
     }
 }
