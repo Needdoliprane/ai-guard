@@ -311,8 +311,8 @@ async fn policy_scope_body_and_method_failures_keep_existing_boundaries() {
     let (_fixture,state) = policy_state(15);
     let original = policy_body(&state);
     let before = policy_snapshot(&state);
-    for token in ["synthetic-A-viewer","synthetic-unknown-control"] {
-        assert!(matches!(policy_call(&state,"POST",REPLACE,token,original.clone()).await.0,401|403|503));
+    for (token,status) in [("synthetic-A-viewer",403),("synthetic-unknown-control",401)] {
+        assert_eq!(policy_call(&state,"POST",REPLACE,token,original.clone()).await.0,status);
         assert_eq!(policy_snapshot(&state),before);
     }
     for scope in [None,Some(json!(null)),Some(json!({"tenant_id":"A"}))] {
@@ -330,6 +330,106 @@ async fn policy_scope_body_and_method_failures_keep_existing_boundaries() {
     let (status,body) = policy_call(&state,"POST",REPLACE,RUNNER,policy_body(&state)).await;
     assert_eq!(status,409);
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_migration_required");
+    policy_drain(&state).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn policy_role_format_and_declared_size_refuse_before_body_polling() {
+    use std::sync::atomic::AtomicUsize;
+    use tower::ServiceExt;
+    for (format,token,length,expected_status) in [
+        (15,"synthetic-A-viewer",None,403),
+        (15,"synthetic-unknown-control",None,401),
+        (14,RUNNER,None,409),
+        (15,RUNNER,Some("65537"),413),
+    ] {
+        let (_fixture,state) = policy_state(format);
+        let b = state.tenants.iter().position(|t|t.tenant_id=="B").unwrap();
+        let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let observed = polls.clone();
+        // An actual untrusted request stream witnesses ordering: polling it
+        // would return an IO error, rather than a fabricated HTTP response.
+        let body = axum::body::Body::from_stream(futures_util::stream::poll_fn(move |_| {
+            observed.fetch_add(1,Ordering::SeqCst);
+            std::task::Poll::Ready(Some(Err::<axum::body::Bytes,_>(std::io::Error::other("synthetic body must remain unpolled"))))
+        }));
+        let mut request = axum::http::Request::builder().method("POST").uri(REPLACE)
+            .header("authorization",format!("Bearer {token}"))
+            .header("content-type","application/json");
+        if let Some(length) = length { request = request.header("content-length",length); }
+        let request = request.body(body).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(120),gateway_router(state.clone()).oneshot(request)).await.unwrap().unwrap();
+        assert_eq!(response.status().as_u16(),expected_status);
+        assert_eq!(polls.load(Ordering::SeqCst),0,"rejected admission polled the request body");
+        assert!(neighbor.try_recv().is_err());
+        policy_drain(&state).await;
+    }
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn retained_read_gate_refuses_policy_write_until_the_same_guard_is_released() {
+    let (_fixture,state) = policy_state(15);
+    let owned = state.owned_human.as_ref().unwrap();
+    let a = state.tenants.iter().position(|t|t.tenant_id=="A").unwrap();
+    let b = state.tenants.iter().position(|t|t.tenant_id=="B").unwrap();
+    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let request = policy_body(&state);
+    let before = policy_snapshot(&state);
+    let retained = owned.owner.try_read_epoch().unwrap();
+    retained.validate_source(&owned.sources[a]).unwrap();
+    assert!(matches!(owned.owner.try_write_epoch(),Err(crate::human_authority::HumanAuthorityFailure::GateBusy)));
+    let (status,body) = policy_call(&state,"POST",REPLACE,RUNNER,request.clone()).await;
+    assert_eq!(status,503);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_busy");
+    assert_eq!(policy_snapshot(&state),before);
+    assert!(neighbor.try_recv().is_err());
+    // The retained guard, rather than an elapsed epoch deadline, is the gate
+    // witness. No stale-epoch validation after the HTTP wait is asserted.
+    assert!(matches!(owned.owner.try_write_epoch(),Err(crate::human_authority::HumanAuthorityFailure::GateBusy)));
+    drop(retained);
+    assert_eq!(policy_call(&state,"POST",REPLACE,RUNNER,request).await.0,200);
+    policy_drain(&state).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn binding_revoked_after_real_policy_commit_cannot_publish_a_receipt() {
+    use crate::control::review_binding::{ReviewBindingSnapshotV1,RevokeRunnerReviewBindingV1,ReviewBindingRevocationReasonV1};
+    use tower::ServiceExt;
+    let (_fixture,state) = policy_state(15);
+    let owned = state.owned_human.as_ref().unwrap();
+    let a = state.tenants.iter().position(|t|t.tenant_id=="A").unwrap();
+    let path = owned.sources[a].descriptor().storage_binding.path();
+    let db = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let original_id = crate::control::review_binding::tests::provision().binding.binding_id;
+    let snapshot: String = db.query_row("SELECT snapshot_json FROM runner_review_bindings WHERE binding_id=?1",[original_id],|r|r.get(0)).unwrap();
+    let binding: ReviewBindingSnapshotV1 = serde_json::from_str(&snapshot).unwrap();
+    let (reached,release) = crate::api::auth::owned_control::test_hook::install(&state);
+    let request = axum::http::Request::builder().method("POST").uri(REPLACE)
+        .header("authorization",format!("Bearer {RUNNER}")).header("content-type","application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&policy_body(&state)).unwrap())).unwrap();
+    let router = gateway_router(state.clone());
+    let observer = tokio::spawn(async move {router.oneshot(request).await});
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM egress_policy_operations",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    {
+        // Success here also proves that the true write epoch ended before
+        // the post-commit rendezvous; no epoch is held over this test wait.
+        let epoch = owned.owner.try_write_epoch().unwrap();
+        let result = state.tenants[a].store.revoke_review_binding(&epoch,&owned.sources[a],&RevokeRunnerReviewBindingV1 {
+            version:1,operation_id:uuid::Uuid::new_v4().to_string(),operator_delegation_id:uuid::Uuid::new_v4().to_string(),
+            binding_id:binding.binding.binding_id,expected_revision:binding.binding.revision,
+            expected_binding_digest:binding.binding_digest,reason:ReviewBindingRevocationReasonV1::OperatorRevoked,
+        }).unwrap();
+        assert!(!result.snapshot.binding.active);
+    }
+    release.release();
+    let response = tokio::time::timeout(Duration::from_secs(30),observer).await.unwrap().unwrap().unwrap();
+    assert_eq!(response.status().as_u16(),503);
+    let body = axum::body::to_bytes(response.into_body(),4096).await.unwrap();
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_unavailable");
+    assert_eq!(db.query_row("SELECT count(*) FROM egress_policy_operations",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    drop(db);
     policy_drain(&state).await;
 }
 
