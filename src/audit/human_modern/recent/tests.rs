@@ -107,7 +107,7 @@ impl Drop for AbortAudit<'_> {
 }
 
 #[test]
-fn modern_recent_real_audit_insert_abort_rolls_back_restores_713_then_recovers() {
+fn modern_recent_real_audit_insert_abort_rolls_back_restores_713_and_latches_unavailable() {
     let fixture = Fixture::new();
     let bundle = fixture.migrated();
     scoped(&fixture, &bundle, |store, access, scope| {
@@ -128,11 +128,14 @@ fn modern_recent_real_audit_insert_abort_rolls_back_restores_713_then_recovers()
         assert_eq!(usage(), before_usage);
         let restored: i64 = store.db.lock().unwrap().pragma_query_value(None, "busy_timeout", |row| row.get(0)).unwrap();
         assert_eq!(restored, 713);
+        assert!(!store.healthy(), "a real INSERT error retains the existing mandatory-audit latch");
         // Durable floor validation can independently advance; event/head/hash
         // and cached human usage above are the rollback oracle here.
         trigger.remove();
-        store.modern_human_events_recent(access, scope, &filter(), None, 1, &Redactor::new(vec![])).unwrap();
-        assert_eq!(snapshot(store).0, before.0 + 1);
+        assert!(store.modern_human_events_recent(access, scope, &filter(), None, 1, &Redactor::new(vec![])).is_err());
+        assert!(!store.healthy(), "removing fixture fault does not repair an unhealthy Store");
+        assert_eq!(snapshot(store), before);
+        assert_eq!(usage(), before_usage);
         let restored: i64 = store.db.lock().unwrap().pragma_query_value(None, "busy_timeout", |row| row.get(0)).unwrap();
         assert_eq!(restored, 713);
     });
