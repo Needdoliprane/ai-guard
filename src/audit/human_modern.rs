@@ -36,15 +36,35 @@ impl Store {
         release.recv().unwrap();
     }
     #[cfg(test)]
-    pub(crate) fn modern_test_abort_events_audit(
+    pub(crate) fn modern_test_limit_audit_pages(
         &self,
-    ) -> anyhow::Result<HumanEventsAuditAbortGuard<'_>> {
+    ) -> anyhow::Result<HumanAuditPageLimitGuard<'_>> {
         let db = self
             .db
             .try_lock()
             .map_err(|_| anyhow::anyhow!("fixture store busy"))?;
-        db.execute_batch("CREATE TEMP TRIGGER fixture_owned_events_audit_abort BEFORE INSERT ON main.events WHEN NEW.kind='control.identity.access' AND json_extract(NEW.payload,'$.data.action')='events' BEGIN SELECT RAISE(ABORT,'synthetic owned events audit insertion failure'); END;")?;
-        Ok(HumanEventsAuditAbortGuard { store: Some(self) })
+        let previous: i64 = db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+        let pages: i64 = db.pragma_query_value(None, "page_count", |row| row.get(0))?;
+        let limit = pages.checked_add(1).context("fixture page limit overflow")?;
+        anyhow::ensure!(previous > limit, "fixture page limit must reduce capacity");
+        let applied = (|| -> anyhow::Result<()> {
+            db.pragma_update(None, "max_page_count", limit)?;
+            let actual: i64 = db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+            anyhow::ensure!(actual == limit, "fixture page limit was not applied");
+            Ok(())
+        })();
+        if let Err(error) = applied {
+            db.pragma_update(None, "max_page_count", previous)?;
+            let restored: i64 =
+                db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+            anyhow::ensure!(restored == previous, "fixture page limit restoration failed");
+            return Err(error);
+        }
+        Ok(HumanAuditPageLimitGuard {
+            store: self,
+            previous,
+            active: true,
+        })
     }
     #[cfg(test)]
     pub(crate) fn modern_test_human_usage(&self) -> Value {
@@ -207,37 +227,42 @@ impl Store {
     }
 }
 
-/// Temporary SQLite fixture state. Never present in a production build.
+/// Logical SQLite page cap for private fixtures, absent from production builds.
 #[cfg(test)]
-pub(crate) struct HumanEventsAuditAbortGuard<'a> {
-    store: Option<&'a Store>,
+pub(crate) struct HumanAuditPageLimitGuard<'a> {
+    store: &'a Store,
+    previous: i64,
+    active: bool,
 }
 #[cfg(test)]
-impl HumanEventsAuditAbortGuard<'_> {
-    pub(crate) fn remove(mut self) -> anyhow::Result<()> {
-        let store = self
+impl HumanAuditPageLimitGuard<'_> {
+    fn restore_limit(&self) -> anyhow::Result<()> {
+        let db = self
             .store
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("fixture trigger removed"))?;
-        store
             .db
             .try_lock()
-            .map_err(|_| anyhow::anyhow!("fixture store busy"))?
-            .execute_batch("DROP TRIGGER temp.fixture_owned_events_audit_abort;")?;
-        self.store = None;
+            .map_err(|_| anyhow::anyhow!("fixture store busy"))?;
+        db.pragma_update(None, "max_page_count", self.previous)?;
+        let actual: i64 = db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+        anyhow::ensure!(
+            actual == self.previous,
+            "fixture page limit restoration failed"
+        );
+        Ok(())
+    }
+    pub(crate) fn restore(mut self) -> anyhow::Result<()> {
+        self.restore_limit()?;
+        self.active = false;
         Ok(())
     }
 }
 #[cfg(test)]
-impl Drop for HumanEventsAuditAbortGuard<'_> {
+impl Drop for HumanAuditPageLimitGuard<'_> {
     fn drop(&mut self) {
-        if let Some(store) = self.store.take() {
-            // Unwind cleanup never blocks behind a failed asynchronous test.
-            // In the normal path remove() above verifies exact removal.
-            if let Ok(db) = store.db.try_lock() {
-                let _ = db
-                    .execute_batch("DROP TRIGGER IF EXISTS temp.fixture_owned_events_audit_abort;");
-            }
+        if self.active {
+            // Best-effort unwind cleanup never waits behind a failed request.
+            // The normal path calls restore() and verifies the prior limit.
+            let _ = self.restore_limit();
         }
     }
 }
