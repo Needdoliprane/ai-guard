@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 13 novembre — egress logiciel : preuves sans clôture du risque bridge
+
+Les [31 parents egress et 3 mapper rejoués](evidence/2026-11-13/egress-core-protocol/README.md) vérifient le noyau et le protocole purs, avec deux reproductions avant correction et relectures indépendantes. Le check toutes cibles passe sur leur composition propre. Les types de politique/résolution/acceptation ne sont pas des permis de connexion.
+
+NV-13/RISK-D1 et les risques associés restent ouverts : aucun listener, stockage de politique, émetteur durable, transport/canal runtime, capteur ou sortie Internet n’est activé. Le bridge actuel reste non médié. Le résultat ne ferme pas non plus la garde des clés fournisseur RISK-D3, les outils distants ou les garanties de confinement réelles.
+
 ## 13 novembre — erreur d’expiration humaine, correction limitée du diagnostic
 
 La [tranche EpochExpired](evidence/2026-11-13/human-epoch-error/README.md) corrige le classement public d’un refus temporaire en `503 identity_unavailable` / `retry`, avec trois régressions ciblées vertes et revue indépendante. Le refus reste appliqué, sans délai prolongé ni mutation rejouée. La reproduction typée initiale et la nouvelle composition publique ont des sources distinctes, conservées dans les preuves.

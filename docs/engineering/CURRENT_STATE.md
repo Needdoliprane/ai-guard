@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 13 novembre — noyau et protocole egress, tranche logicielle vérifiée
+
+Le module Rust `egress` livre autorités ASCII exactes, politiques tenant∩session, validation d’un ensemble d’IP fourni, parsing CONNECT emprunté et états de flux bornés. La composition formatée passe **34 parents purs** (31 egress et 3 mapper rejoués) ainsi que le check toutes cibles. Les deux défauts de revue ont été reproduits, corrigés et relus. [Preuves](evidence/2026-11-13/egress-core-protocol/README.md), [contrat FR](EGRESS_SOFTWARE.fr.md) et [EN](EGRESS_SOFTWARE.md).
+
+Ce module n’active aucun proxy ni sortie Internet. Store/API/grants, permis durable, canal commun, vrais FD, bootstrap/runtime et IHM ne sont pas raccordés. Le réseau existant `none|bridge` n’a pas changé ; bridge reste non médié. Les limites de flux V1 sont fixes ; aucune qualification de RAM, débit, 100 workers ou moteurs n’est déduite. Capteur des refus directs, Web/MCP distants, clés fournisseur et garanties HTTPS restent ouverts. Aucun gate global clos.
+
 ## 13 novembre — expiration du contrôle d’identité : erreur temporaire explicite
 
 Le mapper humain conserve le refus `503` et classe désormais `HumanAuthorityFailure::EpochExpired` en `identity_unavailable` / `retry`. Les credentials expirés gardent `401 credential_expired` et les erreurs de stockage restent masquées. Aucune permission, échéance Core ou reprise automatique de mutation n’a changé. Le correctif public réduit passe ses trois tests ciblés ; [sources, revue et limites](evidence/2026-11-13/human-epoch-error/README.md).

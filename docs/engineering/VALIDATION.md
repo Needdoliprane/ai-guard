@@ -1,5 +1,13 @@
 # Validation courante
 
+## 13 novembre — composition egress : 34 parents et toutes cibles
+
+**PASS ciblé** sur source `8dddbb19e7f7253cffa28cdc8d877f06091d07faa8db3efbbea2c4a9c3c0d7cb`, 2618 fichiers, base publique `970636e` : 14 politique + 6 frontend + 11 protocole + 3 mapper existants rejoués. Tous les parents passent une fois, sans ignoré ; un check toutes cibles suit les 34 PASS. Aucun avertissement de compilation dans les nouveaux modules egress. Formatage épinglé effectué avant ce gel et son propre build.
+
+Le RED distinct `7dbf1a71…` a réellement donné deux échecs attendus (crédit après HalfClose et ordre Size avant DTO). L’essai r1 du harnais avait exécuté zéro test après une erreur de clé de métadonnée ; il reste séparé. Post-export des 2618 sources/modes identique ; capture bornée à 32Mio, fermeture 0/OOMfalse, CID exact supprimé. [Commandes, reçus et limites](evidence/2026-11-13/egress-core-protocol/README.md).
+
+Clippy, navigateur, suite complète, vrais workers/réseaux/fournisseurs Docker/Podman/Kubernetes et charge 100 restent NOT_RUN. Aucun contrôle réseau de bout en bout ni gate de production n’est clos.
+
 ## 13 novembre — classification typée EpochExpired, composition publique réduite
 
 **PASS ciblé : trois tests purs du vrai mapper**, compilation des tests de bibliothèque et fermeture QA. Source publique de départ `21608aa`, composition de 2608 fichiers SHA `51f91f7896f2dfef7cecfa3994eb0935a0a74fb40f9c6922148a9ad0d3b352f5`. Les trois parents sont exécutés chacun une fois ; les 1106 autres tests filtrés par parent restent non exécutés. Le post-export est identique pour les 2608 payloads/modes, sans OOM constaté ; conteneur exact supprimé.

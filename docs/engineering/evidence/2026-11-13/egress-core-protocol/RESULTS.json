@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "date": "2026-11-13",
+  "scope": "Rust egress policy, borrowed CONNECT parsing and pure payload/flow-state contracts only",
+  "public_base": "970636e1141a8fd2eaf382e9eeb52e7282fc8a35",
+  "source": {
+    "sha256": "8dddbb19e7f7253cffa28cdc8d877f06091d07faa8db3efbbea2c4a9c3c0d7cb",
+    "files": 2618,
+    "bytes": 30490624
+  },
+  "source_reviews": {
+    "policy_core": "fc1d1371ef7df464db5857fcb0c0c2c787b762238edb8398fdab33ffd2a189fa",
+    "corrected_protocol": "6953fe78d22d0407c46f08a748885c6fa47b929d72343b9afde20abdd669aa8c",
+    "final_composition": "c95d10a36b3646b2fe2e4744fd1175c00750787f97dc34b97b485a1a4dbc9e8b"
+  },
+  "RED": {
+    "source_sha256": "7dbf1a7121a569e95b8ee23ecb6b90dfa836bcf3e752bc745ef70a5391755155",
+    "files": 2615,
+    "tests": {
+      "PASS": 0,
+      "FAIL": 2,
+      "NOT_RUN": 0
+    },
+    "assertions": [
+      "Credit refusal after HalfClose prevented sibling credit",
+      "Some(Protocol) != Some(Size) for oversized control before DTO decoding"
+    ],
+    "receipt_sha256": "ca11b5e6a5a52aaea0c55b78e13a0b1095b7c66027109b8a3d13c49ecb93b326",
+    "prior_attempt": "r1 harness metadata contract failed before compilation/test; preserved separately, not RED"
+  },
+  "GREEN": {
+    "tests": {
+      "PASS": 34,
+      "FAIL": 0,
+      "NOT_RUN": 0
+    },
+    "groups": {
+      "policy": 14,
+      "frontend": 6,
+      "protocol": 11,
+      "human_mapper_replayed_in_composition": 3
+    },
+    "unique_selected_parents": 34,
+    "new_egress_parents": 31,
+    "lib_tests_compilation": "PASS",
+    "all_targets_check": "PASS",
+    "formatting": "PASS rustfmt1.99.1 metadata derivative before execution",
+    "new_egress_compiler_warnings": 0,
+    "post_source": {
+      "sha256": "364a8321c2de73737ddcb2f558074bf3bb3b24be9ed61377a5b270d2027e394a",
+      "files": 2618,
+      "all_payloads_modes_match": true
+    },
+    "raw_result_files": 993,
+    "raw_result_manifest_sha256": "483c4819ef6ef6e183f38425658156162ede9f4c62b4a0d844b8a2878e6ac064",
+    "receipt_sha256": "2bcb3ecab86f714a9f1544947ae29683891f7db8f0eb8009bec1b38a6bd43f0c",
+    "closure_rc": 0,
+    "container_removed": true,
+    "OOMKilled": false
+  },
+  "bounds": {
+    "authority_wire_bytes": 512,
+    "canonical_dns_bytes": 253,
+    "policy_destinations": 128,
+    "resolution_candidates": 16,
+    "local_head_bytes": 16384,
+    "local_header_fields": 32,
+    "data_decoded_bytes": 16384,
+    "data_frame_bytes": 24576,
+    "control_frame_bytes": 2048,
+    "flow_slots": 16,
+    "pending_opens": 4,
+    "credit_plus_queued_per_direction_bytes": 262144,
+    "declared_channel_payload_buffer_ceiling_bytes": 1048576,
+    "flow_limit_negotiation": "V1 fixed exact values only"
+  },
+  "not_implemented": [
+    "proxy listener and trusted IO owner",
+    "durable egress Store/API/grants/issuer",
+    "common framed capability integration",
+    "bootstrap/runtime/provider handoff",
+    "contextual control-address filtering and actual DNS",
+    "actual FD revocation/expiry",
+    "independent direct-attempt sensor",
+    "dashboard egress views"
+  ],
+  "NOT_RUN": [
+    "real worker/network/provider/runtime acceptance",
+    "Docker/Podman/Kubernetes qualification",
+    "TLS/no-tunnel guarantees",
+    "throughput/100-worker capacity/process memory bound",
+    "Clippy/browser/full repository test suite"
+  ],
+  "global_gates_closed": 0
+}

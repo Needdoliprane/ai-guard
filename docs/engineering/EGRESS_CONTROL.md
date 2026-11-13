@@ -1,5 +1,11 @@
 # P1 — contrôle et supervision des sorties réseau
 
+## Tranche logicielle du 13 novembre — noyau et protocole vérifiés
+
+Une première tranche Rust est intégrée : politique pure tenant∩session, validation de candidats IP, parseur CONNECT et registre/payloads de flux bornés. [Contrat logiciel FR](EGRESS_SOFTWARE.fr.md), [EN](EGRESS_SOFTWARE.md) et [preuves des 34 parents/toutes cibles](evidence/2026-11-13/egress-core-protocol/README.md) décrivent exactement cette portée. Les valeurs acceptées restent descriptives ; elles ne créent ni autorité, ni socket.
+
+Aucun listener, Store/API/grant, émetteur de permis durable, framing commun, bootstrap ou runtime n’est raccordé par cette tranche. `none|bridge` reste inchangé et bridge non médié. Ni activation Internet, capteur, MITM/PKI, action cluster ou garantie HTTPS n’est livrée. Les obligations et statuts historiques ci-dessous ne sont pas remplacés par les tests logiciels. G05/G07/G11 restent ouverts.
+
 ## Décision du 13 novembre 2026 — code et tests logiciels locaux autorisés
 
 Le mainteneur a accepté la direction C présentée dans la [proposition figée au commit `b10c72ff`](https://github.com/Needdoliprane/ai-guard/blob/b10c72ff3b6b0642cf0bdb86af9e98a4ea014cf8/docs/engineering/EGRESS_CONTROL.md) : worker en réseau `none`, frontend Rust loopback non fiable, admission egress distincte et sockets amont possédés par le broker Rust après audit durable. L’accord couvre la conception, le code Rust et les tests logiciels locaux isolés. Les anciens statuts « en attente » ci-dessous décrivent les propositions à leur date.

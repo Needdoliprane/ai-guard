@@ -1,5 +1,11 @@
 # Décisions d'industrialisation
 
+## 13 novembre — contrats egress descriptifs et framing fermé
+
+Dans la direction C autorisée, le premier module logiciel expose des valeurs descriptives : `PolicyAllowed`, résolution de candidats validés et acceptation wire ne produisent aucune capacité de connexion. Le parser d’autorité est unique, ASCII et exact ; les formes non prises en charge sont refusées. Le préflight du payload est fermé avant appropriation variable, et la demi-fermeture rend le crédit inutilisé sans effacer les bytes déjà en queue.
+
+`httparse 1.10.1`, déjà transitif et verrouillé, devient une dépendance directe ; aucune nouvelle version n’est téléchargée. Le framing historique V1/V2, les modes réseau, le bootstrap et les routes existantes ne changent pas. Les bornes de flux V1 restent fixes, sans promesse de mémoire physique ou de transport qualifié. Raccords Store/API, autorité source, réserves et migrations éventuelles exigent leur lot propre ; aucune table ajoutée clandestinement au format 14. [Contrats FR](EGRESS_SOFTWARE.fr.md), [EN](EGRESS_SOFTWARE.md) et [preuves](evidence/2026-11-13/egress-core-protocol/README.md).
+
 ## 13 novembre — direction C egress autorisée pour code et tests locaux
 
 Le mainteneur accepte la [direction C et ses limites](EGRESS_CONTROL.md#décision-du-13-novembre-2026--code-et-tests-logiciels-locaux-autorisés) : réseau worker `none`, frontend loopback non fiable et sockets amont du broker Rust, après audit durable et admission egress distincte. L’accord couvre conception/code/tests logiciels locaux isolés ; aucune activation Internet, nouvelle campagne moteur, installation de capteur, MITM/PKI ou action cloud/cluster. Les anciens permis du relais ne deviennent pas des permis egress. Aucun nouveau service, stockage ni repli bridge n’est introduit par cette décision.
