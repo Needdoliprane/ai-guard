@@ -274,6 +274,12 @@ impl OwnedHumanGateway {
 }
 
 impl GatewayState {
+    #[cfg(test)]
+    pub(crate) fn human_admission_closed_for_test(&self) -> bool {
+        self.owned_human
+            .as_ref()
+            .is_some_and(|owned| owned.admit().is_err())
+    }
     pub fn human_retirement(&self) -> Option<GatewayHumanRetirement> {
         self.owned_human
             .as_ref()
@@ -415,7 +421,7 @@ impl GatewayState {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 // Exact existing route templates, reviewed in CONTRACT_W0_R2.
 const REGISTERED_ROUTES: &[(&str, &[&str])] = &[

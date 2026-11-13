@@ -97,6 +97,64 @@ async fn same_incarnation_identity_or_workload_change_requires_rebuild_without_n
 }
 
 #[tokio::test]
+async fn real_exhausted_owned_profile_budget_preserves_429_without_publishing_contexts() {
+    let fixture = Fixture::new_owned();
+    let (mut request, credentials, tokens) = fixture.owned_request();
+    for options in request.sources.values_mut() {
+        if let crate::human_authority::startup::HumanOwnedSourceOptions::TenantStore {
+            capacity,
+            ..
+        } = options
+        {
+            capacity.human_tenant.events = 4;
+            capacity.human_principal.events = 2;
+        }
+    }
+    let bundle = crate::human_authority::startup::HumanOwnedStartupBundle::open(request).unwrap();
+    let state = GatewayState::for_owned_human_sources(
+        bundle,
+        credentials,
+        tokens,
+        Policy::default(),
+        None,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    let owned = state.owned_human.as_ref().unwrap();
+    let observed_a = crate::audit::read_test_observer::observe(&state.tenants[0].store);
+    let source = &owned.sources[1];
+    let epoch = owned.owner.try_read_epoch().unwrap();
+    let access = HumanSourceAccess::read(&epoch, source).unwrap();
+    for _ in 0..2 {
+        state.tenants[1]
+            .store
+            .modern_human_profile(&access, fixture.principal(), &Redactor::new(vec![]))
+            .unwrap();
+    }
+    let error = state.tenants[1]
+        .store
+        .modern_human_profile(&access, fixture.principal(), &Redactor::new(vec![]))
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.downcast_ref::<crate::audit::AuditCapacityFailureV1>(),
+        Some(&crate::audit::AuditCapacityFailureV1::HumanReadBudgetExhausted)
+    );
+    drop(epoch);
+    let (status, body) = get(
+        &gateway_router(state.clone()),
+        "/api/v1/human/identity",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body["error"]["code"], "audit_read_budget_exhausted");
+    assert_eq!(body["error"]["retry_action"], "contact_operator");
+    assert!(body.get("contexts").is_none());
+    assert!(observed_a.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn live_read_epoch_a_does_not_require_global_write_for_b() {
     let (_fixture, state) = fixture();
     let owned = state.owned_human.as_ref().unwrap();

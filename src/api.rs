@@ -47,6 +47,8 @@ mod held_policy_tests;
 mod human;
 mod human_sources;
 pub use human_sources::GatewayHumanRetirement;
+#[cfg(test)]
+pub(crate) use human_sources::tests::fixture as owned_human_fixture_for_test;
 mod human_state;
 mod human_streams;
 mod kubernetes;

@@ -856,42 +856,44 @@ fn identity_sync(
             contexts_complete = false;
             continue;
         }
-        let snapshot = match state.io_scope.with_store(
-            tenant,
-            store_io::Lane::Read,
-            true,
-            |store| {
-                if let Some(owned) = &state.owned_human {
-                    owned
-                        .profile(index, store, &proof.credential.principal, &proof.redactor)
-                        .map_err(|_| anyhow::anyhow!("owned human profile unavailable"))
-                } else {
-                    store.human_profile(&proof.credential.principal, &proof.redactor)
+        let snapshot = if let Some(owned) = &state.owned_human {
+            // Preserve typed API status/code/retry action from the real own
+            // source, especially cumulative audit-budget refusals.
+            state
+                .io_scope
+                .with_store(tenant, store_io::Lane::Read, true, |store| {
+                    owned.profile(index, store, &proof.credential.principal, &proof.redactor)
+                })??
+        } else {
+            let snapshot = match state.io_scope.with_store(
+                tenant,
+                store_io::Lane::Read,
+                true,
+                |store| store.human_profile(&proof.credential.principal, &proof.redactor),
+            ) {
+                Ok(snapshot) => snapshot,
+                Err(error) if matches!(proof.source, HumanProofSource::Local(source) if source == index) =>
+                {
+                    return Err(error);
                 }
-            },
-        ) {
-            Ok(snapshot) => snapshot,
-            Err(error) if matches!(proof.source, HumanProofSource::Local(source) if source == index) =>
-            {
-                return Err(error);
-            }
-            Err(_) => {
-                contexts_complete = false;
-                continue;
-            }
-        };
-        let snapshot = match snapshot {
-            Ok(snapshot) => snapshot,
-            Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
-            {
-                return Err(store_failure(error));
-            }
-            Err(_) => {
-                // Do not reconcile an unreadable profile as an empty one: its
-                // existing contexts remain unknown and are revalidated against
-                // their own store before any use.
-                contexts_complete = false;
-                continue;
+                Err(_) => {
+                    contexts_complete = false;
+                    continue;
+                }
+            };
+            match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(error) if matches!(&proof.source, HumanProofSource::Local(source) if index == *source) =>
+                {
+                    return Err(store_failure(error));
+                }
+                Err(_) => {
+                    // Do not reconcile an unreadable profile as an empty one: its
+                    // existing contexts remain unknown and are revalidated against
+                    // their own store before any use.
+                    contexts_complete = false;
+                    continue;
+                }
             }
         };
         state

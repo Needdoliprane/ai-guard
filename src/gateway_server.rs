@@ -190,6 +190,7 @@ impl BoundOwners {
             router,
             self.stop.clone(),
             Arc::clone(&self.retirement),
+            self.human.clone(),
         ));
         Ok(address)
     }
@@ -207,10 +208,30 @@ async fn wait_for_stop(mut stop: watch::Receiver<bool>) {
 }
 
 fn http_owner(
+    listener: TcpListener,
+    router: Router,
+    stop: watch::Sender<bool>,
+    retirement: Arc<GatewayControlRecoveryRetirementV2>,
+    human: Option<Arc<GatewayHumanRetirement>>,
+) -> ServingOwner {
+    http_owner_inner(
+        listener,
+        router,
+        stop,
+        retirement,
+        human,
+        #[cfg(test)]
+        None,
+    )
+}
+
+fn http_owner_inner(
     mut listener: TcpListener,
     router: Router,
     stop: watch::Sender<bool>,
     retirement: Arc<GatewayControlRecoveryRetirementV2>,
+    human: Option<Arc<GatewayHumanRetirement>>,
+    #[cfg(test)] mut before_error_stop: Option<Box<dyn FnOnce() + Send>>,
 ) -> ServingOwner {
     async move {
         let mut connections = JoinSet::new();
@@ -224,7 +245,10 @@ fn http_owner(
                     if let Some(Err(error)) = result {
                         // Retire before starting this owner's error cleanup,
                         // and before its sibling can be asked to drain.
+                        if let Some(human)=&human {human.retire();}
                         retirement.retire();
+                        #[cfg(test)]
+                        if let Some(observe)=before_error_stop.take() {observe();}
                         stop.send_replace(true);
                         break Some(anyhow::Error::new(error).context("gateway connection owner failed"));
                     }
@@ -340,3 +364,7 @@ async fn wait_for_usage_drain(retirement: &GatewayControlRecoveryRetirementV2) {
 #[cfg(test)]
 #[path = "gateway_server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "gateway_server_owned_tests.rs"]
+mod owned_tests;
