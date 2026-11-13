@@ -192,7 +192,9 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
     assert!(store.healthy());
     let quota = || {
         database
-            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap()
     };
     let page_limit = store.modern_test_limit_audit_pages().unwrap();
@@ -206,14 +208,21 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
             let items = body["items"].as_array().unwrap();
             assert_eq!(items.len(), 1);
             assert!(items.iter().all(|item| item["content"].is_null()));
-            assert!(!body.to_string().contains("synthetic-private-journal-content"));
+            assert!(
+                !body
+                    .to_string()
+                    .contains("synthetic-private-journal-content")
+            );
             assert_eq!(snapshot(&database).0, before.0 + 1);
             let receipt_exists: bool = database.query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE seq=?1 AND id=?2 AND received_at=?3 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events' AND json_extract(payload,'$.data.request_id')=?4 AND json_extract(payload,'$.data.result_count')=1)",
                 rusqlite::params![before.0 + 1, body["read_receipt"]["audit_event_id"].as_str().unwrap(), body["read_receipt"]["received_at"].as_str().unwrap(), body["read_receipt"]["request_id"].as_str().unwrap()],
                 |row| row.get(0),
             ).unwrap();
-            assert!(receipt_exists, "successful HTTP read must have its committed receipt");
+            assert!(
+                receipt_exists,
+                "successful HTTP read must have its committed receipt"
+            );
             let after_quota = quota();
             assert!(after_quota > before_quota);
             let after_usage = store.modern_test_human_usage();
@@ -246,8 +255,8 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
         failed_state = Some((before, before_quota, usage));
         break;
     }
-    let (before, before_quota, usage) = failed_state
-        .expect("bounded SQLite page cap did not reach a real allocation refusal");
+    let (before, before_quota, usage) =
+        failed_state.expect("bounded SQLite page cap did not reach a real allocation refusal");
     // Restoring fixture capacity is cleanup, not a Store recovery procedure.
     page_limit.restore().unwrap();
     assert!(!store.healthy());
@@ -258,7 +267,11 @@ async fn owned_events_metadata_real_audit_full_rolls_back_without_publication() 
     assert!(latched.get("read_receipt").is_none());
     assert!(latched.get("next_cursor").is_none());
     assert!(latched.get("live_cursor").is_none());
-    assert!(!latched.to_string().contains("synthetic-private-journal-content"));
+    assert!(
+        !latched
+            .to_string()
+            .contains("synthetic-private-journal-content")
+    );
     assert_eq!(snapshot(&database), before);
     assert_eq!(quota(), before_quota);
     assert_eq!(store.modern_test_human_usage(), usage);

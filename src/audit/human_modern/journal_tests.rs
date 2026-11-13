@@ -288,7 +288,9 @@ fn metadata_events_sqlite_audit_full_preserves_head_quota_and_usage() {
     let (fixture, _, _) = fixture();
     let bundle = fixture.migrated();
     // Profile auditing and scope resolution precede the logical page cap.
-    let scope = read(&bundle, |store, access| scope(store, access, fixture.principal()));
+    let scope = read(&bundle, |store, access| {
+        scope(store, access, fixture.principal())
+    });
     let source_id = bundle
         .owner()
         .closure()
@@ -311,7 +313,9 @@ fn metadata_events_sqlite_audit_full_preserves_head_quota_and_usage() {
             .db
             .lock()
             .unwrap()
-            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap()
     };
     let page_limit = store.modern_test_limit_audit_pages().unwrap();
@@ -324,27 +328,44 @@ fn metadata_events_sqlite_audit_full_preserves_head_quota_and_usage() {
         // production two-second epoch bound is neither extended nor reused.
         let result = read(&bundle, |store, access| {
             store.modern_human_events(
-                access, &scope, &metadata(), 0, None, 25, &Redactor::new(vec![]),
+                access,
+                &scope,
+                &metadata(),
+                0,
+                None,
+                25,
+                &Redactor::new(vec![]),
             )
         });
         assert_eq!(
-            store.db.lock().unwrap()
+            store
+                .db
+                .lock()
+                .unwrap()
                 .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
                 .unwrap(),
             713
         );
         match result {
             Ok(poll) => {
-                let page = poll.page.expect("successful metadata read must return a page");
+                let page = poll
+                    .page
+                    .expect("successful metadata read must return a page");
                 assert_eq!(page.items.len(), 2);
                 assert!(page.items.iter().all(|item| item.content.is_none()));
-                assert_eq!(audit_head(&store.db.lock().unwrap()).unwrap().0, before.0 + 1);
+                assert_eq!(
+                    audit_head(&store.db.lock().unwrap()).unwrap().0,
+                    before.0 + 1
+                );
                 let receipt_exists: bool = store.db.lock().unwrap().query_row(
                     "SELECT EXISTS(SELECT 1 FROM events WHERE seq=?1 AND id=?2 AND received_at=?3 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events' AND json_extract(payload,'$.data.request_id')=?4 AND json_extract(payload,'$.data.result_count')=2)",
                     params![before.0 + 1, &page.receipt.audit_event_id, &page.receipt.received_at, &page.receipt.request_id],
                     |row| row.get(0),
                 ).unwrap();
-                assert!(receipt_exists, "successful read must have its committed receipt");
+                assert!(
+                    receipt_exists,
+                    "successful read must have its committed receipt"
+                );
                 let after_quota = quota();
                 assert!(after_quota > before_quota);
                 let after_usage = store.modern_test_human_usage();
@@ -379,16 +400,24 @@ fn metadata_events_sqlite_audit_full_preserves_head_quota_and_usage() {
             }
         }
     }
-    let (before, before_quota, usage) = failed_state
-        .expect("bounded SQLite page cap did not reach a real allocation refusal");
+    let (before, before_quota, usage) =
+        failed_state.expect("bounded SQLite page cap did not reach a real allocation refusal");
     // Restoring fixture capacity is cleanup, not operator latch recovery.
     page_limit.restore().unwrap();
     assert!(!store.permanently_healthy());
     let latched = read(&bundle, |store, access| {
         store.modern_human_events(
-            access, &scope, &metadata(), 0, None, 25, &Redactor::new(vec![]),
+            access,
+            &scope,
+            &metadata(),
+            0,
+            None,
+            25,
+            &Redactor::new(vec![]),
         )
-    }).err().unwrap();
+    })
+    .err()
+    .unwrap();
     assert!(
         format!("{latched:#}").contains("audit integrity failure is latched; recovery required"),
         "expected existing permanent audit latch, got {latched:#}"
@@ -397,7 +426,10 @@ fn metadata_events_sqlite_audit_full_preserves_head_quota_and_usage() {
     assert_eq!(quota(), before_quota);
     assert_eq!(store.modern_test_human_usage(), usage);
     assert_eq!(
-        store.db.lock().unwrap()
+        store
+            .db
+            .lock()
+            .unwrap()
             .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
             .unwrap(),
         713

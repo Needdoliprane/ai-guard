@@ -175,16 +175,19 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
     let store = bundle.store(source_id).unwrap();
     // This positive control uses a fresh epoch and the real checked route.
     read(&bundle, |store, access| {
-        let page = store.modern_human_events_recent(
-            access, &scope, &filter(), None, 1, &Redactor::new(vec![]),
-        ).unwrap();
+        let page = store
+            .modern_human_events_recent(access, &scope, &filter(), None, 1, &Redactor::new(vec![]))
+            .unwrap();
         let receipt_exists: bool = store.db.lock().unwrap().query_row(
             "SELECT EXISTS(SELECT 1 FROM events WHERE id=?1 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events')",
             [&page.receipt.audit_event_id], |row| row.get(0),
         ).unwrap();
         assert!(receipt_exists);
     });
-    store.db.lock().unwrap()
+    store
+        .db
+        .lock()
+        .unwrap()
         .busy_timeout(std::time::Duration::from_millis(713))
         .unwrap();
     assert!(store.permanently_healthy());
@@ -194,7 +197,9 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
             .db
             .lock()
             .unwrap()
-            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT bytes FROM quota WHERE id=1", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .unwrap()
     };
     let page_limit = store.modern_test_limit_audit_pages().unwrap();
@@ -205,11 +210,19 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
         let usage = store.modern_test_human_usage();
         let result = read(&bundle, |store, access| {
             store.modern_human_events_recent(
-                access, &scope, &filter(), None, 1, &Redactor::new(vec![]),
+                access,
+                &scope,
+                &filter(),
+                None,
+                1,
+                &Redactor::new(vec![]),
             )
         });
         assert_eq!(
-            store.db.lock().unwrap()
+            store
+                .db
+                .lock()
+                .unwrap()
                 .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
                 .unwrap(),
             713
@@ -223,7 +236,10 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
                     params![before.0 + 1, &page.receipt.audit_event_id, &page.receipt.received_at, &page.receipt.request_id, i64::try_from(page.items.len()).unwrap()],
                     |row| row.get(0),
                 ).unwrap();
-                assert!(receipt_exists, "successful read must have its committed receipt");
+                assert!(
+                    receipt_exists,
+                    "successful read must have its committed receipt"
+                );
                 let after_quota = quota();
                 assert!(after_quota > before_quota);
                 let after_usage = store.modern_test_human_usage();
@@ -239,12 +255,15 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
                 assert!(store.healthy());
             }
             Err(error) => {
-                assert!(error.chain().any(|cause| matches!(
-                    cause.downcast_ref::<rusqlite::Error>(),
-                    Some(rusqlite::Error::SqliteFailure(code, _))
-                        if code.code == rusqlite::ErrorCode::DiskFull
-                            && code.extended_code == rusqlite::ffi::SQLITE_FULL
-                )), "expected actual SQLite FULL, got {error:#}");
+                assert!(
+                    error.chain().any(|cause| matches!(
+                        cause.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::SqliteFailure(code, _))
+                            if code.code == rusqlite::ErrorCode::DiskFull
+                                && code.extended_code == rusqlite::ffi::SQLITE_FULL
+                    )),
+                    "expected actual SQLite FULL, got {error:#}"
+                );
                 // The durable floor may independently advance, but no event,
                 // quota byte or cached human capacity may survive this failure.
                 assert_eq!(snapshot(store), before);
@@ -257,15 +276,15 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
             }
         }
     }
-    let (before, before_quota, usage) = failed_state
-        .expect("bounded SQLite page cap did not reach a real allocation refusal");
+    let (before, before_quota, usage) =
+        failed_state.expect("bounded SQLite page cap did not reach a real allocation refusal");
     page_limit.restore().unwrap();
     assert!(!store.permanently_healthy());
     let latched = read(&bundle, |store, access| {
-        store.modern_human_events_recent(
-            access, &scope, &filter(), None, 1, &Redactor::new(vec![]),
-        )
-    }).err().unwrap();
+        store.modern_human_events_recent(access, &scope, &filter(), None, 1, &Redactor::new(vec![]))
+    })
+    .err()
+    .unwrap();
     assert!(
         format!("{latched:#}").contains("audit integrity failure is latched; recovery required"),
         "expected existing permanent audit latch, got {latched:#}"
@@ -274,11 +293,17 @@ fn modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable
     assert_eq!(quota(), before_quota);
     assert_eq!(store.modern_test_human_usage(), usage);
     assert_eq!(
-        store.db.lock().unwrap()
+        store
+            .db
+            .lock()
+            .unwrap()
             .pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0))
             .unwrap(),
         713
     );
     assert!(!store.permanently_healthy());
-    assert!(!store.healthy(), "restoring page capacity does not repair the latch");
+    assert!(
+        !store.healthy(),
+        "restoring page capacity does not repair the latch"
+    );
 }

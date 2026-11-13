@@ -45,7 +45,9 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("fixture store busy"))?;
         let previous: i64 = db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
         let pages: i64 = db.pragma_query_value(None, "page_count", |row| row.get(0))?;
-        let limit = pages.checked_add(1).context("fixture page limit overflow")?;
+        let limit = pages
+            .checked_add(1)
+            .context("fixture page limit overflow")?;
         anyhow::ensure!(previous > limit, "fixture page limit must reduce capacity");
         let applied = (|| -> anyhow::Result<()> {
             db.pragma_update(None, "max_page_count", limit)?;
@@ -55,9 +57,11 @@ impl Store {
         })();
         if let Err(error) = applied {
             db.pragma_update(None, "max_page_count", previous)?;
-            let restored: i64 =
-                db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
-            anyhow::ensure!(restored == previous, "fixture page limit restoration failed");
+            let restored: i64 = db.pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+            anyhow::ensure!(
+                restored == previous,
+                "fixture page limit restoration failed"
+            );
             return Err(error);
         }
         Ok(HumanAuditPageLimitGuard {
