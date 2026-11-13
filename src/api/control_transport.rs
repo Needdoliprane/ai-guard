@@ -243,3 +243,11 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
 
 #[cfg(test)]
 mod tests;
+
+// Test-only observation of the actual reserved-operation semaphore.
+#[cfg(test)]
+impl ControlCapacity {
+    pub(super) fn runner_semaphore_for_test(&self) -> Arc<tokio::sync::Semaphore> {
+        Arc::clone(&self.runner)
+    }
+}

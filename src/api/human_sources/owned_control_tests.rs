@@ -155,3 +155,10 @@ async fn owned_control_protocol_format14_reaches_real_sdk_and_keeps_broker_incom
 async fn owned_control_protocol_format15_reaches_real_sdk_and_keeps_broker_incompatible() {
     diagnostic_and_broker_boundary(15).await;
 }
+
+// Negative regressions are deliberately outside the frozen positive prefix.
+mod negative;
+
+// Separate canary for the composed A0 postcommit rendez-vous.
+#[cfg(test)]
+mod cancellation;
