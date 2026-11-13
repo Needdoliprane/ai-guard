@@ -423,7 +423,9 @@ async fn binding_revoked_after_real_policy_commit_cannot_publish_a_receipt() {
         }).unwrap();
         assert!(!result.snapshot.binding.active);
     }
-    release.release();
+    let ack = release.release_with_ack().expect("postcommit waiter must still accept release");
+    tokio::task::spawn_blocking(move || ack.recv_timeout(Duration::from_secs(15))).await.unwrap()
+        .expect("postcommit job must acknowledge receiving release before its refusal is accepted");
     let response = tokio::time::timeout(Duration::from_secs(30),observer).await.unwrap().unwrap().unwrap();
     assert_eq!(response.status().as_u16(),503);
     let body = axum::body::to_bytes(response.into_body(),4096).await.unwrap();
@@ -460,7 +462,9 @@ async fn aborted_policy_observer_retains_committed_work_and_operation_until_drai
     let retirement = state.human_retirement().unwrap();
     retirement.retire();
     assert!(!owned.healthy());
-    release.release();
+    let ack = release.release_with_ack().expect("abandoned job must still accept release");
+    tokio::task::spawn_blocking(move || ack.recv_timeout(Duration::from_secs(15))).await.unwrap()
+        .expect("abandoned job must acknowledge receiving release before drainage is accepted");
     tokio::time::timeout(Duration::from_secs(30),retirement.drain()).await.unwrap().unwrap();
     assert_eq!(semaphore.available_permits(),available);
     assert_eq!(owned.usages.load(Ordering::Acquire),super::CLOSED);
