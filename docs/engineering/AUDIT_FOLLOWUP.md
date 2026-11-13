@@ -1,5 +1,11 @@
 # Suivi des audits indépendants
 
+## 13 novembre — erreur d’expiration humaine, correction limitée du diagnostic
+
+La [tranche EpochExpired](evidence/2026-11-13/human-epoch-error/README.md) corrige le classement public d’un refus temporaire en `503 identity_unavailable` / `retry`, avec trois régressions ciblées vertes et revue indépendante. Le refus reste appliqué, sans délai prolongé ni mutation rejouée. La reproduction typée initiale et la nouvelle composition publique ont des sources distinctes, conservées dans les preuves.
+
+Ce changement ne clôture aucun constat de disponibilité, collision ou audit des rapports précédents. La cause des expirations et les lectures privées initialement refusées restent à traiter ; ni SSO réel, ni autres portages humains ou D5 ne sont qualifiés par les trois tests du mapper.
+
 ## 12 novembre — RC-P6-R03 : surpromesses documentaires corrigées
 
 Les guides ne promettent plus `runtime.security_downgrade`, `network.unrestricted` ou `runtime.execution.error` comme événements de ces parcours lorsqu’aucun producteur correspondant n’est établi sur `ba17452`. Ils décrivent les champs réseau effectivement enregistrés et la tentative conditionnelle de transition Unknown, sans confondre demande et observation. Les paires EN/FR explicitent la provenance déclarée et les limites Web/MCP. [Exploitation et couverture](../operations.md#audit-sorties-et-couverture).

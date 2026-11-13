@@ -65,6 +65,8 @@ mod brokers_tests;
 mod context_fairness_controls;
 #[cfg(test)]
 mod context_fairness_tests;
+#[cfg(test)]
+mod epoch_error_tests;
 
 pub(super) fn failure(
     status: StatusCode,
@@ -114,6 +116,18 @@ fn store_failure(error: anyhow::Error) -> (StatusCode, Json<Value>) {
             "review_permissions",
         ),
         Some(IdentityFailureV1::InvalidRequest) => invalid_request(),
+        _ if matches!(
+            error.downcast_ref::<crate::human_authority::HumanAuthorityFailure>(),
+            Some(crate::human_authority::HumanAuthorityFailure::EpochExpired)
+        ) =>
+        {
+            failure(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "identity_unavailable",
+                "The human access check expired. Refresh identity, then retry the refused read explicitly.",
+                "retry",
+            )
+        }
         _ => failure(
             StatusCode::SERVICE_UNAVAILABLE,
             "audit_unavailable",

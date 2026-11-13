@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "date": "2026-11-13",
+  "scope": "human API error mapping only",
+  "base_public": "21608aa27d98852f3ab1edd8a1ca266828e0621c",
+  "implemented": {
+    "typed_error": "HumanAuthorityFailure::EpochExpired",
+    "http": 503,
+    "code": "identity_unavailable",
+    "retry_action": "retry",
+    "other_identity_storage_and_capacity_precedence": "unchanged",
+    "automatic_mutation_replay": false,
+    "Core_deadline": "unchanged"
+  },
+  "RED": {
+    "source_sha256": "3a24537a56a7355fcc8da5fbcd5782999b3ab681b1167f207167f5bcd3d10c21",
+    "files": 2614,
+    "context": "larger private candidate, not the released composition",
+    "old_mapper_sha256": "a6ec147a4621c0e714ee6178ac0aed376ab4c7237e86136cea83139370a58114",
+    "old_mapper_same_as_public_base": true,
+    "target": "api::human::epoch_error_tests::expired_authority_is_a_transient_identity_read_refusal",
+    "assertion": "audit_unavailable != identity_unavailable",
+    "PASS": 0,
+    "FAIL": 1,
+    "NOT_RUN": 2,
+    "receipt_sha256": "a0d7b3ed9e9e01724ce0ef3243ebe1e764002b6e8f20fb59f4f6e03d337707ad"
+  },
+  "GREEN": {
+    "source_sha256": "51f91f7896f2dfef7cecfa3994eb0935a0a74fb40f9c6922148a9ad0d3b352f5",
+    "files": 2608,
+    "context": "public base plus mapper-only branch and unchanged three tests",
+    "PASS": 3,
+    "FAIL": 0,
+    "NOT_RUN": 0,
+    "lib_tests_compilation": "PASS",
+    "all_targets": "NOT_RUN",
+    "post_source_sha256": "2f6e03d81118088203228978209a4591cfdd6379b5e1563f86cc967a329afee2",
+    "post_source_files": 2608,
+    "all_post_payloads_and_modes_match": true,
+    "raw_result_manifest_sha256": "234102ef8c9339b2f5890c391de7e2d74ee3a873f2105009c8361ecf499f0f5a",
+    "raw_result_files": 206,
+    "receipt_sha256": "963084a0ebee1b193abfe719eec26ce2939b215b4faaa37a961f204830596cff",
+    "container_removed": true,
+    "closure_rc": 0,
+    "OOMKilled": false
+  },
+  "review": {
+    "source": "GO_SOURCE",
+    "sha256": "89972ba4deb5433810d6609f33803d23df9ac7259f4a9c117944df83a667e214"
+  },
+  "limits": [
+    "Root cause and frequency/cost of authority expiry remain unresolved",
+    "No authority deadline or authorization guard changed",
+    "No OIDC/Keycloak/provider/runtime/browser campaign executed",
+    "Private owned-port candidate not integrated or qualified by this lot",
+    "No audit fingerprint or production gate closed"
+  ]
+}

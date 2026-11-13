@@ -1,5 +1,11 @@
 # État constaté — suivi du développement
 
+## 13 novembre — expiration du contrôle d’identité : erreur temporaire explicite
+
+Le mapper humain conserve le refus `503` et classe désormais `HumanAuthorityFailure::EpochExpired` en `identity_unavailable` / `retry`. Les credentials expirés gardent `401 credential_expired` et les erreurs de stockage restent masquées. Aucune permission, échéance Core ou reprise automatique de mutation n’a changé. Le correctif public réduit passe ses trois tests ciblés ; [sources, revue et limites](evidence/2026-11-13/human-epoch-error/README.md).
+
+La cause, la fréquence et le coût des expirations restent ouverts. Les anciennes lectures privées qui attendaient `200` ne deviennent pas vertes grâce à cette classification. Les autres ports humains privés, le SSO réel, les fournisseurs et les moteurs ne sont pas qualifiés par ce lot. Aucun gate global clos.
+
 ## 13 novembre — contrôle réseau : accord de développement, réalisation en cours
 
 La [direction C](EGRESS_CONTROL.md#décision-du-13-novembre-2026--code-et-tests-logiciels-locaux-autorisés) est autorisée pour le code Rust et les tests logiciels locaux isolés. Deux lots indépendants démarrent : politique de destinations et validation des adresses ; parsing CONNECT et protocole borné. Ils ne constituent pas encore un chemin réseau utilisable. Store/API, permis durable, binding runtime et raccord fournisseur restent à composer et vérifier.

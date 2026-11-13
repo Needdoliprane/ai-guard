@@ -1,5 +1,13 @@
 # Validation courante
 
+## 13 novembre — classification typée EpochExpired, composition publique réduite
+
+**PASS ciblé : trois tests purs du vrai mapper**, compilation des tests de bibliothèque et fermeture QA. Source publique de départ `21608aa`, composition de 2608 fichiers SHA `51f91f7896f2dfef7cecfa3994eb0935a0a74fb40f9c6922148a9ad0d3b352f5`. Les trois parents sont exécutés chacun une fois ; les 1106 autres tests filtrés par parent restent non exécutés. Le post-export est identique pour les 2608 payloads/modes, sans OOM constaté ; conteneur exact supprimé.
+
+Le RED précédent est une exécution sur une autre composition privée, 2614 fichiers : assertion réelle `audit_unavailable != identity_unavailable`. Seule l’identité byte à byte de la fonction antérieure est rapprochée de la base publique ; aucune qualification de l’ancien arbre n’est transférée. Revue source indépendante GO_SOURCE. [Commandes, empreintes et limites](evidence/2026-11-13/human-epoch-error/README.md).
+
+**NOT_RUN pour ce lot :** all-targets, Clippy, navigateur, SSO/Keycloak et fournisseurs réels, workers Docker/Podman/Kubernetes. Le classement d’une erreur ne répare pas les délais d’accès.
+
 ## 12 novembre — guides opérateur : vérification documentaire ciblée
 
 Base `ba17452`, six Markdown, patch `bf8f8c98b45dcf02992f6f6e63c7a41716680649e6f70c5852def16b217c7f49` : revue indépendante GO_DOCS_DIFF, 15 empreintes vérifiées, 120 blocs de commandes identiques et 12 liens ajoutés valides. Garanties de lancement, événements réellement produits et limites des déclarations fournisseur sont rapprochés du code. Aucun Cargo, application, test produit, runtime, fournisseur ou cluster exécuté pour ce lot documentaire. Ces contrôles ne ferment pas RC-P6-R03 ni une qualification de confinement.
@@ -22,7 +30,7 @@ La comparaison initiale est une comparaison de blobs seulement :269 références
 
 ## 12 novembre — ports scoped et contrat : deux gels vérifiés
 
-Store : source436cfe76… /2 597 fichiers,22 parents exacts PASS (1 réussi/0 échec/0 ignoré chacun), build/list et check toutes cibles RC0 ;692 pièces runtime/27 statiques, export e329fd86… entièrement comparé, fermeture0/OOMfalse. Contrat séparé : source acc40251… /2 597 fichiers,5 parents exacts PASS, build/list RC0, all-targets NOT_RUN ;258 pièces runtime/28 statiques, export a7b35482… exact et fermeture0/OOMfalse. Les15 fichiers applicatifs Store sont identiques entre ces gels ; les comptes ne sont pas présentés comme une suite unique. [Commandes, sélecteurs, reçus et limites](evidence/2026-11-12/human-scoped-ports/README.md), [données vérifiables](evidence/2026-11-12/human-scoped-ports/TESTS.json).
+Store : source436cfe76… /2 597 fichiers,22 parents exacts PASS (1 réussi/0 échec/0 ignoré chacun), build/list et check toutes cibles RC0 ;692 pièces runtime/27 statiques, export e329fd86… entièrement comparé, fermeture 0/OOMfalse. Contrat séparé : source acc40251… /2 597 fichiers,5 parents exacts PASS, build/list RC0, all-targets NOT_RUN ;258 pièces runtime/28 statiques, export a7b35482… exact et fermeture 0/OOMfalse. Les15 fichiers applicatifs Store sont identiques entre ces gels ; les comptes ne sont pas présentés comme une suite unique. [Commandes, sélecteurs, reçus et limites](evidence/2026-11-12/human-scoped-ports/README.md), [données vérifiables](evidence/2026-11-12/human-scoped-ports/TESTS.json).
 
 L’assertion DTO14 avait effectivement échoué avant correction. Le premier build Store a échoué sur une contrainte Debug du test, sans exécuter de parent ; seule l’extraction Err a changé. Le contrat conserve un PASS historique4 distinct et préserve le test11/12 privé en remplaçant l’oracle futur13 périmé par15. Clippy strict, suite complète, moteurs, fournisseurs, IdP et navigateur restent NOT_RUN dans ce lot. Aucun gate clos.
 
@@ -40,11 +48,11 @@ Le RED getter, le RED backup main et les deux essais interrompus sur des fixture
 
 ## 12 novembre — profil fermé tenant14 : onze parents et check toutes cibles PASS
 
-Source 4184cf827918d49a34ee6777451fc81cc6cbcaa212ee775af362ae3126bff988 (2579 fichiers), build lib/liste 0,11 parents exacts PASS/0 ignoré, check toutes cibles 0. Export vivant64e8c121…/29880320 octets entièrement comparé ;290 empreintes runtime, 2604 statiques, fermeture0/OOM0, pic 6416056320/9663676416 octets. [Sélecteurs, RED conservées, revue et limites](evidence/2026-11-12/tenant14-storage/README.md). Les nouveaux openers, l’union de sources et le canari de concurrence bloqué restent NOT_RUN dans cette campagne. Aucun résultat runtime/fournisseur ou gate global n’est déduit.
+Source 4184cf827918d49a34ee6777451fc81cc6cbcaa212ee775af362ae3126bff988 (2579 fichiers), build lib/liste 0,11 parents exacts PASS/0 ignoré, check toutes cibles 0. Export vivant64e8c121…/29880320 octets entièrement comparé ;290 empreintes runtime, 2604 statiques, fermeture 0/OOM0, pic 6416056320/9663676416 octets. [Sélecteurs, RED conservées, revue et limites](evidence/2026-11-12/tenant14-storage/README.md). Les nouveaux openers, l’union de sources et le canari de concurrence bloqué restent NOT_RUN dans cette campagne. Aucun résultat runtime/fournisseur ou gate global n’est déduit.
 
 ## 12 novembre — deux consommateurs relais sur c173086 + Full3 privé : PASS ciblé
 
-Une compilation lib offline, liste réelle, deux parents exacts et check toutes cibles RC0 sur source 0a0d7a73… (2643 fichiers). Export vivant bc621555…/31631360 octets, tous contenus/modes identiques,171 pièces runtime vérifiées, fermeture0/OOM0, pic compilation7475396608/9663676416 octets. [Commandes, noms, reçus et portée](evidence/2026-11-12/relay-current-composition/README.md). Cette preuve n’est pas transférée au seul code public ni à tout le comportement des134 fichiers. L’édition postrun de HANDOFF invalide uniquement sa ligne du manifeste statique conservé ; cet écart est explicitement documenté, sans relance ni reconstruction. Les compilations indépendantes ont réellement tourné en parallèle ; aucune mesure de latence produit n’est déduite.
+Une compilation lib offline, liste réelle, deux parents exacts et check toutes cibles RC0 sur source 0a0d7a73… (2643 fichiers). Export vivant bc621555…/31631360 octets, tous contenus/modes identiques,171 pièces runtime vérifiées, fermeture 0/OOM0, pic compilation7475396608/9663676416 octets. [Commandes, noms, reçus et portée](evidence/2026-11-12/relay-current-composition/README.md). Cette preuve n’est pas transférée au seul code public ni à tout le comportement des134 fichiers. L’édition postrun de HANDOFF invalide uniquement sa ligne du manifeste statique conservé ; cet écart est explicitement documenté, sans relance ni reconstruction. Les compilations indépendantes ont réellement tourné en parallèle ; aucune mesure de latence produit n’est déduite.
 
 ## 12 novembre — candidat AuthLedger5 corrigé : 17 parents et toutes cibles PASS
 
@@ -114,7 +122,7 @@ Export vivant de 27 330 560 octets SHA `46bcff74…`, vérification source et fe
 
 ## 11 novembre, 17:17 UTC — Core/schema13, FAIL_PARENT conservé
 
-Build offline `--lib --bin agentsandbox --test schema13_protocol_contract --no-run --message-format=json` RC0 ; douze parents exacts PASS, puis parent13 RC101 à `schema13_compat_tests.rs:128:5`, attente `open_existing_for_tenant(...).is_err()`. Diagnostic du contrat de quarantaine en cours, sans modification du comportement global d'ouverture. Parents14–26 et check toutes cibles NOT_RUN. Résultat final101, fermeture0, OOM0. Le RC64 de l'invocation préalable avec argument supplémentaire reste distinct et n'a exécuté aucun build/test. Root vérifie les sorties brutes et l'export vivant des2537 sources, SHA4cb697c7… intégralement conforme au manifeste193399a5…. [Preuves et portée](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).
+Build offline `--lib --bin agentsandbox --test schema13_protocol_contract --no-run --message-format=json` RC0 ; douze parents exacts PASS, puis parent13 RC101 à `schema13_compat_tests.rs:128:5`, attente `open_existing_for_tenant(...).is_err()`. Diagnostic du contrat de quarantaine en cours, sans modification du comportement global d'ouverture. Parents14–26 et check toutes cibles NOT_RUN. Résultat final101, fermeture 0, OOM0. Le RC64 de l'invocation préalable avec argument supplémentaire reste distinct et n'a exécuté aucun build/test. Root vérifie les sorties brutes et l'export vivant des2537 sources, SHA4cb697c7… intégralement conforme au manifeste193399a5…. [Preuves et portée](evidence/2026-11-11/kubernetes-held-create-recovery/README.md#composed-coreschema13-attempt--11-november-1717-utc).
 
 ## 11 novembre, 15:44 UTC — correction du consommateur V2 sous schéma12
 
