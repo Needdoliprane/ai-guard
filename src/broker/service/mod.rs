@@ -379,3 +379,20 @@ mod selection_tests {
         );
     }
 }
+
+/// Test-only access to the real early broker authentication path. This helper
+/// never calls open_context, prepares a job, or constructs an executor/runtime.
+#[cfg(test)]
+pub(crate) async fn owned_protocol_precheck_for_test(
+    registry_path: &Path,
+    profile_id: &str,
+    credential: &str,
+) -> std::result::Result<(), protocol::BrokerErrorCodeV1> {
+    let registry = profile::Registry::load(registry_path)
+        .expect("synthetic operator registry must be valid before broker precheck");
+    // Ignore only the separate active-state condition so this canary is
+    // discriminating for the unchanged schema3..13 gate on an owned reopen.
+    VerifiedProfile::authenticate(&registry, profile_id, credential, false)
+        .await
+        .map(|_| ())
+}
