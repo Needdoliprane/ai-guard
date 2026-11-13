@@ -1,4 +1,23 @@
 use super::*;
+use crate::audit::human_modern::{HumanDiscoveryGeneration, discovery_generation};
+use crate::control::egress_policy::EgressPolicyExpectedScopeV1;
+
+fn check_policy_context(
+    store: &Store,
+    tx: &CheckedTransaction<'_>,
+    expected: &EgressPolicyExpectedScopeV1,
+    generation: HumanDiscoveryGeneration,
+) -> anyhow::Result<()> {
+    tx.require_identity_authority()?;
+    if store.tenant_id() != expected.tenant_id()
+        || crate::audit::supervision::namespace(tx)? != expected.control_namespace_uuid() {
+        return Err(EgressStoreFailure::ScopeConflict.into());
+    }
+    if discovery_generation(tx)? != generation {
+        return Err(EgressStoreFailure::DiscoveryStale.into());
+    }
+    Ok(())
+}
 
 /// Minted only by an exact active head debit under the selected checked
 /// transaction and revalidated machine binding. No request can construct it.
@@ -53,37 +72,43 @@ impl Store {
         epoch: &HumanSourcesWriteEpoch,
         source: &OwnedSourceToken,
         credential: &AuthenticatedReviewRunnerCredential,
+        expected_scope: &EgressPolicyExpectedScopeV1,
+        generation: HumanDiscoveryGeneration,
         request: &EgressReplacePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
-        self.mutate_egress_policy(epoch, source, credential, request.change()?)
+        self.mutate_egress_policy(epoch, source, credential, expected_scope, generation, request.change()?)
     }
     pub(crate) fn egress_revoke_policy_scoped(
         &self,
         epoch: &HumanSourcesWriteEpoch,
         source: &OwnedSourceToken,
         credential: &AuthenticatedReviewRunnerCredential,
+        expected_scope: &EgressPolicyExpectedScopeV1,
+        generation: HumanDiscoveryGeneration,
         request: &EgressRevokePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
-        self.mutate_egress_policy(epoch, source, credential, request.change())
+        self.mutate_egress_policy(epoch, source, credential, expected_scope, generation, request.change())
     }
     fn mutate_egress_policy(
         &self,
         epoch: &HumanSourcesWriteEpoch,
         source: &OwnedSourceToken,
         credential: &AuthenticatedReviewRunnerCredential,
+        expected_scope: &EgressPolicyExpectedScopeV1,
+        generation: HumanDiscoveryGeneration,
         change: Change,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
         change.validate()?;
+        expected_scope.validate().map_err(|_| EgressStoreFailure::Invalid)?;
         epoch.validate_source(source)?;
         let access = HumanSourceAccess::write(epoch, source)?;
-        let mut db = self
-            .db
-            .try_lock()
-            .map_err(|_| review_access::ReviewAccessFailure::Busy)?;
-        let tx =
-            self.begin_checked_scoped(&mut db, &access, StoreOperationClass::IdentityAuthority)?;
+        self.with_scoped_nowait(&access, StoreOperationClass::IdentityAuthority, |db| {
+        let tx = self.begin_checked_with_access(db, Some(&access), StoreOperationClass::IdentityAuthority)?;
         tx.require_identity_authority()?;
         require15(&tx)?;
+        // Required origin/integrity guards above remain intact. This assertion
+        // precedes business policy replay, operation lookup, CAS and clock work.
+        check_policy_context(self, &tx, expected_scope, generation)?;
         let verified = self.verify_review_binding_for_registration_in_transaction(
             &tx, epoch, source, credential,
         )?;
@@ -106,6 +131,7 @@ impl Store {
             ensure(bounded_json(&receipt, RECEIPT_BYTES)? == *json)?;
             verified.revalidate()?;
             epoch.validate_source(source)?;
+            check_policy_context(self, &tx, expected_scope, generation)?;
             drop(verified);
             self.commit_authorized(tx, &clock)?;
             epoch.validate_source(source)?;
@@ -182,10 +208,12 @@ impl Store {
         replay(&tx)?;
         verified.revalidate()?;
         epoch.validate_source(source)?;
+        check_policy_context(self, &tx, expected_scope, generation)?;
         drop(verified);
         self.commit_authorized(tx, &clock)?;
         epoch.validate_source(source)?;
         Ok(receipt)
+        })
     }
 
     /// Internal permission helper only; public read delivery/audit envelopes and

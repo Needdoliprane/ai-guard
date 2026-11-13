@@ -21,6 +21,8 @@ pub(crate) enum EgressStoreFailure {
     Integrity,
     Permission,
     MigrationRequired,
+    ScopeConflict,
+    DiscoveryStale,
 }
 impl std::fmt::Display for EgressStoreFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -34,10 +36,34 @@ impl std::fmt::Display for EgressStoreFailure {
             Self::Integrity => "egress policy audit projection mismatch",
             Self::Permission => "egress policy source or control authority unavailable",
             Self::MigrationRequired => "explicit backed-up egress policy migration required",
+            Self::ScopeConflict => "egress expected scope conflicts with authenticated source",
+            Self::DiscoveryStale => "owned control discovery requires rebuilding",
         })
     }
 }
 impl std::error::Error for EgressStoreFailure {}
+impl EgressStoreFailure {
+    pub(crate) fn admin_error(error: &anyhow::Error) -> crate::control::egress_policy::EgressPolicyAdminErrorV1 {
+        use crate::control::egress_policy::EgressPolicyAdminErrorV1 as E;
+        if let Some(kind) = error.downcast_ref::<Self>() {
+            return match kind {
+                Self::Invalid => E::InvalidRequest, Self::Conflict => E::Conflict,
+                Self::ScopeConflict => E::ScopeConflict, Self::MigrationRequired => E::MigrationRequired,
+                Self::Capacity | Self::AuditReservationExhausted => E::Capacity,
+                Self::DiscoveryStale | Self::Integrity | Self::Permission => E::Unavailable,
+            };
+        }
+        if error.downcast_ref::<review_access::ReviewAccessFailure>() == Some(&review_access::ReviewAccessFailure::Busy)
+            || error.downcast_ref::<crate::human_authority::HumanAuthorityFailure>() == Some(&crate::human_authority::HumanAuthorityFailure::GateBusy) {
+            return E::Busy;
+        }
+        if error.downcast_ref::<crate::workload::WorkloadFailureV1>() == Some(&crate::workload::WorkloadFailureV1::ClockRegression) {
+            return E::Clock;
+        }
+        if error.downcast_ref::<capacity::AuditCapacityFailureV1>().is_some() { return E::Capacity; }
+        E::Unavailable
+    }
+}
 pub(super) fn ensure(ok: bool) -> anyhow::Result<()> {
     if ok {
         Ok(())
@@ -144,16 +170,16 @@ impl EgressStoreLimitsV1 {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub(crate) enum EgressPolicySelectorV1 {
+pub enum EgressPolicySelectorV1 {
     Tenant,
     Session(String),
 }
 impl EgressPolicySelectorV1 {
-    pub(crate) fn session(id: &str) -> anyhow::Result<Self> {
+    pub fn session(id: &str) -> anyhow::Result<Self> {
         canonical_id(id)?;
         Ok(Self::Session(id.into()))
     }
-    pub(super) fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::Tenant => Ok(()),
             Self::Session(id) => canonical_id(id),
@@ -169,7 +195,7 @@ impl EgressPolicySelectorV1 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum EgressPolicyStateV1 {
+pub enum EgressPolicyStateV1 {
     Active,
     RevokeRequested,
 }
@@ -557,7 +583,7 @@ pub(super) struct Genesis {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EgressPolicyReceiptV1 {
+pub struct EgressPolicyReceiptV1 {
     version: u32,
     operation_id: uuid::Uuid,
     action: String,
@@ -573,18 +599,28 @@ pub(crate) struct EgressPolicyReceiptV1 {
     received_at: String,
 }
 impl EgressPolicyReceiptV1 {
-    pub(crate) fn state(&self) -> EgressPolicyStateV1 {
+    pub fn state(&self) -> EgressPolicyStateV1 {
         self.state
     }
-    pub(crate) fn before_epoch(&self) -> u64 {
+    pub fn before_epoch(&self) -> u64 {
         self.before_epoch
     }
-    pub(crate) fn after_epoch(&self) -> u64 {
+    pub fn after_epoch(&self) -> u64 {
         self.after_epoch
     }
-    pub(crate) fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
+    pub fn canonical_bytes(&self) -> anyhow::Result<Vec<u8>> {
         Ok(bounded_json(self, RECEIPT_BYTES)?.into_bytes())
     }
+    pub fn version(&self) -> u32 { self.version }
+    pub fn operation_id(&self) -> uuid::Uuid { self.operation_id }
+    pub fn action(&self) -> &str { &self.action }
+    pub fn selector(&self) -> &EgressPolicySelectorV1 { &self.selector }
+    pub fn revision(&self) -> u64 { self.revision }
+    pub fn policy_digest(&self) -> &str { &self.policy_digest }
+    pub fn event_id(&self) -> &str { &self.event_id }
+    pub fn event_seq(&self) -> i64 { self.event_seq }
+    pub fn event_hash(&self) -> &str { &self.event_hash }
+    pub fn received_at(&self) -> &str { &self.received_at }
     pub(super) fn from_event(
         stored: &StoredEvent,
         record: &MutationRecord,

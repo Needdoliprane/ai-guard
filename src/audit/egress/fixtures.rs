@@ -320,10 +320,10 @@ pub(super) fn require_saturation_cause(
 }
 pub(super) struct Fixture {
     base: BaseFixture,
-    owner: OwnedHumanSources,
-    sources: Vec<OwnedSourceToken>,
+    pub(super) owner: OwnedHumanSources,
+    pub(super) sources: Vec<OwnedSourceToken>,
     pub(super) stores: Vec<Arc<Store>>,
-    credential: AuthenticatedReviewRunnerCredential,
+    pub(super) credential: AuthenticatedReviewRunnerCredential,
     account: crate::identity::HumanAccountV1,
     policy_start: u64,
     policy_end: u64,
@@ -525,7 +525,13 @@ impl Fixture {
         request: &EgressReplacePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
         let epoch = self.owner.try_write_epoch()?;
-        store.egress_replace_policy_scoped(&epoch, &self.sources[0], &self.credential, request)
+        let source = &self.sources[0];
+        let access = HumanSourceAccess::write(&epoch, source)?;
+        let generation = self.stores[0].modern_discovery_generation(&access)?;
+        let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
+            self.stores[0].tenant_id(), &source.descriptor().durable_namespace_id.to_string(),
+        )?;
+        store.egress_replace_policy_scoped(&epoch, source, &self.credential, &expected, generation, request)
     }
     pub(super) fn install_with_other_credential(
         &self,
@@ -550,7 +556,12 @@ impl Fixture {
             "synthetic-B-runner",
         )?;
         let epoch = self.owner.try_write_epoch()?;
-        self.stores[0].egress_replace_policy_scoped(&epoch, &self.sources[0], &credential, request)
+        let access = HumanSourceAccess::write(&epoch, &self.sources[0])?;
+        let generation = self.stores[0].modern_discovery_generation(&access)?;
+        let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
+            self.stores[0].tenant_id(), &self.sources[0].descriptor().durable_namespace_id.to_string(),
+        )?;
+        self.stores[0].egress_replace_policy_scoped(&epoch, &self.sources[0], &credential, &expected, generation, request)
     }
     pub(super) fn revoke_control_binding(&self) {
         use crate::control::review_binding::{
@@ -631,10 +642,17 @@ impl Fixture {
         request: &EgressRevokePolicyV1,
     ) -> anyhow::Result<EgressPolicyReceiptV1> {
         let epoch = self.owner.try_write_epoch()?;
+        let access = HumanSourceAccess::write(&epoch, &self.sources[0])?;
+        let generation = self.stores[0].modern_discovery_generation(&access)?;
+        let expected = crate::control::egress_policy::EgressPolicyExpectedScopeV1::new(
+            self.stores[0].tenant_id(), &self.sources[0].descriptor().durable_namespace_id.to_string(),
+        )?;
         self.stores[0].egress_revoke_policy_scoped(
             &epoch,
             &self.sources[0],
             &self.credential,
+            &expected,
+            generation,
             request,
         )
     }

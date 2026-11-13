@@ -12,6 +12,21 @@ impl std::fmt::Display for StaleControlDiscovery {
 impl std::error::Error for StaleControlDiscovery {}
 
 impl Store {
+    /// Source/format admission only. No request body or expected_scope exists
+    /// yet, and this read epoch is never promoted into writer authority.
+    pub(crate) fn modern_control_write_admission(
+        &self,
+        access: &HumanSourceAccess<'_>,
+    ) -> anyhow::Result<()> {
+        self.with_modern_read(access, |tx| {
+            let format: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if format != 15 {
+                return Err(crate::audit::egress::EgressStoreFailure::MigrationRequired.into());
+            }
+            Ok(())
+        })
+    }
+
     /// None means the complete startup collision index needs rebuilding. It
     /// never means an absent identity or permission to fall back to legacy.
     pub(crate) fn modern_control_protocol(

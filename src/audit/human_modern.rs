@@ -12,7 +12,7 @@ pub(crate) struct HumanDiscoveryGeneration {
     authorization_revision: u64,
     workload_history_event: Option<i64>,
 }
-fn discovery_generation(tx: &CheckedTransaction<'_>) -> anyhow::Result<HumanDiscoveryGeneration> {
+pub(super) fn discovery_generation(tx: &CheckedTransaction<'_>) -> anyhow::Result<HumanDiscoveryGeneration> {
     Ok(HumanDiscoveryGeneration {
         authorization_revision: identity::authorization_revision(tx)?,
         workload_history_event: tx.query_row(
@@ -82,38 +82,13 @@ impl Store {
         access: &HumanSourceAccess<'_>,
         read: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        access.check(StoreOperationClass::Business)?;
-        let mut db = self
-            .db
-            .try_lock()
-            .map_err(|_| review_access::ReviewAccessFailure::Busy)?;
-        let prior: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
-        let prior = u64::try_from(prior).context("invalid negative SQLite busy timeout")?;
-        db.busy_timeout(std::time::Duration::ZERO)?;
-        let result = (|| {
-            // Unlike begin_checked_scoped, this entrance does not reset zero
-            // to100ms. Every source/lease/floor/schema/capacity check is shared.
-            let tx = self.begin_checked_with_access(
-                &mut db,
-                Some(access),
-                StoreOperationClass::Business,
-            )?;
+        self.with_scoped_nowait(access, StoreOperationClass::Business, |db| {
+            let tx = self.begin_checked_with_access(db, Some(access), StoreOperationClass::Business)?;
             let result = read(&tx)?;
             self.commit_checked(tx)?;
             Ok(result)
-        })();
-        // The exclusive connection guard survives rollback and restoration.
-        // A restoration error refuses publication even after a known COMMIT.
-        db.busy_timeout(std::time::Duration::from_millis(prior))?;
-        let restored: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
-        let restored = u64::try_from(restored).context("invalid negative SQLite busy timeout")?;
-        anyhow::ensure!(restored == prior, "human source timeout restoration failed");
-        result.map_err(|error:anyhow::Error| {
-            let busy=error.chain().any(|cause|matches!(cause.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)));
-            if busy {error.context(review_access::ReviewAccessFailure::Busy)}else{error}
         })
     }
-
     pub(crate) fn modern_authenticate_local_digest(
         &self,
         access: &HumanSourceAccess<'_>,

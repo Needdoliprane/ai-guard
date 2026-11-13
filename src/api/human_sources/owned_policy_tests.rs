@@ -30,11 +30,18 @@ struct Server {
 impl Server {
     async fn close(&mut self) {
         self.stop.take().unwrap().send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(30), self.task.take().unwrap())
-            .await
-            .expect("A1 fixture HTTP cleanup timed out")
-            .unwrap()
-            .unwrap();
+        let task = self.task.as_mut().unwrap();
+        match tokio::time::timeout(Duration::from_secs(30), &mut *task).await {
+            Ok(result) => { result.unwrap().unwrap(); self.task.take(); }
+            Err(_) => {
+                task.abort();
+                let aborted = tokio::time::timeout(Duration::from_secs(30), &mut *task).await;
+                if aborted.is_ok() { self.task.take(); }
+                // A still-unfinished handle remains retained by Server. No
+                // timeout is mistaken for observed server drainage.
+                panic!("A1 fixture HTTP cleanup timed out; abort observed={}", aborted.is_ok());
+            }
+        }
     }
 }
 impl Drop for Server {
@@ -209,4 +216,152 @@ async fn owned_policy_replace_reaches_real_e1_after_reserved_sdk_diagnostic() {
         [], |row| Ok((row.get(0)?,row.get(1)?)),
     ).unwrap();
     assert_eq!(held, (1, 98_304));
+}
+
+
+// Additional implementation regressions use the same genuine fixture and real
+// Router. They do not participate in the archived feature-absence baseline.
+fn policy_state(format: u32) -> (impl Send, GatewayState) {
+    let mut fixture = Store::owned_control_fixture_for_test(format);
+    let (bundle, credentials, tokens) = fixture.take_startup();
+    let state = GatewayState::for_owned_human_sources(bundle, credentials, tokens, Policy::default(), None, Redactor::new(vec![])).unwrap();
+    (fixture, state)
+}
+fn policy_body(state: &GatewayState) -> serde_json::Value {
+    let owned = state.owned_human.as_ref().unwrap();
+    let index = state.tenants.iter().position(|t|t.tenant_id=="A").unwrap();
+    let now = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+    json!({"version":1,"expected_scope":{"tenant_id":"A","control_namespace_uuid":owned.sources[index].descriptor().durable_namespace_id},
+        "operation_id":uuid::Uuid::new_v4(),"selector":{"kind":"tenant"},"expected_revision":0,"expected_epoch":0,
+        "policy":{"not_before_ms":now.saturating_sub(60_000),"expires_at_ms":now+600_000,
+            "destinations":[{"name":"example.com","port":443,"transport":"connect_tcp_opaque"}],
+            "max_destinations":1,"max_resolution_ips":1},"tenant_ceiling":null})
+}
+async fn policy_call(state: &GatewayState, method: &str, path: &str, token: &str, value: serde_json::Value) -> (u16, Vec<u8>) {
+    use tower::ServiceExt;
+    let request = axum::http::Request::builder().method(method).uri(path)
+        .header("authorization",format!("Bearer {token}")).header("content-type","application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&value).unwrap())).unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(120),gateway_router(state.clone()).oneshot(request)).await.unwrap().unwrap();
+    let status = response.status().as_u16();
+    let body = axum::body::to_bytes(response.into_body(),4096).await.unwrap();
+    (status,body.to_vec())
+}
+async fn policy_drain(state: &GatewayState) {
+    let retirement = state.human_retirement().unwrap(); retirement.retire();
+    tokio::time::timeout(Duration::from_secs(30),retirement.drain()).await.unwrap().unwrap();
+}
+fn policy_snapshot(state: &GatewayState) -> Vec<Vec<rusqlite::types::Value>> {
+    let owned = state.owned_human.as_ref().unwrap();
+    let index = state.tenants.iter().position(|t|t.tenant_id=="A").unwrap();
+    let path = owned.sources[index].descriptor().storage_binding.path();
+    let db = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let mut all = Vec::new();
+    for (table,columns) in [("egress_policy_meta",5),("egress_policy_revisions",6),("egress_policy_heads",6),("egress_policy_operations",5),("egress_policy_reservations",4),("audit_time_floors",2)] {
+        all.extend(db.prepare(&format!("SELECT * FROM {table} ORDER BY 1,2")).unwrap().query_map([],|row|{
+            (0..columns).map(|i|row.get(i)).collect::<rusqlite::Result<Vec<rusqlite::types::Value>>>()
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap());
+    }
+    all.push(db.query_row("SELECT count(*),coalesce(max(seq),0) FROM events",[],|r|Ok(vec![r.get(0)?,r.get(1)?])).unwrap());
+    all.push(db.query_row("SELECT bytes FROM quota WHERE id=1",[],|r|Ok(vec![r.get(0)?])).unwrap());
+    all
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn expected_scope_conflicts_before_fresh_and_replayed_policy_with_no_neighbor_sql() {
+    let (_fixture,state) = policy_state(15);
+    let b = state.tenants.iter().position(|t|t.tenant_id=="B").unwrap();
+    let neighbor = crate::audit::read_test_observer::observe(&state.tenants[b].store);
+    let request = policy_body(&state);
+    for replay in [false,true] {
+        if replay { assert_eq!(policy_call(&state,"POST",REPLACE,RUNNER,request.clone()).await.0,200); }
+        let before = policy_snapshot(&state);
+        for (field,value) in [("tenant_id",json!("B")),("control_namespace_uuid",json!(uuid::Uuid::new_v4()))] {
+            let mut wrong = request.clone(); wrong["expected_scope"][field]=value;
+            let (status,body) = policy_call(&state,"POST",REPLACE,RUNNER,wrong).await;
+            assert_eq!(status,409);
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_scope_conflict");
+            assert_eq!(policy_snapshot(&state),before);
+            assert!(neighbor.try_recv().is_err());
+        }
+    }
+    policy_drain(&state).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn expected_scope_survives_real_gateway_namespace_replacement() {
+    let (_old,old) = policy_state(15);
+    let request = policy_body(&old);
+    let (status,body) = policy_call(&old,"GET",PROTOCOL,RUNNER,json!({})).await;
+    assert_eq!(status,200);
+    let diagnostic: crate::control::ControlProtocolV1 = serde_json::from_slice(&body).unwrap();
+    assert_eq!(diagnostic.control_namespace_uuid.as_deref(),request["expected_scope"]["control_namespace_uuid"].as_str());
+    let (_new,new) = policy_state(15);
+    assert_ne!(policy_body(&new)["expected_scope"],request["expected_scope"]);
+    let before = policy_snapshot(&new);
+    // Both routers have genuine but different authorities with the same
+    // configured bearer; no mocked diagnostic or Store result participates.
+    assert_eq!(policy_call(&new,"POST",REPLACE,RUNNER,request).await.0,409);
+    assert_eq!(policy_snapshot(&new),before);
+    policy_drain(&old).await; policy_drain(&new).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn policy_scope_body_and_method_failures_keep_existing_boundaries() {
+    let (_fixture,state) = policy_state(15);
+    let original = policy_body(&state);
+    let before = policy_snapshot(&state);
+    for token in ["synthetic-A-viewer","synthetic-unknown-control"] {
+        assert!(matches!(policy_call(&state,"POST",REPLACE,token,original.clone()).await.0,401|403|503));
+        assert_eq!(policy_snapshot(&state),before);
+    }
+    for scope in [None,Some(json!(null)),Some(json!({"tenant_id":"A"}))] {
+        let mut request = original.clone();
+        match scope {Some(scope)=>request["expected_scope"]=scope,None=>{request.as_object_mut().unwrap().remove("expected_scope");}}
+        assert_eq!(policy_call(&state,"POST",REPLACE,RUNNER,request).await.0,400);
+        assert_eq!(policy_snapshot(&state),before);
+    }
+    for (method,path) in [("POST","/api/v1/egress/policies/replace"),("HEAD",REPLACE),("GET",REPLACE),("POST","/control/api/v1/egress/policies/unknown")] {
+        assert!(matches!(policy_call(&state,method,path,RUNNER,original.clone()).await.0,404|405|503));
+        assert_eq!(policy_snapshot(&state),before);
+    }
+    policy_drain(&state).await;
+    let (_fixture,state) = policy_state(14);
+    let (status,body) = policy_call(&state,"POST",REPLACE,RUNNER,policy_body(&state)).await;
+    assert_eq!(status,409);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap()["error"]["code"],"egress_policy_migration_required");
+    policy_drain(&state).await;
+}
+
+#[tokio::test(flavor="multi_thread",worker_threads=2)]
+async fn aborted_policy_observer_retains_committed_work_and_operation_until_drain() {
+    use tower::ServiceExt;
+    let (_fixture,state) = policy_state(15);
+    let index = state.tenants.iter().position(|t|t.tenant_id=="A").unwrap();
+    let semaphore = state.tenants[index].control_capacity.runner_semaphore_for_test();
+    let available = semaphore.available_permits();
+    let (reached,release) = crate::api::auth::owned_control::test_hook::install(&state);
+    let request = axum::http::Request::builder().method("POST").uri(REPLACE)
+        .header("authorization",format!("Bearer {RUNNER}")).header("content-type","application/json")
+        .body(axum::body::Body::from(serde_json::to_vec(&policy_body(&state)).unwrap())).unwrap();
+    let router = gateway_router(state.clone());
+    let observer = tokio::spawn(async move {router.oneshot(request).await});
+    tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
+    assert_eq!(semaphore.available_permits(),available-1);
+    let owned = state.owned_human.as_ref().unwrap();
+    assert_eq!(owned.usages.load(Ordering::Acquire),1);
+    let path = owned.sources[index].descriptor().storage_binding.path();
+    let db = rusqlite::Connection::open_with_flags(path,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM egress_policy_operations",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    drop(db);
+    observer.abort(); let _ = observer.await;
+    assert_eq!(semaphore.available_permits(),available-1);
+    assert_eq!(owned.usages.load(Ordering::Acquire),1);
+    let retirement = state.human_retirement().unwrap();
+    retirement.retire();
+    assert!(!owned.healthy());
+    release.release();
+    tokio::time::timeout(Duration::from_secs(30),retirement.drain()).await.unwrap().unwrap();
+    assert_eq!(semaphore.available_permits(),available);
+    assert_eq!(owned.usages.load(Ordering::Acquire),super::CLOSED);
 }
