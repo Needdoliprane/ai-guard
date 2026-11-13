@@ -5,7 +5,7 @@ use agentsandbox::{
         EnvelopeExpectationsV1, TechnicalCredentialInput, TechnicalCredentialRoleV1,
         prepare_envelope_configuration, validate_technical_credentials_configuration,
     },
-    control_fs::{Directory, PrivateFile},
+    control_fs::PrivateFile,
     human_authority::migration::operator::{
         self, ExpectedOwnedSourceV1, InputBudget, LegacySourceInput, OperatorMigrationRequest,
         OperatorResolvedView, OperatorSourceOptions, PreparationDirectoryIdentityV1,
