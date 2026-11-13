@@ -383,7 +383,9 @@ fn reserve_workload_fixture_worker(store: &Store) -> WorkerV1 {
     assert!(!result.replayed);
     assert!(result.refusal.is_none());
     assert!(result.receipt.audit_seq > stored.seq);
-    let worker = result.worker.expect("actual admission must reserve a worker");
+    let worker = result
+        .worker
+        .expect("actual admission must reserve a worker");
     let persisted = store.worker(&worker.worker_id).unwrap().unwrap();
     assert_eq!(persisted.worker_id, worker.worker_id);
     assert_eq!(persisted.attempt.attempt_id, worker.attempt.attempt_id);
