@@ -136,6 +136,8 @@ fn metadata_events_sqlite_audit_insert_abort_preserves_head_and_usage() {
     let bundle = fixture.migrated();
     read(&bundle, |store, access| {
         let scope = scope(store, access, fixture.principal());
+        store.db.lock().unwrap()
+            .busy_timeout(std::time::Duration::from_millis(713)).unwrap();
         let trigger = store.modern_test_abort_events_audit().unwrap();
         let before = audit_head(&store.db.lock().unwrap()).unwrap();
         let usage = store.modern_test_human_usage();
@@ -149,7 +151,18 @@ fn metadata_events_sqlite_audit_insert_abort_preserves_head_and_usage() {
         assert!(format!("{error:#}").contains("synthetic owned events audit insertion failure"));
         assert_eq!(audit_head(&store.db.lock().unwrap()).unwrap(), before);
         assert_eq!(store.modern_test_human_usage(), usage);
+        assert_eq!(store.db.lock().unwrap().pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0)).unwrap(), 713);
+        assert!(!store.permanently_healthy());
+        assert!(!store.healthy());
+        // TEMP trigger removal is fixture cleanup, not operator recovery.
         trigger.remove().unwrap();
-        assert_eq!(store.modern_human_events(access, &scope, &metadata(), 0, None, 25, &Redactor::new(vec![])).unwrap().page.unwrap().items.len(), 2);
+        assert!(!store.permanently_healthy());
+        let latched = store.modern_human_events(access, &scope, &metadata(), 0, None, 25, &Redactor::new(vec![])).err().unwrap();
+        assert!(format!("{latched:#}").contains("audit integrity failure is latched; recovery required"), "expected existing permanent audit latch, got {latched:#}");
+        assert_eq!(audit_head(&store.db.lock().unwrap()).unwrap(), before);
+        assert_eq!(store.modern_test_human_usage(), usage);
+        assert_eq!(store.db.lock().unwrap().pragma_query_value(None, "busy_timeout", |row| row.get::<_, i64>(0)).unwrap(), 713);
+        assert!(!store.permanently_healthy());
+        assert!(!store.healthy());
     });
 }
