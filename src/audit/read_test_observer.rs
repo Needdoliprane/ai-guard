@@ -14,6 +14,7 @@ use std::{
 pub(crate) enum Call {
     BeginChecked,
     Integrity,
+    Metadata,
 }
 
 #[derive(Debug)]

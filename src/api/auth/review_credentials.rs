@@ -13,13 +13,10 @@ use crate::{
         OwnedHumanSources, OwnedSourceToken,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+pub mod preparation;
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt, sync::Arc};
 use uuid::Uuid;
 
 const MAX_ENVELOPE_BYTES: usize = 1_048_576;
@@ -43,7 +40,7 @@ impl fmt::Display for ReviewCredentialFailure {
 impl std::error::Error for ReviewCredentialFailure {}
 
 // Deliberately not Debug or Serialize: these are private credential bytes.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EnvelopeV1 {
     version: u32,
@@ -53,7 +50,7 @@ struct EnvelopeV1 {
     control_config_public_digest: String,
     entries: Vec<EnvelopeEntryV1>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EnvelopeEntryV1 {
     tenant_id: String,
@@ -62,7 +59,7 @@ struct EnvelopeEntryV1 {
     generation: u64,
     token: String,
 }
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum EnvelopeRoleV1 {
     Runner,
@@ -87,7 +84,7 @@ struct ReviewCredentialEntry {
 
 /// Installation only, before serving requests. Its constructor never performs
 /// a Store lookup, accepts a credential UUID from HTTP, or mutates authority.
-pub(super) struct ReviewCredentialRegistry {
+pub(in crate::api) struct ReviewCredentialRegistry {
     file: PrivateFile,
     owner: OwnedHumanSources,
     entries: HashMap<[u8; 32], ReviewCredentialEntry>,
@@ -113,7 +110,7 @@ impl fmt::Debug for AuthenticatedReviewRunnerCredential {
 }
 
 impl ReviewCredentialRegistry {
-    pub(super) fn from_private_file(
+    pub(in crate::api) fn from_private_file(
         file: PrivateFile,
         owner: OwnedHumanSources,
         expected: &CredentialIndex,
@@ -292,18 +289,8 @@ fn resolve_envelope(
     {
         return Err(invalid);
     }
-    let envelope: EnvelopeV1 = serde_json::from_slice(bytes).map_err(|_| invalid)?;
-    if envelope.version != 1
-        || envelope.installation_id != closure.installation_id
-        || envelope.closure_id != closure.closure_id
-        || envelope.closure_revision != closure.closure_revision
-        || envelope.control_config_public_digest != closure.configuration.public_config_digest
-        || envelope.entries.len() != expected.entries.len()
-        || envelope.entries.len() != tenants.len() * 2
-        || envelope.entries.len() > MAX_ENVELOPE_ENTRIES
-    {
-        return Err(invalid);
-    }
+    let validated = preparation::validate_runtime_configuration(bytes, expected, tenants, closure)
+        .map_err(|_| invalid)?;
     let mut tenant_indices = HashMap::new();
     let mut sources = HashMap::new();
     for (i, tenant) in tenants.iter().enumerate() {
@@ -327,43 +314,21 @@ fn resolve_envelope(
     if sources.len() != tenants.len() {
         return Err(invalid);
     }
-    let mut stable_ids = HashSet::new();
-    let mut digests = HashSet::new();
-    let mut tuples = HashSet::new();
     let mut runners = HashMap::new();
-    for entry in envelope.entries {
-        let Some(&tenant_index) = tenant_indices.get(entry.tenant_id.as_str()) else {
-            return Err(invalid);
-        };
-        let role = entry.role.role();
-        let digest = credential_digest(&entry.token);
-        let expected_binding = expected.lookup_digest(&digest).ok_or(invalid)?;
-        if !valid_credential(&entry.token)
-            || entry.credential_id.is_nil()
-            || entry.generation == 0
-            || expected_binding.tenant_index != tenant_index
-            || expected_binding.role != role
-            || !stable_ids.insert(entry.credential_id)
-            || !digests.insert(digest)
-            || !tuples.insert((tenant_index, role.as_str()))
-        {
-            return Err(invalid);
-        }
-        if role == CredentialRole::Runner {
-            let source = sources.get(entry.tenant_id.as_str()).ok_or(invalid)?;
-            runners.insert(
-                digest,
-                ReviewCredentialEntry {
-                    tenant_id: entry.tenant_id,
-                    credential_id: entry.credential_id,
-                    generation: entry.generation,
-                    source_id: source.source_id,
-                    namespace: source.durable_namespace_id,
-                },
-            );
-        }
+    for (digest, entry) in validated.runners {
+        let source = sources.get(entry.tenant_id.as_str()).ok_or(invalid)?;
+        runners.insert(
+            digest,
+            ReviewCredentialEntry {
+                tenant_id: entry.tenant_id,
+                credential_id: entry.credential_id,
+                generation: entry.generation,
+                source_id: source.source_id,
+                namespace: source.durable_namespace_id,
+            },
+        );
     }
-    if digests.len() != expected.entries.len() || runners.len() != tenants.len() {
+    if runners.len() != tenants.len() {
         return Err(invalid);
     }
     Ok(runners)

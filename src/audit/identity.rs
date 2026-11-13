@@ -1436,11 +1436,31 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let result = self.authorize_human_context_checked(
+            &tx,
+            principal,
+            &key,
+            membership_id,
+            expected_revision,
+            mode,
+        )?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    pub(super) fn authorize_human_context_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        principal: &PrincipalRefV1,
+        key: &str,
+        membership_id: &str,
+        expected_revision: u64,
+        mode: ContextModeV1,
+    ) -> anyhow::Result<AuthorizedScopeV1> {
         require_identity_read(&tx)?;
         let account: HumanAccountV1 = json_row(
             &tx,
             "SELECT payload_json FROM identity_accounts WHERE principal_key=?1",
-            &key,
+            key,
         )?
         .ok_or(IdentityFailureV1::IdentityRevoked)?;
         if !account.active {
@@ -1457,7 +1477,6 @@ impl Store {
         let scope =
             crate::identity::authorize_context(principal, &membership, mode, expected_revision)?
                 .at_authorization_revision(authorization_revision);
-        self.commit_checked(tx)?;
         Ok(scope)
     }
     /// Revalidate account, context revision and all authorization mutations in

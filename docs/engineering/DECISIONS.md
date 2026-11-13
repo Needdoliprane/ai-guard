@@ -1,5 +1,14 @@
 # Décisions d'industrialisation
 
+## 13 novembre — note de réalisation : adoption explicite des sources humaines
+
+Dans les frontières Rust existantes, le gateway conserve legacy par défaut et propose un profil owned explicite. Les documents privés fermés lient identités, configuration et attentes physiques ; le coordinateur13→14/4→5 précède la publication. Chaque startup reprend les sources, planchers et CAS réels. L’enveloppe seule n’est pas une autorité. Prepare a des effets SQLite ; check reste une vérification de fichiers/métadonnées, sans admission Ready.
+
+Le raccord fournit le producteur utile au startup sans nouveau service, stockage, permission humaine ou migration automatique. L’arrêt des anciens consommateurs reste une précondition attestée, sans fencing. Seuls GET identity/resources sont adoptés ; les autres opérations sensibles connues restent fermées avant les extracteurs legacy et une source voisine non lue reste inconnue. SSO, délégation, réseau et reprise restent des exigences ouvertes.
+
+Cette note décrit une réalisation dans l’architecture existante ; elle n’autorise aucune nouvelle frontière ou action externe. [Preuves EN](evidence/2026-11-13/human-sources-operator/README.md) · [FR](evidence/2026-11-13/human-sources-operator/README.fr.md) : 107 fonctions uniques sur le même gel en deux campagnes 34 + 73, sans qualification production/runtime.
+
+
 ## 13 novembre — contrats egress descriptifs et framing fermé
 
 Dans la direction C autorisée, le premier module logiciel expose des valeurs descriptives : `PolicyAllowed`, résolution de candidats validés et acceptation wire ne produisent aucune capacité de connexion. Le parser d’autorité est unique, ASCII et exact ; les formes non prises en charge sont refusées. Le préflight du payload est fermé avant appropriation variable, et la demi-fermeture rend le crédit inutilisé sans effacer les bytes déjà en queue.

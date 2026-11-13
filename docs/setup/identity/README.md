@@ -1,5 +1,7 @@
 # Named local access
 
+The optional [owned source profile](OWNED_SOURCES.md) adopts local identity/resources on existing Store14/15 sources with complete retained ownership. The [offline adoption workflow](../human-sources-maintenance/README.md) now prepares an existing Store13/Auth4 union, applies13→14/4→5 and publishes `gateway --human-sources-activation`. It creates no person or credential: provision named accounts and grants through the legacy procedures below before conversion, within their supported formats. Other modern handlers, including OIDC, remain closed. Bootstrap execution and W0 functional validation remain NOT_RUN for this source; legacy procedures retain their own format and qualification limits.
+
 [Français](README.fr.md) · [Setup index](../README.md) · [Local workstation](../local/README.md) · [OIDC](../keycloak/README.md)
 
 Use a named local account to inspect explicitly authorized resources without an identity provider. A human credential is separate from the technical runner/viewer credentials and from Codex or Claude authentication. Membership in a tenant does not grant access to all its sessions. This guide covers local account maintenance and read/export access; the [engineering ledger](../../engineering/CURRENT_STATE.md) records implementation and qualification separately.

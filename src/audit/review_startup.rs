@@ -403,6 +403,21 @@ fn require_current_incarnation(db: &Connection, source: &OwnedSourceToken) -> an
 }
 
 impl ReviewStoreStartup {
+    pub(crate) fn configure_owned_read_policies(
+        &mut self,
+        capacity: AuditCapacityPolicyV1,
+        workload: WorkloadAuditPolicyV1,
+        retention: crate::relay::RelayRetentionPolicyV1,
+    ) -> anyhow::Result<()> {
+        capacity.validate(self.store.max_events)?;
+        workload.validate(self.store.max_events, &capacity)?;
+        retention.validate()?;
+        self.store.capacity_policy = capacity;
+        self.store.workload_audit_policy = workload;
+        self.store.workload_audit_policy_explicit = true;
+        self.store.relay_retention_policy = retention;
+        Ok(())
+    }
     fn same_source(
         &self,
         epoch: &HumanSourcesWriteEpoch,

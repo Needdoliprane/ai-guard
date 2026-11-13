@@ -1,5 +1,30 @@
 # Validation courante
 
+## 13 novembre — sources humaines : 107 fonctions sur un même gel
+
+Source `dbee1d5f90abd884badf5cd255b69c436f38ae4a`, arbre `f3f8c1e3ed7d3358526d1cf926d9b99f1b6f5b6b`, archive `7050d12ba3f8fe621b8efcf91a614c3715f410de2bf9302f07b310af89e79302` : 2 771 fichiers /34 061 824 octets. [Preuves EN](evidence/2026-11-13/human-sources-operator/README.md) · [FR](evidence/2026-11-13/human-sources-operator/README.fr.md) · [Résultats typés](evidence/2026-11-13/human-sources-operator/RESULTS.json).
+
+| Campagne | Résultat constaté |
+|---|---|
+| Combinée | Check toutes cibles et build RC0 ;34 PASS/0 échec/ignoré, puis liste scoped vide : shell 85,73 NOT_RUN. Fermeture0. |
+| Restante | Même archive ;73 PASS/0 échec/ignoré dans 12 groupes, après trois listings globaux et toutes les prélistes. Relevé final du shell 0, fermeture 0 ; pas de nouveau check toutes cibles. |
+| Union |107 noms uniques ; intersection vide entre34 et73, sans double comptage. |
+| Source/captures |2771 contenus et modes identiques après chaque exécution ; sept collectes RC0, réelles archives de fixtures vides après RAII, 10 240 octets/0600, aucun OOM, tmp vide, conteneurs exacts retirés. |
+
+Commandes Cargo réelles en QA Linux ARM64 hors ligne épinglée :
+
+```console
+/usr/local/cargo/bin/cargo check --frozen --offline --all-targets --message-format=json
+/usr/local/cargo/bin/cargo test --frozen --offline --lib --bin agentsandbox --test human_sources_bootstrap --no-run --message-format=json
+```
+
+Le check appartient à la première campagne ; le no-run à chacune. Quatre exécutables sont résolus uniquement depuis le JSON du build, avec vrai help du CLI normal et listes/summaries des groupes. Le handle initial `25710` de la seconde campagne est devenu indisponible après changement de contexte : aucun restart. Root a confirmé le PID et Cargo/rustc vivants puis FINAL, chaque RC et les disparitions du PID/conteneur. Le nouveau rapport Luna observe la fin ; il ne revendique ni nouvelle exécution ni sortie du handle initial directement observée.
+
+Reçus Root `0c3fc032…`/`83e7f5ad…`, seconds regards `db1ba53f…`/`d043904e…`. Les erreurs antérieures de compilation, ancien SIG25 sur une autre source et propositions rejetées avant création sont conservées. Sur le gel final, les rlib de 545 228 954 puis 545 229 866 octets dépassent 512 Mio sous limite QA de 1 Gio ; le fichier exact de l’ancien SIG25 reste non observé. Ces mesures concernent le build, pas un worker.
+
+Moteurs métier, fournisseurs/IdP, frontend, macOS natif, panne physique, facturation et 100 workers restent hors campagne. Clippy strict, release et suite complète NOT_RUN ; aucun gate global fermé. Pièces brutes et archives privées restent hors Git.
+
+
 ## 13 novembre — sources humaines : coût privé, RED/GREEN distincts et huit canaris publics
 
 **PASS ciblé public**, gel `8c97f261f299922123ff161f1b4938e916e1a17b6751e318650dcb81708c9769` /2622 fichiers, base `ceb7b1f` plus quatre postimages : huit parents exacts, chacun 1 PASS/0 FAIL/0 ignoré, puis check toutes cibles RC 0, `build-finished=true`, zéro erreur et 353 diagnostics d’avertissement. Post-run : 2622 contenus/modes identiques, export `6c308d09…`, 337 pièces brutes hachées, collecte/fermeture RC 0, OOMfalse et conteneur exact absent ; holder 137 séparé. La sélection comprend quatre nouveaux canaris R1/R2, deux canaris source_owner et deux voisins epoch/token existants.

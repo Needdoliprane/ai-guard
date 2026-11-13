@@ -82,6 +82,14 @@ fn require_view(scope: &AuthorizedScopeV1, filter: &HumanEventFilterV1) -> anyho
     Ok(())
 }
 
+pub(super) fn validate_resource_page(after: &str, limit: usize) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after.len() <= 64,
+        "invalid human resource page"
+    );
+    Ok(())
+}
+
 pub(super) fn validate_read(record: &HumanReadAuditV1) -> anyhow::Result<()> {
     anyhow::ensure!(
         record.version == 1
@@ -207,8 +215,16 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let result = self.authenticate_local_digest_checked(&tx, digest)?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    pub(super) fn authenticate_local_digest_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        digest: &[u8; 32],
+    ) -> anyhow::Result<Option<VerifiedLocalCredentialV1>> {
         if !identity::identity_read_format(&tx)? {
-            self.commit_checked(tx)?;
             return Ok(None);
         }
         let binding: Option<LocalCredentialV1> = identity::json_row(
@@ -217,7 +233,6 @@ impl Store {
             &hex::encode(digest),
         )?;
         let Some(binding) = binding else {
-            self.commit_checked(tx)?;
             return Ok(None);
         };
         identity::require_human_read(&tx)?;
@@ -246,7 +261,6 @@ impl Store {
             revision: binding.revision,
             expires_at: binding.expires_at,
         };
-        self.commit_checked(tx)?;
         Ok(Some(verified))
     }
     pub(crate) fn human_profile(
@@ -280,8 +294,17 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let result = self.human_profile_checked(&tx, principal, transient)?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    pub(super) fn human_profile_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        principal: &PrincipalRefV1,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanProfileSnapshotV1> {
         if !identity::identity_read_format(&tx)? {
-            self.commit_checked(tx)?;
             return Ok(HumanProfileSnapshotV1 {
                 account: None,
                 memberships: vec![],
@@ -296,7 +319,6 @@ impl Store {
             &key,
         )?;
         let Some(account) = account.filter(|account| account.active) else {
-            self.commit_checked(tx)?;
             return Ok(HumanProfileSnapshotV1 {
                 account: None,
                 memberships: vec![],
@@ -312,7 +334,6 @@ impl Store {
         };
         anyhow::ensure!(members.len() <= 256, "human membership capacity exceeded");
         self.record_human_read_checked(&tx, principal, None, "identity", 1, transient)?;
-        self.commit_checked(tx)?;
         Ok(HumanProfileSnapshotV1 {
             account: Some(account),
             memberships: members,
@@ -346,10 +367,7 @@ impl Store {
         limit: usize,
         transient: &Redactor,
     ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
-        anyhow::ensure!(
-            (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit) && after.len() <= 64,
-            "invalid human resource page"
-        );
+        validate_resource_page(after, limit)?;
         let mut db = self
             .db
             .lock()
@@ -360,6 +378,19 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
+        let result = self.human_resources_checked(&tx, scope, after, limit, transient)?;
+        self.commit_checked(tx)?;
+        Ok(result)
+    }
+    pub(super) fn human_resources_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        scope: &AuthorizedScopeV1,
+        after: &str,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanStorePageV1<HumanResourceItemV1>> {
+        validate_resource_page(after, limit)?;
         identity::require_human_read(&tx)?;
         let current = identity::revalidate_scope_checked(&tx, scope, &self.tenant_id)?;
         require_view(
@@ -434,7 +465,6 @@ impl Store {
             items.len(),
             transient,
         )?;
-        self.commit_checked(tx)?;
         Ok(HumanStorePageV1 {
             items,
             after_resource: position,

@@ -20,8 +20,14 @@ pub(crate) use control_recovery::with_control_recovery_auth_pair_for_test;
 pub(crate) use control_recovery::{AuthenticatedControlRecoveryV2, ControlRecoveryUsageV2};
 pub(super) use control_recovery::{ControlRecoveryAuthEpochV2, VerifiedControlRecoveryRunnerV2};
 pub(crate) use review_credentials::AuthenticatedReviewRunnerCredential;
+pub(super) use review_credentials::ReviewCredentialRegistry;
 #[cfg(test)]
 pub(crate) use review_credentials::authenticate_review_runner_fixture;
+pub use review_credentials::preparation::{
+    EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
+    TechnicalCredentialRoleV1, prepare_envelope_configuration,
+    validate_technical_credentials_configuration,
+};
 
 const MAX_CREDENTIAL_BYTES: usize = 4096;
 
@@ -63,33 +69,88 @@ pub(super) struct CredentialBinding {
     pub(super) role: CredentialRole,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct CredentialIndex {
     entries: HashMap<[u8; 32], CredentialBinding>,
 }
 
+struct ControlCredentialInput<'a> {
+    tenant_id: &'a str,
+    role: CredentialRole,
+    token: &'a str,
+}
+
 impl CredentialIndex {
+    pub(super) fn digests(&self) -> impl Iterator<Item = &[u8; 32]> {
+        self.entries.keys()
+    }
     pub(super) fn for_tenants(tenants: &[TenantGateway]) -> anyhow::Result<Self> {
-        let mut index = Self::default();
-        for (tenant_index, tenant) in tenants.iter().enumerate() {
-            for (token, role) in [
-                (&tenant.runner_token, CredentialRole::Runner),
-                (&tenant.viewer_token, CredentialRole::Viewer),
-            ] {
-                anyhow::ensure!(
-                    valid_credential(token),
-                    "invalid credential: expected 1 to 4096 bytes without whitespace"
-                );
-                let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-                anyhow::ensure!(
-                    index
-                        .entries
-                        .insert(digest, CredentialBinding { tenant_index, role })
-                        .is_none(),
-                    "ambiguous credentials"
-                );
-            }
+        let order = tenants
+            .iter()
+            .map(|tenant| tenant.tenant_id.clone())
+            .collect::<Vec<_>>();
+        Self::from_configured_inputs(
+            &order,
+            tenants.iter().flat_map(|tenant| {
+                [
+                    ControlCredentialInput {
+                        tenant_id: &tenant.tenant_id,
+                        role: CredentialRole::Runner,
+                        token: &tenant.runner_token,
+                    },
+                    ControlCredentialInput {
+                        tenant_id: &tenant.tenant_id,
+                        role: CredentialRole::Viewer,
+                        token: &tenant.viewer_token,
+                    },
+                ]
+            }),
+        )
+    }
+    fn from_configured_inputs<'a>(
+        tenant_order: &[String],
+        inputs: impl Iterator<Item = ControlCredentialInput<'a>>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            !tenant_order.is_empty() && tenant_order.len() <= 256,
+            "invalid credential configuration"
+        );
+        let mut tenants = HashMap::new();
+        for (i, tenant) in tenant_order.iter().enumerate() {
+            crate::tenancy::validate_tenant_id(tenant)?;
+            anyhow::ensure!(
+                tenants.insert(tenant.as_str(), i).is_none(),
+                "ambiguous credential tenant"
+            );
         }
+        let mut index = Self::default();
+        let mut tuples = std::collections::HashSet::new();
+        for ControlCredentialInput {
+            tenant_id,
+            role,
+            token,
+        } in inputs
+        {
+            let tenant_index = *tenants
+                .get(tenant_id)
+                .ok_or_else(|| anyhow::anyhow!("unknown credential tenant"))?;
+            anyhow::ensure!(
+                valid_credential(token) && tuples.insert((tenant_index, role.as_str())),
+                "invalid credential: expected 1 to 4096 bytes without whitespace"
+            );
+            let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+            anyhow::ensure!(
+                index
+                    .entries
+                    .insert(digest, CredentialBinding { tenant_index, role })
+                    .is_none(),
+                "ambiguous credentials"
+            );
+        }
+        anyhow::ensure!(
+            index.entries.len() == tenant_order.len() * 2,
+            "incomplete credential configuration"
+        );
         Ok(index)
     }
 

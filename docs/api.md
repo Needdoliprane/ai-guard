@@ -786,6 +786,23 @@ The gateway reserves separate refresh completion/cleanup capacity before mutatio
 
 ## Consultation humaine nominative / Named human reads
 
+### Profil owned / Owned source profile
+
+Le défaut reste `legacy`. Le mode explicite `owned_sources`, préparé par les [commandes d’adoption](setup/human-sources-maintenance/README.fr.md) puis `gateway --human-sources-activation`, conserve les DTO humains version1 et adopte seulement **GET `/api/v1/human/identity` et GET `/api/v1/human/resources`**. La source retenue et authentifiée détermine l’autorité, jamais un tenant fourni dans la requête. Le credential humain local reste nominatif ; ce profil ne crée aucun endpoint login/password, credential runner ou permission supplémentaire.
+
+La découverte vérifie sa propre source. Si un autre Store tenant est volontairement non consulté, `contexts_complete=false` signifie que ses appartenances restent inconnues même s’il est sain. Sans autre source tenant à consulter, `true` reste possible. Les contextes sont opaques ; les ressources portent un reçu durable. Un Store propre occupé renvoie 503 et un budget de lecture épuisé conserve 429, sans repli legacy ni SQL voisin.
+
+Les méthodes connues des routes non adoptées, y compris HEAD humain, sont refusées 503 `identity_unavailable` avant les extracteurs legacy/Store. Les chemins/méthodes inconnus gardent le routage 404/405. GET/HEAD `/healthz` est une observation mémoire. Les GET existants `/auth/oidc/status` et `/auth/oidc/cli-profile` peuvent annoncer désactivé seulement si OIDC est absent ; sélectionné, il reste retenu avec handlers fermés, sans être annoncé désactivé. Écritures, événements, SSO complet et lancement humain de ce profil restent à adopter. [Limites opérateur](setup/identity/OWNED_SOURCES.fr.md) · [Preuves logicielles](engineering/evidence/2026-11-13/human-sources-operator/README.fr.md).
+
+The default remains `legacy`. Explicit `owned_sources`, prepared with the [adoption commands](setup/human-sources-maintenance/README.md) and started through `gateway --human-sources-activation`, retains human DTO version1 and adopts only **GET `/api/v1/human/identity` and GET `/api/v1/human/resources`**. A retained authenticated source determines authority, never a caller-supplied tenant. The existing named local human credential remains distinct from technical credentials; this profile creates no login/password endpoint, runner credential or extra permission.
+
+Discovery verifies its own source. When another tenant Store is intentionally not queried, `contexts_complete=false` means its memberships remain unknown even if it is healthy. With no other tenant source to query, `true` remains possible. Contexts stay opaque and resource reads have durable receipts. Own-Store contention returns 503 and an exhausted read budget retains 429, without legacy fallback or neighboring SQL.
+
+Known methods of non-adopted routes, including human HEAD, return 503 `identity_unavailable` before legacy extractors/Store access. Unknown paths/methods retain ordinary 404/405 routing. GET/HEAD `/healthz` observes service memory. Existing GET `/auth/oidc/status` and `/auth/oidc/cli-profile` may report disabled only if OIDC is absent; selected configuration/ledger stays retained with closed handlers, rather than being reported disabled. Writes, events, complete SSO and human launch in this profile remain to be adopted. [Operator limits](setup/identity/OWNED_SOURCES.md) · [Software evidence](engineering/evidence/2026-11-13/human-sources-operator/README.md).
+
+### Mode legacy / Legacy mode
+
+
 Le [guide local](setup/identity/README.fr.md) et son [équivalent anglais](setup/identity/README.md) décrivent provisioning, fichiers privés, migration explicite vers5 et reprise ; les guides SSO ci-dessus couvrent l'autre méthode humaine. La preuve humaine est vérifiée à chaque requête/lot ; elle ne donne aucun rôle runner/worker/viewer. Le contrôle propose les contextes issus des memberships durables. Hors `/identity`, fournir un unique `X-AiGuard-Context` proposé ; aucun tenant libre ne choisit le périmètre. Le dashboard ne relaie que ces GET humains exacts, sans repli technique.
 
 Human credentials are verified on every request/batch and never become runner/worker/viewer authority. The control offers contexts from durable memberships; all routes except identity require one offered `X-AiGuard-Context`. The dashboard forwards only the exact human GET allowlist. No caller-supplied tenant chooses scope and no failed human login falls back to technical reads.

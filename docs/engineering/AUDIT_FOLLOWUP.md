@@ -1,5 +1,12 @@
 # Suivi des audits indépendants
 
+## 13 novembre — lectures possédées et préparation opérateur
+
+Une verticale nominative utilise de vrais Stores14/15 retenus et, si sélectionné, Auth5. Le bootstrap enveloppe le coordinateur13→14/4→5 ; un UUID ou fichier d’activation seul n’est pas une autorité. Deux GET adoptés authentifient et lisent la propre source sans SQL voisin. La même archive `7050d12b…9302` du Git `dbee1d5f…` passe 107 fonctions uniques en deux campagnes 34 + 73, avec sources exactes, collectes et fermetures vérifiées. [Preuves EN/FR](evidence/2026-11-13/human-sources-operator/README.fr.md).
+
+Ce résultat ne clôture par transfert ni le run-1 lot K, ni le run-2 V2 `api/preauth-bearer-scan-shared-lanes`, ni les capacités globales ou l’approbation humaine. Legacy reste le défaut ; seuls les deux GET du profil owned sont adoptés. Les autres opérations sensibles connues, sessions OIDC, écritures et effets réseau restent fermées dans ce profil. L’attestation d’arrêt ne ferme ni fencing, ni panne physique, ni sorties auditées de quota. Aucun fingerprint ou gate global n’est clos. Le [complément D4](AUDIT_RUN_2_20261110.md#complément-d4--13-novembre-admission-et-lecteur-historique-rapprochés) conserve son périmètre distinct.
+
+
 ## 13 novembre — amplification des validations de source : preuve bornée, aucun fingerprint clos
 
 Le diagnostic privé HTTP503 /2301.7 ms a mesuré des appels répétés de revalidation ; les spans inclusifs ne fournissent ni décomposition complète du coût ni fréquence de panne. Le candidat relu supprime des parcours redondants 14→7 dans une validation composée, sans cache de succès, retry, hausse du délai 2 s ou retrait des contrôles liens/DAC/ACL/montage/identités/autorisation. La revue R2 ciblée corrige le classement de la première observation I/O du parent en indisponible, conserve le classement binding des entrées/montages et la chaîne EMFILE/ENFILE synthétique ; le NO_GO R1 historique reste conservé.

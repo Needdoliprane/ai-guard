@@ -93,6 +93,33 @@ async fn read_body(body: Body) -> Result<Vec<u8>, Response> {
 }
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
+    if state.owned_human.is_some() {
+        let method = if request.method() == "HEAD" {
+            &axum::http::Method::GET
+        } else {
+            request.method()
+        };
+        if control_route(method, request.uri().path()).is_some() {
+            return super::human_sources::unavailable().into_response();
+        }
+        if [axum::http::Method::GET, axum::http::Method::POST]
+            .iter()
+            .any(|method| control_route(method, request.uri().path()).is_some())
+        {
+            return refused(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "control_method_not_allowed",
+                "Method not registered for this control transport route.",
+            );
+        }
+        // Unknown routes/methods still use the closed transport classifier;
+        // no legacy extractor or body reader is reached in this branch.
+        return refused(
+            StatusCode::NOT_FOUND,
+            "unknown_control_route",
+            "Unknown control transport route.",
+        );
+    }
     if request.uri().to_string().len() > 4096
         || request.uri().scheme().is_some()
         || request.uri().authority().is_some()

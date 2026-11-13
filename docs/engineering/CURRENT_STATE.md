@@ -1,5 +1,14 @@
 # État constaté — suivi du développement
 
+## 13 novembre — sources humaines possédées et bootstrap opérateur
+
+Le startup retient les vraies sources avant HTTP, vérifie relecture SQLite, planchers et CAS, puis construit un index privé borné. Les deux lectures nominatives adoptées vérifient leur propre source sans SQL voisin. Le bootstrap Rust fournit `human-sources prepare`, `resume-prepare`, `apply`, `resume` et `check`, puis `gateway --human-sources-activation` ; il conserve les identités, historiques et backups existants. L’attestation d’arrêt manuel ne constitue pas un fencing.
+
+Sur Git `dbee1d5f90abd884badf5cd255b69c436f38ae4a`, archive `7050d12b…9302` de 2 771 fichiers, **107 fonctions ciblées passent :34 puis 73 en deux campagnes distinctes**. La première termine85 après les34 PASS sur un sélecteur erroné ; la seconde réussit les73 restants. Les noms sont disjoints. Builds, help CLI réel, check toutes cibles de la première, sources après exécution, sept collectes et fermetures sont vérifiés, sans OOM. [Preuves EN](evidence/2026-11-13/human-sources-operator/README.md) · [FR](evidence/2026-11-13/human-sources-operator/README.fr.md).
+
+Legacy reste le défaut. Le profil owned n’adopte que GET identity/resources ; les autres opérations sensibles connues restent fermées, dont OIDC sélectionné. Une appartenance voisine non consultée reste inconnue. Écritures humaines, SSO complet de ce profil, délégation, egress et reprise générale restent à poursuivre. Runtimes réels, frontend, pannes physiques, Clippy strict, suite complète et 100 workers sont hors campagne ; aucun fingerprint d’audit ou gate global n’est clos.
+
+
 ## 13 novembre — validation des sources humaines, composition publique réduite
 
 La candidate publique `ceb7b1f` plus quatre postimages relues passe huit canaris exacts et le check toutes cibles sur le gel `8c97f261…` /2622 fichiers. Les contrôles parent/entrée, liens, DAC/ACL et montage restent actifs, avec échéance d’epoch 2 s et autorisations inchangées. Le trajet relu passe de 14 à 7 parcours d’ancêtres par validation : un fait du code, pas une garantie de latence. L’observation initiale du parent garde son classement indisponible, les erreurs entrée/montage leur classement binding et les causes EMFILE/ENFILE restent structurées. [Preuves EN/FR, commandes et limites](evidence/2026-11-13/human-source-validation/README.fr.md).

@@ -1,0 +1,532 @@
+{
+  "schema": 1,
+  "date": "2026-11-13",
+  "status": "PASS_TARGETED_SOFTWARE_107_UNIQUE_ACROSS_TWO_SAME_SOURCE_CAMPAIGNS",
+  "source": {
+    "commit": "dbee1d5f90abd884badf5cd255b69c436f38ae4a",
+    "tree": "f3f8c1e3ed7d3358526d1cf926d9b99f1b6f5b6b",
+    "archive_sha256": "7050d12ba3f8fe621b8efcf91a614c3715f410de2bf9302f07b310af89e79302",
+    "archive_bytes": 34061824,
+    "regular_files": 2771,
+    "post_campaign_payloads_and_modes_exact": [
+      true,
+      true
+    ],
+    "guide_baseline_commit": "e9c474af68c5ce9d91e963515801e108bd39f93e",
+    "guide_baseline_parent": "dbee1d5f90abd884badf5cd255b69c436f38ae4a"
+  },
+  "aggregation": {
+    "campaigns": 2,
+    "first": 34,
+    "second": 73,
+    "intersection": 0,
+    "unique_union": 107,
+    "failed": 0,
+    "ignored": 0,
+    "accepted_omissions": 0,
+    "single_107_test_run": false,
+    "subcase_completeness_independently_asserted": false
+  },
+  "campaigns": [
+    {
+      "id": "combined-r3",
+      "passed": 34,
+      "failed": 0,
+      "ignored": 0,
+      "accepted_omissions": 0,
+      "groups": [
+        {
+          "id": "owned-api",
+          "passed": 21,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "6c6dba1970be9218036e6c003adc996e78210bc09bec00fd82bd90a08a62afa8",
+          "names": [
+            "api::human_sources::tests::candidate_limit_refuses_before_insertion_and_never_truncates",
+            "api::human_sources::tests::candidates_keep_collisions_across_classes_and_sources",
+            "api::human_sources::tests::dashboard_head_and_unadopted_get_refuse_before_any_upstream_or_store_work",
+            "api::human_sources::tests::every_existing_control_alias_and_head_closes_before_body_and_store",
+            "api::human_sources::tests::historical_revoked_neighbor_collision_refuses_even_while_a_sqlite_is_busy",
+            "api::human_sources::tests::live_read_epoch_a_does_not_require_global_write_for_b",
+            "api::human_sources::tests::modern_on_bound_error_is_preserved_after_real_cleanup",
+            "api::human_sources::tests::modern_route_matrix_closes_before_body_extractors_and_store",
+            "api::human_sources::tests::modern_second_bind_failure_closes_and_drains_real_bundle",
+            "api::human_sources::tests::modern_server_constructor_without_runtime_refuses_without_panicking",
+            "api::human_sources::tests::no_oidc_selection_adopts_only_existing_disabled_status_and_profile",
+            "api::human_sources::tests::own_sqlite_busy_is_503_without_legacy_or_neighbor_lookup",
+            "api::human_sources::tests::queued_blocking_usage_survives_waiter_abort_and_server_drop_before_epoch",
+            "api::human_sources::tests::real_b_proof_and_receipt_while_mutex_a_stays_held_without_neighbor_sql",
+            "api::human_sources::tests::real_b_proof_and_receipt_while_sqlite_a_immediate_stays_held_without_neighbor_sql",
+            "api::human_sources::tests::real_configuration_mismatch_and_bind_failure_preserve_both_errors",
+            "api::human_sources::tests::real_exhausted_owned_profile_budget_preserves_429_without_publishing_contexts",
+            "api::human_sources::tests::real_revoked_and_expired_own_credentials_remain_authentication_refusals",
+            "api::human_sources::tests::real_shared_write_gate_refusal_is_separate_from_neighbor_sqlite_availability",
+            "api::human_sources::tests::same_incarnation_identity_or_workload_change_requires_rebuild_without_neighbor_sql",
+            "api::human_sources::tests::server_drop_before_serve_keeps_real_accepted_usage_until_completion"
+          ]
+        },
+        {
+          "id": "owned-audit",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "01c00a95f646ac0a39819579cdd91078d027d2de31a2e43e49921b4464eea7d5",
+          "names": [
+            "audit::human_modern::tests::mutex_a_stays_locked_until_b_authentication_and_profile_receipt_commit",
+            "audit::human_modern::tests::own_mutex_busy_refuses_without_waiting_or_changing_timeout",
+            "audit::human_modern::tests::own_sqlite_busy_refuses_without_latching_and_restores_timeout",
+            "audit::human_modern::tests::sqlite_a_immediate_lock_remains_held_until_b_authentication_and_receipt"
+          ]
+        },
+        {
+          "id": "owned-startup",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "0f17e621af487f30d13be1c4b5f6fb240738b5ab17ba2587b49ea1028e436c9e",
+          "names": [
+            "human_authority::startup::tests::configured_auth_capacity_mismatch_refuses_before_first_incarnation",
+            "human_authority::startup::tests::drain_error_does_not_release_owner_retained_by_a_real_epoch",
+            "human_authority::startup::tests::exact_union_is_required_before_any_new_incarnation",
+            "human_authority::startup::tests::later_source_busy_cannot_append_an_incarnation_in_first_source"
+          ]
+        },
+        {
+          "id": "owned-config",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "18231efaebf8c3e2b3a16921099bae968f37ec146746523c4a3f64d72023a4d4",
+          "names": [
+            "gateway_config::human_sources::tests::canonical_bytes_are_compact_sorted_utf8_with_explicit_null",
+            "gateway_config::human_sources::tests::canonicalization_preserves_semantic_array_order_and_refuses_noninteger_numbers",
+            "gateway_config::human_sources::tests::mode_selection_refuses_ambiguous_or_missing_inputs_without_opening_sources",
+            "gateway_config::human_sources::tests::public_digest_sorts_tenants_excludes_credentials_and_paths_and_binds_effective_policy"
+          ]
+        },
+        {
+          "id": "owned-http-lifecycle",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "7f8bee888bd411fea7b782384dbc17c1b1f9aa6befc6c92f685e2fa58694b809",
+          "names": [
+            "gateway_server::owned_tests::connection_join_error_retires_humans_before_signalling_acceptors"
+          ]
+        }
+      ],
+      "seven_independent_captures_rc": 0,
+      "closure_rc": 0
+    },
+    {
+      "id": "remaining-r1",
+      "passed": 73,
+      "failed": 0,
+      "ignored": 0,
+      "accepted_omissions": 0,
+      "groups": [
+        {
+          "id": "legacy-scoped",
+          "passed": 5,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "935d0494fa2966cb5322cad1b0878253b06af896bc8c4fb9b488386d7eb81e80",
+          "names": [
+            "audit::identity::scoped_read_tests::scoped_human_reads_preserve_resource_acl_redaction_and_atomic_receipts",
+            "audit::identity::scoped_read_tests::scoped_human_reads_revalidate_revision_permissions_and_credential_revocation",
+            "audit::identity::scoped_read_tests::scoped_identity_and_authentication_reads_require_the_migrated_source",
+            "audit::identity::scoped_read_tests::scoped_reads_refuse_expired_epoch_without_a_read_receipt",
+            "audit::identity::scoped_read_tests::scoped_reads_refuse_other_source_tenant_and_drain_accepted_epoch_on_close"
+          ]
+        },
+        {
+          "id": "legacy-migration",
+          "passed": 13,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "00c1840503f10ffebf092178bbceed26b10aabd1f44f472a8b303104acd8b87c",
+          "names": [
+            "human_authority::migration::tests::authentication_capacity_scope_must_match_complete_tenant_union",
+            "human_authority::migration::tests::changed_journal_plan_after_partial_commit_never_rewrites_backup_or_marker",
+            "human_authority::migration::tests::fresh_migration_refuses_preexisting_backup_sidecars_before_intent",
+            "human_authority::migration::tests::fresh_migration_refuses_preexisting_exact_legacy_backup_before_intent",
+            "human_authority::migration::tests::last_source_writer_busy_mutates_nothing_and_keeps_backups_absent",
+            "human_authority::migration::tests::maximum_floor_keeps_submillisecond_precision_and_never_defaults_to_zero",
+            "human_authority::migration::tests::missing_extra_or_changed_migration_sources_refuse_without_backup",
+            "human_authority::migration::tests::only_b_migrated_never_returns_a_modern_source_bundle",
+            "human_authority::migration::tests::partial_first_commit_resumes_same_plan_without_new_anchor",
+            "human_authority::migration::tests::physical_authentication_source_substitution_refuses_before_any_backup_or_intent",
+            "human_authority::migration::tests::physical_configuration_substitution_refuses_before_any_backup_or_intent",
+            "human_authority::migration::tests::real_migration_a_b_auth_is_owned_and_scoped_after_reopen",
+            "human_authority::migration::tests::startup_collects_three_real_durable_floors_and_preserves_submillisecond_maximum"
+          ]
+        },
+        {
+          "id": "legacy-context",
+          "passed": 10,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "84d5ce33d3ea8824ced49d8abb06ed04c6da7dd9e6c1d8cac454e76f2542cca3",
+          "names": [
+            "api::human_state::tests::authoritative_revocation_retires_held_arc_and_stale_snapshot_cannot_evict_newer_context",
+            "api::human_state::tests::broker_and_legacy_cursors_share_nonce_and_reject_domains_positions_and_budget_overflow",
+            "api::human_state::tests::concurrent_seals_share_one_non_resetting_nonce_sequence",
+            "api::human_state::tests::context_capacity_never_evicts_live_entries_or_resets_a_reused_context",
+            "api::human_state::tests::expiration_invalidates_held_arc_without_recreating_its_identifier",
+            "api::human_state::tests::failed_encoding_consumes_nonce_and_exhaustion_never_wraps",
+            "api::human_state::tests::fixed_padded_cursor_rejects_binding_key_format_and_tag_changes",
+            "api::human_state::tests::nil_worker_keyset_position_seals_for_a_following_page_without_widening_brokers",
+            "api::human_state::tests::unchanged_context_reuses_arc_key_ttl_and_sequence_but_restart_rejects_it",
+            "api::human_state::tests::worker_cursors_are_separate_from_brokers_resources_limits_contexts_and_budgets"
+          ]
+        },
+        {
+          "id": "legacy-context-fairness",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "a228417b4deefd82a466ab623440255fe1b180785b4b8018fbbc02613b368199",
+          "names": [
+            "api::human_state::context_fairness_tests::a_full_tenant_keeps_its_exact_context_and_cannot_borrow_an_idle_share",
+            "api::human_state::context_fairness_tests::concurrent_allocation_cannot_overbook_a_tenant_or_consume_its_peer_share",
+            "api::human_state::context_fairness_tests::configured_shares_are_deterministic_and_configuration_has_explicit_bounds",
+            "api::human_state::context_fairness_tests::expiry_and_authoritative_revocation_release_only_the_original_tenant_place",
+            "api::human_state::context_fairness_tests::per_owner_bound_survives_tenant_changes_digest_rotation_and_principal_aliases",
+            "api::human_state::context_fairness_tests::unknown_or_disabled_tenant_cannot_create_a_share_or_reconcile_a_live_context"
+          ]
+        },
+        {
+          "id": "legacy-http-lifecycle",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "874dcbe166d151e8395d680bc75db544a298dea577520a930e8276c867947a1e",
+          "names": [
+            "gateway_server::tests::both_real_listener_surfaces_authenticate_in_the_same_epoch",
+            "gateway_server::tests::caller_cancellation_retires_then_owns_cleanup_until_the_blocking_commit_drains",
+            "gateway_server::tests::dropping_the_owner_before_signal_setup_or_binding_retires_the_real_epoch",
+            "gateway_server::tests::malformed_peer_connection_does_not_retire_the_gateway_epoch",
+            "gateway_server::tests::occupied_first_or_second_bind_retires_and_leaves_no_new_listener",
+            "gateway_server::tests::panic_during_grace_returns_error_only_after_connections_and_real_usage_drain",
+            "gateway_server::tests::serving_owner_error_retires_before_draining_its_real_sibling_usage",
+            "gateway_server::tests::signal_stops_both_acceptors_and_waits_for_real_usage_and_sqlite_commit"
+          ]
+        },
+        {
+          "id": "bootstrap-cli",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "84a852ff21f31c88aeeaf556fdfc578bab61f604d6208d7535f1d0116528c53a",
+          "names": [
+            "human_sources_cli::tests::activation_is_closed_and_does_not_accept_unpublished_mode",
+            "human_sources_cli::tests::activation_publication_interruptions_replay_coordinator_then_final_ack_is_files_only",
+            "human_sources_cli::tests::check_preserves_directory_without_recovery_and_never_opens_sqlite",
+            "human_sources_cli::tests::check_preserves_main_sidecars_and_all_preparation_documents",
+            "human_sources_cli::tests::cli_refuses_missing_stop_attestation_before_preparation",
+            "human_sources_cli::tests::final_ack_input_resync_failure_preserves_published_ids_and_commits_then_same_retry_succeeds",
+            "human_sources_cli::tests::interrupted_preparation_keeps_ids_and_changed_input_refuses_before_first_envelope"
+          ]
+        },
+        {
+          "id": "bootstrap-integration",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "676e7a94f67fbf93c8f3269baac9155661594334f5de2985ed73bf7e3a1b7eab",
+          "names": [
+            "activation_contradictory_cli_options_refuse_before_sqlite_or_file_creation",
+            "changed_token_before_envelope_and_truncated_publications_are_preserved",
+            "cli_activation_reaches_real_identity_resources_and_durable_receipt_without_oidc",
+            "cli_activation_reaches_real_identity_resources_with_selected_auth5_union",
+            "prepare_check_resume_and_readoption_preserve_real_legacy_and_stable_ids",
+            "valid_same_inode_legacy_change_after_prepare_is_examined_at_apply_without_a_prepared_head"
+          ]
+        },
+        {
+          "id": "bootstrap-operator",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "71f427c8f02fd93e3a1089398c8b03c50ce2c5b175be065e741313e5542b2b90",
+          "names": [
+            "human_authority::migration::operator::tests::auth5_startup_stale_cas_refuses_without_changing_revision_head_incarnation_or_floor",
+            "human_authority::migration::operator::tests::budget_is_reserved_before_read_and_repeated_reference_is_not_reopened",
+            "human_authority::migration::operator::tests::closed_documents_reject_duplicates_and_bound_before_insertion",
+            "human_authority::migration::operator::tests::publication_reuses_identical_bytes_and_preserves_conflicting_inode",
+            "human_authority::migration::operator::tests::real_temporary_migration_owner_closes_admission_and_waits_for_drain",
+            "human_authority::migration::operator::tests::retained_input_resync_observes_real_syncs_for_registry_tokens_oidc_and_ca_without_reopen",
+            "human_authority::migration::operator::tests::retained_input_resync_refuses_same_bytes_replacement_without_adopting_new_inode",
+            "human_authority::migration::operator::tests::store14_startup_stale_cas_refuses_without_changing_revision_head_incarnation_or_floor"
+          ]
+        },
+        {
+          "id": "bootstrap-preparation",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "28b0add0459beaf0f2e79349cdd1faef19c3d695f2d9f7bfe17ca7e7f84957cb",
+          "names": [
+            "api::auth::review_credentials::preparation::tests::pure_configuration_checks_headers_roles_tokens_and_stable_identity",
+            "api::auth::review_credentials::preparation::tests::pure_configuration_rejects_duplicate_and_unknown_json_before_authority"
+          ]
+        },
+        {
+          "id": "shared-registry",
+          "passed": 6,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "a4ca80b5e24d6659242d29404243973e6e955790489fa4662f85e5b72f85fa20",
+          "names": [
+            "api::auth::review_credentials::tests::closure_identity_revision_and_public_configuration_are_all_bound",
+            "api::auth::review_credentials::tests::every_tenant_needs_one_exact_modern_source_and_no_duplicate_scope",
+            "api::auth::review_credentials::tests::missing_extra_or_cross_role_credentials_cannot_create_an_index",
+            "api::auth::review_credentials::tests::private_envelope_resolves_only_the_exact_configured_runner_entries",
+            "api::auth::review_credentials::tests::private_values_and_parser_errors_never_appear_in_diagnostics",
+            "api::auth::review_credentials::tests::stable_credential_ids_are_unique_across_tenants_and_roles"
+          ]
+        },
+        {
+          "id": "shared-store-head",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "ce70f7fd17d0880add178dfd155a314eaf6537b996fecde6ed37601caffdcd94",
+          "names": [
+            "audit::review_startup::tests::startup_getters_retain_the_real_head_observed_after_another_wrapper_commits"
+          ]
+        },
+        {
+          "id": "shared-auth-incarnation",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "stdout_sha256": "27680445df7844756430c7523ecbe9cacaa4ea7b1a1b12c4bb34a3f4b4d2a9f0",
+          "names": [
+            "audit::authentication::source_authority_migration::tests::new_owner_requires_real_new_incarnation_before_retention"
+          ]
+        }
+      ],
+      "seven_independent_captures_rc": 0,
+      "closure_rc": 0
+    }
+  ],
+  "build": {
+    "combined_r3": {
+      "all_targets_check_rc": 0,
+      "tests_no_run_rc": 0,
+      "real_Cargo_artifacts": 4,
+      "normal_CLI_help": "PASS"
+    },
+    "remaining_r1": {
+      "all_targets_check": "PREVIOUS_EXACT_SOURCE_PASS_NOT_REEXECUTED",
+      "tests_no_run_rc": 0,
+      "real_Cargo_artifacts": 4,
+      "normal_CLI_help_rc": 0,
+      "error_diagnostics": 0,
+      "warning_diagnostics": 164
+    },
+    "artifact_roles": [
+      "lib-test",
+      "main-test",
+      "human_sources_bootstrap-test",
+      "normal-agentsandbox-CLI"
+    ],
+    "strict_Clippy": "NOT_RUN",
+    "full_suite": "NOT_RUN",
+    "release": "NOT_RUN"
+  },
+  "profile": {
+    "scope": "isolated Linux ARM64 software QA; not a business worker runtime qualification",
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "Rust": "1.99.1",
+    "network": "none",
+    "UID_GID": "1000:1000",
+    "root_readonly": true,
+    "privileged": false,
+    "caps_drop": "ALL",
+    "no_new_privileges": true,
+    "CPU": 4,
+    "memory_bytes": 9663676416,
+    "swap_max_bytes": 0,
+    "pids_max": 128,
+    "scratch_bytes": 4294967296,
+    "file_size_soft_hard_bytes": 1073741824
+  },
+  "captures": {
+    "per_campaign_count": 7,
+    "all_capture_rcs_zero": true,
+    "source_post_archives": [
+      {
+        "campaign": "combined-r3",
+        "sha256": "d055dee032b5c755c01b8ad6bc7f268a856ddcb54200f7c72fadab8497227d6c",
+        "bytes": 34263040,
+        "exact_payloads_and_modes": 2771
+      },
+      {
+        "campaign": "remaining-r1",
+        "sha256": "88e83d891b5b2aa969c75a45041f4eb306a5f28bff6cbfa51f9ec6731daa6635",
+        "bytes": 34263040,
+        "exact_payloads_and_modes": 2771
+      }
+    ],
+    "fixtures": {
+      "per_archive_bytes": 10240,
+      "sha256": "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652",
+      "regular_files": 0,
+      "payload_bytes": 0,
+      "meaning": "Real anchored fixture roots observed empty after RAII teardown; actual GNU tar capture, not fabricated"
+    },
+    "qa_memory_peak_bytes": [
+      9158021120,
+      8938557440
+    ],
+    "oom": [
+      0,
+      0
+    ],
+    "oom_kill": [
+      0,
+      0
+    ],
+    "build_rlib_bytes": [
+      545228954,
+      545229866
+    ],
+    "rlib_is_QA_build_metadata_only": true,
+    "rlib_proves_old_a166_SIG25_file_or_cause": false,
+    "worker_usage_or_price_inferred": false
+  },
+  "closure": {
+    "both_campaigns_rc": 0,
+    "stop_rcs": [
+      0,
+      0
+    ],
+    "remove_rcs": [
+      0,
+      0
+    ],
+    "exact_container_listing_rcs": [
+      0,
+      0
+    ],
+    "Root_exact_CID_absence_verified": [
+      true,
+      true
+    ],
+    "remaining_exact_RUN_PID_absence_verified": true,
+    "holder_after_deliberate_stop_exit": [
+      137,
+      137
+    ],
+    "holder_exit_is_product_failure_or_OOM_proof": false
+  },
+  "observation_continuity": {
+    "original_execution_delegated_to": "Luna",
+    "remaining_initial_tool_handle": 25710,
+    "after_context_reset": "UNKNOWN_PROCESS; not restarted",
+    "Root_confirmed_existing_PID_34620_and_Cargo_rustc_live_before_terminal": true,
+    "later_Luna_role": "observer only; no new execution",
+    "unified_tool_terminal_exit_directly_observed": false,
+    "terminal_basis": "Trusted FINAL and every phase rc, actual Cargo JSON/test summaries, continuity of the live runner then exact RUN PID and CID absence"
+  },
+  "preserved_history": [
+    {
+      "record": "qa-human-owned-public-20261113-r2/ROOT_VERIFIED.json",
+      "status": "FAIL_COMPILATION_CONFIRMED_ZERO_TESTS_REACHED",
+      "source": "3a79c521fca1ed2ef8e370d0f2905df74339c789",
+      "compiler_errors": 4,
+      "tests_reached": 0
+    },
+    {
+      "record": "qa-human-owned-public-20261113-r3/ROOT_VERIFIED.json",
+      "status": "FAIL_BUILD_NO_RUN_TESTS_NOT_RUN",
+      "source": "a1669bfff35a0e4258d6888989c4184ead965419",
+      "all_targets_check_rc": 0,
+      "tests_no_run_rc": 101,
+      "stderr_signal": 25,
+      "cause": "512MiB file-size-limit hypothesis strongly supported, not formally confirmed; exact failing file and kernel siginfo not observed",
+      "tests_reached": 0
+    },
+    {
+      "record": "qa-human-sources-combined-20261113-r1/ROOT_PRECREATE_FAILURE.json",
+      "status": "PRECREATE_FAIL_METADATA_BYTE_ORDER_NO_TARGET_EXECUTION",
+      "rc": 96,
+      "tests_reached": 0
+    },
+    {
+      "record": "combined-r2 proposal",
+      "status": "metadata corrected; namespace/name proposal superseded before target execution; preserved in place"
+    },
+    {
+      "record": "qa-human-sources-combined-20261113-r3/ROOT_VERIFIED.json",
+      "status": "PARTIAL_SOFTWARE_PASS_34_REMAINING_73_NOT_RUN",
+      "orchestration_rc": 85,
+      "reason": "Incorrect scoped-read selector namespace; listing guard stopped before the empty group",
+      "wrong_prefix": "audit::identity_scoped_read_tests::",
+      "correct_prefix": "audit::identity::scoped_read_tests::",
+      "source_product_defect": false,
+      "closure_rc": 0
+    }
+  ],
+  "behavior": {
+    "default_mode": "legacy",
+    "owned_adopted_human_GETs": [
+      "/api/v1/human/identity",
+      "/api/v1/human/resources"
+    ],
+    "known_unadopted_routes": "Explicit coverage refusal 503 before legacy/body/Store work; unknown URI/method retains normal 404/405",
+    "oidc_selected": "Retained in the source union; known OIDC handlers including status/cli-profile closed with 503",
+    "oidc_absent_exceptions": "Existing GET /auth/oidc/status and GET /auth/oidc/cli-profile disabled-state reads only",
+    "contexts_complete": "false when another tenant source is skipped and its memberships remain unknown; true is possible with no other tenant source",
+    "provisioning": "Named people, private local credentials and explicit grants pre-exist adoption; adoption creates none",
+    "stop_attestation": "--confirm-control-stopped is manual operator attestation, not legacy-process fencing",
+    "check": "Files/metadata only, not SQLite integrity/authentication/readiness",
+    "power_loss": "NOT_QUALIFIED"
+  },
+  "not_qualified": [
+    "native macOS",
+    "business worker or Docker/Podman/Kubernetes runtime adapters",
+    "real IdP or provider",
+    "frontend/browser",
+    "physical power loss",
+    "full test suite",
+    "strict Clippy",
+    "release",
+    "100 workers",
+    "modern OIDC sessions/revocation",
+    "human approval/launch",
+    "egress permissions or network filtering",
+    "modern human identity provisioning"
+  ],
+  "evidence": {
+    "primary_records_retained_privately": true,
+    "public_record_contains_sanitized_metadata_only": true,
+    "receipts": [
+      {
+        "record": "qa-human-sources-combined-20261113-r3/ROOT_VERIFIED.json",
+        "sha256": "0c3fc032b51f33582eaa6ba478c2e7d50f0ead6b39c3bf5a3b7fb8babb45ba9f"
+      },
+      {
+        "record": "qa-human-sources-combined-20261113-r3-review/RESULT_REVIEW.json",
+        "sha256": "db1ba53f5abfadf4b99e5f3411d85b92177e2034d8f38f7defbe20f5fd14332b"
+      },
+      {
+        "record": "qa-human-sources-remaining-20261113-r1/ROOT_VERIFIED.json",
+        "sha256": "83e7f5ad07f9936cd15b7d018106451286cfaab1f046e383367cfccca78d0b5f"
+      },
+      {
+        "record": "qa-human-sources-remaining-20261113-r1-review/RESULT_REVIEW.json",
+        "sha256": "d043904ef335e4a81ec714d07d05200c2a6757b5f210119f66bc9b9422033e55"
+      }
+    ],
+    "raw_results_manifest_sha256": {
+      "combined-r3": "41301502e69c156ab6c7b28825ce25b79397833d9b4f483f24c5750913ffe1dc",
+      "remaining-r1": "4502e213b1dae79e535f14db78b12acbe5a0010960d039d32b7999e64d0fe7a7"
+    }
+  },
+  "production_gates_closed": 0,
+  "audit_findings_closed": 0,
+  "new_execution_for_documentation": false
+}

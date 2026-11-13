@@ -26,6 +26,7 @@ use std::{
 
 mod broker_cli;
 mod gateway_config;
+mod human_sources_cli;
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +44,8 @@ enum Command {
     Broker(broker_cli::BrokerArgs),
     /// Named local accounts, authorized human reads and filtered audit export.
     Human(agentsandbox::identity_cli::HumanArgs),
+    /// Explicit private preparation, migration and activation of owned human sources.
+    HumanSources(human_sources_cli::HumanSourcesArgs),
     /// Prepare or recover a new private local OIDC installation offline.
     Setup(agentsandbox::setup::SetupArgs),
     /// Prepare, record and resume private workload credential operations.
@@ -123,6 +126,24 @@ enum Command {
 }
 #[derive(Args)]
 struct GatewayArgs {
+    /// Published private owned-source activation; reconstruct and replay at every startup.
+    #[arg(long, conflicts_with_all=["human_source_mode","human_sources_manifest","human_credentials_envelope","human_control_config_revision","human_oidc_mapping_revision","tenants_file","audit_capacity_file","workload_audit_file","relay_retention_file","oidc_config","initialize_oidc_audit","data","runner_token_file","viewer_token_file","max_events","initialize_supervised_stores","worker_limit","worker_cpu_millis","worker_memory_bytes","worker_max_seconds"])]
+    human_sources_activation: Option<PathBuf>,
+    /// Explicit human source protocol; legacy preserves the existing gateway.
+    #[arg(long,value_parser=["legacy","owned_sources"])]
+    human_source_mode: Option<String>,
+    /// Existing private closure manifest; never creates or migrates a source.
+    #[arg(long, requires = "tenants_file")]
+    human_sources_manifest: Option<PathBuf>,
+    /// Existing private technical credential envelope, matching tenant tokens.
+    #[arg(long, requires = "human_sources_manifest")]
+    human_credentials_envelope: Option<PathBuf>,
+    /// Independent positive revision of the retained public control configuration.
+    #[arg(long, requires = "human_sources_manifest")]
+    human_control_config_revision: Option<u64>,
+    /// Independent positive closure revision; distinct from OIDC mapping.revision String.
+    #[arg(long,requires_all=["human_sources_manifest","oidc_config"])]
+    human_oidc_mapping_revision: Option<u64>,
     #[arg(long, default_value = "127.0.0.1:8787")]
     listen: SocketAddr,
     /// Private gateway-root control listener; /control also remains on --listen.
@@ -296,6 +317,9 @@ fn preflight_jev(args: &GatewayArgs, selected: SelectedJev) -> Result<JevTrust> 
 }
 #[derive(Args)]
 struct DashboardArgs {
+    /// Trusted presentation profile; the gateway enforces authority separately.
+    #[arg(long,default_value="legacy",value_parser=["legacy","owned_sources"])]
+    human_source_mode: String,
     #[arg(long, default_value = "127.0.0.1:4000")]
     listen: SocketAddr,
     #[arg(long)]
@@ -359,13 +383,7 @@ fn read_token(path: &Path) -> Result<String> {
     );
     let mut token = String::new();
     file.take(1025).read_to_string(&mut token)?;
-    anyhow::ensure!(token.len() <= 1024, "Fichier de secret trop volumineux");
-    let token = token.trim().to_string();
-    anyhow::ensure!(
-        token.len() >= 32 && token.len() <= 512 && !token.chars().any(char::is_whitespace),
-        "Secret invalide : 32 à 512 caractères sans espace requis"
-    );
-    Ok(token)
+    agentsandbox::human_authority::migration::operator::parse_private_token_file(token.as_bytes())
 }
 fn validate_bind(addr: SocketAddr, container: bool) -> Result<()> {
     anyhow::ensure!(
@@ -525,6 +543,96 @@ struct GatewaySessionPolicies {
     )>,
 }
 
+async fn serve_owned_human_gateway(
+    args: &GatewayArgs,
+    tenants: Vec<gateway_config::ConfiguredTenant>,
+    policy: Policy,
+    jev: Option<JevBackend>,
+    redactor: Redactor,
+) -> Result<()> {
+    let prepared = gateway_config::load_owned_sources(
+        args.human_sources_manifest
+            .as_deref()
+            .context("owned human manifest required")?,
+        args.human_credentials_envelope
+            .as_deref()
+            .context("owned human credential envelope required")?,
+        args.tenants_file
+            .as_deref()
+            .context("owned human tenant configuration required")?,
+        args.oidc_config.as_deref(),
+        &tenants,
+        args.max_events,
+        args.human_control_config_revision
+            .context("explicit owned human control configuration revision required")?,
+        args.human_oidc_mapping_revision,
+        redactor.clone(),
+    )?;
+    serve_prepared_owned_human_gateway(args, tenants, prepared, policy, jev, redactor).await
+}
+
+async fn serve_prepared_owned_human_gateway(
+    args: &GatewayArgs,
+    tenants: Vec<gateway_config::ConfiguredTenant>,
+    prepared: gateway_config::human_sources::PreparedOwnedSources,
+    policy: Policy,
+    jev: Option<JevBackend>,
+    redactor: Redactor,
+) -> Result<()> {
+    let policies = GatewaySessionPolicies::from_tenants(&tenants);
+    let tokens = tenants
+        .iter()
+        .map(|tenant| {
+            (
+                tenant.tenant_id.clone(),
+                tenant.runner_token.clone(),
+                tenant.viewer_token.clone(),
+            )
+        })
+        .collect();
+    let mut state = GatewayState::for_owned_human_sources(
+        prepared.bundle,
+        prepared.credentials,
+        tokens,
+        policy,
+        jev,
+        redactor,
+    )?;
+    // Construction reserves cleanup before any later fallible builder/bind.
+    let server = GatewayServer::new_owned(
+        state.control_recovery_retirement(),
+        state
+            .human_retirement()
+            .context("owned human cleanup handle required")?,
+    )?;
+    let quotas = tenants
+        .iter()
+        .map(|tenant| (tenant.tenant_id.clone(), tenant.worker_quota.clone()))
+        .collect();
+    let held = tenants
+        .iter()
+        .filter_map(|tenant| {
+            tenant
+                .held_create_policy
+                .clone()
+                .map(|policy| (tenant.tenant_id.clone(), policy))
+        })
+        .collect();
+    state = policies.apply(
+        state
+            .with_worker_quotas(quotas)?
+            .with_kubernetes_held_create_policies(held)?,
+    )?;
+    let control = args
+        .control_listen
+        .map(|address| (address, api::gateway_control_router(state.clone())));
+    let router = api::gateway_router(state);
+    server.serve((args.listen,router),control,shutdown_signal()?,|listen,_|{
+        eprintln!("Gateway {} — owned human sources; identity/resources adopted; remaining modern routes closed",listen);
+        Ok(())
+    }).await
+}
+
 impl GatewaySessionPolicies {
     fn from_tenants(tenants: &[gateway_config::ConfiguredTenant]) -> Self {
         let mut policies = Self::default();
@@ -561,6 +669,7 @@ async fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
+        Command::HumanSources(args) => human_sources_cli::run(args).await?,
         Command::Setup(args) => agentsandbox::setup::execute(args)?,
         Command::Workload(args) => agentsandbox::workload_cli::run(args).await?,
         Command::Kubernetes(args) => agentsandbox::kubernetes_cli::execute(args).await?,
@@ -572,6 +681,14 @@ async fn main() -> Result<()> {
             .map_err(|_| anyhow::anyhow!("model TLS import refused"))?,
         Command::Gateway(args) => {
             let args = *args;
+            gateway_config::validate_human_mode(
+                args.human_source_mode.as_deref().unwrap_or("legacy"),
+                args.human_sources_manifest.as_deref(),
+                args.human_credentials_envelope.as_deref(),
+                args.tenants_file.as_deref(),
+                args.initialize_supervised_stores.is_some(),
+                args.initialize_oidc_audit,
+            )?;
             validate_bind(args.listen, args.container_listen)?;
             if let Some(control) = args.control_listen {
                 validate_bind(control, args.container_listen)?;
@@ -591,11 +708,33 @@ async fn main() -> Result<()> {
             };
             let selected_jev = select_jev(&args, backend_environment.as_deref())?;
             let jev_trust = preflight_jev(&args, selected_jev)?;
-            let tenants = if let Some(path) = &args.tenants_file {
-                gateway_config::load(path)?
-            } else {
-                vec![configured_local_tenant(&args)?]
-            };
+            let activation = args
+                .human_sources_activation
+                .as_deref()
+                .map(human_sources_cli::load_human_sources_activation)
+                .transpose()?;
+            let (tenants, activation_request) =
+                if let Some(human_sources_cli::LoadedHumanSourcesActivation {
+                    tenants,
+                    request,
+                    credentials,
+                }) = activation
+                {
+                    (tenants, Some((request, credentials)))
+                } else {
+                    (
+                        if let Some(path) = &args.tenants_file {
+                            if args.human_source_mode.as_deref() == Some("owned_sources") {
+                                gateway_config::load_owned_tenants(path)?
+                            } else {
+                                gateway_config::load(path)?
+                            }
+                        } else {
+                            vec![configured_local_tenant(&args)?]
+                        },
+                        None,
+                    )
+                };
             let mut secrets: Vec<String> = tenants
                 .iter()
                 .flat_map(|tenant| [tenant.runner_token.clone(), tenant.viewer_token.clone()])
@@ -665,9 +804,41 @@ async fn main() -> Result<()> {
                 &std::fs::read(&args.policy).context("Politique locale manquante")?,
             )
             .context("Politique locale invalide")?;
+            if let Some((mut request, credentials)) = activation_request {
+                // Apply the same complete redactor as the direct owned path;
+                // public configuration digests exclude private redaction data.
+                for options in request.sources.values_mut() {
+                    use agentsandbox::human_authority::startup::HumanOwnedSourceOptions;
+                    match options {
+                        HumanOwnedSourceOptions::TenantStore {
+                            redactor: source, ..
+                        }
+                        | HumanOwnedSourceOptions::AuthenticationLedger {
+                            redactor: source, ..
+                        } => *source = source.union(&redactor),
+                    }
+                }
+                let bundle =
+                    agentsandbox::human_authority::startup::HumanOwnedStartupBundle::open(request)?;
+                return serve_prepared_owned_human_gateway(
+                    &args,
+                    tenants,
+                    gateway_config::human_sources::PreparedOwnedSources {
+                        bundle,
+                        credentials,
+                    },
+                    policy,
+                    jev,
+                    redactor,
+                )
+                .await;
+            }
             // Validate the complete registry before preparing backups or any
             // fresh origin: a later tenant must not strand an earlier one.
             gateway_config::validate_policies(&tenants, args.max_events)?;
+            if args.human_source_mode.as_deref() == Some("owned_sources") {
+                return serve_owned_human_gateway(&args, tenants, policy, jev, redactor).await;
+            }
             let session_policies = GatewaySessionPolicies::from_tenants(&tenants);
             let backup_root = if let Some(root) = args.initialize_supervised_stores.as_deref() {
                 let mut credential_files: Vec<&Path> = tenants
@@ -928,25 +1099,31 @@ async fn main() -> Result<()> {
         Command::Dashboard(args) => {
             validate_bind(args.listen, args.container_listen)?;
             anyhow::ensure!(
+                args.human_source_mode != "owned_sources" || args.shared_tenants,
+                "owned human dashboard requires --shared-tenants; no viewer fallback"
+            );
+            anyhow::ensure!(
                 args.front_dir.join("index.html").is_file(),
                 "Front absent : exécuter npm ci && npm run build dans front/"
             );
             let router = if args.shared_tenants {
-                api::dashboard_router_with_oidc(
+                api::dashboard_router_with_human_mode(
                     &args.upstream,
                     None,
                     args.front_dir,
                     args.oidc_web_origin,
+                    args.human_source_mode == "owned_sources",
                 )?
             } else {
                 let token_path = args
                     .viewer_token_file
                     .unwrap_or_else(|| PathBuf::from(".agentsandbox/secrets/viewer"));
-                api::dashboard_router_with_oidc(
+                api::dashboard_router_with_human_mode(
                     &args.upstream,
                     Some(read_token(&token_path)?),
                     args.front_dir,
                     args.oidc_web_origin,
+                    args.human_source_mode == "owned_sources",
                 )?
             };
             let shutdown = shutdown_signal()?;
