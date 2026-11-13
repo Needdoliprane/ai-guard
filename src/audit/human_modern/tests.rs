@@ -93,7 +93,7 @@ fn own_sqlite_busy_refuses_without_latching_and_restores_timeout() {
                 .modern_authenticate_local_digest(access, &[0xad; 32])
                 .is_err()
         );
-        let timeout: u64 = store
+        let timeout: i64 = store
             .db
             .lock()
             .unwrap()

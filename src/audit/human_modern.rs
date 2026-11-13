@@ -44,7 +44,8 @@ impl Store {
             .db
             .try_lock()
             .map_err(|_| review_access::ReviewAccessFailure::Busy)?;
-        let prior: u64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        let prior: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        let prior = u64::try_from(prior).context("invalid negative SQLite busy timeout")?;
         db.busy_timeout(std::time::Duration::ZERO)?;
         let result = (|| {
             // Unlike begin_checked_scoped, this entrance does not reset zero
@@ -61,7 +62,8 @@ impl Store {
         // The exclusive connection guard survives rollback and restoration.
         // A restoration error refuses publication even after a known COMMIT.
         db.busy_timeout(std::time::Duration::from_millis(prior))?;
-        let restored: u64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        let restored: i64 = db.pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        let restored = u64::try_from(restored).context("invalid negative SQLite busy timeout")?;
         anyhow::ensure!(restored == prior, "human source timeout restoration failed");
         result.map_err(|error:anyhow::Error| {
             let busy=error.chain().any(|cause|matches!(cause.downcast_ref::<rusqlite::Error>(),Some(rusqlite::Error::SqliteFailure(code,_)) if matches!(code.code,rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)));

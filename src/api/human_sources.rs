@@ -133,7 +133,7 @@ impl OwnedHumanGateway {
     }
     pub(super) fn require_rebuild(&self) {
         self.coverage.store(REBUILD_REQUIRED, Ordering::Release);
-        self.human.contexts.close();
+        self.human.close_contexts();
     }
     pub(super) fn healthy(&self) -> bool {
         self.coverage.load(Ordering::Acquire) == COMPLETE && self.owner.admission_available()
@@ -144,7 +144,7 @@ impl OwnedHumanGateway {
     fn begin_close(&self) {
         self.coverage.store(CLOSING, Ordering::Release);
         self.usages.fetch_or(CLOSED, Ordering::AcqRel);
-        self.human.contexts.close();
+        self.human.close_contexts();
         self.owner.begin_close();
         self.drained.notify_waiters();
     }
