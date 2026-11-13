@@ -196,3 +196,46 @@ async fn activation_publication_interruptions_replay_coordinator_then_final_ack_
     );
     assert_eq!(check(&directory), CheckStatus::ActivationFilesValid);
 }
+
+#[test]
+fn check_preserves_main_sidecars_and_all_preparation_documents() {
+    use std::os::unix::fs::MetadataExt;
+    let (_temporary, args, data) = real_legacy_fixture();
+    let directory = args.output_dir.clone();
+    preparation::prepare(args).unwrap();
+    let snapshot = || {
+        let mut paths = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.is_file())
+            .collect::<Vec<_>>();
+        paths.extend([
+            data.clone(),
+            PathBuf::from(format!("{}-wal", data.display())),
+            PathBuf::from(format!("{}-shm", data.display())),
+        ]);
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                let state = std::fs::metadata(&path).ok().map(|m| {
+                    (
+                        m.dev(),
+                        m.ino(),
+                        m.mtime(),
+                        m.mtime_nsec(),
+                        std::fs::read(&path).unwrap(),
+                    )
+                });
+                (path, state)
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = snapshot();
+    assert_eq!(check(&directory), CheckStatus::PreparedFilesValid);
+    assert_eq!(
+        snapshot(),
+        before,
+        "check must neither open SQLite nor change/publish files"
+    );
+}

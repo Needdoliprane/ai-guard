@@ -133,6 +133,66 @@ fn activation_contradictory_cli_options_refuse_before_sqlite_or_file_creation() 
     }
 }
 
+#[test]
+fn valid_same_inode_legacy_change_after_prepare_is_examined_at_apply_without_a_prepared_head() {
+    use agentsandbox::{audit::Store, identity::*, redaction::Redactor};
+    use uuid::Uuid;
+    let f = Fixture::new(false);
+    successful(f.prepare());
+    let source = &f.sources[0];
+    let store = Store::open_existing_for_tenant(source, "tenant-a", Redactor::new(vec![]), 100_000)
+        .unwrap();
+    store
+        .mutate_identity(&IdentityMutationV1 {
+            version: 1,
+            operation_id: Uuid::new_v4().to_string(),
+            actor: PrincipalRefV1::LegacyControl {
+                credential_id: "synthetic-stopped-operator".into(),
+                role: LegacyControlRoleV1::Runner,
+            },
+            change: IdentityChangeV1::Account {
+                expected_revision: 0,
+                account: HumanAccountV1 {
+                    version: 1,
+                    principal: PrincipalRefV1::HumanLocal {
+                        installation_id: f.installation.to_string(),
+                        account_id: Uuid::new_v4().to_string(),
+                    },
+                    display_name: "Synthetic later named account".into(),
+                    revision: 1,
+                    active: true,
+                },
+            },
+        })
+        .unwrap();
+    drop(store);
+    let history = |limit: i64| {
+        let db = rusqlite::Connection::open_with_flags(
+            source,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .unwrap();
+        let mut query = db
+            .prepare("SELECT seq,hash FROM events WHERE seq<=?1 ORDER BY seq")
+            .unwrap();
+        query
+            .query_map([limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = history(i64::MAX);
+    let last = before.last().unwrap().0;
+    successful(f.step("apply", true));
+    assert_eq!(
+        history(last),
+        before,
+        "the real apply-time legacy prefix must be preserved"
+    );
+}
+
 async fn complete_and_read(oidc: bool) {
     let f = Fixture::new(oidc);
     successful(f.prepare());
