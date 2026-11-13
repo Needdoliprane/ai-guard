@@ -58,7 +58,10 @@ async fn owned_recent_metadata_returns_snapshot_only_after_a_real_read_commit() 
             |row| row.get(0),
         )
         .unwrap();
-    assert!(floor, "the published receipt must have a committed time floor");
+    assert!(
+        floor,
+        "the published receipt must have a committed time floor"
+    );
 }
 
 // Additional parents use only application APIs present on120b. The original
@@ -126,7 +129,10 @@ mod extended {
 
     fn seeded(administration: bool) -> (Fixture, Vec<String>, Vec<String>) {
         let fixture = Fixture::new_owned();
-        let PrincipalRefV1::HumanLocal { installation_id, .. } = fixture.principal() else {
+        let PrincipalRefV1::HumanLocal {
+            installation_id, ..
+        } = fixture.principal()
+        else {
             panic!("fixture is a local identity");
         };
         let other = PrincipalRefV1::HumanLocal {
@@ -164,10 +170,15 @@ mod extended {
             }))
             .unwrap();
         if administration {
-            let mut membership = store.identity_memberships(fixture.principal()).unwrap().remove(0);
+            let mut membership = store
+                .identity_memberships(fixture.principal())
+                .unwrap()
+                .remove(0);
             let expected_revision = membership.revision;
             membership.revision += 1;
-            membership.capabilities.insert(HumanCapabilityV1::ReadTenantMetadata);
+            membership
+                .capabilities
+                .insert(HumanCapabilityV1::ReadTenantMetadata);
             store
                 .mutate_identity(&change(IdentityChangeV1::Membership {
                     expected_revision,
@@ -178,7 +189,13 @@ mod extended {
         grant(&fixture, "B", "recent-owned-b", fixture.principal(), false);
         grant(&fixture, "B", "recent-shared-b", &other, true);
         grant(&fixture, "B", "recent-hidden-b", &other, false);
-        grant(&fixture, "A", "recent-foreign-a", fixture.principal(), false);
+        grant(
+            &fixture,
+            "A",
+            "recent-foreign-a",
+            fixture.principal(),
+            false,
+        );
         let owned_old = append(&fixture, "B", "recent-owned-b");
         let shared = append(&fixture, "B", "recent-shared-b");
         let hidden_old = append(&fixture, "B", "recent-hidden-b");
@@ -248,7 +265,15 @@ mod extended {
             let state = state(&fixture);
             let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
             let router = gateway_router(state.clone());
-            let context = context(&router, if administration { "administration" } else { "personal" }).await;
+            let context = context(
+                &router,
+                if administration {
+                    "administration"
+                } else {
+                    "personal"
+                },
+            )
+            .await;
             let mut selection = format!("{RECENT}?view=metadata&limit=1");
             let mut actual = Vec::new();
             for _ in 0..8 {
@@ -256,8 +281,18 @@ mod extended {
                 assert_eq!(status, StatusCode::OK, "{page}");
                 assert_eq!(page["stream_mode"], "snapshot_only");
                 assert!(page["live_cursor"].is_null());
-                assert!(page["items"].as_array().unwrap().iter().all(|item| item["content"].is_null()));
-                assert!(!page.to_string().contains("synthetic-recent-content-must-stay-private"));
+                assert!(
+                    page["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|item| item["content"].is_null())
+                );
+                assert!(
+                    !page
+                        .to_string()
+                        .contains("synthetic-recent-content-must-stay-private")
+                );
                 actual.extend(ids(&page));
                 if let Some(cursor) = page["next_cursor"].as_str() {
                     assert_eq!(page["has_more"], true);
@@ -267,9 +302,15 @@ mod extended {
                     break;
                 }
             }
-            assert_eq!(actual, expected, "hidden events must not consume the SQL limit");
+            assert_eq!(
+                actual, expected,
+                "hidden events must not consume the SQL limit"
+            );
             assert!(foreign.iter().all(|id| !actual.contains(id)));
-            assert_eq!(events_receipts(&connection(&state)), i64::try_from(expected.len()).unwrap());
+            assert_eq!(
+                events_receipts(&connection(&state)),
+                i64::try_from(expected.len()).unwrap()
+            );
             assert!(neighbor.try_recv().is_err());
         }
     }
@@ -281,7 +322,12 @@ mod extended {
         let state = state(&fixture);
         let router = gateway_router(state.clone());
         let context = context(&router, "personal").await;
-        let (status, first) = get(&router, &format!("{RECENT}?view=metadata&limit=1"), Some(&context)).await;
+        let (status, first) = get(
+            &router,
+            &format!("{RECENT}?view=metadata&limit=1"),
+            Some(&context),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{first}");
         assert_eq!(ids(&first), expected[..1]);
         let cursor = first["next_cursor"].as_str().unwrap();
@@ -291,7 +337,12 @@ mod extended {
         assert_eq!(ids(&second), expected[1..2]);
         // The intervening first-page read commits another real events receipt.
         // No unavailable owned business writer is invented to append a fixture.
-        let (status, refreshed) = get(&router, &format!("{RECENT}?view=metadata&limit=1"), Some(&context)).await;
+        let (status, refreshed) = get(
+            &router,
+            &format!("{RECENT}?view=metadata&limit=1"),
+            Some(&context),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{refreshed}");
         let (status, repeated) = get(&router, &older, Some(&context)).await;
         assert_eq!(status, StatusCode::OK, "{repeated}");
@@ -300,7 +351,9 @@ mod extended {
         assert!(repeated["live_cursor"].is_null());
         for query in [
             format!("{RECENT}?view=metadata&limit=2&cursor={cursor}"),
-            format!("{RECENT}?view=metadata&limit=1&resource_kind=session&resource_id=recent-shared-b&cursor={cursor}"),
+            format!(
+                "{RECENT}?view=metadata&limit=1&resource_kind=session&resource_id=recent-shared-b&cursor={cursor}"
+            ),
         ] {
             let (status, refused) = get(&router, &query, Some(&context)).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
@@ -315,7 +368,9 @@ mod extended {
         let (status, refused) = get(&router, &older, Some(&another)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
         assert_eq!(refused["error"]["code"], "invalid_cursor");
-        let filtered = format!("{RECENT}?view=metadata&limit=10&resource_kind=session&resource_id=recent-shared-b");
+        let filtered = format!(
+            "{RECENT}?view=metadata&limit=10&resource_kind=session&resource_id=recent-shared-b"
+        );
         let (status, filtered) = get(&router, &filtered, Some(&another)).await;
         assert_eq!(status, StatusCode::OK, "{filtered}");
         assert_eq!(ids(&filtered), expected[1..2]);
@@ -347,17 +402,34 @@ mod extended {
             ("POST", RECENT, StatusCode::METHOD_NOT_ALLOWED),
             ("GET", "/api/v1/human/does-not-exist", StatusCode::NOT_FOUND),
         ] {
-            let response = router.clone().oneshot(
-                axum::http::Request::builder().method(method).uri(path)
-                    .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
-                    .header("x-aiguard-context", &context).body(Body::empty()).unwrap(),
-            ).await.unwrap();
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
+                        .header("x-aiguard-context", &context)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(response.status(), expected_status, "{method} {path}");
         }
-        let (status, refused) = get(&router, &format!("{RECENT}?event_id={}", expected[0]), Some(&context)).await;
+        let (status, refused) = get(
+            &router,
+            &format!("{RECENT}?event_id={}", expected[0]),
+            Some(&context),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
         assert_eq!(refused["error"]["code"], "invalid_request");
-        assert_eq!(events_receipts(&database), before, "closed selectors must not append an events receipt");
+        assert_eq!(
+            events_receipts(&database),
+            before,
+            "closed selectors must not append an events receipt"
+        );
     }
 
     struct HeldMutex {
@@ -370,13 +442,20 @@ mod extended {
             let (release, resume) = std::sync::mpsc::channel();
             let thread = std::thread::spawn(move || store.modern_test_hold_mutex(ready, resume));
             reached.recv_timeout(Duration::from_secs(5)).unwrap();
-            Self { release: Some(release), thread: Some(thread) }
+            Self {
+                release: Some(release),
+                thread: Some(thread),
+            }
         }
     }
     impl Drop for HeldMutex {
         fn drop(&mut self) {
-            if let Some(release) = self.release.take() { let _ = release.send(()); }
-            if let Some(thread) = self.thread.take() { let _ = thread.join(); }
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
         }
     }
 
@@ -388,7 +467,10 @@ mod extended {
         let context = context(&router, "personal").await;
         let neighbor = crate::audit::read_test_observer::observe(&state.tenants[0].store);
         let held = HeldMutex::acquire(state.tenants[0].store.clone());
-        let path = state.owned_human.as_ref().unwrap().sources[0].descriptor().storage_binding.path();
+        let path = state.owned_human.as_ref().unwrap().sources[0]
+            .descriptor()
+            .storage_binding
+            .path();
         let a = rusqlite::Connection::open(path).unwrap();
         a.execute_batch("BEGIN IMMEDIATE").unwrap();
         let (status, page) = get(&router, &format!("{RECENT}?limit=10"), Some(&context)).await;
@@ -413,7 +495,10 @@ mod extended {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
         assert!(refused.get("items").is_none());
         drop(held);
-        let path = state.owned_human.as_ref().unwrap().sources[1].descriptor().storage_binding.path();
+        let path = state.owned_human.as_ref().unwrap().sources[1]
+            .descriptor()
+            .storage_binding
+            .path();
         let b = rusqlite::Connection::open(path).unwrap();
         b.execute_batch("BEGIN IMMEDIATE").unwrap();
         let (status, refused) = get(&router, RECENT, Some(&context)).await;
@@ -434,13 +519,26 @@ mod extended {
         let (fixture, _, _) = seeded(false);
         let (mut request, credentials, tokens) = fixture.owned_request();
         for options in request.sources.values_mut() {
-            if let crate::human_authority::startup::HumanOwnedSourceOptions::TenantStore { capacity, .. } = options {
+            if let crate::human_authority::startup::HumanOwnedSourceOptions::TenantStore {
+                capacity,
+                ..
+            } = options
+            {
                 capacity.human_tenant.events = 4;
                 capacity.human_principal.events = 2;
             }
         }
-        let bundle = crate::human_authority::startup::HumanOwnedStartupBundle::open(request).unwrap();
-        let state = GatewayState::for_owned_human_sources(bundle, credentials, tokens, Policy::default(), None, Redactor::new(vec![])).unwrap();
+        let bundle =
+            crate::human_authority::startup::HumanOwnedStartupBundle::open(request).unwrap();
+        let state = GatewayState::for_owned_human_sources(
+            bundle,
+            credentials,
+            tokens,
+            Policy::default(),
+            None,
+            Redactor::new(vec![]),
+        )
+        .unwrap();
         let router = gateway_router(state.clone());
         let context = context(&router, "personal").await;
         let (status, positive) = get(&router, RECENT, Some(&context)).await;
@@ -452,7 +550,13 @@ mod extended {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{refused}");
         assert_eq!(refused["error"]["code"], "audit_read_budget_exhausted");
         assert_eq!(refused["error"]["retry_action"], "contact_operator");
-        for field in ["items", "read_receipt", "next_cursor", "live_cursor", "stream_mode"] {
+        for field in [
+            "items",
+            "read_receipt",
+            "next_cursor",
+            "live_cursor",
+            "stream_mode",
+        ] {
             assert!(refused.get(field).is_none(), "{field}");
         }
         assert_eq!(events_receipts(&database), before);
@@ -464,23 +568,39 @@ mod extended {
 
         async fn committed_race(revoke: bool) {
             let fixture = Fixture::new_owned();
-            grant(&fixture, "B", "recent-postcommit-b", fixture.principal(), false);
+            grant(
+                &fixture,
+                "B",
+                "recent-postcommit-b",
+                fixture.principal(),
+                false,
+            );
             append(&fixture, "B", "recent-postcommit-b");
             let state = state(&fixture);
             let router = gateway_router(state.clone());
             let context = context(&router, "personal").await;
             let database = connection(&state);
-            let before: i64 = database.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| row.get(0)).unwrap();
+            let before: i64 = database
+                .query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
             let (reached, release) = human::event_read_test_hook::install(&state);
             let request = tokio::spawn(async move { get(&router, RECENT, Some(&context)).await });
-            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
+            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15)))
+                .await
+                .unwrap()
+                .unwrap();
             let (audit_id, payload): (String, String) = database.query_row(
                 "SELECT id,payload FROM events WHERE seq>?1 AND kind='control.identity.access' AND json_extract(payload,'$.data.action')='events'",
                 [before], |row| Ok((row.get(0)?, row.get(1)?)),
             ).unwrap();
             let audit: Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(audit["data"]["result_count"], 1);
-            assert_eq!(audit["data"]["principal"], serde_json::to_value(fixture.principal()).unwrap());
+            assert_eq!(
+                audit["data"]["principal"],
+                serde_json::to_value(fixture.principal()).unwrap()
+            );
             let floor: bool = database.query_row(
                 "SELECT EXISTS(SELECT 1 FROM audit_time_floors f JOIN events e ON f.event_seq>=e.seq WHERE e.id=?1)",
                 [&audit_id], |row| row.get(0),
@@ -494,23 +614,56 @@ mod extended {
                 let epoch = owned.owner.try_write_epoch().unwrap();
                 let access = HumanSourceAccess::write(&epoch, &owned.sources[1]).unwrap();
                 let digest: [u8; 32] = Sha256::digest(Fixture::bearer("B").as_bytes()).into();
-                let mut binding = state.tenants[1].store.local_credential_binding_scoped(&access, &digest).unwrap().unwrap();
+                let mut binding = state.tenants[1]
+                    .store
+                    .local_credential_binding_scoped(&access, &digest)
+                    .unwrap()
+                    .unwrap();
                 let expected_revision = binding.revision;
-                binding.revision += 1; binding.active = false;
-                state.tenants[1].store.mutate_identity_scoped(
-                    &epoch, &owned.sources[1], &change(IdentityChangeV1::Credential { expected_revision, binding }),
-                ).unwrap();
+                binding.revision += 1;
+                binding.active = false;
+                state.tenants[1]
+                    .store
+                    .mutate_identity_scoped(
+                        &epoch,
+                        &owned.sources[1],
+                        &change(IdentityChangeV1::Credential {
+                            expected_revision,
+                            binding,
+                        }),
+                    )
+                    .unwrap();
                 drop(epoch);
-            } else { state.human.close_contexts(); }
+            } else {
+                state.human.close_contexts();
+            }
             drop(release); // Journal guard also releases on panic/unwind.
-            let (status, refused) = tokio::time::timeout(Duration::from_secs(15), request).await.unwrap().unwrap();
+            let (status, refused) = tokio::time::timeout(Duration::from_secs(15), request)
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
             assert_eq!(refused["error"]["code"], "identity_unavailable");
-            for field in ["items", "read_receipt", "next_cursor", "live_cursor", "stream_mode"] {
+            for field in [
+                "items",
+                "read_receipt",
+                "next_cursor",
+                "live_cursor",
+                "stream_mode",
+            ] {
                 assert!(refused.get(field).is_none(), "{field}");
             }
-            let retained: String = database.query_row("SELECT payload FROM events WHERE id=?1", [&audit_id], |row| row.get(0)).unwrap();
-            assert_eq!(retained, payload, "the committed historical receipt is retained");
+            let retained: String = database
+                .query_row(
+                    "SELECT payload FROM events WHERE id=?1",
+                    [&audit_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                retained, payload,
+                "the committed historical receipt is retained"
+            );
         }
 
         #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -535,8 +688,15 @@ mod extended {
             let owned = state.owned_human.as_ref().unwrap().clone();
             let (reached, release) = human::event_read_test_hook::install(&state);
             let request = tokio::spawn(async move { get(&router, RECENT, Some(&context)).await });
-            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15))).await.unwrap().unwrap();
-            assert_eq!(events_receipts(&database), before + 1, "real receipt committed before waiter cancellation");
+            tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15)))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                events_receipts(&database),
+                before + 1,
+                "real receipt committed before waiter cancellation"
+            );
             // The owned read epoch is already gone; usage and I/O ownership
             // must nevertheless survive cancellation of the HTTP observer.
             drop(owned.owner.try_write_epoch().unwrap());
@@ -549,10 +709,19 @@ mod extended {
                 while owned.coverage.load(Ordering::Acquire) != CLOSING {
                     tokio::task::yield_now().await;
                 }
-            }).await.unwrap();
-            assert!(!drain.is_finished(), "accepted work still holds its usage while paused");
+            })
+            .await
+            .unwrap();
+            assert!(
+                !drain.is_finished(),
+                "accepted work still holds its usage while paused"
+            );
             drop(release);
-            tokio::time::timeout(Duration::from_secs(15), drain).await.unwrap().unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(15), drain)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
             assert_eq!(owned.usages.load(Ordering::Acquire), CLOSED);
             assert_eq!(events_receipts(&database), before + 1);
         }

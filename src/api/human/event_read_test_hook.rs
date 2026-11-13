@@ -32,8 +32,16 @@ pub(crate) fn install(state: &GatewayState) -> (Receiver<()>, Release) {
             reached,
             resume: resumed,
         });
-    assert!(previous.is_none(), "one event publication pause per fixture");
-    (observed, Release { resume: Some(resume) })
+    assert!(
+        previous.is_none(),
+        "one event publication pause per fixture"
+    );
+    (
+        observed,
+        Release {
+            resume: Some(resume),
+        },
+    )
 }
 
 pub(super) fn pause(human: &HumanAccessState) -> ApiResult<()> {
@@ -43,7 +51,10 @@ pub(super) fn pause(human: &HumanAccessState) -> ApiResult<()> {
         .map_err(|_| cursor_unavailable())?
         .take();
     if let Some(pause) = pause {
-        pause.reached.try_send(()).map_err(|_| cursor_unavailable())?;
+        pause
+            .reached
+            .try_send(())
+            .map_err(|_| cursor_unavailable())?;
         // This bound exists only in a test build. Production deadlines and
         // behavior have no test barrier or extra wait.
         pause

@@ -3,9 +3,9 @@ use super::*;
 use crate::{human_authority::migration::tests::Fixture, model::Event};
 use tower::ServiceExt;
 
+mod dashboard;
 mod races;
 mod selection;
-mod dashboard;
 
 fn change(change: IdentityChangeV1) -> IdentityMutationV1 {
     IdentityMutationV1 {
@@ -69,7 +69,10 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     // All history/grants are prepared by existing real Store APIs before the
     // existing owned migration/startup protocol. No modern helper is needed.
     let fixture = Fixture::new_owned();
-    let PrincipalRefV1::HumanLocal { installation_id, .. } = fixture.principal() else {
+    let PrincipalRefV1::HumanLocal {
+        installation_id, ..
+    } = fixture.principal()
+    else {
         panic!("fixture must retain its local human identity");
     };
     let other = PrincipalRefV1::HumanLocal {
@@ -140,7 +143,10 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["view"], "metadata");
     assert_eq!(page["context_id"], context["id"]);
-    assert_eq!(page["authorization_version"], context["authorization_version"]);
+    assert_eq!(
+        page["authorization_version"],
+        context["authorization_version"]
+    );
     assert_eq!(page["coverage"], "authorized_selection");
     assert_eq!(page["has_more"], false);
     assert!(page["next_cursor"].is_null());
@@ -191,7 +197,10 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
     let membership: Value = serde_json::from_str(&membership).unwrap();
     assert_eq!(membership["tenant_id"], "B");
     assert_eq!(membership["principal"], identity["principal"]);
-    assert_eq!(membership["organization_scope"], context["organization_scope"]);
+    assert_eq!(
+        membership["organization_scope"],
+        context["organization_scope"]
+    );
     assert_eq!(record["membership_revision"], membership["revision"]);
     assert_eq!(
         record["membership_revision"].as_u64().unwrap().to_string(),
@@ -213,5 +222,8 @@ async fn owned_events_metadata_returns_authorized_items_and_committed_scope_rece
             |row| row.get(0),
         )
         .unwrap();
-    assert!(floor, "real committed receipt must retain its durable wall floor");
+    assert!(
+        floor,
+        "real committed receipt must retain its durable wall floor"
+    );
 }

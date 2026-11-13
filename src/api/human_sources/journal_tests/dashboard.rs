@@ -1,5 +1,5 @@
-use super::*;
 use super::races::{connection, context, snapshot, state};
+use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 struct LoopbackGateway {
@@ -44,18 +44,32 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
     let router = gateway_router(state.clone());
     let task = tokio::spawn(async move {
         axum::serve(listener, router)
-            .with_graceful_shutdown(async { let _ = stopped.await; })
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
             .await
     });
-    let server = LoopbackGateway { stop: Some(stop), task: Some(task) };
+    let server = LoopbackGateway {
+        stop: Some(stop),
+        task: Some(task),
+    };
     let front = tempfile::Builder::new()
         .permissions(std::fs::Permissions::from_mode(0o700))
         .tempdir()
         .unwrap();
-    std::fs::write(front.path().join("index.html"), "synthetic journal dashboard").unwrap();
+    std::fs::write(
+        front.path().join("index.html"),
+        "synthetic journal dashboard",
+    )
+    .unwrap();
     let dashboard = dashboard_router_with_human_mode(
-        &format!("http://{address}"), None, front.path().to_owned(), None, true
-    ).unwrap();
+        &format!("http://{address}"),
+        None,
+        front.path().to_owned(),
+        None,
+        true,
+    )
+    .unwrap();
     let context = context(&dashboard).await;
     let database = connection(&state);
     let before = snapshot(&database);
@@ -66,23 +80,32 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
     assert!(page["items"][0]["content"].is_null());
     assert!(page.get("live_cursor").is_none());
     assert_eq!(snapshot(&database).0, before.0 + 1);
-    let action: String = database.query_row(
-        "SELECT json_extract(payload,'$.data.action') FROM events WHERE id=?1",
-        [page["read_receipt"]["audit_event_id"].as_str().unwrap()],
-        |row| row.get(0),
-    ).unwrap();
+    let action: String = database
+        .query_row(
+            "SELECT json_extract(payload,'$.data.action') FROM events WHERE id=?1",
+            [page["read_receipt"]["audit_event_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(action, "events");
     for (method, path) in [
         ("HEAD", "/api/v1/human/events"),
         ("GET", "/api/v1/human/export"),
     ] {
         let before = snapshot(&database);
-        let response = dashboard.clone().oneshot(
-            axum::http::Request::builder().method(method).uri(path)
-                .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
-                .header("x-aiguard-context", &context)
-                .body(Body::empty()).unwrap()
-        ).await.unwrap();
+        let response = dashboard
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("authorization", format!("Bearer {}", Fixture::bearer("B")))
+                    .header("x-aiguard-context", &context)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(snapshot(&database), before);
     }

@@ -12,10 +12,10 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde::{Deserialize, Serialize};
 mod brokers;
-mod recent;
-mod workers;
 #[cfg(test)]
 pub(super) mod event_read_test_hook;
+mod recent;
+mod workers;
 
 const CONTEXT_HEADER: &str = "x-aiguard-context";
 pub(super) struct HumanAccessState {

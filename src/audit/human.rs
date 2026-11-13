@@ -521,7 +521,8 @@ impl Store {
             }
             None => self.begin_checked(&mut db)?,
         };
-        let result = self.human_events_checked(&tx, scope, filter, after, upper, limit, transient)?;
+        let result =
+            self.human_events_checked(&tx, scope, filter, after, upper, limit, transient)?;
         self.commit_checked(tx)?;
         Ok(result)
     }

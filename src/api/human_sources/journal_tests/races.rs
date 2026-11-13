@@ -58,9 +58,8 @@ async fn committed_read_race(revoke_credential: bool) {
     let database = connection(&state);
     let before = snapshot(&database);
     let (reached, release) = human::event_read_test_hook::install(&state);
-    let request = tokio::spawn(async move {
-        get(&router, "/api/v1/human/events", Some(&context)).await
-    });
+    let request =
+        tokio::spawn(async move { get(&router, "/api/v1/human/events", Some(&context)).await });
     // A separate blocking participant observes the barrier; the Tokio worker
     // remains available to run the actual HTTP request.
     tokio::task::spawn_blocking(move || reached.recv_timeout(Duration::from_secs(15)))
@@ -76,7 +75,10 @@ async fn committed_read_race(revoke_credential: bool) {
         .unwrap();
     let audit: Value = serde_json::from_str(&payload).unwrap();
     assert_eq!(audit["data"]["result_count"], 1);
-    assert_eq!(audit["data"]["principal"], serde_json::to_value(fixture.principal()).unwrap());
+    assert_eq!(
+        audit["data"]["principal"],
+        serde_json::to_value(fixture.principal()).unwrap()
+    );
     assert_eq!(audit["data"]["mode"], "personal");
     assert!(audit["data"]["membership_id"].is_string());
     let committed = snapshot(&database);
@@ -88,7 +90,10 @@ async fn committed_read_race(revoke_credential: bool) {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(floor, "the publication barrier must follow the real receipt commit");
+    assert!(
+        floor,
+        "the publication barrier must follow the real receipt commit"
+    );
     if revoke_credential {
         // Controlled test intervention through an existing scoped writer.
         // It does not adopt a public identity mutation route.
@@ -135,9 +140,16 @@ async fn committed_read_race(revoke_credential: bool) {
     assert!(body.get("read_receipt").is_none());
     assert!(body.get("next_cursor").is_none());
     let retained: String = database
-        .query_row("SELECT payload FROM events WHERE id=?1", [&audit_id], |row| row.get(0))
+        .query_row(
+            "SELECT payload FROM events WHERE id=?1",
+            [&audit_id],
+            |row| row.get(0),
+        )
         .unwrap();
-    assert_eq!(retained, payload, "the earlier committed read remains historical");
+    assert_eq!(
+        retained, payload,
+        "the earlier committed read remains historical"
+    );
     if !revoke_credential {
         assert_eq!(snapshot(&database), committed);
     }
@@ -174,7 +186,10 @@ async fn owned_events_metadata_real_audit_insert_abort_rolls_back_without_public
         )
         .unwrap();
     assert!(receipt_exists);
-    let trigger = state.tenants[1].store.modern_test_abort_events_audit().unwrap();
+    let trigger = state.tenants[1]
+        .store
+        .modern_test_abort_events_audit()
+        .unwrap();
     let before = snapshot(&database);
     let usage = state.tenants[1].store.modern_test_human_usage();
     let (status, refused) = get(&router, "/api/v1/human/events", Some(&context)).await;
@@ -183,8 +198,16 @@ async fn owned_events_metadata_real_audit_insert_abort_rolls_back_without_public
     assert!(refused.get("items").is_none());
     assert!(refused.get("read_receipt").is_none());
     assert!(refused.get("next_cursor").is_none());
-    assert!(!refused.to_string().contains("synthetic owned events audit insertion failure"));
-    assert!(!refused.to_string().contains("synthetic-private-journal-content"));
+    assert!(
+        !refused
+            .to_string()
+            .contains("synthetic owned events audit insertion failure")
+    );
+    assert!(
+        !refused
+            .to_string()
+            .contains("synthetic-private-journal-content")
+    );
     assert_eq!(snapshot(&database), before);
     assert_eq!(state.tenants[1].store.modern_test_human_usage(), usage);
     assert!(!state.tenants[1].store.healthy());
