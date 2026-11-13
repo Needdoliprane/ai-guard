@@ -1,5 +1,20 @@
 # Validation courante
 
+## 13 novembre — métadonnées owned, réparations et contraste
+
+| Campagne | Résultat constaté |
+|---|---|
+| Rust `195b437` | 72 PASS, 13 FAIL et 2 ignorés ; RC terminal 85 conservé. |
+| Rust `858fc7d` | 14 parents de réparation PASS, sans échec ni ignoré ; neuf listes réelles préalables, vrai libtest identifié par Cargo JSON, 2 788 fichiers source et modes conservés, export de fixtures vide, sept collectes et fermeture exacte vérifiées, compteurs OOM à zéro. |
+| Node `e25b631`, puis real-wire `195b437` | 32 PASS et 1 test ignoré, avec agrégat `FAIL_HARNESS_NOT_GREEN` conservé. Complément séparé : 6/6 PASS sur quatre réponses réellement capturées par Rust. Total : 33 fonctions PASS distinctes sur deux sources. |
+| Navigateur R1, puis R2 | R1 échoue à l’import de `playwright-core` avant Chromium et la cible, mais son conteneur est effectivement fermé ; les cibles restent `NOT_RUN`. R2 passe trois scénarios fonctionnels, avec un défaut visuel de survol ensuite relevé dans les captures ; son acceptation visuelle reste ouverte à ce stade. |
+| Frontend `810711b` | Cache public épinglé, `npm ci` hors réseau avec `--ignore-scripts`, syntaxe du pilote, TypeScript et Vite RC 0. Les 25 phases retournent 0 ; les 2 788 fichiers source et 64 fichiers de travail frontend sont inchangés. Dist de quatre fichiers `42bc519b…`, compteurs OOM à zéro et fermeture RC 0. |
+| Navigateur composé corrigé | Trois scénarios, quatre PNG et huit ratios de contraste à 14,5556:1. Sept réponses de page réussies sont chacune corrélées à un reçu SQL parmi les huit exportés. Phases et fermeture RC 0, fixture libtest RC 0, garde OS et sandbox Chromium réellement vérifiés ; producteurs backend `858fc7d` et frontend `810711b` distincts et vérifiés. |
+
+Les 85 fonctions Rust PASS distinctes (72 + 14 − 1) et les 33 fonctions frontend PASS distinctes (32 + 6 − 5) ne forment pas une suite unique exécutée sur la source courante. Les erreurs historiques restent enregistrées. Les fixtures SQLite-FULL bornent l’allocation logique avec `max_page_count` ; elles ne saturent pas le disque physique. Les fenêtres d’observation navigateur ne sont pas un benchmark de latence. Root a examiné les quatre PNG ; aucune conformité WCAG complète n’en est déduite.
+
+Références des preuves : Rust `3fe243ff…`, build `799ebd86…`, navigateur `cd3b3ad9…` et provenance des composants `281f60fe…`. Les fichiers et répertoires conservés font l’objet de fsync après fermeture, sans qualification de coupure électrique. L’exécutable principal du backend produit, les fournisseurs/SSO réels, moteurs de workers, cluster, restauration, Clippy strict, suite complète et capacité de 100 workers restent `NOT_RUN` dans ce lot. [Détails EN](evidence/2026-11-13/human-owned-metadata/README.md) · [FR](evidence/2026-11-13/human-owned-metadata/README.fr.md) · [Sélections exactes](evidence/2026-11-13/human-owned-metadata/SELECTIONS.json).
+
 ## 13 novembre — sources humaines : 107 fonctions sur un même gel
 
 Source `dbee1d5f90abd884badf5cd255b69c436f38ae4a`, arbre `f3f8c1e3ed7d3358526d1cf926d9b99f1b6f5b6b`, archive `7050d12ba3f8fe621b8efcf91a614c3715f410de2bf9302f07b310af89e79302` : 2 771 fichiers /34 061 824 octets. [Preuves EN](evidence/2026-11-13/human-sources-operator/README.md) · [FR](evidence/2026-11-13/human-sources-operator/README.fr.md) · [Résultats typés](evidence/2026-11-13/human-sources-operator/RESULTS.json).

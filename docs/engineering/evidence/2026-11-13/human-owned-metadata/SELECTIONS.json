@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "scope": "Selected software evidence only; no production gate closed",
+  "rust_repair_source": "858fc7dab3f26e8edfae8f07425868bc2201b2f6",
+  "rust_repair_groups": [
+    {
+      "group": "recent-contracts",
+      "filters": [
+        "api::human_sources::tests::recent_contract_tests::"
+      ],
+      "exact": false,
+      "actual_pass": 10,
+      "actual_ignored": 0,
+      "parents": [
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_b_commits_while_real_neighbor_a_mutex_and_sqlite_stay_locked",
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_exhausted_real_read_budget_returns_429_without_page_or_extra_receipt",
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_keeps_content_detail_export_stream_head_and_unknown_contracts_closed",
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_older_cursor_is_immutable_and_bound_to_limit_resource_and_context",
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_own_mutex_and_sqlite_busy_refuse_then_recover_without_neighbor_lookup",
+        "api::human_sources::tests::recent_contract_tests::extended::owned_recent_owner_share_and_admin_apply_acl_before_descending_limit",
+        "api::human_sources::tests::recent_contract_tests::extended::publication_races::owned_recent_aborted_waiter_keeps_committed_work_usage_until_release_and_drain",
+        "api::human_sources::tests::recent_contract_tests::extended::publication_races::owned_recent_real_commit_then_context_close_refuses_publication",
+        "api::human_sources::tests::recent_contract_tests::extended::publication_races::owned_recent_real_commit_then_credential_revocation_refuses_publication",
+        "api::human_sources::tests::recent_contract_tests::owned_recent_metadata_returns_snapshot_only_after_a_real_read_commit"
+      ]
+    },
+    {
+      "group": "store-full",
+      "filters": [
+        "audit::human_modern::journal_tests::metadata_events_sqlite_audit_full_preserves_head_quota_and_usage",
+        "audit::human_modern::recent::tests::modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable"
+      ],
+      "exact": true,
+      "actual_pass": 2,
+      "actual_ignored": 0,
+      "parents": [
+        "audit::human_modern::journal_tests::metadata_events_sqlite_audit_full_preserves_head_quota_and_usage",
+        "audit::human_modern::recent::tests::modern_recent_real_audit_full_rolls_back_restores_713_and_latches_unavailable"
+      ]
+    },
+    {
+      "group": "api-full",
+      "filters": [
+        "api::human_sources::journal_tests::races::owned_events_metadata_real_audit_full_rolls_back_without_publication"
+      ],
+      "exact": true,
+      "actual_pass": 1,
+      "actual_ignored": 0,
+      "parents": [
+        "api::human_sources::journal_tests::races::owned_events_metadata_real_audit_full_rolls_back_without_publication"
+      ]
+    },
+    {
+      "group": "retained-gate",
+      "filters": [
+        "api::human_sources::tests::retained_read_gate_a_does_not_require_global_write_for_b"
+      ],
+      "exact": true,
+      "actual_pass": 1,
+      "actual_ignored": 0,
+      "parents": [
+        "api::human_sources::tests::retained_read_gate_a_does_not_require_global_write_for_b"
+      ]
+    }
+  ],
+  "frontend_source": "810711bcf3d3158990c40f9290fdc80b878bf5f9",
+  "backend_browser_source": "858fc7dab3f26e8edfae8f07425868bc2201b2f6",
+  "frontend_driver": "front/tests/browser_owned_snapshot.mjs",
+  "browser_scenarios": [
+    "real_login_metadata_receipt_refresh_and_no_automatic_journal_traffic",
+    "real_grants_unchanged_controls_unavailable_profile_kept_and_keyboard_focus",
+    "actual_sqlite_lock_503_withdrawal_restrictive_fact_and_explicit_200_recovery"
+  ],
+  "actual_navigation_contrast": [
+    {
+      "width": 1440,
+      "theme": "light",
+      "state": "normal",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "state": "hover",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "state": "normal",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 1440,
+      "theme": "dark",
+      "state": "hover",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 320,
+      "theme": "light",
+      "state": "normal",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 320,
+      "theme": "light",
+      "state": "hover",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "state": "normal",
+      "ratio": 14.555603859702387
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "state": "hover",
+      "ratio": 14.555603859702387
+    }
+  ],
+  "proof_sha256": {
+    "rust_repair": "3fe243ff7fabcd5a9bb2ebc601369c776e3b73e929f32b48bb034d36dae5d7c9",
+    "frontend_build": "799ebd86664461c5b842437e0fcea445b8e83cb6625aff7455a0547cfd8e0ea8",
+    "browser": "cd3b3ad9f824baa1b2bd68d0f613835d6d5112845e0251f29e9a0425cf47b343",
+    "component_identity": "281f60fe6f4483da6bb4d825c38d53d081c9ce6f2935a0a0c128515548c2f7a9"
+  }
+}

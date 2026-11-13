@@ -1,5 +1,15 @@
 # État constaté — suivi du développement
 
+## 13 novembre — lectures owned de métadonnées et interface vérifiées
+
+La candidate applicative `810711b` adopte les pages de métadonnées du Journal et des événements récents sous les contrôles owned : source propre, ressources autorisées avant la limite de page, reçu durable avant publication et usage retenu jusqu’à la fin réelle du travail. Après établissement positif du profil `snapshot_only`, l’interface n’ouvre ni flux direct ni boucle de relance automatique. L’actualisation explicite, le retrait des données sur 503 et la reprise explicite sont vérifiés. Contenu, détail, export et autres opérations non adoptées restent fermés.
+
+Les 14 parents Rust de réparation passent sur `858fc7d`. Les 85 fonctions Rust PASS distinctes sont réparties sur deux sources (72 + 14 − 1) ; les 13 échecs et 2 ignorés du premier run restent conservés. Les 33 fonctions frontend PASS distinctes proviennent de deux sources (32 + 6 − 5), sans transformer l’ancien agrégat Node en réussite. Le nouveau build frontend sur `810711b` passe les contrôles de syntaxe du pilote, TypeScript et Vite.
+
+Le navigateur composé utilise le vrai libtest Rust `858fc7d` et le nouveau dist `810711b`. Trois scénarios réels réussissent ; Root examine quatre captures desktop/mobile en clair/sombre. Les huit contrastes normal/survol mesurés donnent 14,5556:1. Chacune des sept réponses de page réussies est corrélée à un reçu SQL parmi les huit exportés. La fixture et le CID sont fermés ; les compteurs OOM sont à zéro. Le défaut de survol constaté sur l’ancien dist est corrigé et revérifié dans ce périmètre ciblé. Le libtest exécute le vrai gateway/dashboard ; l’exécutable principal du backend produit reste `NOT_RUN`.
+
+Aucun fournisseur, IdP, runtime de worker, cluster, suite complète, accessibilité complète, reprise après panne physique ou capacité de 100 workers n’est qualifié ici. Aucun gate global ni fingerprint n’est clos. [Preuves EN](evidence/2026-11-13/human-owned-metadata/README.md) · [FR](evidence/2026-11-13/human-owned-metadata/README.fr.md).
+
 ## 13 novembre — sources humaines possédées et bootstrap opérateur
 
 Le startup retient les vraies sources avant HTTP, vérifie relecture SQLite, planchers et CAS, puis construit un index privé borné. Les deux lectures nominatives adoptées vérifient leur propre source sans SQL voisin. Le bootstrap Rust fournit `human-sources prepare`, `resume-prepare`, `apply`, `resume` et `check`, puis `gateway --human-sources-activation` ; il conserve les identités, historiques et backups existants. L’attestation d’arrêt manuel ne constitue pas un fencing.

@@ -1,0 +1,41 @@
+# Lectures de métadonnées owned — périmètre logiciel vérifié
+
+[English](README.md). Résultats du 13 novembre 2026. Ces preuves portent sur le frontend `810711bcf3d3158990c40f9290fdc80b878bf5f9` et le backend `858fc7dab3f26e8edfae8f07425868bc2201b2f6`, dans les périmètres décrits ci-dessous. Elles n’établissent pas une qualification production.
+
+## Comportement livré
+
+Aux lectures identity/resources du profil owned s’ajoutent les métadonnées auditées du Journal et les événements récents par ordre décroissant. L’autorisation de la source et des ressources précède la limite de page. Le reçu obligatoire est durable avant publication. Une vraie erreur d’allocation SQLite ne publie aucune page et annule les changements de tête, quota et usage de cette tentative. L’usage accepté reste retenu jusqu’à la fin réelle du travail, même après abandon HTTP.
+
+Les pages d’événements récents de ce profil renvoient `stream_mode:"snapshot_only"` et `live_cursor:null`. Une fois ce profil positivement établi, l’interface ne démarre ni polling Journal/récents, ni SSE, ni boucle de relance automatique. Actualiser est une action explicite. Un 503 dans le même contexte retire les lignes, reçus et curseurs tout en conservant le fait restrictif ; une actualisation explicite peut rétablir la lecture. Contenu, détail, export, flux, HEAD sur ces lectures de métadonnées et autres opérations non adoptées restent fermés pour ce profil. Ces pages ne constituent ni l’audit complet ni un inventaire runtime. Voir le [contrat API](../../../../api.md) et le [guide des sources possédées](../../../../setup/identity/OWNED_SOURCES.fr.md).
+
+## Résultats constatés
+
+| Source ou campagne | Résultat réel |
+|---|---|
+| Avant implémentation, Rust `82c9807` | Deux réponses 503 aux assertions qui attendaient HTTP 200 ; chaque processus de test termine avec le code 101. Intégrité de la source et fermeture du CID exact vérifiées. |
+| Rust `195b437` | 72 PASS, 13 FAIL et 2 ignorés ; RC terminal 85. Les échecs de fixtures restent enregistrés comme échecs historiques. |
+| Réparations Rust `858fc7d` | 14/14 parents ciblés PASS, sans échec ni ignoré, après neuf listes d’inscription. Le vrai libtest est identifié par Cargo JSON ; les 2 788 fichiers source et leurs modes sont inchangés. Export de fixtures vide, compteurs OOM à zéro et CID exact fermé. |
+| Node `e25b631` | 32 PASS et 1 test ignoré ; agrégat `FAIL_HARNESS_NOT_GREEN` malgré le RC brut 0. TypeScript et Vite RC 0 restent des résultats limités à leur périmètre. |
+| Complément Node real-wire `195b437` | 6/6 PASS à partir de quatre réponses réellement sérialisées par Rust, sans substitution HTTP. Une fonction unique s’ajoute aux 32 précédentes. |
+| Navigateur R1 | `FAIL_QA_PREFLIGHT_MODULE_RESOLUTION_TARGET_NOT_RUN` : échec du harnais à l’import de `playwright-core`, avant Chromium et l’application. Cibles restées `NOT_RUN` ; arrêt, suppression et vérification d’absence du CID exact effectivement réussis. |
+| Navigateur R2, ancien dist | Trois scénarios fonctionnels réussis. Root a examiné quatre PNG réels et constaté une sélection illisible au survol. L’acceptation visuelle reste ouverte à ce stade à cause de ce défaut. |
+| Frontend actuel `810711b` | Installation hors réseau, syntaxe du pilote, TypeScript et Vite terminent RC 0. Les 25 phases enregistrées retournent 0 ; les 2 788 fichiers source et 64 fichiers de travail frontend sont inchangés. Nouveau dist de quatre fichiers vérifié, compteurs OOM à zéro et CID exact fermé. |
+| Navigateur composé corrigé | Trois scénarios réussis, quatre PNG et huit contrastes calculés depuis les styles réels du navigateur. Chacune des sept réponses de page réussies est corrélée à un reçu SQL ; huit reçus SQL sont exportés au total. La fixture termine avec le code 0 ; les serveurs et le propriétaire des sources sont drainés, le verrou SQLite est libéré, et les phases et la fermeture retournent 0. |
+
+Les **85 fonctions Rust PASS distinctes sont réparties sur deux instantanés source** (72 + 14 − 1 fonction répétée), sans constituer 85 exécutions sur `858fc7d`. Les **33 fonctions frontend PASS distinctes sont réparties sur deux sources Node** (32 + 6 − 5 recoupements), et non 38. Les scénarios navigateur restent séparés et ne s’ajoutent pas à ces comptes. Les fixtures SQLite-FULL bornent `max_page_count` ; elles ne reproduisent ni saturation physique du disque ni coupure électrique.
+
+## Navigateur et provenance des composants
+
+Le navigateur exerce le vrai gateway/dashboard Rust et des bases SQLite privées dans une fixture libtest explicitement activée et ignorée par défaut. Identités et données sont synthétiques ; les écoutes sont limitées au loopback dans une QA Docker isolée. Aucun fournisseur, IdP ou runtime de worker n’est contacté. Root a examiné quatre captures réelles : 1 440 px en clair et sombre, 320 px en clair et 390 px en sombre. Texte/fond de la navigation sélectionnée : `rgb(23, 27, 7)` / `rgb(226, 244, 113)`. Les huit mesures normales/au survol donnent toutes un ratio de contraste de **14,555603859702387:1**, supérieur au seuil ciblé de 4,5:1. Cette observation ciblée ne constitue pas un [audit WCAG complet](https://www.w3.org/WAI/WCAG22/Understanding/contrast-minimum.html).
+
+Le composant backend est le vrai libtest construit sur `858fc7d` : SHA256 `235d0320ffc8b269fd4263d221cadbbc0a9de1993b8dcedb9930a9e0b27c1da0`, 296 616 648 octets. Il est distinct de l’exécutable principal du backend produit. Le dist frontend est construit sur `810711b`, SHA256 `42bc519b86c2ff26b19cf06fc3ee323f7ac02dbe4e8a6faa275dedf9cfa78daa`. Les 2 724 chemins hors frontend, dont 778 fichiers Rust, sont identiques entre ces révisions. Le dashboard sert le dist fourni à l’exécution. Seuls le CSS et le pilote navigateur diffèrent ; le frontend modifié n’est pas déclaré identique à celui de `858fc7d`.
+
+Après établissement du profil positif, la vraie fenêtre calme dure 33 041 ms sans requête automatique Journal/récents/flux. Une tentative de flux antérieure à l’établissement du profil reste enregistrée. Un vrai verrou SQLite, un refus 503 et une reprise 200 explicite sont observés ; la fenêtre busy de 2 510 ms n’est pas un benchmark de latence. État réel des processus, contrôles noyau/réseau du même CID, artefacts bornés, sources/modes et fermeture du CID exact sont conservés. Des fsync de fichiers et de répertoires sur l’hôte sont observés après fermeture ; ils ne qualifient pas une reprise après coupure électrique.
+
+## Reproduction et limites
+
+[SELECTIONS.json](SELECTIONS.json) donne les parents Rust exacts, les scénarios navigateur et les empreintes de source/preuve. La QA construit un seul libtest avec `cargo test --frozen --offline --lib --no-run --message-format=json`, vérifie ses inscriptions réelles puis lance les parents sélectionnés. Aucun code projet n’est exécuté nativement sur l’hôte. Dans une isolation admise, un sélecteur contributeur est `cargo test --frozen --offline --lib api::human_sources::tests::recent_contract_tests:: -- --test-threads=1` ; un parent exact de `SELECTIONS.json` peut être sélectionné avec `cargo test --frozen --offline --lib <FQN> -- --exact --test-threads=1`.
+
+Le test frontend real-wire exige `AIGUARD_SUPERVISION_WIRE_DIR` contenant les quatre captures de réponses réelles. Sans cette variable, le cas real-wire reste ignoré et non qualifié. Le pilote navigateur exige `AI_GUARD_OWNED_BROWSER_FIXTURE=run-v1`, le vrai chemin libtest, un dist construit et des répertoires privés neufs et distincts pour contrôle/artefacts. Lire sa source avant toute exécution dans une isolation admise. Ces entrées de test sont distinctes de l’exécutable principal du backend produit.
+
+`NOT_RUN` dans ce lot : exécutable principal du backend produit sur cette source, qualification des vrais workers Docker/Podman/Kubernetes, intégration fournisseur/IdP, restauration ou reprise après coupure électrique, comportement macOS natif, suite complète, Clippy strict, capacité de 100 workers et revue complète d’accessibilité. Ces contrôles ne qualifient ni facturation ni compatibilité complète broker/egress. Aucun fingerprint d’audit ni gate de production n’est clos. Le mainteneur conserve les logs et archives primaires privés ; seuls le code de tests synthétiques et les preuves limitées sont publiés.
