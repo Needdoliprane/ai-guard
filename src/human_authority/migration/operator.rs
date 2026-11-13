@@ -737,6 +737,16 @@ impl InputBudget {
         }
         Ok(())
     }
+    /// Explicit writer retry only: resynchronize every retained configured
+    /// input and publication through the same PrivateFile descriptors. This
+    /// neither reopens a file by pathname nor starts a source/SQLite owner.
+    pub fn resync_all(&self) -> Result<()> {
+        self.revalidate()?;
+        for file in self.files.values() {
+            resync_private_file(file)?;
+        }
+        self.revalidate()
+    }
 }
 
 pub fn validate_absolute_path(path: &Path) -> Result<()> {

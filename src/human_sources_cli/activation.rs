@@ -5,6 +5,13 @@ use agentsandbox::human_authority::{
 };
 use preparation::LoadedPreparation;
 
+#[cfg(test)]
+type FinalAckResyncHook = Box<dyn FnOnce()>;
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_FINAL_ACK_RESYNC: std::cell::RefCell<Option<FinalAckResyncHook>>=const{std::cell::RefCell::new(None)};
+}
+
 #[derive(Debug)]
 pub(super) struct ActivationIncomplete;
 impl std::fmt::Display for ActivationIncomplete {
@@ -141,11 +148,14 @@ pub(super) async fn apply(path: &Path, resume_only: bool) -> Result<(&'static st
     let mut loaded = preparation::load_preparation(path, true)
         .map_err(|_| anyhow::anyhow!("human_sources_preparation_incomplete_or_conflicting"))?;
     if loaded.directory.contains("activation-complete.json")? {
-        let (activation, seal, manifest) =
-            validate_activation(&mut loaded)?.context("human_sources_activation_conflict")?;
-        for file in [&activation, &manifest, &seal] {
-            operator::resync_private_file(file)?;
-        }
+        let _ = validate_activation(&mut loaded)?.context("human_sources_activation_conflict")?;
+        #[cfg(test)]
+        BEFORE_FINAL_ACK_RESYNC.with(|hook| {
+            if let Some(work) = hook.borrow_mut().take() {
+                work();
+            }
+        });
+        loaded.inputs.budget.resync_all()?;
         return Ok((
             "already_published_files",
             loaded.recovery.target_sources.len(),

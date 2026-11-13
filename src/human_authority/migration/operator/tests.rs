@@ -81,3 +81,104 @@ async fn real_temporary_migration_owner_closes_admission_and_waits_for_drain() {
     manifest.persistent_revalidate().unwrap();
     assert!(owner.try_read_epoch().is_err());
 }
+
+#[tokio::test]
+async fn retained_input_resync_observes_real_syncs_for_registry_tokens_oidc_and_ca_without_reopen()
+{
+    use crate::control_fs::cost_probe::{EXCLUSIVE, Measurement, Operation};
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+    let _exclusive = EXCLUSIVE.lock().await;
+    let temporary = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let inputs: [(&str, &[u8]); 5] = [
+        ("registry.json", br#"{"version":1,"tenants":[]}"#),
+        ("runner.token", b"synthetic-runner-credential-long-enough"),
+        ("viewer.token", b"synthetic-viewer-credential-long-enough"),
+        (
+            "oidc.json",
+            include_bytes!("../../../../docs/setup/sso/examples/gateway.https.json"),
+        ),
+        (
+            "public-ca.pem",
+            include_bytes!("../../../../tests/diagnose_support/fixtures/public-test-root.pem"),
+        ),
+    ];
+    let mut budget = InputBudget::new();
+    for (name, bytes) in inputs {
+        let path = root.join(name);
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+        budget.read(&path, 1_048_576).unwrap();
+    }
+    // Each scoped collector observes exactly that retained input's actual
+    // std::File::sync_all span; no pathname or credential leaves the collector.
+    for (name, _) in inputs {
+        let measurement = Measurement::start(&root.join(name)).unwrap();
+        budget.resync_all().unwrap();
+        let observed = measurement.finish().unwrap();
+        assert_eq!(observed.metric(Operation::FileSyncAll).calls, 1);
+        assert_eq!(observed.metric(Operation::FileSyncAll).succeeded, 1);
+        assert_eq!(
+            observed.metric(Operation::Read).calls,
+            0,
+            "resync must use the retained FD"
+        );
+        assert_eq!(observed.outstanding, 0);
+    }
+}
+
+#[test]
+fn retained_input_resync_refuses_same_bytes_replacement_without_adopting_new_inode() {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+    let temporary = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let path = root.join("runner.token");
+    let bytes = b"synthetic-runner-credential-long-enough";
+    let write = || {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    };
+    write();
+    let mut budget = InputBudget::new();
+    let retained = budget.read(&path, 1024).unwrap();
+    let original = observe_private_file_binding(&retained).unwrap();
+    let preserved = root.join("preserved-original.token");
+    fs::rename(&path, &preserved).unwrap();
+    write();
+    let replacement =
+        observe_private_file_binding(&PrivateFile::open(&path, 1024).unwrap()).unwrap();
+    assert_ne!(
+        (original.source_device, original.source_inode),
+        (replacement.source_device, replacement.source_inode)
+    );
+    assert!(budget.resync_all().is_err());
+    assert_eq!(retained.bytes(), bytes);
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(fs::read(&preserved).unwrap(), bytes);
+}

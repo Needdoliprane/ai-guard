@@ -239,3 +239,155 @@ fn check_preserves_main_sidecars_and_all_preparation_documents() {
         "check must preserve source/sidecar bytes and must not change/publish files"
     );
 }
+
+fn real_legacy_oidc_fixture() -> (tempfile::TempDir, PrepareArgs, PathBuf) {
+    use agentsandbox::audit::authentication::{
+        AuthenticationAudit, AuthenticationAuditPolicyV1, AuthenticationCapacityPlanV1,
+    };
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+    let (temporary, mut args, data) = real_legacy_fixture();
+    let root = args.output_dir.parent().unwrap();
+    let auth_parent = root.join("authentication");
+    fs::create_dir(&auth_parent).unwrap();
+    fs::set_permissions(&auth_parent, fs::Permissions::from_mode(0o700)).unwrap();
+    let auth_path = auth_parent.join("audit.sqlite");
+    let ca = root.join("public-ca.pem");
+    let write = |path: &Path, bytes: &[u8]| {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.sync_all().unwrap();
+    };
+    write(
+        &ca,
+        include_bytes!("../../tests/diagnose_support/fixtures/public-test-root.pem"),
+    );
+    let mut config: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../docs/setup/sso/examples/gateway.https.json"
+    ))
+    .unwrap();
+    config["authentication_audit"]["path"] = serde_json::json!(auth_path);
+    config["authentication_audit"]["installation_id"] = serde_json::json!(args.installation_id);
+    config["authentication_audit"]["capacity_plan"]["tenants"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|tenant| tenant["tenant_id"] == "tenant-a");
+    config["ca_bundle_file"] = serde_json::json!(ca);
+    let policy: AuthenticationAuditPolicyV1 =
+        serde_json::from_value(config["authentication_audit"]["policy"].clone()).unwrap();
+    let plan: AuthenticationCapacityPlanV1 =
+        serde_json::from_value(config["authentication_audit"]["capacity_plan"].clone()).unwrap();
+    let audit = AuthenticationAudit::init_new_v4(
+        &auth_path,
+        args.installation_id,
+        policy,
+        plan,
+        Redactor::new(vec![]),
+    )
+    .unwrap();
+    assert_eq!(audit.format_version().unwrap(), 4);
+    drop(audit);
+    let path = root.join("oidc.json");
+    write(&path, &serde_json::to_vec(&config).unwrap());
+    args.oidc_config = Some(path);
+    args.oidc_mapping_revision = Some(9);
+    (temporary, args, data)
+}
+
+#[tokio::test]
+async fn final_ack_input_resync_failure_preserves_published_ids_and_commits_then_same_retry_succeeds()
+ {
+    use std::{
+        fs,
+        io::Write,
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
+    for oidc in [false, true] {
+        let (_temporary, args, data) = if oidc {
+            real_legacy_oidc_fixture()
+        } else {
+            real_legacy_fixture()
+        };
+        let directory = args.output_dir.clone();
+        let root = directory.parent().unwrap().to_owned();
+        preparation::prepare(args).unwrap();
+        activation::apply(&directory, false).await.unwrap();
+        let snapshot = || {
+            let mut files = walkdir::WalkDir::new(&directory)
+                .into_iter()
+                .map(|entry| entry.unwrap())
+                .filter(|entry| entry.file_type().is_file())
+                .map(|entry| entry.path().to_owned())
+                .collect::<Vec<_>>();
+            files.push(data.clone());
+            if oidc {
+                files.push(root.join("authentication/audit.sqlite"));
+            }
+            files.sort();
+            files
+                .into_iter()
+                .map(|path| {
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        let token = root.join("runner.token");
+        let preserved = root.join("preserved-runner.token");
+        let replacement_saved = root.join("divergent-runner.token");
+        let token_for_hook = token.clone();
+        let preserved_for_hook = preserved.clone();
+        let _ = activation::BEFORE_FINAL_ACK_RESYNC.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                // Real private-file replacement after the full activation/input
+                // validation. The retained original FD must refuse the new inode.
+                let bytes = fs::read(&token_for_hook).unwrap();
+                fs::rename(&token_for_hook, &preserved_for_hook).unwrap();
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&token_for_hook)
+                    .unwrap();
+                file.write_all(&bytes).unwrap();
+                file.sync_all().unwrap();
+            })))
+        });
+        assert!(
+            activation::apply(&directory, true).await.is_err(),
+            "an input resync refusal must not acknowledge already_published_files"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "all published IDs, journal/backups and committed sources remain unchanged"
+        );
+        assert_eq!(check(&directory), CheckStatus::Conflict);
+        // Explicit synthetic-fixture reconciliation preserves both original
+        // and divergent artifacts; no product file is removed or overwritten.
+        fs::rename(&token, &replacement_saved).unwrap();
+        fs::rename(&preserved, &token).unwrap();
+        assert_eq!(
+            activation::apply(&directory, true).await.unwrap().0,
+            "already_published_files"
+        );
+        assert_eq!(
+            snapshot(),
+            before,
+            "a final ACK retry must not rerun migration/startup or rotate IDs"
+        );
+        assert_eq!(
+            fs::metadata(&token).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
