@@ -33,6 +33,21 @@ async fn owned_events_metadata_cursor_is_query_bound() {
         assert_eq!(body["error"]["code"], "invalid_cursor");
         assert!(body.get("items").is_none());
     }
+    let a = router.clone().oneshot(
+        axum::http::Request::get("/api/v1/human/identity")
+            .header("authorization", format!("Bearer {}", Fixture::bearer("A")))
+            .body(Body::empty()).unwrap()
+    ).await.unwrap();
+    assert_eq!(a.status(), StatusCode::OK);
+    let a: Value = serde_json::from_slice(
+        &axum::body::to_bytes(a.into_body(), 262_144).await.unwrap()
+    ).unwrap();
+    let a_context = a["contexts"].as_array().unwrap().iter()
+        .find(|context| context["tenant_id"] == "A").unwrap()["id"].as_str().unwrap();
+    let (status, wrong_context) = get(&router, &next, Some(a_context)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{wrong_context}");
+    assert_eq!(wrong_context["error"]["code"], "context_invalid");
+    assert!(wrong_context.get("items").is_none());
     let (status, filtered) = get(
         &router,
         "/api/v1/human/events?resource_kind=session&resource_id=owned-page-second-b",
