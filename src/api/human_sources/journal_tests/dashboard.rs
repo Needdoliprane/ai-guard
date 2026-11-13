@@ -74,7 +74,7 @@ async fn owned_dashboard_events_metadata_forwards_exact_get_without_identity_pro
     assert_eq!(action, "events");
     for (method, path) in [
         ("HEAD", "/api/v1/human/events"),
-        ("GET", "/api/v1/human/events/recent"),
+        ("GET", "/api/v1/human/export"),
     ] {
         let before = snapshot(&database);
         let response = dashboard.clone().oneshot(

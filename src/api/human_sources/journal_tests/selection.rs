@@ -83,7 +83,6 @@ async fn owned_events_metadata_refuses_unadopted_views_and_routes() {
     let observed = crate::audit::read_test_observer::observe(&state.tenants[1].store);
     for (method, path) in [
         ("HEAD", "/api/v1/human/events".to_owned()),
-        ("GET", "/api/v1/human/events/recent".to_owned()),
         ("GET", format!("/api/v1/human/events/{event_id}")),
         ("GET", "/api/v1/human/export".to_owned()),
         ("GET", "/api/v1/human/stream".to_owned()),

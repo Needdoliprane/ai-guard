@@ -271,6 +271,22 @@ impl OwnedHumanGateway {
             store.modern_human_resources(access, scope, after, limit, redactor)
         })
     }
+
+    pub(super) fn events(
+        &self,
+        index: usize,
+        store: &Store,
+        scope: &AuthorizedScopeV1,
+        filter: &crate::audit::HumanEventFilterV1,
+        after: i64,
+        upper: Option<i64>,
+        limit: usize,
+        redactor: &Redactor,
+    ) -> ApiResult<crate::audit::HumanEventPollV1> {
+        self.read(index, store, |access| {
+            store.modern_human_events(access, scope, filter, after, upper, limit, redactor)
+        })
+    }
 }
 
 impl GatewayState {
@@ -567,7 +583,12 @@ pub(super) async fn route_gate(
     let path = request.uri().path();
     let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
         || request.method() == "GET"
-            && ["/api/v1/human/identity", "/api/v1/human/resources"].contains(&path)
+            && [
+                "/api/v1/human/identity",
+                "/api/v1/human/resources",
+                "/api/v1/human/events",
+            ]
+            .contains(&path)
         || request.method() == "GET"
             && !owned.oidc_selected()
             && ["/auth/oidc/status", "/auth/oidc/cli-profile"].contains(&path);

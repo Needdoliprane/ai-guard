@@ -125,10 +125,12 @@ async fn committed_read_race(revoke_credential: bool) {
         .unwrap()
         .unwrap();
     assert_ne!(status, StatusCode::OK, "{body}");
-    assert_eq!(
-        body["error"]["code"],
-        if revoke_credential { "identity_unavailable" } else { "cursor_unavailable" }
-    );
+    // Both a changed source generation and a closed cursor registry map to
+    // the existing identity_unavailable code; their recovery actions differ.
+    assert_eq!(body["error"]["code"], "identity_unavailable");
+    if !revoke_credential {
+        assert_eq!(body["error"]["retry_action"], "retry");
+    }
     assert!(body.get("items").is_none());
     assert!(body.get("read_receipt").is_none());
     assert!(body.get("next_cursor").is_none());

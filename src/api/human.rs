@@ -1171,6 +1171,11 @@ fn event_page_sync(
     } else {
         Traversal::Events
     })?;
+    if state.owned_human.is_some()
+        && (id.is_some() || is_export || key.view != HumanReadViewV1::Metadata)
+    {
+        return Err(super::human_sources::unavailable());
+    }
     let mut cursor = context
         .start(&key, query.cursor.as_deref())
         .map_err(state_failure)?;
@@ -1181,17 +1186,33 @@ fn event_page_sync(
         export: is_export,
         stream: false,
     };
-    let poll: HumanEventPollV1 = tenant
-        .store
-        .human_events(
+    let poll: HumanEventPollV1 = if let Some(owned) = &state.owned_human {
+        let HumanProofSource::Local(source) = proof.source else {
+            return Err(super::human_sources::unavailable());
+        };
+        owned.events(
+            source,
+            &tenant.store,
             &scope,
             &filter,
             cursor.after_event,
             cursor.upper_event,
             key.limit,
             &proof.redactor,
-        )
-        .map_err(store_failure)?;
+        )?
+    } else {
+        tenant
+            .store
+            .human_events(
+                &scope,
+                &filter,
+                cursor.after_event,
+                cursor.upper_event,
+                key.limit,
+                &proof.redactor,
+            )
+            .map_err(store_failure)?
+    };
     let page = poll.page.ok_or_else(invalid_request)?;
     #[cfg(test)]
     event_read_test_hook::pause(&state.human)?;
@@ -1204,6 +1225,9 @@ fn event_page_sync(
         ));
     }
     reauthenticate(&state, &proof)?;
+    if state.owned_human.is_some() {
+        selected_context(&state, &proof, &headers)?;
+    }
     cursor.after_event = page.after_event;
     cursor.upper_event = Some(page.upper_event);
     let page = envelope(&context, page, Some(key.view), is_export);

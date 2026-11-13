@@ -141,6 +141,32 @@ impl Store {
         })
     }
 
+    /// Adopted metadata list only. Other event traversals remain unadopted
+    /// even when the existing legacy selector supports their filters.
+    pub(crate) fn modern_human_events(
+        &self,
+        access: &HumanSourceAccess<'_>,
+        scope: &AuthorizedScopeV1,
+        filter: &HumanEventFilterV1,
+        after: i64,
+        upper: Option<i64>,
+        limit: usize,
+        transient: &Redactor,
+    ) -> anyhow::Result<HumanEventPollV1> {
+        anyhow::ensure!(
+            filter.view == HumanReadViewV1::Metadata
+                && filter.event_id.is_none()
+                && !filter.export
+                && !filter.stream
+                && (1..=HUMAN_MAX_PAGE_ITEMS).contains(&limit)
+                && after >= 0,
+            IdentityFailureV1::InvalidRequest
+        );
+        self.with_modern_read(access, |tx| {
+            self.human_events_checked(tx, scope, filter, after, upper, limit, transient)
+        })
+    }
+
     /// Streaming startup-only producer. The consumer charges each fixed-size
     /// candidate before accumulation. Historical positive ownership is kept.
     pub(crate) fn modern_visit_candidates(
