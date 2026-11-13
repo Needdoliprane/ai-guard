@@ -6,6 +6,8 @@ mod recent;
 
 mod control;
 
+mod control;
+
 /// Existing durable projection markers; coverage metadata, never identity.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HumanDiscoveryGeneration {
