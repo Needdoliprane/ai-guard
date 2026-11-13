@@ -1,5 +1,19 @@
 # Validation courante
 
+## 13 novembre — A0 : 37 PASS ciblés, sources et historiques distincts
+
+| Source/étape | Résultat constaté |
+|---|---|
+| Test-only `a47e8c9` | Build et cinq listes réelles aboutis ; deux vrais oracles 101 après marqueurs, HTTP 503/SDK Unavailable, zéro PASS et C3 non atteint. Agrégat FAIL_HARNESS 127 conservé (ps absent), pas de RED globalement qualifié. |
+| Formatter R1 `2d3a8cd` → `452d1e8` | 17 sorties stdin/idempotences, dix modifiées/sept identiques, terminal/phases/fermeture 0. Refus d’arguments 64 avant claim distinct, sans traitement source. |
+| GREEN R1 sur `452d1e8` | Compilation Cargo 0 puis FAIL_HARNESS 88 dans l’allowlist Bash des auxiliaires. Aucun exécutable produit lancé ; zéro groupe/PASS parent, listes/check/37 tests NOT_RUN. |
+| GREEN R2 sur `452d1e8` | Build/check 0 ; 20 listes, 37 noms actifs. SDK 2 PASS ; refus 12 PASS / 1 fixture FAIL avant gateway/HTTP. Total 14 PASS / 1 FAIL / 22 NOT_RUN, agrégat 101 ; collectes/fermeture 0, CID exact absent. |
+| Réparation `6c62ad0`, formatter R2 → `0114013` | Setup de test Worker réservé et helper cfg(test), aucun guard assoupli. 17 sorties stdin/idempotences, une modifiée/16 identiques ; terminal/collecte/fermeture 0 et flush séparé. Formatage seulement. |
+| GREEN R3 sur `0114013` | Compilation 0 avec 157 warnings, check toutes cibles 0 ; 20 listes, 37 noms actifs uniques, neuf groupes : 34 lib + 3 schéma, 37 PASS / 0 FAIL / 0 ignoré, aucun sélectionné NOT_RUN. Sept collectes/fermeture 0, source/modes exacts, CID exact absent et flush séparé. |
+
+Source testée : arbre `8803a0ccb45086669afb76fdee0d685e380845ba`, archive `ccae8be5…`, 2 796 fichiers / 34 457 088 octets. Résultat primaire `90b4c58e…`, flush `1719b781…` ; groupes, SHA/tailles des trois opaques non exécutés sur l’hôte et archives réelles dans [SELECTIONS.json](evidence/2026-11-13/owned-control-diagnostic/SELECTIONS.json). Les fixtures sont réellement vides (USTAR 10 240 octets) ; pic campagne 9 006 641 152 / 9 663 676 416 octets, swap/OOM 0. Ne pas sommer les résultats recouvrants ni les anciens 85 Rust/33 frontend. Fournisseurs/IdP, workers/moteurs/cluster réels, navigateur, Clippy strict, suite complète, pannes physiques et 100 workers restent NOT_RUN ; aucun gate clos (0/12) ni fingerprint clos. Revue/application/publication documentaires restent à Root. [EN](evidence/2026-11-13/owned-control-diagnostic/README.md) · [FR](evidence/2026-11-13/owned-control-diagnostic/README.fr.md).
+
+
 ## 13 novembre — métadonnées owned, réparations et contraste
 
 | Campagne | Résultat constaté |

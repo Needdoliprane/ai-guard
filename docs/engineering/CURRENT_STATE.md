@@ -1,5 +1,12 @@
 # État constaté — suivi du développement
 
+## 13 novembre — A0 : diagnostic réservé, 37 PASS ciblés sur `0114013`
+
+A0 raccorde uniquement le GET existant réservé `/control/api/v1/control/protocol` au vrai registre runner retenu, à sa source et au binding relu dans la même transaction `Business`. Les formats 14/15 sont descriptifs ; le diagnostic SDK n’ouvre ni lifecycle broker 3–13 ni relais 6–13 et ne donne aucun permis egress. GET public, HEAD du diagnostic et writers HTTP owned restent fermés ; la santé GET/HEAD est distincte. W0 garde l’index complet au démarrage et la génération propre, sans cohérence multiprocessus garantie.
+
+La campagne GREEN R3 sur `0114013` constate compilation 0 (157 warnings), check toutes cibles 0, 20 listes, neuf groupes et 37 PASS / 0 FAIL / 0 ignoré. Les 2 796 contenus/modes concordent ; sept collectes et fermeture 0, CID exact absent, flush séparé. Le formatter précédent vérifie 17 sorties/idempotences entre `6c62ad0` et `0114013` : ce sont des fichiers formatés, pas 17 tests. Les échecs historiques restent explicites : a47 harnais 127 malgré deux vrais oracles séparés, GREEN R1 harnais 88 après build 0, GREEN R2 sur `452d` 14 PASS / 1 fixture FAIL / 22 NOT_RUN. Aucun compte recouvrant n’est ajouté. Fournisseurs, moteurs de workers réels, cluster, Clippy strict, suite complète et pannes physiques restent NOT_RUN ; aucun gate clos (0/12). Application/publication documentaires restent soumises à la revue finale Root. [EN](evidence/2026-11-13/owned-control-diagnostic/README.md) · [FR](evidence/2026-11-13/owned-control-diagnostic/README.fr.md).
+
+
 ## 13 novembre — lectures owned de métadonnées et interface vérifiées
 
 La candidate applicative `810711b` adopte les pages de métadonnées du Journal et des événements récents sous les contrôles owned : source propre, ressources autorisées avant la limite de page, reçu durable avant publication et usage retenu jusqu’à la fin réelle du travail. Après établissement positif du profil `snapshot_only`, l’interface n’ouvre ni flux direct ni boucle de relance automatique. L’actualisation explicite, le retrait des données sur 503 et la reprise explicite sont vérifiés. Contenu, détail, export et autres opérations non adoptées restent fermés.

@@ -1,5 +1,12 @@
 # Stratégie de qualification
 
+## 13 novembre — A0 : sélection ciblée exécutée sur `0114013`
+
+GREEN R3 compile et passe le check toutes cibles à 0 (157 warnings de compilation), vérifie 20 listes puis exécute les 37 FQN uniques en neuf groupes : 34 parents lib (SDK 14/15, refus, abandon/drain, DTO et canaris metadata) et trois `control_protocol_schema`, tous PASS, zéro FAIL/ignoré. Les noms et résultats réels par groupe figurent dans [SELECTIONS.json](evidence/2026-11-13/owned-control-diagnostic/SELECTIONS.json). Conserver séparément les deux vrais oracles avant correction sur a47 et son harnais 127, le build 0 suivi du harnais 88 de GREEN R1, puis les 14 PASS / 1 fixture FAIL / 22 NOT_RUN de GREEN R2 sur `452d` ; aucune addition de parents recouvrants.
+
+Les commandes ciblées sont `cargo test --frozen --offline --lib --test control_protocol_schema --no-run --message-format=json` et `cargo check --frozen --offline --all-targets`. Les positifs traversent le vrai HTTP/SDK ; la fixture réparée prouve le Worker réservé et le binding réel, pas un relais Running. Le canari Router couvre un abandon logiciel, pas une déconnexion TCP. SQLite FULL est une limite logique de la base de fixture, pas un disque physique rempli. Les sept collectes, source/modes, artefacts opaques, RC et fermeture exacts sont conservés ; la garde ne donne pas une qualification réseau produit. Les 17 stdin/idempotences du formatter `6c62ad0` → `0114013` restent une preuve distincte de formatage. Pas de délai/epoch produit élargi ni de gate broker 3–13/relais 6–13 ouvert. Suite complète, Clippy strict, fournisseurs, moteurs réels, cluster, pannes physiques et capacité 100 restent NOT_RUN ; aucun gate production clos. [EN](evidence/2026-11-13/owned-control-diagnostic/README.md) · [FR](evidence/2026-11-13/owned-control-diagnostic/README.fr.md).
+
+
 ## 13 novembre — contrat de test des lectures owned de métadonnées
 
 Les sélections suivent les sources réellement exécutées : Rust `195b437`, puis 14 réparations sur `858fc7d` ; Node `e25b631`, puis un seul fichier real-wire sur `195b437` ; enfin build frontend `810711b` et navigateur composé backend `858fc7d` / dist `810711b`. Les noms exacts et empreintes figurent dans [SELECTIONS.json](evidence/2026-11-13/human-owned-metadata/SELECTIONS.json). Ne pas compter deux fois les fonctions répétées ni additionner les scénarios navigateur aux fonctions de test. Un ancien agrégat FAIL ou un test ignoré reste inchangé.
