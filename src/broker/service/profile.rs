@@ -38,6 +38,9 @@ pub(super) struct Registry {
     start_profiles: BTreeMap<String, PrearmedStartProfile>,
     presence_profiles: BTreeMap<String, PathBuf>,
     gateway_trust: BTreeMap<String, crate::tls::ClientTrust>,
+    relay_profiles: BTreeMap<String, RelayProfileV1>,
+    pub(super) relay_service:
+        std::sync::OnceLock<std::sync::Arc<crate::broker::relay_owner::RelayRegistry>>,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -102,9 +105,42 @@ struct ControlProfileV2 {
     presence_file: Option<PathBuf>,
     #[serde(default)]
     gateway_ca_bundle_file: Option<PathBuf>,
+    #[serde(default)]
+    relay: Option<RelayProfileV1>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayProfileV1 {
+    version: u32,
+    workload_operations: Vec<PathBuf>,
+}
+impl RelayProfileV1 {
+    fn validate(&mut self) -> Result<()> {
+        ensure!(
+            self.version == 1 && (1..=100).contains(&self.workload_operations.len()),
+            "invalid broker relay configuration"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for path in &mut self.workload_operations {
+            *path = normalized(path)?;
+            ensure!(
+                seen.insert(path.clone()),
+                "duplicate broker workload operation reference"
+            );
+        }
+        Ok(())
+    }
 }
 impl ControlProfileV2 {
-    fn resolve(self) -> Result<(ControlProfileV1, PrearmedStartProfile, Option<PathBuf>)> {
+    fn resolve(
+        mut self,
+    ) -> Result<(
+        ControlProfileV1,
+        PrearmedStartProfile,
+        Option<PathBuf>,
+        Option<RelayProfileV1>,
+    )> {
         ensure!(
             self.prearmed_start_profile.version == 1,
             "unsupported broker start profile"
@@ -120,6 +156,9 @@ impl ControlProfileV2 {
             }
         };
         let presence = self.presence_file.as_deref().map(normalized).transpose()?;
+        if let Some(relay) = self.relay.as_mut() {
+            relay.validate()?;
+        }
         Ok((
             ControlProfileV1 {
                 id: self.id,
@@ -145,6 +184,7 @@ impl ControlProfileV2 {
             },
             selection,
             presence,
+            self.relay,
         ))
     }
 }
@@ -172,6 +212,7 @@ impl Registry {
         let mut start_profiles = BTreeMap::new();
         let mut presence_profiles = BTreeMap::new();
         let mut gateway_ca_paths = BTreeMap::new();
+        let mut relay_profiles = BTreeMap::new();
         let mut data: RegistryWireV1 = match version.version {
             1 => serde_json::from_slice(source.bytes())
                 .map_err(|_| anyhow!("invalid private broker configuration"))?,
@@ -183,7 +224,7 @@ impl Registry {
                     if let Some(path) = &profile.gateway_ca_bundle_file {
                         gateway_ca_paths.insert(profile.id.clone(), normalized(path)?);
                     }
-                    let (profile, selection, presence) = profile.resolve()?;
+                    let (profile, selection, presence, relay) = profile.resolve()?;
                     ensure!(
                         start_profiles
                             .insert(profile.id.clone(), selection)
@@ -192,6 +233,9 @@ impl Registry {
                     );
                     if let Some(path) = presence {
                         presence_profiles.insert(profile.id.clone(), path);
+                    }
+                    if let Some(relay) = relay {
+                        relay_profiles.insert(profile.id.clone(), relay);
                     }
                     profiles.push(profile);
                 }
@@ -229,10 +273,38 @@ impl Registry {
         let mut ids = std::collections::HashSet::new();
         for profile in &mut data.profiles {
             profile.validate(data.installation_id)?;
+            if let Some(relay) = relay_profiles.get(&profile.id) {
+                for operation in &relay.workload_operations {
+                    for root in profile.source_roots.iter().chain(&profile.export_roots) {
+                        ensure!(
+                            !operation.starts_with(root) && !root.starts_with(operation),
+                            "broker issued workload references must be outside workspace and export roots"
+                        );
+                    }
+                }
+            }
             ensure!(
                 ids.insert(profile.id.clone()),
                 "duplicate broker profile identity"
             );
+        }
+        for operation in relay_profiles
+            .values()
+            .flat_map(|relay| &relay.workload_operations)
+        {
+            let parent = operation
+                .parent()
+                .ok_or_else(|| anyhow!("invalid issued workload parent"))?;
+            for root in data
+                .profiles
+                .iter()
+                .flat_map(|profile| profile.source_roots.iter().chain(&profile.export_roots))
+            {
+                ensure!(
+                    !parent.starts_with(root) && !root.starts_with(parent),
+                    "broker workload private parents must be disjoint from every workspace and export root"
+                );
+            }
         }
         // Capture explicit public roots before the listener is opened. Every
         // caller later reads this immutable memory, never a changed CA path.
@@ -258,6 +330,8 @@ impl Registry {
             start_profiles,
             presence_profiles,
             gateway_trust,
+            relay_profiles,
+            relay_service: std::sync::OnceLock::new(),
         })
     }
 
@@ -276,6 +350,19 @@ impl Registry {
     }
     pub(super) fn gateway_trust(&self, id: &str) -> crate::tls::ClientTrust {
         self.gateway_trust.get(id).cloned().unwrap_or_default()
+    }
+    pub(super) fn relay_operations(&self) -> BTreeMap<String, Vec<PathBuf>> {
+        self.relay_profiles
+            .iter()
+            .map(|(profile, relay)| (profile.clone(), relay.workload_operations.clone()))
+            .collect()
+    }
+    pub(super) fn relay_parents(&self) -> std::collections::BTreeSet<PathBuf> {
+        self.relay_profiles
+            .values()
+            .flat_map(|relay| &relay.workload_operations)
+            .filter_map(|path| path.parent().map(Path::to_owned))
+            .collect()
     }
 }
 

@@ -243,6 +243,39 @@ fn history_context(
     }
 }
 
+/// Revalidate a persisted historical response with its complete expected DTO.
+/// The tenant comes from the retained journal scope, never the response.
+pub(crate) fn validate_relay_channel_history(
+    tenant: &str,
+    request: &RelayChannelReconcileV1,
+    response: &RelayChannelReconciliationV1,
+) -> Result<()> {
+    request.validate().map_err(|_| Error::InvalidRequest)?;
+    history_context(response, tenant, request)
+}
+
+/// Pure correlation of a transition acknowledgement, with no fresh exec type.
+/// Broker-local terminal/join and full-prefix conditions remain mandatory.
+pub(crate) fn validate_relay_channel_transition_result(
+    tenant: &str,
+    admission: &RelayChannelAdmissionV1,
+    request: &RelayChannelTransitionV1,
+    response: &RelayChannelResultV1,
+) -> Result<()> {
+    admission.validate().map_err(|_| Error::InvalidRequest)?;
+    let pending = RelayChannelPendingV1::Transition(request.clone());
+    pending
+        .validate(admission)
+        .map_err(|_| Error::InvalidRequest)?;
+    context(
+        response,
+        tenant,
+        admission,
+        &request.operation_id,
+        &request.input_hash().map_err(|_| Error::InvalidRequest)?,
+    )
+}
+
 impl AuditClient {
     /// Obtain tenant/namespace only from authenticated supervision identity.
     /// `active` describes namespace admission mode, not runner authentication;

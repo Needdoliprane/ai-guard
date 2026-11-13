@@ -25,6 +25,16 @@ pub async fn request(
     credential: &str,
     command: BrokerCommandV1,
 ) -> Result<BrokerReplyV1> {
+    let expected_v2_operation = match &command {
+        BrokerCommandV1::RecoveryStatusV2 { operation_id } => {
+            ensure!(
+                !operation_id.is_nil(),
+                "invalid recovery-status-v2 operation identity"
+            );
+            Some(*operation_id)
+        }
+        _ => None,
+    };
     if let BrokerCommandV1::RecoveryInventory { after, limit } = &command {
         ensure!(
             (1..=100).contains(limit) && after.is_none_or(|id| !id.is_nil()),
@@ -81,5 +91,25 @@ pub async fn request(
     let answer:ReplyEnvelopeV1 = read_frame(&mut stream,512*1024,Duration::from_secs(60)).await
         .map_err(|_| anyhow!("broker reply is unavailable or invalid; inspect or retry the same operation identity"))?;
     ensure!(answer.version == 1, "incompatible broker reply version");
+    if let Some(operation) = expected_v2_operation {
+        match &answer.reply {
+            BrokerReplyV1::RecoveryStatusV2 { status } => ensure!(
+                status.version == 2
+                    && status.journal.version == 1
+                    && status
+                        .preclaim
+                        .iter()
+                        .all(|entry| entry.preclaim.version == 1)
+                    && status.journal.operation_id == operation,
+                "incompatible or uncorrelated recovery-status-v2 reply; no V1 fallback was attempted"
+            ),
+            BrokerReplyV1::Error { code } => anyhow::bail!(
+                "recovery-status-v2 refused ({code}); V2 compatibility is not established, including with an older broker; no V1 fallback was attempted"
+            ),
+            _ => anyhow::bail!(
+                "incompatible broker reply to recovery-status-v2; no V1 fallback was attempted"
+            ),
+        }
+    }
     Ok(answer.reply)
 }

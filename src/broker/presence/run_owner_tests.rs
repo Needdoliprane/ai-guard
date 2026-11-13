@@ -49,30 +49,6 @@ impl DiskBarrier {
             .expect("actual FS worker must reach owned barrier");
     }
 }
-
-/// Test-only controller around the existing barrier after real heartbeat FS.
-/// One controller releases the worker on every unwind path; no fake IO result.
-pub(in crate::broker) struct ServiceDiskBarrier(Arc<DiskBarrier>);
-impl ServiceDiskBarrier {
-    pub(in crate::broker) fn new() -> Self {
-        Self(DiskBarrier::new())
-    }
-    pub(in crate::broker) fn attach(&self, prepared: &mut PreparedPresence) {
-        prepared.disk_barrier = Some(Arc::clone(&self.0));
-    }
-    pub(in crate::broker) async fn wait(&self) {
-        self.0.wait().await;
-    }
-    pub(in crate::broker) fn release(&self) {
-        self.0.release();
-    }
-}
-impl Drop for ServiceDiskBarrier {
-    fn drop(&mut self) {
-        self.0.release();
-    }
-}
-
 struct Release(Arc<DiskBarrier>);
 impl Drop for Release {
     fn drop(&mut self) {

@@ -9,6 +9,9 @@ RUN cargo build --release --locked --bin ai-guard-provider --bin ai-guard-relay
 FROM node:24-bookworm-slim
 ARG CODEX_VERSION=""
 ARG CLAUDE_CODE_VERSION=""
+LABEL ai-guard.image.recipe="images/worker.Dockerfile" \
+    ai-guard.provider.codex.requested-version="${CODEX_VERSION}" \
+    ai-guard.provider.claude-code.requested-version="${CLAUDE_CODE_VERSION}"
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends bash git python3 python3-pip python3-venv curl ca-certificates build-essential pkg-config tar coreutils findutils \
     && rm -rf /var/lib/apt/lists/* \

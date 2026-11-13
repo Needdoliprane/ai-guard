@@ -53,6 +53,21 @@ const MAX_SHOWN_CHARACTERS: usize = 1024;
 /// request can interrupt.
 const MAX_OPEN_DIRECTORIES: usize = MAX_DEPTH + 2;
 const DIGEST_DOMAIN: &[u8] = b"ai-guard:public-distribution:v1\0";
+/// `DIGEST_DOMAIN` without its terminating NUL: the name of the layout the
+/// digest is computed with, for a document that records the digest.
+pub(super) const DIGEST_LAYOUT: &str = "ai-guard:public-distribution:v1";
+// The recorded layout name and the domain the digest is computed with cannot
+// drift apart: a change of one without the other does not compile.
+const _: () = {
+    let layout = DIGEST_LAYOUT.as_bytes();
+    assert!(DIGEST_DOMAIN.len() == layout.len() + 1);
+    assert!(DIGEST_DOMAIN[layout.len()] == 0);
+    let mut index = 0;
+    while index < layout.len() {
+        assert!(DIGEST_DOMAIN[index] == layout[index]);
+        index += 1;
+    }
+};
 const MANIFEST: &str = "manifest.json";
 const COMPOSE_ENV_FILE: &str = "compose-empty.env";
 pub(super) const UNKNOWN_MARKER: &str = "RETAINED-UNKNOWN.json";
@@ -994,6 +1009,27 @@ struct Entry {
     sha256: String,
 }
 
+/// One captured entry as it was recorded at capture time: its validated
+/// relative name, its length and the SHA-256 of the captured bytes. Nothing is
+/// read, and no path into the copy is given.
+#[derive(Clone, Copy)]
+pub(super) struct RetainedEntry<'a>(&'a Entry);
+
+impl<'a> RetainedEntry<'a> {
+    pub(super) fn name(self) -> &'a str {
+        &self.0.path
+    }
+
+    pub(super) fn bytes(self) -> u64 {
+        self.0.bytes
+    }
+
+    /// Lowercase hexadecimal SHA-256 of the captured bytes.
+    pub(super) fn sha256(self) -> &'a str {
+        &self.0.sha256
+    }
+}
+
 #[derive(Serialize)]
 struct Manifest<'a> {
     version: u8,
@@ -1079,6 +1115,80 @@ impl Snapshot {
         self.files
             .binary_search_by(|entry| entry.path.as_str().cmp(relative))
             .is_ok()
+    }
+
+    /// The value printed after `sha256=` in the provenance line.
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// The sum of the captured lengths, printed after `bytes=` in the
+    /// provenance line.
+    pub(super) fn total_bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// The captured entries, sorted by name: the list the digest was computed
+    /// over, in its order.
+    pub(super) fn entries(&self) -> impl ExactSizeIterator<Item = RetainedEntry<'_>> + '_ {
+        self.files.iter().map(RetainedEntry)
+    }
+
+    /// The bytes of the captured entries `names`, in that order, read from the
+    /// copy. Refused before any read: no name or more than 64, a name given
+    /// twice or not captured, a bound above the private-file bound, an entry
+    /// longer than `max_bytes`. The copy is verified before the first read and
+    /// after the last, and each entry is read through one private-file
+    /// descriptor whose length and SHA-256 must equal the record. All or
+    /// nothing: no path, file or directory of the copy is returned, the
+    /// original is never reopened and nothing is written.
+    pub(super) fn read_retained(&self, names: &[&str], max_bytes: u64) -> Result<Vec<Vec<u8>>> {
+        const MAX_NAMES: usize = 64;
+        ensure!(
+            !names.is_empty() && names.len() <= MAX_NAMES,
+            "a read of the prepared copy names from 1 to {MAX_NAMES} entries, not {}",
+            names.len()
+        );
+        ensure!(
+            max_bytes <= control_fs::MAX_PRIVATE_FILE_BYTES,
+            "a read of the prepared copy is bounded by at most {} bytes per entry",
+            control_fs::MAX_PRIVATE_FILE_BYTES
+        );
+        let mut named = BTreeSet::new();
+        let mut wanted = Vec::with_capacity(names.len());
+        for &name in names {
+            let shown_name = || shown(Path::new(name));
+            ensure!(
+                named.insert(name),
+                "entry named twice in a read of the prepared copy: {}",
+                shown_name()
+            );
+            let index = self
+                .files
+                .binary_search_by(|entry| entry.path.as_str().cmp(name))
+                .map_err(|_| anyhow!("not an entry of the prepared copy: {}", shown_name()))?;
+            let entry = &self.files[index];
+            ensure!(
+                entry.bytes <= max_bytes,
+                "prepared copy entry {} is longer than the bound of {max_bytes} bytes",
+                entry.path
+            );
+            wanted.push(entry);
+        }
+        self.verify()?;
+        let mut contents = Vec::with_capacity(wanted.len());
+        for entry in wanted {
+            let changed = || format!("prepared copy content changed: {}", entry.path);
+            let file = PrivateFile::open(&self.context.path().join(&entry.path), entry.bytes)
+                .with_context(changed)?;
+            ensure!(
+                file.bytes().len() as u64 == entry.bytes && file.digest() == entry.sha256,
+                changed()
+            );
+            contents.push(file.bytes().to_vec());
+        }
+        self.verify()?;
+        Ok(contents)
     }
 
     /// The digest identifies the prepared bytes. It is not an image digest.

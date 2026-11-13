@@ -123,6 +123,8 @@ struct JobBound {
     outbox_bytes: Option<u64>,
     cancel_bytes: u64,
     completion_bytes: u64,
+    retirement_bytes: u64,
+    retirement_revisions: u64,
 }
 
 opaque!(ReservationState, PhysicalUsage, JobUsage, JobBound);
@@ -181,6 +183,7 @@ pub(in crate::broker) fn prepare(
             &recovered.head,
             metadata,
             id == operation_id,
+            &journal.core.limits,
         )?);
         if id == operation_id {
             selected = Some(recovered);
@@ -599,10 +602,19 @@ struct OutboxBound<'a> {
 }
 
 #[derive(Serialize)]
+struct RetirementBound<'a> {
+    version: u32,
+    outbox: OutboxBound<'a>,
+    full3_registrations: &'a [crate::broker::retirement_checkpoint::Full3RegistrationBindingV1],
+    retirements: &'a [crate::broker::retirement_checkpoint::RetirementEntryV1],
+}
+
+#[derive(Serialize)]
 #[serde(untagged)]
 enum PayloadBound<'a> {
     Lifecycle(LifecycleBound<'a>),
     Outbox(OutboxBound<'a>),
+    Retirement(RetirementBound<'a>),
 }
 
 #[derive(Serialize)]
@@ -620,6 +632,7 @@ fn estimate_job(
     head: &RevisionRefV1,
     metadata: &StopMetadata,
     selected: bool,
+    limits: &JournalLimitsV1,
 ) -> JournalResult<JobBound> {
     if operation_id.is_nil() || metadata.intent.operation_id() != operation_id {
         return Err(JournalError::InvalidInput);
@@ -673,7 +686,23 @@ fn estimate_job(
         entries: outbox.map_or(&[][..], |cp| cp.events()),
         selected,
     };
-    let payload = if outbox.is_some() {
+    let retirement = metadata.checkpoint.retirement();
+    let payload = if let Some(retirement) = retirement {
+        PayloadBound::Retirement(RetirementBound {
+            version: 5,
+            outbox: OutboxBound {
+                version: 4,
+                lifecycle,
+                events: CountSection {
+                    value: &entries,
+                    total: &total,
+                    section: &outbox_bytes,
+                },
+            },
+            full3_registrations: retirement.bindings(),
+            retirements: retirement.retirements(),
+        })
+    } else if outbox.is_some() {
         PayloadBound::Outbox(OutboxBound {
             version: 4,
             lifecycle,
@@ -688,7 +717,13 @@ fn estimate_job(
     };
     let maximal_head = RevisionRefV1::new(u64::MAX, head.hash())?;
     let envelope = EnvelopeBound {
-        version: if outbox.is_some() { 4 } else { 3 },
+        version: if retirement.is_some() {
+            5
+        } else if outbox.is_some() {
+            4
+        } else {
+            3
+        },
         operation_id,
         intent_hash: &intent_hash,
         revision: u64::MAX,
@@ -735,6 +770,24 @@ fn estimate_job(
     } else {
         0
     };
+    let (retirement_bytes, retirement_revisions) = retirement
+        .map(|checkpoint| {
+            super::super::retirement::cold_future(
+                checkpoint,
+                checkpoint_bytes,
+                outbox_bytes.ok_or(JournalError::Corrupt)?,
+                head,
+                limits,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    // The existing D5 future bound charges 1024 bytes per remaining closed
+    // Cancel. Verify inclusion against this job's actual sizing serialization
+    // before using that combined Cancel+Final bound for Cold admission.
+    if retirement_bytes != 0 && cancel_delta_bytes > 1024 {
+        return Err(JournalError::LimitExceeded);
+    }
     Ok(JobBound {
         operation_id,
         head: head.clone(),
@@ -746,6 +799,8 @@ fn estimate_job(
         outbox_bytes,
         cancel_bytes,
         completion_bytes,
+        retirement_bytes,
+        retirement_revisions,
     })
 }
 
@@ -819,16 +874,21 @@ fn check_capacity(
         {
             return Err(JournalError::Corrupt);
         }
-        let entries = multiply(2, add(bound.remaining_cancels, selected)?)?;
-        let bytes = add(bound.cancel_bytes, bound.completion_bytes)?;
+        // D5 metadata is frozen while this reservation lives. Its already
+        // promised Finals follow the Cold merge; their existing worst-case
+        // reserve includes all remaining Cancels, so charge the maximum once.
+        let future_revisions = bound.remaining_cancels.max(bound.retirement_revisions);
+        let entries = multiply(2, add(future_revisions, selected)?)?;
+        let bytes = add(
+            bound.cancel_bytes.max(bound.retirement_bytes),
+            bound.completion_bytes,
+        )?;
         if add(usage.bytes, bytes)? > limits.job_bytes
             || add(u64::from(usage.entries), entries)? > u64::from(limits.job_entries)
-            || add(add(bound.head.revision, bound.remaining_cancels)?, selected)?
+            || add(add(bound.head.revision, future_revisions)?, selected)?
                 >= u64::from(limits.revisions)
-            || add(
-                u64::from(usage.revisions),
-                add(bound.remaining_cancels, selected)?,
-            )? > u64::from(limits.revisions)
+            || add(u64::from(usage.revisions), add(future_revisions, selected)?)?
+                > u64::from(limits.revisions)
         {
             return Err(JournalError::LimitExceeded);
         }
@@ -856,3 +916,7 @@ fn check_capacity(
 #[cfg(test)]
 #[path = "cold_audit_tests.rs"]
 mod tests;
+
+#[cfg(all(test, unix))]
+#[path = "cold_audit_v5_test_support.rs"]
+pub(in crate::broker) mod v5_test_support;

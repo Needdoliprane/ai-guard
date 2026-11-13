@@ -3,8 +3,8 @@
 #![cfg(unix)]
 
 use agentsandbox::runtime::{
-    BeforeSpawnGuard, ManagedPrearmedExecution, PrearmedExecutionResult, PrearmedStartControl,
-    PrearmedStartDirective,
+    BeforeSpawnGuard, ManagedPrearmedExecution, ManagedPrearmedOutcome, PrearmedExecutionResult,
+    PrearmedStartControl, PrearmedStartDirective,
 };
 use std::os::unix::fs::PermissionsExt;
 use tokio::sync::watch;
@@ -249,6 +249,12 @@ async fn prearmed_stop_interrupts_pending_started_callback_without_global_ctrl_c
             )
             .await
             .expect("recovered owned Created instance starts only with a new permit");
+        let recovered = match recovered {
+            ManagedPrearmedOutcome::Executed(execution) => execution,
+            ManagedPrearmedOutcome::Abandoned { .. } => {
+                panic!("fresh recovered start must execute rather than abandon before claim")
+            }
+        };
         drop(recovery_stop_tx);
         assert_eq!(recovered.handle().id(), owned.handle.id());
         assert_eq!(recovered.terminal().process.exit_code, Some(0));
@@ -687,6 +693,12 @@ async fn pending_started_callback_is_not_reinvoked_when_attach_reaches_eof() {
             .expect("fixture runtime finishes its captures and final observation")
             .expect("runtime task does not panic")
             .expect("terminal attach completes without a synthetic timeout");
+        let result = match result {
+            ManagedPrearmedOutcome::Executed(execution) => execution,
+            ManagedPrearmedOutcome::Abandoned { .. } => {
+                panic!("completed terminal attach must retain an executed transport")
+            }
+        };
         assert_eq!(calls_at_eof, 1, "on_started was reinvoked after attach EOF");
         assert_eq!(
             calls.load(Ordering::SeqCst),

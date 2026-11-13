@@ -571,7 +571,7 @@ async fn unconfirmable_quarantine_in_first_profile_does_not_starve_second_profil
         preparation: Arc::new(tokio::sync::Semaphore::new(1)),
         execution: Arc::new(tokio::sync::Semaphore::new(2)),
         stopping: Arc::new(AtomicBool::new(false)),
-        fenced: AtomicBool::new(true),
+        fenced: Arc::new(AtomicBool::new(true)),
     });
     let cold_a = jobs_a.writer.get().unwrap().cold_audit().unwrap();
     let cold_b = jobs_b.writer.get().unwrap().cold_audit().unwrap();

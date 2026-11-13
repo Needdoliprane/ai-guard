@@ -4,6 +4,7 @@ use super::*;
 use crate::broker::terminal_facts::{
     BatchResultFactsV1, CaptureFactsV1, CoverageFactsV1, TransportFactsV1,
 };
+use futures_util::FutureExt;
 
 impl Execution<'_> {
     pub(super) async fn save_worker_result(
@@ -256,17 +257,19 @@ impl Execution<'_> {
                 cp.events()
                     .iter()
                     .filter(|entry| entry.audit_seq().is_none())
-                    .map(|entry| entry.event().clone())
+                    .cloned()
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let mut acknowledgements = Vec::with_capacity(pending.len());
-        for event in pending {
-            let seq = self
-                .client
-                .post_event(serde_json::to_value(&event)?)
-                .await?;
-            acknowledgements.push((Uuid::parse_str(&event.id)?, seq));
+        for entry in pending {
+            let event = serde_json::to_value(entry.event())?;
+            let seq = if self.retirement_control_delivery(&job, &entry)? {
+                self.client.post_control_event(event).await?
+            } else {
+                self.client.post_event(event).await?
+            };
+            acknowledgements.push((entry.event_id(), seq));
         }
         if !acknowledgements.is_empty() {
             self.executor
@@ -304,7 +307,7 @@ impl Execution<'_> {
         self.emit_event(serde_json::from_value(event)?).await
     }
 
-    pub(super) async fn final_scan(&self, runtime: &ManagedRuntime) -> Result<usize> {
+    pub(super) async fn final_scan(&self, runtime: &ManagedRuntime) -> Result<BatchStep<usize>> {
         self.stage(LocalFailurePhaseV1::FinalScan);
         let (job, draft) = self.load().await?;
         if let Some(checkpoint) = job.broker_checkpoint_v4() {
@@ -315,21 +318,22 @@ impl Execution<'_> {
                         facts.version == 1 && facts.worker_id == draft.worker()?.worker_id,
                         "scan result context differs"
                     );
-                    return Ok(facts.changed_files);
+                    return Ok(ControlFlow::Continue(facts.changed_files));
                 }
             }
         }
         let receipt = self.admission_receipt().await?;
         // A final scan whose transport bytes were lost can be repeated under a
         // new helper identity. Import, worker and existing claims are untouched.
-        let completion = self
-            .helper(
+        let completion = continue_step!(
+            self.helper(
                 runtime,
                 HelperPurposeV1::FinalScan,
                 HelperPermissionV1::Admission { receipt },
                 Some(Uuid::new_v4()),
             )
-            .await?;
+            .await?
+        );
         let manifest = completion
             .manifest
             .context("final scan bytes are unavailable")?;
@@ -375,10 +379,13 @@ impl Execution<'_> {
             facts.truncated = true;
         }
         self.fact_event("broker.batch.scan", &facts).await?;
-        Ok(changed_files)
+        Ok(ControlFlow::Continue(changed_files))
     }
 
-    pub(super) async fn export(&self, target: ValidatedExportTarget) -> Result<ExportCompletion> {
+    pub(super) async fn export(
+        &self,
+        target: ValidatedExportTarget,
+    ) -> Result<BatchStep<ExportCompletion>> {
         self.stage(LocalFailurePhaseV1::Export);
         self.replay_events().await?;
         self.reconcile_pending().await?;
@@ -396,11 +403,11 @@ impl Execution<'_> {
                                     == target.destination_intent_hash(),
                             "export request conflicts with its result"
                         );
-                        return Ok(ExportCompletion {
+                        return Ok(ControlFlow::Continue(ExportCompletion {
                             request_id: facts.request_id,
                             manifest_digest: facts.manifest_digest,
                             files: facts.files,
-                        });
+                        }));
                     }
                 }
             }
@@ -449,14 +456,16 @@ impl Execution<'_> {
             destination_ref: target.destination_ref().into(),
             destination_intent_hash: target.destination_intent_hash().into(),
         };
-        let completion = self
-            .helper(
+        let completion = continue_step!(
+            self.helper(
                 &runtime,
                 HelperPurposeV1::Export,
                 permission,
                 Some(target.request_id()),
             )
-            .await?;
+            .boxed()
+            .await?
+        );
         let bytes = completion
             .bytes
             .context("export transport bytes are unavailable; destination was not recreated")?;
@@ -498,11 +507,11 @@ impl Execution<'_> {
             files: report.manifest.len(),
         };
         self.fact_event("broker.batch.export", &result).await?;
-        Ok(ExportCompletion {
+        Ok(ControlFlow::Continue(ExportCompletion {
             request_id,
             manifest_digest,
             files: report.manifest.len(),
-        })
+        }))
     }
 }
 

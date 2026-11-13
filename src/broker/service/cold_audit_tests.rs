@@ -126,7 +126,7 @@ pub(in crate::broker::service) async fn stop_only_service(
         preparation: Arc::new(tokio::sync::Semaphore::new(1)),
         execution: Arc::new(tokio::sync::Semaphore::new(1)),
         stopping: Arc::new(AtomicBool::new(false)),
-        fenced: AtomicBool::new(true),
+        fenced: Arc::new(AtomicBool::new(true)),
     });
     // The child is reaped before its private socket directory is removed.
     let owner = RecoveryEnforcerOwner {

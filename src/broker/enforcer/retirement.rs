@@ -1,0 +1,1235 @@
+//! Live retirement authority. Durable records describe facts; only the owner
+//! of an original actor and its actual native JoinHandle can create witnesses.
+use super::*;
+use super::{
+    ledger::{ClosingCommitted, LedgerCoverageV1, RetirementLedger, TombstoneCommitted},
+    server::lifetime::{ActorKey, NativeOwners},
+};
+use crate::{
+    broker::{
+        clock::{HostClock, NativeHostClock},
+        retirement::*,
+        retirement_checkpoint::Full3RegistrationBindingV1,
+    },
+    runtime::ManagedRuntime,
+};
+use serde::de::Error as _;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{
+        Condvar,
+        atomic::{AtomicBool, AtomicU8},
+    },
+    time::Instant,
+};
+use tokio::sync::watch;
+
+/// Explicit new sealed authority. The child creates this root itself and is
+/// never handed a reconstructible creation capability through argv.
+pub async fn run_internal_full3_fresh(
+    parent: &crate::control_fs::Directory,
+    name: &str,
+    installation_id: Uuid,
+    max_slots: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots) || installation_id.is_nil() {
+        return Err(EnforcerError::InvalidInput);
+    }
+    let parent = parent.clone();
+    let name = name.to_owned();
+    let ledger = tokio::task::spawn_blocking(move || {
+        let fresh = parent
+            .create_enforcer_root(&name)
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+        let ledger = RetirementLedger::initialize_new(fresh, installation_id)?;
+        // Only the successful exclusive fresh factory is allowed to create
+        // auth. Existing roots always require the retained original bytes.
+        capability(ledger.lease().ledger_root(), true)?;
+        Ok::<_, EnforcerError>(Arc::new(ledger))
+    })
+    .await
+    .map_err(|_| EnforcerError::Unavailable)??;
+    super::recovery::run_full_listener(ledger, max_slots).await
+}
+
+pub async fn run_internal_full3_existing(
+    root: &crate::control_fs::Directory,
+    max_slots: u32,
+) -> EnforcerResult<()> {
+    if !(1..=MAX_SLOTS).contains(&max_slots) {
+        return Err(EnforcerError::InvalidInput);
+    }
+    super::recovery::run_full_existing_listener(root, max_slots).await
+}
+
+fn data<T>(result: crate::broker::journal::JournalResult<T>) -> EnforcerResult<T> {
+    result.map_err(|_| EnforcerError::InvalidInput)
+}
+
+struct ActorState {
+    status: EnforcerSlotStatusV1,
+    gate: OriginalGate,
+}
+struct FullActor {
+    registration: RegistrationV1,
+    digest: String,
+    key: ActorKey,
+    original_registration_nonce: Uuid,
+    state: Mutex<ActorState>,
+    wake: Condvar,
+    // Only T permits the original thread to return normally. Closing alone
+    // keeps the thread and lease retained if durable publication is unknown.
+    exit: AtomicBool,
+    owners: NativeOwners,
+}
+type FinalResult = EnforcerResult<(RetiredReceiptV1, LedgerHeadV1)>;
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum RegistryOwner {
+    Full,
+    Restored,
+}
+pub(super) type AdmissionRegistry = Arc<Mutex<BTreeMap<String, RegistryOwner>>>;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum FullCommand {
+    Status {},
+    Watch {},
+    ShutdownIfIdle {},
+    Slots {
+        arm_ids: Vec<String>,
+    },
+    Register {
+        registration: Box<RegistrationV1>,
+        generation: u64,
+        observe_only: bool,
+    },
+    Prepare {
+        arm_id: String,
+        registration_hash: RetirementDigestV1,
+        generation: u64,
+    },
+    Cancel {
+        arm_id: String,
+        registration_hash: RetirementDigestV1,
+        generation: u64,
+    },
+    RevokeUnused {
+        arm_id: String,
+        registration_hash: RetirementDigestV1,
+        generation: u64,
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        actor_nonce: Uuid,
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        original_registration_nonce: Uuid,
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        retirement_id: Uuid,
+    },
+    RetireUnused {
+        identity: Box<RetirementIdentityV1>,
+        evidence: RetirementEvidenceV1,
+        audit_ack: RetirementAuditAckV1,
+    },
+    QueryRetirement {
+        identity: Box<RetirementIdentityV1>,
+    },
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(super) enum FullReply {
+    Status {
+        value: EnforcerStatusV1,
+    },
+    Slots {
+        values: Vec<EnforcerSlotStatusV1>,
+    },
+    Registered {
+        value: Box<EnforcerSlotStatusV1>,
+        replayed: bool,
+        binding: Full3RegistrationBindingV1,
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        actor_nonce: Uuid,
+        #[serde(deserialize_with = "strict_optional_uuid")]
+        original_registration_nonce: Option<Uuid>,
+    },
+    Prepared {
+        value: Box<EnforcerSlotStatusV1>,
+    },
+    Revoked {
+        #[serde(deserialize_with = "crate::broker::retirement::strict_uuid")]
+        revocation_nonce: Uuid,
+    },
+    Retirement {
+        receipt: Option<Box<RetiredReceiptV1>>,
+        head: LedgerHeadV1,
+        accepted: Option<Box<ClosingAcceptanceV1>>,
+    },
+    Acknowledged {},
+    Error {
+        code: EnforcerError,
+    },
+}
+fn strict_optional_uuid<'de, D: Deserializer<'de>>(decoder: D) -> Result<Option<Uuid>, D::Error> {
+    let text = Option::<String>::deserialize(decoder)?;
+    text.map(|text| {
+        let id = Uuid::parse_str(&text).map_err(D::Error::custom)?;
+        if id.is_nil() || id.to_string() != text {
+            return Err(D::Error::custom("noncanonical original registration nonce"));
+        }
+        Ok(id)
+    })
+    .transpose()
+}
+struct RetiringOperation {
+    identity_hash: RetirementDigestV1,
+    receiver: watch::Receiver<Option<FinalResult>>,
+}
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct RetirementOperationKey {
+    scope: Vec<u8>,
+    job_id: Uuid,
+    retirement_id: Uuid,
+}
+impl RetirementOperationKey {
+    fn from_identity(identity: &RetirementIdentityV1) -> EnforcerResult<Self> {
+        Ok(Self {
+            scope: data(crate::broker::journal::canonical(identity.scope()))?,
+            job_id: *identity.job_operation_id(),
+            retirement_id: *identity.retirement_id(),
+        })
+    }
+}
+struct RetiringActor {
+    actor: Arc<FullActor>,
+    accepted: ClosingAcceptanceV1,
+}
+pub(super) struct FullState {
+    pub(super) epoch: Uuid,
+    pub(super) ledger: Arc<RetirementLedger>,
+    owners: NativeOwners,
+    joiner: Mutex<Option<std::thread::JoinHandle<EnforcerResult<()>>>>,
+    max_slots: u32,
+    admitted: AdmissionRegistry,
+    clock: Option<Arc<NativeHostClock>>,
+    actors: Mutex<BTreeMap<Uuid, Arc<FullActor>>>,
+    retiring: Mutex<BTreeMap<RetirementOperationKey, RetiringOperation>>,
+    closed_arms: Mutex<BTreeSet<Uuid>>,
+    closed: AtomicBool,
+    // Separate from ledger/Full failure: recovery STOP remains available on
+    // those failures. Read and close this fence only while admitted is held.
+    idle_admission_closed: AtomicBool,
+    io: Arc<tokio::sync::Semaphore>,
+}
+
+impl FullState {
+    async fn ledger_io<T, F>(self: &Arc<Self>, promised: bool, operation: F) -> EnforcerResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&RetirementLedger) -> EnforcerResult<T> + Send + 'static,
+    {
+        let permit = if promised {
+            Arc::clone(&self.io)
+                .acquire_owned()
+                .await
+                .map_err(|_| EnforcerError::Unhealthy)?
+        } else {
+            Arc::clone(&self.io)
+                .try_acquire_owned()
+                .map_err(|_| EnforcerError::Unavailable)?
+        };
+        let ledger = Arc::clone(&self.ledger);
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            operation(&ledger)
+        })
+        .await
+        .map_err(|_| EnforcerError::Unhealthy)?
+    }
+    pub(super) async fn finish_idle(self: &Arc<Self>) -> EnforcerResult<()> {
+        self.complete().await?;
+        {
+            let admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if !admitted.is_empty() {
+                return Err(EnforcerError::NotIdle);
+            }
+            self.idle_admission_closed.store(true, Ordering::SeqCst);
+            self.closed.store(true, Ordering::SeqCst);
+        }
+        let joiner = self
+            .joiner
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .take()
+            .ok_or(EnforcerError::Conflict)?;
+        self.owners.finish_sealed_idle(joiner).await
+    }
+    // The caller holds the shared admission mutex across this check and any
+    // insertion. finish_idle closes the monotone fence under that same mutex.
+    pub(super) fn check_new_stop_admission(&self) -> EnforcerResult<()> {
+        if self.idle_admission_closed.load(Ordering::SeqCst) {
+            return Err(EnforcerError::Unhealthy);
+        }
+        Ok(())
+    }
+    #[cfg(test)]
+    pub(super) async fn finish_empty_fixture_support(&self) -> EnforcerResult<()> {
+        // Test teardown joins the actual support owner after a real ledger
+        // failure. It creates no retirement witness and never reopens Full.
+        let joiner = {
+            let admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let retiring = self.retiring.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if !self.closed.load(Ordering::SeqCst)
+                || !admitted.is_empty()
+                || !actors.is_empty()
+                || !retiring.is_empty()
+            {
+                return Err(EnforcerError::NotIdle);
+            }
+            self.joiner
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?
+                .take()
+                .ok_or(EnforcerError::Conflict)?
+        };
+        self.owners.finish_sealed_idle(joiner).await
+    }
+    pub(super) fn restore_existing(
+        &self,
+        registration: &RegistrationV1,
+        generation: u64,
+    ) -> EnforcerResult<Option<EnforcerSlotStatusV1>> {
+        let arm_id = Uuid::parse_str(&registration.arm.operation_id)
+            .map_err(|_| EnforcerError::InvalidInput)?;
+        let closed = self
+            .closed_arms
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if closed.contains(&arm_id) {
+            return Err(EnforcerError::Conflict);
+        }
+        let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let Some(actor) = actors.get(&arm_id) else {
+            return Ok(None);
+        };
+        if actor.digest != registration.digest()? {
+            return Err(EnforcerError::Conflict);
+        }
+        let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if state.gate.is_closing() {
+            return Err(EnforcerError::Conflict);
+        }
+        state.gate.restore();
+        state.status.prepared_once = true;
+        state.status.generation = state.status.generation.max(generation);
+        Ok(Some(state.status.clone()))
+    }
+    pub(super) fn slot_snapshot(
+        &self,
+        arm_id: &str,
+        digest: &str,
+    ) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let actor = self.actor(arm_id, digest)?;
+        let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        Ok(state.status.clone())
+    }
+    pub(super) fn check_restore(&self, arm_id: &str) -> EnforcerResult<()> {
+        let arm_id = Uuid::parse_str(arm_id).map_err(|_| EnforcerError::InvalidInput)?;
+        if self
+            .closed_arms
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .contains(&arm_id)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
+    }
+    async fn retire(
+        self: &Arc<Self>,
+        identity: RetirementIdentityV1,
+        evidence: RetirementEvidenceV1,
+        audit_ack: RetirementAuditAckV1,
+    ) -> FinalResult {
+        let head = self.complete().await?;
+        data(identity.validate())?;
+        data(evidence.validate())?;
+        data(audit_ack.validate())?;
+        let hash = data(identity.digest())?;
+        if evidence.identity_hash() != &hash
+            || identity.scope().installation_id() != *head.ledger().installation_id()
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        // A Q replay never starts a thread or asks an actor to close again.
+        let query_identity = identity.clone();
+        if let Some(entry) = self
+            .ledger_io(false, move |ledger| ledger.query(&query_identity))
+            .await?
+            && let RetirementLedgerPhaseV1::Final { receipt, .. } = entry.phase()
+        {
+            return Ok((receipt.as_ref().clone(), head));
+        }
+        let mut receiver = {
+            let operation_key = RetirementOperationKey::from_identity(&identity)?;
+            let mut operations = self.retiring.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if let Some(operation) = operations.get(&operation_key) {
+                if operation.identity_hash != hash {
+                    return Err(EnforcerError::Conflict);
+                }
+                operation.receiver.clone()
+            } else {
+                let actor = self.actor(
+                    &identity.arm().operation_id,
+                    identity.registration_hash().as_str(),
+                )?;
+                let accepted = data(ClosingAcceptanceV1::new(
+                    identity.clone(),
+                    evidence.clone(),
+                    audit_ack,
+                    Uuid::new_v4(),
+                ))?;
+                {
+                    let mut closed = self
+                        .closed_arms
+                        .lock()
+                        .map_err(|_| EnforcerError::Unhealthy)?;
+                    let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                    if actor.key.epoch != *identity.original_epoch()
+                        || actor.key.nonce != *evidence.original_actor_nonce()
+                        || state.status.generation != *identity.generation()
+                        || actor
+                            .registration
+                            .arm
+                            .input_hash()
+                            .map_err(|_| EnforcerError::InvalidInput)?
+                            != identity
+                                .arm()
+                                .input_hash()
+                                .map_err(|_| EnforcerError::InvalidInput)?
+                        || serde_json::to_vec(&actor.registration.receipt)
+                            .map_err(|_| EnforcerError::InvalidInput)?
+                            != serde_json::to_vec(identity.arm_receipt())
+                                .map_err(|_| EnforcerError::InvalidInput)?
+                    {
+                        return Err(EnforcerError::Conflict);
+                    }
+                    state.gate.close(
+                        *identity.retirement_id(),
+                        *evidence.prepare_revocation_nonce(),
+                    )?;
+                    closed.insert(actor.key.arm_id);
+                }
+                let (sender, receiver) = watch::channel(None);
+                operations.insert(
+                    operation_key,
+                    RetiringOperation {
+                        identity_hash: hash,
+                        receiver: receiver.clone(),
+                    },
+                );
+                let owner = Arc::clone(self);
+                // The coordinator belongs to the role, independently of the
+                // IPC waiter. Losing that waiter cannot cancel a join/finalize.
+                tokio::spawn(async move {
+                    let outcome = owner.coordinate(RetiringActor { actor, accepted }).await;
+                    if outcome.is_err() {
+                        owner.closed.store(true, Ordering::SeqCst);
+                    }
+                    sender.send_replace(Some(outcome));
+                });
+                receiver
+            }
+        };
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            receiver
+                .changed()
+                .await
+                .map_err(|_| EnforcerError::Unhealthy)?;
+        }
+    }
+
+    async fn coordinate(self: &Arc<Self>, retiring: RetiringActor) -> FinalResult {
+        let acceptance = retiring.accepted.clone();
+        let closing = self
+            .ledger_io(true, move |ledger| ledger.begin_closing(acceptance))
+            .await?;
+        let (closing, tombstone) = self
+            .ledger_io(true, move |ledger| {
+                let tombstone = ledger.commit_tombstone(&closing)?;
+                Ok::<_, EnforcerError>((closing, tombstone))
+            })
+            .await?;
+        let arm_id = retiring.actor.key.arm_id;
+        let actor = Arc::clone(&retiring.actor);
+        let joined = self
+            .owners
+            .join_retiring(retiring, &closing, &tombstone)
+            .await?;
+        let result = self
+            .ledger_io(true, move |ledger| {
+                ledger.finalize(&closing, &tombstone, joined)
+            })
+            .await?;
+        // The active map is the capacity counter. It changes exactly once,
+        // after Q, and remains independent of cumulative ledger admissions.
+        let mut actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if actors
+            .get(&arm_id)
+            .is_none_or(|current| !Arc::ptr_eq(current, &actor))
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        actors.remove(&arm_id);
+        drop(actors);
+        self.admitted
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .remove(&arm_id.to_string());
+        Ok(result)
+    }
+    pub(super) async fn dispatch(
+        self: &Arc<Self>,
+        command: FullCommand,
+        progress: u64,
+    ) -> EnforcerResult<FullReply> {
+        match command {
+            FullCommand::ShutdownIfIdle {} => {
+                self.finish_idle().await?;
+                Ok(FullReply::Acknowledged {})
+            }
+            FullCommand::Status {} => {
+                self.complete().await?;
+                let count = self
+                    .admitted
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?
+                    .len();
+                Ok(FullReply::Status {
+                    value: EnforcerStatusV1 {
+                        epoch: self.epoch,
+                        slot_count: count,
+                        max_slots: self.max_slots,
+                        progress,
+                        healthy: self
+                            .clock
+                            .as_ref()
+                            .is_some_and(|clock| clock.sample().is_ok()),
+                    },
+                })
+            }
+            FullCommand::Watch {} => Err(EnforcerError::InvalidInput),
+            FullCommand::Slots { arm_ids } => {
+                if arm_ids.is_empty() || arm_ids.len() > MAX_SLOT_QUERY {
+                    return Err(EnforcerError::InvalidInput);
+                }
+                let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                let mut values = Vec::with_capacity(arm_ids.len());
+                for id in arm_ids {
+                    let id = Uuid::parse_str(&id).map_err(|_| EnforcerError::InvalidInput)?;
+                    let actor = actors.get(&id).ok_or(EnforcerError::Conflict)?;
+                    values.push(
+                        actor
+                            .state
+                            .lock()
+                            .map_err(|_| EnforcerError::Unhealthy)?
+                            .status
+                            .clone(),
+                    );
+                }
+                Ok(FullReply::Slots { values })
+            }
+            FullCommand::Register {
+                registration,
+                generation,
+                observe_only,
+            } => {
+                let (value, replayed, binding, actor_nonce, original_registration_nonce) = self
+                    .register(*registration, generation, observe_only)
+                    .await?;
+                Ok(FullReply::Registered {
+                    value: Box::new(value),
+                    replayed,
+                    binding,
+                    actor_nonce,
+                    original_registration_nonce,
+                })
+            }
+            FullCommand::Prepare {
+                arm_id,
+                registration_hash,
+                generation,
+            } => {
+                self.complete().await?;
+                Ok(FullReply::Prepared {
+                    value: Box::new(self.prepare(
+                        &arm_id,
+                        registration_hash.as_str(),
+                        generation,
+                    )?),
+                })
+            }
+            FullCommand::Cancel {
+                arm_id,
+                registration_hash,
+                generation,
+            } => {
+                // STOP does not depend on the ledger FS mutex or Full health.
+                self.cancel(&arm_id, registration_hash.as_str(), generation)?;
+                Ok(FullReply::Acknowledged {})
+            }
+            FullCommand::RevokeUnused {
+                arm_id,
+                registration_hash,
+                generation,
+                actor_nonce,
+                original_registration_nonce,
+                retirement_id,
+            } => {
+                self.complete().await?;
+                Ok(FullReply::Revoked {
+                    revocation_nonce: self.revoke(
+                        &arm_id,
+                        registration_hash.as_str(),
+                        generation,
+                        actor_nonce,
+                        original_registration_nonce,
+                        retirement_id,
+                    )?,
+                })
+            }
+            FullCommand::RetireUnused {
+                identity,
+                evidence,
+                audit_ack,
+            } => {
+                let expected = identity.clone();
+                let (receipt, head) = self.retire(*identity, evidence, audit_ack).await?;
+                let accepted = self
+                    .ledger_io(false, move |ledger| ledger.query(&expected))
+                    .await?
+                    .map(|entry| entry.accepted().clone())
+                    .ok_or(EnforcerError::Conflict)?;
+                Ok(FullReply::Retirement {
+                    receipt: Some(Box::new(receipt)),
+                    head,
+                    accepted: Some(Box::new(accepted)),
+                })
+            }
+            FullCommand::QueryRetirement { identity } => {
+                let head = self.complete().await?;
+                let entry = self
+                    .ledger_io(false, move |ledger| ledger.query(&identity))
+                    .await?;
+                let accepted = entry.as_ref().map(|entry| entry.accepted().clone());
+                let receipt = entry.and_then(|entry| match entry.phase() {
+                    RetirementLedgerPhaseV1::Final { receipt, .. } => {
+                        Some(receipt.as_ref().clone())
+                    }
+                    _ => None,
+                });
+                Ok(FullReply::Retirement {
+                    receipt: receipt.map(Box::new),
+                    head,
+                    accepted: accepted.map(Box::new),
+                })
+            }
+        }
+    }
+    pub(super) fn new(
+        ledger: Arc<RetirementLedger>,
+        epoch: Uuid,
+        max_slots: u32,
+        clock: Option<Arc<NativeHostClock>>,
+        admitted: AdmissionRegistry,
+    ) -> EnforcerResult<Arc<Self>> {
+        let closed_arms = ledger.known_arms()?.into_iter().collect();
+        let done = Arc::new(AtomicBool::new(false));
+        let (owners, joiner) = NativeOwners::start_sealed(ledger.lease(), done, max_slots)?;
+        // This Full listener has no native progress thread. The owner retains
+        // all per-Arm handles; detaching its support joiner claims no join.
+        owners.progress(None)?;
+        Ok(Arc::new(Self {
+            epoch,
+            ledger,
+            owners,
+            joiner: Mutex::new(Some(joiner)),
+            max_slots,
+            admitted,
+            clock,
+            actors: Mutex::new(BTreeMap::new()),
+            retiring: Mutex::new(BTreeMap::new()),
+            closed_arms: Mutex::new(closed_arms),
+            closed: AtomicBool::new(false),
+            idle_admission_closed: AtomicBool::new(false),
+            // Slow ledger IO has its own bounded budget. It cannot occupy all
+            // 32 transport slots or allocate an unbounded blocking task queue.
+            io: Arc::new(tokio::sync::Semaphore::new(4)),
+        }))
+    }
+
+    pub(super) async fn complete(self: &Arc<Self>) -> EnforcerResult<LedgerHeadV1> {
+        if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        let coverage = self.ledger_io(false, |ledger| ledger.coverage()).await;
+        match coverage {
+            Ok(LedgerCoverageV1::Complete { head, .. }) => Ok(head),
+            Err(EnforcerError::Unavailable) => Err(EnforcerError::Unavailable),
+            _ => {
+                self.closed.store(true, Ordering::SeqCst);
+                Err(EnforcerError::Unhealthy)
+            }
+        }
+    }
+
+    pub(super) async fn register(
+        self: &Arc<Self>,
+        registration: RegistrationV1,
+        generation: u64,
+        observe_only: bool,
+    ) -> EnforcerResult<(
+        EnforcerSlotStatusV1,
+        bool,
+        Full3RegistrationBindingV1,
+        Uuid,
+        Option<Uuid>,
+    )> {
+        let head = self.complete().await?;
+        registration.validate()?;
+        if generation == u64::MAX && !observe_only {
+            return Err(EnforcerError::InvalidInput);
+        }
+        let arm_id = Uuid::parse_str(&registration.arm.operation_id)
+            .map_err(|_| EnforcerError::InvalidInput)?;
+        // Positive Closing/Q excludes a new actor, including Restore. The
+        // coverage check above never turns unknown into absence.
+        if self
+            .ledger_io(false, move |ledger| ledger.known_entry(arm_id))
+            .await?
+            .is_some()
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let digest = registration.digest()?;
+        let (actor, replayed) = {
+            let mut admitted = self.admitted.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
+                return Err(EnforcerError::Unhealthy);
+            }
+            if admitted.get(&registration.arm.operation_id) == Some(&RegistryOwner::Restored) {
+                return Err(EnforcerError::Conflict);
+            }
+            let mut actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if let Some(actor) = actors.get(&arm_id) {
+                if actor.digest != digest {
+                    return Err(EnforcerError::Conflict);
+                }
+                if observe_only {
+                    let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                    if state.gate.is_closing() {
+                        return Err(EnforcerError::Conflict);
+                    }
+                    state.gate.restore();
+                    state.status.prepared_once = true;
+                }
+                (Arc::clone(actor), true)
+            } else {
+                if admitted.len() >= self.max_slots as usize {
+                    return Err(EnforcerError::Capacity);
+                }
+                let actor = Arc::new(FullActor {
+                    registration,
+                    digest: digest.clone(),
+                    key: ActorKey {
+                        arm_id,
+                        epoch: self.epoch,
+                        nonce: Uuid::new_v4(),
+                    },
+                    original_registration_nonce: Uuid::new_v4(),
+                    state: Mutex::new(ActorState {
+                        status: EnforcerSlotStatusV1 {
+                            arm_id: arm_id.to_string(),
+                            registration_hash: digest.clone(),
+                            phase: SlotPhaseV1::Initializing,
+                            prepared_once: observe_only,
+                            generation,
+                            clock: None,
+                            observation: None,
+                            stop_failures: 0,
+                        },
+                        gate: OriginalGate::new(!observe_only),
+                    }),
+                    wake: Condvar::new(),
+                    exit: AtomicBool::new(false),
+                    owners: self.owners.clone(),
+                });
+                actors.insert(arm_id, Arc::clone(&actor));
+                admitted.insert(
+                    actor.registration.arm.operation_id.clone(),
+                    RegistryOwner::Full,
+                );
+                (actor, false)
+            }
+        };
+        if !replayed {
+            let work = Arc::clone(&actor);
+            let clock = self.clock.clone();
+            let (retained, start) = std::sync::mpsc::sync_channel(1);
+            match std::thread::Builder::new()
+                .name("enforcer-full-stop".into())
+                .stack_size(1024 * 1024)
+                .spawn(move || {
+                    // The actor cannot publish Ready before its exact native
+                    // handle belongs to NativeOwners. A concurrent Register
+                    // replay therefore cannot retire across a handoff gap.
+                    if start.recv().is_ok() {
+                        work.run(clock);
+                    } else {
+                        work.failed();
+                        work.owners.actor_exited();
+                    }
+                }) {
+                Ok(handle) => {
+                    self.owners.actor_keyed(actor.key, handle)?;
+                    retained.send(()).map_err(|_| EnforcerError::Unhealthy)?;
+                }
+                Err(_) => {
+                    actor.failed();
+                    self.owners.actor_exited();
+                    return Err(EnforcerError::Unavailable);
+                }
+            }
+        }
+        let expires = Instant::now()
+            + if observe_only {
+                POLL
+            } else {
+                REGISTER_TIMEOUT - Duration::from_secs(1)
+            };
+        loop {
+            let (ready, value) = {
+                let state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                if state.gate.is_closing() {
+                    return Err(EnforcerError::Conflict);
+                }
+                (
+                    state.status.phase == SlotPhaseV1::Ready || observe_only,
+                    state.status.clone(),
+                )
+            };
+            if ready {
+                let binding = data(Full3RegistrationBindingV1::new(
+                    arm_id,
+                    data(RetirementDigestV1::parse(&digest))?,
+                    head.ledger().clone(),
+                    self.epoch,
+                ))?;
+                return Ok((
+                    value,
+                    replayed,
+                    binding,
+                    actor.key.nonce,
+                    if replayed || observe_only {
+                        None
+                    } else {
+                        Some(actor.original_registration_nonce)
+                    },
+                ));
+            }
+            if Instant::now() >= expires {
+                return Err(EnforcerError::NotReady);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn actor(&self, arm_id: &str, digest: &str) -> EnforcerResult<Arc<FullActor>> {
+        let id = Uuid::parse_str(arm_id).map_err(|_| EnforcerError::InvalidInput)?;
+        let actors = self.actors.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        let actor = actors.get(&id).ok_or(EnforcerError::Conflict)?;
+        if actor.digest != digest {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(Arc::clone(actor))
+    }
+
+    pub(super) fn revoke(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        generation: u64,
+        actor_nonce: Uuid,
+        original_registration_nonce: Uuid,
+        retirement_id: Uuid,
+    ) -> EnforcerResult<Uuid> {
+        let actor = self.actor(arm_id, digest)?;
+        if actor.key.nonce != actor_nonce
+            || actor.original_registration_nonce != original_registration_nonce
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        if state.status.generation != generation {
+            return Err(EnforcerError::Conflict);
+        }
+        state.gate.revoke(retirement_id)
+    }
+
+    pub(super) fn prepare(
+        &self,
+        arm_id: &str,
+        digest: &str,
+        generation: u64,
+    ) -> EnforcerResult<EnforcerSlotStatusV1> {
+        let actor = self.actor(arm_id, digest)?;
+        let clock = self.clock.as_ref().ok_or(EnforcerError::Unhealthy)?;
+        let sample = clock.sample().map_err(|_| EnforcerError::Unhealthy)?;
+        actor
+            .registration
+            .arm
+            .validate_clock_check(&sample)
+            .map_err(|_| EnforcerError::NotReady)?;
+        let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if self.closed.load(Ordering::SeqCst) || self.owners.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        if generation == u64::MAX
+            || state.status.generation != generation
+            || state.status.phase != SlotPhaseV1::Ready
+        {
+            return Err(EnforcerError::NotReady);
+        }
+        state.gate.prepare()?;
+        state.status.prepared_once = true;
+        state.status.clock = Some(sample);
+        Ok(state.status.clone())
+    }
+
+    pub(super) fn cancel(&self, arm_id: &str, digest: &str, generation: u64) -> EnforcerResult<()> {
+        let actor = self.actor(arm_id, digest)?;
+        let mut state = actor.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if generation < state.status.generation {
+            return Err(EnforcerError::Conflict);
+        }
+        state.gate.reserve_stop()?;
+        state.status.generation = generation;
+        state.status.phase = SlotPhaseV1::Stopping;
+        actor.wake.notify_all();
+        Ok(())
+    }
+}
+
+impl NativeOwners {
+    async fn join_retiring(
+        &self,
+        retiring: RetiringActor,
+        closing: &ClosingCommitted,
+        tombstone: &TombstoneCommitted,
+    ) -> EnforcerResult<JoinedQuiescence> {
+        let accepted = &retiring.accepted;
+        let committed = closing.accepted();
+        let tombstone_record = tombstone.tombstone();
+        let identity_hash = data(accepted.identity().digest())?;
+        let closing_hash = data(accepted.digest())?;
+        if data(committed.digest())? != closing_hash
+            || tombstone_record.identity_hash() != &identity_hash
+            || tombstone_record.closing_hash() != &closing_hash
+            || retiring.actor.key.epoch != *accepted.identity().original_epoch()
+            || retiring.actor.key.nonce != *accepted.evidence().original_actor_nonce()
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let tombstone_hash = data(tombstone_record.digest())?;
+        {
+            let state = retiring
+                .actor
+                .state
+                .lock()
+                .map_err(|_| EnforcerError::Unhealthy)?;
+            if !state.gate.is_closing() {
+                return Err(EnforcerError::Conflict);
+            }
+            retiring.actor.exit.store(true, Ordering::SeqCst);
+            retiring.actor.wake.notify_all();
+        }
+        let key = retiring.actor.key;
+        let mut native = self.take_retiring(key)?;
+        let (returned, receiver) = tokio::sync::oneshot::channel();
+        let joiner = std::thread::Builder::new()
+            .name("enforcer-retiring-join".into())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let _ = returned.send(native.join());
+            })
+            .map_err(|_| EnforcerError::Unavailable)?;
+        // The per-Arm support joiner owns the original guarded handle/lease.
+        // It must not occupy Tokio's shared blocking pool: many blocked joins
+        // cannot starve independent STOP transport revalidation or ledger IO.
+        drop(joiner);
+        receiver.await.map_err(|_| EnforcerError::Unhealthy)??;
+        if self.failed() {
+            return Err(EnforcerError::Unhealthy);
+        }
+        // This is the sole live witness constructor. Neither a finished flag,
+        // a durable record, Drop nor a cancelled future can reach this line.
+        let record = data(JoinedQuiescenceV1::new(
+            identity_hash,
+            closing_hash,
+            tombstone_hash,
+            key.epoch,
+            key.nonce,
+        ))?;
+        Ok(JoinedQuiescence { record })
+    }
+}
+
+impl FullActor {
+    fn failed(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            // Closing is represented in its own latch and never erased by
+            // Ready/Quarantined status updates or an actor failure.
+            if !state.gate.is_closing() {
+                state.status.phase = SlotPhaseV1::Quarantined;
+            }
+            state.status.stop_failures = state.status.stop_failures.saturating_add(1);
+        }
+    }
+
+    fn run(self: Arc<Self>, clock: Option<Arc<NativeHostClock>>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(result) = tests::synthetic_ready_original(&self) {
+                return result;
+            }
+            self.run_inner(clock)
+        }));
+        if !matches!(result, Ok(Ok(()))) {
+            self.failed();
+            self.owners.actor_exited();
+        }
+    }
+    fn run_inner(&self, clock: Option<Arc<NativeHostClock>>) -> EnforcerResult<()> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let managed = loop {
+            // Reopen performs info/inspect only. It is owned by this native
+            // thread, so its real return is drained by the retained join.
+            if self.exit.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            match runtime.block_on(ManagedRuntime::reopen(self.registration.authority.clone())) {
+                Ok(managed) => break managed,
+                Err(_) => {
+                    self.failed();
+                    let state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                    let _waiting = self
+                        .wake
+                        .wait_timeout(state, Duration::from_secs(1))
+                        .map_err(|_| EnforcerError::Unhealthy)?;
+                }
+            }
+        };
+        let mut last = None;
+        loop {
+            if self.exit.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            let sample = clock.as_ref().and_then(|clock| clock.sample().ok());
+            let live = sample.as_ref().is_some_and(|sample| {
+                sample.continuous_ns().is_ok_and(|now| {
+                    let monotone = last.is_none_or(|old| now >= old);
+                    last = Some(now);
+                    monotone && self.registration.arm.validate_clock_check(sample).is_ok()
+                })
+            });
+            let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            if self.exit.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            if state.gate.is_closing() {
+                // A C publication failure keeps the native owner fenced. A T
+                // coordinator will wake it after setting exit, outside IO.
+                drop(
+                    self.wake
+                        .wait(state)
+                        .map_err(|_| EnforcerError::Unhealthy)?,
+                );
+                continue;
+            }
+            if !live {
+                state.gate.reserve_stop()?;
+            }
+            state.status.clock = sample;
+            let stopping = state.gate.stop_reserved;
+            state.status.phase = if stopping {
+                SlotPhaseV1::Stopping
+            } else {
+                SlotPhaseV1::Ready
+            };
+            drop(state);
+            if stopping {
+                // The irreversible reservation happened under exactly the
+                // same mutex as Closing; all runtime IO happens after it.
+                let result =
+                    runtime.block_on(managed.stop_snapshot_owned(&self.registration.owned));
+                let mut state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+                match result {
+                    Ok(observed) => state.status.observation = Some(observed),
+                    Err(_) => {
+                        state.status.stop_failures = state.status.stop_failures.saturating_add(1)
+                    }
+                }
+                state.status.phase = SlotPhaseV1::Quarantined;
+            }
+            let state = self.state.lock().map_err(|_| EnforcerError::Unhealthy)?;
+            let _waiting = self
+                .wake
+                .wait_timeout(
+                    state,
+                    if stopping {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_millis(25)
+                    },
+                )
+                .map_err(|_| EnforcerError::Unhealthy)?;
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct SlotLatch(AtomicU8);
+impl SlotLatch {
+    pub(super) fn reserve_claim(&self) -> EnforcerResult<()> {
+        self.0
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ())
+            .map_err(|_| EnforcerError::Conflict)
+    }
+    pub(super) fn revoke(&self) -> EnforcerResult<()> {
+        self.0
+            .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ())
+            .map_err(|_| EnforcerError::Conflict)
+    }
+    pub(super) fn revoked(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 2
+    }
+    pub(super) fn claim_reserved(&self) -> bool {
+        self.0.load(Ordering::SeqCst) == 1
+    }
+}
+
+/// This latch belongs to one slot. Dropping the reservation never changes it
+/// back to Unclaimed, even if the central claim reply was lost.
+pub(crate) use super::client::ClaimReservation;
+
+/// All methods are called under the actor's existing status mutex. They do no
+/// IO and arbitrate Prepare, deadline/reopen STOP, Cancel and Closing together.
+pub(super) struct OriginalGate {
+    original: bool,
+    prepared: bool,
+    stop_reserved: bool,
+    revoked: Option<(Uuid, Uuid)>,
+    closing: bool,
+}
+impl OriginalGate {
+    pub(super) fn new(original: bool) -> Self {
+        Self {
+            original,
+            prepared: !original,
+            stop_reserved: false,
+            revoked: None,
+            closing: false,
+        }
+    }
+    pub(super) fn prepare(&mut self) -> EnforcerResult<()> {
+        if self.closing || self.revoked.is_some() || self.stop_reserved {
+            return Err(EnforcerError::Conflict);
+        }
+        if self.prepared {
+            return Err(EnforcerError::AlreadyPrepared);
+        }
+        self.prepared = true;
+        Ok(())
+    }
+    pub(super) fn reserve_stop(&mut self) -> EnforcerResult<()> {
+        if self.closing {
+            return Err(EnforcerError::Conflict);
+        }
+        self.stop_reserved = true;
+        Ok(())
+    }
+    pub(super) fn restore(&mut self) {
+        self.original = false;
+        self.prepared = true;
+    }
+    pub(super) fn revoke(&mut self, retirement_id: Uuid) -> EnforcerResult<Uuid> {
+        if !self.original {
+            return Err(EnforcerError::Unauthorized);
+        }
+        if self.prepared {
+            return Err(EnforcerError::AlreadyPrepared);
+        }
+        if self.stop_reserved || self.closing || retirement_id.is_nil() {
+            return Err(EnforcerError::Conflict);
+        }
+        if let Some((old, nonce)) = self.revoked {
+            return if old == retirement_id {
+                Ok(nonce)
+            } else {
+                Err(EnforcerError::Conflict)
+            };
+        }
+        let nonce = Uuid::new_v4();
+        self.revoked = Some((retirement_id, nonce));
+        Ok(nonce)
+    }
+    pub(super) fn close(&mut self, retirement_id: Uuid, nonce: Uuid) -> EnforcerResult<()> {
+        if self.closing
+            || !self.original
+            || self.prepared
+            || self.stop_reserved
+            || self.revoked != Some((retirement_id, nonce))
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        self.closing = true;
+        Ok(())
+    }
+    pub(super) fn is_closing(&self) -> bool {
+        self.closing
+    }
+}
+
+/// Kept by the writer until the audited Pending has authorized its consumption.
+/// There is no constructor from stored records or public status.
+pub(crate) use super::client::{UnusedPrepareRevoked, VerifiedRetirementReceipt};
+
+/// Non-Clone/non-Serde permission, created only after the retained handle's
+/// join returned successfully. The record itself cannot recreate this type.
+pub(crate) struct JoinedQuiescence {
+    record: JoinedQuiescenceV1,
+}
+impl JoinedQuiescence {
+    pub(super) fn into_record(self) -> JoinedQuiescenceV1 {
+        self.record
+    }
+}
+
+#[cfg(test)]
+#[path = "retirement_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "retirement_test_support.rs"]
+pub(crate) mod test_support;

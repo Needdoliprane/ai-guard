@@ -74,6 +74,13 @@ impl<'a> Execution<'a> {
             .await?
             .context("job is unavailable")?;
         ensure!(same(job.scope(), context.scope())?, "job scope mismatch");
+        ensure!(
+            executor.enforcer.full3().is_some()
+                || job
+                    .broker_checkpoint_v5()
+                    .is_none_or(|checkpoint| checkpoint.bindings().is_empty()),
+            "Full3 assigned job cannot execute through a legacy guardian"
+        );
         if let Some(profile) = job.launch_profile_binding() {
             ensure!(
                 profile.invocation_fingerprint == context.runtime().invocation().fingerprint(),

@@ -1,6 +1,6 @@
 use agentsandbox::{
     broker::service::{
-        self, RequestedExecutionV1, SubmitV1,
+        self, RequestedExecutionV1, ServiceEnforcerSelectionV1, SubmitV1,
         protocol::{BrokerCommandV1, BrokerReplyV1},
     },
     control_fs::{PrivateFile, absolute_path},
@@ -35,14 +35,44 @@ enum BrokerCommand {
         /// Restore only proven STOP targets; never open admission or initialize auth.
         #[arg(long)]
         recovery_only: bool,
+        /// Create a fresh Full3 enforcer in a new private role child.
+        #[arg(
+            long,
+            value_name = "ROLE",
+            value_parser = parse_enforcer_role,
+            conflicts_with_all = ["enforcer_full3_existing", "recovery_only", "enforcer_role"]
+        )]
+        enforcer_full3_new: Option<String>,
+        /// Connect explicitly to an existing sealed Full3 role without spawning it.
+        #[arg(
+            long,
+            value_name = "ROLE",
+            value_parser = parse_enforcer_role,
+            conflicts_with_all = ["enforcer_full3_new", "recovery_only", "enforcer_role"]
+        )]
+        enforcer_full3_existing: Option<String>,
+        /// Restore proven STOP targets from an existing sealed private role.
+        #[arg(
+            long,
+            value_name = "ROLE",
+            value_parser = parse_enforcer_role,
+            requires = "recovery_only",
+            conflicts_with_all = ["enforcer_full3_new", "enforcer_full3_existing"]
+        )]
+        enforcer_role: Option<String>,
     },
     /// Persist a new batch job. The broker continues after this client exits.
     Submit(SubmitArgs),
     /// Read cached journal/control facts for this identity's job.
     Status(OperationArgs),
+    /// Read the retained relay attachment state and its coverage for this job.
+    RelayStatus(OperationArgs),
     /// Read confirmed recovery metadata, including when business loading fails.
     /// Does not inspect the runtime or establish that a worker has stopped.
     RecoveryStatus(OperationArgs),
+    /// Read explicit D5 preclaim/retirement metadata; requires V2 support.
+    /// Never falls back to the historical diagnostic on an older service.
+    RecoveryStatusV2(OperationArgs),
     /// Discover accepted job UUIDs from confirmed journal metadata, even in STOP-only mode.
     /// No runtime probe or recovery action is performed.
     /// Cold discovery requires a broker explicitly started with serve --recovery-only.
@@ -72,6 +102,19 @@ enum BrokerCommand {
     },
     /// Persist cancellation. Its ACK is not a runtime terminal observation.
     Cancel(MutationArgs),
+    /// Inhibit one original Full3 Arm before its claim. ACK means audited request.
+    AbandonBeforeClaim {
+        #[command(flatten)]
+        operation: OperationArgs,
+        #[arg(long)]
+        arm_id: Uuid,
+        #[arg(long)]
+        expected_epoch: Uuid,
+        #[arg(long)]
+        generation: u64,
+        #[arg(long)]
+        command_id: Uuid,
+    },
     /// Explicitly reconcile the same job without renewing a claim or deadline.
     Resume(MutationArgs),
     /// Request an audited export into a new allowed destination.
@@ -130,6 +173,38 @@ struct SubmitArgs {
     model: Option<String>,
     #[arg(last=true,num_args=0..)]
     argv: Vec<String>,
+}
+
+fn parse_enforcer_role(value: &str) -> std::result::Result<String, String> {
+    if value.is_empty()
+        || value.len() > 100
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        || matches!(value, "broker" | "journals" | "enforcer")
+    {
+        return Err("enforcer role must be a non-reserved private child name of 1–100 ASCII letters, digits, hyphens or underscores".into());
+    }
+    Ok(value.into())
+}
+
+fn serve_enforcer_selection(
+    recovery_only: bool,
+    full3_new: Option<String>,
+    full3_existing: Option<String>,
+    enforcer_role: Option<String>,
+) -> Result<ServiceEnforcerSelectionV1> {
+    match (recovery_only, full3_new, full3_existing, enforcer_role) {
+        (false, None, None, None) => Ok(ServiceEnforcerSelectionV1::Legacy),
+        (true, None, None, role_name) => Ok(ServiceEnforcerSelectionV1::Recovery { role_name }),
+        (false, Some(role_name), None, None) => {
+            Ok(ServiceEnforcerSelectionV1::Full3Fresh { role_name })
+        }
+        (false, None, Some(role_name), None) => {
+            Ok(ServiceEnforcerSelectionV1::Full3Existing { role_name })
+        }
+        _ => Err(anyhow!("incompatible enforcer selection")),
+    }
 }
 
 fn command_id(value: Option<Uuid>) -> Result<Uuid> {
@@ -214,6 +289,10 @@ async fn send(connection: ConnectionArgs, command: BrokerCommandV1) -> Result<()
             .map_err(|_| anyhow!("broker reply cannot be rendered"))?
     );
     ensure!(
+        !matches!(&reply, BrokerReplyV1::AbandonedBeforeClaim { .. }),
+        "execution was abandoned before its claim; the requested operation did not complete"
+    );
+    ensure!(
         !denied,
         "broker request was not accepted; inspect its response code"
     );
@@ -229,11 +308,23 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
         BrokerCommand::Serve {
             config,
             recovery_only,
+            enforcer_full3_new,
+            enforcer_full3_existing,
+            enforcer_role,
         } => {
-            if recovery_only {
-                service::serve_recovery(&config).await
-            } else {
-                service::serve(&config).await
+            let selection = serve_enforcer_selection(
+                recovery_only,
+                enforcer_full3_new,
+                enforcer_full3_existing,
+                enforcer_role,
+            )?;
+            match service::serve_selected_owned(&config, selection).await? {
+                service::ServiceShutdown::Drained => Ok(()),
+                service::ServiceShutdown::Retained(owner) => {
+                    // Keep the actual D5/backends through recovery supervision.
+                    // Never erase this outcome with a generic error conversion.
+                    owner.supervise().await
+                }
             }
         }
         BrokerCommand::Submit(args) => {
@@ -291,10 +382,28 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
             )
             .await
         }
+        BrokerCommand::RelayStatus(args) => {
+            send(
+                args.connection,
+                BrokerCommandV1::RelayStatus {
+                    operation_id: args.operation_id,
+                },
+            )
+            .await
+        }
         BrokerCommand::RecoveryStatus(args) => {
             send(
                 args.connection,
                 BrokerCommandV1::RecoveryStatus {
+                    operation_id: args.operation_id,
+                },
+            )
+            .await
+        }
+        BrokerCommand::RecoveryStatusV2(args) => {
+            send(
+                args.connection,
+                BrokerCommandV1::RecoveryStatusV2 {
                     operation_id: args.operation_id,
                 },
             )
@@ -328,6 +437,28 @@ pub async fn execute(args: BrokerArgs) -> Result<()> {
                     command_id,
                     request_hash,
                 },
+            )
+            .await
+        }
+        BrokerCommand::AbandonBeforeClaim {
+            operation,
+            arm_id,
+            expected_epoch,
+            generation,
+            command_id,
+        } => {
+            let request = service::AbandonBeforeClaimV1 {
+                version: 1,
+                operation_id: operation.operation_id,
+                arm_id,
+                expected_epoch,
+                generation,
+                command_id,
+            };
+            request.validate()?;
+            send(
+                operation.connection,
+                BrokerCommandV1::AbandonBeforeClaim { request },
             )
             .await
         }
@@ -382,6 +513,30 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         args: BrokerArgs,
+    }
+
+    #[test]
+    fn broker_recovery_status_versions_are_selected_explicitly() {
+        for (name, extended) in [("recovery-status", false), ("recovery-status-v2", true)] {
+            let parsed = TestCli::try_parse_from([
+                "broker",
+                name,
+                "--root",
+                "/private/fixture",
+                "--profile",
+                "fixture",
+                "--token-file",
+                "/private/token",
+                "--operation-id",
+                "11111111-1111-4111-8111-111111111111",
+            ])
+            .unwrap();
+            match parsed.args.command {
+                BrokerCommand::RecoveryStatus(_) => assert!(!extended),
+                BrokerCommand::RecoveryStatusV2(_) => assert!(extended),
+                _ => panic!("explicit recovery diagnostic selected another command"),
+            }
+        }
     }
 
     #[test]
@@ -461,5 +616,130 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // Parser and selection checks do not start a service or prove that its
+    // selected enforcer is available, authenticated, or eligible for admission.
+    fn selected_enforcer(options: &[&str]) -> ServiceEnforcerSelectionV1 {
+        let mut argv = vec!["broker", "serve", "--config", "/private/fixture.json"];
+        argv.extend_from_slice(options);
+        let args = TestCli::try_parse_from(argv).unwrap();
+        let BrokerCommand::Serve {
+            recovery_only,
+            enforcer_full3_new,
+            enforcer_full3_existing,
+            enforcer_role,
+            ..
+        } = args.args.command
+        else {
+            panic!("expected broker serve");
+        };
+        serve_enforcer_selection(
+            recovery_only,
+            enforcer_full3_new,
+            enforcer_full3_existing,
+            enforcer_role,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn broker_serve_preserves_default_legacy_and_explicit_recovery() {
+        assert!(matches!(
+            selected_enforcer(&[]),
+            ServiceEnforcerSelectionV1::Legacy
+        ));
+        assert!(matches!(
+            selected_enforcer(&["--recovery-only"]),
+            ServiceEnforcerSelectionV1::Recovery { role_name: None }
+        ));
+        assert!(matches!(
+            selected_enforcer(&["--recovery-only", "--enforcer-role", "stops_3-qa"]),
+            ServiceEnforcerSelectionV1::Recovery { role_name: Some(name) }
+                if name == "stops_3-qa"
+        ));
+    }
+
+    #[test]
+    fn broker_serve_selects_full3_fresh_or_existing_explicitly() {
+        assert!(matches!(
+            selected_enforcer(&["--enforcer-full3-new", "full3_qa-1"]),
+            ServiceEnforcerSelectionV1::Full3Fresh { role_name }
+                if role_name == "full3_qa-1"
+        ));
+        assert!(matches!(
+            selected_enforcer(&["--enforcer-full3-existing", "full3_qa-1"]),
+            ServiceEnforcerSelectionV1::Full3Existing { role_name }
+                if role_name == "full3_qa-1"
+        ));
+        let maximum_name = "A".repeat(100);
+        assert!(matches!(
+            selected_enforcer(&["--enforcer-full3-new", &maximum_name]),
+            ServiceEnforcerSelectionV1::Full3Fresh { role_name }
+                if role_name == maximum_name
+        ));
+    }
+
+    #[test]
+    fn broker_serve_rejects_incompatible_enforcer_selections() {
+        let incompatible = [
+            vec![
+                "--enforcer-full3-new",
+                "full3",
+                "--enforcer-full3-existing",
+                "full3",
+            ],
+            vec!["--enforcer-full3-new", "full3", "--recovery-only"],
+            vec!["--enforcer-full3-existing", "full3", "--recovery-only"],
+            vec!["--enforcer-role", "full3"],
+            vec!["--enforcer-role", "full3", "--enforcer-full3-new", "full3"],
+            vec![
+                "--enforcer-role",
+                "full3",
+                "--enforcer-full3-existing",
+                "full3",
+            ],
+        ];
+        for options in incompatible {
+            let mut argv = vec!["broker", "serve", "--config", "/private/fixture.json"];
+            argv.extend(options);
+            assert!(TestCli::try_parse_from(argv).is_err());
+        }
+    }
+
+    #[test]
+    fn broker_serve_rejects_role_paths_reserved_names_and_invalid_components() {
+        let overlong = "a".repeat(101);
+        let invalid_names = [
+            "",
+            ".",
+            "..",
+            "../other",
+            "role/child",
+            "/private/role",
+            "role\\child",
+            "role.name",
+            "role name",
+            "rôle",
+            "role\0name",
+            "broker",
+            "journals",
+            "enforcer",
+            &overlong,
+        ];
+        for option in [
+            "--enforcer-full3-new",
+            "--enforcer-full3-existing",
+            "--enforcer-role",
+        ] {
+            for name in invalid_names {
+                let mut argv = vec!["broker", "serve", "--config", "/private/fixture.json"];
+                if option == "--enforcer-role" {
+                    argv.push("--recovery-only");
+                }
+                argv.extend([option, name]);
+                assert!(TestCli::try_parse_from(argv).is_err());
+            }
+        }
     }
 }

@@ -1,5 +1,10 @@
 use super::diagnostics::{EnforcerFailureReason, EnforcerStage, arm_clock_rejection};
 use super::*;
+use super::{
+    recovery::recovery_v3,
+    retirement::{FullCommand, FullReply},
+};
+use crate::broker::{retirement::*, retirement_checkpoint::Full3RegistrationBindingV1};
 use crate::{
     broker::{
         clock::{HostClock, NativeHostClock},
@@ -31,6 +36,7 @@ impl fmt::Debug for EnforcerClient {
     }
 }
 struct Client {
+    authority: SlotAuthorityV1,
     root: Directory,
     executable: PathBuf,
     max_slots: u32,
@@ -51,6 +57,956 @@ struct Client {
     // recover the original stop target/deadline.
     slots: Mutex<BTreeMap<String, Arc<LocalSlot>>>,
 }
+enum SlotAuthorityV1 {
+    Legacy,
+    Full3(Arc<FullTransport>),
+}
+struct FullTransport {
+    ledger: crate::broker::retirement::LedgerIdentityV1,
+    binding: String,
+    registrations: Mutex<BTreeMap<String, RetainedFullRegistration>>,
+    #[cfg(test)]
+    lose_query_reply_after_successes: Mutex<Option<usize>>,
+}
+struct OriginalRegistration {
+    nonce: Uuid,
+}
+struct RetainedFullRegistration {
+    binding: Full3RegistrationBindingV1,
+    actor_nonce: Uuid,
+    // A verified fresh ACK alone creates this live capability. Replay data
+    // never reconstructs it; an existing actual owner may retain its own.
+    original: Option<OriginalRegistration>,
+}
+
+#[derive(Clone)]
+pub(crate) struct EnforcerFullClientV3(EnforcerClient);
+impl fmt::Debug for EnforcerFullClientV3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("EnforcerFullClientV3(<private explicit Full3>)")
+    }
+}
+
+pub(crate) struct UnusedPrepareRevoked {
+    registration: RegistrationV1,
+    ledger: LedgerIdentityV1,
+    epoch: Uuid,
+    generation: u64,
+    retirement_id: Uuid,
+    actor_nonce: Uuid,
+    revocation_nonce: Uuid,
+}
+
+pub(crate) struct ClaimReservation {
+    local: Arc<LocalSlot>,
+    arm_id: String,
+    registration_hash: String,
+    epoch: Uuid,
+    generation: u64,
+}
+impl UnusedPrepareRevoked {
+    pub(crate) fn registration(&self) -> &RegistrationV1 {
+        &self.registration
+    }
+    pub(crate) fn ledger(&self) -> &LedgerIdentityV1 {
+        &self.ledger
+    }
+    pub(crate) fn epoch(&self) -> Uuid {
+        self.epoch
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub(crate) fn retirement_id(&self) -> Uuid {
+        self.retirement_id
+    }
+    pub(crate) fn actor_nonce(&self) -> Uuid {
+        self.actor_nonce
+    }
+    pub(crate) fn revocation_nonce(&self) -> Uuid {
+        self.revocation_nonce
+    }
+}
+
+pub(crate) struct VerifiedRetirementReceipt {
+    identity: RetirementIdentityV1,
+    receipt: RetiredReceiptV1,
+    head: LedgerHeadV1,
+    accepted: ClosingAcceptanceV1,
+    // Opaque process proof, never serialized: only the strict Final check and
+    // actual local-slot removal below can seal the same retained owner here.
+    local_completion: Option<Arc<crate::broker::service::preclaim::RetirementSubmission>>,
+}
+impl VerifiedRetirementReceipt {
+    pub(crate) fn completes_retained_submission(
+        &self,
+        owner: &Arc<crate::broker::service::preclaim::RetirementSubmission>,
+    ) -> bool {
+        self.local_completion
+            .as_ref()
+            .is_some_and(|completed| Arc::ptr_eq(completed, owner))
+    }
+    pub(crate) fn identity(&self) -> &RetirementIdentityV1 {
+        &self.identity
+    }
+    pub(crate) fn receipt(&self) -> &RetiredReceiptV1 {
+        &self.receipt
+    }
+    pub(crate) fn head(&self) -> &LedgerHeadV1 {
+        &self.head
+    }
+    pub(crate) fn accepted(&self) -> &ClosingAcceptanceV1 {
+        &self.accepted
+    }
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        RetirementIdentityV1,
+        RetiredReceiptV1,
+        LedgerHeadV1,
+        ClosingAcceptanceV1,
+    ) {
+        (self.identity, self.receipt, self.head, self.accepted)
+    }
+}
+
+fn full_data<T>(result: crate::broker::journal::JournalResult<T>) -> EnforcerResult<T> {
+    result.map_err(|_| EnforcerError::InvalidInput)
+}
+
+impl CancelGeneration {
+    /// Linearize the final retirement guard and submission with cancellation,
+    /// using the same gate as invalidate/advance_to. No IO runs under this gate.
+    pub(crate) fn with_current_retirement<T>(
+        &self,
+        expected: u64,
+        action: impl FnOnce() -> EnforcerResult<T>,
+    ) -> EnforcerResult<T> {
+        let _gate = self.0.gate.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if expected == u64::MAX || self.current() != expected {
+            return Err(EnforcerError::NotReady);
+        }
+        action()
+    }
+}
+
+impl EnforcerFullClientV3 {
+    pub(crate) async fn connect_existing(root: &Directory, max_slots: u32) -> EnforcerResult<Self> {
+        if !(1..=MAX_SLOTS).contains(&max_slots) {
+            return Err(EnforcerError::InvalidInput);
+        }
+        root.revalidate()
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?;
+        let endpoint = load_endpoint(root)?.ok_or(EnforcerError::Unavailable)?;
+        let endpoint_root = root
+            .persistent_child("endpoints", false)
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?
+            .ok_or(EnforcerError::UnsafeFilesystem)?;
+        let secret = capability(root, false)?;
+        let binding = crate::broker::discovery::recovery_root_binding(root, &endpoint)?;
+        let mut stream = endpoint.connect_checked(&endpoint_root).await?;
+        let (session, ledger) =
+            recovery_v3::connect_full(&mut stream, &secret, endpoint.epoch(), &binding, max_slots)
+                .await?;
+        let mut watch = recovery_v3::FullWatchReader::start(&mut stream, session).await?;
+        let FullReply::Status { value } = watch.read(&mut stream).await? else {
+            return Err(EnforcerError::Unhealthy);
+        };
+        if value.epoch != endpoint.epoch() || value.max_slots != max_slots || !value.healthy {
+            return Err(EnforcerError::Unauthorized);
+        }
+        // SAFETY: duplicate only this live authenticated watch socket. The
+        // nonblocking final spawn guard polls its retained kernel object.
+        let fd = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        if fd < 0 {
+            return Err(EnforcerError::Unavailable);
+        }
+        // SAFETY: successful F_DUPFD_CLOEXEC returned a fresh owned descriptor.
+        let liveness = unsafe { OwnedFd::from_raw_fd(fd) };
+        let client = EnforcerClient(Arc::new(Client {
+            authority: SlotAuthorityV1::Full3(Arc::new(FullTransport {
+                ledger,
+                binding,
+                registrations: Mutex::new(BTreeMap::new()),
+                #[cfg(test)]
+                lose_query_reply_after_successes: Mutex::new(None),
+            })),
+            root: root.clone(),
+            executable: PathBuf::new(),
+            max_slots,
+            endpoint_root,
+            endpoint,
+            capability: secret,
+            liveness,
+            replacement: Mutex::new(None),
+            // Full3 admission is arbitrated against the server's shared
+            // registry per Arm; another job's known STOP is not a global fuse.
+            unknown_slots: AtomicU64::new(0),
+            lost_unknown: AtomicBool::new(false),
+            accounted: Mutex::new(BTreeSet::new()),
+            auto_recovery: AtomicBool::new(false),
+            recovery_gate: Mutex::new(()),
+            failed: AtomicBool::new(false),
+            health: Mutex::new(Some((value.progress, Instant::now()))),
+            slots: Mutex::new(BTreeMap::new()),
+        }));
+        let weak = Arc::downgrade(&client.0);
+        tokio::spawn(async move {
+            loop {
+                let Some(client) = weak.upgrade() else {
+                    return;
+                };
+                let result = match watch.read(&mut stream).await {
+                    Ok(FullReply::Status { value }) => {
+                        record_health_and_slots(&client, value).await
+                    }
+                    _ => Err(EnforcerError::Unhealthy),
+                };
+                if result.is_err() {
+                    client.fail();
+                    return;
+                }
+                drop(client);
+            }
+        });
+        Ok(Self(client))
+    }
+
+    pub(crate) async fn spawn_fresh(
+        parent: &Directory,
+        name: &str,
+        executable: &Path,
+        installation_id: Uuid,
+        max_slots: u32,
+    ) -> EnforcerResult<Self> {
+        if name.is_empty()
+            || name.len() > 100
+            || name == "."
+            || name == ".."
+            || !name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+            || !executable.is_absolute()
+            || installation_id.is_nil()
+            || !(1..=MAX_SLOTS).contains(&max_slots)
+        {
+            return Err(EnforcerError::InvalidInput);
+        }
+        if parent
+            .persistent_child(name, false)
+            .map_err(|_| EnforcerError::UnsafeFilesystem)?
+            .is_some()
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        spawn_helper_config(
+            parent,
+            executable,
+            max_slots,
+            HelperMode::Full3Fresh {
+                name,
+                installation_id,
+            },
+        )?;
+        let expires = Instant::now() + REGISTER_TIMEOUT;
+        loop {
+            if let Some(root) = parent
+                .persistent_child(name, false)
+                .map_err(|_| EnforcerError::UnsafeFilesystem)?
+            {
+                match Self::connect_existing(&root, max_slots).await {
+                    Ok(client) => return Ok(client),
+                    Err(EnforcerError::Unavailable | EnforcerError::Unauthorized)
+                        if Instant::now() < expires => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if Instant::now() >= expires {
+                return Err(EnforcerError::Unavailable);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    pub(crate) async fn register(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+    ) -> EnforcerResult<EnforcedSlot> {
+        self.0
+            .register_current(registration, generation, false)
+            .await
+    }
+    pub(crate) async fn restore(
+        &self,
+        _registration: RegistrationV1,
+        _generation: CancelGeneration,
+    ) -> EnforcerResult<EnforcedSlot> {
+        // A loaded Arm without an exact assignment must retain its original
+        // metadata STOP route. It cannot be adopted by this Full3 role.
+        Err(EnforcerError::Unauthorized)
+    }
+    pub(crate) fn ledger_identity(&self) -> EnforcerResult<&LedgerIdentityV1> {
+        Ok(&self.full()?.ledger)
+    }
+    pub(crate) fn verify_installation(&self, expected: Uuid) -> EnforcerResult<()> {
+        if expected.is_nil() || self.ledger_identity()?.installation_id() != &expected {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) fn validate_registration_binding(
+        &self,
+        registration: &RegistrationV1,
+        binding: &Full3RegistrationBindingV1,
+    ) -> EnforcerResult<()> {
+        let digest = registration.digest()?;
+        super::execution::validate_assignment(
+            self.ledger_identity()?,
+            self.epoch(),
+            &registration.arm.operation_id,
+            &digest,
+            binding,
+        )
+    }
+    pub(crate) async fn restore_with_binding(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        binding: &Full3RegistrationBindingV1,
+    ) -> EnforcerResult<EnforcedSlot> {
+        self.validate_registration_binding(&registration, binding)?;
+        self.0
+            .register_current(registration, generation, true)
+            .await
+    }
+    pub(crate) async fn cancel_retained_bound(
+        &self,
+        registration: RegistrationV1,
+        generation: CancelGeneration,
+        binding: &Full3RegistrationBindingV1,
+    ) -> EnforcerResult<()> {
+        self.validate_registration_binding(&registration, binding)?;
+        // The retained-cancel machinery dispatches through SlotAuthorityV1::
+        // Full3 and this client's disabled legacy recovery. No conversion or
+        // fallback is exposed. Partial ledger/old epoch keeps metadata STOP.
+        self.0.cancel_retained(registration, generation).await
+    }
+    pub(crate) async fn status(&self) -> EnforcerResult<EnforcerStatusV1> {
+        match self
+            .0
+            .0
+            .full_request(self.full()?, FullCommand::Status {}, IO_TIMEOUT)
+            .await?
+        {
+            FullReply::Status { value }
+                if value.epoch == self.epoch()
+                    && value.max_slots == self.0.0.max_slots
+                    && value.slot_count <= value.max_slots as usize =>
+            {
+                Ok(value)
+            }
+            FullReply::Error { code } => Err(code),
+            _ => Err(EnforcerError::Unauthorized),
+        }
+    }
+    pub(crate) fn epoch(&self) -> Uuid {
+        self.0.0.endpoint.epoch()
+    }
+    pub(crate) async fn require_admission_ready(&self) -> EnforcerResult<()> {
+        self.0.0.check_health()?;
+        match self
+            .0
+            .0
+            .full_request(self.full()?, FullCommand::Status {}, IO_TIMEOUT)
+            .await?
+        {
+            FullReply::Status { value }
+                if value.epoch == self.epoch()
+                    && value.healthy
+                    && value.max_slots == self.0.0.max_slots =>
+            {
+                if value.slot_count >= value.max_slots as usize {
+                    Err(EnforcerError::Capacity)
+                } else {
+                    Ok(())
+                }
+            }
+            FullReply::Error { code } => Err(code),
+            _ => Err(EnforcerError::Unhealthy),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn shutdown_if_idle(&self) -> EnforcerResult<()> {
+        match self
+            .0
+            .0
+            .full_request(self.full()?, FullCommand::ShutdownIfIdle {}, IO_TIMEOUT)
+            .await?
+        {
+            FullReply::Acknowledged {} => Ok(()),
+            FullReply::Error { code } => Err(code),
+            _ => Err(EnforcerError::Unauthorized),
+        }
+    }
+
+    fn full(&self) -> EnforcerResult<&FullTransport> {
+        match &self.0.0.authority {
+            SlotAuthorityV1::Full3(full) => Ok(full),
+            SlotAuthorityV1::Legacy => Err(EnforcerError::Unauthorized),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) async fn retire_unused(
+        &self,
+        authorized: crate::broker::writer::AuthorizedRetirement,
+    ) -> EnforcerResult<VerifiedRetirementReceipt> {
+        let (identity, evidence, audit_ack) = full_data(authorized.into_parts())?;
+        let expected_evidence = evidence.clone();
+        let expected_ack = audit_ack.clone();
+        let reply = self
+            .0
+            .0
+            .full_request(
+                self.full()?,
+                FullCommand::RetireUnused {
+                    identity: Box::new(identity.clone()),
+                    evidence,
+                    audit_ack,
+                },
+                REGISTER_TIMEOUT,
+            )
+            .await?;
+        let verified = self
+            .verify_retirement(&identity, reply)?
+            .ok_or(EnforcerError::Conflict)?;
+        if full_data(verified.accepted.evidence().digest())?
+            != full_data(expected_evidence.digest())?
+            || serde_json::to_vec(verified.accepted.audit_ack())
+                .map_err(|_| EnforcerError::InvalidInput)?
+                != serde_json::to_vec(&expected_ack).map_err(|_| EnforcerError::InvalidInput)?
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        Ok(verified)
+    }
+
+    /// Productive retirement always borrows the original already retained by
+    /// Preclaim. A dropped caller or failed connect cannot destroy that owner.
+    pub(crate) async fn retire_unused_retained<F>(
+        &self,
+        owner: &Arc<crate::broker::service::preclaim::RetirementSubmission>,
+        before_write: F,
+    ) -> EnforcerResult<VerifiedRetirementReceipt>
+    where
+        F: FnOnce() -> EnforcerResult<()> + Send,
+    {
+        owner.reserve_attempt()?;
+        self.verify_installation(owner.identity().scope().installation_id())?;
+        if *owner.identity().original_epoch() != self.epoch() {
+            return Err(EnforcerError::Conflict);
+        }
+        let reply = self
+            .0
+            .0
+            .full_request_before_write(
+                self.full()?,
+                FullCommand::RetireUnused {
+                    identity: Box::new(owner.identity().clone()),
+                    evidence: owner.evidence().clone(),
+                    audit_ack: owner.audit_ack().clone(),
+                },
+                REGISTER_TIMEOUT,
+                before_write,
+            )
+            .await?;
+        let verified = self
+            .verify_retirement(owner.identity(), reply)?
+            .ok_or(EnforcerError::Conflict)?;
+        self.verify_retained_retirement(owner, &verified)?;
+        Ok(verified)
+    }
+
+    fn verify_retained_retirement(
+        &self,
+        owner: &crate::broker::service::preclaim::RetirementSubmission,
+        verified: &VerifiedRetirementReceipt,
+    ) -> EnforcerResult<()> {
+        if !owner.is_submitted()?
+            || full_data(verified.identity.digest())? != full_data(owner.identity().digest())?
+            || full_data(verified.accepted.evidence().digest())?
+                != full_data(owner.evidence().digest())?
+            || serde_json::to_vec(verified.accepted.audit_ack())
+                .map_err(|_| EnforcerError::InvalidInput)?
+                != serde_json::to_vec(owner.audit_ack()).map_err(|_| EnforcerError::InvalidInput)?
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        Ok(())
+    }
+
+    /// Query never changes the submission phase or regenerates an original.
+    /// None/error retains the exact submitted owner and its uncertainty.
+    pub(crate) async fn query_retirement_retained(
+        &self,
+        owner: &Arc<crate::broker::service::preclaim::RetirementSubmission>,
+    ) -> EnforcerResult<Option<VerifiedRetirementReceipt>> {
+        if !owner.is_submitted()? {
+            return Err(EnforcerError::Conflict);
+        }
+        let verified = self.query_retirement(owner.identity()).await?;
+        if let Some(verified) = verified.as_ref() {
+            self.verify_retained_retirement(owner, verified)?;
+        }
+        Ok(verified)
+    }
+    pub(crate) fn retire_local_slot(
+        &self,
+        verified: &VerifiedRetirementReceipt,
+    ) -> EnforcerResult<()> {
+        if verified.identity.original_epoch() != &self.epoch()
+            || !full_data(verified.receipt.ledger().matches(&self.full()?.ledger))?
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let _gate = self
+            .0
+            .0
+            .recovery_gate
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let mut slots = self
+            .0
+            .0
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        if let Some(slot) = slots.get(&verified.identity.arm().operation_id)
+            && (!slot.latch.revoked()
+                || slot.digest != verified.identity.registration_hash().as_str())
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        slots.remove(&verified.identity.arm().operation_id);
+        Ok(())
+    }
+
+    /// An ordinary checkpoint receipt or Q alone is insufficient to release
+    /// an original keeper. Verify this reader-attested Final first, then seal
+    /// the actual removal of the present matching LocalSlot without an await.
+    pub(crate) fn retire_retained_local_after_final(
+        &self,
+        owner: &Arc<crate::broker::service::preclaim::RetirementSubmission>,
+        verified: &mut VerifiedRetirementReceipt,
+        snapshot: &crate::broker::journal::StopJobSnapshotV1,
+    ) -> EnforcerResult<()> {
+        self.verify_retained_retirement(owner, verified)?;
+        if verified.completes_retained_submission(owner) {
+            return Ok(());
+        }
+        if !owner.matches_recovery_origin(snapshot)
+            || snapshot.incomplete()
+            || snapshot.operation_id() != *owner.identity().job_operation_id()
+            || full_data(crate::broker::journal::canonical(snapshot.scope()))?
+                != full_data(crate::broker::journal::canonical(owner.identity().scope()))?
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let mut matching = snapshot.retirements().iter().filter(|entry| {
+            entry.request().identity().retirement_id() == owner.identity().retirement_id()
+        });
+        let entry = matching.next().ok_or(EnforcerError::Conflict)?;
+        if matching.next().is_some() {
+            return Err(EnforcerError::Conflict);
+        }
+        let pending = entry.request();
+        let finalized = entry.finalized().ok_or(EnforcerError::Conflict)?;
+        if full_data(pending.identity().digest())? != full_data(owner.identity().digest())?
+            || full_data(pending.evidence().digest())? != full_data(owner.evidence().digest())?
+            || serde_json::to_vec(pending.audit_ack().ok_or(EnforcerError::Conflict)?)
+                .map_err(|_| EnforcerError::InvalidInput)?
+                != serde_json::to_vec(owner.audit_ack()).map_err(|_| EnforcerError::InvalidInput)?
+            || full_data(finalized.receipt().digest())? != full_data(verified.receipt.digest())?
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        let _gate = self
+            .0
+            .0
+            .recovery_gate
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let mut slots = self
+            .0
+            .0
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?;
+        let arm_id = &owner.identity().arm().operation_id;
+        let local = slots.get(arm_id).ok_or(EnforcerError::Conflict)?;
+        if !local.latch.revoked() || local.digest != owner.identity().registration_hash().as_str() {
+            return Err(EnforcerError::Conflict);
+        }
+        slots.remove(arm_id);
+        verified.local_completion = Some(Arc::clone(owner));
+        Ok(())
+    }
+    /// Process-local retention observation for reconciliation scheduling only.
+    /// Presence or absence grants no permission and proves no quiescence.
+    pub(crate) fn has_local_slot(&self, arm_id: &str) -> EnforcerResult<bool> {
+        if !valid_uuid(arm_id) {
+            return Err(EnforcerError::InvalidInput);
+        }
+        Ok(self
+            .0
+            .0
+            .slots
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .contains_key(arm_id))
+    }
+    #[cfg(test)]
+    pub(crate) fn lose_query_reply_after_successes_for_test(&self, n: usize) -> EnforcerResult<()> {
+        *self
+            .full()?
+            .lose_query_reply_after_successes
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)? = Some(n);
+        Ok(())
+    }
+    pub(crate) async fn query_retirement(
+        &self,
+        identity: &RetirementIdentityV1,
+    ) -> EnforcerResult<Option<VerifiedRetirementReceipt>> {
+        let reply = self
+            .0
+            .0
+            .full_request(
+                self.full()?,
+                FullCommand::QueryRetirement {
+                    identity: Box::new(identity.clone()),
+                },
+                IO_TIMEOUT,
+            )
+            .await?;
+        let verified = self.verify_retirement(identity, reply)?;
+        #[cfg(test)]
+        if verified.is_some() {
+            let lose = {
+                let mut remaining = self
+                    .full()?
+                    .lose_query_reply_after_successes
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?;
+                match *remaining {
+                    Some(0) => {
+                        *remaining = None;
+                        true
+                    }
+                    Some(count) => {
+                        *remaining = Some(count - 1);
+                        false
+                    }
+                    None => false,
+                }
+            };
+            if lose {
+                // Lose only the actual authenticated and fully verified Q.
+                // Never construct a substitute reply, wrapper or permission.
+                drop(verified);
+                return Err(EnforcerError::Unavailable);
+            }
+        }
+        Ok(verified)
+    }
+    fn verify_retirement(
+        &self,
+        identity: &RetirementIdentityV1,
+        reply: FullReply,
+    ) -> EnforcerResult<Option<VerifiedRetirementReceipt>> {
+        // No RecoveredPriorEpoch producer exists. Complete storage and a new
+        // MAC session cannot exclude an intervening STOP across guardian epochs.
+        if *identity.original_epoch() != self.epoch() {
+            return Err(EnforcerError::Conflict);
+        }
+        let FullReply::Retirement {
+            receipt,
+            head,
+            accepted,
+        } = reply
+        else {
+            return Err(match reply {
+                FullReply::Error { code } => code,
+                _ => EnforcerError::Unauthorized,
+            });
+        };
+        if !full_data(head.ledger().matches(&self.full()?.ledger))? {
+            return Err(EnforcerError::Unauthorized);
+        }
+        let Some(receipt) = receipt else {
+            return Ok(None);
+        };
+        let accepted = accepted.ok_or(EnforcerError::Unauthorized)?;
+        let identity_hash = full_data(identity.digest())?;
+        let closing_hash = full_data(accepted.digest())?;
+        let tombstone = full_data(RetiredTombstoneV1::new(
+            self.full()?.ledger.clone(),
+            identity_hash.clone(),
+            closing_hash.clone(),
+        ))?;
+        if !full_data(receipt.ledger().matches(&self.full()?.ledger))?
+            || receipt.retirement_id() != identity.retirement_id()
+            || receipt.identity_hash() != &identity_hash
+            || full_data(accepted.identity().digest())? != identity_hash
+            || receipt.finalization().closing_hash() != &closing_hash
+            || receipt.finalization().tombstone_hash() != &full_data(tombstone.digest())?
+            || receipt.finalization().joined().original_epoch() != identity.original_epoch()
+            || receipt.finalization().joined().original_actor_nonce()
+                != accepted.evidence().original_actor_nonce()
+        {
+            return Err(EnforcerError::Unauthorized);
+        }
+        Ok(Some(VerifiedRetirementReceipt {
+            identity: identity.clone(),
+            receipt: *receipt,
+            head,
+            accepted: *accepted,
+            local_completion: None,
+        }))
+    }
+}
+
+impl EnforcedSlot {
+    pub(crate) fn full3_registration_binding(&self) -> EnforcerResult<Full3RegistrationBindingV1> {
+        let SlotAuthorityV1::Full3(full) = &self.client.0.authority else {
+            return Err(EnforcerError::Unauthorized);
+        };
+        full.registrations
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .get(&self.local.registration.arm.operation_id)
+            .map(|registration| registration.binding.clone())
+            .ok_or(EnforcerError::NotReady)
+    }
+    pub(crate) async fn revoke_unused(
+        &self,
+        retirement_id: Uuid,
+    ) -> EnforcerResult<UnusedPrepareRevoked> {
+        let generation = self.local.generation.current();
+        self.check_ready_for_claim(generation)?;
+        let SlotAuthorityV1::Full3(full) = &self.client.0.authority else {
+            return Err(EnforcerError::Unauthorized);
+        };
+        let (actor_nonce, original_registration_nonce) = full
+            .registrations
+            .lock()
+            .map_err(|_| EnforcerError::Unhealthy)?
+            .get(&self.local.registration.arm.operation_id)
+            .map(|registration| {
+                registration
+                    .original
+                    .as_ref()
+                    .map(|original| (registration.actor_nonce, original.nonce))
+            })
+            .ok_or(EnforcerError::NotReady)?
+            .ok_or(EnforcerError::Unauthorized)?;
+        // Revoke every old slot handle/guard before sending any RPC. This
+        // never invalidates the shared job generation or another slot.
+        self.local.latch.revoke()?;
+        self.local.stop.send_replace(true);
+        let response = self
+            .client
+            .0
+            .full_request(
+                full,
+                FullCommand::RevokeUnused {
+                    arm_id: self.local.registration.arm.operation_id.clone(),
+                    registration_hash: full_data(RetirementDigestV1::parse(&self.local.digest))?,
+                    generation,
+                    actor_nonce,
+                    original_registration_nonce,
+                    retirement_id,
+                },
+                IO_TIMEOUT,
+            )
+            .await?;
+        match response {
+            FullReply::Revoked { revocation_nonce } => Ok(UnusedPrepareRevoked {
+                registration: self.local.registration.clone(),
+                ledger: full.ledger.clone(),
+                epoch: self.client.0.endpoint.epoch(),
+                generation,
+                retirement_id,
+                actor_nonce,
+                revocation_nonce,
+            }),
+            FullReply::Error { code } => Err(code),
+            _ => Err(EnforcerError::Unauthorized),
+        }
+    }
+}
+
+impl Client {
+    async fn full_request(
+        &self,
+        full: &FullTransport,
+        command: FullCommand,
+        timeout: Duration,
+    ) -> EnforcerResult<FullReply> {
+        self.full_request_before_write(full, command, timeout, || Ok(()))
+            .await
+    }
+
+    async fn full_request_before_write<F>(
+        &self,
+        full: &FullTransport,
+        command: FullCommand,
+        timeout: Duration,
+        before_write: F,
+    ) -> EnforcerResult<FullReply>
+    where
+        F: FnOnce() -> EnforcerResult<()> + Send,
+    {
+        let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
+        let binding = crate::broker::discovery::recovery_root_binding(&self.root, &self.endpoint)?;
+        if binding != full.binding {
+            return Err(EnforcerError::Unauthorized);
+        }
+        let (session, ledger) = recovery_v3::connect_full(
+            &mut stream,
+            &self.capability,
+            self.endpoint.epoch(),
+            &binding,
+            self.max_slots,
+        )
+        .await?;
+        if !full_data(ledger.matches(&full.ledger))? {
+            return Err(EnforcerError::Unauthorized);
+        }
+        recovery_v3::request_full_before_write(
+            &mut stream,
+            &session,
+            command,
+            timeout,
+            before_write,
+        )
+        .await
+    }
+
+    async fn request_full_legacy(
+        &self,
+        full: &FullTransport,
+        request: Request,
+        timeout: Duration,
+    ) -> EnforcerResult<Response> {
+        let command = match request {
+            Request::Status {} => FullCommand::Status {},
+            Request::Slots { arm_ids } => FullCommand::Slots { arm_ids },
+            Request::Register {
+                registration,
+                generation,
+                observe_only,
+            } => FullCommand::Register {
+                registration,
+                generation,
+                observe_only,
+            },
+            Request::Prepare {
+                arm_id,
+                registration_hash,
+                generation,
+            } => FullCommand::Prepare {
+                arm_id,
+                registration_hash: full_data(RetirementDigestV1::parse(&registration_hash))?,
+                generation,
+            },
+            Request::Cancel {
+                arm_id,
+                registration_hash,
+                generation,
+            } => FullCommand::Cancel {
+                arm_id,
+                registration_hash: full_data(RetirementDigestV1::parse(&registration_hash))?,
+                generation,
+            },
+            Request::ShutdownIfIdle {} => FullCommand::ShutdownIfIdle {},
+            Request::Watch {} => {
+                return Err(EnforcerError::Unauthorized);
+            }
+        };
+        let expected_register = match &command {
+            FullCommand::Register {
+                registration,
+                generation,
+                observe_only,
+            } => Some((
+                registration.arm.operation_id.clone(),
+                registration.digest()?,
+                *generation,
+                *observe_only,
+            )),
+            _ => None,
+        };
+        Ok(match self.full_request(full, command, timeout).await? {
+            FullReply::Status { value } => Response::Status { value },
+            FullReply::Slots { values } => Response::Slots { values },
+            FullReply::Prepared { value } => Response::Prepared { value },
+            FullReply::Registered {
+                value,
+                replayed,
+                binding,
+                actor_nonce,
+                original_registration_nonce,
+            } => {
+                let (arm, digest, generation, observe_only) =
+                    expected_register.ok_or(EnforcerError::Conflict)?;
+                if binding.arm_id().to_string() != arm
+                    || binding.registration_hash().as_str() != digest
+                    || binding.original_epoch() != self.endpoint.epoch()
+                    || !full_data(binding.ledger().matches(&full.ledger))?
+                    || value.arm_id != arm
+                    || value.registration_hash != digest
+                    || (replayed && original_registration_nonce.is_some())
+                    || (!replayed
+                        && !observe_only
+                        && (original_registration_nonce.is_none()
+                            || value.phase != SlotPhaseV1::Ready
+                            || value.prepared_once
+                            || value.generation != generation))
+                    || (observe_only && original_registration_nonce.is_some())
+                {
+                    return Err(EnforcerError::Unauthorized);
+                }
+                let mut retained = full
+                    .registrations
+                    .lock()
+                    .map_err(|_| EnforcerError::Unhealthy)?;
+                if let Some(old) = retained.get(&arm) {
+                    if old.binding.registration_hash() != binding.registration_hash()
+                        || old.actor_nonce != actor_nonce
+                        || !replayed
+                    {
+                        return Err(EnforcerError::Conflict);
+                    }
+                } else {
+                    retained.insert(
+                        arm,
+                        RetainedFullRegistration {
+                            binding,
+                            actor_nonce,
+                            original: original_registration_nonce
+                                .map(|nonce| OriginalRegistration { nonce }),
+                        },
+                    );
+                }
+                Response::Registered { value, replayed }
+            }
+            FullReply::Acknowledged {} => Response::Acknowledged {},
+            FullReply::Error { code } => Response::Error { code },
+            _ => return Err(EnforcerError::Unauthorized),
+        })
+    }
+}
 struct LocalSlot {
     registration: RegistrationV1,
     digest: String,
@@ -62,6 +1018,7 @@ struct LocalSlot {
     // An exact durable Cancel replay stops this target without seeding a job's
     // shared generation, including when the enforcer itself must be recovered.
     retained_cancel: AtomicBool,
+    latch: retirement::SlotLatch,
 }
 
 impl EnforcerClient {
@@ -173,6 +1130,7 @@ impl EnforcerClient {
         // SAFETY: successful F_DUPFD_CLOEXEC returned a fresh owned descriptor.
         let liveness = unsafe { OwnedFd::from_raw_fd(fd) };
         let client = Self(Arc::new(Client {
+            authority: SlotAuthorityV1::Legacy,
             root: root.clone(),
             executable: executable.into(),
             max_slots,
@@ -297,6 +1255,7 @@ impl EnforcerClient {
                     acknowledged: AtomicBool::new(false),
                     cancel_durable: AtomicBool::new(retained_cancel),
                     retained_cancel: AtomicBool::new(retained_cancel),
+                    latch: retirement::SlotLatch::default(),
                 });
                 slots.insert(
                     local.registration.arm.operation_id.clone(),
@@ -718,6 +1677,9 @@ impl Client {
         Ok(())
     }
     async fn request(&self, request: Request, timeout: Duration) -> EnforcerResult<Response> {
+        if let SlotAuthorityV1::Full3(full) = &self.authority {
+            return self.request_full_legacy(full, request, timeout).await;
+        }
         let mut stream = self.endpoint.connect_checked(&self.endpoint_root).await?;
         self.authenticate(&mut stream).await?;
         write_frame(&mut stream, &request, MAX_FRAME, IO_TIMEOUT).await?;
@@ -744,6 +1706,50 @@ impl fmt::Debug for EnforcedSlot {
     }
 }
 impl EnforcedSlot {
+    pub(crate) fn reserve_claim(
+        &self,
+        expected_generation: u64,
+    ) -> EnforcerResult<retirement::ClaimReservation> {
+        self.check_ready_for_claim(expected_generation)?;
+        self.local.latch.reserve_claim()?;
+        Ok(ClaimReservation {
+            local: Arc::clone(&self.local),
+            arm_id: self.local.registration.arm.operation_id.clone(),
+            registration_hash: self.local.digest.clone(),
+            epoch: self.client.0.endpoint.epoch(),
+            generation: expected_generation,
+        })
+    }
+    /// Consume a reservation for this exact local owner and the particular
+    /// Arm about to be included in the caller's durable pending claim.
+    pub(crate) fn consume_claim_reservation(
+        &self,
+        reservation: ClaimReservation,
+        pending_arm: &ArmV1,
+        expected_generation: u64,
+    ) -> EnforcerResult<()> {
+        if !Arc::ptr_eq(&reservation.local, &self.local)
+            || reservation.arm_id != self.local.registration.arm.operation_id
+            || reservation.arm_id != pending_arm.operation_id
+            || reservation.registration_hash != self.local.digest
+            || reservation.epoch != self.client.0.endpoint.epoch()
+            || reservation.generation != expected_generation
+            || self.local.generation.current() != expected_generation
+            || !self.local.latch.claim_reserved()
+            || self
+                .local
+                .registration
+                .arm
+                .input_hash()
+                .map_err(|_| EnforcerError::InvalidInput)?
+                != pending_arm
+                    .input_hash()
+                    .map_err(|_| EnforcerError::InvalidInput)?
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        self.check_ready_for_claim(expected_generation)
+    }
     /// Call immediately before requesting a central start claim. A registration
     /// handle can also represent a retained ObserveOnly/quarantined target.
     pub fn check_ready_for_claim(&self, expected_generation: u64) -> EnforcerResult<()> {
@@ -759,6 +1765,9 @@ impl EnforcedSlot {
         let failure = |reason, sample: Option<&HostClockSampleV1>| {
             EnforcerStageFailure::from_arm(arm, EnforcerStage::BeforeClaim, reason, sample)
         };
+        if self.local.latch.revoked() {
+            return Err(failure(EnforcerFailureReason::StopSignalled, None));
+        }
         self.client
             .0
             .check_health()
@@ -811,6 +1820,9 @@ impl EnforcedSlot {
         let failure = |reason, sample: Option<&HostClockSampleV1>| {
             EnforcerStageFailure::from_arm(arm, EnforcerStage::Prepare, reason, sample)
         };
+        if self.local.latch.revoked() {
+            return Err(failure(EnforcerFailureReason::StopSignalled, None));
+        }
         if permission.arm_id() != arm.operation_id
             || permission.worker_id() != arm.worker_id
             || permission.attempt_id() != arm.attempt_id
@@ -953,6 +1965,9 @@ impl BeforeSpawnGuard for SpawnGuard {
         let failure = |reason, sample: Option<&HostClockSampleV1>| {
             EnforcerStageFailure::from_arm(arm, EnforcerStage::BeforeSpawn, reason, sample)
         };
+        if self.local.latch.revoked() {
+            return Err(failure(EnforcerFailureReason::StopSignalled, None).into());
+        }
         let _gate = self
             .local
             .generation
@@ -1120,6 +2135,10 @@ async fn monitor_once(client: &Client, stream: &mut UnixStream) -> EnforcerResul
     let Response::Status { value } = response else {
         return Err(EnforcerError::Unhealthy);
     };
+    record_health_and_slots(client, value).await
+}
+
+async fn record_health_and_slots(client: &Client, value: EnforcerStatusV1) -> EnforcerResult<()> {
     if value.epoch != client.endpoint.epoch() || !value.healthy {
         return Err(EnforcerError::Unhealthy);
     }
@@ -1141,7 +2160,7 @@ async fn monitor_once(client: &Client, stream: &mut UnixStream) -> EnforcerResul
         let slots = client.slots.lock().map_err(|_| EnforcerError::Unhealthy)?;
         slots
             .values()
-            .filter(|slot| slot.acknowledged.load(Ordering::SeqCst))
+            .filter(|slot| slot.acknowledged.load(Ordering::SeqCst) && !slot.latch.revoked())
             .cloned()
             .collect()
     };
@@ -1325,6 +2344,33 @@ fn spawn_helper_mode(
     max_slots: u32,
     recovery_only: bool,
 ) -> EnforcerResult<()> {
+    spawn_helper_config(
+        root,
+        executable,
+        max_slots,
+        if recovery_only {
+            HelperMode::Recovery
+        } else {
+            HelperMode::Legacy
+        },
+    )
+}
+
+enum HelperMode<'a> {
+    Legacy,
+    Recovery,
+    Full3Fresh {
+        name: &'a str,
+        installation_id: Uuid,
+    },
+}
+
+fn spawn_helper_config(
+    root: &Directory,
+    executable: &Path,
+    max_slots: u32,
+    mode: HelperMode<'_>,
+) -> EnforcerResult<()> {
     use std::os::unix::process::CommandExt;
     let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
     // SAFETY: read-only process resource query into writable ABI storage.
@@ -1357,8 +2403,22 @@ fn spawn_helper_mode(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if recovery_only {
-        command.arg("--recovery-only");
+    match mode {
+        HelperMode::Legacy => {}
+        HelperMode::Recovery => {
+            command.arg("--recovery-only");
+        }
+        HelperMode::Full3Fresh {
+            name,
+            installation_id,
+        } => {
+            command
+                .arg("--full3-fresh")
+                .arg("--role-name")
+                .arg(name)
+                .arg("--installation-id")
+                .arg(installation_id.to_string());
+        }
     }
     // SAFETY: only async-signal-safe syscalls; no parent lock, token, socket or
     // incidental inherited FD may survive exec. CLOEXEC preserves Command's

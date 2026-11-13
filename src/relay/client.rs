@@ -106,7 +106,26 @@ impl WorkerRelayClient {
         endpoint: RelayEndpointV1,
         profile: RelayClientProfile,
     ) -> Result<Self> {
-        Self::build(origin, workload_credential, endpoint, profile, None)
+        Self::build(origin, workload_credential, endpoint, profile, None, None)
+    }
+
+    /// The broker passes its already captured immutable profile roots. No CA
+    /// path, runner authority or credential is inherited by this worker client.
+    pub(crate) fn with_profile_and_gateway_trust(
+        origin: &str,
+        workload_credential: &str,
+        endpoint: RelayEndpointV1,
+        profile: RelayClientProfile,
+        gateway_trust: &crate::tls::ClientTrust,
+    ) -> Result<Self> {
+        Self::build(
+            origin,
+            workload_credential,
+            endpoint,
+            profile,
+            None,
+            Some(gateway_trust),
+        )
     }
 
     /// Explicit public CA roots replace built-in roots for this immutable client.
@@ -142,6 +161,7 @@ impl WorkerRelayClient {
             endpoint,
             profile,
             Some(ca_file),
+            None,
         )
     }
 
@@ -151,6 +171,7 @@ impl WorkerRelayClient {
         endpoint: RelayEndpointV1,
         profile: RelayClientProfile,
         ca_file: Option<&Path>,
+        gateway_trust: Option<&crate::tls::ClientTrust>,
     ) -> Result<Self> {
         let origin = checked_origin(origin)?;
         if endpoint.validate().is_err()
@@ -161,6 +182,9 @@ impl WorkerRelayClient {
                 .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
             || origin.as_str().contains(workload_credential)
             || ca_file.is_some() && origin.scheme() != "https"
+            || gateway_trust.is_some_and(|trust| trust.digest().is_some())
+                && origin.scheme() != "https"
+            || ca_file.is_some() && gateway_trust.is_some()
         {
             return Err(RelayClientError::InvalidConfiguration);
         }
@@ -178,11 +202,15 @@ impl WorkerRelayClient {
             .read_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(12))
             .pool_max_idle_per_host(0);
-        let trust = ca_file
-            .map(crate::tls::ClientTrust::from_ca_file)
-            .transpose()
-            .map_err(|_| RelayClientError::InvalidConfiguration)?
-            .unwrap_or_default();
+        let trust = if let Some(trust) = gateway_trust {
+            trust.clone()
+        } else {
+            ca_file
+                .map(crate::tls::ClientTrust::from_ca_file)
+                .transpose()
+                .map_err(|_| RelayClientError::InvalidConfiguration)?
+                .unwrap_or_default()
+        };
         let http = trust
             .apply_to_client(builder)
             .map_err(|_| RelayClientError::InvalidConfiguration)?

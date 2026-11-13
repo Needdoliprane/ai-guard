@@ -4,14 +4,54 @@ mod client;
 #[path = "gateway_trust_tests.rs"]
 mod gateway_trust_tests;
 mod jobs;
+pub(crate) mod preclaim;
 mod profile;
 pub mod protocol;
 mod recovery_inventory;
+#[cfg(all(test, unix))]
+#[path = "relay_gateway_trust_tests.rs"]
+mod relay_gateway_trust_tests;
+mod retirement_startup;
 mod server;
 mod targets;
 pub use client::{encode_submit, request};
+pub use preclaim::{AbandonBeforeClaimV1, PreclaimStateV1};
 pub use profile::{RequestedExecutionV1, SubmitV1};
-pub use server::{serve, serve_recovery};
+pub use server::{ServiceShutdown, serve_selected_owned};
+pub use server::{serve, serve_recovery, serve_selected};
+
+/// Explicit operator selection. Existing files never promote a legacy service
+/// into Full3, and recovery never requests admission authority.
+#[derive(Debug)]
+pub enum ServiceEnforcerSelectionV1 {
+    Legacy,
+    Recovery { role_name: Option<String> },
+    Full3Fresh { role_name: String },
+    Full3Existing { role_name: String },
+}
+
+impl ServiceEnforcerSelectionV1 {
+    fn validate(&self) -> anyhow::Result<()> {
+        let role = match self {
+            Self::Legacy | Self::Recovery { role_name: None } => return Ok(()),
+            Self::Recovery {
+                role_name: Some(role_name),
+            }
+            | Self::Full3Fresh { role_name }
+            | Self::Full3Existing { role_name } => role_name,
+        };
+        anyhow::ensure!(
+            !role.is_empty()
+                && role.len() <= 100
+                && role
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                && !matches!(role.as_str(), "broker" | "journals" | "enforcer"),
+            "invalid or reserved private enforcer role name"
+        );
+        Ok(())
+    }
+}
 
 use super::{enforcer::CancelGeneration, journal::JournalScopeV1};
 use crate::{
@@ -34,10 +74,12 @@ use uuid::Uuid;
 /// the current gateway. No serde or public constructor from caller strings.
 pub(crate) struct AuthenticatedBatchContext {
     client: AuditClient,
+    gateway_trust: crate::tls::ClientTrust,
     scope: JournalScopeV1,
     config: Directory,
     runtime: Runtime,
     cancel: CancelGeneration,
+    preclaim: preclaim::PreclaimControlV1,
     expected_generation: u64,
     source: Option<Arc<AuthorizedSource>>,
     exclusions: Vec<File>,
@@ -72,9 +114,13 @@ impl AuthenticatedBatchContext {
         let expected_generation = cancel.current();
         Ok(Self {
             client,
+            // This data/RPC-only test constructor has no operator Registry.
+            // Real broker contexts below retain the verified profile snapshot.
+            gateway_trust: crate::tls::ClientTrust::default(),
             scope,
             config,
             runtime,
+            preclaim: preclaim::PreclaimControlV1::new(cancel.clone()),
             cancel,
             expected_generation,
             source: None,
@@ -84,6 +130,9 @@ impl AuthenticatedBatchContext {
 
     pub(crate) fn client(&self) -> &AuditClient {
         &self.client
+    }
+    pub(crate) fn gateway_trust(&self) -> &crate::tls::ClientTrust {
+        &self.gateway_trust
     }
     pub(crate) fn scope(&self) -> &JournalScopeV1 {
         &self.scope
@@ -96,6 +145,9 @@ impl AuthenticatedBatchContext {
     }
     pub(crate) fn cancel_generation(&self) -> &CancelGeneration {
         &self.cancel
+    }
+    pub(crate) fn preclaim(&self) -> &preclaim::PreclaimControlV1 {
+        &self.preclaim
     }
     pub(crate) fn expected_generation(&self) -> u64 {
         self.expected_generation
@@ -136,10 +188,27 @@ impl ValidatedExportTarget {
     pub(crate) fn parent(&self) -> &AuthorizedExportParent {
         &self.parent
     }
+
+    /// Test bridge to the real target validator and immutable input producer.
+    /// A parsed fixture profile does not prove registry authentication.
+    #[cfg(test)]
+    pub(crate) fn for_executor_test(
+        root: &Directory,
+        profile: serde_json::Value,
+        scope: &JournalScopeV1,
+        operation: Uuid,
+        request: Uuid,
+        destination: &Path,
+    ) -> Result<Self, protocol::BrokerErrorCodeV1> {
+        let profile: profile::ControlProfileV1 = serde_json::from_value(profile)
+            .map_err(|_| protocol::BrokerErrorCodeV1::InvalidInput)?;
+        targets::validate_and_persist(root, &profile, scope, operation, request, destination)
+    }
 }
 
 struct VerifiedProfile {
     client: AuditClient,
+    gateway_trust: crate::tls::ClientTrust,
     scope: JournalScopeV1,
 }
 impl VerifiedProfile {
@@ -163,12 +232,9 @@ impl VerifiedProfile {
         let profile = registry
             .profile(profile_id)
             .map_err(|_| Code::Unauthorized)?;
-        let client = AuditClient::with_gateway_trust(
-            &profile.gateway,
-            credential,
-            &registry.gateway_trust(profile_id),
-        )
-        .map_err(|_| Code::Unauthorized)?;
+        let gateway_trust = registry.gateway_trust(profile_id);
+        let client = AuditClient::with_gateway_trust(&profile.gateway, credential, &gateway_trust)
+            .map_err(|_| Code::Unauthorized)?;
         let protocol =
             client
                 .control_supervision_identity()
@@ -202,7 +268,11 @@ impl VerifiedProfile {
             &profile.id,
         )
         .map_err(|_| Code::IncompatibleControl)?;
-        Ok(Self { client, scope })
+        Ok(Self {
+            client,
+            gateway_trust,
+            scope,
+        })
     }
 
     fn open_context(
@@ -211,6 +281,7 @@ impl VerifiedProfile {
         profile: &profile::ControlProfileV1,
         root: &Directory,
         cancel: CancelGeneration,
+        preclaim: preclaim::PreclaimControlV1,
         source: Option<Arc<AuthorizedSource>>,
     ) -> Result<AuthenticatedBatchContext> {
         // Capture once, before any filesystem operation or deferred task. A
@@ -239,13 +310,72 @@ impl VerifiedProfile {
         ];
         Ok(AuthenticatedBatchContext {
             client: self.client,
+            gateway_trust: self.gateway_trust,
             scope: self.scope,
             config,
             runtime,
             cancel,
+            preclaim,
             expected_generation,
             source,
             exclusions,
         })
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::ServiceEnforcerSelectionV1;
+
+    #[test]
+    fn service_selection_validates_roles_without_relying_on_cli_parser() {
+        for role in [
+            "../other",
+            "/private/other",
+            "a/b",
+            "a\\b",
+            ".",
+            "..",
+            "",
+            "broker",
+            "journals",
+            "enforcer",
+            "é",
+            "role\0suffix",
+        ] {
+            for selection in [
+                ServiceEnforcerSelectionV1::Full3Fresh {
+                    role_name: role.into(),
+                },
+                ServiceEnforcerSelectionV1::Full3Existing {
+                    role_name: role.into(),
+                },
+                ServiceEnforcerSelectionV1::Recovery {
+                    role_name: Some(role.into()),
+                },
+            ] {
+                assert!(selection.validate().is_err());
+            }
+        }
+        assert!(ServiceEnforcerSelectionV1::Legacy.validate().is_ok());
+        assert!(
+            ServiceEnforcerSelectionV1::Recovery { role_name: None }
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            ServiceEnforcerSelectionV1::Full3Fresh {
+                role_name: "role-D5_1".into()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ServiceEnforcerSelectionV1::Full3Fresh {
+                role_name: "a".repeat(101)
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

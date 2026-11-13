@@ -308,7 +308,10 @@ pub(super) fn parse(
         observed_at: Utc::now(),
     })
 }
-fn optional_string(value: Option<&Value>, limit: usize) -> KubernetesResult<Option<String>> {
+pub(super) fn optional_string(
+    value: Option<&Value>,
+    limit: usize,
+) -> KubernetesResult<Option<String>> {
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value))
@@ -321,7 +324,7 @@ fn optional_string(value: Option<&Value>, limit: usize) -> KubernetesResult<Opti
         _ => Err(KubernetesError::InvalidResponse),
     }
 }
-fn optional_identity(value: Option<&Value>) -> KubernetesResult<Option<String>> {
+pub(super) fn optional_identity(value: Option<&Value>) -> KubernetesResult<Option<String>> {
     // Kubernetes uses an empty identity before the container is created.
     if value.and_then(Value::as_str) == Some("") {
         return Ok(None);
@@ -336,7 +339,7 @@ fn optional_identity(value: Option<&Value>) -> KubernetesResult<Option<String>> 
     }
     Ok(result)
 }
-fn timestamp(value: Option<&Value>) -> KubernetesResult<Option<DateTime<Utc>>> {
+pub(super) fn timestamp(value: Option<&Value>) -> KubernetesResult<Option<DateTime<Utc>>> {
     optional_string(value, 64)?
         .map(|value| {
             DateTime::parse_from_rfc3339(&value)
@@ -352,7 +355,7 @@ fn timestamp(value: Option<&Value>) -> KubernetesResult<Option<DateTime<Utc>>> {
         })
         .transpose()
 }
-fn quantity(value: Option<&Value>) -> KubernetesResult<Option<String>> {
+pub(super) fn quantity(value: Option<&Value>) -> KubernetesResult<Option<String>> {
     let result = optional_string(value, 64)?;
     if result.as_ref().is_some_and(|value| !valid_quantity(value)) {
         return Err(KubernetesError::InvalidResponse);

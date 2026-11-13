@@ -161,6 +161,12 @@ pub enum OperatorCommand {
         #[arg(long, requires = "checkpoint_dir")]
         data: Option<PathBuf>,
     },
+    /// Write or verify the release manifest of a build source prepared as `build` prepares it.
+    /// Starts no engine and opens no network connection; nothing is signed or uploaded.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -181,6 +187,46 @@ pub enum ProviderCommand {
         providers_file: Option<PathBuf>,
         #[arg(long)]
         json: bool,
+    },
+}
+
+// Every value is checked by the release command itself, so that a malformed
+// one is refused with a named reason (exit status 1), not as a usage error.
+#[derive(Subcommand, Debug)]
+pub enum ReleaseCommand {
+    /// Prepare --source as `build` does, then write release-manifest.json, sbom.cdx.json and
+    /// SHA256SUMS into a new directory whose parent is an existing private directory.
+    Manifest {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+        /// Built file to bind by name, size and SHA-256; repeat for each file.
+        #[arg(long = "artifact", value_name = "FILE")]
+        artifacts: Vec<PathBuf>,
+        #[arg(long)]
+        codex_version: Option<String>,
+        #[arg(long)]
+        claude_code_version: Option<String>,
+        /// Operator-declared digest (64 lowercase hex) from a `build` provenance line; the
+        /// command refuses before any output if the new capture differs. Not authenticated.
+        #[arg(long, value_name = "HEX64")]
+        expect_source_digest: Option<String>,
+    },
+    /// Prepare --source again and compare source, locks, inventory and the given artefacts with
+    /// a manifest directory; any divergence is refused; a manifest this CLI cannot judge is
+    /// UNVERIFIED.
+    Verify {
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        manifest: PathBuf,
+        /// Built file listed in the manifest; repeat for each listed file.
+        #[arg(long = "artifact", value_name = "FILE")]
+        artifacts: Vec<PathBuf>,
+        /// Compare the source, locks and inventory only; no artefact is verified.
+        #[arg(long)]
+        source_only: bool,
     },
 }
 
@@ -313,9 +359,10 @@ fn require_successful_resume(result: &serde_json::Value) -> Result<()> {
 
 pub async fn execute(command: OperatorCommand) -> Result<()> {
     use crate::runner::AuditClient;
-    // Build, Up and Down hold a prepared source across engine commands: run
-    // them inside one operator-interruption scope. Every other command,
-    // including VerifyAudit, keeps its existing flow.
+    // Build, Up and Down hold a prepared source across engine commands, and
+    // Release holds one while it reads and hashes: run them inside one
+    // operator-interruption scope. Every other command, including
+    // VerifyAudit, keeps its existing flow.
     if source_snapshot::needs_interrupt_scope(&command) {
         return source_snapshot::interrupt_scope(Box::pin(execute(command))).await;
     }
@@ -638,6 +685,7 @@ pub async fn execute(command: OperatorCommand) -> Result<()> {
                 }
             }
         }
+        OperatorCommand::Release { command } => source_snapshot::release(command).await?,
     }
     Ok(())
 }

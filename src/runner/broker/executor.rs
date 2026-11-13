@@ -1,10 +1,22 @@
 //! Batch execution from a durable intention. Journal I/O is delegated to the
 //! bounded writer; the enforcer owns stop independently of that writer.
+macro_rules! continue_step {
+    ($step:expr) => {
+        match $step {
+            ControlFlow::Continue(value) => value,
+            ControlFlow::Break(abandoned) => return Ok(ControlFlow::Break(abandoned)),
+        }
+    };
+}
+
 mod cancelled;
 mod diagnostics;
 mod helpers;
 mod journal;
 mod results;
+mod retirement;
+#[cfg(all(test, unix))]
+mod retirement_live_tests;
 use super::{BrokerRunState, FreshStartPermission, credentials_from_job};
 use crate::{
     broker::{
@@ -13,7 +25,7 @@ use crate::{
             SupervisionOperationV1 as Operation,
         },
         clock::{HostClock, checked_deadline},
-        enforcer::{CancelGeneration, EnforcedSlot, EnforcerClient, RegistrationV1},
+        enforcer::{CancelGeneration, EnforcedSlot, ExecutionEnforcerV1, RegistrationV1},
         journal::{AcceptedJobV1, CancelStopProjectionV1, JournalError, JournalScopeV1},
         lifecycle::{
             BrokerCheckpointV3, LocalCommandRequestV1, LocalCommandV1, LocalFailureCodeV1,
@@ -32,6 +44,7 @@ use crate::{
     workspace::{self, Limits},
 };
 use anyhow::{Context, Result, anyhow, ensure};
+use futures_util::future::BoxFuture;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) use journal::{ColdRecoverySeed, terminal_pending_seed_for_cold_audit_test};
 use journal::{operation_key, same};
@@ -39,6 +52,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
+    ops::ControlFlow,
     sync::{
         Arc,
         atomic::{AtomicU8, Ordering},
@@ -53,8 +67,9 @@ const CANCEL_TOTAL_TIMEOUT: Duration = Duration::from_secs(45);
 #[derive(Clone)]
 pub(crate) struct BatchExecutor {
     writer: WriterClient,
-    enforcer: EnforcerClient,
+    enforcer: ExecutionEnforcerV1,
     clock: Arc<dyn HostClock>,
+    relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
 }
 impl fmt::Debug for BatchExecutor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -65,12 +80,21 @@ impl fmt::Debug for BatchExecutor {
 /// Disposition of this invocation. Detailed results are already persisted in
 /// the journal and audit; the service reads those facts for status responses.
 pub(crate) enum BatchOutcome {
+    AbandonedBeforeClaim(Box<AbandonedBatch>),
     AwaitingReview,
     Denied,
     AdmissionRefused,
     Cancelled,
     Terminal,
 }
+
+pub(crate) struct AbandonedBatch {
+    pub(crate) owned: OwnedContainerSnapshot,
+    pub(crate) retirement: crate::runtime::AbandonedBeforeClaim,
+}
+
+pub(crate) type BatchStep<T> = ControlFlow<Box<AbandonedBatch>, T>;
+
 impl fmt::Debug for BatchOutcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("BatchOutcome(<private observed state>)")
@@ -199,17 +223,54 @@ struct Execution<'a> {
     launch_profile: Option<crate::runtime::launch_profile::RetainedDockerLaunchProfile>,
 }
 
+// These owned snapshots retain the original inputs across sequential phases.
+// They are data, never a replacement for the checked loads in each phase.
+struct PreparedRunPhase {
+    job: Box<AcceptedJobV1>,
+    draft: Box<Draft>,
+}
+
+struct ActiveRuntimePhase {
+    runtime: ManagedRuntime,
+    _initial_draft: Box<Draft>,
+}
+
+struct ActiveWorkerPhase {
+    runtime: Box<ActiveRuntimePhase>,
+    _draft: Box<Draft>,
+    worker: Box<WorkerV1>,
+}
+
+// Construct the concrete phase future inside a separate call boundary before
+// boxing it. Boxing an already constructed aggregate can leave its temporary
+// storage in the caller's debug poll frame. This invokes construct immediately;
+// it does not poll, spawn, defer argument evaluation or change cancellation.
+#[inline(never)]
+fn boxed_execution_phase<F: std::future::Future>(
+    construct: impl FnOnce() -> F,
+) -> std::pin::Pin<Box<F>> {
+    Box::pin(construct())
+}
+
 impl BatchExecutor {
     pub(crate) fn new(
         writer: WriterClient,
-        enforcer: EnforcerClient,
+        enforcer: impl Into<ExecutionEnforcerV1>,
         clock: Arc<dyn HostClock>,
     ) -> Self {
         Self {
             writer,
-            enforcer,
+            enforcer: enforcer.into(),
             clock,
+            relays: None,
         }
+    }
+    pub(crate) fn with_relays(
+        mut self,
+        relays: Option<Arc<crate::broker::relay_owner::RelayRegistry>>,
+    ) -> Self {
+        self.relays = relays;
+        self
     }
     pub(crate) async fn run(
         &self,
@@ -219,7 +280,7 @@ impl BatchExecutor {
         let execution = Execution::open(self, operation, context)
             .await
             .map_err(|_| BatchFailure)?;
-        match Box::pin(execution.run()).await {
+        match boxed_execution_phase(|| execution.run()).await {
             Ok(outcome) => Ok(outcome),
             Err(error) => {
                 execution.failure(execution.phase(), &error).await;
@@ -232,7 +293,7 @@ impl BatchExecutor {
         operation: Uuid,
         target: ValidatedExportTarget,
         context: &AuthenticatedBatchContext,
-    ) -> std::result::Result<ExportCompletion, BatchFailure> {
+    ) -> std::result::Result<BatchStep<ExportCompletion>, BatchFailure> {
         let execution = Execution::open(self, operation, context)
             .await
             .map_err(|_| BatchFailure)?;
@@ -251,7 +312,7 @@ impl BatchExecutor {
 /// immutable Cancel prefix. Known targets are attempted before partial coverage
 /// is reported, without changing a job generation, deadline or start permission.
 pub(crate) async fn deliver_cancellation(
-    enforcer: &EnforcerClient,
+    enforcer: &ExecutionEnforcerV1,
     expected_scope: &JournalScopeV1,
     projection: CancelStopProjectionV1,
     cancel: &CancelGeneration,
@@ -294,10 +355,27 @@ pub(crate) async fn deliver_cancellation(
                     continue;
                 }
             };
+            let binding = stop.full3_registration_binding().cloned();
             let enforcer = enforcer.clone();
             let cancel = cancel.clone();
             attempts.push(async move {
-                tokio::time::timeout(budget, enforcer.cancel_retained(registration, cancel)).await
+                tokio::time::timeout(budget, async {
+                    match (enforcer.full3(), binding.as_ref()) {
+                        (Some(_), Some(binding)) => {
+                            enforcer
+                                .cancel_retained_bound(registration, cancel, binding)
+                                .await
+                        }
+                        (Some(_), None) => {
+                            Err(crate::broker::enforcer::EnforcerError::Unauthorized)
+                        }
+                        (None, Some(_)) => {
+                            Err(crate::broker::enforcer::EnforcerError::Unauthorized)
+                        }
+                        (None, None) => enforcer.cancel_retained(registration, cancel).await,
+                    }
+                })
+                .await
             });
         }
         let outcomes = futures_util::future::join_all(attempts).await;
@@ -315,10 +393,32 @@ impl<'a> Execution<'a> {
     // its frame before the cancellation branch can return early.
     async fn run(&self) -> Result<BatchOutcome> {
         self.stage(LocalFailurePhaseV1::Decision);
-        self.replay_events().await?;
-        self.reconcile_pending().await?;
-        let (job, draft) = self.load().await?;
-        if draft.cancelled() {
+        let prepared = self.prepare_run_phase().await?;
+        if prepared.draft.cancelled() {
+            return self.cancelled_run_phase(prepared).await;
+        }
+        let PreparedRunPhase { job, draft } = *prepared;
+        boxed_execution_phase(|| self.run_active(job, draft)).await
+    }
+
+    fn prepare_run_phase(&self) -> BoxFuture<'_, Result<Box<PreparedRunPhase>>> {
+        Box::pin(async move {
+            self.replay_events().await?;
+            self.reconcile_pending().await?;
+            let (job, draft) = self.load().await?;
+            Ok(Box::new(PreparedRunPhase {
+                job: Box::new(job),
+                draft: Box::new(draft),
+            }))
+        })
+    }
+
+    fn cancelled_run_phase(
+        &self,
+        prepared: Box<PreparedRunPhase>,
+    ) -> BoxFuture<'_, Result<BatchOutcome>> {
+        Box::pin(async move {
+            let draft = &prepared.draft;
             let worker = draft
                 .run
                 .plan
@@ -343,122 +443,162 @@ impl<'a> Execution<'a> {
                 None | Some(WorkerStateV1::Cancelled) => {}
                 Some(_) => return Err(anyhow!("cancelled worker requires reconciliation")),
             }
-            return Ok(BatchOutcome::Cancelled);
-        }
-        Box::pin(self.run_active(job, draft)).await
+            if let Some(relays) = &self.executor.relays {
+                let (current, latest) = self.load().await?;
+                if latest.worker().is_ok_and(|worker| {
+                    worker.state == WorkerStateV1::Terminal && !worker.quota_held
+                }) {
+                    relays
+                        .retire(self.context, current, self.executor.clock.clone())
+                        .await?;
+                }
+            }
+            Ok(BatchOutcome::Cancelled)
+        })
     }
 
-    async fn run_active(&self, job: AcceptedJobV1, mut draft: Draft) -> Result<BatchOutcome> {
+    async fn run_active(
+        &self,
+        job: Box<AcceptedJobV1>,
+        mut draft: Box<Draft>,
+    ) -> Result<BatchOutcome> {
         self.generation_current()?;
         if draft.run.plan.managed.is_none() {
-            self.executor.enforcer.require_admission_ready().await?;
-            let mut request = draft.run.plan.request.clone();
-            let (answer, _) = self
-                .rpc(Operation::Decision {
+            let answer = match boxed_execution_phase(|| self.decide_active(&draft)).await? {
+                ControlFlow::Break(outcome) => return Ok(outcome),
+                ControlFlow::Continue(answer) => answer,
+            };
+            draft = boxed_execution_phase(|| self.prepare_active(&job, answer)).await?;
+        }
+        let outcome = boxed_execution_phase(|| self.execute_active(draft)).await;
+        // Keep the accepted job and its retained files through every phase,
+        // just as the original single run_active body did.
+        drop(job);
+        outcome
+    }
+
+    // Each sequential phase has its own heap-owned future and poll frame. The
+    // orchestrator retains the existing owner; these methods spawn no work.
+    async fn decide_active(
+        &self,
+        draft: &Draft,
+    ) -> Result<ControlFlow<BatchOutcome, DecisionAnswerV1>> {
+        self.executor.enforcer.require_admission_ready().await?;
+        let mut request = draft.run.plan.request.clone();
+        let (answer, _) = self
+            .rpc(Operation::Decision {
+                request: request.clone(),
+                response: None,
+            })
+            .await?;
+        let Operation::Decision {
+            response: Some(mut answer),
+            ..
+        } = answer
+        else {
+            return Err(anyhow!("decision acknowledgement is missing"));
+        };
+        if answer.decision().outcome == Outcome::Review {
+            let (_, current) = self.load().await?;
+            let approval = current
+                .commands
+                .iter()
+                .find_map(|command| match command.request() {
+                    LocalCommandRequestV1::ApprovalSubmitted {
+                        request_hash,
+                        review_receipt,
+                    } if same(review_receipt, answer.receipt()).unwrap_or(false) => {
+                        Some(request_hash.clone())
+                    }
+                    _ => None,
+                });
+            let Some(hash) = approval else {
+                return Ok(ControlFlow::Break(BatchOutcome::AwaitingReview));
+            };
+            request.human_approved = true;
+            request.approval_hash = Some(hash);
+            self.patch(|draft| {
+                ensure!(
+                    !draft.cancelled() && draft.run.plan.managed.is_none(),
+                    "approval context changed"
+                );
+                draft.run.plan.request = request.clone();
+                let pending = Operation::Decision {
                     request: request.clone(),
+                    response: None,
+                };
+                if !draft
+                    .operations
+                    .iter()
+                    .any(|op| operation_key(op) == operation_key(&pending))
+                {
+                    draft.operations.push(pending);
+                }
+                Ok(())
+            })
+            .await?;
+            let (approved, _) = self
+                .rpc(Operation::Decision {
+                    request,
                     response: None,
                 })
                 .await?;
             let Operation::Decision {
-                response: Some(mut answer),
+                response: Some(approved),
                 ..
-            } = answer
+            } = approved
             else {
-                return Err(anyhow!("decision acknowledgement is missing"));
+                return Err(anyhow!("approved decision acknowledgement is missing"));
             };
-            if answer.decision().outcome == Outcome::Review {
-                let (_, current) = self.load().await?;
-                let approval =
-                    current
-                        .commands
-                        .iter()
-                        .find_map(|command| match command.request() {
-                            LocalCommandRequestV1::ApprovalSubmitted {
-                                request_hash,
-                                review_receipt,
-                            } if same(review_receipt, answer.receipt()).unwrap_or(false) => {
-                                Some(request_hash.clone())
-                            }
-                            _ => None,
-                        });
-                let Some(hash) = approval else {
-                    return Ok(BatchOutcome::AwaitingReview);
-                };
-                request.human_approved = true;
-                request.approval_hash = Some(hash);
-                self.patch(|draft| {
-                    ensure!(
-                        !draft.cancelled() && draft.run.plan.managed.is_none(),
-                        "approval context changed"
-                    );
-                    draft.run.plan.request = request.clone();
-                    let pending = Operation::Decision {
-                        request: request.clone(),
-                        response: None,
-                    };
-                    if !draft
-                        .operations
-                        .iter()
-                        .any(|op| operation_key(op) == operation_key(&pending))
-                    {
-                        draft.operations.push(pending);
-                    }
-                    Ok(())
-                })
-                .await?;
-                let (approved, _) = self
-                    .rpc(Operation::Decision {
-                        request,
-                        response: None,
-                    })
-                    .await?;
-                let Operation::Decision {
-                    response: Some(approved),
-                    ..
-                } = approved
-                else {
-                    return Err(anyhow!("approved decision acknowledgement is missing"));
-                };
-                answer = approved;
+            answer = approved;
+        }
+        match answer.decision().outcome {
+            Outcome::Deny => return Ok(ControlFlow::Break(BatchOutcome::Denied)),
+            Outcome::Review => {
+                return Ok(ControlFlow::Break(BatchOutcome::AwaitingReview));
             }
-            match answer.decision().outcome {
-                Outcome::Deny => return Ok(BatchOutcome::Denied),
-                Outcome::Review => {
-                    return Ok(BatchOutcome::AwaitingReview);
-                }
-                Outcome::Allow => {}
-            }
-            self.generation_current()?;
-            self.stage(LocalFailurePhaseV1::WorkspacePreparation);
-            self.executor.enforcer.require_admission_ready().await?;
-            let (current_job, current) = self.load().await?;
-            ensure!(
-                !current.cancelled(),
-                "cancelled before workspace preparation"
-            );
-            let config = current.run.options().config_dir.clone();
-            let operation = self.operation;
-            tokio::task::spawn_blocking(move || {
-                managed::broker_require_new_archive(&config, operation)
-            })
-            .await??;
-            let source = self
-                .context
-                .source_handle()
-                .context("authorized source is unavailable for initial preparation")?;
-            let exclusions = self
-                .context
-                .excluded_roots()
-                .iter()
-                .map(|file| file.try_clone())
-                .collect::<std::io::Result<Vec<_>>>()?;
-            let workspace = tokio::task::spawn_blocking(move || {
-                let exclusions = exclusions.iter().collect::<Vec<_>>();
-                source.prepare(Limits::default(), &exclusions)
-            })
-            .await??;
-            let credentials = credentials_from_job(&current_job, self.context.config())?;
-            let managed = Box::pin(managed::broker_prepare(managed::BrokerPreparation {
+            Outcome::Allow => {}
+        }
+        Ok(ControlFlow::Continue(answer))
+    }
+
+    async fn prepare_active(
+        &self,
+        job: &AcceptedJobV1,
+        answer: DecisionAnswerV1,
+    ) -> Result<Box<Draft>> {
+        self.generation_current()?;
+        self.stage(LocalFailurePhaseV1::WorkspacePreparation);
+        self.executor.enforcer.require_admission_ready().await?;
+        let (current_job, current) = self.load().await?;
+        ensure!(
+            !current.cancelled(),
+            "cancelled before workspace preparation"
+        );
+        let config = current.run.options().config_dir.clone();
+        let operation = self.operation;
+        tokio::task::spawn_blocking(move || {
+            managed::broker_require_new_archive(&config, operation)
+        })
+        .await??;
+        let source = self
+            .context
+            .source_handle()
+            .context("authorized source is unavailable for initial preparation")?;
+        let exclusions = self
+            .context
+            .excluded_roots()
+            .iter()
+            .map(|file| file.try_clone())
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let workspace = tokio::task::spawn_blocking(move || {
+            let exclusions = exclusions.iter().collect::<Vec<_>>();
+            source.prepare(Limits::default(), &exclusions)
+        })
+        .await??;
+        let credentials = credentials_from_job(&current_job, self.context.config())?;
+        let managed = boxed_execution_phase(|| {
+            managed::broker_prepare(managed::BrokerPreparation {
                 plan: &current.run.plan,
                 scope: self.context.scope(),
                 binding: current_job.binding_manifest(),
@@ -467,109 +607,190 @@ impl<'a> Execution<'a> {
                 workspace,
                 credentials: credentials.as_ref().map(|c| &c.credential),
                 launch_profile: self.launch_profile.as_ref(),
-            }))
-            .await
-            .map_err(|_| anyhow!("immutable workspace preparation requires reconciliation"))?;
-            let request = SupervisedAdmissionV1 {
-                version: 1,
-                protocol: SupervisionProtocolV1::BrokerSupervisionV1,
-                intent_hash: job.intent_hash().into(),
-                admission: managed.admission.clone(),
-            };
-            self.stage(LocalFailurePhaseV1::Admission);
-            self.executor.enforcer.require_admission_ready().await?;
-            self.patch(|draft| {
-                ensure!(
-                    !draft.cancelled() && draft.run.plan.managed.is_none(),
-                    "admission context changed"
-                );
-                self.generation_current()?;
-                draft.run.plan.managed = Some(managed.clone());
-                draft.operations.push(Operation::Admission {
-                    request: request.clone(),
-                    response: None,
-                });
-                Ok(())
             })
-            .await?;
-            self.rpc(Operation::Admission {
-                request,
+        })
+        .await
+        .map_err(|_| anyhow!("immutable workspace preparation requires reconciliation"))?;
+        let request = SupervisedAdmissionV1 {
+            version: 1,
+            protocol: SupervisionProtocolV1::BrokerSupervisionV1,
+            intent_hash: job.intent_hash().into(),
+            admission: managed.admission.clone(),
+        };
+        self.stage(LocalFailurePhaseV1::Admission);
+        self.executor.enforcer.require_admission_ready().await?;
+        self.patch(|draft| {
+            ensure!(
+                !draft.cancelled() && draft.run.plan.managed.is_none(),
+                "admission context changed"
+            );
+            self.generation_current()?;
+            draft.run.plan.managed = Some(managed.clone());
+            draft.operations.push(Operation::Admission {
+                request: request.clone(),
                 response: None,
-            })
-            .await?;
-            (_, draft) = self.load().await?;
-        }
-        if let Some(response) = draft.operations.iter().find_map(|op| match op {
-            Operation::Admission {
-                response: Some(result),
-                ..
-            } if !result.accepted => Some(result),
-            _ => None,
-        }) {
-            response.refusal.context("admission refusal is missing")?;
-            return Ok(BatchOutcome::AdmissionRefused);
-        }
-        self.generation_current()?;
-        let checkpoint = draft
-            .run
-            .plan
-            .managed
-            .as_ref()
-            .context("managed preparation is missing")?;
-        let runtime = managed::broker_runtime(
-            checkpoint,
-            self.context.runtime(),
-            draft.run.options().allow_rootful_runtime,
-            self.launch_profile.as_ref(),
-        )
+            });
+            Ok(())
+        })
         .await?;
-        let binding = runtime.binding().clone();
-        if checkpoint.binding.is_none() {
-            self.patch(|draft| {
-                self.generation_current()?;
-                draft
-                    .run
-                    .plan
-                    .managed
-                    .as_mut()
-                    .context("managed state disappeared")?
-                    .binding = Some(binding.clone());
-                Ok(())
-            })
-            .await?;
-        }
+        self.rpc(Operation::Admission {
+            request,
+            response: None,
+        })
+        .await?;
         let (_, draft) = self.load().await?;
-        let mut worker = draft.worker()?.clone();
-        if worker.state == WorkerStateV1::Reserved {
-            worker = self.mutate(WorkerTransitionV1::Prepare).await?;
-        }
-        if worker.state == WorkerStateV1::Preparing && worker.attempt.create_operation_id.is_none()
-        {
-            Box::pin(self.import(&runtime)).await?;
-            worker = self.mutate(WorkerTransitionV1::CreateIssued).await?;
-        }
-        if (worker.state == WorkerStateV1::Preparing
-            && worker.attempt.create_operation_id.is_some())
-            || matches!(
-                worker.state,
-                WorkerStateV1::Created
-                    | WorkerStateV1::StartIssued
-                    | WorkerStateV1::Running
-                    | WorkerStateV1::InDoubt
-                    | WorkerStateV1::Stopping
+        Ok(Box::new(draft))
+    }
+
+    async fn execute_active(&self, draft: Box<Draft>) -> Result<BatchOutcome> {
+        let runtime = match self.active_runtime_phase(draft).await? {
+            ControlFlow::Break(outcome) => return Ok(outcome),
+            ControlFlow::Continue(runtime) => runtime,
+        };
+        let prepared = match self.active_import_phase(runtime).await? {
+            ControlFlow::Break(abandoned) => {
+                return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+            }
+            ControlFlow::Continue(prepared) => prepared,
+        };
+        let prepared = match self.active_worker_phase(prepared).await? {
+            ControlFlow::Break(abandoned) => {
+                return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+            }
+            ControlFlow::Continue(prepared) => prepared,
+        };
+        self.active_terminal_phase(prepared).await
+    }
+
+    fn active_runtime_phase(
+        &self,
+        draft: Box<Draft>,
+    ) -> BoxFuture<'_, Result<ControlFlow<BatchOutcome, Box<ActiveRuntimePhase>>>> {
+        Box::pin(async move {
+            if let Some(response) = draft.operations.iter().find_map(|op| match op {
+                Operation::Admission {
+                    response: Some(result),
+                    ..
+                } if !result.accepted => Some(result),
+                _ => None,
+            }) {
+                response.refusal.context("admission refusal is missing")?;
+                return Ok(ControlFlow::Break(BatchOutcome::AdmissionRefused));
+            }
+            self.generation_current()?;
+            let checkpoint = draft
+                .run
+                .plan
+                .managed
+                .as_ref()
+                .context("managed preparation is missing")?;
+            let runtime = managed::broker_runtime(
+                checkpoint,
+                self.context.runtime(),
+                draft.run.options().allow_rootful_runtime,
+                self.launch_profile.as_ref(),
             )
-        {
-            Box::pin(self.execute_worker(&runtime)).await?;
-        }
-        let (_, draft) = self.load().await?;
-        let worker = draft.worker()?.clone();
-        ensure!(
-            worker.state == WorkerStateV1::Terminal && !worker.quota_held,
-            "runtime terminal is not centrally acknowledged"
-        );
-        self.post_worker_result().await?;
-        Box::pin(self.final_scan(&runtime)).await?;
-        Ok(BatchOutcome::Terminal)
+            .await?;
+            let binding = runtime.binding().clone();
+            if checkpoint.binding.is_none() {
+                self.patch(|draft| {
+                    self.generation_current()?;
+                    draft
+                        .run
+                        .plan
+                        .managed
+                        .as_mut()
+                        .context("managed state disappeared")?
+                        .binding = Some(binding.clone());
+                    Ok(())
+                })
+                .await?;
+            }
+            Ok(ControlFlow::Continue(Box::new(ActiveRuntimePhase {
+                runtime,
+                _initial_draft: draft,
+            })))
+        })
+    }
+
+    fn active_import_phase(
+        &self,
+        runtime: Box<ActiveRuntimePhase>,
+    ) -> BoxFuture<'_, Result<BatchStep<Box<ActiveWorkerPhase>>>> {
+        Box::pin(async move {
+            let (_, draft) = self.load().await?;
+            let mut worker = draft.worker()?.clone();
+            if worker.state == WorkerStateV1::Reserved {
+                worker = self.mutate(WorkerTransitionV1::Prepare).await?;
+            }
+            if worker.state == WorkerStateV1::Preparing
+                && worker.attempt.create_operation_id.is_none()
+            {
+                if let ControlFlow::Break(abandoned) =
+                    boxed_execution_phase(|| self.import(&runtime.runtime)).await?
+                {
+                    return Ok(ControlFlow::Break(abandoned));
+                }
+                worker = self.mutate(WorkerTransitionV1::CreateIssued).await?;
+            }
+            Ok(ControlFlow::Continue(Box::new(ActiveWorkerPhase {
+                runtime,
+                _draft: Box::new(draft),
+                worker: Box::new(worker),
+            })))
+        })
+    }
+
+    fn active_worker_phase(
+        &self,
+        prepared: Box<ActiveWorkerPhase>,
+    ) -> BoxFuture<'_, Result<BatchStep<Box<ActiveWorkerPhase>>>> {
+        Box::pin(async move {
+            let worker = &prepared.worker;
+            if ((worker.state == WorkerStateV1::Preparing
+                && worker.attempt.create_operation_id.is_some())
+                || matches!(
+                    worker.state,
+                    WorkerStateV1::Created
+                        | WorkerStateV1::StartIssued
+                        | WorkerStateV1::Running
+                        | WorkerStateV1::InDoubt
+                        | WorkerStateV1::Stopping
+                ))
+                && let ControlFlow::Break(abandoned) =
+                    boxed_execution_phase(|| self.execute_worker(&prepared.runtime.runtime)).await?
+            {
+                return Ok(ControlFlow::Break(abandoned));
+            }
+            Ok(ControlFlow::Continue(prepared))
+        })
+    }
+
+    fn active_terminal_phase(
+        &self,
+        prepared: Box<ActiveWorkerPhase>,
+    ) -> BoxFuture<'_, Result<BatchOutcome>> {
+        Box::pin(async move {
+            let (_, draft) = self.load().await?;
+            let worker = draft.worker()?.clone();
+            ensure!(
+                worker.state == WorkerStateV1::Terminal && !worker.quota_held,
+                "runtime terminal is not centrally acknowledged"
+            );
+            self.post_worker_result().await?;
+            if let Some(relays) = &self.executor.relays {
+                let (current, _) = self.load().await?;
+                relays
+                    .retire(self.context, current, self.executor.clock.clone())
+                    .await?;
+            }
+            if let ControlFlow::Break(abandoned) =
+                boxed_execution_phase(|| self.final_scan(&prepared.runtime.runtime)).await?
+            {
+                return Ok(BatchOutcome::AbandonedBeforeClaim(abandoned));
+            }
+            Ok(BatchOutcome::Terminal)
+        })
     }
 
     async fn admission_receipt(&self) -> Result<MutationReceiptV1> {
@@ -586,7 +807,7 @@ impl<'a> Execution<'a> {
             })
             .context("accepted admission receipt is missing")
     }
-    async fn import(&self, runtime: &ManagedRuntime) -> Result<()> {
+    async fn import(&self, runtime: &ManagedRuntime) -> Result<BatchStep<()>> {
         let (_, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
         // Repeating volume creation is safe only through the existing runtime's
@@ -612,31 +833,37 @@ impl<'a> Execution<'a> {
             )
             .await?;
         let admission = self.admission_receipt().await?;
-        let imported = self
-            .helper(
+        let imported = continue_step!(
+            self.helper(
                 runtime,
                 HelperPurposeV1::Import,
                 HelperPermissionV1::Admission { receipt: admission },
                 None,
             )
-            .await?;
+            .await?
+        );
         let verification = HelperPermissionV1::ImportVerification {
             import_helper_id: imported.policy.helper_id.clone(),
             import_arm: imported.arm,
             import_terminal: imported.receipt,
             manifest_digest: worker.launch.workspace_manifest_digest.clone(),
         };
-        self.helper(
-            runtime,
-            HelperPurposeV1::ImportVerification,
-            verification,
-            None,
-        )
-        .await?;
-        Ok(())
+        continue_step!(
+            self.helper(
+                runtime,
+                HelperPurposeV1::ImportVerification,
+                verification,
+                None,
+            )
+            .await?
+        );
+        Ok(ControlFlow::Continue(()))
     }
 
-    async fn execute_worker(&self, runtime: &ManagedRuntime) -> Result<ContainerObservation> {
+    async fn execute_worker(
+        &self,
+        runtime: &ManagedRuntime,
+    ) -> Result<BatchStep<ContainerObservation>> {
         self.stage(LocalFailurePhaseV1::Worker);
         let (job, draft) = self.load().await?;
         let worker = draft.worker()?.clone();
@@ -688,22 +915,29 @@ impl<'a> Execution<'a> {
                     _ => None,
                 })
                 .context("historical worker arm is missing")?;
-            self.executor
-                .enforcer
-                .restore(
-                    RegistrationV1::new(
-                        hex::encode(Sha256::digest(
-                            self.context.scope().gateway_origin().as_bytes(),
-                        )),
-                        self.context.scope().tenant_id().into(),
-                        arm.0,
-                        arm.1,
-                        runtime.binding().clone(),
-                        owned.clone(),
-                    )?,
-                    self.context.cancel_generation().clone(),
-                )
-                .await?;
+            self.restore_assigned_slot(RegistrationV1::new(
+                hex::encode(Sha256::digest(
+                    self.context.scope().gateway_origin().as_bytes(),
+                )),
+                self.context.scope().tenant_id().into(),
+                arm.0,
+                arm.1,
+                runtime.binding().clone(),
+                owned.clone(),
+            )?)
+            .await?;
+            if let Some(relays) = &self.executor.relays {
+                let (current, _) = self.load().await?;
+                relays
+                    .started(
+                        self.context,
+                        current,
+                        runtime.clone(),
+                        spec.clone(),
+                        self.executor.clock.clone(),
+                    )
+                    .await?;
+            }
             let terminal = runtime.resume_terminal(&owned.handle).await?;
             self.save_observed_result(&terminal).await?;
             self.mutate(WorkerTransitionV1::Observe {
@@ -711,7 +945,13 @@ impl<'a> Execution<'a> {
             })
             .await?;
             self.post_worker_result().await?;
-            return Ok(terminal);
+            if let Some(relays) = &self.executor.relays {
+                let (current, _) = self.load().await?;
+                relays
+                    .retire(self.context, current, self.executor.clock.clone())
+                    .await?;
+            }
+            return Ok(ControlFlow::Continue(terminal));
         }
         let callback = |owned: OwnedContainerSnapshot| async move {
             self.patch(|draft| {
@@ -757,13 +997,29 @@ impl<'a> Execution<'a> {
                 .context("worker ownership was not persisted")?;
             self.arm_and_claim(runtime, durable, None).await
         };
-        let started = |observation: ContainerObservation| async move {
-            let (_, draft) = self.load().await?;
-            self.mutate(WorkerTransitionV1::Observe {
-                observation: managed::observation_dto(draft.worker()?, &observation)?,
-            })
-            .await?;
-            Ok(())
+        let relay_spec = spec.clone();
+        let started = |observation: ContainerObservation| {
+            let relay_spec = relay_spec.clone();
+            async move {
+                let (_, draft) = self.load().await?;
+                self.mutate(WorkerTransitionV1::Observe {
+                    observation: managed::observation_dto(draft.worker()?, &observation)?,
+                })
+                .await?;
+                if let Some(relays) = &self.executor.relays {
+                    let (current, _) = self.load().await?;
+                    relays
+                        .started(
+                            self.context,
+                            current,
+                            runtime.clone(),
+                            relay_spec,
+                            self.executor.clock.clone(),
+                        )
+                        .await?;
+                }
+                Ok(())
+            }
         };
         let retained = if let Some(owned) = owned {
             // An owned instance is always reopened by immutable CID. A stored
@@ -776,6 +1032,15 @@ impl<'a> Execution<'a> {
             runtime
                 .execute_prearmed_retained(&spec, None, 1024 * 1024, callback, started)
                 .await?
+        };
+        let retained = match retained {
+            crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
+            crate::runtime::ManagedPrearmedOutcome::Abandoned { owned, retirement } => {
+                return Ok(ControlFlow::Break(Box::new(AbandonedBatch {
+                    owned,
+                    retirement,
+                })));
+            }
         };
         self.save_worker_result(&retained).await?;
         let (_, draft) = self.load().await?;
@@ -791,16 +1056,23 @@ impl<'a> Execution<'a> {
         self.post_worker_result().await?;
         // Enforcer registrations remain held. Cleanup is an independent fact;
         // no disarm or capacity release is inferred from this central terminal.
-        let removed = runtime
-            .cleanup_terminal(retained.handle(), retained.terminal())
-            .await
-            .is_ok();
+        let relay_joined = if let Some(relays) = &self.executor.relays {
+            let (current, _) = self.load().await?;
+            relays.worker_terminal(&current).await.is_ok()
+        } else {
+            true
+        };
+        let removed = relay_joined
+            && runtime
+                .cleanup_terminal(retained.handle(), retained.terminal())
+                .await
+                .is_ok();
         self.mutate(WorkerTransitionV1::CleanupResult {
             removed,
             error: (!removed).then(|| "runtime cleanup was not confirmed".into()),
         })
         .await?;
         ensure!(removed, "worker cleanup requires reconciliation");
-        Ok(retained.terminal().clone())
+        Ok(ControlFlow::Continue(retained.terminal().clone()))
     }
 }

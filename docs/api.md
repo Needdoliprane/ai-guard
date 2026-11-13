@@ -212,6 +212,51 @@ for lifecycle limits and the [French guide](setup/workloads/README.fr.md#lire-le
 An envelope containing retained credential material is refused as opaque
 `503 identity_unavailable`, without masked identifiers or a partial snapshot.
 
+### Checkpoints déclarés des brokers / Declared broker checkpoints
+
+Le schéma12 ajoute deux routes réservées au Bearer **Broker** courant, sans
+alias `/api`. Elles sont également admises sur le transport `/control` de la
+même origine ; aucun credential du relais n'est ajouté.
+
+| Route canonique / Canonical route | Demande / Request | Réponse / Response |
+|---|---|---|
+| `POST /api/v1/brokers/checkpoints` | `BrokerCheckpointV1`, au plus32768 octets / at most32768 bytes | `200 BrokerCheckpointResultV1`, première écriture ou replay exact / first write or exact replay |
+| `GET /api/v1/brokers/checkpoints/self` | Aucun corps / No body | `200 BrokerCheckpointViewV1`, publication optionnelle / optional publication |
+
+Le DTO fermé de demande contient `version:1`, `operation_id`, `incarnation_id`,
+`previous_sequence`, `sequence` et `snapshot`. Le snapshot fermé contient
+`version:1`, `authority`, `jobs` et `has_more` ; chaque job comporte `job_id`,
+`revision`, `checkpoint_hash`. Les UUID sont canoniques, les hashes sont64
+caractères hexadécimaux minuscules et les références sont triées, uniques et
+limitées à100. La séquence vaut exactement précédente+1. Tenant, broker,
+credential, binding et grant proviennent de l'identité vérifiée, jamais du
+corps ; même tenant ne permet pas de publier pour un autre broker.
+
+The Store revalidates the current binding/grant before an exact replay and
+commits the operation with mandatory workload audit. The same operation with
+different content conflicts. An ACK loss preserves the same Pending and sequence;
+it does not authorize replacement identity or a new operation. The response
+contains the submitted checkpoint, its receipt and `replayed`. The self view
+contains `version:1`, the broker view and optional checkpoint observation with
+receipt, reception/expiry timestamps, freshness, `in_current_grant`, provenance
+and `coverage:declared_partial`, including when `has_more:false`.
+
+Ces références sont des métadonnées déclarées de têtes locales confirmées,
+pas un inventaire runtime, une preuve de zéro activité ou les points de contrôle
+signés exigés par le contrat global. Leur réception est observée ; elles ne
+renouvellent ni heartbeat, grant, quota, durée d'exécution ou permission.
+Une source indisponible n'est pas remplacée par un snapshot vide.
+
+Known credentials in input, authenticated scope or commitment are refused
+before mutation. Both response envelopes are checked with the current proof's
+redactor; unsafe retained output returns generic `503 broker_checkpoint_unavailable`
+without substituting identifiers/hashes. A withheld POST response does not prove
+rollback: reconcile that same operation. A wrong role or revoked authority is
+refused; body bounds, conflicts and tenant workload budgets remain enforced.
+See [EN](setup/broker/CHECKPOINTS.md)/[FR](setup/broker/CHECKPOINTS.fr.md) for
+configuration and migration, and the [software evidence](engineering/evidence/2026-11-09/control-12-federation-bootstrap/README.md)
+for exact tested sources and remaining service/runtime qualification.
+
 ## Kubernetes held-CREATE HTTP v1
 
 Les six routes suivantes du gateway exigent une preuve Bearer **broker**

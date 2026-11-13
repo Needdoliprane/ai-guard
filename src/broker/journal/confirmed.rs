@@ -108,6 +108,7 @@ impl<'a> ChainVerifierV1<'a> {
             Some(2) => decode!(SupervisedCheckpoint, V2, "ai-guard:broker-checkpoint:v2"),
             Some(3) => decode!(LifecycleCheckpoint, V3, "ai-guard:broker-checkpoint:v3"),
             Some(4) => decode!(OutboxCheckpoint, V4, "ai-guard:broker-checkpoint:v4"),
+            Some(5) => decode!(RetirementCheckpoint, V5, "ai-guard:broker-checkpoint:v5"),
             _ => return Err(JournalError::UnsupportedVersion),
         };
         context_checkpoint_with_launch(
@@ -244,6 +245,13 @@ pub(super) fn context_checkpoint_with_launch(
     if let Some(value) = checkpoint.outbox() {
         value.validate_context(intent)?;
     }
+    if let Some(value) = checkpoint.retirement() {
+        value.validate_context(
+            scope,
+            intent.operation_id(),
+            &intent.intent_hash().map_err(|_| JournalError::Conflict)?,
+        )?;
+    }
     Ok(())
 }
 pub(super) fn context(
@@ -294,6 +302,11 @@ pub(super) fn check_transition(
         // must not erase its engaged start profile. Legacy transitions stay exact.
         return Err(JournalError::Conflict);
     }
+    if let Some(value) = next.retirement() {
+        value.validate_transition(previous.retirement())?;
+    } else if previous.retirement().is_some() {
+        return Err(JournalError::Conflict);
+    }
     if let Some(value) = next.outbox() {
         value.validate_transition(previous.outbox())?;
     } else if previous.outbox().is_some() {
@@ -338,6 +351,8 @@ pub(super) fn check_transition(
         (LoadedCheckpoint::V3(_), _)
         | (_, LoadedCheckpoint::V3(_))
         | (LoadedCheckpoint::V4(_), _)
-        | (_, LoadedCheckpoint::V4(_)) => Err(JournalError::Conflict),
+        | (_, LoadedCheckpoint::V4(_))
+        | (LoadedCheckpoint::V5(_), _)
+        | (_, LoadedCheckpoint::V5(_)) => Err(JournalError::Conflict),
     }
 }

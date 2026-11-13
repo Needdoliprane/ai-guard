@@ -332,6 +332,22 @@ async fn control_caps_bind_request_scope_policy_origin_and_both_deadlines() {
                     .revision,
                 1
             );
+            let head = store.head()?;
+            let confirmed =
+                store.confirm_kubernetes_session_control_before_effect(auth, &cap, &policy)?;
+            assert_eq!(confirmed.tenant_id(), store.tenant_id());
+            assert_eq!(
+                confirmed.snapshot().input_hash,
+                input.input_hash(store.tenant_id())?
+            );
+            assert!(confirmed.audit_seq() > 0);
+            assert_eq!(store.head()?, head);
+            assert!(
+                store
+                    .confirm_kubernetes_session_control_before_effect(other, &cap, &policy)
+                    .is_err()
+            );
+            assert_eq!(store.head()?, head);
             let mut cap = before_effect(store.authorize_kubernetes_session_control_recovery(
                 auth,
                 &KubernetesSessionControlRecoveryTargetV2::CloseBeforeEffect {

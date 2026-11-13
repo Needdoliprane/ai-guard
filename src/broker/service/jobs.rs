@@ -28,10 +28,64 @@ use uuid::Uuid;
 
 const MAX_JOBS: usize = 256;
 
+#[cfg(test)]
+mod retirement_audit_tests {
+    use super::*;
+
+    #[test]
+    fn audit_sweep_visits_later_jobs_without_creating_or_waiting_for_earlier_jobs() {
+        let jobs = ProfileJobs::new();
+        for id in 1..=6 {
+            jobs.job(Uuid::from_u128(id)).unwrap();
+        }
+        let first = jobs.retirement_audit_batch().unwrap();
+        let second = jobs.retirement_audit_batch().unwrap();
+        assert_eq!(first.len(), 4);
+        assert_eq!(second.len(), 4);
+        assert!(second.contains(&Uuid::from_u128(5)));
+        assert!(second.contains(&Uuid::from_u128(6)));
+        assert_eq!(jobs.jobs.lock().unwrap().len(), 6);
+        assert!(jobs.known(Uuid::from_u128(7)).is_none());
+    }
+
+    #[test]
+    fn retirement_probe_cursor_rotates_one_entry_and_remains_metadata_after_cancel() {
+        let job = Job::new();
+        let ids = [Uuid::from_u128(3), Uuid::from_u128(1), Uuid::from_u128(2)];
+        for expected in [1, 2, 3, 1] {
+            assert_eq!(
+                job.next_retirement_query(&ids).unwrap(),
+                Some(Uuid::from_u128(expected))
+            );
+        }
+        job.cancel.invalidate();
+        assert_eq!(
+            job.next_retirement_query(&ids).unwrap(),
+            Some(Uuid::from_u128(2))
+        );
+        assert_eq!(job.next_retirement_query(&[]).unwrap(), None);
+        assert!(job.next_retirement_query(&[Uuid::nil()]).is_err());
+    }
+}
+
 pub(super) struct ProfileJobs {
     pub(super) writer: OnceCell<ProfileWriterCapabilities>,
     identity: Arc<AsyncMutex<()>>,
     jobs: Mutex<BTreeMap<Uuid, Arc<Job>>>,
+    retirement_audit_cursor: Mutex<Option<Uuid>>,
+    pub(super) retirement_startup: super::retirement_startup::StartupSlot,
+    #[cfg(test)]
+    retirement_snapshot_gate: Mutex<Option<RetirementSnapshotGate>>,
+    #[cfg(test)]
+    retirement_after_q_gate: Mutex<Option<RetirementSnapshotGate>>,
+    #[cfg(test)]
+    retirement_before_q_gate: Mutex<Option<RetirementSnapshotGate>>,
+}
+#[cfg(test)]
+struct RetirementSnapshotGate {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: tokio::sync::oneshot::Receiver<()>,
+    completed: tokio::sync::oneshot::Sender<()>,
 }
 impl ProfileJobs {
     pub(super) fn new() -> Self {
@@ -39,7 +93,105 @@ impl ProfileJobs {
             writer: OnceCell::new(),
             identity: Arc::new(AsyncMutex::new(())),
             jobs: Mutex::new(BTreeMap::new()),
+            retirement_audit_cursor: Mutex::new(None),
+            retirement_startup: super::retirement_startup::StartupSlot::default(),
+            #[cfg(test)]
+            retirement_snapshot_gate: Mutex::new(None),
+            #[cfg(test)]
+            retirement_after_q_gate: Mutex::new(None),
+            #[cfg(test)]
+            retirement_before_q_gate: Mutex::new(None),
         }
+    }
+    #[cfg(test)]
+    pub(super) fn gate_retirement_snapshot_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        let mut gate = self.retirement_snapshot_gate.lock().unwrap();
+        assert!(gate.is_none(), "one per-profile test barrier");
+        *gate = Some(RetirementSnapshotGate {
+            entered,
+            resume: wait,
+            completed,
+        });
+        (observe, resume, done)
+    }
+    #[cfg(test)]
+    pub(super) async fn retirement_snapshot_boundary_for_test(
+        &self,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let gate = { self.retirement_snapshot_gate.lock().unwrap().take() };
+        let gate = gate?;
+        let _ = gate.entered.send(());
+        let _ = gate.resume.await;
+        Some(gate.completed)
+    }
+    #[cfg(test)]
+    pub(super) fn gate_retirement_after_q_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        let mut gate = self.retirement_after_q_gate.lock().unwrap();
+        assert!(gate.is_none(), "one per-profile post-Q test barrier");
+        *gate = Some(RetirementSnapshotGate {
+            entered,
+            resume: wait,
+            completed,
+        });
+        (observe, resume, done)
+    }
+    #[cfg(test)]
+    pub(super) async fn retirement_after_q_boundary_for_test(
+        &self,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let gate = { self.retirement_after_q_gate.lock().unwrap().take() };
+        let gate = gate?;
+        let _ = gate.entered.send(());
+        let _ = gate.resume.await;
+        Some(gate.completed)
+    }
+    #[cfg(test)]
+    pub(super) fn gate_retirement_before_q_for_test(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (entered, observe) = tokio::sync::oneshot::channel();
+        let (resume, wait) = tokio::sync::oneshot::channel();
+        let (completed, done) = tokio::sync::oneshot::channel();
+        let mut gate = self.retirement_before_q_gate.lock().unwrap();
+        assert!(gate.is_none(), "one per-profile pre-Q test barrier");
+        *gate = Some(RetirementSnapshotGate {
+            entered,
+            resume: wait,
+            completed,
+        });
+        (observe, resume, done)
+    }
+    #[cfg(test)]
+    pub(super) async fn retirement_before_q_boundary_for_test(
+        &self,
+    ) -> Option<tokio::sync::oneshot::Sender<()>> {
+        let gate = { self.retirement_before_q_gate.lock().unwrap().take() };
+        let gate = gate?;
+        let _ = gate.entered.send(());
+        let _ = gate.resume.await;
+        Some(gate.completed)
     }
     /// Covers only identity checks and their local durable publication. Never
     /// hold this across a provider/runtime/HTTP call or the execution lifetime.
@@ -73,6 +225,55 @@ impl ProfileJobs {
     pub(super) fn known(&self, operation: Uuid) -> Option<Arc<Job>> {
         self.jobs.lock().ok()?.get(&operation).cloned()
     }
+    /// Process-local exclusion over the original known Job. Authentication
+    /// and durable/native evidence remain necessary for every guardian action.
+    pub(super) fn try_retirement_query(
+        &self,
+        operation: Uuid,
+    ) -> Result<Option<RetirementQueryGuard>, BrokerErrorCodeV1> {
+        if operation.is_nil() {
+            return Err(BrokerErrorCodeV1::InvalidInput);
+        }
+        let job = self
+            .jobs
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?
+            .get(&operation)
+            .cloned()
+            .ok_or(BrokerErrorCodeV1::Unavailable)?;
+        let Ok(guard) = Arc::clone(&job.gate).try_lock_owned() else {
+            return Ok(None);
+        };
+        Ok(Some(RetirementQueryGuard {
+            job,
+            operation,
+            _guard: guard,
+        }))
+    }
+    /// A bounded round-robin metadata sweep. A broken job cannot permanently
+    /// keep later jobs behind its audit retries; this never creates a job.
+    pub(super) fn retirement_audit_batch(&self) -> Result<Vec<Uuid>, BrokerErrorCodeV1> {
+        use std::ops::Bound::{Excluded, Unbounded};
+        let jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let mut cursor = self
+            .retirement_audit_cursor
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let after = cursor.unwrap_or(Uuid::nil());
+        let batch = jobs
+            .range((Excluded(after), Unbounded))
+            .chain(jobs.range(..=after))
+            .map(|(id, _)| *id)
+            .take(4)
+            .collect::<Vec<_>>();
+        if let Some(last) = batch.last() {
+            *cursor = Some(*last);
+        }
+        Ok(batch)
+    }
     pub(super) fn invalidate_all(&self) {
         if let Ok(jobs) = self.jobs.lock() {
             for job in jobs.values() {
@@ -80,10 +281,22 @@ impl ProfileJobs {
             }
         }
     }
+    pub(super) fn has_retained_retirement(&self) -> bool {
+        self.retirement_startup.has_retained()
+            || self
+                .jobs
+                .lock()
+                .map(|jobs| {
+                    jobs.values()
+                        .any(|job| job.preclaim.has_retained_retirement())
+                })
+                .unwrap_or(true)
+    }
 }
 
 pub(super) struct Job {
     pub(super) cancel: CancelGeneration,
+    pub(super) preclaim: super::preclaim::PreclaimControlV1,
     gate: Arc<AsyncMutex<()>>,
     running: AtomicBool,
     cancelling: AtomicUsize,
@@ -91,6 +304,7 @@ pub(super) struct Job {
     error: Mutex<Option<BrokerErrorCodeV1>>,
     source: Mutex<Option<Arc<AuthorizedSource>>>,
     reconciliation: Mutex<(u32, Option<Instant>)>,
+    retirement_query_cursor: Mutex<Option<Uuid>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -101,8 +315,10 @@ enum CancelState {
 }
 impl Job {
     fn new() -> Self {
+        let cancel = CancelGeneration::new();
         Self {
-            cancel: CancelGeneration::new(),
+            preclaim: super::preclaim::PreclaimControlV1::new(cancel.clone()),
+            cancel,
             gate: Arc::new(AsyncMutex::new(())),
             running: AtomicBool::new(false),
             cancelling: AtomicUsize::new(0),
@@ -110,6 +326,7 @@ impl Job {
             error: Mutex::new(None),
             source: Mutex::new(None),
             reconciliation: Mutex::new((0, None)),
+            retirement_query_cursor: Mutex::new(None),
         }
     }
     /// A failed attempt does not queue another execution behind a live one.
@@ -227,6 +444,27 @@ impl Job {
             .map_err(|_| BrokerErrorCodeV1::Unavailable)? = source;
         Ok(())
     }
+    /// Select one confirmed retirement for this process's next metadata probe.
+    /// The cursor is scheduling data and cannot authorize a guardian action.
+    pub(super) fn next_retirement_query(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Option<Uuid>, BrokerErrorCodeV1> {
+        if ids.iter().any(Uuid::is_nil) {
+            return Err(BrokerErrorCodeV1::NeedsReconciliation);
+        }
+        let mut cursor = self
+            .retirement_query_cursor
+            .lock()
+            .map_err(|_| BrokerErrorCodeV1::Unavailable)?;
+        let next = cursor
+            .and_then(|after| ids.iter().copied().filter(|id| *id > after).min())
+            .or_else(|| ids.iter().copied().min());
+        if let Some(next) = next {
+            *cursor = Some(next);
+        }
+        Ok(next)
+    }
     pub(super) fn result(&self, error: Option<BrokerErrorCodeV1>) {
         if let Ok(mut current) = self.error.lock() {
             *current = error;
@@ -253,6 +491,22 @@ impl Job {
             Ok(error) => *error,
             Err(_) => Some(BrokerErrorCodeV1::Unavailable),
         };
+    }
+}
+
+/// Metadata coordination only. The same mutex excludes an existing Full
+/// producer, while acquisition leaves running/cancellation state unchanged.
+pub(super) struct RetirementQueryGuard {
+    job: Arc<Job>,
+    operation: Uuid,
+    _guard: OwnedMutexGuard<()>,
+}
+impl RetirementQueryGuard {
+    pub(super) fn operation_id(&self) -> Uuid {
+        self.operation
+    }
+    pub(super) fn job(&self) -> &Arc<Job> {
+        &self.job
     }
 }
 
@@ -383,6 +637,19 @@ pub(super) fn entry_status(entry: &JournalEntryV1, local: Option<&Job>) -> JobSt
     if let Some(local) = local {
         local.enrich(&mut result);
     }
+    result
+}
+
+/// The same closed V1 diagnostic fields, from an actor-acknowledged projection.
+/// No checkpoint, review receipt or runner material is recovered from this view.
+pub(super) fn last_confirmed_status(
+    projection: &crate::broker::journal::status_projection::LastConfirmedStatus,
+    local: Option<&Job>,
+) -> JobStatusV1 {
+    let mut result = entry_status(projection.entry(), local);
+    result.intent_hash = projection.intent_hash().map(str::to_owned);
+    result.last_decision = projection.last_decision().cloned();
+    result.review_request_hash = projection.review_request_hash().map(str::to_owned);
     result
 }
 

@@ -7,7 +7,7 @@ use crate::{
     broker_registry::{BrokerMutationResultV1, parse_time, registry_uuid, revision},
     control::{ControlProtocolV1, SupervisionProtocolV1},
     control_fs::{Directory, PrivateFile, absolute_path},
-    workload::WorkloadBindingReceiptV1,
+    workload::{WorkloadBindingIssueV1, WorkloadBindingReceiptV1},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,6 +87,7 @@ pub(super) struct Operation {
     source: PrivateFile,
     credential: Option<PrivateFile>,
     pub recovery: Recovery,
+    readonly: bool,
 }
 
 fn encode(value: &impl Serialize) -> Result<Vec<u8>> {
@@ -173,12 +174,16 @@ impl Operation {
             source,
             credential,
             recovery,
+            readonly: false,
         };
         operation.revalidate()?;
         Ok(operation)
     }
 
     fn synchronize_preparation(&self) -> Result<()> {
+        if self.readonly {
+            return Err(E::UnsafeState);
+        }
         // Visible complete bytes after a failed/interrupted preparation are not
         // proof that its file or directory durability barriers completed.
         if let Some(file) = &self.credential {
@@ -193,6 +198,18 @@ impl Operation {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        let operation = Self::open_existing(path, false)?;
+        operation.synchronize_preparation()?;
+        Ok(operation)
+    }
+
+    /// Broker reads completed issued material without publishing or syncing a
+    /// CLI stage. The original CLI open path above keeps its recovery barriers.
+    pub(super) fn open_readonly(path: &Path) -> Result<Self> {
+        Self::open_existing(path, true)
+    }
+
+    fn open_existing(path: &Path, readonly: bool) -> Result<Self> {
         let path = absolute_path(path).map_err(|_| E::UnsafeState)?;
         let directory = Directory::open_existing(&path).map_err(|_| E::UnsafeState)?;
         inventory(&directory)?;
@@ -203,19 +220,32 @@ impl Operation {
         if !source.persistent_try_lock().map_err(|_| E::UnsafeState)? {
             return Err(E::Busy);
         }
-        let recovery: Recovery =
-            serde_json::from_slice(source.bytes()).map_err(|_| E::IncompletePreparation)?;
+        let recovery: Recovery = serde_json::from_slice(source.bytes()).map_err(|_| {
+            if readonly {
+                E::UnsafeState
+            } else {
+                E::IncompletePreparation
+            }
+        })?;
+        if readonly {
+            crate::json::decode_unique(source.bytes(), 64).map_err(|_| E::UnsafeState)?;
+        }
         let credential = directory
             .persistent_read("credential", 128, &[])
             .map_err(|_| E::UnsafeState)?;
+        if readonly && matches!(&recovery.request, Request::Issue(_)) && credential.is_none() {
+            // Preparation writes its key before recovery.json. Once the latter
+            // is visible, a missing key is an integrity failure, not late issue.
+            return Err(E::UnsafeState);
+        }
         let operation = Self {
             directory,
             source,
             credential,
             recovery,
+            readonly,
         };
         operation.revalidate()?;
-        operation.synchronize_preparation()?;
         Ok(operation)
     }
 
@@ -292,6 +322,9 @@ impl Operation {
     }
 
     pub fn confirm_scope(&self, protocol: &ControlProtocolV1) -> Result<()> {
+        if self.readonly {
+            return Err(E::UnsafeState);
+        }
         self.revalidate()?;
         self.validate_protocol(protocol)?;
         if self.read_record::<Scope>("scope", "scope.json")?.is_none() {
@@ -335,6 +368,9 @@ impl Operation {
     }
 
     pub fn save_receipt(&self, receipt: &RecordedReceipt) -> Result<()> {
+        if self.readonly {
+            return Err(E::UnsafeState);
+        }
         self.revalidate()?;
         validate_receipt(&self.recovery, receipt)?;
         if let Some(previous) = self.receipt()? {
@@ -384,13 +420,58 @@ impl Operation {
             .persistent_read(file, MAX_RECORD, &[])
             .map_err(|_| E::UnsafeState)?
             .ok_or(E::UnsafeState)?;
+        if self.readonly {
+            crate::json::decode_unique(source.bytes(), 64).map_err(|_| E::UnsafeState)?;
+        }
         let value = serde_json::from_slice(source.bytes()).map_err(|_| E::UnsafeState)?;
-        source.persistent_sync().map_err(|_| E::UnsafeState)?;
-        directory.durable_bootstrap().map_err(|_| E::UnsafeState)?;
+        if !self.readonly {
+            source.persistent_sync().map_err(|_| E::UnsafeState)?;
+            directory.durable_bootstrap().map_err(|_| E::UnsafeState)?;
+        }
         Ok(Some(value))
     }
 
+    pub(super) fn retained_binding_material(
+        &self,
+    ) -> Result<(
+        WorkloadBindingIssueV1,
+        WorkloadBindingReceiptV1,
+        PrivateFile,
+        Vec<PrivateFile>,
+    )> {
+        if !self.readonly {
+            return Err(E::UnsafeState);
+        }
+        self.revalidate()?;
+        let Request::Issue(issue) = &self.recovery.request else {
+            return Err(E::ScopeMismatch);
+        };
+        let Some(RecordedReceipt::Binding(receipt)) = self.receipt()? else {
+            return Err(E::IncompletePreparation);
+        };
+        let credential = self.credential.clone().ok_or(E::IncompletePreparation)?;
+        let mut retained = Vec::new();
+        for (name, leaf) in [("scope", "scope.json"), ("receipt", "receipt.json")] {
+            let directory = self
+                .directory
+                .persistent_child(name, false)
+                .map_err(|_| E::UnsafeState)?
+                .ok_or(E::IncompletePreparation)?;
+            let record = directory
+                .persistent_read(leaf, MAX_RECORD, &[])
+                .map_err(|_| E::UnsafeState)?
+                .ok_or(E::IncompletePreparation)?;
+            record.persistent_revalidate().map_err(|_| E::UnsafeState)?;
+            retained.push(record);
+        }
+        self.revalidate()?;
+        Ok((issue.clone(), receipt, credential, retained))
+    }
+
     fn publish(&self, target: &str, file: &str, value: &impl Serialize) -> Result<()> {
+        if self.readonly {
+            return Err(E::UnsafeState);
+        }
         if inventory(&self.directory)? >= MAX_STAGES {
             return Err(E::UnsafeState);
         }

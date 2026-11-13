@@ -1,5 +1,12 @@
 //! A bounded typed queue around the existing journal. Only the dedicated OS
 //! thread performs journal work; a caller timeout never cancels queued work.
+#[path = "writer_retirement.rs"]
+mod retirement;
+pub(crate) use retirement::{
+    AuthorizedRetirement, BeginUnusedRetirement, FinalRetirementRecovery, PendingUnusedRetirement,
+    RetirementContinuation, RetirementFailure,
+};
+
 use super::{
     checkpoint::{BrokerCheckpointV2, SupervisionCheckpointV1},
     journal::{
@@ -28,6 +35,14 @@ use uuid::Uuid;
 
 mod cold_audit;
 mod queue;
+mod retirement_owners;
+mod status_cache;
+pub(crate) use status_cache::LastConfirmedHeads;
+#[cfg(test)]
+#[path = "writer/stops_handoff_test.rs"]
+mod stops_handoff_test;
+#[cfg(test)]
+pub(in crate::broker) use stops_handoff_test::StopsHandoffForTest;
 
 use cold_audit::ColdAuditCompletion;
 pub(in crate::broker) use cold_audit::{ColdAuditWriterClient, ReservedColdAudit};
@@ -157,6 +172,51 @@ enum Command {
         operation_id: Uuid,
         reply: Reply<Option<super::journal::recovery::cold_audit::completion::ConfirmedColdAudit>>,
     },
+    #[cfg(test)]
+    TestPause {
+        release: mpsc::Receiver<()>,
+        active: Arc<std::sync::atomic::AtomicBool>,
+        reply: Reply<()>,
+    },
+    #[cfg(test)]
+    TestAdvanceReplyBarrier {
+        entered: oneshot::Sender<()>,
+        release: mpsc::Receiver<()>,
+        fail_before_ack: bool,
+        reply: Reply<()>,
+    },
+    PendingRetirementEvents {
+        operation_id: Uuid,
+        reply: Reply<Vec<OutboxEventV1>>,
+    },
+    AcknowledgeRetirementEvents {
+        operation_id: Uuid,
+        acknowledgements: Vec<(Uuid, String, i64)>,
+        reply: Reply<Vec<OutboxReceiptV1>>,
+    },
+    BeginUnusedRetirement {
+        owner: Arc<retirement_owners::Owner<BeginUnusedRetirement, PendingUnusedRetirement>>,
+        reply: Reply<()>,
+    },
+    AuthorizeUnusedRetirement {
+        owner: Arc<retirement_owners::Owner<PendingUnusedRetirement, AuthorizedRetirement>>,
+        reply: Reply<()>,
+    },
+    BindFull3 {
+        operation_id: Uuid,
+        expected: RevisionRefV1,
+        binding: Box<super::retirement_checkpoint::Full3RegistrationBindingV1>,
+        reply: Reply<CheckpointReceiptV1>,
+    },
+    FinalizeRetirement {
+        owner: Arc<
+            retirement_owners::Owner<
+                super::enforcer::retirement::VerifiedRetirementReceipt,
+                CheckpointReceiptV1,
+            >,
+        >,
+        reply: Reply<()>,
+    },
     Reserve {
         operation_id: Uuid,
         submit: Vec<u8>,
@@ -231,13 +291,22 @@ struct ClientState {
     scope: JournalScopeV1,
     timeout: Duration,
     inventory_pending: Arc<AtomicBool>,
+    retirements: Arc<retirement_owners::RetirementOwners>,
+    status_cache: Arc<status_cache::StatusCache>,
 }
 
+#[derive(Clone)]
 enum Backend {
     Full(Journal),
     Stops(StopJournal),
 }
 impl Backend {
+    fn projection_limits(&self) -> (u32, u64) {
+        match self {
+            Self::Full(journal) => journal.status_projection_limits(),
+            Self::Stops(_) => (0, 0),
+        }
+    }
     fn scope(&self) -> &JournalScopeV1 {
         match self {
             Self::Full(journal) => journal.scope(),
@@ -267,17 +336,29 @@ impl ClientState {
         let scope = backend.scope().clone();
         let (sender, receiver) =
             queue::bounded(capacity as usize).map_err(|_| JournalError::InvalidInput)?;
+        let retirements = Arc::new(retirement_owners::RetirementOwners::new(
+            capacity as usize,
+            backend.clone(),
+        ));
+        let retained = Arc::clone(&retirements);
+        let limits = backend.projection_limits();
+        let status_cache = Arc::new(status_cache::StatusCache::new(limits.0, limits.1));
+        let actor_status = Arc::clone(&status_cache);
         // Closing the queue is graceful. No client Drop joins a blocked fsync;
         // the actor owns its exact existing lease until queued work drains.
         let _thread = std::thread::Builder::new()
             .name("ai-guard-journal-writer".into())
-            .spawn(move || serve_backend(backend, receiver))
+            .spawn(move || serve_backend(backend, receiver, retained, actor_status))
             .map_err(|_| JournalError::Io)?;
+        #[cfg(test)]
+        retirements.retain_writer_join_for_test(_thread);
         Ok(Arc::new(Self {
             sender,
             scope,
             timeout,
             inventory_pending: Arc::new(AtomicBool::new(false)),
+            retirements,
+            status_cache,
         }))
     }
     async fn call<T: Send + 'static>(
@@ -286,19 +367,76 @@ impl ClientState {
     ) -> JournalResult<T> {
         tokio::runtime::Handle::try_current().map_err(|_| JournalError::Io)?;
         let (reply, receive) = oneshot::channel();
-        match self.sender.try_send(command(reply)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
-            Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
+        #[cfg(test)]
+        {
+            use super::journal::cost_measurement::{self, WriterKind};
+            let command = command(reply);
+            let context = self as *const Self as usize;
+            let cost = match &command {
+                Command::Load { operation_id, .. } => {
+                    cost_measurement::caller(context, WriterKind::Load, *operation_id)
+                }
+                Command::Status { operation_id, .. } => {
+                    cost_measurement::caller(context, WriterKind::Status, *operation_id)
+                }
+                _ => None,
+            };
+            let sent = self.sender.try_send(command);
+            match sent {
+                Ok(()) => {
+                    if let Some(cost) = &cost {
+                        cost.sent();
+                    }
+                }
+                Err(mpsc::TrySendError::Full(_)) => {
+                    if let Some(cost) = cost {
+                        cost.finish(false, false);
+                    }
+                    return Err(JournalError::Busy);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    if let Some(cost) = cost {
+                        cost.finish(false, false);
+                    }
+                    return Err(JournalError::Io);
+                }
+            }
+            // Same timeout and nested error mapping as receive. Only this
+            // test branch can distinguish reception from an actor's Io reply.
+            let mut waiter = status_cache::WaiterGuard::new(Arc::clone(&self.status_cache));
+            let completed = tokio::time::timeout(self.timeout, receive).await;
+            let received = matches!(&completed, Ok(Ok(_)));
+            if received {
+                waiter.acknowledged();
+            }
+            let result = match completed {
+                Ok(Ok(result)) => result,
+                _ => Err(JournalError::Io),
+            };
+            if let Some(cost) = cost {
+                cost.finish(received, result.is_ok());
+            }
+            result
         }
-        // A lost reply never removes or cancels the actor's typed command.
-        self.receive(receive).await
+        #[cfg(not(test))]
+        {
+            match self.sender.try_send(command(reply)) {
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => return Err(JournalError::Busy),
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(JournalError::Io),
+            }
+            // A lost reply never removes or cancels the actor's typed command.
+            self.receive(receive).await
+        }
     }
     async fn receive<T>(&self, receive: oneshot::Receiver<JournalResult<T>>) -> JournalResult<T> {
-        tokio::time::timeout(self.timeout, receive)
+        let mut waiter = status_cache::WaiterGuard::new(Arc::clone(&self.status_cache));
+        let result = tokio::time::timeout(self.timeout, receive)
             .await
             .map_err(|_| JournalError::Io)?
-            .map_err(|_| JournalError::Io)?
+            .map_err(|_| JournalError::Io)?;
+        waiter.acknowledged();
+        result
     }
 }
 
@@ -472,19 +610,161 @@ impl StopWriterClient {
 #[derive(Clone)]
 pub struct WriterClient(Arc<ClientState>);
 
+/// Controls only a test pause in the real actor, without acquiring its journal
+/// mutex or replacing its backend, queue, or lease. Drop releases the actor.
+#[cfg(test)]
+pub(crate) struct WriterPauseGuard {
+    release: mpsc::Sender<()>,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+#[cfg(test)]
+impl WriterPauseGuard {
+    pub(crate) fn is_paused(&self) -> bool {
+        self.active.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+#[cfg(test)]
+impl Drop for WriterPauseGuard {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+    }
+}
+#[cfg(test)]
+pub(crate) struct AdvanceReplyBarrier {
+    entered: Option<oneshot::Receiver<()>>,
+    release: mpsc::Sender<()>,
+}
+#[cfg(test)]
+impl AdvanceReplyBarrier {
+    pub(crate) async fn entered(&mut self) {
+        self.entered
+            .take()
+            .expect("one owned barrier waiter")
+            .await
+            .expect("actor reached its real reply barrier");
+    }
+}
+#[cfg(test)]
+impl Drop for AdvanceReplyBarrier {
+    fn drop(&mut self) {
+        let _ = self.release.send(());
+    }
+}
+
 impl fmt::Debug for WriterClient {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("WriterClient(<private>)")
     }
 }
 
+// Exercise the same existing actor pause after a genuine Full-to-Stops
+// handoff. This test seam does not construct or convert a Full facade.
+#[cfg(test)]
+impl StopWriterClient {
+    pub(crate) async fn pause_for_test(&self) -> JournalResult<WriterPauseGuard> {
+        let (release, wait) = mpsc::channel();
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guard = WriterPauseGuard {
+            release,
+            active: Arc::clone(&active),
+        };
+        self.0
+            .call(move |reply| Command::TestPause {
+                release: wait,
+                active,
+                reply,
+            })
+            .await?;
+        Ok(guard)
+    }
+}
+
 impl WriterClient {
+    #[cfg(test)]
+    pub(crate) async fn advance_reply_barrier_for_test(
+        &self,
+        fail_before_ack: bool,
+    ) -> JournalResult<AdvanceReplyBarrier> {
+        let (entered, observed) = oneshot::channel();
+        let (release, wait) = mpsc::channel();
+        let guard = AdvanceReplyBarrier {
+            entered: Some(observed),
+            release,
+        };
+        self.call(move |reply| Command::TestAdvanceReplyBarrier {
+            entered,
+            release: wait,
+            fail_before_ack,
+            reply,
+        })
+        .await?;
+        Ok(guard)
+    }
+    /// Last actor-acknowledged control facts only, never a fresh filesystem or
+    /// engine observation. Cold entries use the existing strict writer path.
+    pub(crate) async fn last_confirmed_status(
+        &self,
+        operation_id: Uuid,
+    ) -> JournalResult<Option<super::journal::status_projection::LastConfirmedStatus>> {
+        if let Some(status) = self.0.status_cache.read(operation_id)? {
+            return Ok(Some(status));
+        }
+        let strict = self.status(operation_id).await?;
+        // Observe closure/taint after the cold read too. An unknown or fenced
+        // writer never turns into a known-empty diagnostic response.
+        if let Some(status) = self.0.status_cache.read(operation_id)? {
+            return Ok(Some(status));
+        }
+        Ok(strict.as_ref().map(|status| {
+            super::journal::status_projection::LastConfirmedStatus::from_status(
+                operation_id,
+                status,
+            )
+        }))
+    }
+    /// Sorted metadata from the retained last-ACK cache window only. No strict
+    /// read, FIFO request or fallback is performed. Cold/empty is unknown, and
+    /// even has_more=false never establishes complete journal coverage.
+    pub(crate) fn last_confirmed_heads(&self, limit: usize) -> JournalResult<LastConfirmedHeads> {
+        self.0.status_cache.read_heads(limit)
+    }
+    pub(crate) fn invalidate_status_projection(&self) {
+        self.0.status_cache.invalidate();
+    }
+    pub(crate) fn bind_status_service(&self, fenced: &Arc<AtomicBool>, stopping: &Arc<AtomicBool>) {
+        self.0
+            .status_cache
+            .bind_service(Arc::downgrade(fenced), Arc::downgrade(stopping));
+    }
+    #[cfg(test)]
+    pub(crate) async fn pause_for_test(&self) -> JournalResult<WriterPauseGuard> {
+        let (release, wait) = mpsc::channel();
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // Construct before the fallible call: even a queued command whose ACK
+        // is lost will be released when this guard drops on the error path.
+        let guard = WriterPauseGuard {
+            release,
+            active: Arc::clone(&active),
+        };
+        self.call(move |reply| Command::TestPause {
+            release: wait,
+            active,
+            reply,
+        })
+        .await?;
+        Ok(guard)
+    }
+
     pub fn start(journal: Journal, capacity: u32, timeout: Duration) -> JournalResult<Self> {
         ClientState::start(Backend::Full(journal), capacity, timeout).map(Self)
     }
 
     pub fn scope(&self) -> &JournalScopeV1 {
         &self.0.scope
+    }
+    #[cfg(test)]
+    pub(in crate::broker) fn cost_context_for_test(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
     }
     pub fn stops(&self) -> StopWriterClient {
         StopWriterClient(Arc::clone(&self.0))
@@ -742,15 +1022,31 @@ impl WriterClient {
 
 #[cfg(test)]
 fn serve(journal: Journal, receiver: queue::QueueReceiver<Command>) {
-    serve_backend(Backend::Full(journal), receiver);
+    let limits = journal.status_projection_limits();
+    let status = Arc::new(status_cache::StatusCache::new(limits.0, limits.1));
+    let backend = Backend::Full(journal);
+    let owners = Arc::new(retirement_owners::RetirementOwners::new(
+        256,
+        backend.clone(),
+    ));
+    serve_backend(backend, receiver, owners, status);
 }
 
-fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
+fn serve_backend(
+    backend: Backend,
+    receiver: queue::QueueReceiver<Command>,
+    _retirements: Arc<retirement_owners::RetirementOwners>,
+    status: Arc<status_cache::StatusCache>,
+) {
+    let _lifetime = retirement_owners::WriterExit(Arc::clone(&_retirements));
+    let _status_lifetime = status_cache::ActorLifetime(Arc::clone(&status));
     // At most one preparation can be live in this actor's weak registry. An
     // error retains that strong guard before replying, so another preparation
     // cannot refund or reuse an ambiguous publication's capacity. These inputs
     // contain no ClientState/sender and cannot prevent graceful queue closure.
     let mut cold_quarantine = Vec::new();
+    #[cfg(test)]
+    let mut advance_reply_barrier: Option<(oneshot::Sender<()>, mpsc::Receiver<()>, bool)> = None;
     while let Ok(command) = receiver.recv() {
         match command {
             Command::CompleteColdAudit { mut input, reply } => {
@@ -758,7 +1054,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     Backend::Stops(journal) => input.apply(journal),
                     Backend::Full(_) => {
                         // No publication was attempted on this rejected route.
-                        let _ = reply.send(Err(JournalError::InvalidInput));
+                        let _ = respond(
+                            &backend,
+                            &status,
+                            reply,
+                            Err(JournalError::InvalidInput),
+                            status_cache::Update::None,
+                            false,
+                        );
                         continue;
                     }
                 };
@@ -768,14 +1071,28 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     // on its ordinary path. Recovery is confirmation-only.
                     cold_quarantine.push(input);
                 }
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                );
             }
             Command::RecoverColdAudit {
                 operation_id,
                 reply,
             } => {
                 if operation_id.is_nil() {
-                    let _ = reply.send(Err(JournalError::InvalidInput));
+                    let _ = respond(
+                        &backend,
+                        &status,
+                        reply,
+                        Err(JournalError::InvalidInput),
+                        status_cache::Update::None,
+                        false,
+                    );
                     continue;
                 }
                 let result = match &backend {
@@ -800,7 +1117,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                         }
                     }
                 };
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                );
             }
             Command::PrepareColdAudit {
                 operation_id,
@@ -814,17 +1138,190 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     // descriptive facts can convert a Full actor into Stops.
                     Backend::Full(_) => Err(JournalError::InvalidInput),
                 };
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            #[cfg(test)]
+            Command::TestAdvanceReplyBarrier {
+                entered,
+                release,
+                fail_before_ack,
+                reply,
+            } => {
+                assert!(
+                    advance_reply_barrier
+                        .replace((entered, release, fail_before_ack))
+                        .is_none(),
+                    "one pending actor reply barrier"
+                );
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    Ok(()),
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            #[cfg(test)]
+            Command::TestPause {
+                release,
+                active,
+                reply,
+            } => {
+                active.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    Ok(()),
+                    status_cache::Update::None,
+                    false,
+                );
+                // Fail-safe bound belongs only to the test seam; no productive
+                // queue, RPC, Arm, or journal timeout is changed.
+                let _ = release.recv_timeout(Duration::from_secs(10));
+                active.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            Command::PendingRetirementEvents {
+                operation_id,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => {
+                        StopJournal::from_full(journal).pending_retirement_events(operation_id)
+                    }
+                    Backend::Stops(journal) => journal.pending_retirement_events(operation_id),
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            Command::AcknowledgeRetirementEvents {
+                operation_id,
+                acknowledgements,
+                reply,
+            } => {
+                let result = match &backend {
+                    Backend::Full(journal) => StopJournal::from_full(journal)
+                        .acknowledge_retirement_events(operation_id, acknowledgements),
+                    Backend::Stops(journal) => {
+                        journal.acknowledge_retirement_events(operation_id, acknowledgements)
+                    }
+                };
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                );
+            }
+            Command::BeginUnusedRetirement { owner, reply } => {
+                let result = owner.process(|input| retirement::process_begin(&backend, input));
+                #[cfg(test)]
+                _retirements.reply_boundary_for_test(
+                    retirement_owners::OwnerPhase::Begin,
+                    false,
+                    None,
+                );
+                let _sent = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                )
+                .is_ok();
+                #[cfg(test)]
+                _retirements.reply_boundary_for_test(
+                    retirement_owners::OwnerPhase::Begin,
+                    true,
+                    Some(_sent),
+                );
+            }
+            Command::AuthorizeUnusedRetirement { owner, reply } => {
+                let result = owner.process(|input| retirement::process_authorize(&backend, input));
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
+            }
+            Command::BindFull3 {
+                operation_id,
+                expected,
+                binding,
+                reply,
+            } => {
+                let result = backend.full().and_then(|journal| {
+                    journal.bind_full3_registration(operation_id, expected, *binding)
+                });
+                let update = result
+                    .as_ref()
+                    .map_or(status_cache::Update::None, |receipt| {
+                        status_cache::Update::Head {
+                            operation: operation_id,
+                            head: receipt.head().clone(),
+                        }
+                    });
+                let _ = respond(&backend, &status, reply, result, update, true);
+            }
+            Command::FinalizeRetirement { owner, reply } => {
+                let result = owner.process(|input| retirement::process_final(&backend, input));
+                #[cfg(test)]
+                _retirements.reply_boundary_for_test(
+                    retirement_owners::OwnerPhase::Final,
+                    false,
+                    None,
+                );
+                let _sent = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                )
+                .is_ok();
+                #[cfg(test)]
+                _retirements.reply_boundary_for_test(
+                    retirement_owners::OwnerPhase::Final,
+                    true,
+                    Some(_sent),
+                );
             }
             Command::Reserve {
                 operation_id,
                 submit,
                 reply,
             } => {
-                let _ = reply.send(
-                    backend
-                        .full()
-                        .and_then(|journal| journal.reserve(operation_id, &submit)),
+                let result = backend
+                    .full()
+                    .and_then(|journal| journal.reserve(operation_id, &submit));
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    true,
                 );
             }
             Command::Reject { input, reply } => {
@@ -832,7 +1329,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     let (ticket, phase, code) = input.into_parts();
                     journal.reject(ticket, phase, code)
                 });
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    true,
+                );
             }
             Command::AcceptPrepared { input, reply } => {
                 let result = backend.full().and_then(|journal| {
@@ -847,37 +1351,80 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                         )
                     })
                 });
-                let _ = reply.send(result);
+                let update = result
+                    .as_ref()
+                    .map_or(status_cache::Update::None, status_from_job);
+                let _ = respond(&backend, &status, reply, result, update, true);
             }
             Command::Load {
                 operation_id,
                 reply,
             } => {
-                let _ = reply.send(
-                    backend
-                        .full()
-                        .and_then(|journal| journal.load(operation_id)),
-                );
+                #[cfg(test)]
+                use super::journal::cost_measurement::{self, WriterKind};
+                #[cfg(test)]
+                let cost = backend.full().ok().and_then(|journal| {
+                    cost_measurement::actor(journal, WriterKind::Load, operation_id)
+                });
+                let result = backend
+                    .full()
+                    .and_then(|journal| journal.load(operation_id));
+                #[cfg(test)]
+                if let Some(cost) = cost {
+                    cost.reply_ready(result.is_ok());
+                }
+                let update = result
+                    .as_ref()
+                    .ok()
+                    .and_then(Option::as_ref)
+                    .map_or(status_cache::Update::None, status_from_job);
+                let _ = respond(&backend, &status, reply, result, update, false);
             }
             Command::Status {
                 operation_id,
                 reply,
             } => {
-                let _ = reply.send(
-                    backend
-                        .full()
-                        .and_then(|journal| journal.status(operation_id)),
+                #[cfg(test)]
+                use super::journal::cost_measurement::{self, WriterKind};
+                #[cfg(test)]
+                let cost = backend.full().ok().and_then(|journal| {
+                    cost_measurement::actor(journal, WriterKind::Status, operation_id)
+                });
+                let result = backend
+                    .full()
+                    .and_then(|journal| journal.status(operation_id));
+                #[cfg(test)]
+                if let Some(cost) = cost {
+                    cost.reply_ready(result.is_ok());
+                }
+                let update = result.as_ref().ok().and_then(Option::as_ref).map_or(
+                    status_cache::Update::None,
+                    |value| {
+                        status_cache::Update::Replace(
+                            super::journal::status_projection::LastConfirmedStatus::from_status(
+                                operation_id,
+                                value,
+                            ),
+                        )
+                    },
                 );
+                let _ = respond(&backend, &status, reply, result, update, false);
             }
             Command::List {
                 after,
                 limit,
                 reply,
             } => {
-                let _ = reply.send(
-                    backend
-                        .full()
-                        .and_then(|journal| journal.list(after, limit)),
+                let result = backend
+                    .full()
+                    .and_then(|journal| journal.list(after, limit));
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
                 );
             }
             Command::AdvanceLifecycle {
@@ -886,10 +1433,33 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                 next,
                 reply,
             } => {
-                let _ =
-                    reply.send(backend.full().and_then(|journal| {
-                        advance_lifecycle(journal, operation_id, expected, &next)
-                    }));
+                #[cfg(test)]
+                if advance_reply_barrier
+                    .as_ref()
+                    .is_some_and(|(_, _, fail)| *fail)
+                {
+                    super::journal::fail_next_cold_ack_for_test();
+                }
+                let result = backend
+                    .full()
+                    .and_then(|journal| advance_lifecycle(journal, operation_id, expected, &next));
+                #[cfg(test)]
+                if let Some((entered, release, _)) = advance_reply_barrier.take() {
+                    let _ = entered.send(());
+                    // After the actual Journal call, without any filesystem
+                    // mutex held. Drop of the owned test guard releases it.
+                    let _ = release.recv_timeout(Duration::from_secs(10));
+                }
+                let update = result
+                    .as_ref()
+                    .map_or(status_cache::Update::None, |receipt| {
+                        status_cache::Update::Lifecycle {
+                            operation: operation_id,
+                            head: receipt.head().clone(),
+                            next: &next,
+                        }
+                    });
+                let _ = respond(&backend, &status, reply, result, update, true);
             }
             Command::AppendLocal {
                 operation_id,
@@ -897,9 +1467,19 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                 request,
                 reply,
             } => {
-                let _ = reply.send(backend.full().and_then(|journal| {
-                    append_command(journal, operation_id, command_id, *request)
-                }));
+                let result = backend.full().and_then(|journal| {
+                    append_command(journal, operation_id, command_id, request.as_ref().clone())
+                });
+                let update = result
+                    .as_ref()
+                    .map_or(status_cache::Update::None, |receipt| {
+                        status_cache::Update::Local {
+                            operation: operation_id,
+                            head: receipt.head().clone(),
+                            request: &request,
+                        }
+                    });
+                let _ = respond(&backend, &status, reply, result, update, true);
             }
             Command::CancelStopProjection {
                 operation_id,
@@ -913,7 +1493,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                         journal.cancel_stop_projection(operation_id, command_id)
                     }
                 };
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
             }
             Command::AppendCancel { input, reply } => {
                 let result = match &backend {
@@ -923,7 +1510,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                         journal.append_cancel(input.operation_id, input.command_id)
                     }
                 };
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::Clear,
+                    true,
+                );
             }
             Command::RecoveryStatus {
                 operation_id,
@@ -935,7 +1529,14 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     }
                     Backend::Stops(journal) => journal.recovery_status(operation_id),
                 };
-                let _ = reply.send(result);
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
             }
             Command::RecoveryInventory {
                 after,
@@ -949,30 +1550,88 @@ fn serve_backend(backend: Backend, receiver: queue::QueueReceiver<Command>) {
                     }
                     Backend::Stops(journal) => journal.recovery_inventory(after, limit),
                 };
-                let _ = reply.send(result);
+                if result.as_ref().is_ok_and(|page| {
+                    page.issues_truncated()
+                        || page
+                            .issues()
+                            .iter()
+                            .any(|issue| issue.error() != JournalError::Interrupted)
+                }) {
+                    // Preserve the useful bounded STOP inventory reply while
+                    // closing a diagnostic cache contradicted by its findings.
+                    // Ordinary pagination and a coverage-only Interrupted
+                    // (for example an unacknowledged Arm) are not corruption.
+                    status.invalidate();
+                }
+                let _ = respond(
+                    &backend,
+                    &status,
+                    reply,
+                    result,
+                    status_cache::Update::None,
+                    false,
+                );
             }
             Command::EnqueueEvents {
                 operation_id,
                 events,
                 reply,
             } => {
-                let _ = reply.send(
-                    backend
-                        .full()
-                        .and_then(|journal| enqueue_events(journal, operation_id, events)),
-                );
+                let result = backend
+                    .full()
+                    .and_then(|journal| enqueue_events(journal, operation_id, events));
+                let update = head_update(operation_id, result.as_deref().ok());
+                let _ = respond(&backend, &status, reply, result, update, true);
             }
             Command::AcknowledgeEvents {
                 operation_id,
                 acknowledgements,
                 reply,
             } => {
-                let _ = reply.send(backend.full().and_then(|journal| {
+                let result = backend.full().and_then(|journal| {
                     acknowledge_events(journal, operation_id, acknowledgements)
-                }));
+                });
+                let update = head_update(operation_id, result.as_deref().ok());
+                let _ = respond(&backend, &status, reply, result, update, true);
             }
         }
     }
+}
+
+fn status_from_job(job: &AcceptedJobV1) -> status_cache::Update<'static> {
+    status_cache::Update::Replace(
+        super::journal::status_projection::LastConfirmedStatus::from_accepted(job),
+    )
+}
+fn head_update(
+    operation: Uuid,
+    receipts: Option<&[OutboxReceiptV1]>,
+) -> status_cache::Update<'static> {
+    receipts
+        .and_then(|receipts| {
+            receipts
+                .iter()
+                .max_by_key(|receipt| receipt.head().revision())
+        })
+        .map_or(status_cache::Update::None, |receipt| {
+            status_cache::Update::Head {
+                operation,
+                head: receipt.head().clone(),
+            }
+        })
+}
+fn respond<T>(
+    backend: &Backend,
+    status: &status_cache::StatusCache,
+    reply: Reply<T>,
+    result: JournalResult<T>,
+    update: status_cache::Update<'_>,
+    mutation: bool,
+) -> Result<(), JournalResult<T>> {
+    let failed = backend.full().is_ok_and(Journal::status_projection_failed)
+        || (!mutation
+            && matches!(&result, Err(error) if !matches!(error, JournalError::InvalidInput | JournalError::Busy | JournalError::Interrupted)));
+    status.reply(reply, result, update, mutation, failed)
 }
 
 fn append_command(
@@ -1143,6 +1802,21 @@ fn acknowledge_events(
 mod inventory_tests;
 
 #[cfg(all(test, unix))]
+#[path = "writer_status_projection_tests.rs"]
+mod status_projection_tests;
+
+#[cfg(all(test, unix))]
+#[path = "writer_checkpoint_heads_tests.rs"]
+mod checkpoint_heads_tests;
+
+#[cfg(all(test, unix))]
+#[path = "writer_retirement_cold_tests.rs"]
+mod retirement_cold_tests;
+#[cfg(all(test, unix))]
+#[path = "writer_retirement_live_tests.rs"]
+mod retirement_live_tests;
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::control_fs::Directory;
@@ -1186,6 +1860,14 @@ mod tests {
                 scope: journal.scope().clone(),
                 timeout,
                 inventory_pending: Arc::new(AtomicBool::new(false)),
+                retirements: Arc::new(retirement_owners::RetirementOwners::new(
+                    capacity,
+                    Backend::Full(journal.clone()),
+                )),
+                status_cache: Arc::new(status_cache::StatusCache::new(
+                    journal.status_projection_limits().0,
+                    journal.status_projection_limits().1,
+                )),
             })),
             receiver,
         )
@@ -1304,6 +1986,8 @@ mod tests {
             scope: writer.0.scope.clone(),
             timeout: Duration::from_secs(2),
             inventory_pending: Arc::clone(&writer.0.inventory_pending),
+            retirements: Arc::clone(&writer.0.retirements),
+            status_cache: Arc::clone(&writer.0.status_cache),
         }));
         let worker = std::thread::spawn(move || serve(journal, receiver));
 
@@ -1449,6 +2133,8 @@ mod tests {
             scope: writer.0.scope.clone(),
             timeout: Duration::from_secs(2),
             inventory_pending: Arc::clone(&writer.0.inventory_pending),
+            retirements: Arc::clone(&writer.0.retirements),
+            status_cache: Arc::clone(&writer.0.status_cache),
         }));
         let worker_journal = journal.clone();
         let worker = std::thread::spawn(move || serve(worker_journal, receiver));

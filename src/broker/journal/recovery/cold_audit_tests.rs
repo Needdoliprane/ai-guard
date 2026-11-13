@@ -330,7 +330,13 @@ fn estimate_result_at(
         .metadata
         .as_ref()
         .expect("accepted metadata exists");
-    estimate_job(fixture.operation_id, &head, metadata, selected)
+    estimate_job(
+        fixture.operation_id,
+        &head,
+        metadata,
+        selected,
+        &stops.core.limits,
+    )
 }
 
 fn lifecycle_shape_for_current(fixture: &Fixture) -> BrokerCheckpointV3 {

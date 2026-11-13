@@ -11,14 +11,15 @@ mod invocation;
 pub mod kubernetes;
 pub(crate) mod launch_profile;
 mod managed;
+pub(crate) use managed::relay::{RelayExecError, RelayExecPermit, RelayExecTransport};
 pub(crate) mod model_tls;
 mod prestart;
 pub mod retained_cli;
 pub mod terminal;
 pub use invocation::{ExecutableDirectoryIdentityV1, ExecutableIdentityV1, InvocationBindingV1};
 pub use managed::{
-    ContainerHandle, ManagedPrearmedExecution, ManagedRetainedExecution, ManagedRuntime,
-    ManagedRuntimeError, OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
+    ContainerHandle, ManagedPrearmedExecution, ManagedPrearmedOutcome, ManagedRetainedExecution,
+    ManagedRuntime, ManagedRuntimeError, OwnedContainerSnapshot, RuntimeAuthority, StartDirective,
 };
 pub(crate) use prestart::{RuntimePrestartStage, RuntimePrestartStageFailure};
 
@@ -74,10 +75,62 @@ impl std::fmt::Debug for PrearmedStartControl {
         f.write_str("PrearmedStartControl([private consumed permit])")
     }
 }
+
+/// Process-local result returned only after the broker confirms the real Final
+/// retirement checkpoint. Its identifiers and reference are data; they do not
+/// establish runtime terminal state, quota release or permission to clean up.
+/// It is deliberately neither Clone nor serializable/deserializable.
+pub struct AbandonedBeforeClaim {
+    operation_id: Uuid,
+    arm_id: Uuid,
+    final_revision: crate::broker::journal::RevisionRefV1,
+}
+
+impl AbandonedBeforeClaim {
+    /// The trusted broker calls this only after verifying Final for this exact
+    /// operation/Arm. A valid reference alone never establishes that Final.
+    pub(crate) fn new(
+        operation_id: Uuid,
+        arm_id: Uuid,
+        final_revision: crate::broker::journal::RevisionRefV1,
+    ) -> Result<Self> {
+        ensure!(
+            !operation_id.is_nil() && !arm_id.is_nil() && final_revision.revision() > 0,
+            "invalid abandoned-before-claim result identity or final revision"
+        );
+        let final_revision = crate::broker::journal::RevisionRefV1::new(
+            final_revision.revision(),
+            final_revision.hash(),
+        )?;
+        Ok(Self {
+            operation_id,
+            arm_id,
+            final_revision,
+        })
+    }
+
+    pub fn operation_id(&self) -> Uuid {
+        self.operation_id
+    }
+    pub fn arm_id(&self) -> Uuid {
+        self.arm_id
+    }
+    pub fn final_revision(&self) -> &crate::broker::journal::RevisionRefV1 {
+        &self.final_revision
+    }
+}
+
+impl std::fmt::Debug for AbandonedBeforeClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AbandonedBeforeClaim([private confirmed result])")
+    }
+}
+
 #[derive(Debug)]
 pub enum PrearmedStartDirective {
     ObserveOnly,
     EmitOnce(PrearmedStartControl),
+    AbandonedBeforeClaim(AbandonedBeforeClaim),
 }
 
 /// Captured transport facts. A daemon transport has no locally reset business
@@ -1945,6 +1998,30 @@ fn parse_runtime_info(kind: RuntimeKind, bytes: &[u8], allow_rootful: bool) -> R
 #[cfg(test)]
 mod capture_error_tests {
     use super::*;
+
+    #[test]
+    fn abandoned_before_claim_requires_non_nil_identities_and_a_final_revision() {
+        use crate::broker::journal::RevisionRefV1;
+        let operation = Uuid::from_u128(1);
+        let arm = Uuid::from_u128(2);
+        let final_revision = RevisionRefV1::new(7, &"a".repeat(64)).unwrap();
+        for (operation, arm, reference) in [
+            (Uuid::nil(), arm, final_revision.clone()),
+            (operation, Uuid::nil(), final_revision.clone()),
+            (
+                operation,
+                arm,
+                RevisionRefV1::new(0, &"a".repeat(64)).unwrap(),
+            ),
+        ] {
+            assert!(AbandonedBeforeClaim::new(operation, arm, reference).is_err());
+        }
+        let retirement = AbandonedBeforeClaim::new(operation, arm, final_revision).unwrap();
+        assert_eq!(retirement.operation_id(), operation);
+        assert_eq!(retirement.arm_id(), arm);
+        assert_eq!(retirement.final_revision().revision(), 7);
+        assert_eq!(retirement.final_revision().hash(), "a".repeat(64));
+    }
 
     #[test]
     fn profile_guard_compares_complete_binding_before_consuming_existing_guard() {

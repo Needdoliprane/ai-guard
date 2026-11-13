@@ -1,7 +1,11 @@
 //! Explicit Kubernetes authority, inspection, preflight and internal held CREATE.
 //!
 //! Held CREATE remains closed in production. This is not a workload launcher;
-//! there is no exec, attach, DELETE, kubeconfig or ambient context interface.
+//! there is no exec, attach, kubeconfig or ambient context interface. The V2
+//! CREATE, release PATCH and DELETE mechanics are crate-internal behind a
+//! sealed guard that has no production implementor. The V2 before-effect
+//! lifecycle (abandonment, successor recovery, observe-only report) is
+//! crate-internal and has no production caller yet.
 //! Pod API configuration is not proof of runtime enforcement or CPU usage.
 use crate::control_fs::PrivateFile;
 use serde::{Deserialize, Serialize};
@@ -17,7 +21,14 @@ mod prerequisites;
 #[path = "kubernetes/prerequisites_tests.rs"]
 mod prerequisites_tests;
 pub(crate) mod session;
+pub(crate) mod session_effect;
+pub(crate) mod session_instance;
+pub(crate) mod session_lifecycle;
+pub(crate) mod session_pod;
 pub mod session_profile;
+#[cfg(test)]
+#[path = "kubernetes/session_test_peer.rs"]
+pub(crate) mod session_test_peer;
 mod transport;
 pub use observation::{
     KubernetesConfiguredLimitsV1, KubernetesPodHandle, KubernetesPodObservationV1,
@@ -32,6 +43,7 @@ pub use prerequisites::{
     KubernetesPermissionActionV1, KubernetesPermissionCoverageV1, KubernetesPermissionDecisionV1,
     KubernetesPermissionReviewStatusV1, KubernetesPrerequisitesV1,
 };
+pub use session_instance::KubernetesSessionWorkspaceClaimV2;
 use transport::Transport;
 
 pub type KubernetesResult<T> = Result<T, KubernetesError>;

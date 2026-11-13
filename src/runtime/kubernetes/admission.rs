@@ -19,6 +19,7 @@ mod json;
 pub(crate) mod permission;
 #[path = "admission_profile.rs"]
 mod profile;
+pub(super) use profile::{cpu_quantity, mib};
 #[path = "admission_remote_coordinator.rs"]
 pub(crate) mod remote_coordinator;
 #[path = "admission_response.rs"]

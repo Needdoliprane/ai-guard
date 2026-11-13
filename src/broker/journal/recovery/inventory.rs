@@ -67,7 +67,15 @@ impl StopJournal {
             return Err(JournalError::InvalidInput);
         }
         let mut writer = self.core.writer.lock().map_err(|_| JournalError::Corrupt)?;
-        let mut report = StopRecoveryReaderV1::from_core(&self.core)?.scan();
+        let integrity_failure = |error| {
+            self.core
+                .status_observation_failed
+                .store(true, Ordering::SeqCst);
+            error
+        };
+        let mut report = StopRecoveryReaderV1::from_core(&self.core)
+            .map_err(integrity_failure)?
+            .scan();
         // A shared anchor/lease failure purges every projection. It cannot be
         // downgraded to an incomplete or empty successful reply.
         if let Some(issue) = report
@@ -75,7 +83,7 @@ impl StopJournal {
             .iter()
             .find(|issue| issue.phase == StopRecoveryPhaseV1::SharedScope)
         {
-            return Err(issue.error);
+            return Err(integrity_failure(issue.error));
         }
         if self.scope_incomplete {
             report.issue(
@@ -130,10 +138,20 @@ impl StopJournal {
         for id in &conflicts {
             report.issue(Some(*id), StopRecoveryPhaseV1::Job, JournalError::Conflict);
         }
+        if report.issues_truncated
+            || report
+                .issues
+                .iter()
+                .any(|issue| issue.error != JournalError::Interrupted)
+        {
+            self.core
+                .status_observation_failed
+                .store(true, Ordering::SeqCst);
+        }
         report
             .jobs
             .retain(|job| conflicts.binary_search(&job.operation_id).is_err());
-        report.reader.check_shared()?;
+        report.reader.check_shared().map_err(integrity_failure)?;
         writer
             .observed_jobs
             .extend(report.observed_jobs.iter().copied());
@@ -183,7 +201,7 @@ impl StopJournal {
         };
         let issues_truncated = report.issues_truncated || report.issues.len() > MAX_ISSUES;
         report.issues.truncate(MAX_ISSUES);
-        report.reader.check_shared()?;
+        report.reader.check_shared().map_err(integrity_failure)?;
         Ok(StopInventoryPageV1 {
             scope: self.scope().clone(),
             entries,

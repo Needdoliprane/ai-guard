@@ -147,13 +147,13 @@ async fn full_service(seed: &ColdRecoverySeed) -> (Arc<Service>, WriterClient, N
         root: Directory::open_existing(seed.root()).unwrap(),
         material,
         profiles: BTreeMap::from([(seed.scope().profile_id().into(), jobs)]),
-        enforcer: Some(ServiceEnforcer::Native(enforcer)),
+        enforcer: Some(ServiceEnforcer::Native(enforcer.into())),
         stop_enforcer: None,
         blocking: Arc::new(Semaphore::new(1)),
         preparation: Arc::new(Semaphore::new(1)),
         execution: Arc::new(Semaphore::new(1)),
         stopping: Arc::new(AtomicBool::new(false)),
-        fenced: AtomicBool::new(false),
+        fenced: Arc::new(AtomicBool::new(false)),
     });
     assert!(!service.recovery_only());
     assert!(service.profiles.values().all(|jobs| {

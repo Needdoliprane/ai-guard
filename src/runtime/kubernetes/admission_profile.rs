@@ -40,11 +40,7 @@ pub(super) fn pod(intent: &KubernetesCreateIntentV1) -> KubernetesResult<Value> 
     // response validation through prepare. This renderer performs no effects.
     let resources = &intent.resources;
     resources.validate()?;
-    let cpu = if resources.cpu_millis.is_multiple_of(1000) {
-        (resources.cpu_millis / 1000).to_string()
-    } else {
-        format!("{}m", resources.cpu_millis)
-    };
+    let cpu = cpu_quantity(resources.cpu_millis);
     let limits = json!({"cpu":cpu,"memory":mib(resources.memory_mib),"ephemeral-storage":"1Mi"});
     let security = json!({"runAsNonRoot":true,"runAsUser":1000,"runAsGroup":1000,
         "privileged":false,"allowPrivilegeEscalation":false,"readOnlyRootFilesystem":true,
@@ -86,7 +82,17 @@ fn pod_name(create_id: &str) -> KubernetesResult<String> {
     }
     Ok(format!("ai-guard-held-{}", id.simple()))
 }
-fn mib(value: u32) -> String {
+/// V1 canonical CPU form: whole cores as an integer, otherwise millicores.
+/// Shared unchanged with the V2 session renderer; no runtime enforcement.
+pub(in crate::runtime::kubernetes) fn cpu_quantity(millis: u32) -> String {
+    if millis.is_multiple_of(1000) {
+        (millis / 1000).to_string()
+    } else {
+        format!("{millis}m")
+    }
+}
+/// V1 canonical memory form: `Gi` for whole multiples of 1024 MiB, else `Mi`.
+pub(in crate::runtime::kubernetes) fn mib(value: u32) -> String {
     if value.is_multiple_of(1024) {
         format!("{}Gi", value / 1024)
     } else {

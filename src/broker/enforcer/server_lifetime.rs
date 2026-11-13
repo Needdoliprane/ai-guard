@@ -4,22 +4,56 @@
 //! claims retirement: legacy actors can run until process exit.
 
 use super::{EnforcerError, EnforcerResult, RoleLease, State};
+use crate::broker::discovery::EnforcerRoleLeaseV2;
 use std::{
+    collections::BTreeMap,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc, Weak,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel},
     },
     thread::JoinHandle,
     time::Duration,
 };
+use uuid::Uuid;
 
 #[derive(Clone)]
-pub(super) struct NativeOwners {
+enum LeaseOwner {
+    Legacy(Arc<RoleLease>),
+    Sealed(EnforcerRoleLeaseV2),
+}
+impl LeaseOwner {
+    fn revalidate(&self) -> EnforcerResult<()> {
+        match self {
+            Self::Legacy(lease) => {
+                // Legacy bootstrap ordering and its validation are unchanged.
+                let _retained = lease;
+                Ok(())
+            }
+            Self::Sealed(lease) => lease.revalidate().map_err(Into::into),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::broker::enforcer) struct ActorKey {
+    pub(in crate::broker::enforcer) arm_id: Uuid,
+    pub(in crate::broker::enforcer) epoch: Uuid,
+    pub(in crate::broker::enforcer) nonce: Uuid,
+}
+
+struct KeyedHandle {
+    key: ActorKey,
+    native: NativeHandle,
+}
+
+#[derive(Clone)]
+pub(in crate::broker::enforcer) struct NativeOwners {
     sender: SyncSender<Envelope>,
-    lease: Arc<RoleLease>,
+    lease: LeaseOwner,
     failed: Arc<AtomicBool>,
+    keyed: Arc<Mutex<BTreeMap<Uuid, KeyedHandle>>>,
 }
 
 enum Work {
@@ -32,7 +66,7 @@ enum Work {
 // The envelope also guards messages that have no handle (known spawn failure).
 struct Envelope {
     work: Option<Work>,
-    lease: Arc<RoleLease>,
+    lease: LeaseOwner,
     failed: Arc<AtomicBool>,
 }
 
@@ -40,19 +74,19 @@ impl Drop for Envelope {
     fn drop(&mut self) {
         if let Some(work) = self.work.take() {
             self.failed.store(true, Ordering::SeqCst);
-            std::mem::forget((Arc::clone(&self.lease), work));
+            std::mem::forget((self.lease.clone(), work));
         }
     }
 }
 
-struct NativeHandle {
+pub(in crate::broker::enforcer) struct NativeHandle {
     handle: Option<JoinHandle<()>>,
-    lease: Arc<RoleLease>,
+    lease: LeaseOwner,
     failed: Arc<AtomicBool>,
 }
 
 impl NativeHandle {
-    fn join(&mut self) -> EnforcerResult<()> {
+    pub(in crate::broker::enforcer) fn join(&mut self) -> EnforcerResult<()> {
         // join consumes the handle even when its thread panicked. The joiner's
         // outer owner still retains the same lease and all remaining handles.
         self.handle
@@ -67,7 +101,7 @@ impl Drop for NativeHandle {
     fn drop(&mut self) {
         if let Some(handle) = self.handle.take() {
             self.failed.store(true, Ordering::SeqCst);
-            std::mem::forget((Arc::clone(&self.lease), handle));
+            std::mem::forget((self.lease.clone(), handle));
         }
     }
 }
@@ -80,7 +114,7 @@ enum Progress {
 }
 
 struct Joiner {
-    _lease: Arc<RoleLease>,
+    _lease: LeaseOwner,
     receiver: Receiver<Envelope>,
     done: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
@@ -90,21 +124,49 @@ struct Joiner {
     actor_count: usize,
     actor_not_started: bool,
     ended: Option<bool>,
+    keyed: Arc<Mutex<BTreeMap<Uuid, KeyedHandle>>>,
 }
 
 impl NativeOwners {
+    pub(in crate::broker::enforcer) async fn finish_sealed_idle(
+        &self,
+        joiner: JoinHandle<EnforcerResult<()>>,
+    ) -> EnforcerResult<()> {
+        self.send(Work::ListenerEnd { idle: true })?;
+        tokio::task::spawn_blocking(move || joiner.join().map_err(|_| EnforcerError::Unhealthy)?)
+            .await
+            .map_err(|_| EnforcerError::Unhealthy)?
+    }
     pub(super) fn start(
         lease: Arc<RoleLease>,
         done: Arc<AtomicBool>,
         max_slots: u32,
     ) -> EnforcerResult<(Self, JoinHandle<EnforcerResult<()>>)> {
+        Self::start_owned(LeaseOwner::Legacy(lease), done, max_slots)
+    }
+
+    pub(in crate::broker::enforcer) fn start_sealed(
+        lease: EnforcerRoleLeaseV2,
+        done: Arc<AtomicBool>,
+        max_slots: u32,
+    ) -> EnforcerResult<(Self, JoinHandle<EnforcerResult<()>>)> {
+        Self::start_owned(LeaseOwner::Sealed(lease), done, max_slots)
+    }
+
+    fn start_owned(
+        lease: LeaseOwner,
+        done: Arc<AtomicBool>,
+        max_slots: u32,
+    ) -> EnforcerResult<(Self, JoinHandle<EnforcerResult<()>>)> {
+        lease.revalidate()?;
         let actor_limit = max_slots as usize;
         // Exactly one outcome per newly reserved slot (no replay sends), one
         // progress outcome and one listener end. Slots are never evicted.
         let (sender, receiver) = sync_channel(actor_limit + 2);
         let failed = Arc::new(AtomicBool::new(false));
+        let keyed = Arc::new(Mutex::new(BTreeMap::new()));
         let joiner = Joiner {
-            _lease: Arc::clone(&lease),
+            _lease: lease.clone(),
             receiver,
             done,
             failed: Arc::clone(&failed),
@@ -114,6 +176,7 @@ impl NativeOwners {
             actor_count: 0,
             actor_not_started: false,
             ended: None,
+            keyed: Arc::clone(&keyed),
         };
         // Refuse startup before progress, actors or IPC admission if this
         // owner cannot be created. No new flock or discovery format is used.
@@ -127,28 +190,32 @@ impl NativeOwners {
                 sender,
                 lease,
                 failed,
+                keyed,
             },
             handle,
         ))
     }
 
-    pub(super) fn failed(&self) -> bool {
+    pub(in crate::broker::enforcer) fn failed(&self) -> bool {
         self.failed.load(Ordering::SeqCst)
     }
 
-    pub(super) fn actor_exited(&self) {
+    pub(in crate::broker::enforcer) fn actor_exited(&self) {
         self.failed.store(true, Ordering::SeqCst);
     }
 
     fn native_handle(&self, handle: JoinHandle<()>) -> NativeHandle {
         NativeHandle {
             handle: Some(handle),
-            lease: Arc::clone(&self.lease),
+            lease: self.lease.clone(),
             failed: Arc::clone(&self.failed),
         }
     }
 
-    pub(super) fn progress(&self, handle: Option<JoinHandle<()>>) -> EnforcerResult<()> {
+    pub(in crate::broker::enforcer) fn progress(
+        &self,
+        handle: Option<JoinHandle<()>>,
+    ) -> EnforcerResult<()> {
         self.send(Work::Progress(
             handle.map(|handle| self.native_handle(handle)),
         ))
@@ -158,10 +225,42 @@ impl NativeOwners {
         self.send(Work::Actor(handle.map(|handle| self.native_handle(handle))))
     }
 
+    pub(in crate::broker::enforcer) fn actor_keyed(
+        &self,
+        key: ActorKey,
+        handle: JoinHandle<()>,
+    ) -> EnforcerResult<()> {
+        let native = self.native_handle(handle);
+        let mut keyed = self.keyed.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if key.arm_id.is_nil()
+            || key.epoch.is_nil()
+            || key.nonce.is_nil()
+            || keyed.contains_key(&key.arm_id)
+        {
+            return Err(EnforcerError::Conflict);
+        }
+        keyed.insert(key.arm_id, KeyedHandle { key, native });
+        Ok(())
+    }
+
+    pub(in crate::broker::enforcer) fn take_retiring(
+        &self,
+        key: ActorKey,
+    ) -> EnforcerResult<NativeHandle> {
+        let mut keyed = self.keyed.lock().map_err(|_| EnforcerError::Unhealthy)?;
+        if keyed.get(&key.arm_id).is_none_or(|owned| owned.key != key) {
+            return Err(EnforcerError::Conflict);
+        }
+        Ok(keyed
+            .remove(&key.arm_id)
+            .ok_or(EnforcerError::Conflict)?
+            .native)
+    }
+
     fn send(&self, work: Work) -> EnforcerResult<()> {
         let message = Envelope {
             work: Some(work),
-            lease: Arc::clone(&self.lease),
+            lease: self.lease.clone(),
             failed: Arc::clone(&self.failed),
         };
         // On Full/Disconnected or unwind the message's guard pins ownership.
@@ -248,6 +347,14 @@ impl Joiner {
                     for actor in &mut self.actors {
                         actor.join()?;
                     }
+                    for actor in self
+                        .keyed
+                        .lock()
+                        .map_err(|_| EnforcerError::Unhealthy)?
+                        .values_mut()
+                    {
+                        actor.native.join()?;
+                    }
                     return if self.actor_count == 0 && !self.failed.load(Ordering::SeqCst) {
                         Ok(())
                     } else {
@@ -262,7 +369,13 @@ impl Joiner {
             if self.ended == Some(true) {
                 // ShutdownIfIdle closes admission while holding the slot map
                 // and only sends this message when that map is empty.
-                if self.actor_count != 0 {
+                if self.actor_count != 0
+                    || !self
+                        .keyed
+                        .lock()
+                        .map_err(|_| EnforcerError::Unhealthy)?
+                        .is_empty()
+                {
                     return Err(EnforcerError::Unhealthy);
                 }
                 if matches!(self.progress, Progress::NotStarted | Progress::Joined) {
@@ -441,8 +554,9 @@ mod tests {
         let failed = Arc::new(AtomicBool::new(false));
         let owners = NativeOwners {
             sender,
-            lease: Arc::clone(&lease),
+            lease: LeaseOwner::Legacy(Arc::clone(&lease)),
             failed: Arc::clone(&failed),
+            keyed: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let (handle, release, exited) = owned_thread();
         assert_busy(&root);
@@ -470,14 +584,15 @@ mod tests {
         let failed = Arc::new(AtomicBool::new(false));
         let owners = NativeOwners {
             sender,
-            lease: Arc::clone(&lease),
+            lease: LeaseOwner::Legacy(Arc::clone(&lease)),
             failed: Arc::clone(&failed),
+            keyed: Arc::new(Mutex::new(BTreeMap::new())),
         };
         let (handle, release, exited) = owned_thread();
         assert_busy(&root);
         let message = Envelope {
             work: Some(Work::Actor(Some(owners.native_handle(handle)))),
-            lease: Arc::clone(&owners.lease),
+            lease: owners.lease.clone(),
             failed: Arc::clone(&failed),
         };
         let unwound = catch_unwind(AssertUnwindSafe(move || {

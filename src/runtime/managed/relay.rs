@@ -1,11 +1,9 @@
 //! Restricted, separate stdio exec for the worker relay helper.
 //!
 //! This is an internal byte transport, not a workload identity, a start permit
-//! or a terminal/quota witness. Production admission is deliberately sealed:
-//! no constructor issues `RelayExecPermit` until durable audit, current workload
-//! binding and the registry's exclusive RoleLease are connected. The registry
-//! must retain this owner until explicit close/join and reconciliation.
-#![allow(dead_code)] // Closed integration port; no production permit issuer yet.
+//! or a terminal/quota witness. Production admission consumes the broker's
+//! opaque verified source and one fresh Core exec claim. The registry retains
+//! this owner until explicit close/join and exact terminal reconciliation.
 
 use super::*;
 use futures_util::task::AtomicWaker;
@@ -70,9 +68,8 @@ impl std::fmt::Display for RelayExecError {
 impl std::error::Error for RelayExecError {}
 
 /// A consumed capability distinct from every start guard. Its private admission
-/// field has no production constructor. Neither a CID nor worker frames can
-/// produce this value. The future issuer must bind an independently audited,
-/// current workload admission and the registry's retained RoleLease here.
+/// field is built only from the broker's opaque composition. Neither a CID nor
+/// worker frames can produce this value.
 pub(crate) struct RelayExecPermit {
     snapshot: OwnedContainerSnapshot,
     authorized: ContainerSpec,
@@ -83,7 +80,8 @@ pub(crate) struct RelayExecPermit {
 }
 mod sealed {
     pub(super) struct DurableRelayAdmission {
-        _private: (),
+        pub(super) _claim: crate::runner::relay_admission::FreshRelayExecClaim,
+        pub(super) authority: std::sync::Arc<crate::broker::relay_owner::DispatchAuthority>,
     }
 }
 #[derive(Clone, PartialEq, Eq)]
@@ -98,7 +96,76 @@ impl std::fmt::Debug for RelayExecPermit {
 }
 
 impl ManagedRuntime {
-    /// No public/raw exec port and no production permit factory are supplied.
+    /// The issuer accepts one opaque broker composition, not free runtime DTOs
+    /// or a caller assertion. Its fresh SDK claim is consumed exactly once.
+    pub(crate) fn prepare_relay_exec(
+        &self,
+        admission: crate::broker::relay_owner::VerifiedRelayExecAdmission,
+    ) -> std::result::Result<RelayExecPermit, RelayExecError> {
+        let (fresh, snapshot, authorized, authority) = admission.into_parts();
+        let input = fresh.admission();
+        if input.inspection.container_id != snapshot.handle.id
+            || input.session_id != snapshot.handle.session.to_string()
+            || input.session_id != authorized.session.to_string()
+            || input.authority_binding_hash != self.binding.fingerprint()
+            || input.configuration_fingerprint_version != snapshot.handle.fingerprint_version()
+            || Some(&input.configuration_fingerprint)
+                != snapshot.observation.configuration_fingerprint.as_ref()
+            || input.started_at
+                != snapshot
+                    .observation
+                    .process
+                    .started_at
+                    .as_ref()
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default()
+        {
+            return Err(RelayExecError::Identity);
+        }
+        validate_running_snapshot(&snapshot, &snapshot.observation)?;
+        validate_authorized_identity(&authorized, &snapshot.observation)
+            .map_err(|_| RelayExecError::Profile)?;
+        Ok(RelayExecPermit {
+            snapshot,
+            authorized,
+            authority: self.binding.fingerprint(),
+            invocation: self.runtime.invocation().fingerprint(),
+            profile: self.relay_profile()?,
+            _admission: sealed::DurableRelayAdmission {
+                _claim: fresh,
+                authority,
+            },
+        })
+    }
+
+    pub(crate) async fn revalidate_relay_channel(
+        &self,
+        snapshot: &OwnedContainerSnapshot,
+        authorized: &ContainerSpec,
+    ) -> std::result::Result<(), RelayExecError> {
+        self.validate_handle(&snapshot.handle)
+            .map_err(|_| RelayExecError::Identity)?;
+        self.relay_profile()?;
+        let facts = self
+            .inspect_facts(&snapshot.handle.id)
+            .await
+            .map_err(|_| RelayExecError::Authority)?;
+        let observed = parse_container_observation_version(
+            &facts.bytes,
+            self.binding.kind,
+            snapshot.handle.fingerprint_version(),
+        )
+        .map_err(|_| RelayExecError::Identity)?;
+        validate_running_snapshot(snapshot, &observed)?;
+        validate_authorized_identity(authorized, &observed).map_err(|_| RelayExecError::Profile)?;
+        validate_configuration(authorized, &facts.bytes, self.binding.kind)
+            .map_err(|_| RelayExecError::Profile)?;
+        validate_helper_environment(&facts.bytes)?;
+        authorized
+            .validate_secret_env_file()
+            .map_err(|_| RelayExecError::Profile)
+    }
+    /// No public/raw exec port is supplied.
     /// Inspection races remain possible: the engine owns process creation, so
     /// a successful CLI spawn is not a ready handshake or a workload effect.
     pub(crate) async fn open_relay_channel(
@@ -120,6 +187,12 @@ impl ManagedRuntime {
             return Err(RelayExecError::Profile);
         }
         validate_running_snapshot(&permit.snapshot, &permit.snapshot.observation)?;
+        permit
+            ._admission
+            .authority
+            .current_binding()
+            .await
+            .map_err(|_| RelayExecError::Authority)?;
         // Re-read raw facts only transiently; no environment or raw inspection
         // bytes are copied into errors, observations or the transport owner.
         let facts = self
@@ -158,7 +231,14 @@ impl ManagedRuntime {
             .anchor
             .verify(self.runtime.invocation(), self.binding.kind)
             .map_err(|_| RelayExecError::Authority)?;
-        RelayExecTransport::spawn(command, permit.snapshot, retained)
+        permit
+            ._admission
+            .authority
+            .check_deadline()
+            .map_err(|_| RelayExecError::Authority)?;
+        let mut transport = RelayExecTransport::spawn(command, permit.snapshot, retained)?;
+        transport._admission = Some(permit._admission);
+        Ok(transport)
     }
 
     fn relay_profile(&self) -> std::result::Result<RelayExecProfile, RelayExecError> {
@@ -563,6 +643,7 @@ pub(crate) struct RelayExecTransport {
     state: RelayExecState,
     cli_status: Option<ExitStatus>,
     cli_kill_requested: bool,
+    _admission: Option<sealed::DurableRelayAdmission>,
 }
 impl std::fmt::Debug for RelayExecTransport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -611,6 +692,7 @@ impl RelayExecTransport {
             },
             cli_status: None,
             cli_kill_requested: false,
+            _admission: None,
         })
     }
     pub(crate) fn io_pair(

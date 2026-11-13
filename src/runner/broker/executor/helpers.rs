@@ -1,8 +1,58 @@
 //! Private batch helpers operations.
 use super::journal::{same, without_response};
 use super::*;
+use futures_util::{FutureExt, future::BoxFuture};
+
+struct PreparedHelper {
+    worker: WorkerV1,
+    draft: Draft,
+    preparation: HelperPreparationV1,
+    policy: HelperExecutionPolicyV1,
+}
+
+enum HelperPreparationPhase {
+    Completed(Box<HelperCompletion>),
+    Ready(Box<PreparedHelper>),
+}
 
 impl Execution<'_> {
+    /// A loaded Arm can only reconnect to the exact role assignment confirmed
+    /// in V5. Its metadata never reconstructs an original registration owner.
+    pub(super) async fn restore_assigned_slot(
+        &self,
+        registration: RegistrationV1,
+    ) -> Result<EnforcedSlot> {
+        let (job, _) = self.load().await?;
+        let arm = Uuid::parse_str(registration.arm_id())?;
+        let binding = job.broker_checkpoint_v5().and_then(|checkpoint| {
+            checkpoint
+                .bindings()
+                .iter()
+                .find(|binding| binding.arm_id() == arm)
+        });
+        if self.executor.enforcer.full3().is_none() {
+            ensure!(
+                binding.is_none(),
+                "Full3 assigned Arm cannot enter a legacy guardian"
+            );
+            return Ok(self
+                .executor
+                .enforcer
+                .restore(registration, self.context.cancel_generation().clone())
+                .await?);
+        }
+        let binding = binding.context("loaded Arm has no confirmed Full3 assignment")?;
+        Ok(self
+            .executor
+            .enforcer
+            .restore_with_binding(
+                registration,
+                self.context.cancel_generation().clone(),
+                binding,
+            )
+            .await?)
+    }
+
     pub(super) async fn arm_and_claim(
         &self,
         runtime: &ManagedRuntime,
@@ -31,6 +81,7 @@ impl Execution<'_> {
                 }
                 _ => None,
             });
+        let newly_requested_arm = previous_arm.is_none();
         let pending = if let Some(previous) = previous_arm {
             without_response(&previous)
         } else {
@@ -99,33 +150,78 @@ impl Execution<'_> {
         let (_confirmed_arm_head, current) = committed
             .into_parts(self.operation, self.context.scope())
             .context(diagnostics::BrokerStep::ArmExchange)?;
-        let slot = self
-            .executor
-            .enforcer
-            .register(
-                RegistrationV1::new(
-                    hex::encode(Sha256::digest(
-                        self.context.scope().gateway_origin().as_bytes(),
-                    )),
-                    self.context.scope().tenant_id().into(),
-                    request.clone(),
-                    response.receipt.clone(),
-                    runtime.binding().clone(),
-                    owned,
-                )
-                .context(diagnostics::BrokerStep::Registration)?,
-                self.context.cancel_generation().clone(),
-            )
-            .await
-            .map_err(|code| -> anyhow::Error {
-                match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
-                    &request, code,
-                ) {
-                    Some(failure) => failure.into(),
-                    None => code.into(),
+        if let Some(full) = self.executor.enforcer.full3()
+            && newly_requested_arm
+        {
+            self.context.preclaim().announce_registration(
+                self.operation,
+                Uuid::parse_str(&request.operation_id)?,
+                full.epoch(),
+                self.generation,
+            )?;
+        }
+        let registration = RegistrationV1::new(
+            hex::encode(Sha256::digest(
+                self.context.scope().gateway_origin().as_bytes(),
+            )),
+            self.context.scope().tenant_id().into(),
+            request.clone(),
+            response.receipt.clone(),
+            runtime.binding().clone(),
+            owned,
+        )
+        .context(diagnostics::BrokerStep::Registration)?;
+        let slot = if self.executor.enforcer.full3().is_some() && !newly_requested_arm {
+            self.restore_assigned_slot(registration).await
+        } else {
+            self.executor
+                .enforcer
+                .register(registration, self.context.cancel_generation().clone())
+                .await
+                .map_err(anyhow::Error::from)
+        }
+        .map_err(|code| -> anyhow::Error {
+            let Some(code) = code
+                .downcast_ref::<crate::broker::enforcer::EnforcerError>()
+                .copied()
+            else {
+                return code;
+            };
+            match crate::broker::enforcer::EnforcerStageFailure::registration_failure(
+                &request, code,
+            ) {
+                Some(failure) => failure.into(),
+                None => code.into(),
+            }
+        })
+        .context(diagnostics::BrokerStep::Registration)?;
+        if self.executor.enforcer.full3().is_some() && newly_requested_arm {
+            let binding = slot.full3_registration_binding()?;
+            let mut confirmed = false;
+            for _ in 0..16 {
+                // An authenticated abandon signal or Cancel can advance the
+                // head while native Register is in flight. Keep this exact
+                // original slot/binding; merge only through the writer CAS.
+                let (latest, _) = self.load().await?;
+                match self
+                    .executor
+                    .writer
+                    .bind_full3_registration(self.operation, latest.head().clone(), binding.clone())
+                    .await
+                {
+                    Ok(_) => {
+                        confirmed = true;
+                        break;
+                    }
+                    Err(JournalError::Conflict) => continue,
+                    Err(error) => return Err(error.into()),
                 }
-            })
-            .context(diagnostics::BrokerStep::Registration)?;
+            }
+            ensure!(
+                confirmed,
+                "Full3 assignment publication requires reconciliation"
+            );
+        }
         // Later mutations still reload and use the writer's strict CAS.
         if current.operations.iter().any(|op| match op {
             Operation::WorkerClaim { request: claim, .. } => {
@@ -144,6 +240,32 @@ impl Execution<'_> {
         // the enforcer's consumed guard immediately before the engine spawn.
         slot.check_ready_for_claim_diagnosed(self.generation)
             .context(diagnostics::BrokerStep::ReadinessBeforeClaim)?;
+        if let Some(full) = self.executor.enforcer.full3() {
+            let arm_id = Uuid::parse_str(&request.operation_id)?;
+            self.context.preclaim().mark_original_unclaimed(
+                arm_id,
+                full.epoch(),
+                self.generation,
+            )?;
+            match self
+                .context
+                .preclaim()
+                .choose_claim(arm_id, full.epoch(), self.generation)
+            {
+                Ok(reservation) => reservation.consume()?,
+                Err(crate::broker::service::protocol::BrokerErrorCodeV1::Conflict) => {
+                    let signal = self
+                        .context
+                        .preclaim()
+                        .signal_for_arm(arm_id, full.epoch(), self.generation)?
+                        .context("preclaim reservation is unavailable")?;
+                    return self
+                        .retire_unused_before_claim(slot, &request, signal)
+                        .await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let operation_id = Uuid::new_v4().to_string();
         let emitter_id = Uuid::new_v4().to_string();
         let check = self
@@ -178,6 +300,17 @@ impl Execution<'_> {
                 response: None,
             }
         };
+        let reservation = slot.reserve_claim(self.generation)?;
+        let claim_arm_id = match &claim {
+            Operation::WorkerClaim { request, .. } => &request.arm_receipt.arm_id,
+            Operation::HelperClaim { request, .. } => &request.arm_receipt.arm_id,
+            _ => return Err(anyhow!("invalid preclaim operation")),
+        };
+        ensure!(
+            claim_arm_id == &request.operation_id,
+            "claim selected a different Arm"
+        );
+        slot.consume_claim_reservation(reservation, &request, self.generation)?;
         let (acknowledged, fresh) = self
             .rpc_checked(claim, Some(&slot))
             .await
@@ -223,289 +356,371 @@ impl Execution<'_> {
         purpose: HelperPurposeV1,
         permission: HelperPermissionV1,
         request_id: Option<Uuid>,
-    ) -> Result<HelperCompletion> {
-        self.stage(match purpose {
-            HelperPurposeV1::Import => LocalFailurePhaseV1::Import,
-            HelperPurposeV1::ImportVerification => LocalFailurePhaseV1::ImportVerification,
-            HelperPurposeV1::FinalScan => LocalFailurePhaseV1::FinalScan,
-            HelperPurposeV1::Export => LocalFailurePhaseV1::Export,
-        });
-        let (_, draft) = self.load().await?;
-        let worker = draft.worker()?.clone();
-        // Import has one immutable subject per attempt. Other helpers are
-        // selected by their exact durable permission, never a caller argv.
-        let mut preparation = None;
-        for helper in &draft.helpers {
-            if helper.policy().purpose != purpose
-                || !same(helper.permission(), &permission)?
-                || request_id.is_some_and(|id| helper.policy().helper_id != id.to_string())
-            {
-                continue;
-            }
-            let verification_lost = purpose == HelperPurposeV1::ImportVerification
-                && draft.operations.iter().any(|op| matches!(op,
-                    Operation::HelperObservation {request, response: Some(_)}
-                    if request.helper_id == helper.policy().helper_id && request.verification.is_none()
-                    && request.observation.finished_at.is_some()));
-            if !verification_lost {
-                preparation = Some(helper.clone());
-                break;
-            }
-        }
-        let preparation = match preparation {
-            Some(preparation) => preparation,
-            None => {
-                self.generation_current()?;
-                let policy = helper_execution_policy_v1(
-                    &worker,
-                    purpose,
-                    request_id.unwrap_or_else(Uuid::new_v4),
-                )?;
-                let preparation = HelperPreparationV1::new(policy, permission, None)?;
-                self.patch(|draft| {
-                    self.generation_current()?;
-                    ensure!(
-                        !draft
-                            .helpers
-                            .iter()
-                            .any(|h| h.policy().helper_id == preparation.policy().helper_id),
-                        "helper already exists"
-                    );
-                    draft.helpers.push(preparation.clone());
-                    Ok(())
-                })
-                .await?;
-                preparation
-            }
-        };
-        let policy = preparation.policy().clone();
-        let (_, draft) = self.load().await?;
-        if let Some(completion) = completed_helper(&draft, &policy)? {
-            self.finish_helper_cleanup(runtime, &preparation, &completion.arm)
-                .await?;
-            return Ok(completion);
-        }
-        if let Some(owned) = preparation.owned()
-            && draft.operations.iter().any(|op| matches!(op,
-                Operation::HelperClaim {request, response: Some(_)} if request.helper_id == policy.helper_id))
+    ) -> Result<BatchStep<HelperCompletion>> {
+        // A phase owns its future on the heap, but stays with this same caller.
+        // Completed preparation/result polls must not remain on the native
+        // stack while the prearmed transport polls its ownership/Arm callback.
+        let prepared = match self
+            .prepare_helper(runtime, purpose, permission, request_id)
+            .await?
         {
-            let (arm, receipt) = draft.operations.iter().find_map(|op| match op {
-                Operation::Arm {request, response: Some(response), ..}
-                    if matches!(&request.subject, ArmSubjectV1::Helper {helper_id, ..} if helper_id == &policy.helper_id)
-                    => Some((request.clone(), response.receipt.clone())),
-                _ => None,
-            }).context("historical helper arm is missing")?;
-            self.executor.enforcer.restore(RegistrationV1::new(
-                hex::encode(Sha256::digest(self.context.scope().gateway_origin().as_bytes())),
-                self.context.scope().tenant_id().into(), arm, receipt.clone(),
-                runtime.binding().clone(), owned.clone(),
-            )?, self.context.cancel_generation().clone()).await?;
-            let terminal = runtime.resume_terminal(&owned.handle).await?;
-            let observation = managed::broker_helper_observation(&worker, &policy, &terminal)?;
-            let request = HelperObservationV1 {version: 1, operation_id: Uuid::new_v4().to_string(),
-                helper_id: policy.helper_id.clone(), arm_receipt: receipt.clone(), observation, verification: None};
-            let (ack, _) = self.rpc(Operation::HelperObservation { request, response: None }).await?;
-            let Operation::HelperObservation {response: Some(terminal_receipt), request} = ack else {
-                return Err(anyhow!("helper terminal acknowledgement is missing"));
-            };
-            self.finish_helper_cleanup(runtime, &preparation, &receipt).await?;
-            ensure!(request.observation.exit_code == Some(0), "historical helper failed");
-            ensure!(purpose == HelperPurposeV1::Import,
-                "historical helper transport bytes are unknown; fresh verification or export is required");
-            return Ok(HelperCompletion { policy, arm: receipt, receipt: terminal_receipt, bytes: None, manifest: None });
-        }
-        let input = if purpose == HelperPurposeV1::Import {
-            let checkpoint = draft
-                .run
-                .plan
-                .managed
-                .as_ref()
-                .context("workspace preparation is missing")?
-                .clone();
-            Some(tokio::task::spawn_blocking(move || managed::broker_archive(&checkpoint)).await??)
-        } else {
-            None
-        };
-        let spec = managed::broker_helper_spec(&policy)?;
-        let recovered = match preparation.owned() {
-            Some(owned) => Some(owned.clone()),
-            None => runtime.lookup_created(&spec).await?,
-        };
-        let permission = preparation.permission().clone();
-        let on_created = |owned: OwnedContainerSnapshot| {
-            let policy = policy.clone();
-            let permission = permission.clone();
-            async move {
-                self.patch(|draft| {
-                    let current = draft
-                        .helpers
-                        .iter_mut()
-                        .find(|h| h.policy().helper_id == policy.helper_id)
-                        .context("prepared helper disappeared")?;
-                    if let Some(previous) = current.owned() {
-                        ensure!(
-                            same(&previous.handle, &owned.handle)?,
-                            "owned helper changed"
-                        );
-                        owned
-                            .observation
-                            .validate_identity_allocation(&previous.observation)?;
-                    } else {
-                        *current = HelperPreparationV1::new(
-                            policy.clone(),
-                            permission.clone(),
-                            Some(owned.clone()),
-                        )?;
-                    }
-                    Ok(())
-                })
-                .await?;
-                let (_, draft) = self.load().await?;
-                let durable = draft
-                    .helpers
-                    .iter()
-                    .find(|h| h.policy().helper_id == policy.helper_id)
-                    .and_then(|h| h.owned())
-                    .cloned()
-                    .context("helper ownership was not persisted")?;
-                self.arm_and_claim(runtime, durable, Some((&policy, &permission)))
-                    .await
+            HelperPreparationPhase::Completed(completion) => {
+                return Ok(ControlFlow::Continue(*completion));
             }
+            HelperPreparationPhase::Ready(prepared) => prepared,
         };
-        let retained = if let Some(owned) = recovered.as_ref() {
-            runtime
-                .start_owned_prearmed_retained(
-                    &spec,
+        let retained = match self.execute_helper(runtime, &prepared).await? {
+            crate::runtime::ManagedPrearmedOutcome::Executed(retained) => retained,
+            crate::runtime::ManagedPrearmedOutcome::Abandoned { owned, retirement } => {
+                return Ok(ControlFlow::Break(Box::new(AbandonedBatch {
                     owned,
-                    input,
-                    Limits::default().max_archive_bytes(),
-                    on_created,
-                    |_observation| async { Ok(()) },
-                )
-                .await?
-        } else {
-            self.generation_current()?;
-            runtime
-                .execute_prearmed_retained(
-                    &spec,
-                    input,
-                    Limits::default().max_archive_bytes(),
-                    on_created,
-                    |_observation| async { Ok(()) },
-                )
-                .await?
+                    retirement,
+                })));
+            }
         };
-        let observation =
-            managed::broker_helper_observation(&worker, &policy, retained.terminal())?;
-        ensure!(
-            observation.exit_code.is_some()
-                && observation.running == Some(false)
-                && observation.started_at.is_some()
-                && observation.finished_at.is_some(),
-            "helper did not prove terminal execution"
-        );
-        let succeeded = observation.exit_code == Some(0);
-        let bytes = retained.result().stdout.bytes.clone();
-        let manifest: Result<Option<workspace::Manifest>> = if retained.result().stdout.truncated {
-            Err(anyhow!("helper archive exceeded its bound"))
-        } else if purpose != HelperPurposeV1::Import {
-            let bytes = bytes.clone();
-            tokio::task::spawn_blocking(move || {
-                workspace::scan_workspace_archive(bytes.as_slice(), Limits::default())
-            })
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result)
-            .map(Some)
-        } else {
-            Ok(None)
-        };
-        let verification = if let HelperPermissionV1::ImportVerification {
-            import_helper_id,
-            manifest_digest,
-            ..
-        } = preparation.permission()
-        {
-            if let Ok(Some(manifest)) = &manifest {
-                let recorded = &draft
+        self.complete_helper(runtime, prepared, retained).await
+    }
+
+    fn prepare_helper<'phase>(
+        &'phase self,
+        runtime: &'phase ManagedRuntime,
+        purpose: HelperPurposeV1,
+        permission: HelperPermissionV1,
+        request_id: Option<Uuid>,
+    ) -> BoxFuture<'phase, Result<HelperPreparationPhase>> {
+        async move {
+            self.stage(match purpose {
+                HelperPurposeV1::Import => LocalFailurePhaseV1::Import,
+                HelperPurposeV1::ImportVerification => LocalFailurePhaseV1::ImportVerification,
+                HelperPurposeV1::FinalScan => LocalFailurePhaseV1::FinalScan,
+                HelperPurposeV1::Export => LocalFailurePhaseV1::Export,
+            });
+            let (_, draft) = self.load().await?;
+            let worker = draft.worker()?.clone();
+            // Import has one immutable subject per attempt. Other helpers are
+            // selected by their exact durable permission, never a caller argv.
+            let mut preparation = None;
+            for helper in &draft.helpers {
+                if helper.policy().purpose != purpose
+                    || !same(helper.permission(), &permission)?
+                    || request_id.is_some_and(|id| helper.policy().helper_id != id.to_string())
+                {
+                    continue;
+                }
+                let verification_lost = purpose == HelperPurposeV1::ImportVerification
+                    && draft.operations.iter().any(|op| matches!(op,
+                        Operation::HelperObservation {request, response: Some(_)}
+                        if request.helper_id == helper.policy().helper_id && request.verification.is_none()
+                        && request.observation.finished_at.is_some()));
+                if !verification_lost {
+                    preparation = Some(helper.clone());
+                    break;
+                }
+            }
+            let preparation = match preparation {
+                Some(preparation) => preparation,
+                None => {
+                    self.generation_current()?;
+                    let policy = helper_execution_policy_v1(
+                        &worker,
+                        purpose,
+                        request_id.unwrap_or_else(Uuid::new_v4),
+                    )?;
+                    let preparation = HelperPreparationV1::new(policy, permission, None)?;
+                    self.patch(|draft| {
+                        self.generation_current()?;
+                        ensure!(
+                            !draft
+                                .helpers
+                                .iter()
+                                .any(|h| h.policy().helper_id == preparation.policy().helper_id),
+                            "helper already exists"
+                        );
+                        draft.helpers.push(preparation.clone());
+                        Ok(())
+                    })
+                    .await?;
+                    preparation
+                }
+            };
+            let policy = preparation.policy().clone();
+            let (_, draft) = self.load().await?;
+            if let Some(completion) = completed_helper(&draft, &policy)? {
+                self.finish_helper_cleanup(runtime, &preparation, &completion.arm)
+                    .await?;
+                return Ok(HelperPreparationPhase::Completed(Box::new(completion)));
+            }
+            if let Some(owned) = preparation.owned()
+                && draft.operations.iter().any(|op| matches!(op,
+                    Operation::HelperClaim {request, response: Some(_)} if request.helper_id == policy.helper_id))
+            {
+                let (arm, receipt) = draft.operations.iter().find_map(|op| match op {
+                    Operation::Arm {request, response: Some(response), ..}
+                        if matches!(&request.subject, ArmSubjectV1::Helper {helper_id, ..} if helper_id == &policy.helper_id)
+                        => Some((request.clone(), response.receipt.clone())),
+                    _ => None,
+                }).context("historical helper arm is missing")?;
+                self.restore_assigned_slot(RegistrationV1::new(
+                    hex::encode(Sha256::digest(self.context.scope().gateway_origin().as_bytes())),
+                    self.context.scope().tenant_id().into(), arm, receipt.clone(),
+                    runtime.binding().clone(), owned.clone(),
+                )?).await?;
+                let terminal = runtime.resume_terminal(&owned.handle).await?;
+                let observation = managed::broker_helper_observation(&worker, &policy, &terminal)?;
+                let request = HelperObservationV1 {version: 1, operation_id: Uuid::new_v4().to_string(),
+                    helper_id: policy.helper_id.clone(), arm_receipt: receipt.clone(), observation, verification: None};
+                let (ack, _) = self.rpc(Operation::HelperObservation { request, response: None }).await?;
+                let Operation::HelperObservation {response: Some(terminal_receipt), request} = ack else {
+                    return Err(anyhow!("helper terminal acknowledgement is missing"));
+                };
+                self.finish_helper_cleanup(runtime, &preparation, &receipt).await?;
+                ensure!(request.observation.exit_code == Some(0), "historical helper failed");
+                ensure!(purpose == HelperPurposeV1::Import,
+                    "historical helper transport bytes are unknown; fresh verification or export is required");
+                return Ok(HelperPreparationPhase::Completed(Box::new(HelperCompletion { policy, arm: receipt, receipt: terminal_receipt, bytes: None, manifest: None })));
+            }
+            Ok(HelperPreparationPhase::Ready(Box::new(PreparedHelper {
+                worker,
+                draft,
+                preparation,
+                policy,
+            })))
+        }
+        .boxed()
+    }
+
+    fn execute_helper<'phase>(
+        &'phase self,
+        runtime: &'phase ManagedRuntime,
+        prepared: &'phase PreparedHelper,
+    ) -> BoxFuture<'phase, Result<crate::runtime::ManagedPrearmedOutcome>> {
+        async move {
+            let PreparedHelper {
+                worker,
+                draft,
+                preparation,
+                policy,
+            } = prepared;
+            let purpose = policy.purpose;
+            let input = if purpose == HelperPurposeV1::Import {
+                let checkpoint = draft
                     .run
                     .plan
                     .managed
                     .as_ref()
-                    .context("source manifest is missing")?
-                    .before;
-                let observed = workspace::manifest_at_recorded_coverage(recorded, manifest);
-                Some(ImportVerificationReportV1 {
-                    import_helper_id: import_helper_id.clone(),
-                    expected_manifest_digest: manifest_digest.clone(),
-                    observed_manifest_digest: content_hash(
-                        "ai-guard:workspace-manifest:v1",
-                        &observed,
-                    )?,
-                })
+                    .context("workspace preparation is missing")?
+                    .clone();
+                Some(
+                    tokio::task::spawn_blocking(move || managed::broker_archive(&checkpoint))
+                        .await??,
+                )
             } else {
                 None
-            }
-        } else {
-            None
-        };
-        let verified = purpose != HelperPurposeV1::ImportVerification
-            || verification.as_ref().is_some_and(|report| {
-                report.expected_manifest_digest == report.observed_manifest_digest
-            });
-        let arm = self.helper_arm(&policy.helper_id).await?;
-        let request = HelperObservationV1 {
-            version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            helper_id: policy.helper_id.clone(),
-            arm_receipt: arm.clone(),
-            observation,
-            verification,
-        };
-        let (ack, _) = self
-            .rpc(Operation::HelperObservation {
-                request,
+            };
+            let spec = managed::broker_helper_spec(&policy)?;
+            let recovered = match preparation.owned() {
+                Some(owned) => Some(owned.clone()),
+                None => runtime.lookup_created(&spec).await?,
+            };
+            let permission = preparation.permission().clone();
+            let on_created = |owned: OwnedContainerSnapshot| {
+                let policy = policy.clone();
+                let permission = permission.clone();
+                async move {
+                    self.patch(|draft| {
+                        let current = draft
+                            .helpers
+                            .iter_mut()
+                            .find(|h| h.policy().helper_id == policy.helper_id)
+                            .context("prepared helper disappeared")?;
+                        if let Some(previous) = current.owned() {
+                            ensure!(
+                                same(&previous.handle, &owned.handle)?,
+                                "owned helper changed"
+                            );
+                            owned
+                                .observation
+                                .validate_identity_allocation(&previous.observation)?;
+                        } else {
+                            *current = HelperPreparationV1::new(
+                                policy.clone(),
+                                permission.clone(),
+                                Some(owned.clone()),
+                            )?;
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                    let (_, draft) = self.load().await?;
+                    let durable = draft
+                        .helpers
+                        .iter()
+                        .find(|h| h.policy().helper_id == policy.helper_id)
+                        .and_then(|h| h.owned())
+                        .cloned()
+                        .context("helper ownership was not persisted")?;
+                    self.arm_and_claim(runtime, durable, Some((&policy, &permission)))
+                        .boxed()
+                        .await
+                }
+                .boxed()
+            };
+            let retained = if let Some(owned) = recovered.as_ref() {
+                runtime
+                    .start_owned_prearmed_retained(
+                        &spec,
+                        owned,
+                        input,
+                        Limits::default().max_archive_bytes(),
+                        on_created,
+                        |_observation| async { Ok(()) },
+                    )
+                    .await?
+            } else {
+                self.generation_current()?;
+                runtime
+                    .execute_prearmed_retained(
+                        &spec,
+                        input,
+                        Limits::default().max_archive_bytes(),
+                        on_created,
+                        |_observation| async { Ok(()) },
+                    )
+                    .await?
+            };
+            Ok(retained)
+        }
+        .boxed()
+    }
+
+    fn complete_helper<'phase>(
+        &'phase self,
+        runtime: &'phase ManagedRuntime,
+        prepared: Box<PreparedHelper>,
+        retained: ManagedPrearmedExecution,
+    ) -> BoxFuture<'phase, Result<BatchStep<HelperCompletion>>> {
+        async move {
+            let PreparedHelper {
+                worker,
+                draft,
+                preparation,
+                policy,
+            } = *prepared;
+            let purpose = policy.purpose;
+            let observation =
+                managed::broker_helper_observation(&worker, &policy, retained.terminal())?;
+            ensure!(
+                observation.exit_code.is_some()
+                    && observation.running == Some(false)
+                    && observation.started_at.is_some()
+                    && observation.finished_at.is_some(),
+                "helper did not prove terminal execution"
+            );
+            let succeeded = observation.exit_code == Some(0);
+            let bytes = retained.result().stdout.bytes.clone();
+            let manifest: Result<Option<workspace::Manifest>> =
+                if retained.result().stdout.truncated {
+                    Err(anyhow!("helper archive exceeded its bound"))
+                } else if purpose != HelperPurposeV1::Import {
+                    let bytes = bytes.clone();
+                    tokio::task::spawn_blocking(move || {
+                        workspace::scan_workspace_archive(bytes.as_slice(), Limits::default())
+                    })
+                    .await
+                    .map_err(anyhow::Error::from)
+                    .and_then(|result| result)
+                    .map(Some)
+                } else {
+                    Ok(None)
+                };
+            let verification = if let HelperPermissionV1::ImportVerification {
+                import_helper_id,
+                manifest_digest,
+                ..
+            } = preparation.permission()
+            {
+                if let Ok(Some(manifest)) = &manifest {
+                    let recorded = &draft
+                        .run
+                        .plan
+                        .managed
+                        .as_ref()
+                        .context("source manifest is missing")?
+                        .before;
+                    let observed = workspace::manifest_at_recorded_coverage(recorded, manifest);
+                    Some(ImportVerificationReportV1 {
+                        import_helper_id: import_helper_id.clone(),
+                        expected_manifest_digest: manifest_digest.clone(),
+                        observed_manifest_digest: content_hash(
+                            "ai-guard:workspace-manifest:v1",
+                            &observed,
+                        )?,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let verified = purpose != HelperPurposeV1::ImportVerification
+                || verification.as_ref().is_some_and(|report| {
+                    report.expected_manifest_digest == report.observed_manifest_digest
+                });
+            let arm = self.helper_arm(&policy.helper_id).await?;
+            let request = HelperObservationV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                helper_id: policy.helper_id.clone(),
+                arm_receipt: arm.clone(),
+                observation,
+                verification,
+            };
+            let (ack, _) = self
+                .rpc(Operation::HelperObservation {
+                    request,
+                    response: None,
+                })
+                .await?;
+            let Operation::HelperObservation {
+                response: Some(receipt),
+                ..
+            } = ack
+            else {
+                return Err(anyhow!("helper terminal acknowledgement is missing"));
+            };
+            let removed = runtime
+                .cleanup_terminal(retained.handle(), retained.terminal())
+                .await
+                .is_ok();
+            let cleanup = HelperCleanupV1 {
+                version: 1,
+                operation_id: Uuid::new_v4().to_string(),
+                helper_id: policy.helper_id.clone(),
+                arm_receipt: arm.clone(),
+                removed,
+                error: (!removed).then(|| "helper cleanup was not confirmed".into()),
+            };
+            self.rpc(Operation::HelperCleanup {
+                request: cleanup,
                 response: None,
             })
             .await?;
-        let Operation::HelperObservation {
-            response: Some(receipt),
-            ..
-        } = ack
-        else {
-            return Err(anyhow!("helper terminal acknowledgement is missing"));
-        };
-        let removed = runtime
-            .cleanup_terminal(retained.handle(), retained.terminal())
-            .await
-            .is_ok();
-        let cleanup = HelperCleanupV1 {
-            version: 1,
-            operation_id: Uuid::new_v4().to_string(),
-            helper_id: policy.helper_id.clone(),
-            arm_receipt: arm.clone(),
-            removed,
-            error: (!removed).then(|| "helper cleanup was not confirmed".into()),
-        };
-        self.rpc(Operation::HelperCleanup {
-            request: cleanup,
-            response: None,
-        })
-        .await?;
-        ensure!(removed, "helper cleanup requires reconciliation");
-        ensure!(succeeded, "helper reported a nonzero exit status");
-        let manifest = manifest?;
-        ensure!(
-            verified,
-            "import verification differs from its immutable source"
-        );
-        Ok(HelperCompletion {
-            policy,
-            arm,
-            receipt,
-            bytes: Some(bytes),
-            manifest,
-        })
+            ensure!(removed, "helper cleanup requires reconciliation");
+            ensure!(succeeded, "helper reported a nonzero exit status");
+            let manifest = manifest?;
+            ensure!(
+                verified,
+                "import verification differs from its immutable source"
+            );
+            Ok(ControlFlow::Continue(HelperCompletion {
+                policy,
+                arm,
+                receipt,
+                bytes: Some(bytes),
+                manifest,
+            }))
+        }
+        .boxed()
     }
 
     pub(super) async fn helper_arm(&self, helper_id: &str) -> Result<ArmReceiptV1> {
