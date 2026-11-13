@@ -1370,3 +1370,146 @@ pub(super) fn assert_stopped_consumer_maintenance_refusal_is_typed_and_effect_fr
         0
     );
 }
+
+// A0 test-only adapter: reuse the existing real E1 migrations and the W0
+// startup; never construct an actor proof or a diagnostic DTO from metadata.
+pub(crate) struct OwnedControlFixture {
+    _base: BaseFixture,
+    bundle: Option<crate::human_authority::startup::HumanOwnedStartupBundle>,
+    credentials: PrivateFile,
+    tokens: Vec<(String, String, String)>,
+}
+impl OwnedControlFixture {
+    pub(crate) fn take_startup(
+        &mut self,
+    ) -> (
+        crate::human_authority::startup::HumanOwnedStartupBundle,
+        PrivateFile,
+        Vec<(String, String, String)>,
+    ) {
+        (
+            self.bundle.take().expect("fixture startup may be consumed once"),
+            self.credentials.clone(),
+            self.tokens.clone(),
+        )
+    }
+}
+impl Store {
+    pub(crate) fn owned_control_fixture_for_test(format: u32) -> OwnedControlFixture {
+        use crate::human_authority::startup::{
+            HumanOwnedSourceOptions, HumanOwnedStartupBundle, HumanOwnedStartupRequest,
+        };
+        assert!(matches!(format, 14 | 15));
+        let base = BaseFixture::new(&["A", "B"]);
+        let anchors = base.migrate_all();
+        if format == 15 {
+            migrate15(&base, &EgressStoreLimitsV1::default());
+        }
+        let owner = base.owner(&anchors, "a0-active.json", format);
+        let closure = owner.closure().clone();
+        // Release the actual temporary owner before the genuine startup opens
+        // its retained consumer and CAS incarnation. No lock is fabricated.
+        drop(owner);
+        let credentials = base.configuration_files.iter()
+            .find(|(kind, _)| *kind == HumanConfigurationFileKindV1::TechnicalCredentials)
+            .unwrap().1.clone();
+        let tokens = ["A", "B"].into_iter().map(|tenant| (
+            tenant.to_owned(), format!("synthetic-{tenant}-runner"),
+            format!("synthetic-{tenant}-viewer"),
+        )).collect::<Vec<_>>();
+        let redactor = Redactor::new(tokens.iter()
+            .flat_map(|(_, runner, viewer)| [runner.clone(), viewer.clone()]).collect());
+        let configuration = HumanSourcesConfigurationV1::new(
+            closure.sources.clone(), closure.configuration.clone(), base.configuration_files.clone(),
+        ).unwrap();
+        let sources = closure.sources.iter().map(|source| {
+            let capacity = AuditCapacityPolicyV1::resolved(10_000);
+            (source.source_id, HumanOwnedSourceOptions::TenantStore {
+                redactor: redactor.clone(), max_events: 10_000,
+                workload: WorkloadAuditPolicyV1::resolved(10_000, &capacity),
+                capacity, retention: crate::relay::RelayRetentionPolicyV1::default(),
+            })
+        }).collect();
+        let manifest = PrivateFile::open(
+            &base.root.path().join("configuration/a0-active.json"), 1024 * 1024,
+        ).unwrap();
+        let bundle = HumanOwnedStartupBundle::open(HumanOwnedStartupRequest {
+            manifest, configuration, sources,
+        }).unwrap();
+        let source = bundle.owner.source_token(closure.sources[0].source_id).unwrap();
+        let store = bundle.stores.get(&source.source_id()).unwrap();
+        let mut command = crate::control::review_binding::tests::provision();
+        command.binding.tenant_id = "A".into();
+        command.policy.tenant_id = "A".into();
+        command.binding.credential_id = Uuid::from_u128(100).to_string();
+        command.binding.control_namespace_uuid = source.descriptor().durable_namespace_id.to_string();
+        command.policy.control_namespace_uuid = command.binding.control_namespace_uuid.clone();
+        command.binding.closure_id = bundle.owner.closure().closure_id.to_string();
+        command.binding.closure_revision = bundle.owner.closure().closure_revision;
+        command.binding.closure_digest = bundle.owner.closure().closure_digest.clone();
+        command.binding.control_config_public_digest = bundle.owner.closure().configuration.public_config_digest.clone();
+        command.policy.shares.clear();
+        command.policy.owner_permissions = vec![crate::control::review_binding::ReviewSessionPermissionV1::Content];
+        command.binding.session_binding_policy_digest = command.policy.digest().unwrap();
+        let account = crate::identity::HumanAccountV1 {
+            version: 1, principal: command.policy.owner.clone(),
+            display_name: "Synthetic A0 owner".into(), revision: 1, active: true,
+        };
+        let membership = crate::identity::MembershipV1 {
+            version: 1, membership_id: Uuid::new_v4().to_string(),
+            principal: account.principal.clone(), tenant_id: "A".into(),
+            organization_scope: command.policy.organization_scope.clone(),
+            revision: 1, active: true,
+            capabilities: [crate::identity::HumanCapabilityV1::ReadContent].into_iter().collect(),
+        };
+        for change in [
+            crate::identity::IdentityChangeV1::Account { expected_revision: 0, account },
+            crate::identity::IdentityChangeV1::Membership { expected_revision: 0, membership },
+        ] {
+            mutate(&bundle.owner, &source, store, change);
+        }
+        {
+            let epoch = bundle.owner.try_write_epoch().unwrap();
+            store.provision_review_binding(&epoch, &source, &command).unwrap();
+        }
+        OwnedControlFixture { _base: base, bundle: Some(bundle), credentials, tokens }
+    }
+
+    // Called only after the real registry lookup, on the real retained Store.
+    // It deliberately avoids ControlProtocolV1::validate: diagnostic15 is the
+    // behavior under test, not a prerequisite that may fail before its oracle.
+    pub(crate) fn assert_owned_control_fixture_binding_for_test(
+        &self,
+        epoch: &crate::human_authority::HumanSourcesReadEpoch,
+        source: &OwnedSourceToken,
+        credential: &AuthenticatedReviewRunnerCredential,
+        expected_format: u32,
+    ) -> (String, bool) {
+        let access = HumanSourceAccess::read(epoch, source).unwrap();
+        let mut db = self.db.try_lock().unwrap();
+        let tx = self.begin_checked_scoped(&mut db, &access, StoreOperationClass::Business).unwrap();
+        let actual: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(actual, expected_format);
+        let verified = self.verify_review_binding_in_transaction(
+            &tx, epoch, source, credential,
+        ).unwrap();
+        assert_eq!(verified.binding().tenant_id, "A");
+        assert_eq!(verified.binding().credential_id, credential.credential_id().to_string());
+        let namespace = authority::namespace(&tx).unwrap().to_string();
+        assert_eq!(verified.binding().control_namespace_uuid, namespace);
+        assert!(verified.binding().active);
+        if expected_format == 15 {
+            let anchored: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM egress_policy_meta m JOIN events e ON e.seq=m.genesis_seq AND e.hash=m.genesis_hash WHERE m.singleton=1)",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert!(anchored, "format15 must come from its actual anchored E1 migration");
+        }
+        let active = tx.lease.active;
+        verified.revalidate().unwrap();
+        drop(verified);
+        self.commit_checked(tx).unwrap();
+        epoch.check().unwrap();
+        (namespace, active)
+    }
+}
