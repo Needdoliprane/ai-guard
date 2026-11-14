@@ -11,6 +11,8 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 
 mod control_recovery;
+/// Proposed owned broker-supervision proof, authenticated only by the gate.
+pub(super) mod owned_broker_supervision;
 pub(super) mod owned_control;
 mod review_credentials;
 pub use control_recovery::GatewayControlRecoveryRetirementV2;

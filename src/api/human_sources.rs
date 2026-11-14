@@ -12,6 +12,8 @@ use std::{
 };
 use tokio::sync::Notify;
 
+/// Owned broker-supervision candidates and owned broker reads.
+mod broker_candidates;
 mod recent;
 
 #[cfg(test)]
@@ -28,7 +30,8 @@ const INVALID: usize = 3;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Candidate {
     Local(usize),
-    Workload,
+    /// Historical workload digest of its only retained source by index.
+    Workload(usize),
     Technical,
 }
 #[derive(Default)]
@@ -402,7 +405,7 @@ impl GatewayState {
                     candidates.insert(
                         digest,
                         if workload {
-                            Candidate::Workload
+                            Candidate::Workload(i)
                         } else {
                             Candidate::Local(i)
                         },
@@ -534,6 +537,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/human/export", &["GET", "HEAD"]),
     ("/api/v1/human/federation/workers", &["GET", "HEAD"]),
     ("/api/v1/human/identity", &["GET", "HEAD"]),
+    ("/api/v1/human/owned/brokers", &["GET", "HEAD"]),
     ("/api/v1/human/resources", &["GET", "HEAD"]),
     ("/api/v1/human/stream", &["GET", "HEAD"]),
     ("/api/v1/human/workers", &["GET", "HEAD"]),
@@ -544,6 +548,11 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
         &["POST"],
     ),
     ("/api/v1/overview", &["GET", "HEAD"]),
+    ("/api/v1/owned/brokers/checkpoints", &["POST"]),
+    ("/api/v1/owned/brokers/checkpoints/self", &["GET", "HEAD"]),
+    ("/api/v1/owned/brokers/heartbeats", &["POST"]),
+    ("/api/v1/owned/brokers/identity", &["GET", "HEAD"]),
+    ("/api/v1/owned/brokers/self", &["GET", "HEAD"]),
     ("/api/v1/quota", &["GET", "HEAD"]),
     ("/api/v1/relay/channels/admissions", &["POST"]),
     ("/api/v1/relay/channels/{id}/claims", &["POST"]),
@@ -612,6 +621,7 @@ pub(super) async fn route_gate(
     let path = request.uri().path();
     let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
         || super::control_transport::owned_protocol_request(&request)
+        || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)
         || super::control_transport::owned_policy_inspection_request(&request)
         || request.method() == "GET"
@@ -620,6 +630,7 @@ pub(super) async fn route_gate(
                 "/api/v1/human/resources",
                 "/api/v1/human/events",
                 "/api/v1/human/events/recent",
+                "/api/v1/human/owned/brokers",
             ]
             .contains(&path)
         || request.method() == "GET"

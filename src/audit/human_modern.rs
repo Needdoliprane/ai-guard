@@ -80,7 +80,9 @@ impl Store {
         let capacity = self.supervision_lease.capacity.lock().unwrap();
         json!({"tenant":capacity.tenant,"principals":capacity.principals})
     }
-    fn with_modern_read<T>(
+    /// Also the transaction of the owned human broker projection
+    /// (`human_brokers::owned`), so that read keeps this exact protocol.
+    pub(super) fn with_modern_read<T>(
         &self,
         access: &HumanSourceAccess<'_>,
         read: impl FnOnce(&CheckedTransaction<'_>) -> anyhow::Result<T>,

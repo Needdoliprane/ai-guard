@@ -22,9 +22,32 @@ pub(super) struct Client {
     origin: reqwest::Url,
     authorization: header::HeaderValue,
 }
+/// Bounds of one protected exchange. A non-200 body stays transient memory.
+#[derive(Clone, Copy)]
+pub(super) struct Limits {
+    pub request: u64,
+    pub success: u64,
+    pub error: u64,
+}
+impl Limits {
+    fn uniform(limit: u64) -> Self {
+        Self {
+            request: limit,
+            success: limit,
+            error: limit,
+        }
+    }
+}
 impl Client {
     pub(super) fn new(p: &PreparedPresence) -> Result<Self> {
-        let origin = origin(&p.scope.gateway)?;
+        Self::build(&p.scope.gateway, p.ca.as_ref(), &p.token)
+    }
+    /// Protected transport shared by the legacy and owned profiles: exact
+    /// origin, HTTPS unless a loopback IP, HTTP/1 only, no proxy, redirect or
+    /// automatic retry, bounded timeouts, an optional private CA replacing the
+    /// public roots and a sensitive bearer header.
+    pub(super) fn build(gateway: &str, ca: Option<&PrivateFile>, token: &str) -> Result<Self> {
+        let origin = origin(gateway)?;
         let mut builder = reqwest::Client::builder()
             .https_only(origin.scheme() == "https")
             .http1_only()
@@ -35,13 +58,13 @@ impl Client {
             .read_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(12))
             .pool_max_idle_per_host(0);
-        if let Some(ca) = &p.ca {
+        if let Some(ca) = ca {
             builder = builder.tls_built_in_root_certs(false);
             for cert in certificates(ca)? {
                 builder = builder.add_root_certificate(cert);
             }
         }
-        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {}", p.token))
+        let mut authorization = header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|_| PresenceError::InvalidConfig)?;
         authorization.set_sensitive(true);
         Ok(Self {
@@ -75,6 +98,32 @@ impl Client {
         {
             return Err(PresenceError::Protocol);
         }
+        let (status, bytes) = self
+            .send_bounded(method, path, request, Limits::uniform(limit))
+            .await?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| PresenceError::Protocol)?;
+        if status != StatusCode::OK {
+            // Error bodies remain bounded, transient memory only. Interpret
+            // only status and recognized codes into fieldless local errors;
+            // never return, persist or display the remote prose. Screening it
+            // as success metadata would mistake e.g. "Bearer proof" for a key.
+            return Err(remote_error(status, &value));
+        }
+        p.screen(&value)?;
+        // Decode the typed object from original bytes so duplicate fields are
+        // rejected too; the Value above is only the decoded secret screen.
+        serde_json::from_slice(&bytes).map_err(|_| PresenceError::Protocol)
+    }
+    /// Protected exchange shared by both profiles, after the caller's exact
+    /// route classification. It returns the status and the bounded JSON body;
+    /// the caller alone interprets them and never keeps a non-200 body.
+    pub(super) async fn send_bounded(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        request: Option<Vec<u8>>,
+        limits: Limits,
+    ) -> Result<(StatusCode, Vec<u8>)> {
         let url = self
             .origin
             .join(&format!("control{path}"))
@@ -86,7 +135,7 @@ impl Client {
             .header(header::ACCEPT, "application/json")
             .header(header::CACHE_CONTROL, "no-store");
         if let Some(request) = request {
-            if request.len() as u64 > limit {
+            if request.len() as u64 > limits.request {
                 return Err(PresenceError::Protocol);
             }
             builder = builder
@@ -94,6 +143,12 @@ impl Client {
                 .body(request);
         }
         let response = builder.send().await.map_err(|_| PresenceError::Transport)?;
+        let status = response.status();
+        let limit = if status == StatusCode::OK {
+            limits.success
+        } else {
+            limits.error
+        };
         let header_bytes: usize = response
             .headers()
             .iter()
@@ -113,7 +168,6 @@ impl Client {
         {
             return Err(PresenceError::Protocol);
         }
-        let status = response.status();
         if status.is_redirection() {
             return Err(PresenceError::Protocol);
         }
@@ -126,18 +180,7 @@ impl Client {
             }
             bytes.extend_from_slice(&chunk);
         }
-        let value: Value = serde_json::from_slice(&bytes).map_err(|_| PresenceError::Protocol)?;
-        if status != StatusCode::OK {
-            // Error bodies remain bounded, transient memory only. Interpret
-            // only status and recognized codes into fieldless local errors;
-            // never return, persist or display the remote prose. Screening it
-            // as success metadata would mistake e.g. "Bearer proof" for a key.
-            return Err(remote_error(status, &value));
-        }
-        p.screen(&value)?;
-        // Decode the typed object from original bytes so duplicate fields are
-        // rejected too; the Value above is only the decoded secret screen.
-        serde_json::from_slice(&bytes).map_err(|_| PresenceError::Protocol)
+        Ok((status, bytes))
     }
     pub(super) async fn identity(&self, p: &PreparedPresence) -> Result<BrokerIdentityViewV1> {
         self.exchange(p, "/api/v1/brokers/identity", None).await

@@ -7,6 +7,10 @@ mod checkpoint;
 #[cfg(test)]
 mod checkpoint_tests;
 pub(super) mod federation;
+/// Proposed owned broker-supervision Store entries: scoped formats 14/15 only.
+/// These local declarations shadow the glob-imported shared contract module.
+pub(super) mod owned_checkpoint;
+pub(super) mod owned_supervision;
 
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (
@@ -884,12 +888,28 @@ impl Store {
             checkpoint::require_schema12(&tx)?;
         }
         let clock = super::workload::capture_control_time(&tx)?;
+        let result = self.persist_broker_change_checked(&tx, &clock, change, identity)?;
+        self.commit_authorized(tx, &clock)?;
+        Ok(result)
+    }
+    /// Shared registry mutation body over a checked transaction whose access
+    /// class, format guard and control clock the caller already established.
+    /// Identity revalidation precedes an exact replay; the audit event and the
+    /// projection rows are written in this same transaction. The caller alone
+    /// commits, and publishes no positive result before that commit.
+    fn persist_broker_change_checked(
+        &self,
+        tx: &CheckedTransaction<'_>,
+        clock: &super::workload::AuthorizedControlTimeV1,
+        change: Change,
+        identity: Option<&BrokerIdentityV1>,
+    ) -> anyhow::Result<BrokerMutationResultV1> {
         let now = clock.at();
         let received_at = format_time(now);
         if let Some(identity) = identity {
             permission(identity.tenant_id() == self.tenant_id)?;
-            super::workload::revalidate_broker_identity_checked(&tx, identity, now)?;
-            let broker = load_broker(&tx, identity.broker_id())?
+            super::workload::revalidate_broker_identity_checked(tx, identity, now)?;
+            let broker = load_broker(tx, identity.broker_id())?
                 .ok_or(BrokerRegistryFailureV1::PermissionDenied)?;
             broker.require_current_grant(identity, &received_at)?;
             if let Change::Heartbeat { heartbeat, .. } = &change {
@@ -897,8 +917,7 @@ impl Store {
             }
         }
         // Revocation/expiry/binding validation precede even an exact replay.
-        if let Some(result) = replay(&tx, &change)? {
-            self.commit_authorized(tx, &clock)?;
+        if let Some(result) = replay(tx, &change)? {
             return Ok(result);
         }
         let record = Record {
@@ -907,9 +926,9 @@ impl Store {
             received_at,
             change,
         };
-        super::workload::validate_control_time(&tx, &record.received_at, None)?;
-        let mut projection = preflight(&tx, &record.change)?;
-        let next_seq = audit_head(&tx)?
+        super::workload::validate_control_time(tx, &record.received_at, None)?;
+        let mut projection = preflight(tx, &record.change)?;
+        let next_seq = audit_head(tx)?
             .0
             .checked_add(1)
             .context("audit sequence exhausted")?;
@@ -922,18 +941,18 @@ impl Store {
         require(serde_json::to_value(&event)? == original)?;
         let stored = if let Some(identity) = identity {
             self.append_authorized_workload_in_transaction(
-                &tx,
+                tx,
                 event,
                 payload,
                 super::capacity::WorkloadAuditPrincipalV1::Broker {
                     broker_id: identity.broker_id().to_owned(),
                 },
-                &clock,
+                clock,
             )?
         } else if matches!(record.change, Change::Revoke { .. }) {
-            self.append_authorized_identity_in_transaction(&tx, event, payload, &clock)?
+            self.append_authorized_identity_in_transaction(tx, event, payload, clock)?
         } else {
-            self.append_authorized_in_transaction(&tx, event, payload, &clock)?
+            self.append_authorized_in_transaction(tx, event, payload, clock)?
         };
         require(
             stored.seq == next_seq
@@ -947,7 +966,6 @@ impl Store {
             tx.execute("INSERT INTO broker_registry_incarnations(incarnation_id,broker_id,event_seq) VALUES(?1,?2,?3)", params![mutation.incarnation_id,broker.broker_id,stored.seq])?;
         }
         tx.execute("INSERT INTO broker_registry_operations(operation_id,input_hash,event_seq,broker_id,result_json) VALUES(?1,?2,?3,?4,?5)", params![record.change.operation_id(),record.input_hash,stored.seq,broker.broker_id,serde_json::to_string(&broker)?])?;
-        self.commit_authorized(tx, &clock)?;
         Ok(result(
             &stored,
             broker,

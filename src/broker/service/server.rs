@@ -23,7 +23,10 @@ use crate::{
         },
         lifecycle::{LocalCommandReceiptV1, LocalCommandRequestV1},
         local_ipc::{PrivateListener, read_frame, write_frame},
-        presence::{PreparedPresence, PresenceError, PresenceScope},
+        presence::{
+            PresenceError, PresenceScope,
+            owned::{SelectedPresence, load_selected},
+        },
         writer::{
             CancelInputV1, CompletionFailure, ProfileWriterCapabilities, StopWriterClient,
             WriterClient,
@@ -68,6 +71,11 @@ mod retained_audit;
 
 #[path = "checkpoint_source.rs"]
 mod checkpoint_source;
+
+/// Proposed owned broker-supervision publisher, selected only by a presence
+/// file naming its exact profile. It shares the publication owner above.
+#[path = "owned_presence.rs"]
+mod owned_presence;
 
 #[path = "retirement_settlement.rs"]
 mod retirement_settlement;
@@ -192,7 +200,7 @@ impl Material {
         }
         Ok(())
     }
-    fn protect_presence(&mut self, prepared: &PreparedPresence) -> Result<()> {
+    fn protect_presence(&mut self, prepared: &SelectedPresence) -> Result<()> {
         for file in prepared.protected_files() {
             file.revalidate()
                 .map_err(|_| anyhow!("broker presence protection is unavailable"))?;
@@ -457,9 +465,11 @@ impl Response {
 
 /// Prepare all presence protections together before any actor or new helper.
 /// Only normal mode with explicit opt-in calls this; STOP-only never opens it.
+/// Each presence file explicitly selects the legacy or the owned profile; a
+/// refused owned configuration never falls back to the legacy profile.
 async fn prepare_presence(
     registry: Arc<Registry>,
-) -> Result<(Material, Vec<(String, PreparedPresence)>)> {
+) -> Result<(Material, Vec<(String, SelectedPresence)>)> {
     tokio::task::spawn_blocking(move || {
         let mut material = Material::load(&registry)?;
         let mut prepared = Vec::new();
@@ -487,9 +497,12 @@ async fn prepare_presence(
                     }
                 },
             };
-            let presence = PreparedPresence::load(path, scope, material.literals.clone())?;
+            let presence = load_selected(path, scope, material.literals.clone())?;
             prepared.push((profile.id.clone(), presence));
         }
+        // Owned journals stay dedicated across every profile and one broker is
+        // published once, before any protection, lock or anchor exists.
+        owned_presence::check_owned_profiles(&registry, &material, &prepared)?;
         // Preflight cumulative protection/secret caps before initializing any
         // state. A later profile's key must also protect earlier metadata.
         for (_, presence) in &prepared {

@@ -1,0 +1,18 @@
+{
+  "profile": "broker_supervision_owned_v1",
+  "version": 1,
+  "enrollment_file": "/absolute/private/ai-guard/owned-presence/enrollment.json",
+  "bearer_file": "/absolute/private/ai-guard/credentials/owned-broker-bearer",
+  "ca_bundle_file": "/absolute/private/ai-guard/trust/control-ca.pem",
+  "interval_seconds": 30,
+  "heartbeat_journal": {
+    "state_dir": "/absolute/private/ai-guard/owned-heartbeat-journal",
+    "max_operations": 2880,
+    "max_state_bytes": 100663296
+  },
+  "checkpoint_journal": {
+    "state_dir": "/absolute/private/ai-guard/owned-checkpoint-journal",
+    "max_operations": 1440,
+    "max_state_bytes": 121634816
+  }
+}

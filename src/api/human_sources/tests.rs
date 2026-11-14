@@ -440,6 +440,7 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                     "/api/v1/human/resources",
                     "/api/v1/human/events",
                     "/api/v1/human/events/recent",
+                    "/api/v1/human/owned/brokers",
                 ]
                 .contains(path)
                 || *path == "/healthz"
@@ -756,7 +757,7 @@ fn candidates_keep_collisions_across_classes_and_sources() {
     assert!(index.local_source(&[7; 32]).is_err());
     let mut index = CandidateIndex::default();
     index.insert([9; 32], Candidate::Local(0)).unwrap();
-    index.insert([9; 32], Candidate::Workload).unwrap();
+    index.insert([9; 32], Candidate::Workload(0)).unwrap();
     assert!(index.local_source(&[9; 32]).is_err());
 }
 
@@ -768,7 +769,7 @@ fn candidate_limit_refuses_before_insertion_and_never_truncates() {
         digest[..8].copy_from_slice(&(value as u64).to_be_bytes());
         index.insert(digest, Candidate::Local(0)).unwrap();
     }
-    assert!(index.insert([255; 32], Candidate::Workload).is_err());
+    assert!(index.insert([255; 32], Candidate::Workload(0)).is_err());
     assert_eq!(index.count, MAX_CANDIDATES);
     assert_eq!(index.entries.len(), MAX_CANDIDATES);
 }

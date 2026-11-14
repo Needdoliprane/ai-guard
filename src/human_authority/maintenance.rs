@@ -28,6 +28,10 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Proposed offline owned broker identity lifecycle (decision D1). It opens
+/// no route, admits no credential at runtime and qualifies nothing.
+pub mod broker_identity;
+
 const MAX_SOURCES_PER_VIEW: usize = 256;
 const MAX_MAINTENANCE_PLAN_BYTES: usize = 512 * 1024;
 const MAX_MAINTENANCE_OPEN_TIME: Duration = Duration::from_secs(10);
