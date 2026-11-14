@@ -57,6 +57,16 @@ test("common delivery ID and revision detect partial updates without rewriting b
   assert.match(identityRows(bundle, state)[2].build.id ?? "inconnu", /inconnu/);
 });
 
+test("revision comparison uses hexadecimal identity while preserving the received spelling", () => {
+  const bundle = frontendIdentity("0.0.1", "delivery-A", "aB".repeat(20));
+  const state = { dashboard: available("dashboard", "0.0.1", { id: "delivery-A", revision: "ab".repeat(20) }),
+    gateway: available("gateway", "0.0.1", { id: "delivery-A", revision: "AB".repeat(20) }) };
+  assert.equal(identitySummary(bundle, state).mismatch, false);
+  assert.equal(identityRows(bundle, state)[2].build.revision, "AB".repeat(20));
+  state.gateway = available("gateway", "0.0.1", { id: "delivery-a", revision: "AB".repeat(20) });
+  assert.equal(identitySummary(bundle, state).mismatch, true, "build IDs retain their case-sensitive identity");
+});
+
 test("UI identity stays visible before login/offline; unknown services are never assigned the bundle version", () => {
   const unknown = { dashboard: { kind: "loading" }, gateway: { kind: "unavailable", reason: "unsupported" } };
   const rows = identityRows(frontend, unknown);
