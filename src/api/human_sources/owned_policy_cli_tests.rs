@@ -80,19 +80,19 @@ impl Drop for Server {
     }
 }
 
-struct ActualCli {
+pub(super) struct ActualCli {
     executable: PathBuf,
     home: PathBuf,
 }
 
-struct CliOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
+pub(super) struct CliOutput {
+    pub(super) status: ExitStatus,
+    pub(super) stdout: Vec<u8>,
+    pub(super) stderr: Vec<u8>,
 }
 
 impl ActualCli {
-    fn from_qa(home: &Path) -> Result<Self> {
+    pub(super) fn from_qa(home: &Path) -> Result<Self> {
         let executable = PathBuf::from(
             std::env::var_os("AI_GUARD_A1_CLI_TEST_BIN")
                 .context("select this acceptance case only with the Cargo-bound normal CLI")?,
@@ -143,7 +143,7 @@ impl ActualCli {
         })
     }
 
-    async fn run(&self, args: &[&str]) -> Result<CliOutput> {
+    pub(super) async fn run(&self, args: &[&str]) -> Result<CliOutput> {
         let mut child = Command::new(&self.executable)
             .args(args)
             .env_clear()
@@ -199,7 +199,7 @@ async fn bounded_output(reader: impl tokio::io::AsyncRead + Unpin) -> Result<Vec
     Ok(bytes)
 }
 
-fn private_input(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn private_input(path: &Path, bytes: &[u8]) -> Result<()> {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -210,7 +210,7 @@ fn private_input(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn text(path: &Path) -> Result<&str> {
+pub(super) fn text(path: &Path) -> Result<&str> {
     path.to_str()
         .context("synthetic acceptance pathname is not UTF-8")
 }

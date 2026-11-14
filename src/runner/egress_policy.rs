@@ -118,5 +118,7 @@ fn policy_error(status: u16, body: &[u8]) -> E {
     }
 }
 
+mod inspection;
+
 #[cfg(test)]
 mod tests;

@@ -8,7 +8,10 @@ use reqwest::{
     header::{AUTHORIZATION, HeaderMap, HeaderValue},
 };
 use serde::de::DeserializeOwned;
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 use tokio::sync::Semaphore;
 
 #[path = "prerequisites_transport.rs"]
@@ -26,6 +29,17 @@ pub(super) struct Transport {
     endpoint: String,
     credentials: KubernetesCredentials,
     permits: Semaphore,
+    /// Slots of the V2 preamble-only attach attempts. They are separate from
+    /// `permits`, so an open attach never takes a request slot. The field is
+    /// read only by the V2 attach route, which has no production caller yet.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "read only by the V2 attach route, which has no production caller (DESIGN section 3.6)"
+        )
+    )]
+    attach_permits: Arc<Semaphore>,
 }
 /// The outer Result is reserved for refusals before HTTP initiation. Once the
 /// consumed guard has admitted initiation, every failure is an uncertain effect.
@@ -99,6 +113,7 @@ impl Transport {
             endpoint: binding.endpoint.trim_end_matches('/').into(),
             credentials,
             permits: Semaphore::new(4),
+            attach_permits: Arc::new(Semaphore::new(super::session_attach::MAX_CONCURRENT_ATTACH)),
         })
     }
     /// All callers use fixed API paths and validated DNS names, never caller URLs.

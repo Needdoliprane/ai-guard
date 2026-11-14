@@ -1,5 +1,87 @@
 # Stratégie de qualification
 
+## 14 novembre — sélection inspection composée : API, CLI historique et FS
+
+Sur `45179db`, une seule no-run offline/frozen avec lib, bin agentsandbox et
+intégration kubernetes_waiting_cli fournit cinq exécutables frais liés au JSON
+Cargo. Un check toutes cibles est suivi de 24 listes réelles : global/default et
+ignored sur trois harnesses, puis exact/ignored des neuf groupes. Le default
+`--list` comprend aussi les ignorés : corréler les ensembles réels. Les 47 FQN
+uniques sont 27 libtest, 13 bin-test et sept intégrations ; 44 actifs et trois
+CLI ignorés par défaut, explicitement exécutés avec le normal CLI de même build
+et son SHA. Aucun helper hors sélection n'est compté comme un PASS.
+
+Les neuf groupes passent, sans addition avec les campagnes antérieures :
+API3, CLI ignorés3, Core9, CLI13, E1compat2, A1auth3, FS3, Kube4 et stdio7.
+Les noms et argv exacts restent dans
+[SELECTIONS.json](evidence/2026-11-14/owned-policy-inspection/SELECTIONS.json).
+Exiger le nom réellement exécuté et le résumé exact, pas seulement RC0.
+Conserver chaque groupe partiel : R2 avait huit PASS dans son groupe Core en
+échec, bien que son compteur des tests PASS issus des deux groupes entièrement réussis restât 6.
+R1 compilation101 et R2 faux positif d'oracle restent des échecs datés, pas des
+réussites reconstruites. Le correctif R3 vérifie les clés JSON, sans mutation produit.
+
+Les tests traversent le vrai HTTP/SDK/SQLite et le CLI Rust interne : scope
+observé, rapport historique, préparation/durabilité, CAS final, conflits sans
+réparation, reprise et contrôles d'autorité/FS. Les nouveaux contrôles de parent
+physique restent distincts d'une qualification case-insensitive : l'oracle
+report/REPORT est NOT_APPLICABLE sur le filesystem Linux de cette campagne.
+Ne pas transformer cette branche non exercée en preuve macOS.
+
+Les quatre contrats Kube sont un HTTPS/TLS loopback et trois duplex mémoire ;
+les sept stdio exécutent le vrai provider Rust interne avec pipes, sans client
+Codex/Claude, modèle ou worker. Préserver source/modes, cinq SHA, sept collectes,
+OOM0, source intacte, absence du CID exact et flush séparé. Les fichiers par phase
+et l'extrait terminal borné sont conservés ; la transcription brute complète
+n'est pas persistée ni reconstruite. Ces tests ne qualifient ni runtime/réseau
+produit, E2/flow16, fédération Claude, capacité100 ou production ; 0/12 gates fermés.
+[Preuves EN](evidence/2026-11-14/owned-policy-inspection/README.md) /
+[FR](evidence/2026-11-14/owned-policy-inspection/README.fr.md).
+
+## 14 novembre — Kubernetes attach : 4 contrats et 7 processus stdio
+
+Le gel `1e30e5e8546ab614eba7849789a1a0468cbc2843` est compilé une fois
+avec libtest et `--test kubernetes_waiting_cli`, puis vérifié all-targets,
+offline/frozen et `-j1`. Les vrais messages Cargo identifient trois
+artefacts : libtest, intégration stdio et binaire Rust normal
+`ai-guard-provider` (`profile_test:false`). Quatorze listes réelles
+précèdent les cinq groupes : quatre parents de contrat chacun en exact et
+sept noms stdio exacts ensemble. Total réel : 11 PASS uniques, zéro FAIL,
+zéro sélectionné ignoré ; les 121 PASS historiques be6 ne sont pas rejoués.
+[FQN et argv](evidence/2026-11-14/kubernetes-attach-composition/SELECTIONS.json).
+
+Les contrats utilisent les vrais owner/codec/lecteur avec peers synthétiques.
+Le contrat 1 exerce une requête d'upgrade HTTPS vers un peer TLS loopback ;
+les contrats 2/3 emploient `tokio::io::duplex(64)` et le contrat 4
+play→open→duplex mémoire. Les trois derniers ne prouvent aucun TCP/TLS.
+Ils couvrent le travail initié et son slot, le pong bloqué après Ready,
+l'annulation gardée avec le délai d'IO et les closes invalides, sans serveur
+d'API Kubernetes. L'addendum de couverture est lié aux reçus des preuves.
+Les sept intégrations
+lancent réellement le binaire normal, avec environnement nettoyé, répertoire
+privé neuf et pipes bornés. Exiger sa fin terminale observée, stdout/stderr
+bornés et kill/reap sur erreur ; le cas préfixe retenu doit observer 65 alors
+que le writer stdin reste ouvert, sans fabriquer EOF à l'échéance.
+
+Le test Hello vérifie exactement un Ready déclaré corrélé puis sortie 66 ;
+ce n'est pas une identité ou une exécution métier. Les refus d'arguments
+supplémentaires, UTF-8 invalide et troncature gardent 64/126. Le code interne
+du provider est exécuté pour attente/arguments, aucun client ou modèle IA.
+La bibliothèque WebSocket épinglée, le confinement et le protocole ne gagnent
+aucune qualification cluster par le seul passage des fixtures.
+
+Conserver les 2805 contenus/tailles/modes, les trois SHA Cargo, les 56 RC
+d'étapes, exports bornés, fermeture exacte, OOM 0 et flush FD séparé. Ne pas
+exécuter les opaques sur l'hôte. Les [preuves EN](evidence/2026-11-14/kubernetes-attach-composition/README.md) /
+[FR](evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+restent propres à `1e30e5e`. La campagne inspection `45179db`, décrite
+ci-dessus, répète séparément ces onze contrôles parmi ses 47 parents, sans
+rejouer les 121 historiques ni additionner ces campagnes. Pas de relance automatique des 121
+parents historiques, de toute la suite ou de modèle : choisir les nouvelles
+régressions utiles, sans transformer l'économie de tests en qualification.
+S5/permis/fencing/R4/R7/R10, runtime/réseau/cluster réels, capacité 100,
+Clippy strict et gates production restent ouverts ; activation fermée.
+
 ## 14 novembre — A1 : sélection API/CLI du registre egress
 
 Le gel `db2678d42cff9c8d6d15bf31284a989732cc6f0d` possède une compilation
@@ -33,9 +115,10 @@ lib+bin en no-run, le build du CLI normal et le check all-targets consignés
 dans les [preuves EN](evidence/2026-11-14/owned-egress-policy-api-cli/README.md) /
 [FR](evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md).
 La reprise n'en répète aucune. Aucun nouveau harnais n'est requis par cette
-documentation. Le parcours d'acquisition scope/CAS frais reste ouvert ;
-`inspect` et `prepare --inspection-dir` ne sont pas livrés, leurs cinq
-parents ultérieurs sur `05a4451` sont NOT_RUN. Runtime/réseau/worker,
+documentation. Sur cette preuve A1, l'acquisition scope/CAS restait ouverte
+et les cinq parents ultérieurs `05a4451` étaient NOT_RUN. Le parcours
+`inspect` puis `prepare --inspection-dir` est vérifié séparément sur `45179db`
+par la sélection inspection ci-dessus ; ne pas lui transférer les 74 PASS. Runtime/réseau/worker,
 fournisseurs/SSO, cluster, charge100, suite complète, Clippy strict et tous
 les gates production restent hors qualification ; broker/relais restent fermés.
 

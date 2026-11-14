@@ -7,25 +7,44 @@ ni option `--runtime kubernetes`, ni commande CLI de session, ni activation de
 production. Ce guide décrit le code du runtime de session V2 présent dans les
 sources Rust, ce qu'un opérateur peut faire aujourd'hui, et le plan qui le
 qualifiera plus tard sur le cluster Kubernetes à un nœud de Docker Desktop. Ce
-plan **n’a pas été exécuté sur un cluster réel**. État du 13 novembre : les 144 parents logiciels Kubernetes sélectionnés passent dans la composition QA Linux ARM64 ; les résultats et limites figurent dans les [preuves courantes](../../engineering/evidence/2026-11-13/claude-composition/README.fr.md). Le [registre initial](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) conserve son état de livraison daté.
+plan **n’a pas été exécuté sur un cluster réel**. Les [preuves du 13 novembre](../../engineering/evidence/2026-11-13/claude-composition/README.fr.md) consignent 144 parents logiciels Kubernetes sélectionnés PASS sur leur source exacte, avec un RC99 global et un écart de sous-cas explicite. Le [registre initial](../../engineering/evidence/2026-11-12/kubernetes-v2-runtime/README.md) conserve son état de livraison daté.
 Le contrat de référence est le [contrat d'admission Kubernetes](../../engineering/KUBERNETES_ADMISSION.md).
+
+La source courante compose le lot S2b : attachement limité au préambule,
+durcissement et dispatch du mode d'attente du worker
+([section 11](#11-attachement-limité-au-préambule-et-mode-dattente-du-worker-lot-s2b)).
+Les [preuves ciblées du 14 novembre](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+consignent build/check RC0 et 11 parents uniques PASS sur
+`1e30e5e8546ab614eba7849789a1a0468cbc2843` : quatre contrats de vrais flux
+avec peers synthétiques et sept cas de subprocess stdio réels du
+binaire Rust normal `ai-guard-provider`. Seuls son attente et ses arguments
+sont exercés ; aucun client ou modèle IA. Les 121 PASS distincts sur
+`be6b12dce7f74e2062f7ad5524e12818bf7313b5` restent historiques et ne sont
+pas rejoués sur `1e30e5e`. La [campagne composée inspection sur `45179db`](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md)
+réexécute ces quatre contrats et sept cas stdio parmi ses 47 parents ciblés.
+Elle ne rejoue pas les 121 tests historiques et ne qualifie aucun cluster ;
+les comptes de ces sources ne sont pas additionnés. Seul le contrat 1 utilise un upgrade
+HTTPS vers un peer TLS loopback synthétique ; les contrats 2–4 utilisent des
+duplex mémoire, sans preuve TCP/TLS. Aucun parcours de session du produit
+n'atteint l'attachement.
 
 ## 1. État par couche
 
 | Couche | Ce qui existe | Qui peut l'appeler aujourd'hui | Vérifié |
 |---|---|---|---|
-| A. Entrée de bibliothèque avec données réelles | `KubernetesRuntime::inspect_session_workspace_claim(name)` : nom vérifié comme label DNS avant toute requête, puis GET des deux ancres de namespace, du PVC et à nouveau des ancres. Un nom invalide est signalé comme `InvalidAuthority` avant toute requête, un claim qui ne remplit pas les exigences de la section 3 comme `InvalidResponse`, et un PVC absent comme `ApiRejected(404)`. | Du code Rust qui détient un `KubernetesRuntime`. **Aucun binaire du produit ne l'appelle** ; une entrée CLI en lecture seule, qui associerait les deux premières erreurs à des messages dédiés, n'est qu'un patch proposé. | Logiciel ciblé PASS ; cluster NOT_RUN |
-| B. Mécanismes purs (internes à la crate) | Rendu exact de la requête de Pod V2, projection de la réponse admise, parseur exact d'observation, enregistrements du journal. | Code de la crate seulement. | Logiciel ciblé PASS ; cluster NOT_RUN |
-| C. Cycle de vie avant effet (interne à la crate) | Chaîne de rétention du journal, réouverture en observation seule, abandon avant tout effet, reprise par un successeur, rejeu du reçu, rapport de réconciliation en observation seule. | **Personne en production.** Le Store du gateway émet les confirmations alors que le broker garde le journal ; les routes broker qui les relieraient n'existent pas encore (demande Root R2). | Logiciel ciblé PASS ; cluster NOT_RUN |
-| D. Mécanismes d'effet (fermés) | CREATE retenu des octets exacts, PATCH de levée du gate avec opérations JSON-Patch `test`, DELETE avec précondition d'UID. | Une garde scellée dont la seule implémentation existe dans les tests, liée à un listener loopback possédé. Aucun chemin du produit n'atteint un effet. | Logiciel ciblé PASS ; cluster NOT_RUN |
+| A. Entrée de bibliothèque avec données réelles | `KubernetesRuntime::inspect_session_workspace_claim(name)` : nom vérifié comme label DNS avant toute requête, puis GET des deux ancres de namespace, du PVC et à nouveau des ancres. Un nom invalide est signalé comme `InvalidAuthority` avant toute requête, un claim qui ne remplit pas les exigences de la section 3 comme `InvalidResponse`, et un PVC absent comme `ApiRejected(404)`. | Du code Rust qui détient un `KubernetesRuntime`. **Aucun binaire du produit ne l'appelle** ; une entrée CLI en lecture seule, qui associerait les deux premières erreurs à des messages dédiés, n'est qu'un patch proposé. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| B. Mécanismes purs (internes à la crate) | Rendu exact de la requête de Pod V2, projection de la réponse admise, parseur exact d'observation, enregistrements du journal. | Code de la crate seulement. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| C. Cycle de vie avant effet (interne à la crate) | Chaîne de rétention du journal, réouverture en observation seule, abandon avant tout effet, reprise par un successeur, rejeu du reçu, rapport de réconciliation en observation seule. | **Personne en production.** Le Store du gateway émet les confirmations alors que le broker garde le journal ; les routes broker qui les relieraient n'existent pas encore (demande Root R2). | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| D. Mécanismes d'effet (fermés) | CREATE retenu des octets exacts, PATCH de levée du gate avec opérations JSON-Patch `test`, DELETE avec précondition d'UID ; attachement S2b limité au préambule. | Une garde scellée dont la seule implémentation existe dans les tests, liée à un listener loopback possédé. Aucun chemin du produit n'atteint un effet. | Quatre contrats attach PASS sur 1e30e5e puis sur 45179db ; autres sélections liées à leur source ; effets réels et cluster NOT_RUN |
+| Mode d'attente worker S2b | `ai-guard-provider` sélectionne le mode fixe avant le parcours fournisseur. Il échange Hello/Ready, puis refuse tout octet supplémentaire. | Uniquement l'entrée du mode d'attente du binaire existant ; aucun lanceur de session. | Sept cas stdio du binaire normal PASS sur 1e30e5e puis sur 45179db ; image worker et cluster NOT_RUN |
 | E. Raccords et qualification manquants | Demandes typées R1–R11 au propriétaire du contrôle ; ce plan Docker Desktop. | — | non commencé |
 
-L'attachement à un Pod, le mode d'attente du worker, les permis d'effet, le
-handoff, le démarrage, l'observation terminale et le règlement du quota après
-effet **ne sont pas implémentés**. Rien dans ce guide n'est qualifié, et il ne
-ferme aucun gate de production.
+Les permis d'effet, le handoff, le démarrage, l'observation terminale et le
+règlement du quota après effet **ne sont pas implémentés**. S2b implémente
+seulement le préambule et le mode d'attente en source. Cela ne ferme aucune
+qualification du runtime Kubernetes ni aucun gate de production.
 
-Les résultats logiciels concernent uniquement les sélections du [relevé typé](../../engineering/evidence/2026-11-13/claude-composition/TESTS.json), pas toutes les combinaisons de chaque couche. Global RC99 : un sous-cas release autre UID reste NOT_RUN. Aucun effet produit S5 ouvert. S2b attach reste actif chez Claude et non intégré ; les questions Q1/Q6 héritées ci-dessous restent historiques, distinctes du nouveau dispatch.
+Les résultats du 13 novembre concernent uniquement les sélections du [relevé typé](../../engineering/evidence/2026-11-13/claude-composition/TESTS.json), pas toutes les combinaisons de chaque couche. Global RC99 : un sous-cas release autre UID reste NOT_RUN. Aucun effet produit S5 ouvert. Q1/Q6 sont décidées pour le seul code du préambule S2b ; elles n'autorisent pas l'activation.
 
 ## 2. Ce qu'un opérateur peut faire aujourd'hui
 
@@ -69,8 +88,8 @@ qu'une réconciliation est nécessaire.
 - **Requête exacte.** La requête de Pod est rendue de façon déterministe à
   partir de l'intention confirmée, de l'empreinte de préparation et du claim
   retenu. Sa commande est le mode d'attente du binaire existant
-  `ai-guard-provider` (`kubernetes-session-wait-v2`, orthographe en attente de
-  la décision Root Q6), jamais une invocation métier. Elle n'a ni
+  `ai-guard-provider` (`kubernetes-session-wait-v2`, fixé par la décision
+  Root Q6), jamais une invocation métier. Elle n'a ni
   environnement, ni Secret, ni jeton, ni chemin hôte, ni jeton de
   service-account, et porte un scheduling gate.
 - **Chaîne d'effets.** CREATE (retenu derrière le gate), levée du gate,
@@ -171,13 +190,12 @@ inspectés ; sinon il est absent du rapport sérialisé (et non `null`).
   un enregistrement relu, un booléen ou un UID déclaré. Une observation de Pod
   lie l'UID exact, l'empreinte de spec et l'identité du conteneur ; un autre UID
   sous le même nom est une autre instance.
-- **Attachement (proposition seulement, non implémentée) :** un attachement
-  limité au préambule, encadré par deux observations exactes, qui n'envoie que
-  le Hello non secret avant la seconde vérification. Ce n'est pas une
-  précondition atomique ; il repose sur des hypothèses énoncées (UID jamais
-  réutilisé, unicité des noms, serveur d'API et kubelet honnêtes, GET le plus
-  récent). Chaque attachement terminerait le worker. Il attend la décision
-  Root Q1.
+- **Attachement (préambule seulement, en source, fermé) :** Q1 accepte
+  l'argument encadré pour le seul code du préambule. Seul le Hello non secret
+  voyage avant la seconde observation. Cela ne constitue ni une précondition
+  atomique ni une preuve d'identité ; la section 11 donne ses hypothèses et
+  limites. Toute tentative initiée doit être traitée comme finale pour le
+  Pod. Aucun chemin du produit ne l'atteint.
 - **Les logs du nœud conservent la sortie du worker**, y compris les
   métadonnées du préambule. Aucun secret ne doit transiter du worker vers le
   broker.
@@ -230,9 +248,12 @@ discriminant, refus ou plafond.
   à vérifier auprès des sources officielles, jamais supposés. Une application
   documentée n'est pas une observation ; l'étape 4a du plan l'observe. Sans
   application, les étapes 5 à 12 restent `BLOCKED`.
-- Une image worker construite localement avec les patches proposés 0001 (mode
-  d'attente) et 0002 (propriété du provider) appliqués, référencée par digest et
-  présente dans le magasin d'images du nœud (`imagePullPolicy: Never`).
+- Une image worker construite localement à partir de la source composée du
+  mode d'attente, avec propriétaire et mode exécutable du bootstrap inspectés,
+  référencée par digest et présente dans le magasin d'images du nœud
+  (`imagePullPolicy: Never`). Le dispatch est désormais raccordé en source ;
+  le build d'image et son exécution restent NOT_RUN. L'ancien patch proposé
+  de propriété de l'image n'est pas appliqué ici.
 - `agentsandbox` construit uniquement dans l'environnement de QA isolé admis.
 
 ### 8.2 Prérequis de stockage
@@ -266,9 +287,10 @@ mainteneur.
 
 ### 8.4 Suite d'effets (toute BLOCKED)
 
-Les étapes 4 à 12 restent `BLOCKED` tant que les demandes Root R1–R7, les
-décisions Q1 et Q6 et une autorisation explicite n'existent pas : étape 4
-CREATE retenu, y compris la vérification que le 201 admis passe la projection
+Les étapes 4 à 12 restent `BLOCKED` tant que les demandes Root R1–R7
+manquantes, les permis d'effet S5 et une autorisation explicite n'existent
+pas. Q1 et Q6 sont décidées pour le seul code du préambule S2b. La future
+suite comprend : étape 4 CREATE retenu, y compris la vérification que le 201 admis passe la projection
 fermée de réponse admise (booléens faux omis et formes des quantités,
 EXT-14) ; étape 5 levée du gate avec préconditions et refus d'un
 `resourceVersion` périmé, qui exige aussi l'étape 4a ; étape 6 attachement
@@ -351,12 +373,18 @@ l'étape 4a a laissées non discriminées.
   attachement, suppression, Pod Security, verbes RBAC, `ReadWriteOncePod`,
   encodage des booléens omis, formes des quantités, persistance des logs),
   Docker Desktop, l'application de NetworkPolicy, de CSI et des cgroups, le mode
-  d'attente dans une image, tout permis d'effet, l'échéance durable, le handoff
+  d'attente dans une image worker, tout permis d'effet, l'échéance durable, le handoff
   et le démarrage, le règlement du quota après effet, et la montée à
   100 workers.
 - Les peers de test en loopback répondent avec des fixtures déclarées ; ils ne
   qualifient jamais un serveur d'API Kubernetes, un provisionneur ou
   `ReadWriteOncePod`.
+- Les bornes logicielles S2b, l'interopérabilité WebSocket, `stdinOnce`, les
+  signaux du worker et la rétention des logs du nœud restent non mesurés sur
+  cluster. Sept cas stdio de processus passent sur `1e30e5e`, pour la seule
+  attente et les arguments de l'adaptateur Rust normal. Les mêmes sept cas
+  passent dans la composition inspection `45179db`, sans qualification
+  runtime plus large.
 - Les gates G05, G07 et G11 restent ouverts, G11 `BLOCKED`. Le produit n'est
   pas prêt pour la production, et l'absence de chemin d'effet est la barrière
   qui garde le lancement Kubernetes fermé.
@@ -364,8 +392,9 @@ l'étape 4a a laissées non discriminées.
 ## 10. Points ouverts cités dans ce guide
 
 Ces identifiants viennent de la conception et du contrat du lot, conservés
-hors de ce dépôt. Chaque point est ouvert : ce travail n'en décide ni n'en
-livre aucun.
+hors de ce dépôt. Q1 et Q6 sont décidées pour le seul lot S2b ; les autres
+points ci-dessous restent ouverts. Ce guide ne prend aucune nouvelle décision
+du contrôle.
 
 - **Root** : le propriétaire des contrats du contrôle central et des fichiers
   partagés entre les lots de travail. Il décide les demandes R1–R11 et les
@@ -380,8 +409,10 @@ livre aucun.
 - **R4** : les trames après le `Ready` du mode d'attente (handoff, démarrage,
   résultat déclaré).
 - **R5** : la politique de stockage des claims de workspace des sessions.
-- **R6** : les modifications de fichiers hors de ce lot, livrées uniquement
-  comme patches proposés.
+- **R6** : les modifications hors du lot initial, livrées comme patches
+  proposés. Le dispatch du mode d'attente dans le binaire est désormais
+  composé ; les modifications proposées de propriété de l'image et de CLI
+  d'inspection du claim en lecture seule ne sont pas appliquées ici.
 - **R7** : la capacité d'activation de production, qui reste fermée.
 - **R8** : la coordination avec la prochaine version du schéma central
   (demande d'information).
@@ -390,10 +421,15 @@ livre aucun.
   partagent une autorité ou un namespace Kubernetes.
 - **R11** : une confirmation de successeur pour rouvrir le journal d'une autre
   incarnation.
-- **Q1** : savoir si un attachement limité au préambule, encadré par deux
-  observations exactes, est un argument d'identité d'attachement acceptable.
-- **Q6** : l'orthographe et le point d'entrée du mode d'attente du worker
-  (`kubernetes-session-wait-v2`).
+- **Q1** (décidée pour S2b) : l'argument encadré est accepté pour le seul
+  code du préambule, sous les hypothèses de la section 11. Il ne prouve aucune
+  identité et n'autorise aucun effet ; la garde reste scellée.
+- **Q6** (décidée pour S2b) : le mode d'attente est dans `ai-guard-provider`,
+  sélectionné par le seul argument `kubernetes-session-wait-v2` avant la
+  lecture de l'environnement fournisseur. Tout argument supplémentaire est
+  refusé avec la sortie 64 sans repli.
+- **S5** : permis d'effet et implémentation de production de la garde scellée,
+  avec checkpoint durable avant chaque effet ; bloqué sur R1–R3 et R7.
 - **Q7** : la règle du nom de claim par tentative et la règle de
   non-réutilisation des UID de claim.
 - **Q9** : la conduite à tenir si la seule StorageClass utilise
@@ -405,3 +441,238 @@ livre aucun.
 - **EXT-13** : la politique d'écart de versions de kubectl.
 - **EXT-14** : la façon dont Kubernetes v1.36 encode les booléens faux omis et
   les quantités canoniques dans un Pod admis.
+
+## 11. Attachement limité au préambule et mode d'attente du worker (lot S2b)
+
+Le [propriétaire de l'attachement](../../../src/runtime/kubernetes/session_attach.rs),
+l'[adaptateur WebSocket](../../../src/runtime/kubernetes/session_attach_codec.rs)
+et le [mode d'attente du worker](../../../src/runtime/kubernetes/session_worker.rs)
+existent en source. Le dispatch est raccordé au binaire existant
+[`ai-guard-provider`](../../../src/bin/ai-guard-provider.rs).
+Quatre contrats de vrais flux et sept cas stdio de processus du binaire normal
+passent sur `1e30e5e` ; [les preuves](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+en conservent le périmètre exact. Les 121 PASS historiques sur `be6b12d` ne
+sont pas rejoués. La composition inspection `45179db` répète ces onze
+contrôles ; sa [preuve propre](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md) conserve la même portée logicielle. Aucun cluster, vrai worker ou client/modèle IA n'est exercé.
+La garde d'effet n'a pas d'implémentation de
+production ; aucune commande d'attachement de session, option d'activation
+ou procédure opérateur n'existe.
+
+### 11.1 Une tentative : Hello, Ready, observations, fermeture
+
+L'attachement ne transporte que le préambule du bootstrap, sans donnée métier.
+
+1. Vérifier les UID de `kube-system` et du Namespace du tenant, actifs et sans
+   suppression en cours.
+2. Observer l'UID exact du Pod retenu, l'empreinte de spec, le nœud, l'ID du
+   conteneur worker en cours d'exécution, son heure de démarrage et son ID
+   d'image, zéro redémarrage et aucune date de suppression. La phase du Pod
+   seule ne fait pas preuve.
+3. Vérifier la garde scellée et le drapeau d'annulation avant toute requête.
+4. Initier un unique upgrade WebSocket vers le sous-resource attach du Pod
+   nommé, avec les mêmes endpoint HTTPS, AC et credential que les observations.
+   Les redirections sont refusées. Valider la réponse 101 et le seul
+   sous-protocole `v5.channel.k8s.io` ; extensions et replis sont refusés.
+5. Envoyer uniquement Hello sur stdin ; accepter un Ready correspondant sur
+   stdout. Ils portent identifiants et empreintes non secrets. Tout octet
+   bootstrap supplémentaire sur stdout est refusé ; le worker refuse tout
+   nouvel octet stdin.
+6. Observer à nouveau le Pod et comparer tous les champs de l'étape 2 ;
+   revérifier les ancres de Namespace. Une contention locale des slots de
+   requête fait reprendre ces lectures dans la même échéance, sans envoyer
+   la requête refusée.
+7. Terminer le flux et retenir le résultat local, quel que soit le verdict.
+
+L'ordre normal est ancres, Pod, attach, Pod, ancres. Deux observations égales
+permettent de rapporter le préambule comme **métadonnées déclarées**.
+Ready est un écho : il ne prouve ni identité de processus ni exécution. Le
+rapport local de tentative ne remplace pas l'audit indépendant durable
+manquant des effets du produit.
+
+Q1 accepte cet argument pour le seul code du préambule. Il suppose des UID
+jamais réutilisés, des noms uniques, un serveur d'API et un kubelet honnêtes,
+un attachement qui reste lié à son conteneur et une seconde observation la
+plus récente. Aucune de ces hypothèses n'est vérifiée ici. L'attachement n'a
+aucune précondition atomique d'UID de Pod : il adresse un nom entre deux
+lectures distinctes. Si une hypothèse échoue, Hello peut atteindre un autre
+processus. Aucun secret, credential, argv métier ou contenu du workspace ne
+voyage avant ou après lui.
+
+### 11.2 Propriété, annulation et fins d'échange
+
+`stdinOnce: true` rend toute tentative **initiée** finale pour le Pod, même
+sans réponse d'upgrade réussie. Il n'existe ni reconnexion ni second
+attachement. La reprise exige une nouvelle réservation, un nouveau Pod et un
+nouveau claim de workspace par tentative. Un refus avant initiation n'a pas
+touché le Pod.
+
+Dès l'initiation HTTP, une tâche possède l'upgrade en attente, puis le flux
+et son slot de capacité. La perte de l'appelant n'annule pas la requête et
+ne rend pas le slot : le propriétaire attend la réponse ou l'échéance de
+handshake, puis la fin effective du flux. Sans seconde observation de
+l'appelant, la fin reste sans identité. L'arrêt du runtime abandonne ce que
+le propriétaire détient et consigne un motif d'arrêt du propriétaire ;
+abandonner un propriétaire n'est jamais un succès.
+
+L'annulation est vérifiée avant initiation et sondée environ toutes les
+50 ms pendant l'attente de Ready ou de la seconde observation. C'est une
+constante source, pas une latence mesurée. Elle n'interrompt ni upgrade en
+attente ni écriture que le peer n'absorbe pas. Cette écriture attend
+l'échéance et finit en `AttachDeadline`, avant ou après Ready ; une demande
+d'annulation pendant l'écriture est conservée séparément comme cause. Une
+trame potentiellement coupée rend le flux inutilisable : aucune autre trame
+n'est envoyée.
+
+Sur un flux utilisable, le propriétaire ferme stdin avec le message v5
+`[255, 0]`, puis envoie une fermeture WebSocket et arrête le transport.
+Chaque étape a sa propre limite d'une seconde et peut suivre l'échéance de
+l'encadrement. Après une fermeture peer bien formée, seule la réponse de
+fermeture de la bibliothèque est écrite ; après un transport en échec ou une
+trame coupée, seul l'arrêt borné reste possible. Une fermeture malformée
+refusée par la bibliothèque laisse l'écriture utilisable : la fermeture de
+stdin et le code 1002 sont encore tentés. Le slot revient après la fin du
+propriétaire. Aucune de ces fins n'est une preuve terminale observée du Pod.
+
+| Résultat | Signification |
+|---|---|
+| `AttachHandshakeRefused` | L'upgrade initié a renvoyé un statut, des en-têtes, un sous-protocole ou une extension inattendus. Aucun flux ni aucune trame. |
+| `AttachProtocol` | Trame, canal ou forme de statut refusés, ou borne de contenu dépassée ; tout octet bootstrap supplémentaire après Ready. |
+| `AttachIdentityUnproven` | Pas de deux observations égales autour d'un Ready accepté : divergence, échec d'observation, perte de l'appelant, annulation, fin par le peer, arrivée d'un statut ou autre échec du bootstrap. Une échéance après Ready sans écriture en attente a aussi ce résultat. |
+| `AttachCapacity` | Les deux slots d'attachement du runtime sont occupés. Cela ne couvre pas un abandon de l'allocateur dans le codec. |
+| `AttachDeadline` | Échéance invalide ou dépassée, timeout d'upgrade ou de handshake avant Ready, ou écriture encore en attente à l'échéance. |
+| Erreurs existantes avant requête / de transport | Précondition locale, garde ou annulation précoce peuvent renvoyer `EffectRefusedBeforeSend` ; les observations, `InstanceReplaced`, `ApiRejected` ou `AuthorityChanged`. Une réponse d'upgrade perdue peut renvoyer `TransportUnavailable` ou `Timeout` ; le marqueur d'initiation rend toujours cette tentative finale. |
+
+Une fermeture peer est une fin par le peer seulement sans corps ou avec le
+code 1000 ou 1001. Tout autre code, corps malformé ou motif UTF-8 invalide est
+refusé. EOF ou échec du transport sont aussi des fins par le peer. Aucune ne
+prouve une identité ou un succès.
+
+### 11.3 Bornes logicielles configurées, pas une capacité mesurée
+
+| Borne | Valeur |
+|---|---|
+| Trame WebSocket et message réassemblé | 64 Kio chacun, octet de canal compris |
+| Une lecture / tampon initial de lecture | 4 Kio ; le tampon de trame peut croître |
+| File d'écriture | Une trame client, 4 111 octets ; aucun regroupement d'écritures |
+| Stderr worker | 16 Kio comptés puis écartés par ai-guard |
+| Document de statut | 4 Kio, projeté en statut et motif fermés ; aucun texte peer conservé |
+| Corps d'enveloppe bootstrap | 16 Kio, longueur vérifiée avant allocation |
+| Upgrade et échange du préambule | 5 s chacun, dans l'encadrement global |
+| Encadrement global | Au plus 15 s, observations comprises |
+| Fermeture après la fin | Au plus trois étapes de 1 s chacune |
+| Tentatives simultanées de préambule | Deux par runtime ; pas une capacité de 100 sessions |
+
+Seuls les messages binaires sur stdout, stderr et statut sont admis. Un
+payload stdout vide est permis ; un message sans octet de canal ou sur
+stdin, resize, close ou un canal inconnu est refusé. Le statut est réduit à
+`Success`/`Failure` et un motif fermé (`NonZeroExitCode`, `InternalError`,
+autre ou absent). Un statut arrivé avant la fin des observations ne prouve
+pas un préambule achevé. Interopérabilité avec serveur d'API/kubelet réels,
+échéances, mémoire et débit restent non mesurés.
+
+### 11.4 Bibliothèque WebSocket maintenue et compatibilité H21
+
+`tokio-tungstenite` **0.30.0** est épinglé exactement, avec ses fonctionnalités
+par défaut désactivées, et utilise `tungstenite` 0.30.0 (respectivement MIT
+et MIT-ou-Apache-2.0). Il enveloppe un flux déjà upgradé dans le rôle client.
+Il ne réalise ici ni handshake, connexion, TLS ou redirection. ai-guard
+conserve validation d'upgrade, politique des canaux et autorisation. Les
+erreurs de bibliothèque deviennent des valeurs fermées ; leur texte n'est
+ni formaté ni conservé.
+
+H21 conserve explicitement deux cas de compatibilité : un payload de quatre
+octets annoncé sur 16 bits et un court message Ready annoncé sur 64 bits
+sont acceptés comme le même payload. **Les longueurs non minimales sont
+acceptées** ; il ne s'agit pas d'une application stricte de la longueur
+minimale de RFC 6455. Les bornes de 64 Kio de trame déclarée et de message
+agrégé restent appliquées. Une longueur sur 64 bits dont le bit haut est
+levé, ou une trame déclarée au-delà de la borne, est refusée dès l'en-tête
+comme trop grande.
+
+Opcodes réservés et tailles de trame déclarées excessives sont refusés dès
+l'en-tête. Les autres refus de bibliothèque (bits réservés, trames serveur
+masquées, fragmentation ou trames de contrôle invalides) suivent la lecture
+du payload borné. Le texte est lu avant son refus par ai-guard. Un peer qui
+retient ce payload peut consommer l'échéance. Le fragment qui dépasse la
+borne agrégée peut coexister en mémoire avec le message en cours d'assemblage.
+
+Ce sont des bornes de contenu, **pas une borne exacte du tas**. Les tampons
+croissent et les allocations infaillibles de la bibliothèque peuvent
+abandonner le processus par manque de mémoire ; aucune reprise typée n'est
+garantie. Un panic de bibliothèque arrête le propriétaire et rend son slot
+avec la cause d'arrêt du propriétaire. La bibliothèque émet des messages
+`log` debug/trace pouvant inclure trames et payloads. Cette crate n'installe
+aucun logger aujourd'hui ; un futur logger global à ces niveaux pourrait
+recevoir Hello, Ready et des octets contrôlés par le peer. Aucun plafond de
+journalisation à la compilation n'est implémenté.
+
+### 11.5 Mode d'attente du worker et stdio réels
+
+La commande de Pod rendue utilise le binaire existant avec un argument fixe :
+
+```text
+/usr/local/bin/ai-guard-provider kubernetes-session-wait-v2
+```
+
+C'est la commande bootstrap du Pod, pas une procédure de lancement de
+session. Les arguments bruts la sélectionnent avant décodage en texte et
+avant lecture de l'environnement de handoff fournisseur. Tout argument
+supplémentaire, même UTF-8 invalide, sort en 64 sans construire de runtime,
+lire stdin ni se replier. Les autres premiers arguments conservent le
+parcours fournisseur ; UTF-8 invalide y reste une sortie 126.
+
+Le worker attend sans timeout local avant le premier octet et après Ready ;
+`activeDeadlineSeconds` du Pod borne le runtime, sans être une échéance
+durable du broker. Le premier octet arme cinq secondes pour compléter Hello
+et flusher Ready. Aucun programme n'est exécuté et aucune trame suivante
+n'est acceptée. Seul Ready va sur stdout ; un diagnostic fixe sans
+identifiant ni contenu de trame va sur stderr.
+
+| Sortie | Fin du mode d'attente |
+|---|---|
+| 64 | Refus de protocole : trame invalide, excessive, tronquée ou inattendue ; tout octet après Ready ; tout argument après le mode. |
+| 65 | Hello ou le flush de Ready n'a pas fini dans les cinq secondes suivant le premier octet. |
+| 66 | EOF avant Hello ou après Ready, sans handoff. Attendu pour un échange limité au préambule, jamais un succès de session. |
+| 70 | Échec local de lecture/écriture, de capacité ou de runtime. |
+| 0 | Jamais renvoyé. |
+
+La source appelle `shutdown_background` après l'échange : le lecteur stdin
+bloquant de Tokio peut rester en attente quand le délai du handshake
+expire ; attendre la destruction du runtime empêcherait alors la sortie.
+Sept tests passent sur le vrai binaire Rust normal et ses pipes à
+`1e30e5e`, dont un Hello partiel avec stdin encore ouvert lors de la sortie 65
+observée. Cela exécute l'adaptateur provider interne, pas un client/modèle IA.
+Ces tests stdio n'exercent ni image worker, transport attach ou cluster ; les
+quatre contrats de flux distincts utilisent des peers synthétiques : un
+contrat HTTPS/TLS loopback et trois contrats de duplex mémoire.
+Leurs [preuves liées à la source](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+sont complétées par la [preuve distincte 45179db](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md), de même portée logicielle.
+
+Le mode ne lit lui-même aucun credential ou environnement. La construction
+de son runtime Tokio peut lire le réglage Tokio
+`TOKIO_UNSTABLE_SHARDED_BLOCKING_QUEUE` ; le refus d'argument supplémentaire
+n'en construit aucun. La requête de Pod n'a pas d'environnement.
+Le mode n'installe aucun handler de signal : comportement SIGTERM en PID 1,
+échéance active et délai de terminaison rendu de 30 secondes restent à observer.
+
+Ready répète sur stdout les identifiants et quatre empreintes de Hello.
+Les logs du runtime du nœud peuvent conserver ces métadonnées de session et
+stderr hors d'ai-guard ; ce fait n'a pas été observé sur cluster ici.
+ai-guard ne masque, ne borne ni ne supprime ces logs du nœud. Aucun secret
+ne doit voyager sur ce canal ; la protection des sorties avant persistance
+par le runtime reste ouverte.
+
+### 11.6 Prérequis fermés
+
+- **R4 :** aucune trame handoff, Start ou résultat déclaré après Ready.
+- **R7 :** aucune activation de production ou exclusivité prouvée des
+  permissions attach/exec dans le Namespace du tenant.
+- **R10 :** refuser au chargement de configuration le partage d'une autorité
+  ou d'un Namespace Kubernetes entre tenants reste un prérequis, pas un
+  contrôle livré.
+- **S5 / garde scellée :** aucun permis d'effet de production ni chemin
+  d'attachement du produit.
+- **Qualification cluster :** interopérabilité upgrade/canaux, verbes RBAC
+  effectifs (EXT-8), feature gates, `stdinOnce`, logs du nœud, signaux, CNI,
+  stockage, échéances et capacité de 100 workers restent BLOCKED. L'étape 6
+  reste BLOCKED ; sources et résultats loopback ne qualifient pas un cluster.

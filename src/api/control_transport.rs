@@ -18,6 +18,25 @@ const UPLOAD_IDLE: Duration = Duration::from_secs(2);
 pub(super) struct ReservedProtocol(());
 #[derive(Clone)]
 pub(super) struct ReservedPolicy(());
+#[derive(Clone)]
+pub(super) struct ReservedPolicyInspection(());
+
+pub(super) fn owned_policy_inspection_request(request: &Request) -> bool {
+    request.method() == axum::http::Method::POST
+        && request.uri().query().is_none()
+        && matches!(
+            request.uri().path(),
+            "/api/v1/egress/policies/inspect" | "/egress/policies/inspect"
+        )
+        && request
+            .extensions()
+            .get::<ReservedPolicyInspection>()
+            .is_some()
+        && request
+            .extensions()
+            .get::<Arc<auth::owned_control::OwnedPolicyInspection>>()
+            .is_some()
+}
 
 pub(super) fn owned_policy_request(request: &Request) -> bool {
     request.method() == axum::http::Method::POST
@@ -122,8 +141,12 @@ async fn read_body(body: Body, max_body: usize) -> Result<Vec<u8>, Response> {
 }
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
-    let policy_route =
-        crate::control_transport::owned_policy_route(request.method(), request.uri().path());
+    let inspection_route = crate::control_transport::owned_policy_inspection_route(
+        request.method(),
+        request.uri().path(),
+    );
+    let policy_route = inspection_route
+        || crate::control_transport::owned_policy_route(request.method(), request.uri().path());
     if policy_route && state.owned_human.is_none() {
         return super::egress_policy::failure(
             crate::control::egress_policy::EgressPolicyAdminErrorV1::Unavailable,
@@ -252,15 +275,24 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
         }
     };
     let _operation = if let Some(identity) = owned_policy_identity {
-        let action = match parts.uri.path() {
-            "/api/v1/egress/policies/replace" => auth::owned_control::PolicyWriteAction::Replace,
-            "/api/v1/egress/policies/revoke" => auth::owned_control::PolicyWriteAction::Revoke,
-            _ => return super::human_sources::unavailable().into_response(),
-        };
-        parts.extensions.insert(ReservedPolicy(()));
-        parts
-            .extensions
-            .insert(Arc::new(identity.accept(operation, action)));
+        if inspection_route {
+            parts.extensions.insert(ReservedPolicyInspection(()));
+            parts
+                .extensions
+                .insert(Arc::new(identity.accept_inspection(operation)));
+        } else {
+            let action = match parts.uri.path() {
+                "/api/v1/egress/policies/replace" => {
+                    auth::owned_control::PolicyWriteAction::Replace
+                }
+                "/api/v1/egress/policies/revoke" => auth::owned_control::PolicyWriteAction::Revoke,
+                _ => return super::human_sources::unavailable().into_response(),
+            };
+            parts.extensions.insert(ReservedPolicy(()));
+            parts
+                .extensions
+                .insert(Arc::new(identity.accept(operation, action)));
+        }
         None
     } else if let Some(identity) = owned_identity {
         parts.extensions.insert(ReservedProtocol(()));

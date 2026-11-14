@@ -5,6 +5,7 @@ use crate::identity::*;
 mod recent;
 
 mod control;
+mod egress_policy;
 
 /// Existing durable projection markers; coverage metadata, never identity.
 #[derive(Clone, Copy, PartialEq, Eq)]

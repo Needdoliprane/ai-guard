@@ -1,5 +1,76 @@
 # État constaté — suivi du développement
 
+## 14 novembre — inspection du registre et préparation CLI : composition vérifiée
+
+`broker policy inspect` conserve désormais les métadonnées authentifiées du
+registre et le vrai scope/head/CAS dans un rapport privé historique. L'opérateur
+peut examiner ce rapport puis préparer localement replace/revoke avec
+`prepare --inspection-dir`. Le POST A1 final revalide l'autorité, le scope et
+le CAS courant, ainsi que le plafond pour un remplacement Session. Un conflit
+n'est pas réparé en réécrivant le rapport ou l'ancienne opération ; une nouvelle
+inspection est une décision explicite. `status` reste historique local.
+[Guide EN](../setup/identity/OWNED_SOURCES.md#owned-policy-a1-operator) ·
+[FR](../setup/identity/OWNED_SOURCES.fr.md#owned-policy-a1-operator).
+
+Sur le gel `45179db23205ff2a534bcadfafd694830f2a62ce`, compilation et check
+toutes cibles RC0, 24 listes réelles et 47 parents uniques passent en neuf
+groupes : 44 ordinaires et trois CLI ignorés par défaut explicitement exécutés.
+Les vrais CLI internes Rust traversent gateway/SDK/SQLite ; la publication
+privée et les gardes FS sont exercées. Les quatre contrats Kube — un HTTPS/TLS
+loopback et trois duplex mémoire — et sept processus Rust stdio sont rejoués
+sur cette même source. Aucun Codex/Claude, modèle, moteur de worker ou cluster.
+[Preuve EN](evidence/2026-11-14/owned-policy-inspection/README.md) ·
+[FR](evidence/2026-11-14/owned-policy-inspection/README.fr.md) ·
+[47 sélections](evidence/2026-11-14/owned-policy-inspection/SELECTIONS.json).
+
+Les 2836 sources gardent hashes/tailles/modes ; sept collectes, OOM0,
+fermeture exacte et flush séparé sont vérifiés. Aucun fichier régulier de
+fixture n'est retenu, mais les neuf répertoires de groupe vides sont observés.
+L'oracle case-alias est NOT_APPLICABLE sur le filesystem Linux utilisé ;
+aucune qualification macOS/case-insensitive. R1 compile FAIL et R2
+14 PASS/1 faux positif d'oracle/32 NOT_RUN restent leurs résultats datés.
+Les 74 A1 publiés via `1a9` et les 121 Kube `be6` gardent leurs sources propres.
+
+Le rapport n'est ni une autorité, ni une approbation humaine ou un contrôle
+réseau appliqué. E2/flow16 et la fédération Claude restent des branches statiques
+distinctes, non intégrées ni qualifiées ici. Runtimes/réseau réels, cluster,
+capacité100, suite complète et Clippy strict restent hors preuve ; aucun gate
+production fermé (0/12).
+
+## 14 novembre — attach Kubernetes composé : 11 PASS ciblés sur `1e30e5e`
+
+Le gel `1e30e5e8546ab614eba7849789a1a0468cbc2843` passe compilation et
+check toutes cibles à 0, 14 listes réelles, puis 11 parents uniques PASS :
+quatre contrats du vrai lecteur/flux avec peers synthétiques et
+sept subprocess stdio du binaire Rust normal `ai-guard-provider`.
+[Preuves EN](evidence/2026-11-14/kubernetes-attach-composition/README.md) ·
+[FR](evidence/2026-11-14/kubernetes-attach-composition/README.fr.md) ·
+[sélections](evidence/2026-11-14/kubernetes-attach-composition/SELECTIONS.json).
+
+Le binaire d'adaptation interne est réellement exécuté pour le mode d'attente
+et les arguments : Ready déclaré puis sortie 66, refus 64/126 et délai 65 avec
+stdin encore ouvert. Cela n'appelle aucun client/modèle IA. Le travail HTTP
+initié conserve son slot après perte de l'appelant ; les écritures bloquées
+gardent leur fin Deadline et la cause d'annulation distincte ; les closes
+invalides sont refusées par le vrai lecteur. Ce sont des preuves logicielles
+ciblées, pas un serveur d'API Kubernetes ni un worker réel.
+
+Root vérifie les trois artefacts Cargo, les 2805 contenus/tailles/modes source,
+56 sorties d'étapes à 0, exports bornés, fermeture 0 et absence du CID exact.
+Flush FD complet vérifié séparément ; OOM/OOM-kill 0. L'addendum de couverture
+`92a82687…` distingue le contrat 1 HTTPS/TLS loopback des contrats 2–4 sur
+duplex mémoire, sans preuve TCP/TLS pour ces trois cas. Les 121 PASS historiques
+`be6b12d` restent distincts et ne sont pas rejoués sur ce gel.
+
+Cette preuve `1e30e5e` ne qualifie pas la composition ultérieure `3b538f7`.
+La campagne inspection `45179db`, décrite ci-dessus, répète séparément ces
+onze contrôles parmi ses 47 parents ; aucun compte n'est additionné. Aucune qualification Kubernetes,
+worker/réseau réel, fournisseur IA, capacité 100, suite complète ou Clippy
+strict. S5, permis d'effet, fencing, R4/R7/R10 et les gates production
+restent ouverts ; l'activation et le chemin produit d'attachement restent
+fermés. Les [guides EN](../setup/kubernetes-runtime/README.md) /
+[FR](../setup/kubernetes-runtime/README.fr.md) distinguent ces états.
+
 ## 14 novembre — A1 : API/CLI du registre egress, 74 PASS sur une source exacte
 
 La source `db2678d42cff9c8d6d15bf31284a989732cc6f0d` raccorde les deux POST
@@ -20,14 +91,12 @@ antérieurs — baseline fonctionnelle, compilation101 et harnais1 avant tests �
 restent consignés séparément. Les sources/modes sont préservés et chaque QA
 termine ses sept collectes et sa fermeture à0, OOM0.
 
-**Parcours opérateur encore incomplet :** aucune commande supportée ne fournit
-le scope réservé et le head/CAS frais requis. `status` reste historique local ;
-`control-info` utilise le diagnostic public fermé en owned. `inspect` et
-`prepare --inspection-dir` ne sont pas implémentés ; les cinq nouveaux tests
-du gel ultérieur `05a4451` restent NOT_RUN. Le
-[guide EN](../setup/identity/OWNED_SOURCES.md#owned-policy-a1-operator) /
-[FR](../setup/identity/OWNED_SOURCES.fr.md#owned-policy-a1-operator) conserve
-cet arrêt explicite, sans CAS inventé ni accès SQL opérateur.
+**Limite de cette preuve A1 antérieure :** elle ne fournissait pas encore
+la commande d'acquisition du scope/head/CAS. `status` y restait historique
+local et les cinq tests ultérieurs `05a4451` étaient NOT_RUN. Le parcours
+`inspect` puis `prepare --inspection-dir` est désormais implémenté et vérifié
+sur `45179db`, dans la preuve distincte ci-dessus. Les 74 PASS publiés via
+`1a9` gardent leur source testée `db2678d` et ne sont pas transférés au nouveau gel.
 
 Un reçu de politique durable ou `revoke_requested` n'est ni contrôle réseau
 appliqué, permis de connexion, exécution observée ni approbation humaine.

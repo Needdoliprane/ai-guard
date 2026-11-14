@@ -1,4 +1,5 @@
 //! Explicit operator policy requests; no broker lifecycle or network enforcement.
+mod inspection;
 mod storage;
 #[cfg(test)]
 mod tests;
@@ -15,10 +16,29 @@ use storage::{Loaded, Phase, Request};
 
 #[derive(Subcommand)]
 pub(super) enum PolicyCommand {
-    /// Prepare one immutable request in a new private directory, without network IO.
-    Prepare {
+    /// Retain checked policy metadata as a new private historical report.
+    Inspect {
         #[arg(long)]
         gateway: String,
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(long, required_unless_present = "session", conflicts_with = "session")]
+        tenant: bool,
+        #[arg(long, required_unless_present = "tenant", conflicts_with = "tenant")]
+        session: Option<String>,
+        #[arg(long)]
+        output_dir: PathBuf,
+    },
+    /// Prepare one immutable request in a new private directory, without network IO.
+    Prepare {
+        #[arg(
+            long,
+            required_unless_present = "inspection_dir",
+            conflicts_with = "inspection_dir"
+        )]
+        gateway: Option<String>,
+        #[arg(long, required_unless_present = "gateway", conflicts_with = "gateway")]
+        inspection_dir: Option<PathBuf>,
         #[arg(long)]
         input: PathBuf,
         #[arg(long)]
@@ -47,12 +67,26 @@ pub(super) enum PolicyCommand {
 
 pub(super) async fn execute(command: PolicyCommand) -> Result<()> {
     match command {
+        PolicyCommand::Inspect {
+            gateway,
+            token_file,
+            tenant,
+            session,
+            output_dir,
+        } => inspection::execute(gateway, token_file, tenant, session, output_dir).await,
         PolicyCommand::Prepare {
             gateway,
+            inspection_dir,
             input,
             output_dir,
         } => {
-            let loaded = storage::prepare(&gateway, &input, &output_dir)?;
+            let loaded = match (gateway, inspection_dir) {
+                (Some(gateway), None) => storage::prepare(&gateway, &input, &output_dir)?,
+                (None, Some(report)) => {
+                    storage::prepare_from_inspection(&report, &input, &output_dir)?
+                }
+                _ => return Err(anyhow!("egress_policy_invalid_preparation_source")),
+            };
             emit(&loaded, None)
         }
         PolicyCommand::Status { operation_dir } => emit(&Loaded::open(&operation_dir)?, None),

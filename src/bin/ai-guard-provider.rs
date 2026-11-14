@@ -1,8 +1,12 @@
 fn main() {
-    let arguments: Result<Vec<String>, _> = std::env::args_os()
-        .skip(1)
-        .map(|value| value.into_string())
-        .collect();
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(code) =
+        agentsandbox::runtime::kubernetes::session_worker::dispatch_waiting_mode(&raw)
+    {
+        std::process::exit(code);
+    }
+    let arguments: Result<Vec<String>, _> =
+        raw.into_iter().map(|value| value.into_string()).collect();
     let Ok(arguments) = arguments else {
         eprintln!("invalid provider bootstrap argument encoding");
         std::process::exit(126);

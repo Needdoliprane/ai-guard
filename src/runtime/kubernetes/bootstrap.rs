@@ -1,11 +1,18 @@
 //! V2 waiting-bootstrap preamble, using the relay's four-byte BE envelope.
 //! Attach identity is NOT established by an echo. There is no Release/Start,
 //! credential handoff or command execution in this stage of the protocol.
+//!
+//! Stage S2b gives the worker side a caller: `session_worker` reaches
+//! `bootstrap_waiting_for_attach` from a public library entry. The expectation
+//! below is still fulfilled by `bootstrap_waiting`, which no item outside
+//! tests references: it is dead whether or not rustc counts the callees of
+//! expected or allowed items as live. Calling it from non-test code would
+//! leave the expectation unfulfilled and fail `clippy -D warnings`.
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "V2 waiting-bootstrap preamble without a production caller until stage S2b (Root decisions Q1 and Q6)"
+        reason = "bootstrap_waiting keeps no caller outside tests after stage S2b; the worker waiting mode uses bootstrap_waiting_for_attach"
     )
 )]
 use super::session::SessionBootstrapBindingV2;
@@ -21,7 +28,9 @@ use uuid::Uuid;
 
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024;
 pub(crate) const RESERVED_BYTES: u32 = (2 * MAX_FRAME_BYTES) as u32;
-const MAX_HANDSHAKE_TIME: Duration = Duration::from_secs(5);
+/// Ceiling of one handshake window. The attach owner derives its bootstrap
+/// window from this constant instead of copying the number.
+pub(crate) const MAX_HANDSHAKE_TIME: Duration = Duration::from_secs(5);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BootstrapError {
     Capacity,
@@ -199,25 +208,53 @@ fn decode(bytes: &[u8]) -> Result<Frame> {
     }
     Ok(frame)
 }
+/// Length declared by one 4-byte big-endian envelope prefix. Refuses 0 and any
+/// value above `MAX_FRAME_BYTES` with `FrameSize`. Allocates nothing. Every
+/// reader judges a declared length here and nowhere else; `encode` and
+/// `decode` keep their own checks on buffers they already hold.
+pub(crate) fn declared_frame_length(prefix: [u8; 4]) -> Result<usize> {
+    match usize::try_from(u32::from_be_bytes(prefix)) {
+        Ok(length) if (1..=MAX_FRAME_BYTES).contains(&length) => Ok(length),
+        _ => Err(BootstrapError::FrameSize),
+    }
+}
+/// `read_frame` never told the end of a stream from another read failure.
+fn incomplete_frame(_: std::io::Error) -> BootstrapError {
+    BootstrapError::PartialFrame
+}
+/// The waiting-for-attach reader separates a stream that ends inside a frame
+/// from any other read failure.
+fn truncated_or_io(error: std::io::Error) -> BootstrapError {
+    if error.kind() == std::io::ErrorKind::UnexpectedEof {
+        BootstrapError::PartialFrame
+    } else {
+        BootstrapError::Io
+    }
+}
+/// Prefix step, then the body step.
 async fn read_frame<R: AsyncRead + Unpin>(input: &mut R) -> Result<Frame> {
     let mut prefix = [0u8; 4];
     input
         .read_exact(&mut prefix)
         .await
-        .map_err(|_| BootstrapError::PartialFrame)?;
-    let length = u32::from_be_bytes(prefix) as usize;
-    if length == 0 || length > MAX_FRAME_BYTES {
-        return Err(BootstrapError::FrameSize);
-    }
+        .map_err(incomplete_frame)?;
+    read_frame_body(input, prefix, incomplete_frame).await
+}
+/// Body step of one envelope whose prefix was already read. The declared
+/// length is judged before the exact reservation, and the body is read only
+/// after both. `failure` is how this reader reports a failed body read.
+async fn read_frame_body<R: AsyncRead + Unpin>(
+    input: &mut R,
+    prefix: [u8; 4],
+    failure: fn(std::io::Error) -> BootstrapError,
+) -> Result<Frame> {
+    let length = declared_frame_length(prefix)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
         .map_err(|_| BootstrapError::Capacity)?;
     bytes.resize(length, 0);
-    input
-        .read_exact(&mut bytes)
-        .await
-        .map_err(|_| BootstrapError::PartialFrame)?;
+    input.read_exact(&mut bytes).await.map_err(failure)?;
     decode(&bytes)
 }
 async fn write_frame<W: AsyncWrite + Unpin>(output: &mut W, frame: &Frame) -> Result<()> {
@@ -275,6 +312,85 @@ pub(crate) async fn bootstrap_waiting<R: AsyncRead + Unpin, W: AsyncWrite + Unpi
     // Timeout polls its inner future first. Ready IO may finish in one poll
     // after the absolute deadline, so successful completion needs this fence.
     check_deadline(until)
+}
+
+/// How a waiting-for-attach exchange ended without an error. Neither value is
+/// a release, a start or a session result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WaitingForAttachV2 {
+    /// The input ended before its first byte: no peer wrote anything.
+    EofBeforeHello,
+    /// One Hello was answered by one flushed Ready.
+    ReadyWritten,
+}
+
+/// Worker-side waiting mode behind a Pod attach. Like `bootstrap_waiting`, it
+/// only echoes the closed metadata preamble and executes nothing.
+///
+/// The wait for the first input byte has no local deadline: the peer attaches
+/// at a time this process cannot know, and that wait is bounded by the Pod
+/// lifetime and its `activeDeadlineSeconds`, not by a timer invented here. The
+/// first byte arms `handshake` for the rest of the Hello frame and for the
+/// Ready write, with the same post-completion fence as `bootstrap_waiting`.
+///
+/// `handshake` can shorten the window, never extend it: zero, or more than
+/// `MAX_HANDSHAKE_TIME`, is refused with `Deadline` before any read. The
+/// worker passes `MAX_HANDSHAKE_TIME`.
+///
+/// An input that ends before its first byte is `Ok(EofBeforeHello)`, one that
+/// ends inside a frame is `PartialFrame`, and any other read failure is `Io`.
+/// Nothing is read after the Hello frame: the caller keeps `input` and decides
+/// what the bytes after Ready mean.
+pub(crate) async fn bootstrap_waiting_for_attach<R, W>(
+    input: &mut R,
+    output: &mut W,
+    _capacity: &BootstrapCapacity,
+    handshake: Duration,
+) -> Result<WaitingForAttachV2>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    if handshake.is_zero() || handshake > MAX_HANDSHAKE_TIME {
+        return Err(BootstrapError::Deadline);
+    }
+    let mut prefix = [0u8; 4];
+    match input.read(&mut prefix[..1]).await {
+        Ok(0) => return Ok(WaitingForAttachV2::EofBeforeHello),
+        Ok(_) => {}
+        Err(_) => return Err(BootstrapError::Io),
+    }
+    let until = Instant::now() + handshake;
+    timeout_at(until, async {
+        input
+            .read_exact(&mut prefix[1..])
+            .await
+            .map_err(truncated_or_io)?;
+        match read_frame_body(input, prefix, truncated_or_io).await? {
+            Frame::Hello {
+                version,
+                exchange_id,
+                binding,
+            } => {
+                write_frame(
+                    output,
+                    &Frame::Ready {
+                        version,
+                        exchange_id,
+                        binding,
+                    },
+                )
+                .await
+            }
+            Frame::Ready { .. } => Err(BootstrapError::Protocol),
+        }
+    })
+    .await
+    .map_err(|_| BootstrapError::Deadline)??;
+    // Same fence as `bootstrap_waiting`: the Ready IO may finish in one poll
+    // after `until`.
+    check_deadline(until)?;
+    Ok(WaitingForAttachV2::ReadyWritten)
 }
 
 struct State {

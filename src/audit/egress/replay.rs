@@ -74,6 +74,20 @@ pub(super) fn require15(db: &Connection) -> anyhow::Result<()> {
     }
 }
 
+/// Current identity projection only. Absence is a successful exact lookup;
+/// malformed payloads and database failures are never converted to absence.
+/// Historical policy replay deliberately retains its event-prefix scan below.
+pub(super) fn current_session_grant(
+    db: &Connection,
+    resource: &crate::identity::ResourceRefV1,
+) -> anyhow::Result<Option<crate::identity::ResourceGrantV1>> {
+    identity::json_row(
+        db,
+        "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
+        &resource.key()?,
+    )
+}
+
 /// A real active identity Session resource, selected only inside this Store.
 /// Historical replay reads its last typed identity mutation before the policy.
 pub(super) fn require_session(
@@ -108,11 +122,7 @@ pub(super) fn require_session(
         }
         found
     } else {
-        identity::json_row(
-            db,
-            "SELECT payload_json FROM identity_resources WHERE resource_key=?1",
-            &resource.key()?,
-        )?
+        current_session_grant(db, &resource)?
     };
     let grant = grant.ok_or(EgressStoreFailure::Permission)?;
     grant.validate()?;

@@ -220,7 +220,7 @@ async fn owned_control_protocol_format15_reaches_real_sdk_and_keeps_broker_incom
 }
 
 // Negative regressions are deliberately outside the frozen positive prefix.
-mod negative;
+pub(super) mod negative;
 
 // Separate canary for the composed A0 postcommit rendez-vous.
 #[cfg(test)]

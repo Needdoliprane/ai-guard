@@ -1,11 +1,16 @@
 //! Explicit Kubernetes authority, inspection, preflight and internal held CREATE.
 //!
 //! Held CREATE remains closed in production. This is not a workload launcher;
-//! there is no exec, attach, kubeconfig or ambient context interface. The V2
-//! CREATE, release PATCH and DELETE mechanics are crate-internal behind a
-//! sealed guard that has no production implementor. The V2 before-effect
-//! lifecycle (abandonment, successor recovery, observe-only report) is
-//! crate-internal and has no production caller yet.
+//! there is no exec, kubeconfig or ambient context interface, and no public
+//! attach interface. The V2 CREATE, release PATCH, DELETE and preamble-only
+//! attach mechanics are crate-internal behind a sealed guard that has no
+//! production implementor. That attach carries one bootstrap Hello and its
+//! Ready echo between two observations of the exact instance, then closes its
+//! stdin; it starts nothing and proves no identity by itself. The worker
+//! waiting mode that answers it (`session_worker`) is a public library entry
+//! for the existing provider binary and executes nothing. The V2
+//! before-effect lifecycle (abandonment, successor recovery, observe-only
+//! report) is crate-internal and has no production caller yet.
 //! Pod API configuration is not proof of runtime enforcement or CPU usage.
 use crate::control_fs::PrivateFile;
 use serde::{Deserialize, Serialize};
@@ -21,6 +26,7 @@ mod prerequisites;
 #[path = "kubernetes/prerequisites_tests.rs"]
 mod prerequisites_tests;
 pub(crate) mod session;
+pub(crate) mod session_attach;
 pub(crate) mod session_effect;
 pub(crate) mod session_instance;
 pub(crate) mod session_lifecycle;
@@ -29,6 +35,7 @@ pub mod session_profile;
 #[cfg(test)]
 #[path = "kubernetes/session_test_peer.rs"]
 pub(crate) mod session_test_peer;
+pub mod session_worker;
 mod transport;
 pub use observation::{
     KubernetesConfiguredLimitsV1, KubernetesPodHandle, KubernetesPodObservationV1,

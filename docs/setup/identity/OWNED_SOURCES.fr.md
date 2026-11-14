@@ -63,95 +63,110 @@ Le `HumanApiClient.close()` local efface le token, annule les requêtes et écar
 
 <a id="owned-policy-a1-operator"></a>
 
-## A1 : opérations du registre de politiques
+## A1 : inspecter et préparer les opérations du registre de politiques
 
-**Contrat A1 du registre de politiques.** Ces quatre commandes existent dans la [source aux preuves logicielles ciblées datées](../../engineering/evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md), `db2678d42cff9c8d6d15bf31284a989732cc6f0d`. Ces résultats ne se transfèrent pas à un autre HEAD et ne qualifient pas un parcours opérateur complet. L’acquisition du scope/CAS reste un écart ci-dessous ; `inspect` et `prepare --inspection-dir` ne sont pas implémentés. Le périmètre reste `policy_registry_only` : politique durable ou reçu `revoke_requested` ne prouvent ni filtrage réseau, permis de connexion, start worker/broker ni approbation humaine.
+Les [preuves inspection et CLI interne](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md) vérifient le parcours composé sur `45179db` ; le rapport reste historique et le serveur revérifie la mutation finale. Cette preuve logicielle locale ne qualifie ni client IA, modèle, worker ou filtrage réseau.
+
+Utiliser `broker policy inspect` pour conserver le scope réel et les métadonnées de politique, puis préparer une requête localement depuis ce rapport. Les opérations de registre gardent la portée `policy_registry_only` ; l’inspection porte sur `policy_registry_metadata`. Un rapport, une politique durable ou un reçu `revoke_requested` ne prouvent ni approbation humaine, ni filtrage réseau, permis de connexion ou exécution worker/broker. Les [preuves logicielles A1 antérieures datées](../../engineering/evidence/2026-11-14/owned-egress-policy-api-cli/README.fr.md) conservent leur source et leur périmètre exacts ; elles ne qualifient ni une autre source ni un déploiement en production.
 
 ### Prérequis que ces commandes ne créent pas
 
-Utiliser une installation owned déjà adoptée, avec **vrai Store15**, union complète retenue et credential technique runner déjà présent dans son registre privé **et binding actif vers ces source/tenant/namespace exacts**. Bearer humain nominatif, viewer, token workload ou rôle SSO ne fournit pas ce credential. A1 ne crée aucun credential/binding et ne migre rien. Le parcours d’adoption précédent convertit 13→14, pas 15 ; le [contrat de maintenance E1](../../engineering/EGRESS_POLICY_STORE.fr.md#format15-exact-et-maintenance) décrit le protocole de confiance existant, distinct. Ne pas fabriquer enveloppes, reçus ou lignes SQLite, ni employer les fixtures comme procédure d’installation. Sans ces vrais prérequis, s’arrêter ici et conserver les fichiers de l’installation.
+Utiliser une installation owned déjà adoptée, avec **vrai Store15**, union complète retenue et credential technique runner déjà présent dans son registre privé **avec un binding actif vers ces source/tenant/namespace exacts**. Un bearer humain nominatif, viewer, token workload ou rôle SSO ne fournit pas ce credential. Ces commandes ne provisionnent ni compte, credential, binding, Session ou worker et ne migrent rien. Le parcours d’adoption précédent convertit 13→14, pas 15 ; le [contrat de maintenance E1](../../engineering/EGRESS_POLICY_STORE.fr.md#format15-exact-et-maintenance) décrit le protocole de confiance existant, distinct. Ne pas fabriquer enveloppes, reçus ou lignes SQLite, ni utiliser les fixtures comme procédure d’installation. Sans ces vrais prérequis, s’arrêter ici et conserver les fichiers de l’installation.
 
-> **Limite actuelle du parcours opérateur.** L’input exige tenant_id/control_namespace_uuid confirmés par un vrai diagnostic réservé authentifié et les faits exacts de head/CAS de politique. Ces quatre commandes n’acquièrent pas ces faits. Le broker control-info existant utilise le diagnostic public, fermé en owned ; status est un historique local, pas le head serveur courant. A1 ne fournit pas de commande d’acquisition supportée. Sans la vraie preuve de contrôle conservée, s’arrêter : ni déduction depuis noms/erreurs, ni copie d’un autre tenant, ni contournement Rust/SQLite utilisateur. Le raccord opérateur manquant reste une exigence distincte d’implémentation/qualification.
+Conserver le token runner et les inputs draft/enveloppe complète privés (0600), hors workspace utilisateur, frontend et artefacts publics. Chaque sortie exige un parent privé (0700) déjà présent et une **destination neuve absente**. Séparer rapport et opération ; aucune opération ne peut être préparée dans son rapport, y compris via un alias physique de casse/Unicode. Les noms finaux sont bornés à 128 caractères ASCII alphanumériques/point/tiret/underscore, hors `.` et `..`. Chemins et ancêtres sont contrôlés sans suivre de liens arbitraires ; aucun fichier, mode ou répertoire existant n’est réparé silencieusement.
 
-La valeur active du diagnostic est un fait de lease, pas un droit ; elle ne contient pas le head de politique. Un remplacement Session exige aussi les vrais plafond tenant et état actif de Session. Une autre opération peut périmer un reçu/status historique. Aucune lecture de politique courante n’est fournie ici. `expected_scope` est une assertion comparée, jamais un sélecteur de source/Store/tenant ou une autorité. Renseigner les préconditions exactes uniquement depuis une vraie preuve contrôlée ; aucun CAS par défaut ni réparation automatique. Choisir explicitement l’UUID d’une nouvelle opération ; tout retry/resume conserve son UUID et ses octets.
+**Fixer d’abord les variables ci-dessous aux vraies origines non secrètes et chemins privés de l’installation.** `GATEWAY_ORIGIN` est une origine HTTPS ou HTTP loopback, sans credential URL, query, fragment ni chemin hors racine. `PRIVATE_RUNNER_TOKEN` désigne le fichier privé, jamais son contenu. `SESSION_ID`, si sélectionné, est le vrai UUID Session canonique non nul. Le credential détermine le tenant ; aucun sélecteur ne choisit un autre client.
 
-Conserver input et fichier token runner privés (0600), parent de destination privé (0700) déjà présent et destination d’opération absente. Son nom final est borné à 128 caractères ASCII alphanumériques/point/tiret/underscore, hors `.` et `..`. Input borné à 66 560 octets ; requête canonique 65 536 ; métadonnées/état local et reçu canonique 4 096 chacun. L’input peut contenir des métadonnées sensibles de destinations : le garder hors workspace utilisateur, frontend et artefacts publics. Le credential est lu dans son fichier privé, jamais passé comme valeur ou stocké dans l’opération.
+### Inspecter un sélecteur de politique
 
-### Renseigner l’input avant de l’utiliser
+Choisir l’une de ces alternatives, avec un `NEW_INSPECTION_DIR` neuf :
 
-**Les deux objets JSON ci-dessous sont des modèles, pas des requêtes admises ni des exemples exécutables. Remplacer chaque champ null de scope/UUID/CAS/temps par la vraie valeur typée de l’installation.** Aucun exemple de CAS d’amorçage/par défaut n’est fourni ici. Pour replace, choisir une vraie fenêtre valide not-before/expiry en millisecondes Unix ; l’expiration suit le début. L’horloge durable et les règles du contrôle restent l’autorité. Le tableau de destinations vide illustre une politique de registre deny-all, pas un droit d’accès externe. Revoke ne porte ni policy/fenêtre ni digest attendu. Le sélecteur illustré est Tenant ; un remplacement Session exige aussi son UUID canonique, une Session active et le plafond tenant exact (révision/époque/digest), selon le [contrat API](../../api.md#owned-policy-a1).
+```sh
+agentsandbox broker policy inspect --gateway "$GATEWAY_ORIGIN" --token-file "$PRIVATE_RUNNER_TOKEN" --tenant --output-dir "$NEW_INSPECTION_DIR"
+```
+
+```sh
+agentsandbox broker policy inspect --gateway "$GATEWAY_ORIGIN" --token-file "$PRIVATE_RUNNER_TOKEN" --session "$SESSION_ID" --output-dir "$NEW_INSPECTION_DIR"
+```
+
+Exactement un flag `--tenant` ou `--session` est requis. L’inspection effectue un seul POST réservé explicite de métadonnées ; elle ne soumet ni remplacement ni révocation. Elle valide la réponse et revalide le token privé autour de la requête et de la publication durable. Le succès n’affiche que version, kind, observed_at, historical:true et coverage:policy_registry_metadata. Ce n’est ni une lecture complète de politique ni une vue runtime courante.
+
+Le rapport privé contient exactement quatre entrées : `request.json` (requête canonique du sélecteur), `metadata.json` (`version:1`, `kind:"policy_inspection"`, gateway et SHA-256 de requête/observation), `current.json` (observation canonique) et `owner.lock`. Les records sont 0600 et le répertoire 0700. Sa gateway est l’origine canonique validée **sans son unique slash de chemin racine** ; la réouverture exige cette forme exacte. Les métadonnées de l’opération A1 dérivée conservent leur normalisation d’origine existante. Le rapport n’accepte ni état pending ni reçu et ne peut pas servir de répertoire d’opération à apply/resume/status.
+
+`current.json` conserve le vrai scope authentifié, le sélecteur demandé, un head explicitement absent ou présent, les métadonnées du plafond tenant pour Session, le flag courant de ressource d’identité et observed_at fourni par le contrôle. `session_resource` est une **chaîne** : `"not_applicable"` pour Tenant, sinon `"active"`, `"inactive"` ou `"absent"`. Les états du registre n’établissent ni éligibilité de l’intervalle ni droits effectifs ; le flag de ressource n’est pas un état runtime. Voir les [champs API exacts](../../api.md#owned-policy-inspection).
+
+L’observation est datée, historique, non signée et modifiable par son propriétaire local. Les hashes corrèlent les octets locaux ; ils n’authentifient aucun droit et ne garantissent aucune fraîcheur. Source et audit checked sains sont requis, sans nouvel événement ou reçu d’audit par inspection. Une source inconnue, occupée ou endommagée ne devient jamais un head absent. Une autre opération peut modifier head ou namespace immédiatement après l’inspection.
+
+### Rédiger un draft fermé et préparer localement
+
+Un draft replace contient seulement version, action et policy. **Ceci est un modèle : remplacer les deux temps null par une fenêtre valide explicitement choisie en millisecondes Unix avant utilisation.** L’expiration suit le début ; l’horloge durable et les règles du contrôle restent l’autorité. Le tableau de destinations vide exprime une politique de registre deny-all, pas un accès réseau.
 
 ```json
 {
   "version": 1,
   "action": "replace",
-  "request": {
-    "version": 1,
-    "expected_scope": {
-      "tenant_id": null,
-      "control_namespace_uuid": null
-    },
-    "operation_id": null,
-    "selector": {
-      "kind": "tenant"
-    },
-    "expected_revision": null,
-    "expected_epoch": null,
-    "policy": {
-      "not_before_ms": null,
-      "expires_at_ms": null,
-      "destinations": [],
-      "max_destinations": 128,
-      "max_resolution_ips": 16
-    },
-    "tenant_ceiling": null
+  "policy": {
+    "not_before_ms": null,
+    "expires_at_ms": null,
+    "destinations": [],
+    "max_destinations": 128,
+    "max_resolution_ips": 16
   }
 }
 ```
+
+Un draft revoke ne porte ni policy ni fenêtre temporelle :
 
 ```json
 {
   "version": 1,
-  "action": "revoke",
-  "request": {
-    "version": 1,
-    "expected_scope": {
-      "tenant_id": null,
-      "control_namespace_uuid": null
-    },
-    "operation_id": null,
-    "selector": {
-      "kind": "tenant"
-    },
-    "expected_revision": null,
-    "expected_epoch": null
-  }
+  "action": "revoke"
 }
 ```
 
-### Préparer, soumettre, lire l’historique local et reprendre explicitement
-
-**Fixer d’abord ces variables aux vraies origines non secrètes et chemins privés ; le bloc n’est pas exécutable tel quel.** GATEWAY_ORIGIN est l’origine conservée à la préparation : HTTPS ou HTTP loopback, sans credentials URL/query/fragment ni chemin hors racine. PRIVATE_RUNNER_TOKEN désigne le fichier privé, pas son contenu. Les quatre commandes produit sont exactement :
+Enregistrer le draft choisi dans un fichier privé, puis préparer une **nouvelle** opération :
 
 ```sh
-agentsandbox broker policy prepare --gateway "$GATEWAY_ORIGIN" --input "$PRIVATE_INPUT_JSON" --output-dir "$NEW_OPERATION_DIR"
+agentsandbox broker policy prepare --inspection-dir "$NEW_INSPECTION_DIR" --input "$PRIVATE_DRAFT_JSON" --output-dir "$NEW_OPERATION_DIR"
+```
+
+La préparation est purement locale et retient le verrou du rapport jusqu’à sa fin. Elle copie origine, scope et sélecteur du rapport, emploie 0/0 **seulement pour un head explicitement absent**, conserve sinon les révision/époque exactes et génère un seul UUID pour cette nouvelle requête locale. Un remplacement peut utiliser un head présent `revoke_requested` avec son vrai CAS. Un remplacement Session exige ressource d’identité et plafond tenant actifs, puis copie les révision/époque/digest exacts du plafond. Revoke exige un head cible actif ; ressource ou plafond inactif/absent et fenêtre de l’ancienne politique ne bloquent pas la préparation locale du nettoyage. Autorité A1 finale, scope/CAS et contrôles d’horloge applicables restent obligatoires à la soumission. La révocation n’exige ni ressource Session/plafond tenant actif ni ancienne politique non expirée.
+
+Le draft n’accepte ni `operation_id`, `scope`/`expected_scope`, `selector`, CAS, plafond, enveloppe request ou champ inconnu. Input borné à 66 560 octets ; requête canonique 65 536 ; observation du rapport, métadonnées/état local et reçu 4 096 chacun ; fichier token 4 096. Hashes, forme canonique, sélecteur et origine du rapport sont contrôlés ; rapport/draft/ancêtres sont revalidés autour de la publication. Un échec local ne répare, n’écrase ni ne supprime les preuves.
+
+### Soumettre, lire l’historique local et reprendre explicitement
+
+```sh
 agentsandbox broker policy apply --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
 agentsandbox broker policy status --operation-dir "$NEW_OPERATION_DIR"
 agentsandbox broker policy resume --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
 ```
 
-prepare n’appelle aucun réseau. Il valide version1/action/request fermés, canonicalise et conserve durablement origine/action/op/CAS/expected_scope/octets et hash de requête dans le nouveau répertoire avant soumission. Champ inconnu, UUID/limite invalide ou chemin unsafe refuse sans adopter/écraser d’anciennes données. Input/token et répertoire existant ne sont pas réparés. Après erreur, conserver l’opération complète et ses records partiels ; ne pas éditer son JSON pour forcer un retry.
+apply exige l’état initial préparé. Il retient le verrou local, revalide fichiers/token, compare un vrai diagnostic réservé au scope préparé, rend l’intention durable puis tente l’action préparée une fois. La transaction A1 finale revérifie scope authentifié et CAS courant, ainsi que le plafond pour un remplacement Session. Aucune inspection cachée, surcharge origine/scope/CAS, relance automatique, nouvel UUID, redirect/proxy ou repli public/legacy. Le SDK garde ses bornes 15 s/requête et 3 s/connexion. Le format 14 exige une maintenance explicite.
 
-apply exige l’état initial préparé. Il retient le vrai lock local, revalide fichiers/token, compare le diagnostic réservé réel au scope préparé, rend durable l’intention puis appelle le SDK de l’action au plus une fois. Un diagnostic réussi ne lie pas le POST ultérieur : le serveur vérifie expected_scope dans sa propre transaction. Aucune substitution origine/scope/UUID/CAS, retry automatique, redirect/proxy ou repli public/legacy. Le SDK garde ses bornes 15 s de requête/3 s de connexion. Format 14 exige maintenance explicite ; un vrai refus busy/source/clock/audit n’est ni absence ni permission de basculer.
+status est une preuve historique locale, pas une lecture du head serveur. Son JSON conserve operation_id, action, phase, attempts, last_error, receipt_present, pending_state et résumé receipt, avec historical:true et coverage:policy_registry_only. Phases : prepared, remote_outcome_unresolved et receipt_recorded ; attempts compte les intentions locales, pas les effets distants. Aucun token, vrai scope, origine, DNS, chemin privé ou champ runtime_applied n’est affiché. Un record incomplet/unsafe reste une erreur, jamais un historique vide.
 
-status n’appelle aucun réseau et ne décrit que l’historique local. Un objet JSON et LF porte version, operation_id, action, phase, attempts, last_error, receipt_present, pending_state, résumé receipt, historical:true et coverage:policy_registry_only. Phases : prepared, remote_outcome_unresolved et receipt_recorded. attempts compte des intentions locales, pas des effets distants. Aucun credential, origine, scope réel, DNS, chemin privé, réponse/chaîne arbitraire ou champ runtime_applied n’est imprimé. Une commande en échec peut émettre l’état unresolved sûr seulement si persistance/sortie aboutissent ; sinon elle retourne une erreur fermée. Busy peut signifier qu’une autre commande détient le lock local, pas que l’opération est absente. Record partiel/unsafe reste une erreur, jamais un historique vide.
+resume conserve exactement UUID et octets de requête. Il peut publier une transition locale pending déjà retenue et validée ; reopen/status ne la réparent jamais implicitement. Un reçu canonique corrélé à l’action déjà présent est revalidé/resynchronisé et retourné comme historique sans autre POST ni nouvelle observation serveur. Sinon resume effectue un nouveau diagnostic réservé et au plus un POST de la même opération. Le travail accepté peut finir après perte de l’observateur ; ACK perdu, timeout, token changé, erreur transport/réponse invalide ou publication/sortie locale ne prouvent aucun rollback. Préserver tous les records, y compris les preuves partielles/unresolved.
 
-resume est explicite et conserve exactement la préparation. Il peut publier une **transition locale pending déjà retenue et validée** ; reopen/status ne le font jamais implicitement. Si un reçu canonique corrélé à l’action est déjà durable, resume le revalide/resynchronise avec le fichier token privé fourni puis retourne une preuve historique, sans POST ni état serveur fraîchement constaté. Sinon il effectue un nouveau diagnostic et au plus un POST de la même opération. Le vrai travail accepté peut finir après abandon de l’observateur ; ACK perdu, Transport/InvalidResponse, token changé ou erreur de sortie/publication locale ne prouve jamais un rollback. Conserver tous les records. Une erreur d’affichage ne supprime pas un reçu déjà stocké. Un ScopeConflict ultérieur n’efface pas un ancien essai unresolved ; ne pas changer scope/CAS ou générer un nouvel UUID pour le masquer.
+### Refus, observations périmées et compatibilité de l’enveloppe complète
 
-### Reçu, refus et limites
+| Refus | Action opérateur |
+|---|---|
+| Credential absent/invalide, non-runner ou mauvais binding/source | Vérifier le credential technique et l’installation owned existants. Connexion humaine/rôle SSO ne s’y substitue pas. |
+| `egress_policy_session_resource_unavailable`, `egress_policy_tenant_ceiling_unavailable`, `egress_policy_revoke_requires_active_head` | Examiner l’observation retenue et l’action demandée. La préparation n’invente ni ressource, plafond ou head. |
+| `egress_policy_scope_conflict` / `egress_policy_conflict` (409 A1 final) | Conserver rapport et opération inchangés. Aucune réparation, nouvelle lecture ou relance automatique d’une observation périmée. |
+| `egress_policy_migration_required` | S’arrêter et suivre la maintenance de confiance distincte ; aucune migration automatique. |
+| Busy/capacité/horloge/source/audit indisponible | Conserver les preuves et diagnostiquer le vrai refus. Busy local peut signifier un verrou détenu sur rapport/opération, jamais une absence. |
+| Records locaux unsafe/modifiés/incomplets, sortie dans le rapport ou publication/affichage unresolved | Préserver les fichiers et éventuelles preuves de staging. Ne pas éditer les records, relâcher les contrôles de modes, supprimer un reçu ou réutiliser une destination pour forcer un succès. |
 
-Le SDK lit les octets E1 canoniques bornés et valide l’action. Replace corrèle opération/sélecteur/CAS, révision+1/époque+1, Active et digest recalculé. Revoke conserve la révision, exige époque+1/RevokeRequested et ne vérifie que la **forme** lowercase64hex du policy_digest, sans attente de valeur depuis un ancien reçu ou lecture de politique distante supplémentaire. revoke_requested est une demande au registre, pas une fermeture runtime constatée. Limites, réserves, horloge et audit restent côté contrôle ; fichier/DTO/status local ne fournit aucune autorité d’acteur.
+Si des faits courants sont nécessaires après conflit, demander une **nouvelle inspection explicite**, l’examiner, puis décider séparément d’une nouvelle préparation dans un nouveau répertoire. Cela ne réécrit ni ne résout une ancienne opération ambiguë ; conserver ses preuves et utiliser la reprise correspondante si nécessaire. Le serveur reste l’autorité même pour un rapport modifié par son propriétaire mais aux hashes cohérents. Les états des reçus décrivent le registre : `revoke_requested` ne constate aucune fermeture runtime. Les enveloppes d’erreur sont décrites dans le [contrat API](../../api.md#owned-policy-a1).
 
-Codes fermés : `egress_policy_scope_conflict` et `egress_policy_conflict` (conserver préparation, sans réparation CAS), `egress_policy_migration_required` (aucune migration automatique), `egress_policy_busy`, `egress_policy_clock_unavailable`, `egress_policy_unavailable` ou `egress_policy_capacity_exhausted` (aucun repli), `egress_policy_transport_unresolved`/`egress_policy_invalid_response` (préserver l’ambiguïté et reprendre explicitement). Les erreurs locales unsafe/incomplètes ou de durabilité refusent aussi sans cleanup. Détails HTTP/pré-body dans le [contrat API A1](../../api.md#owned-policy-a1) ; un scope d’erreur n’est pas une découverte faisant autorité.
+L’ancien parcours par enveloppe complète reste disponible lorsqu’une vraie requête A1 complète est déjà retenue :
 
-La barrière FS in-process emploie vrais fichiers/locks retenus et synchronise fichiers, répertoire d’opération et parent contenant. Elle établit une nouvelle barrière locale, sans prouver le succès d’un ancien sync ni une reprise physique après perte de courant. Les limites de confiance UID/root existantes demeurent. Aucune mutation de credential humain, API de lecture de politique, médiation/révocation réseau runtime, qualification fournisseur/worker/cluster ou ouverture broker 3–13 / relais 6–13 n’en découle. La preuve datée couvre le logiciel ciblé sur sa source exacte. Acquisition fraîche du scope/CAS, cinq tests d’inspection ultérieurs, runtime/réseau réels et qualification production restent NOT_RUN ; le parcours opérateur incomplet reste une exigence ouverte.
+```sh
+agentsandbox broker policy prepare --gateway "$GATEWAY_ORIGIN" --input "$PRIVATE_FULL_INPUT_JSON" --output-dir "$NEW_OPERATION_DIR"
+```
+
+Cet input est l’enveloppe version1/action/request fermée existante avec UUID d’opération, expected_scope, sélecteur et CAS explicites (plus policy/plafond pour replace). Voir le [contrat de requête A1](../../api.md#owned-policy-a1). Utiliser uniquement les vrais faits contrôlés ; ni scope/CAS devinés, ni requête SQLite comme contournement utilisateur. `--gateway` et `--inspection-dir` sont mutuellement exclusifs. Une enveloppe complète n’est pas un draft et aucun parcours ne bascule silencieusement vers l’autre format d’input. Les répertoires d’opération existants restent compatibles avec apply/resume/status.
+
+Les barrières FS utilisent les fichiers/verrous retenus et synchronisent fichiers, répertoire d’opération et parent ; elles ne prouvent pas une reprise physique après coupure de courant. Les limites de confiance UID/root existantes demeurent. Ni mutation de credential, lecture complète du contenu d’une politique, médiation/révocation réseau runtime, qualification fournisseur/worker/cluster ou ouverture des gates broker 3–13/relais 6–13 ne découlent de ce parcours. Les preuves de qualification restent liées à leur source et périmètre réels.
