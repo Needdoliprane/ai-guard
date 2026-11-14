@@ -63,95 +63,110 @@ Local browser `HumanApiClient.close()` clears the token, aborts requests and dis
 
 <a id="owned-policy-a1-operator"></a>
 
-## A1: policy-registry operations
+## A1: inspect and prepare policy-registry operations
 
-**A1 policy-registry contract.** These four commands exist in the [source with dated targeted software evidence](../../engineering/evidence/2026-11-14/owned-egress-policy-api-cli/README.md), `db2678d42cff9c8d6d15bf31284a989732cc6f0d`. Those results do not transfer to another HEAD or qualify a complete operator journey. The scope/CAS acquisition gap below remains open; `inspect` and `prepare --inspection-dir` are not implemented. Scope is `policy_registry_only`: a durable policy or `revoke_requested` receipt establishes neither network enforcement, a connection permit, worker/broker start nor human approval.
+The [inspection and internal CLI evidence](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.md) verifies the composed path on `45179db`; the report remains historical and the server rechecks the final mutation. This is local software evidence, without an AI client, model, worker or network-enforcement qualification.
 
-### Prerequisites that these commands do not create
+Use `broker policy inspect` to retain the actual scope and policy metadata, then prepare a request locally from that report. Registry operations remain `policy_registry_only`; inspection has the narrower `policy_registry_metadata` coverage. A report, durable policy or `revoke_requested` receipt is neither human approval nor evidence of network filtering, a connection permit, or worker/broker execution. The [earlier dated A1 software evidence](../../engineering/evidence/2026-11-14/owned-egress-policy-api-cli/README.md) retains its exact source and scope; it does not qualify another source or production deployment.
 
-Use an already adopted owned installation with **actual Store15**, the retained complete source union and a technical `runner` credential already present in its private registry **and live binding to that exact source/tenant/control namespace**. A named human bearer, viewer, workload token or SSO role is not this credential. A1 creates no credential/binding and performs no migration. The adoption procedure above converts 13→14, not 15; the [E1 maintenance contract](../../engineering/EGRESS_POLICY_STORE.md#exact-format-15-and-maintenance) describes the separate existing trusted protocol. Do not fabricate envelopes, receipts, SQLite rows or use fixtures as installation instructions. Without those real prerequisites, stop here and retain the installation's files.
+### Prerequisites these commands do not create
 
-> **Current operator-path limit.** The input requires tenant_id/control_namespace_uuid confirmed by a real authenticated reserved diagnostic and the exact policy-head/CAS facts. These four commands do not acquire those facts. Existing broker control-info uses the public diagnostic, closed in owned mode; status is local history, not a current server head. No supported acquisition command is supplied by A1. Without the actual retained control evidence, stop: do not infer values from filenames/errors, copy another tenant or build a user-side Rust/SQLite workaround. The missing operator connection remains a separate implementation/qualification requirement.
+Use an already adopted owned installation with **actual Store15**, a retained complete source union, and a technical runner credential already present in its private registry **with an active binding to that exact source/tenant/namespace**. A named human bearer, viewer, workload token or SSO role is not this credential. These commands provision no account, credential, binding, Session or worker and perform no migration. The adoption procedure above converts 13→14, not15; the separate [E1 maintenance contract](../../engineering/EGRESS_POLICY_STORE.md#exact-format-15-and-maintenance) describes the existing trusted maintenance protocol. Do not manufacture envelopes, receipts or SQLite rows, or use test fixtures as an installation procedure. Stop here and retain the installation files if these prerequisites are unavailable.
 
-The diagnostic's active value is a lease fact, not permission, and it does not contain a policy head. Session replacement also requires the actual tenant ceiling and active Session facts. Another operation may make a historical receipt/status stale. No current-policy read is provided here. `expected_scope` is a comparison assertion, never a source/Store/tenant selector or authority. Fill exact preconditions only from real controlled evidence; there is no default CAS or automatic repair. Choose the new operation UUID explicitly; every retry/resume retains its UUID and bytes.
+Keep the runner token and draft/full-envelope input files private (0600), outside the user workspace, frontend and public artifacts. Each output needs an existing private parent (0700) and a **new absent destination**. Keep report and operation directories separate; an operation cannot be prepared inside its report, including through a physical case/Unicode alias. Final names are at most 128 ASCII alphanumeric/dot/dash/underscore characters, excluding `.` and `..`. Paths and ancestors are checked without following arbitrary links; no file, permissions or existing directory is silently repaired.
 
-Keep input and runner-token files private (0600), a private (0700) destination parent already present, and the operation destination absent. Its final name is at most 128 ASCII alphanumeric/dot/dash/underscore characters, excluding `.` and `..`. Input is bounded to 66,560 bytes; canonical request to 65,536; local metadata/state and canonical receipt to 4,096 each. The input may contain sensitive destination metadata: keep it outside the user workspace, frontend and public artifacts. The credential is read privately from its file, never passed as a value or stored in the operation.
+**Set the variables below to the installation's actual nonsecret origin and private paths before running a command.** `GATEWAY_ORIGIN` is HTTPS or HTTP loopback, with no URL credential, query, fragment or non-root path. `PRIVATE_RUNNER_TOKEN` names the private file, never its contents. `SESSION_ID`, when selected, is the actual canonical nonnil Session UUID. The credential determines the tenant; neither selector chooses another tenant.
 
-### Fill the input before using it
+### Inspect one policy selector
 
-**The two JSON objects below are templates, not accepted requests or executable examples. Every null scope/UUID/CAS/time field must be replaced with the installation's actual typed value.** There is no bootstrap/default CAS example here. For replacement, choose an actual valid Unix-millisecond not-before/expiry window; expiry must follow not-before. The control's durable clock and policy rules remain authoritative. Empty destinations demonstrates a deny-all registry policy, not an external access grant. Revoke has no policy/window or expected digest. The selector shown is Tenant; a Session replacement additionally requires its canonical session UUID, active Session and exact tenant ceiling (revision/epoch/digest), as specified by the [API contract](../../api.md#owned-policy-a1).
+Choose one of these alternatives, with a new `NEW_INSPECTION_DIR`:
+
+```sh
+agentsandbox broker policy inspect --gateway "$GATEWAY_ORIGIN" --token-file "$PRIVATE_RUNNER_TOKEN" --tenant --output-dir "$NEW_INSPECTION_DIR"
+```
+
+```sh
+agentsandbox broker policy inspect --gateway "$GATEWAY_ORIGIN" --token-file "$PRIVATE_RUNNER_TOKEN" --session "$SESSION_ID" --output-dir "$NEW_INSPECTION_DIR"
+```
+
+Exactly one of `--tenant` and `--session` is required. Inspection makes one explicit reserved metadata POST; it submits no replacement/revocation. It validates the response and revalidates the private token around the request and durable publication. Success prints only version, kind, observed_at, historical:true and coverage:policy_registry_metadata. It is not a full policy read or a current runtime view.
+
+The private report has exactly four entries: `request.json` (canonical selector request), `metadata.json` (`version:1`, `kind:"policy_inspection"`, gateway and request/observation SHA-256), `current.json` (canonical observation), and `owner.lock`. Records are 0600 and the directory 0700. Its gateway is the validated canonical origin **without the single root-path slash**; reopening requires that exact form. Derived A1 operation metadata still uses its existing origin normalization. The report accepts no pending state or receipt and cannot be used as an apply/resume/status operation directory.
+
+`current.json` records the actual authenticated scope, requested selector, an explicitly absent/present policy head, tenant ceiling metadata for Session, the current identity-resource flag, and the control's observed_at. `session_resource` is a **string**: `"not_applicable"` for Tenant, otherwise `"active"`, `"inactive"` or `"absent"`. Registry states do not establish interval eligibility or effective permissions; the resource flag is not runtime status. See the [exact API fields](../../api.md#owned-policy-inspection).
+
+The observation is dated, historical, unsigned and editable by its local owner. Hashes correlate local bytes; they do not authenticate a permission or guarantee freshness. A healthy checked source/audit is required, but inspection creates no per-read audit event or receipt. Unknown, busy or damaged source data never becomes an absent head. Another operation may change the head or namespace immediately after inspection.
+
+### Author a closed draft and prepare locally
+
+A replace draft contains only version, action and policy. **This is a template: replace both null time fields with an explicitly chosen valid Unix-millisecond window before use.** Expiry follows not-before; the server's durable clock and policy rules remain authoritative. The empty destination list expresses a deny-all registry policy, not network access.
 
 ```json
 {
   "version": 1,
   "action": "replace",
-  "request": {
-    "version": 1,
-    "expected_scope": {
-      "tenant_id": null,
-      "control_namespace_uuid": null
-    },
-    "operation_id": null,
-    "selector": {
-      "kind": "tenant"
-    },
-    "expected_revision": null,
-    "expected_epoch": null,
-    "policy": {
-      "not_before_ms": null,
-      "expires_at_ms": null,
-      "destinations": [],
-      "max_destinations": 128,
-      "max_resolution_ips": 16
-    },
-    "tenant_ceiling": null
+  "policy": {
+    "not_before_ms": null,
+    "expires_at_ms": null,
+    "destinations": [],
+    "max_destinations": 128,
+    "max_resolution_ips": 16
   }
 }
 ```
+
+A revoke draft has no policy or time window:
 
 ```json
 {
   "version": 1,
-  "action": "revoke",
-  "request": {
-    "version": 1,
-    "expected_scope": {
-      "tenant_id": null,
-      "control_namespace_uuid": null
-    },
-    "operation_id": null,
-    "selector": {
-      "kind": "tenant"
-    },
-    "expected_revision": null,
-    "expected_epoch": null
-  }
+  "action": "revoke"
 }
 ```
 
-### Prepare, submit, read local history and explicitly resume
-
-**Set these variables to actual nonsecret origins/private paths first; the block is not runnable as supplied.** GATEWAY_ORIGIN is the immutable origin used at preparation: HTTPS or HTTP loopback, without URL credentials/query/fragment or a non-root path. PRIVATE_RUNNER_TOKEN names the private file, not its contents. The four product commands are exactly:
+Save the selected draft privately, then prepare a **new** operation:
 
 ```sh
-agentsandbox broker policy prepare --gateway "$GATEWAY_ORIGIN" --input "$PRIVATE_INPUT_JSON" --output-dir "$NEW_OPERATION_DIR"
+agentsandbox broker policy prepare --inspection-dir "$NEW_INSPECTION_DIR" --input "$PRIVATE_DRAFT_JSON" --output-dir "$NEW_OPERATION_DIR"
+```
+
+Preparation is local only and holds the report lock throughout. It copies origin, scope and selector from the report, uses 0/0 **only for an explicitly absent head**, otherwise retains the exact revision/epoch, and generates one UUID for this new local request. A replacement may use a present `revoke_requested` head with its actual CAS. A Session replacement requires both an active identity resource and active tenant ceiling, and copies its exact revision/epoch/digest. Revoke requires an active target head; inactive/absent resource or ceiling and the former policy's time window do not block local cleanup preparation. Final A1 authority, scope/CAS and applicable clock checks remain mandatory at submission. Revocation does not require an active Session resource/tenant ceiling or an unexpired former policy.
+
+The draft accepts no `operation_id`, `scope`/`expected_scope`, `selector`, CAS, ceiling, request envelope or unknown field. Input is capped at 66,560 bytes; canonical request at 65,536; report observation, local metadata/state and receipt at 4,096 each; token file at 4,096. Report hashes, canonical shape, selector and origin are checked, and report/draft/ancestors are revalidated around publication. A failed local check does not repair, overwrite or delete evidence.
+
+### Submit, read local history and explicitly resume
+
+```sh
 agentsandbox broker policy apply --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
 agentsandbox broker policy status --operation-dir "$NEW_OPERATION_DIR"
 agentsandbox broker policy resume --operation-dir "$NEW_OPERATION_DIR" --token-file "$PRIVATE_RUNNER_TOKEN"
 ```
 
-prepare performs no network call. It validates the closed version1/action/request, canonicalizes it and durably retains origin/action/op/CAS/expected_scope/request bytes and hash in the new directory before any submission. Unknown fields, invalid UUIDs/limits or unsafe paths refuse without adopting/overwriting old data. No input/token or existing directory is repaired. Retain the complete operation directory, including partial records, after an error; do not edit its JSON to force a retry.
+apply requires the initial prepared state. It holds the local lock, revalidates files/token, compares a real reserved diagnostic to the prepared scope, durably records intent and attempts the prepared action once. The final A1 transaction checks the authenticated scope and current CAS again, plus the ceiling for Session replacement. There is no hidden inspection, origin/scope/CAS override, automatic retry, new UUID, redirect/proxy or public/legacy fallback. SDK bounds remain 15 s/request and 3 s/connect. Format 14 requires explicit maintenance.
 
-apply requires the initial prepared state. It holds the real local lock, revalidates retained files/token, compares the actual reserved diagnostic to the prepared scope and durably records an intent, then calls the action-specific SDK at most once. A successful diagnostic does not bind the later POST: the server checks expected_scope again in its own transaction. There is no origin/scope/UUID/CAS override, automatic retry, redirect/proxy or public/legacy fallback. The SDK retains its 15 s request/3 s connect bounds. Format 14 needs explicit maintenance; a true busy/source/clock/audit refusal is not absence or permission to switch.
+status is local historical evidence, not a server-head fetch. Its JSON retains operation_id, action, phase, attempts, last_error, receipt_present, pending_state and receipt summary, with historical:true and coverage:policy_registry_only. Phases are prepared, remote_outcome_unresolved and receipt_recorded; attempts counts local intents, not remote effects. It prints no token, actual scope, origin, DNS, private path or runtime_applied claim. An incomplete/unsafe record is an error, never empty history.
 
-status makes no network call and reports local history only. One JSON object and LF contains version, operation_id, action, phase, attempts, last_error, receipt_present, pending_state, a receipt summary, historical:true and coverage:policy_registry_only. Phases are prepared, remote_outcome_unresolved and receipt_recorded. attempts counts local submission intents, not remote effects. No credential, origin, actual scope, DNS, private path, arbitrary response/chain or runtime_applied field is printed. A failed command may emit safe unresolved state only if its persistence/output succeed; otherwise it returns a closed error. Busy can mean another command holds the local lock, not a missing operation. A partial/unsafe record remains an error, never empty history.
+resume preserves the exact UUID and request bytes. It may publish an already retained validated local pending transition; reopen/status never repair it implicitly. An existing canonical action-correlated receipt is revalidated/resynchronized and returned as history without another POST or new server observation. Otherwise resume performs a new reserved diagnostic and at most one same-operation POST. Accepted work may finish after observer loss; lost ACK, timeout, token change, transport/invalid-response error or local publication/output failure is not proof of rollback. Preserve every record, including partial/unresolved evidence.
 
-resume is explicit and keeps the exact preparation. It may publish an already retained **validated local pending transition**; reopen/status never do so implicitly. If a canonical action-correlated receipt is already durable, resume revalidates/resynchronizes it and the supplied private token and returns historical evidence without another POST or fresh server-state claim. Otherwise it performs a new diagnostic and at most one same-operation POST. Accepted server work may finish after observer loss; lost ACK, Transport/InvalidResponse, changed token or local output/publication failure never proves rollback. Preserve all records. An output failure does not remove an already stored receipt. A later ScopeConflict does not erase an earlier unresolved attempt; do not change scope/CAS or generate another UUID to hide it.
+### Refusals, stale observations and compatible full-envelope preparation
 
-### Receipt, refusals and limits
+| Refusal | Operator action |
+|---|---|
+| Missing/invalid credential, non-runner or wrong binding/source | Check the existing technical credential and owned installation. A human login/SSO role is not a substitute. |
+| `egress_policy_session_resource_unavailable`, `egress_policy_tenant_ceiling_unavailable`, `egress_policy_revoke_requires_active_head` | Review the retained observation and requested action. Preparation invents no resource, ceiling or head. |
+| `egress_policy_scope_conflict` / `egress_policy_conflict` (409 at final A1) | Retain report and operation unchanged. A stale observation is never repaired, refetched or retried automatically. |
+| `egress_policy_migration_required` | Stop and use the separate trusted maintenance procedure; no automatic migration. |
+| Busy/capacity/clock/source/audit unavailable | Retain evidence and diagnose the actual refusal. Local busy may mean another command holds the report/operation lock; it is not absence. |
+| Unsafe/changed/incomplete local records, overlapping output or unresolved publication/output | Preserve files and any staging evidence. Do not edit records, relax permissions checks, remove a receipt or reuse a destination to force success. |
 
-The SDK parses bounded canonical E1 bytes and validates the action. Replace correlates operation/selector/CAS, revision+1/epoch+1, Active and a recomputed digest. Revoke retains revision, requires epoch+1/RevokeRequested and checks policy_digest **shape only** (lowercase64hex), without a prior-receipt value expectation or extra remote policy read. revoke_requested is a registry revocation request, not evidence of runtime closure. The controller owns limits, reservations, clock and audit; a local file/DTO/status is not actor authority.
+If current facts must be obtained after a conflict, request a **new explicit inspection**, review it, and separately decide whether to prepare a new operation in a new directory. This never rewrites or resolves an earlier ambiguous operation; retain its evidence and use matching resume when needed. The server remains authoritative even for an owner-modified but hash-consistent report. Receipt states describe registry changes: `revoke_requested` is not observed runtime closure. Error envelope details are in the [API contract](../../api.md#owned-policy-a1).
 
-Closed codes include `egress_policy_scope_conflict` and `egress_policy_conflict` (retain preparation; no CAS repair), `egress_policy_migration_required` (no automatic migration), `egress_policy_busy`, `egress_policy_clock_unavailable`, `egress_policy_unavailable` or `egress_policy_capacity_exhausted` (no fallback), and `egress_policy_transport_unresolved`/`egress_policy_invalid_response` (preserve ambiguity and explicitly resume). Local unsafe/incomplete or durability failures also refuse without cleanup. HTTP/pre-body error details are in the [A1 API contract](../../api.md#owned-policy-a1); no error scope echo is an authoritative discovery source.
+The existing full-envelope path remains available when the complete real A1 request is already retained:
 
-The in-process filesystem barrier uses real retained files/locks plus file, operation-directory and containing-parent synchronization. It establishes a new local barrier, not proof that a previous sync succeeded or physical power-loss recovery. Existing same-UID/root trust limits remain. No new human credential mutation, policy read API, runtime network mediation/revocation, provider/worker/cluster qualification or broker 3–13 / relay 6–13 opening follows. The dated evidence covers targeted software behavior on its exact source. Fresh scope/CAS acquisition, the later five inspection tests, real runtime/network and production qualification remain NOT_RUN; the incomplete operator path remains an open requirement.
+```sh
+agentsandbox broker policy prepare --gateway "$GATEWAY_ORIGIN" --input "$PRIVATE_FULL_INPUT_JSON" --output-dir "$NEW_OPERATION_DIR"
+```
+
+This input is the existing closed version1/action/request envelope with its explicit operation UUID, expected_scope, selector and CAS (plus policy/ceiling for replace). See the [A1 request contract](../../api.md#owned-policy-a1). Use only actual controlled facts; do not guess scope/CAS or query SQLite as a user workaround. `--gateway` and `--inspection-dir` are mutually exclusive. A full envelope is not a draft, and neither path silently falls back to another input format. Existing operation directories remain compatible with apply/resume/status.
+
+Filesystem barriers use retained files/locks and file, operation-directory and parent synchronization; they do not prove physical power-loss recovery. Existing same-UID/root trust limits remain. No credential mutation, full policy-content read, runtime network mediation/revocation, provider/worker/cluster qualification or broker 3–13/relay 6–13 gate opening follows from this path. Qualification evidence remains tied to its actual source and scope.

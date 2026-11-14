@@ -1,5 +1,93 @@
 # Validation courante
 
+## 14 novembre — inspection composée R3 : 47 parents vérifiés sur `45179db`
+
+Source `45179db23205ff2a534bcadfafd694830f2a62ce`, arbre
+`810080f9933ac0f0ef630f3c1b99c600e9f804a5`, archive d'entrée
+`5379954066640a38ec91753d7adabd65577748145ba087a5347452e82423c1e5`.
+
+| Étape | Résultat constaté |
+|---|---|
+| R1, `e54cd68` | Compilation101, trois E0308 CLI ; check/listes/tests NOT_RUN, zéro PASS. Fermeture et preuves conservées. |
+| R2, `944480b` | Deux checks CLI non mutateurs, build/check RC0 et 24 listes ; 15 tests tentés, 14 PASS/1 FAIL d'oracle JSON, 32 NOT_RUN. Le compteur FINAL 6 additionnait les tests PASS des deux groupes entièrement réussis ; les huit autres PASS proviennent de la sortie primaire Core. Aucun artefact antérieur réécrit. |
+| R3, `45179db` | Seul l'oracle de clés JSON change ; formatage du texte exact vérifié séparément. Deux checks CLI conservés, build/check RC0, 24 listes/47 FQN uniques et neuf groupes : 47 PASS/0 FAIL/0 sélectionné NOT_RUN. |
+
+Les groupes sont API3, CLI ignorés3, Core9, CLI13, compatibilité E1 2,
+autorisation A1 3, FS3, contrats Kube4 et stdio7. Les trois parents ignorés
+par défaut sont exécutés explicitement ; leurs résumés indiquent zéro test
+laissé ignoré. Les helpers hors sélection ne sont pas exécutés séparément.
+Cinq exécutables distincts frais sont liés au même JSON Cargo : libtest,
+bin-test, intégration waiting, CLI normal et provider Rust normal. Commandes,
+FQN, SHA par groupe et reçus :
+[SELECTIONS.json](evidence/2026-11-14/owned-policy-inspection/SELECTIONS.json).
+
+Les parcours réels internes couvrent inspection/rapport historique, préparation
+CAS et reprise A1, refus d'autorité et publication/FS protégées. Les quatre
+contrats Kube sont un HTTPS/TLS loopback et trois duplex mémoire ; les sept
+stdio lancent le vrai provider Rust interne, sans Codex/Claude, modèle ou cluster.
+NOT_APPLICABLE_CASE_ALIAS est réellement émis sur Linux : branche alias physique
+non exercée, aucune preuve macOS/case-insensitive.
+
+Les 2836 contenus/tailles/modes source sont inchangés. Sept collectes à0,
+fermeture0/CID exact absent, OOM/OOM-kill0 et flush fichiers/dossiers sont
+vérifiés. La fixture conserve zéro fichier régulier et neuf répertoires/nœuds
+de groupe vides ; le tar de fichiers réguliers est vide. Le résumé primaire
+`fixtures.nodes=0` ne doit pas être lu comme un inventaire total zéro.
+Reçu réel `8da8e0a8…` et flush `7ea97381…`, empreintes complètes dans les preuves
+[EN](evidence/2026-11-14/owned-policy-inspection/README.md) /
+[FR](evidence/2026-11-14/owned-policy-inspection/README.fr.md).
+
+Les 121 Kube `be6`, 11 Kube `1e30e5e` et 74 A1 source `db2678d`/publication
+`1a9` ne sont pas additionnés ou transférés. E2/flow16 et fédération Claude
+ne sont pas intégrés dans cette source ni qualifiés par ce run. Aucun moteur,
+worker, contrôle réseau produit, fournisseur, cluster, capacité100, suite complète,
+Clippy strict ou gate production qualifié : 0/12 gates fermés.
+
+## 14 novembre — Kubernetes attach : contrats de flux et stdio réels
+
+Source testée `1e30e5e8546ab614eba7849789a1a0468cbc2843`, arbre
+`25f1b907c028a68679d4b9e02b8760e2aa4ea998`, archive d'entrée
+`ec0216f959edd6189102378d0c3250270b26ebd60d8ed177ae74859df380281e`.
+
+| Contrôle | Résultat réel |
+|---|---|
+| Compilation et check toutes cibles | RC0, artefacts liés au vrai JSON Cargo ; aucun nombre d'avertissements inféré. |
+| Enregistrement | 14 listes réelles : quatre inventaires globaux, deux stdio sélectionné/ignoré et huit de contrats individuels. |
+| Quatre contrats attach | 4 PASS : travail d'upgrade possédé après perte de l'appelant, pong bloqué après Ready, annulation gardée à côté du délai d'IO, closes invalides refusées par le vrai lecteur. |
+| Stdio du binaire normal | 7 PASS, vrais subprocess `ai-guard-provider` : EOF 66, Ready déclaré corrélé puis EOF 66, argument supplémentaire 64, supplémentaire non UTF-8 64, préfixe tronqué 64, préfixe retenu/stdin encore ouvert 65, premier argument non UTF-8 126. |
+| Total | 11 parents uniques PASS, zéro FAIL, zéro sélectionné ignoré, terminal 0. |
+
+Le binaire provider interne Rust a effectivement été exécuté ; aucun client
+Codex/Claude ou modèle IA n'est invoqué. Les quatre contrats utilisent de
+vrais owner/codec avec peers synthétiques : contrat 1 via requête d'upgrade
+HTTPS vers un peer TLS loopback, contrats 2/3 via `tokio::io::duplex(64)` et
+contrat 4 via play→open→duplex mémoire. Ces trois derniers ne prouvent aucun
+TCP/TLS ; aucun cas ne prouve serveur Kubernetes, worker/image ou contrôle
+réseau produit. Le timeout du cas stdin ouvert est constaté sur
+l'état terminal réel du processus, sans fermer le writer pour provoquer EOF.
+Les exit 64/65/66/126 sont les résultats attendus des enfants, distincts du
+RC0 des tests. Noms/argv/SHA et trois artefacts dans
+[SELECTIONS.json](evidence/2026-11-14/kubernetes-attach-composition/SELECTIONS.json).
+
+Les 2805 fichiers source gardent hashes, tailles et modes exacts. Export de
+fixture : zéro fichier régulier/nœud retenu. Les 56 RC d'étapes consignés
+valent 0 ; streams producteur/sink bornés, fermeture 0 et CID exact absent.
+Pic mémoire QA 8960716800 sous 9663676416 octets, OOM/OOM-kill 0 : ni mémoire
+worker, ni benchmark. Le résultat primaire `dd197af1…` et le flush FD
+`90e23f7b…` sont vérifiés séparément. L'addendum de précision de couverture
+`92a82687117f7c5eb56518a13506640a7398ee0f5f7d45044fd07b2df24ae90c`
+précise ces transports sans modifier ces reçus ; aucun opaque n'est exécuté sur l'hôte.
+Le flush ne qualifie pas une coupure électrique ou une restauration.
+
+Les 121 PASS sur `be6b12d` restent historiques, sans rejeu ni addition à ces
+11. Ces résultats ne se transfèrent pas à `3b538f7`. Le gel inspection
+`45179db` répète les onze contrôles dans sa campagne propre décrite ci-dessus.
+Cluster/worker/réseau réels, fournisseurs IA, confinement produit Docker/Podman,
+charge 100, suite complète et Clippy strict restent NOT_RUN. Aucun S5/permis/fencing/R4/R7/R10 ni gate production clos ;
+activation et chemin produit restent fermés.
+[EN](evidence/2026-11-14/kubernetes-attach-composition/README.md) ·
+[FR](evidence/2026-11-14/kubernetes-attach-composition/README.fr.md).
+
 ## 14 novembre — A1 : builds et reprise des 74 parents ciblés
 
 Source commune des deux QA finales :
@@ -30,9 +118,10 @@ flushs primaires finaux : `c24896a4…` / `aaba0fd7…` pour build/check,
 `ae52ce89…` / `c5c587f0…` pour la reprise. Les anciens échecs ne sont pas
 requalifiés par ces sorties0.
 
-Le scope/CAS frais n'a toujours pas de commande d'acquisition supportée.
-`inspect`, `prepare --inspection-dir` et leurs cinq tests sur le gel
-ultérieur `05a4451` restent non implémentés/NOT_RUN. Statut local historique,
+Sur cette source A1, l'acquisition scope/CAS n'avait pas encore de commande
+supportée et les cinq tests ultérieurs `05a4451` restaient NOT_RUN. Cette
+limite est traitée par le parcours inspection sur `45179db`, avec sa preuve
+indépendante ci-dessus ; les 74 PASS historiques ne lui sont pas transférés. Statut local historique,
 reçu durable et `revoke_requested` ne prouvent ni état serveur frais,
 filtrage appliqué, exécution ou approbation humaine. Aucun autre HEAD/public
 composé, runtime/worker/réseau, fournisseur/SSO, cluster, charge100, suite
@@ -6049,7 +6138,7 @@ La régression de rotation est ensuite réellement exécutée avec deux canaris 
 
 **GREEN rotation et CLI composé :** correctif minimal `oidc_session.rs` SHA `c7c4c4cca9c1428eef3fcf69be296bedfbde120c28cb2f81cae6e745fc42cda0`. Liaison du tuple vérifiée avant toute mutation, puis rétention du bearer/génération/client et contexte IdP effectivement connus, effacement de l'intent consommé, enfin contrôle de fraîcheur avant toute annonce/lecture. Cette installation ne contient aucun await ; un ACK mal lié n'acquiert aucune autorité. Revue indépendante sans défaut bloquant ; l'absence de nouveau contexte IdP garde le précédent comme auparavant. Fmt PASS puis `cargo test --locked --offline --test sso_cli` **24/24 PASS**, aucun ignoré/filtré, compilation5min18 et exécution7,48s, RC0. Les oracles RED de rotation et les canaris sont inchangés. Capture privée `ai-guard-luna-sso-cli-final-20261102-pvS3a9`, Clippy final en cours. Aucun rejeu des82résultats des autres gels, aucune recette fournisseur/IdP réel déduite.
 
-**Cycle de vie des quatre donneurs — terminé :** archives privées des77chemins source/test/Cargo vérifiées, données inconnues/ignorées absentes, aucun consommateur observé au lsof final. Scans prépush sans binaire, chemin interdit ou secret littéral connu ; une première invocation sans PATH échoue avant scan, puis l'invocation corrigée termine avant commit. Sauvegardes poussées sans force et SHA distants revérifiés par Root : audit `87e2ccacfcb7d807bc28225f42cbc880f7cdc09e`, transport `2647078490f03ca11f603fa7cf90792735a8d98c`, CLI `14a4d6f0be070a1a59dc88c3a391b34a13d83777`, Web `9efb0955200275b878083bfb2e630893bb82138a`. Chaque retrait Git normal termine0, branches conservées ; liste finale : principal, broker-service actif, broker-supervision protégé. Rapport privé `/Users/louis/.codex/private-evidence/oidc-donor-closure-20261102-4b525e4/CLOSURE_REPORT.md`, SHA `8becdc4059469c64c9c4e6240fa6c33ea7710fead81e986b572da3a8db30f6e6`. Les copies anciennes ne remplacent pas les corrections intégrées ; la restriction donneur sur l'annonce discovery `none` contredit le contrat public testé et n'est pas reprise. Un guard donneur de distinctivité end-session est conservé comme proposition archivée, sans défaut prouvé ni qualification. Aucun test/build supplémentaire déduit de cette fermeture, aucune source produit ou gouvernance du principal modifiée par l'opération.
+**Cycle de vie des quatre donneurs — terminé :** archives privées des77chemins source/test/Cargo vérifiées, données inconnues/ignorées absentes, aucun consommateur observé au lsof final. Scans prépush sans binaire, chemin interdit ou secret littéral connu ; une première invocation sans PATH échoue avant scan, puis l'invocation corrigée termine avant commit. Sauvegardes poussées sans force et SHA distants revérifiés par Root : audit `87e2ccacfcb7d807bc28225f42cbc880f7cdc09e`, transport `2647078490f03ca11f603fa7cf90792735a8d98c`, CLI `14a4d6f0be070a1a59dc88c3a391b34a13d83777`, Web `9efb0955200275b878083bfb2e630893bb82138a`. Chaque retrait Git normal termine0, branches conservées ; liste finale : principal, broker-service actif, broker-supervision protégé. Rapport privé `CLOSURE_REPORT.md`, conservé hors dépôt, SHA `8becdc4059469c64c9c4e6240fa6c33ea7710fead81e986b572da3a8db30f6e6`. Les copies anciennes ne remplacent pas les corrections intégrées ; la restriction donneur sur l'annonce discovery `none` contredit le contrat public testé et n'est pas reprise. Un guard donneur de distinctivité end-session est conservé comme proposition archivée, sans défaut prouvé ni qualification. Aucun test/build supplémentaire déduit de cette fermeture, aucune source produit ou gouvernance du principal modifiée par l'opération.
 
 **Clôture statique du gel final CLI :** Clippy `--locked --offline --all-targets -- -D warnings` termine naturellement RC0 en2min05, sans diagnostic, après les24tests. Manifestes avant/après identiques, source c7c4c4 et tests7152fc inchangés, Rust/Cargo1.99.1. Ce résultat termine la validation logicielle ciblée des correctifs connus du lot ; il ne qualifie pas le fournisseur réel, le navigateur, le lancement délégué, le bootstrap ou les effets runtime. Les résultats FAIL/NOT_RUN antérieurs et leurs gels restent conservés. Le nouvel essai d'accès CUA après signalement de permission renvoie encore « The browser access host is unavailable » avant accès à une page ; aucun lien causal avec Python n'est établi.
 

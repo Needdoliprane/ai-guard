@@ -13,22 +13,30 @@ Le contrat de référence est le [contrat d'admission Kubernetes](../../engineer
 La source courante compose le lot S2b : attachement limité au préambule,
 durcissement et dispatch du mode d'attente du worker
 ([section 11](#11-attachement-limité-au-préambule-et-mode-dattente-du-worker-lot-s2b)).
-Une campagne logicielle distincte du 14 novembre a passé 121 parents
-sélectionnés sur `be6b12dce7f74e2062f7ad5524e12818bf7313b5`, avec build et
-check toutes cibles. Ces résultats ne qualifient ni la composition basée sur
-`6fb1e93a0fe4bbcf10aa1fbecd08cb88d481dbf7`, ni ses sept nouveaux tests sur
-stdio réels, ni un cluster : les vérifications de la composition sont
-**NOT_RUN**. Aucun parcours de session du produit n'atteint l'attachement.
+Les [preuves ciblées du 14 novembre](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+consignent build/check RC0 et 11 parents uniques PASS sur
+`1e30e5e8546ab614eba7849789a1a0468cbc2843` : quatre contrats de vrais flux
+avec peers synthétiques et sept cas de subprocess stdio réels du
+binaire Rust normal `ai-guard-provider`. Seuls son attente et ses arguments
+sont exercés ; aucun client ou modèle IA. Les 121 PASS distincts sur
+`be6b12dce7f74e2062f7ad5524e12818bf7313b5` restent historiques et ne sont
+pas rejoués sur `1e30e5e`. La [campagne composée inspection sur `45179db`](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md)
+réexécute ces quatre contrats et sept cas stdio parmi ses 47 parents ciblés.
+Elle ne rejoue pas les 121 tests historiques et ne qualifie aucun cluster ;
+les comptes de ces sources ne sont pas additionnés. Seul le contrat 1 utilise un upgrade
+HTTPS vers un peer TLS loopback synthétique ; les contrats 2–4 utilisent des
+duplex mémoire, sans preuve TCP/TLS. Aucun parcours de session du produit
+n'atteint l'attachement.
 
 ## 1. État par couche
 
 | Couche | Ce qui existe | Qui peut l'appeler aujourd'hui | Vérifié |
 |---|---|---|---|
-| A. Entrée de bibliothèque avec données réelles | `KubernetesRuntime::inspect_session_workspace_claim(name)` : nom vérifié comme label DNS avant toute requête, puis GET des deux ancres de namespace, du PVC et à nouveau des ancres. Un nom invalide est signalé comme `InvalidAuthority` avant toute requête, un claim qui ne remplit pas les exigences de la section 3 comme `InvalidResponse`, et un PVC absent comme `ApiRejected(404)`. | Du code Rust qui détient un `KubernetesRuntime`. **Aucun binaire du produit ne l'appelle** ; une entrée CLI en lecture seule, qui associerait les deux premières erreurs à des messages dédiés, n'est qu'un patch proposé. | Sélection historique PASS ; composition et cluster NOT_RUN |
-| B. Mécanismes purs (internes à la crate) | Rendu exact de la requête de Pod V2, projection de la réponse admise, parseur exact d'observation, enregistrements du journal. | Code de la crate seulement. | Sélection historique PASS ; composition et cluster NOT_RUN |
-| C. Cycle de vie avant effet (interne à la crate) | Chaîne de rétention du journal, réouverture en observation seule, abandon avant tout effet, reprise par un successeur, rejeu du reçu, rapport de réconciliation en observation seule. | **Personne en production.** Le Store du gateway émet les confirmations alors que le broker garde le journal ; les routes broker qui les relieraient n'existent pas encore (demande Root R2). | Sélection historique PASS ; composition et cluster NOT_RUN |
-| D. Mécanismes d'effet (fermés) | CREATE retenu des octets exacts, PATCH de levée du gate avec opérations JSON-Patch `test`, DELETE avec précondition d'UID ; attachement S2b limité au préambule. | Une garde scellée dont la seule implémentation existe dans les tests, liée à un listener loopback possédé. Aucun chemin du produit n'atteint un effet. | Sélections historiques PASS sur leurs sources propres ; composition et cluster NOT_RUN |
-| Mode d'attente worker S2b | `ai-guard-provider` sélectionne le mode fixe avant le parcours fournisseur. Il échange Hello/Ready, puis refuse tout octet supplémentaire. | Uniquement l'entrée du mode d'attente du binaire existant ; aucun lanceur de session. | Sélection de bibliothèque historique PASS ; sept nouveaux tests stdio réels et image NOT_RUN |
+| A. Entrée de bibliothèque avec données réelles | `KubernetesRuntime::inspect_session_workspace_claim(name)` : nom vérifié comme label DNS avant toute requête, puis GET des deux ancres de namespace, du PVC et à nouveau des ancres. Un nom invalide est signalé comme `InvalidAuthority` avant toute requête, un claim qui ne remplit pas les exigences de la section 3 comme `InvalidResponse`, et un PVC absent comme `ApiRejected(404)`. | Du code Rust qui détient un `KubernetesRuntime`. **Aucun binaire du produit ne l'appelle** ; une entrée CLI en lecture seule, qui associerait les deux premières erreurs à des messages dédiés, n'est qu'un patch proposé. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| B. Mécanismes purs (internes à la crate) | Rendu exact de la requête de Pod V2, projection de la réponse admise, parseur exact d'observation, enregistrements du journal. | Code de la crate seulement. | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| C. Cycle de vie avant effet (interne à la crate) | Chaîne de rétention du journal, réouverture en observation seule, abandon avant tout effet, reprise par un successeur, rejeu du reçu, rapport de réconciliation en observation seule. | **Personne en production.** Le Store du gateway émet les confirmations alors que le broker garde le journal ; les routes broker qui les relieraient n'existent pas encore (demande Root R2). | Sélection historique PASS sur sa source ; mécanismes plus larges et cluster non qualifiés par la sélection 45179db |
+| D. Mécanismes d'effet (fermés) | CREATE retenu des octets exacts, PATCH de levée du gate avec opérations JSON-Patch `test`, DELETE avec précondition d'UID ; attachement S2b limité au préambule. | Une garde scellée dont la seule implémentation existe dans les tests, liée à un listener loopback possédé. Aucun chemin du produit n'atteint un effet. | Quatre contrats attach PASS sur 1e30e5e puis sur 45179db ; autres sélections liées à leur source ; effets réels et cluster NOT_RUN |
+| Mode d'attente worker S2b | `ai-guard-provider` sélectionne le mode fixe avant le parcours fournisseur. Il échange Hello/Ready, puis refuse tout octet supplémentaire. | Uniquement l'entrée du mode d'attente du binaire existant ; aucun lanceur de session. | Sept cas stdio du binaire normal PASS sur 1e30e5e puis sur 45179db ; image worker et cluster NOT_RUN |
 | E. Raccords et qualification manquants | Demandes typées R1–R11 au propriétaire du contrôle ; ce plan Docker Desktop. | — | non commencé |
 
 Les permis d'effet, le handoff, le démarrage, l'observation terminale et le
@@ -365,7 +373,7 @@ l'étape 4a a laissées non discriminées.
   attachement, suppression, Pod Security, verbes RBAC, `ReadWriteOncePod`,
   encodage des booléens omis, formes des quantités, persistance des logs),
   Docker Desktop, l'application de NetworkPolicy, de CSI et des cgroups, le mode
-  d'attente dans une image, tout permis d'effet, l'échéance durable, le handoff
+  d'attente dans une image worker, tout permis d'effet, l'échéance durable, le handoff
   et le démarrage, le règlement du quota après effet, et la montée à
   100 workers.
 - Les peers de test en loopback répondent avec des fixtures déclarées ; ils ne
@@ -373,8 +381,10 @@ l'étape 4a a laissées non discriminées.
   `ReadWriteOncePod`.
 - Les bornes logicielles S2b, l'interopérabilité WebSocket, `stdinOnce`, les
   signaux du worker et la rétention des logs du nœud restent non mesurés sur
-  cluster. Les sept nouveaux tests stdio de processus et la composition
-  courante restent NOT_RUN.
+  cluster. Sept cas stdio de processus passent sur `1e30e5e`, pour la seule
+  attente et les arguments de l'adaptateur Rust normal. Les mêmes sept cas
+  passent dans la composition inspection `45179db`, sans qualification
+  runtime plus large.
 - Les gates G05, G07 et G11 restent ouverts, G11 `BLOCKED`. Le produit n'est
   pas prêt pour la production, et l'absence de chemin d'effet est la barrière
   qui garde le lancement Kubernetes fermé.
@@ -439,9 +449,12 @@ l'[adaptateur WebSocket](../../../src/runtime/kubernetes/session_attach_codec.rs
 et le [mode d'attente du worker](../../../src/runtime/kubernetes/session_worker.rs)
 existent en source. Le dispatch est raccordé au binaire existant
 [`ai-guard-provider`](../../../src/bin/ai-guard-provider.rs).
-La composition et ses sept nouveaux tests stdio de processus sont NOT_RUN ;
-les 121 parents PASS sur la source distincte `be6b12d` ne s'y transfèrent pas.
-Aucun cluster n'a été utilisé. La garde d'effet n'a pas d'implémentation de
+Quatre contrats de vrais flux et sept cas stdio de processus du binaire normal
+passent sur `1e30e5e` ; [les preuves](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+en conservent le périmètre exact. Les 121 PASS historiques sur `be6b12d` ne
+sont pas rejoués. La composition inspection `45179db` répète ces onze
+contrôles ; sa [preuve propre](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md) conserve la même portée logicielle. Aucun cluster, vrai worker ou client/modèle IA n'est exercé.
+La garde d'effet n'a pas d'implémentation de
 production ; aucune commande d'attachement de session, option d'activation
 ou procédure opérateur n'existe.
 
@@ -626,9 +639,14 @@ identifiant ni contenu de trame va sur stderr.
 La source appelle `shutdown_background` après l'échange : le lecteur stdin
 bloquant de Tokio peut rester en attente quand le délai du handshake
 expire ; attendre la destruction du runtime empêcherait alors la sortie.
-Sept nouveaux tests visent le vrai binaire et ses pipes, dont un Hello
-partiel avec stdin maintenu ouvert. Ils restent NOT_RUN sur cette
-composition. Ils n'exercent ni image worker, ni transport attach, ni cluster.
+Sept tests passent sur le vrai binaire Rust normal et ses pipes à
+`1e30e5e`, dont un Hello partiel avec stdin encore ouvert lors de la sortie 65
+observée. Cela exécute l'adaptateur provider interne, pas un client/modèle IA.
+Ces tests stdio n'exercent ni image worker, transport attach ou cluster ; les
+quatre contrats de flux distincts utilisent des peers synthétiques : un
+contrat HTTPS/TLS loopback et trois contrats de duplex mémoire.
+Leurs [preuves liées à la source](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.fr.md)
+sont complétées par la [preuve distincte 45179db](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.fr.md), de même portée logicielle.
 
 Le mode ne lit lui-même aucun credential ou environnement. La construction
 de son runtime Tokio peut lire le réglage Tokio

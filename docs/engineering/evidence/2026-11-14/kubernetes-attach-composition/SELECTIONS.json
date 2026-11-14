@@ -1,0 +1,323 @@
+{
+  "schema": 1,
+  "title": "Kubernetes preamble attach composition — actual targeted software evidence",
+  "date": "2026-11-14",
+  "status": "SOURCE_SPECIFIC_BUILD_CHECK_AND_11_PASS",
+  "tested_source": {
+    "commit": "1e30e5e8546ab614eba7849789a1a0468cbc2843",
+    "tree": "25f1b907c028a68679d4b9e02b8760e2aa4ea998",
+    "input_archive_sha256": "ec0216f959edd6189102378d0c3250270b26ebd60d8ed177ae74859df380281e"
+  },
+  "documentation_base": "3b538f7323141c4488baa031f93da5f9b0dc30cf",
+  "receipts": {
+    "result_sha256": "dd197af11edfd46da7c70de6ce1096320e349fb841b4e6f4ab96bf10418a4c74",
+    "host_flush_sha256": "90e23f7b1986cbb90ba46fa2d3c9e6be1803f7fb9c9e5c67d9e99056e892b506",
+    "created_profile_receipt_sha256": "00b69348aa2dad057dd4f2c26032854678f06805ec26cdb9faaa8a88cd37ba87",
+    "coverage_precision_addendum_sha256": "92a82687117f7c5eb56518a13506640a7398ee0f5f7d45044fd07b2df24ae90c"
+  },
+  "actual": {
+    "terminal_rc": 0,
+    "build_rc": 0,
+    "check_all_targets_rc": 0,
+    "warning_count": "NOT_RECORDED_IN_PRIMARY_RESULT",
+    "actual_lists": 14,
+    "registration": {
+      "global_lists_and_ignored": 4,
+      "selected_stdio_and_ignored": 2,
+      "individual_contracts_and_ignored": 8,
+      "total": 14
+    },
+    "unique_pass": 11,
+    "failed": 0,
+    "selected_ignored": 0,
+    "groups": [
+      {
+        "id": "contract-1",
+        "artifact": "lib",
+        "actual_names": [
+          "runtime::kubernetes::session_attach::tests::initiated_upgrade_keeps_capacity_after_caller_loss_until_http_work_ends"
+        ],
+        "passed": 1,
+        "failed": 0,
+        "selected_ignored": 0,
+        "stdout_sha256": "d918af2147fdde91dec25d851f29d17e4aad4459e53f9c514ca4ab1147ede076",
+        "argv": [
+          "--exact",
+          "runtime::kubernetes::session_attach::tests::initiated_upgrade_keeps_capacity_after_caller_loss_until_http_work_ends",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      },
+      {
+        "id": "contract-2",
+        "artifact": "lib",
+        "actual_names": [
+          "runtime::kubernetes::session_attach::tests::post_ready_blocked_pong_write_records_a_typed_io_deadline"
+        ],
+        "passed": 1,
+        "failed": 0,
+        "selected_ignored": 0,
+        "stdout_sha256": "e9ef81189386c56e9608d80795111bd06956a7d4b582b7c9003f204b7e6f486a",
+        "argv": [
+          "--exact",
+          "runtime::kubernetes::session_attach::tests::post_ready_blocked_pong_write_records_a_typed_io_deadline",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      },
+      {
+        "id": "contract-3",
+        "artifact": "lib",
+        "actual_names": [
+          "runtime::kubernetes::session_attach::tests::cancelled_post_ready_blocked_write_keeps_cancellation_with_its_io_deadline"
+        ],
+        "passed": 1,
+        "failed": 0,
+        "selected_ignored": 0,
+        "stdout_sha256": "109331a31352a6397aed84f6744d058bcc7f06419715697058ef9a72cacb7b11",
+        "argv": [
+          "--exact",
+          "runtime::kubernetes::session_attach::tests::cancelled_post_ready_blocked_write_keeps_cancellation_with_its_io_deadline",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      },
+      {
+        "id": "contract-4",
+        "artifact": "lib",
+        "actual_names": [
+          "runtime::kubernetes::session_attach::tests::invalid_close_payloads_are_refused_by_the_real_stream_reader"
+        ],
+        "passed": 1,
+        "failed": 0,
+        "selected_ignored": 0,
+        "stdout_sha256": "a61710f31af5fbd775822e04e099a5f4e04f140d62957d90e041205e0b06f438",
+        "argv": [
+          "--exact",
+          "runtime::kubernetes::session_attach::tests::invalid_close_payloads_are_refused_by_the_real_stream_reader",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      },
+      {
+        "id": "stdio",
+        "artifact": "kubernetes_waiting_cli",
+        "actual_names": [
+          "mode_eof_before_hello_exits_66_without_stdout",
+          "hello_then_eof_emits_one_correlated_declared_ready_and_exits_66",
+          "mode_with_extra_argument_exits_64_without_stdout",
+          "mode_with_non_utf8_extra_argument_exits_64_without_stdout",
+          "truncated_prefix_then_eof_exits_64_without_stdout",
+          "held_prefix_exits_65_while_stdin_remains_open",
+          "non_utf8_first_argument_exits_126_without_stdout"
+        ],
+        "passed": 7,
+        "failed": 0,
+        "selected_ignored": 0,
+        "stdout_sha256": "8ff79fba408121cd83224ea431671e8892404cb7adbd24742070c5409a9e26cf",
+        "argv": [
+          "--exact",
+          "mode_eof_before_hello_exits_66_without_stdout",
+          "hello_then_eof_emits_one_correlated_declared_ready_and_exits_66",
+          "mode_with_extra_argument_exits_64_without_stdout",
+          "mode_with_non_utf8_extra_argument_exits_64_without_stdout",
+          "truncated_prefix_then_eof_exits_64_without_stdout",
+          "held_prefix_exits_65_while_stdin_remains_open",
+          "non_utf8_first_argument_exits_126_without_stdout",
+          "--test-threads=1",
+          "--nocapture"
+        ]
+      }
+    ]
+  },
+  "commands": {
+    "build": [
+      "/usr/local/cargo/bin/cargo",
+      "test",
+      "--frozen",
+      "--offline",
+      "--lib",
+      "--test",
+      "kubernetes_waiting_cli",
+      "--no-run",
+      "--message-format=json",
+      "-j1"
+    ],
+    "check": [
+      "/usr/local/cargo/bin/cargo",
+      "check",
+      "--frozen",
+      "--offline",
+      "--all-targets",
+      "-j1"
+    ],
+    "registration_argv_suffixes": [
+      [
+        "--list"
+      ],
+      [
+        "--list",
+        "--ignored"
+      ],
+      [
+        "--exact",
+        "<selected names>",
+        "--list"
+      ],
+      [
+        "--exact",
+        "<selected names>",
+        "--list",
+        "--ignored"
+      ]
+    ]
+  },
+  "artifacts": [
+    {
+      "id": "lib",
+      "sha256": "56473204b5df5b2c49874846278319e4ec91fb99863708a35af5a95488739810",
+      "bytes": 302212688,
+      "cargo_artifact_json_sha256": "b1b0961ec0fd34ab64ec4fd1202d8151c452e417fff03c492766716b63e4da7d",
+      "profile_test": true,
+      "executed_on_host": false,
+      "executed_in_qa": true
+    },
+    {
+      "id": "kubernetes_waiting_cli",
+      "sha256": "ad87bb5c3d3dee137e6e65d8641ca91af28c16f6cdb828c56a2ab7296a2f265a",
+      "bytes": 3764608,
+      "cargo_artifact_json_sha256": "62ca65af29b2c2d68ba8ed4fb6d5c36cc47ebf0c8a8af96239210187fd84e715",
+      "profile_test": true,
+      "executed_on_host": false,
+      "executed_in_qa": true
+    },
+    {
+      "id": "provider",
+      "sha256": "e4eac98c8b0545293fd5547fd3cfe37a18c64ab6b12d42abe2a14de880f73f59",
+      "bytes": 9419832,
+      "cargo_artifact_json_sha256": "44dab48c87613db29c4fc36554521d441d157191935730dfa009f2834341dff9",
+      "profile_test": false,
+      "executed_on_host": false,
+      "executed_in_qa": true,
+      "provider_scope": "Normal internal Rust adapter waiting mode and argument handling only; no AI client/model invoked"
+    }
+  ],
+  "preservation": {
+    "source_files": 2805,
+    "hashes_sizes_modes_equal": true,
+    "postrun_archive_sha256": "b663b2ccc528e5142de8a9788c86baf1244ac388793fba7ae676a91e20ee5b7d",
+    "fixture_export": {
+      "regular_files": 0,
+      "nodes": 0,
+      "archive_sha256": "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652"
+    },
+    "bounded_producer_sink_rc": 0,
+    "all_recorded_stage_rc": 0,
+    "count_recorded_rc": 56,
+    "closure_rc": 0,
+    "exact_qa_container_absent": true,
+    "opaque_executed_on_host": false,
+    "host_fd_flush": {
+      "files": 493,
+      "directories": 17,
+      "bytes": 391272605,
+      "regular_single_link_no_symlink": true,
+      "power_failure_or_restore_qualification": false
+    }
+  },
+  "qa_profile": {
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "uid_gid": "1000:1000",
+    "network": "none",
+    "readonly_root": true,
+    "privileged": false,
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "cpus": 4,
+    "memory_limit_bytes": 9663676416,
+    "swap_limit_bytes": 0,
+    "pids": 128,
+    "scratch_bytes": 4294967296,
+    "tmp_bytes": 67108864,
+    "tmp_noexec": true,
+    "readonly_input_and_public_cargo_cache_binds": 2,
+    "no_engine_socket_project_home_or_credential_mount": true,
+    "memory_peak_bytes": 8960716800,
+    "oom": 0,
+    "oom_kill": 0,
+    "product_confinement_qualification": false
+  },
+  "scope": {
+    "real_stdio_subprocess_cases": 7,
+    "normal_internal_rust_provider_adapter_executed": true,
+    "ai_client_or_model_executed": false,
+    "real_worker_executed": false,
+    "real_cluster_used": false,
+    "product_network_enforcement_exercised": false,
+    "real_stream_contracts_with_synthetic_peers": 4,
+    "https_tls_loopback_contracts": 1,
+    "in_memory_duplex_contracts": 3,
+    "transport_coverage": [
+      {
+        "id": "contract-1",
+        "transport": "Actual HTTPS upgrade request via the existing client to an owned synthetic TLS loopback peer",
+        "tcp_tls_exercised": true,
+        "limit": "No Kubernetes API-server/kubelet fact"
+      },
+      {
+        "id": "contract-2",
+        "transport": "tokio::io::duplex(64), in memory",
+        "tcp_tls_exercised": false,
+        "limit": "Real owner/codec I/O deadline behavior, no TCP/TLS/cluster proof"
+      },
+      {
+        "id": "contract-3",
+        "transport": "tokio::io::duplex(64), in memory",
+        "tcp_tls_exercised": false,
+        "limit": "Real owner/codec cancellation attribution with I/O deadline, no TCP/TLS/cluster proof"
+      },
+      {
+        "id": "contract-4",
+        "transport": "play→open→tokio::io::duplex(pipe), in memory",
+        "tcp_tls_exercised": false,
+        "limit": "Real reader rejects supplied close payloads, no TCP/TLS/cluster proof"
+      },
+      {
+        "id": "stdio",
+        "transport": "Seven normal ai-guard-provider Rust subprocess standard-stream cases",
+        "tcp_tls_exercised": false,
+        "limit": "Actual waiting/argument/bootstrap boundaries, no AI client/model or worker/cluster launch"
+      }
+    ]
+  },
+  "historical_results": {
+    "source": "be6b12dce7f74e2062f7ad5524e12818bf7313b5",
+    "selected_pass": 121,
+    "rerun_in_this_campaign": false,
+    "added_to_current_unique_pass": false
+  },
+  "not_run": [
+    "Later composition 3b538f7323141c4488baa031f93da5f9b0dc30cf",
+    "Inspection behavior in this 1e30e5e campaign; later45179db has its separate evidence",
+    "Real Kubernetes cluster",
+    "Real worker or AI client/model",
+    "Real network enforcement",
+    "Docker/Podman product confinement qualification",
+    "100 sessions/workers capacity",
+    "Strict Clippy",
+    "Full suite",
+    "Physical power failure/restore"
+  ],
+  "production": false,
+  "production_gates_closed": 0,
+  "production_effect_permits_implemented": false,
+  "production_attach_path_opened": false,
+  "S5_qualified": false,
+  "fencing_qualified": false,
+  "R4_R7_R10_closed": false,
+  "later_composition_evidence": {
+    "commit": "45179db23205ff2a534bcadfafd694830f2a62ce",
+    "relative_record": "../owned-policy-inspection/SELECTIONS.json",
+    "scope": "Separate47-parent run repeats these11softwarechecks; no testcountaddition or qualification transfer."
+  }
+}

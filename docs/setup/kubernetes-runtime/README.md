@@ -12,22 +12,29 @@ The binding contract is the [Kubernetes admission contract](../../engineering/KU
 
 The current source composes stage S2b: a preamble-only attach, its hardening,
 and the worker waiting-mode dispatch ([section 11](#11-preamble-only-attach-and-worker-waiting-mode-stage-s2b)).
-A separate 14 November software run passed 121 selected parents on
-`be6b12dce7f74e2062f7ad5524e12818bf7313b5`, including build and all-targets
-check. Those results do not qualify the composition based on
-`6fb1e93a0fe4bbcf10aa1fbecd08cb88d481dbf7`, its seven new real-stdio tests,
-or a cluster: the composed software checks are **NOT_RUN**. No product session
-path reaches the attach.
+The [14 November targeted evidence](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.md)
+records build/check RC0 and 11 unique parents PASS on
+`1e30e5e8546ab614eba7849789a1a0468cbc2843`: four real-stream contracts with
+synthetic peers and seven real subprocess-stdio cases of the normal
+Rust `ai-guard-provider` binary. Only its waiting/argument handling ran; no
+AI client or model ran. The separate 121 PASS on
+`be6b12dce7f74e2062f7ad5524e12818bf7313b5` remain historical and were not
+rerun on `1e30e5e`. A later [composed inspection run on `45179db`](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.md)
+re-executes these four contracts and seven stdio cases within its 47 selected
+parents. It does not rerun all 121 historical tests or qualify a cluster;
+no counts are added across these sources. Only contract 1 uses an HTTPS upgrade to a
+synthetic TLS loopback peer; contracts 2–4 use in-memory duplex streams, with
+no TCP/TLS proof. No product session path reaches the attach.
 
 ## 1. Status by layer
 
 | Layer | What exists | Who can call it today | Verified |
 |---|---|---|---|
-| A. Library entry with real inputs | `KubernetesRuntime::inspect_session_workspace_claim(name)`: DNS-label name checked before any request, then GET of the two namespace anchors, the PVC and the anchors again. An invalid name is reported as `InvalidAuthority` before any request, a claim that does not meet the requirements of section 3 as `InvalidResponse`, and an absent PVC as `ApiRejected(404)`. | Rust code holding a `KubernetesRuntime`. **No product binary calls it**; a read-only CLI entry, which would map the first two errors to dedicated messages, is only a proposed patch. | Historical selection PASS; composition and cluster NOT_RUN |
-| B. Pure mechanics (crate-internal) | Exact V2 Pod request renderer, admitted-response projection, exact observation parser, journal records. | Crate code only. | Historical selection PASS; composition and cluster NOT_RUN |
-| C. Before-effect lifecycle (crate-internal) | Journal retention chain, observe-only reopen, abandonment before any effect, successor recovery, receipt replay, observe-only reconcile report. | **Nobody in production.** The gateway Store issues the confirmations while the broker keeps the journal; the broker routes that would connect them do not exist yet (Root request R2). | Historical selection PASS; composition and cluster NOT_RUN |
-| D. Effect mechanics (closed) | Held CREATE of the exact bytes, gate-release PATCH with JSON-Patch `test` operations, DELETE with a UID precondition; S2b preamble-only attach. | A sealed guard whose only implementation exists in tests and is bound to an owned loopback listener. No product path reaches an effect. | Historical selections PASS on their own sources; composition and cluster NOT_RUN |
-| S2b worker waiting mode | `ai-guard-provider` dispatches the fixed mode before the provider path. It exchanges Hello/Ready, then refuses any further byte. | The existing binary's waiting-mode entry only; no session launcher. | Historical library selection PASS; seven new real-stdio tests and image NOT_RUN |
+| A. Library entry with real inputs | `KubernetesRuntime::inspect_session_workspace_claim(name)`: DNS-label name checked before any request, then GET of the two namespace anchors, the PVC and the anchors again. An invalid name is reported as `InvalidAuthority` before any request, a claim that does not meet the requirements of section 3 as `InvalidResponse`, and an absent PVC as `ApiRejected(404)`. | Rust code holding a `KubernetesRuntime`. **No product binary calls it**; a read-only CLI entry, which would map the first two errors to dedicated messages, is only a proposed patch. | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
+| B. Pure mechanics (crate-internal) | Exact V2 Pod request renderer, admitted-response projection, exact observation parser, journal records. | Crate code only. | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
+| C. Before-effect lifecycle (crate-internal) | Journal retention chain, observe-only reopen, abandonment before any effect, successor recovery, receipt replay, observe-only reconcile report. | **Nobody in production.** The gateway Store issues the confirmations while the broker keeps the journal; the broker routes that would connect them do not exist yet (Root request R2). | Historical selection PASS on its own source; wider mechanics and cluster not qualified by the 45179db targeted run |
+| D. Effect mechanics (closed) | Held CREATE of the exact bytes, gate-release PATCH with JSON-Patch `test` operations, DELETE with a UID precondition; S2b preamble-only attach. | A sealed guard whose only implementation exists in tests and is bound to an owned loopback listener. No product path reaches an effect. | Four attach contracts PASS on 1e30e5e and again on 45179db; other selections remain source-specific; real effects and cluster NOT_RUN |
+| S2b worker waiting mode | `ai-guard-provider` dispatches the fixed mode before the provider path. It exchanges Hello/Ready, then refuses any further byte. | The existing binary's waiting-mode entry only; no session launcher. | Seven normal-binary stdio cases PASS on 1e30e5e and again on 45179db; worker image and cluster NOT_RUN |
 | E. Missing seams and qualification | Typed requests R1–R11 to the control owner; this Docker Desktop plan. | — | not started |
 
 Effect permits, handoff, start, terminal observation and quota settlement
@@ -335,14 +342,17 @@ not discriminated.
 - Not qualified: any real Kubernetes behaviour (CREATE, gate, patch, attach,
   delete, Pod Security, RBAC verbs, `ReadWriteOncePod`, omitted-boolean encoding,
   quantity forms, log persistence), Docker Desktop, NetworkPolicy, CSI and cgroup
-  enforcement, the waiting mode in an image, any effect permit, the durable
+  enforcement, the waiting mode in a worker image, any effect permit, the durable
   deadline, handoff and start, quota settlement after an effect, and scale to
   100 workers.
 - Loopback test peers answer with declared fixtures; they never qualify a
   Kubernetes API server, a provisioner or `ReadWriteOncePod`.
 - S2b's software ceilings, WebSocket interoperability, `stdinOnce`, worker
   signal handling and node-log retention remain unmeasured on a cluster.
-  The seven new process-stdio tests and the current composition remain NOT_RUN.
+  Seven process-stdio cases passed on `1e30e5e`; they exercised only the
+  normal Rust adapter's waiting/argument handling. The same seven cases pass
+  again in the separate `45179db` inspection composition; no wider runtime
+  qualification follows.
 - Gates G05, G07 and G11 stay open, G11 `BLOCKED`. The product is not
   production-ready, and the absence of an effect path is the barrier that keeps
   Kubernetes launch closed.
@@ -403,9 +413,12 @@ The [attach owner](../../../src/runtime/kubernetes/session_attach.rs),
 and [worker waiting mode](../../../src/runtime/kubernetes/session_worker.rs)
 exist in source. The dispatch is wired into the existing
 [`ai-guard-provider` binary](../../../src/bin/ai-guard-provider.rs).
-The composition and its seven new process-stdio tests are NOT_RUN; the
-121 passing parents on the separate `be6b12d` source do not transfer here.
-No cluster was exercised. The effect guard has no production implementation;
+Four real-stream contracts and seven normal-binary process-stdio cases passed
+on `1e30e5e`; [the evidence](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.md)
+records their exact scope. The 121 historical PASS on `be6b12d` were not
+rerun. The separate `45179db` inspection composition repeats these eleven
+checks; its [own evidence](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.md) does not enlarge their runtime scope.
+No cluster, real worker or AI client/model was exercised. The effect guard has no production implementation;
 there is no session attach command, activation option or operator procedure.
 
 ### 11.1 One attempt: Hello, Ready, observations, close
@@ -573,9 +586,14 @@ contents goes to stderr.
 The source calls `shutdown_background` after the exchange: Tokio's blocking
 stdin reader can still be parked when a handshake deadline expires; waiting
 for runtime destruction would otherwise prevent the exit from arriving.
-Seven new tests target the real binary and pipes, including a partial Hello
-with stdin kept open. They remain NOT_RUN on this composition. They do not
-exercise a worker image, attach transport or cluster.
+Seven tests passed on the real normal Rust binary and pipes at `1e30e5e`,
+including a partial Hello with stdin still open when exit 65 was observed.
+This executes the internal provider adapter, not an AI client/model. These
+stdio tests exercise no worker image, attach transport or cluster; the four
+separate stream-contract tests use synthetic peers: one HTTPS/TLS loopback
+contract and three in-memory duplex contracts. Their
+[source-specific evidence](../../engineering/evidence/2026-11-14/kubernetes-attach-composition/README.md)
+is repeated by the separate [45179db evidence](../../engineering/evidence/2026-11-14/owned-policy-inspection/README.md), with the same software-only scope.
 
 The mode reads no credential or environment itself. Constructing its Tokio
 runtime can read Tokio's `TOKIO_UNSTABLE_SHARDED_BLOCKING_QUEUE` setting;

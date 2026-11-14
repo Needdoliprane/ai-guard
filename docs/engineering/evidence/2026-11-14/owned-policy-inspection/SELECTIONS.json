@@ -1,0 +1,533 @@
+{
+  "schema": 1,
+  "title": "Owned policy inspection — actual composed software evidence",
+  "date": "2026-11-14",
+  "status": "SOURCE_SPECIFIC_BUILD_CHECK_AND_47_TARGETED_PASS",
+  "tested_source": {
+    "commit": "45179db23205ff2a534bcadfafd694830f2a62ce",
+    "tree": "810080f9933ac0f0ef630f3c1b99c600e9f804a5",
+    "input_archive_sha256": "5379954066640a38ec91753d7adabd65577748145ba087a5347452e82423c1e5",
+    "files": 2836,
+    "private0600_source_files": 0
+  },
+  "receipts": {
+    "result_sha256": "8da8e0a8a345a7993374f4170234d774771aed97434db75a13dee7639203204a",
+    "host_flush_sha256": "7ea97381c88406a8cb28b1bc1833268f6efabe8eccd4b79ae2172b46d2f1c51f",
+    "json_text_formatter_result_sha256": "68df78f022cda7c1fa7a963af417ff0748e6442e66984b382eb78acf150b80a2",
+    "json_text_formatter_flush_sha256": "f0aa6dc1fbb32bab276be9026f0cc893b5c96fded8913dde293ce3abe4e5496d"
+  },
+  "actual": {
+    "build_rc": 0,
+    "check_all_targets_rc": 0,
+    "terminal_rc": 0,
+    "actual_lists": 24,
+    "test_harness_distribution": {
+      "libtest": 27,
+      "agentsandbox_bin_test": 13,
+      "kubernetes_waiting_cli": 7
+    },
+    "registration": {
+      "global_default_and_ignored": 6,
+      "selected_exact_and_ignored": 18,
+      "unique": 47,
+      "ordinary_active": 44,
+      "default_ignored_selected": 3,
+      "default_ignored_selected_actually_executed": 3,
+      "left_ignored": 0
+    },
+    "unique_pass": 47,
+    "failed": 0,
+    "not_run_selected": 0,
+    "groups": [
+      {
+        "id": "baseline-api",
+        "artifact": "lib",
+        "actual_names": [
+          "api::human_sources::owned_policy_inspection_tests::reserved_inspection_observes_actual_heads_ceiling_and_resource_metadata",
+          "api::human_sources::owned_policy_inspection_tests::inspection_refuses_role_collisions_and_unreserved_methods_before_body",
+          "api::human_sources::owned_policy_inspection_tests::inspection_never_publishes_unhealthy_busy_or_stale_observations"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "api::human_sources::owned_policy_inspection_tests::reserved_inspection_observes_actual_heads_ceiling_and_resource_metadata",
+          "api::human_sources::owned_policy_inspection_tests::inspection_refuses_role_collisions_and_unreserved_methods_before_body",
+          "api::human_sources::owned_policy_inspection_tests::inspection_never_publishes_unhealthy_busy_or_stale_observations",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 3,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "2be997552f0abbee54765f18d1dce81fdba1161b0b2662aefad6754cbdacd1b3",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "cli-ignored",
+        "artifact": "lib",
+        "actual_names": [
+          "api::human_sources::owned_policy_inspection_cli_tests::real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation",
+          "api::human_sources::owned_policy_inspection_cli_tests::retained_inspection_never_repairs_changed_head_or_namespace",
+          "api::human_sources::owned_policy_cli_tests::actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_runtime_claim"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "api::human_sources::owned_policy_inspection_cli_tests::real_cli_inspect_prepare_apply_keeps_observed_scope_cas_and_operation",
+          "api::human_sources::owned_policy_inspection_cli_tests::retained_inspection_never_repairs_changed_head_or_namespace",
+          "api::human_sources::owned_policy_cli_tests::actual_cli_preserves_operation_after_lost_receipt_then_revokes_without_runtime_claim",
+          "--test-threads=1",
+          "--nocapture",
+          "--ignored"
+        ],
+        "default_ignored_explicitly_executed": true,
+        "passed": 3,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "67794b8219dd64b0bbbc0a8fa515b4dd127d8f5fca9b1438ae440c70af804359",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "core",
+        "artifact": "lib",
+        "actual_names": [
+          "control::egress_policy::inspection::tests::inspection_request_cannot_choose_tenant_scope_actor_or_noncanonical_session",
+          "control::egress_policy::inspection::tests::absent_and_inactive_unions_reject_hidden_policy_or_ceiling_data",
+          "control::egress_policy::inspection::tests::inspection_response_validates_scope_time_bounds_and_selector_cross_fields",
+          "control::egress_policy::inspection::tests::canonical_inspection_is_bounded_historical_metadata_with_exact_resource_wire",
+          "runner::egress_policy::inspection::tests::inspection_sdk_uses_actual_reserved_owned15_metadata_and_closed_role_errors",
+          "runner::egress_policy::inspection::tests::inspection_sdk_rejects_invalid_wire_once_without_fallback_or_remote_text",
+          "api::human_sources::owned_policy_inspection_regression_tests::sdk_inspection_reports_stored_revoke_head_without_writing",
+          "api::human_sources::owned_policy_inspection_regression_tests::inspection_closes_nested_selectors_and_uses_existing_runner_slots_before_body",
+          "audit::egress::inspection::tests::configured_metadata_redaction_refuses_the_whole_observation_without_a_write"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "control::egress_policy::inspection::tests::inspection_request_cannot_choose_tenant_scope_actor_or_noncanonical_session",
+          "control::egress_policy::inspection::tests::absent_and_inactive_unions_reject_hidden_policy_or_ceiling_data",
+          "control::egress_policy::inspection::tests::inspection_response_validates_scope_time_bounds_and_selector_cross_fields",
+          "control::egress_policy::inspection::tests::canonical_inspection_is_bounded_historical_metadata_with_exact_resource_wire",
+          "runner::egress_policy::inspection::tests::inspection_sdk_uses_actual_reserved_owned15_metadata_and_closed_role_errors",
+          "runner::egress_policy::inspection::tests::inspection_sdk_rejects_invalid_wire_once_without_fallback_or_remote_text",
+          "api::human_sources::owned_policy_inspection_regression_tests::sdk_inspection_reports_stored_revoke_head_without_writing",
+          "api::human_sources::owned_policy_inspection_regression_tests::inspection_closes_nested_selectors_and_uses_existing_runner_slots_before_body",
+          "audit::egress::inspection::tests::configured_metadata_redaction_refuses_the_whole_observation_without_a_write",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 9,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "bf37b569d42b8fb0acf6e5d1d919d8cea7087b17d84013691d559f8c0db32057",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "cli",
+        "artifact": "bin-test",
+        "actual_names": [
+          "broker_cli::policy::inspection::tests::inspection_parser_requires_one_selector_and_one_explicit_prepare_source",
+          "broker_cli::policy::inspection::tests::report_roundtrip_is_private_historical_and_not_a_mutation",
+          "broker_cli::policy::inspection::tests::report_hashes_selector_and_closed_metadata_must_correlate",
+          "broker_cli::policy::inspection::tests::report_never_adopts_pending_or_receipt_and_keeps_real_lock",
+          "broker_cli::policy::inspection::tests::retained_report_refuses_changed_record_and_cannot_repair_itself",
+          "broker_cli::policy::inspection::tests::publication_revalidates_private_source_and_retains_late_failure_evidence",
+          "broker_cli::policy::inspection::tests::derived_destination_cannot_add_records_inside_the_report",
+          "broker_cli::policy::inspection::tests::draft_is_closed_and_never_accepts_scope_cas_or_identity_overrides",
+          "broker_cli::policy::inspection::tests::derived_tenant_replace_uses_explicit_absence_or_exact_revoke_requested_head",
+          "broker_cli::policy::inspection::tests::derived_session_replace_requires_and_copies_the_actual_active_ceiling",
+          "broker_cli::policy::inspection::tests::derived_revoke_preserves_cleanup_without_an_active_resource_or_ceiling",
+          "broker_cli::policy::inspection::tests::private_draft_bounds_and_output_failure_preserve_evidence",
+          "broker_cli::policy::tests::policy_parser_accepts_four_exact_commands_and_refuses_apply_scope_overrides"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "broker_cli::policy::inspection::tests::inspection_parser_requires_one_selector_and_one_explicit_prepare_source",
+          "broker_cli::policy::inspection::tests::report_roundtrip_is_private_historical_and_not_a_mutation",
+          "broker_cli::policy::inspection::tests::report_hashes_selector_and_closed_metadata_must_correlate",
+          "broker_cli::policy::inspection::tests::report_never_adopts_pending_or_receipt_and_keeps_real_lock",
+          "broker_cli::policy::inspection::tests::retained_report_refuses_changed_record_and_cannot_repair_itself",
+          "broker_cli::policy::inspection::tests::publication_revalidates_private_source_and_retains_late_failure_evidence",
+          "broker_cli::policy::inspection::tests::derived_destination_cannot_add_records_inside_the_report",
+          "broker_cli::policy::inspection::tests::draft_is_closed_and_never_accepts_scope_cas_or_identity_overrides",
+          "broker_cli::policy::inspection::tests::derived_tenant_replace_uses_explicit_absence_or_exact_revoke_requested_head",
+          "broker_cli::policy::inspection::tests::derived_session_replace_requires_and_copies_the_actual_active_ceiling",
+          "broker_cli::policy::inspection::tests::derived_revoke_preserves_cleanup_without_an_active_resource_or_ceiling",
+          "broker_cli::policy::inspection::tests::private_draft_bounds_and_output_failure_preserve_evidence",
+          "broker_cli::policy::tests::policy_parser_accepts_four_exact_commands_and_refuses_apply_scope_overrides",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 13,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "35c561a5af47fc78ba2aef9ca835b47b5ff3d7f50d5705d724a75a1c9156c795",
+        "stderr_sha256": "dc2017fde1bded528d65289be469f771511a635094a8602cad73892d581bb1a6"
+      },
+      {
+        "id": "e1compat",
+        "artifact": "lib",
+        "actual_names": [
+          "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+          "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "audit::egress::tests::session_requires_real_active_resource_and_historical_tenant_ceiling",
+          "audit::egress::tests::terminal_transition_does_not_require_old_policy_interval_to_be_active",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 2,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "8fd69d0c1fcd1e905ebb565f6b255228dfc0e245a60041f9984ba31ca644137a",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "a1auth",
+        "artifact": "lib",
+        "actual_names": [
+          "api::human_sources::owned_control_tests::negative::owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_store",
+          "api::human_sources::owned_policy_tests::policy_role_format_and_declared_size_refuse_before_body_polling",
+          "api::human_sources::owned_policy_tests::policy_scope_body_and_method_failures_keep_existing_boundaries"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "api::human_sources::owned_control_tests::negative::owned_control_nonrunner_absent_and_duplicate_headers_refuse_before_store",
+          "api::human_sources::owned_policy_tests::policy_role_format_and_declared_size_refuse_before_body_polling",
+          "api::human_sources::owned_policy_tests::policy_scope_body_and_method_failures_keep_existing_boundaries",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 3,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "87875a108716e2bbb705f5cabfac6a7517d1b8bd41a255ed5c2f0fd65752e458",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "fs",
+        "artifact": "lib",
+        "actual_names": [
+          "control_fs::operation::tests::exclusive_preparation_preserves_existing_paths_and_real_ambiguous_publication",
+          "control_fs::operation::tests::containment_checks_retained_physical_ancestry_without_mutating_records",
+          "control_fs::operation::tests::changed_candidate_ancestry_refuses_and_taints_the_retained_instance"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "control_fs::operation::tests::exclusive_preparation_preserves_existing_paths_and_real_ambiguous_publication",
+          "control_fs::operation::tests::containment_checks_retained_physical_ancestry_without_mutating_records",
+          "control_fs::operation::tests::changed_candidate_ancestry_refuses_and_taints_the_retained_instance",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 3,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "0ec44d125aa56853ee06d90a5a25b6802698d8db86edc4f2319102d55274aafb",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "kube-contracts",
+        "artifact": "lib",
+        "actual_names": [
+          "runtime::kubernetes::session_attach::tests::initiated_upgrade_keeps_capacity_after_caller_loss_until_http_work_ends",
+          "runtime::kubernetes::session_attach::tests::post_ready_blocked_pong_write_records_a_typed_io_deadline",
+          "runtime::kubernetes::session_attach::tests::cancelled_post_ready_blocked_write_keeps_cancellation_with_its_io_deadline",
+          "runtime::kubernetes::session_attach::tests::invalid_close_payloads_are_refused_by_the_real_stream_reader"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "runtime::kubernetes::session_attach::tests::initiated_upgrade_keeps_capacity_after_caller_loss_until_http_work_ends",
+          "runtime::kubernetes::session_attach::tests::post_ready_blocked_pong_write_records_a_typed_io_deadline",
+          "runtime::kubernetes::session_attach::tests::cancelled_post_ready_blocked_write_keeps_cancellation_with_its_io_deadline",
+          "runtime::kubernetes::session_attach::tests::invalid_close_payloads_are_refused_by_the_real_stream_reader",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 4,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "7a1ba7e76358fe8f0a7b42ed5a102ea26d8ee06c14c2b686ab8324c1a035f9be",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "id": "stdio",
+        "artifact": "kubernetes_waiting_cli",
+        "actual_names": [
+          "mode_eof_before_hello_exits_66_without_stdout",
+          "hello_then_eof_emits_one_correlated_declared_ready_and_exits_66",
+          "mode_with_extra_argument_exits_64_without_stdout",
+          "mode_with_non_utf8_extra_argument_exits_64_without_stdout",
+          "truncated_prefix_then_eof_exits_64_without_stdout",
+          "held_prefix_exits_65_while_stdin_remains_open",
+          "non_utf8_first_argument_exits_126_without_stdout"
+        ],
+        "argv_after_cargo_resolved_executable": [
+          "--exact",
+          "mode_eof_before_hello_exits_66_without_stdout",
+          "hello_then_eof_emits_one_correlated_declared_ready_and_exits_66",
+          "mode_with_extra_argument_exits_64_without_stdout",
+          "mode_with_non_utf8_extra_argument_exits_64_without_stdout",
+          "truncated_prefix_then_eof_exits_64_without_stdout",
+          "held_prefix_exits_65_while_stdin_remains_open",
+          "non_utf8_first_argument_exits_126_without_stdout",
+          "--test-threads=1",
+          "--nocapture"
+        ],
+        "default_ignored_explicitly_executed": false,
+        "passed": 7,
+        "failed": 0,
+        "left_ignored": 0,
+        "stdout_sha256": "8f1955eff185f12b3151c8619aa76d722c760d896b377aac261814123f48e712",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    ]
+  },
+  "commands": {
+    "build": [
+      "/usr/local/cargo/bin/cargo",
+      "test",
+      "--frozen",
+      "--offline",
+      "--lib",
+      "--bin",
+      "agentsandbox",
+      "--test",
+      "kubernetes_waiting_cli",
+      "--no-run",
+      "--message-format=json",
+      "-j1"
+    ],
+    "check": [
+      "/usr/local/cargo/bin/cargo",
+      "check",
+      "--frozen",
+      "--offline",
+      "--all-targets",
+      "-j1"
+    ],
+    "global_list_suffixes": [
+      [
+        "--list"
+      ],
+      [
+        "--list",
+        "--ignored"
+      ]
+    ],
+    "selected_list_order": "--exact + actual_names + --list, then the same with --ignored appended",
+    "group_argv_scope": "The vectors above omit only the Cargo-resolved executable prefix; all flags/names/order match ARTIFACT_COMMAND.",
+    "cli_ignored_only_environment": {
+      "AI_GUARD_A1_CLI_TEST_BIN": "same-build cli artifact path, identity/hash revalidated immediately before invocation",
+      "AI_GUARD_A1_CLI_TEST_SHA256": "66e72ed5968e43e74770ff48ab21c86abfda1d8581f66d3405a18b2111332dd7"
+    },
+    "provider_binding": "Integration uses Cargo-compiled CARGO_BIN_EXE_ai-guard-provider; no manual override or model credential.",
+    "harness_command_script_sha256": "bd47d4a86f5d9704019b778308c89fe97734b3fae95768686f5cbfb0ef44d4ae",
+    "harness_run_script_sha256": "a22773c61d3adcec0f0326ce60ec6465410b6501eda5df6efbf76b67f538ca92"
+  },
+  "artifacts": [
+    {
+      "id": "lib",
+      "sha256": "5ce317815c5ee9fbe4da0db7aefc9d5297001a55c118b5a89a578047c01920ef",
+      "bytes": 308481544,
+      "profile_test": true,
+      "source_relative": "src/lib.rs",
+      "cargo_target_name": "agentsandbox",
+      "cargo_target_kind": [
+        "lib"
+      ],
+      "cargo_artifact_json_sha256": "8231638a8152fc097ac4a88a1b72ded1aa539396a0f00bb94c707923ba1e3c0a",
+      "cargo_fresh_field": false,
+      "export_mode": "0600",
+      "executed_on_host": false
+    },
+    {
+      "id": "bin-test",
+      "sha256": "f76e7e72b13a00dc94da5ee081578a1f63a2a45ea6381613e992dcc55f7190aa",
+      "bytes": 56961744,
+      "profile_test": true,
+      "source_relative": "src/main.rs",
+      "cargo_target_name": "agentsandbox",
+      "cargo_target_kind": [
+        "bin"
+      ],
+      "cargo_artifact_json_sha256": "8b122958986f680e124fb759d7dc462b6046364202ee3c3377fa98634227c2dd",
+      "cargo_fresh_field": false,
+      "export_mode": "0600",
+      "executed_on_host": false
+    },
+    {
+      "id": "kubernetes_waiting_cli",
+      "sha256": "be6f690a08f798b242c58dceff05a2e23595b2a4480dc51f27cb900e8a24dc90",
+      "bytes": 3764608,
+      "profile_test": true,
+      "source_relative": "tests/kubernetes_waiting_cli.rs",
+      "cargo_target_name": "kubernetes_waiting_cli",
+      "cargo_target_kind": [
+        "test"
+      ],
+      "cargo_artifact_json_sha256": "2161fb997d3139f0efbaf940e05be320a691654e71661115abf789640030a26c",
+      "cargo_fresh_field": false,
+      "export_mode": "0600",
+      "executed_on_host": false
+    },
+    {
+      "id": "cli",
+      "sha256": "66e72ed5968e43e74770ff48ab21c86abfda1d8581f66d3405a18b2111332dd7",
+      "bytes": 205138704,
+      "profile_test": false,
+      "source_relative": "src/main.rs",
+      "cargo_target_name": "agentsandbox",
+      "cargo_target_kind": [
+        "bin"
+      ],
+      "cargo_artifact_json_sha256": "904b0bf1ec48abb57898302db57ca1f4dc8595ce4e2afc6651ad53b1380eaf0e",
+      "cargo_fresh_field": false,
+      "export_mode": "0600",
+      "executed_on_host": false
+    },
+    {
+      "id": "provider",
+      "sha256": "e786bf96ff060f2d7b9dcdc8aa2a1b1dbb058b6d56cf6cb57d3852d7a1becd22",
+      "bytes": 9419896,
+      "profile_test": false,
+      "source_relative": "src/bin/ai-guard-provider.rs",
+      "cargo_target_name": "ai-guard-provider",
+      "cargo_target_kind": [
+        "bin"
+      ],
+      "cargo_artifact_json_sha256": "cb2f769dae1c8baa0df6625f2c0155d47b7c7e0efb12e06c1f620240fedc0b61",
+      "cargo_fresh_field": false,
+      "export_mode": "0600",
+      "executed_on_host": false
+    }
+  ],
+  "preservation": {
+    "source_files": 2836,
+    "source_hashes_sizes_modes_equal": true,
+    "postrun_source_archive_sha256": "434d257cb8607745a2efbb023a313da893d0d5b67c0973e377b595076a3cf73e",
+    "fixture_regular_files": 0,
+    "fixture_payload_bytes": 0,
+    "fixture_empty_group_directories": 9,
+    "fixture_total_inventory_nodes": 9,
+    "fixture_sockets": 0,
+    "regular_file_archive_sha256": "84ff92691f909a05b224e1c56abb4864f01b4f8e3c854e4bb4c7baf1d3f6d652",
+    "fixture_inventory_stdout_sha256": "1b53a5bdf57ababb673251a442228ee9c1e7a60917ca268887c35f76940aa84f",
+    "summary_precision": "Primary result fixtures.nodes=0 is not the full inventory count; primary inventory reports nine empty group directories and no regular files. Both original records remain unchanged.",
+    "collectors": 7,
+    "collector_metadata_rc": 0,
+    "bounded_streams_and_checked_final_renames": true,
+    "oom": 0,
+    "oom_kill": 0,
+    "oom_group_kill": 0,
+    "closure_rc": 0,
+    "exact_qa_container_absent": true,
+    "host_fd_flush_verified": true,
+    "host_flush_files": 666,
+    "host_flush_directories": 12,
+    "host_flush_bytes": 663226198,
+    "terminal_capture": "Per-phase artifacts and bounded terminal excerpt retained; full raw orchestration transcript was not persisted or reconstructed.",
+    "power_failure_or_restore_qualification": false
+  },
+  "qa_profile": {
+    "platform": "Linux ARM64 in isolated Docker tool QA",
+    "image": "sha256:2115d4321fa70d045c7c73361444bdef10f69c9069e66a70ad27a73daa92a207",
+    "uid_gid": "1000:1000",
+    "root_read_only": true,
+    "network": "none",
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "cpus": 4,
+    "memory_limit_bytes": 9663676416,
+    "swap_bytes": 0,
+    "pids": 128,
+    "scratch_bytes": 4294967296,
+    "tmp_bytes": 67108864,
+    "memory_peak_bytes": 9209622528,
+    "worker_capacity_or_memory_benchmark": false
+  },
+  "scope": {
+    "actual_internal_Rust_CLI": true,
+    "gateway_SDK_SQLite_fixtures": true,
+    "historical_inspection_and_CAS_preparation": true,
+    "protected_publication_and_filesystem_guards": true,
+    "case_alias_marker": "NOT_APPLICABLE_CASE_ALIAS",
+    "case_alias_marker_file_sha256": "565225e09d5b1bffc2ffa286e64008f61346e7cfec7e1e30457877230dced736",
+    "physical_case_alias_branch_exercised": false,
+    "macOS_case_insensitive_qualification": false,
+    "kubernetes_attach_contracts": {
+      "HTTPS_TLS_loopback": 1,
+      "in_memory_duplex": 3,
+      "cluster": false
+    },
+    "internal_Rust_provider_stdio_parents": 7,
+    "Codex_Claude_or_AI_model_executed": false,
+    "real_worker_engine_or_product_network_enforcement": false
+  },
+  "history": [
+    {
+      "source": "e54cd68d09605e9adea7291bcc4bd1349a2b9603",
+      "stage": "R1",
+      "build_rc": 101,
+      "compile_errors": "three E0308 CLI type mismatches",
+      "selected_tests": "NOT_RUN",
+      "pass": 0,
+      "result_sha256": "dadf0d44c5de4ed176d86f219ca13486e18dddd42d6b276049c2c130d3752b28",
+      "flush_sha256": "e1063e065a2076da531b4e3f0fa435268edb8362134e0c68b8bf617a34b41584"
+    },
+    {
+      "source": "944480b82adff0fc7015dc38b3fff0d735466048",
+      "stage": "R2",
+      "build_rc": 0,
+      "check_rc": 0,
+      "attempted": 15,
+      "passed": 14,
+      "failed": 1,
+      "not_run": 32,
+      "failure_scope": "false-positive test oracle matched forbidden substring name inside mandatory control_namespace_uuid; no demonstrated product wire leak",
+      "legacy_counter_precision": "FINAL6 summed passed tests from two fully successful groups;8additional passes are in the failingCore primary summary. Original records remain unchanged.",
+      "result_sha256": "ca9504151eb55b7524527314197e23b4d7a188754421dd1d20e06448f294337c",
+      "flush_sha256": "bcaaa46ba444ff258c98af01d208b9c1099c18db808307a905bcf6053a518a87"
+    }
+  ],
+  "separate_historical_campaigns": {
+    "A1_74": {
+      "tested_source": "db2678d42cff9c8d6d15bf31284a989732cc6f0d",
+      "public_checkpoint": "1a9",
+      "record": "../owned-egress-policy-api-cli/SELECTIONS.json"
+    },
+    "Kube_121": {
+      "tested_source": "be6b12dce7f74e2062f7ad5524e12818bf7313b5",
+      "rerun_here": false
+    },
+    "Kube_11": {
+      "tested_source": "1e30e5e8546ab614eba7849789a1a0468cbc2843",
+      "record": "../kubernetes-attach-composition/SELECTIONS.json",
+      "same11parents_repeated_within_current47": true
+    },
+    "counts_added_or_transferred": false
+  },
+  "not_integrated_or_qualified_by_this_run": [
+    "E2/flow16 branch",
+    "Claude federation branches"
+  ],
+  "not_run": [
+    "Clippy strict",
+    "full software suite",
+    "Codex/Claude or AI model",
+    "real worker or Docker/Podman engine confinement",
+    "Kubernetes cluster",
+    "real product network enforcement",
+    "100-worker capacity",
+    "macOS case-insensitive alias branch",
+    "physical failure/restore"
+  ],
+  "production": false,
+  "production_gates_closed": 0
+}
