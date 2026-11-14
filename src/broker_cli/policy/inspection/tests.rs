@@ -39,7 +39,7 @@ fn inspection(
     resource: &str,
 ) -> (EgressPolicyInspectionRequestV1, EgressPolicyInspectionV1) {
     let selector = if session {
-        EgressPolicySelectorV1::Session(uuid::Uuid::parse_str(SESSION).unwrap())
+        EgressPolicySelectorV1::Session(uuid::Uuid::parse_str(SESSION).unwrap().to_string())
     } else {
         EgressPolicySelectorV1::Tenant
     };
@@ -247,7 +247,7 @@ fn report_hashes_selector_and_closed_metadata_must_correlate() {
             serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         if field == "selector" {
             let request = EgressPolicyInspectionRequestV1::new(EgressPolicySelectorV1::Session(
-                uuid::Uuid::parse_str(SESSION).unwrap(),
+                uuid::Uuid::parse_str(SESSION).unwrap().to_string(),
             ))
             .unwrap()
             .canonical_bytes()

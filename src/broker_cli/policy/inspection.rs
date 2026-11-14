@@ -27,7 +27,7 @@ pub(super) async fn execute(
                 !id.is_nil() && id.to_string() == raw,
                 "egress_policy_invalid_selector"
             );
-            EgressPolicySelectorV1::Session(id)
+            EgressPolicySelectorV1::Session(id.to_string())
         }
         _ => return Err(anyhow!("egress_policy_invalid_selector")),
     };
