@@ -459,9 +459,9 @@ mod owned_control_tests;
 #[cfg(all(test, unix))]
 mod owned_policy_inspection_cli_tests;
 #[cfg(all(test, unix))]
-mod owned_policy_inspection_tests;
-#[cfg(all(test, unix))]
 mod owned_policy_inspection_regression_tests;
+#[cfg(all(test, unix))]
+mod owned_policy_inspection_tests;
 #[cfg(all(test, unix))]
 mod owned_policy_tests;
 #[cfg(test)]

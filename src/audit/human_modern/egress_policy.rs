@@ -19,7 +19,8 @@ impl Store {
         self.with_modern_read(access, |tx| {
             tx.require_business_access()?;
             egress::require_inspection_format(tx)?;
-            let binding = self.verify_review_binding_in_transaction(tx, epoch, source, credential)?;
+            let binding =
+                self.verify_review_binding_in_transaction(tx, epoch, source, credential)?;
             if discovery_generation(tx)? != expected_generation {
                 return Err(egress::EgressStoreFailure::DiscoveryStale.into());
             }
@@ -34,7 +35,10 @@ impl Store {
                 return Err(egress::EgressStoreFailure::DiscoveryStale.into());
             }
             let value = serde_json::to_value(&observation)?;
-            anyhow::ensure!(self.redactor.value(&value) == value, "inspection metadata is redacted");
+            anyhow::ensure!(
+                self.redactor.value(&value) == value,
+                "inspection metadata is redacted"
+            );
             workload::validate_fresh_control_time(tx, &clock)?;
             tx.require_business_access()?;
             drop(binding);

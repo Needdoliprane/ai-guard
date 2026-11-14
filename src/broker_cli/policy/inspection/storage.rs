@@ -48,7 +48,10 @@ fn bytes(directory: &DurableOperationDirectory, record: OperationRecord) -> Resu
 fn encode(metadata: &Metadata) -> Result<Vec<u8>> {
     let bytes = serde_json::to_vec(metadata)
         .map_err(|_| anyhow!("egress_policy_invalid_inspection_metadata"))?;
-    ensure!(bytes.len() <= 4096, "egress_policy_invalid_inspection_metadata");
+    ensure!(
+        bytes.len() <= 4096,
+        "egress_policy_invalid_inspection_metadata"
+    );
     Ok(bytes)
 }
 
@@ -123,8 +126,9 @@ impl Report {
                 && directory.record(OperationRecord::Receipt).is_none(),
             "egress_policy_invalid_inspection_inventory"
         );
-        let metadata: Metadata = serde_json::from_slice(bytes(&directory, OperationRecord::Metadata)?)
-            .map_err(|_| anyhow!("egress_policy_invalid_inspection_metadata"))?;
+        let metadata: Metadata =
+            serde_json::from_slice(bytes(&directory, OperationRecord::Metadata)?)
+                .map_err(|_| anyhow!("egress_policy_invalid_inspection_metadata"))?;
         ensure!(
             metadata.version == 1
                 && report_origin(&metadata.gateway)? == metadata.gateway
@@ -135,7 +139,11 @@ impl Report {
         let request = EgressPolicyInspectionRequestV1::from_json(request_bytes)
             .map_err(|_| anyhow!("egress_policy_invalid_inspection_request"))?;
         ensure!(
-            request.canonical_bytes().map_err(|_| anyhow!("egress_policy_invalid_inspection_request"))?.as_slice() == request_bytes,
+            request
+                .canonical_bytes()
+                .map_err(|_| anyhow!("egress_policy_invalid_inspection_request"))?
+                .as_slice()
+                == request_bytes,
             "egress_policy_noncanonical_inspection_request"
         );
         let observation_bytes = bytes(&directory, OperationRecord::State)?;
@@ -149,7 +157,11 @@ impl Report {
                 && metadata.observation_sha256 == hex::encode(Sha256::digest(observation_bytes)),
             "egress_policy_inspection_hash_mismatch"
         );
-        let report = Self { directory, observation, metadata };
+        let report = Self {
+            directory,
+            observation,
+            metadata,
+        };
         report.revalidate()?;
         Ok(report)
     }
@@ -174,7 +186,9 @@ impl Report {
     pub(in crate::broker_cli::policy) fn revalidate(&self) -> Result<()> {
         fs_error(self.directory.revalidate())?;
         ensure!(
-            self.directory.record(OperationRecord::PendingState).is_none()
+            self.directory
+                .record(OperationRecord::PendingState)
+                .is_none()
                 && self.directory.record(OperationRecord::Receipt).is_none(),
             "egress_policy_invalid_inspection_inventory"
         );

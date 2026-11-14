@@ -288,10 +288,24 @@ fn changed_candidate_ancestry_refuses_and_taints_the_retained_instance() {
     let path = temp.path().join("operation");
     let operation = DurableOperationDirectory::open_existing(&path).unwrap();
     let outside = parent.child("outside").unwrap();
-    fs::rename(temp.path().join("outside"), temp.path().join("moved-outside")).unwrap();
-    assert_eq!(operation.contains_directory(&outside), Err(OperationFsError::UnsafeOrIncomplete));
-    fs::rename(temp.path().join("moved-outside"), temp.path().join("outside")).unwrap();
-    assert_eq!(operation.revalidate(), Err(OperationFsError::UnsafeOrIncomplete));
+    fs::rename(
+        temp.path().join("outside"),
+        temp.path().join("moved-outside"),
+    )
+    .unwrap();
+    assert_eq!(
+        operation.contains_directory(&outside),
+        Err(OperationFsError::UnsafeOrIncomplete)
+    );
+    fs::rename(
+        temp.path().join("moved-outside"),
+        temp.path().join("outside"),
+    )
+    .unwrap();
+    assert_eq!(
+        operation.revalidate(),
+        Err(OperationFsError::UnsafeOrIncomplete)
+    );
     assert_eq!(fs::read(path.join("request.json")).unwrap(), b"request");
     drop(operation);
     assert!(DurableOperationDirectory::open_existing(&path).is_ok());

@@ -12,12 +12,21 @@ pub(super) fn router() -> Router<GatewayState> {
 struct Inspection(Arc<OwnedPolicyInspection>);
 impl FromRequestParts<GatewayState> for Inspection {
     type Rejection = (StatusCode, Json<Value>);
-    async fn from_request_parts(parts: &mut Parts, state: &GatewayState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &GatewayState,
+    ) -> Result<Self, Self::Rejection> {
         if state.owned_human.is_none()
             || parts.method != axum::http::Method::POST
             || parts.uri.query().is_some()
-            || !matches!(parts.uri.path(), "/api/v1/egress/policies/inspect" | "/egress/policies/inspect")
-            || parts.extensions.get::<super::super::control_transport::ReservedPolicyInspection>().is_none()
+            || !matches!(
+                parts.uri.path(),
+                "/api/v1/egress/policies/inspect" | "/egress/policies/inspect"
+            )
+            || parts
+                .extensions
+                .get::<super::super::control_transport::ReservedPolicyInspection>()
+                .is_none()
         {
             return Err(failure(E::Unavailable));
         }
@@ -27,17 +36,27 @@ impl FromRequestParts<GatewayState> for Inspection {
         {
             return Err(failure(E::InvalidRequest));
         }
-        parts.extensions.get::<Arc<OwnedPolicyInspection>>().cloned().map(Self)
+        parts
+            .extensions
+            .get::<Arc<OwnedPolicyInspection>>()
+            .cloned()
+            .map(Self)
             .ok_or_else(|| failure(E::Unavailable))
     }
 }
 
 fn response(observation: EgressPolicyInspectionV1) -> ApiResult<Response> {
-    let bytes = observation.canonical_bytes().map_err(|_| failure(E::Unavailable))?;
+    let bytes = observation
+        .canonical_bytes()
+        .map_err(|_| failure(E::Unavailable))?;
     Ok((
-        [(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")],
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         bytes,
-    ).into_response())
+    )
+        .into_response())
 }
 
 async fn inspect(

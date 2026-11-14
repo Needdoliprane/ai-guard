@@ -44,14 +44,27 @@ impl OwnedPolicyInspection {
                 if !owned.technical_candidate(&identity.digest)? {
                     return Err(human_sources::unavailable());
                 }
-                identity.credential.revalidate().map_err(policy_store_failure)?;
-                let source = owned.sources.get(identity.index).ok_or_else(human_sources::unavailable)?;
-                let expected = *owned.discovery_generations.get(identity.index).ok_or_else(human_sources::unavailable)?;
+                identity
+                    .credential
+                    .revalidate()
+                    .map_err(policy_store_failure)?;
+                let source = owned
+                    .sources
+                    .get(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
+                let expected = *owned
+                    .discovery_generations
+                    .get(identity.index)
+                    .ok_or_else(human_sources::unavailable)?;
                 let observation = {
                     // Only this accepted blocking job owns the fresh ReadEpoch.
                     // Nothing source-bound is held across an async boundary.
-                    let epoch = owned.owner.try_read_epoch().map_err(policy_authority_failure)?;
-                    let access = HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
+                    let epoch = owned
+                        .owner
+                        .try_read_epoch()
+                        .map_err(policy_authority_failure)?;
+                    let access =
+                        HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
                     let result = identity.tenant.store.modern_egress_policy_inspection(
                         &access,
                         &identity.credential,
@@ -65,7 +78,9 @@ impl OwnedPolicyInspection {
                         owned.require_rebuild();
                     }
                     let observation = result.map_err(policy_store_failure)?;
-                    epoch.validate_source(source).map_err(policy_authority_failure)?;
+                    epoch
+                        .validate_source(source)
+                        .map_err(policy_authority_failure)?;
                     epoch.check().map_err(policy_authority_failure)?;
                     observation
                 }; // True commit, SQLite timeout restoration, then ReadEpoch end.
@@ -74,14 +89,21 @@ impl OwnedPolicyInspection {
 
                 // This second short checked read verifies publication authority.
                 // It deliberately never refreshes or replaces the observed head.
-                identity.credential.revalidate().map_err(policy_store_failure)?;
-                let epoch = owned.owner.try_read_epoch().map_err(policy_authority_failure)?;
-                let access = HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
-                let current = identity.tenant.store.modern_control_protocol(
-                    &access,
-                    &identity.credential,
-                    expected,
-                ).map_err(policy_store_failure)?;
+                identity
+                    .credential
+                    .revalidate()
+                    .map_err(policy_store_failure)?;
+                let epoch = owned
+                    .owner
+                    .try_read_epoch()
+                    .map_err(policy_authority_failure)?;
+                let access =
+                    HumanSourceAccess::read(&epoch, source).map_err(policy_store_failure)?;
+                let current = identity
+                    .tenant
+                    .store
+                    .modern_control_protocol(&access, &identity.credential, expected)
+                    .map_err(policy_store_failure)?;
                 let Some(current) = current else {
                     owned.require_rebuild();
                     return Err(human_sources::unavailable());
@@ -94,11 +116,14 @@ impl OwnedPolicyInspection {
                 {
                     return Err(human_sources::unavailable());
                 }
-                epoch.validate_source(source).map_err(policy_authority_failure)?;
+                epoch
+                    .validate_source(source)
+                    .map_err(policy_authority_failure)?;
                 epoch.check().map_err(policy_authority_failure)?;
                 Ok(observation)
             },
-        ).await?;
+        )
+        .await?;
         if !owned.healthy() || !owned.technical_candidate(&digest)? {
             return Err(human_sources::unavailable());
         }

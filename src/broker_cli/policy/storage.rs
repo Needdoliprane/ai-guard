@@ -249,8 +249,14 @@ pub(super) fn prepare(gateway: &str, input: &Path, output: &Path) -> Result<Load
         envelope.action,
         request,
         output,
-        |_| file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed")),
-        |_| file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation")),
+        |_| {
+            file.revalidate()
+                .map_err(|_| anyhow!("egress_policy_input_changed"))
+        },
+        |_| {
+            file.revalidate()
+                .map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))
+        },
     )
 }
 
@@ -278,8 +284,8 @@ pub(super) fn prepare_from_inspection(
         EgressPolicyObservedSessionResourceV1, EgressPolicySelectorV1, EgressPolicyStateV1,
         EgressPolicyTenantCeilingV1,
     };
-    let inspection_dir = absolute_path(inspection_dir)
-        .map_err(|_| anyhow!("egress_policy_unsafe_inspection"))?;
+    let inspection_dir =
+        absolute_path(inspection_dir).map_err(|_| anyhow!("egress_policy_unsafe_inspection"))?;
     let output = absolute_path(output).map_err(|_| anyhow!("egress_policy_unsafe_output"))?;
     ensure!(
         !output.starts_with(&inspection_dir),
@@ -288,14 +294,16 @@ pub(super) fn prepare_from_inspection(
     // Retain the real report flock through all derivation and publication.
     let report = super::inspection::storage::Report::open(&inspection_dir)?;
     let input = absolute_path(input).map_err(|_| anyhow!("egress_policy_unsafe_input"))?;
-    let file = PrivateFile::open(&input, 66_560)
-        .map_err(|_| anyhow!("egress_policy_unsafe_input"))?;
-    let draft: Draft = serde_json::from_slice(file.bytes())
-        .map_err(|_| anyhow!("egress_policy_invalid_draft"))?;
+    let file =
+        PrivateFile::open(&input, 66_560).map_err(|_| anyhow!("egress_policy_unsafe_input"))?;
+    let draft: Draft =
+        serde_json::from_slice(file.bytes()).map_err(|_| anyhow!("egress_policy_invalid_draft"))?;
     let observation = &report.observation;
     let (revision, epoch) = match observation.head() {
         EgressPolicyObservedHeadV1::Absent => (0, 0),
-        EgressPolicyObservedHeadV1::Present { revision, epoch, .. } => (*revision, *epoch),
+        EgressPolicyObservedHeadV1::Present {
+            revision, epoch, ..
+        } => (*revision, *epoch),
     };
     let (action, request) = match draft {
         Draft::Replace { version, policy } => {
@@ -304,18 +312,26 @@ pub(super) fn prepare_from_inspection(
                 EgressPolicySelectorV1::Tenant => None,
                 EgressPolicySelectorV1::Session(_) => {
                     ensure!(
-                        observation.session_resource() == EgressPolicyObservedSessionResourceV1::Active,
+                        observation.session_resource()
+                            == EgressPolicyObservedSessionResourceV1::Active,
                         "egress_policy_session_resource_unavailable"
                     );
-                    let EgressPolicyObservedCeilingV1::Active { revision, epoch, digest } = observation.tenant_ceiling() else {
+                    let EgressPolicyObservedCeilingV1::Active {
+                        revision,
+                        epoch,
+                        digest,
+                    } = observation.tenant_ceiling()
+                    else {
                         return Err(anyhow!("egress_policy_tenant_ceiling_unavailable"));
                     };
                     let digest: [u8; 32] = hex::decode(digest)
                         .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?
                         .try_into()
                         .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?;
-                    Some(EgressPolicyTenantCeilingV1::new(*revision, *epoch, digest)
-                        .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?)
+                    Some(
+                        EgressPolicyTenantCeilingV1::new(*revision, *epoch, digest)
+                            .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?,
+                    )
                 }
             };
             let request = EgressReplacePolicyRequestV1::new(
@@ -326,13 +342,20 @@ pub(super) fn prepare_from_inspection(
                 epoch,
                 policy,
                 tenant_ceiling,
-            ).map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
+            )
+            .map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
             (Action::Replace, Request::Replace(request))
         }
         Draft::Revoke { version } => {
             ensure!(version == 1, "egress_policy_invalid_draft");
             ensure!(
-                matches!(observation.head(), EgressPolicyObservedHeadV1::Present { state: EgressPolicyStateV1::Active, .. }),
+                matches!(
+                    observation.head(),
+                    EgressPolicyObservedHeadV1::Present {
+                        state: EgressPolicyStateV1::Active,
+                        ..
+                    }
+                ),
                 "egress_policy_revoke_requires_active_head"
             );
             // Cleanup needs the actual target CAS, independently of resource
@@ -343,7 +366,8 @@ pub(super) fn prepare_from_inspection(
                 observation.selector().clone(),
                 revision,
                 epoch,
-            ).map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
+            )
+            .map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
             (Action::Revoke, Request::Revoke(request))
         }
     };
@@ -355,12 +379,14 @@ pub(super) fn prepare_from_inspection(
         |parent| {
             report.revalidate()?;
             report.require_output_parent_outside(parent)?;
-            file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed"))
+            file.revalidate()
+                .map_err(|_| anyhow!("egress_policy_input_changed"))
         },
         |parent| {
             report.revalidate()?;
             report.require_output_parent_outside(parent)?;
-            file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))
+            file.revalidate()
+                .map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))
         },
     )
 }

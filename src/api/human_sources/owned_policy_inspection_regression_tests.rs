@@ -5,16 +5,25 @@ use super::owned_policy_inspection_tests::{
 use crate::{
     api::gateway_router,
     control::egress_policy::{
-        EgressPolicyInspectionRequestV1, EgressPolicyObservedCeilingV1,
-        EgressPolicyObservedHeadV1, EgressPolicyObservedSessionResourceV1,
-        EgressPolicySelectorV1, EgressPolicyStateV1, EgressRevokePolicyRequestV1,
+        EgressPolicyInspectionRequestV1, EgressPolicyObservedCeilingV1, EgressPolicyObservedHeadV1,
+        EgressPolicyObservedSessionResourceV1, EgressPolicySelectorV1, EgressPolicyStateV1,
+        EgressRevokePolicyRequestV1,
     },
     runner::AuditClient,
 };
 use anyhow::{Context, Result, ensure};
-use axum::{body::Body, http::{StatusCode, header}};
+use axum::{
+    body::Body,
+    http::{StatusCode, header},
+};
 use serde_json::json;
-use std::{sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tower::ServiceExt;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -31,28 +40,45 @@ async fn sdk_inspection_reports_stored_revoke_head_without_writing() -> Result<(
             absent.scope() == &fixture.scope()
                 && absent.head() == &EgressPolicyObservedHeadV1::Absent
                 && absent.tenant_ceiling() == &EgressPolicyObservedCeilingV1::NotApplicable
-                && absent.session_resource() == EgressPolicyObservedSessionResourceV1::NotApplicable
+                && absent.session_resource()
+                    == EgressPolicyObservedSessionResourceV1::NotApplicable
                 && absent.historical()
                 && absent.coverage() == "policy_registry_metadata",
             "SDK altered actual empty metadata"
         );
-        ensure!(snapshot(&fixture)? == before, "SDK inspection wrote empty metadata");
-        sdk.egress_replace_policy(&replacement(&fixture, 0, 0)).await?;
+        ensure!(
+            snapshot(&fixture)? == before,
+            "SDK inspection wrote empty metadata"
+        );
+        sdk.egress_replace_policy(&replacement(&fixture, 0, 0))
+            .await?;
         sdk.egress_revoke_policy(&EgressRevokePolicyRequestV1::new(
-            uuid::Uuid::new_v4(), fixture.scope(), EgressPolicySelectorV1::Tenant, 1, 1,
-        )?).await?;
+            uuid::Uuid::new_v4(),
+            fixture.scope(),
+            EgressPolicySelectorV1::Tenant,
+            1,
+            1,
+        )?)
+        .await?;
         let before = snapshot(&fixture)?;
         let revoked = sdk.egress_inspect_policy(&request).await?;
         ensure!(
-            revoked.head() == &EgressPolicyObservedHeadV1::Present {
-                revision: 1, epoch: 2, state: EgressPolicyStateV1::RevokeRequested,
-            },
+            revoked.head()
+                == &EgressPolicyObservedHeadV1::Present {
+                    revision: 1,
+                    epoch: 2,
+                    state: EgressPolicyStateV1::RevokeRequested,
+                },
             "stored revoke_requested head was omitted or relabeled"
         );
         revoked.validate_for(&request)?;
-        ensure!(snapshot(&fixture)? == before, "SDK inspection wrote revoked metadata");
+        ensure!(
+            snapshot(&fixture)? == before,
+            "SDK inspection wrote revoked metadata"
+        );
         Ok(())
-    }.await;
+    }
+    .await;
     let close = server.close().await;
     let drain = fixture.drain().await;
     close?;
@@ -61,7 +87,8 @@ async fn sdk_inspection_reports_stored_revoke_head_without_writing() -> Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn inspection_closes_nested_selectors_and_uses_existing_runner_slots_before_body() -> Result<()> {
+async fn inspection_closes_nested_selectors_and_uses_existing_runner_slots_before_body()
+-> Result<()> {
     let fixture = Fixture::new(15);
     let mut server = Server::new(&fixture.state).await?;
     let outcome: Result<()> = async {

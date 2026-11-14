@@ -105,7 +105,9 @@ fn emit_to(
     let bytes = output(report)?;
     if let Some(secret) = credential.filter(|secret| !secret.is_empty()) {
         ensure!(
-            !bytes.windows(secret.len()).any(|part| part == secret.as_bytes()),
+            !bytes
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes()),
             "egress_policy_output_unresolved"
         );
     }

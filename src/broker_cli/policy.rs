@@ -31,7 +31,11 @@ pub(super) enum PolicyCommand {
     },
     /// Prepare one immutable request in a new private directory, without network IO.
     Prepare {
-        #[arg(long, required_unless_present = "inspection_dir", conflicts_with = "inspection_dir")]
+        #[arg(
+            long,
+            required_unless_present = "inspection_dir",
+            conflicts_with = "inspection_dir"
+        )]
         gateway: Option<String>,
         #[arg(long, required_unless_present = "gateway", conflicts_with = "gateway")]
         inspection_dir: Option<PathBuf>,
@@ -78,7 +82,9 @@ pub(super) async fn execute(command: PolicyCommand) -> Result<()> {
         } => {
             let loaded = match (gateway, inspection_dir) {
                 (Some(gateway), None) => storage::prepare(&gateway, &input, &output_dir)?,
-                (None, Some(report)) => storage::prepare_from_inspection(&report, &input, &output_dir)?,
+                (None, Some(report)) => {
+                    storage::prepare_from_inspection(&report, &input, &output_dir)?
+                }
                 _ => return Err(anyhow!("egress_policy_invalid_preparation_source")),
             };
             emit(&loaded, None)

@@ -33,7 +33,10 @@ pub struct EgressPolicyInspectionRequestV1 {
 }
 impl EgressPolicyInspectionRequestV1 {
     pub fn new(selector: EgressPolicySelectorV1) -> Result<Self> {
-        let value = Self { version: 1, selector };
+        let value = Self {
+            version: 1,
+            selector,
+        };
         value.validate()?;
         Ok(value)
     }
@@ -72,17 +75,32 @@ impl<'de> Deserialize<'de> for EgressPolicyObservedHeadV1 {
         #[serde(tag = "presence", rename_all = "snake_case", deny_unknown_fields)]
         enum Head {
             Absent {},
-            Present { revision: u64, epoch: u64, state: EgressPolicyStateV1 },
+            Present {
+                revision: u64,
+                epoch: u64,
+                state: EgressPolicyStateV1,
+            },
         }
         Ok(match Head::deserialize(input)? {
             Head::Absent {} => Self::Absent,
-            Head::Present { revision, epoch, state } => Self::Present { revision, epoch, state },
+            Head::Present {
+                revision,
+                epoch,
+                state,
+            } => Self::Present {
+                revision,
+                epoch,
+                state,
+            },
         })
     }
 }
 impl EgressPolicyObservedHeadV1 {
     fn validate(&self) -> Result<()> {
-        if let Self::Present { revision, epoch, .. } = self {
+        if let Self::Present {
+            revision, epoch, ..
+        } = self
+        {
             number(*revision, false)?;
             number(*epoch, false)?;
         }
@@ -95,8 +113,15 @@ impl EgressPolicyObservedHeadV1 {
 pub enum EgressPolicyObservedCeilingV1 {
     NotApplicable,
     Absent,
-    Inactive { revision: u64, epoch: u64 },
-    Active { revision: u64, epoch: u64, digest: String },
+    Inactive {
+        revision: u64,
+        epoch: u64,
+    },
+    Active {
+        revision: u64,
+        epoch: u64,
+        digest: String,
+    },
 }
 impl<'de> Deserialize<'de> for EgressPolicyObservedCeilingV1 {
     fn deserialize<D: serde::Deserializer<'de>>(input: D) -> std::result::Result<Self, D::Error> {
@@ -105,14 +130,29 @@ impl<'de> Deserialize<'de> for EgressPolicyObservedCeilingV1 {
         enum Ceiling {
             NotApplicable {},
             Absent {},
-            Inactive { revision: u64, epoch: u64 },
-            Active { revision: u64, epoch: u64, digest: String },
+            Inactive {
+                revision: u64,
+                epoch: u64,
+            },
+            Active {
+                revision: u64,
+                epoch: u64,
+                digest: String,
+            },
         }
         Ok(match Ceiling::deserialize(input)? {
             Ceiling::NotApplicable {} => Self::NotApplicable,
             Ceiling::Absent {} => Self::Absent,
             Ceiling::Inactive { revision, epoch } => Self::Inactive { revision, epoch },
-            Ceiling::Active { revision, epoch, digest } => Self::Active { revision, epoch, digest },
+            Ceiling::Active {
+                revision,
+                epoch,
+                digest,
+            } => Self::Active {
+                revision,
+                epoch,
+                digest,
+            },
         })
     }
 }
@@ -124,7 +164,11 @@ impl EgressPolicyObservedCeilingV1 {
                 number(*revision, false)?;
                 number(*epoch, false)
             }
-            Self::Active { revision, epoch, digest: value } => {
+            Self::Active {
+                revision,
+                epoch,
+                digest: value,
+            } => {
                 number(*revision, false)?;
                 number(*epoch, false)?;
                 require(digest(value))
@@ -209,11 +253,13 @@ impl EgressPolicyInspectionV1 {
             match &self.selector {
                 EgressPolicySelectorV1::Tenant => require(
                     self.tenant_ceiling == EgressPolicyObservedCeilingV1::NotApplicable
-                        && self.session_resource == EgressPolicyObservedSessionResourceV1::NotApplicable,
+                        && self.session_resource
+                            == EgressPolicyObservedSessionResourceV1::NotApplicable,
                 )?,
                 EgressPolicySelectorV1::Session(_) => require(
                     self.tenant_ceiling != EgressPolicyObservedCeilingV1::NotApplicable
-                        && self.session_resource != EgressPolicyObservedSessionResourceV1::NotApplicable,
+                        && self.session_resource
+                            != EgressPolicyObservedSessionResourceV1::NotApplicable,
                 )?,
             }
             let canonical_time = chrono::DateTime::parse_from_rfc3339(&self.observed_at)

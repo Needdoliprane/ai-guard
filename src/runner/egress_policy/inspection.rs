@@ -15,14 +15,19 @@ impl AuditClient {
         }
         let value: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| E::InvalidRequest)?;
-        if bytes.windows(self.token.len()).any(|part| part == self.token.as_bytes()) {
+        if bytes
+            .windows(self.token.len())
+            .any(|part| part == self.token.as_bytes())
+        {
             return Err(E::InvalidRequest);
         }
-        self.validate_identity_payload(&value).map_err(|_| E::InvalidRequest)?;
+        self.validate_identity_payload(&value)
+            .map_err(|_| E::InvalidRequest)?;
         let url = self
             .control_url(reqwest::Method::POST, "/api/v1/egress/policies/inspect")
             .map_err(|_| E::InvalidRequest)?;
-        let mut response = self.http
+        let mut response = self
+            .http
             .post(url)
             .bearer_auth(&self.token)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -34,7 +39,9 @@ impl AuditClient {
         let status = response.status().as_u16();
         if status == 200
             && (response.headers().get(reqwest::header::CONTENT_TYPE)
-                != Some(&reqwest::header::HeaderValue::from_static("application/json"))
+                != Some(&reqwest::header::HeaderValue::from_static(
+                    "application/json",
+                ))
                 || response.headers().get(reqwest::header::CACHE_CONTROL)
                     != Some(&reqwest::header::HeaderValue::from_static("no-store")))
         {
@@ -50,7 +57,10 @@ impl AuditClient {
         if status != 200 {
             return Err(policy_error(status, &body));
         }
-        if body.windows(self.token.len()).any(|part| part == self.token.as_bytes()) {
+        if body
+            .windows(self.token.len())
+            .any(|part| part == self.token.as_bytes())
+        {
             return Err(E::InvalidResponse);
         }
         let observation = EgressPolicyInspectionV1::from_canonical_bytes(&body)?;
