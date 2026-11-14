@@ -29,11 +29,32 @@ test("build metadata is bounded and explicit; invalid optional compile metadata 
   assert.equal(frontendIdentity("0.0.1", "x".repeat(64), "a".repeat(64)).build.id.length, 64);
   for (const id of ["", "x".repeat(65), "build secret", "path/file", "é", "bad\n"])
     assert.equal(frontendIdentity("0.0.1", id).build.id, null);
-  for (const revision of ["", "a".repeat(39), "a".repeat(41), "g".repeat(40), " a".repeat(20)])
+  for (const revision of ["", "a".repeat(39), "a".repeat(41), "g".repeat(40), " a".repeat(20), "a".repeat(40) + "\n"])
     assert.equal(frontendIdentity("0.0.1", undefined, revision).build.revision, null);
   assert.deepEqual(frontend.build, { id: null, revision: null });
   assert.throws(() => parseBuildStatus(status("dashboard", "0.0.1", { id: "bad value", revision: null }), "dashboard"));
   assert.throws(() => parseBuildStatus(status("dashboard", "0.0.1", { id: null, revision: "g".repeat(40) }), "dashboard"));
+});
+
+test("canonical build version is an assertion, never an override or independently generated identity", () => {
+  assert.equal(frontendIdentity("0.0.1", undefined, undefined, "0.0.1").version, "0.0.1");
+  for (const expected of ["0.0.2", "", " 0.0.1", "0.0.1\n"])
+    assert.throws(() => frontendIdentity("0.0.1", undefined, undefined, expected), /AI_GUARD_VERSION/);
+  assert.deepEqual(frontendIdentity("0.0.1").build, { id: null, revision: null });
+});
+
+test("common delivery ID and revision detect partial updates without rewriting backend facts", () => {
+  const bundle = frontendIdentity("0.0.1", "delivery-A", "a".repeat(40));
+  const state = { dashboard: available("dashboard", "0.0.1", { id: "delivery-A", revision: "a".repeat(40) }),
+    gateway: available("gateway", "0.0.1", { id: "delivery-B", revision: "b".repeat(40) }) };
+  assert.equal(identitySummary(bundle, state).mismatch, true);
+  assert.match(identitySummary(bundle, state).message, /Builds différents/);
+  assert.equal(identityRows(bundle, state)[2].build.id, "delivery-B");
+  const unknown = frontendIdentity("0.0.1");
+  assert.equal(identitySummary(unknown, state).mismatch, true, "two known services still disagree when the bundle build is unknown");
+  state.gateway = available("gateway");
+  assert.equal(identitySummary(bundle, state).mismatch, false, "missing identity is unknown, not invented mismatch");
+  assert.match(identityRows(bundle, state)[2].build.id ?? "inconnu", /inconnu/);
 });
 
 test("UI identity stays visible before login/offline; unknown services are never assigned the bundle version", () => {
