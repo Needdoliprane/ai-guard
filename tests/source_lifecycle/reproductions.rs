@@ -250,9 +250,12 @@ fn r1_build_and_compose_consumers_read_exactly_the_prepared_inputs_from_private_
 #[test]
 fn r2_build_consumers_keep_prepared_bytes_when_the_original_changes_after_preparation() {
     let scenario = Operator::prepare();
+    let prepared_cargo = scenario.source_file("Cargo.toml");
     for relative in CANARIES {
-        fs::write(scenario.source.join(relative), "live-version 0\n")
-            .expect("SETUP: canary build input");
+        if relative != "Cargo.toml" {
+            fs::write(scenario.source.join(relative), "live-version 0\n")
+                .expect("SETUP: canary build input");
+        }
     }
     let source = scenario.source.to_string_lossy().into_owned();
     let canaries = CANARIES.join(",");
@@ -276,12 +279,21 @@ fn r2_build_consumers_keep_prepared_bytes_when_the_original_changes_after_prepar
     for (index, build) in builds.iter().enumerate() {
         let context = build.context_files();
         for relative in CANARIES {
-            let consumed = version_of(relative, context.get(relative).cloned());
-            assert!(
-                consumed == 0,
-                "FAIL: build #{} read live-version {consumed} of {relative} in its context",
-                index + 1
-            );
+            if relative == "Cargo.toml" {
+                assert_eq!(
+                    context.get(relative),
+                    Some(&prepared_cargo),
+                    "FAIL: build #{} did not consume the byte-exact prepared Cargo.toml",
+                    index + 1
+                );
+            } else {
+                let consumed = version_of(relative, context.get(relative).cloned());
+                assert!(
+                    consumed == 0,
+                    "FAIL: build #{} read live-version {consumed} of {relative} in its context",
+                    index + 1
+                );
+            }
             let live = version_of(
                 "the live canary",
                 build.observed(&format!("live/{relative}")),
