@@ -1,4 +1,5 @@
 //! Local test certificates only. Never installs trust or contacts an issuer.
+use agentsandbox::build_identity::{Component, early_exit};
 use agentsandbox::control_fs::{Directory, TrustedExecutable, absolute_path};
 use anyhow::{Context, Result, ensure};
 use clap::Parser;
@@ -43,15 +44,22 @@ struct Arguments {
     openssl: PathBuf,
 }
 
+fn main() {
+    if let Some(code) = early_exit(Component::DemoPki) {
+        std::process::exit(code);
+    }
+    run();
+}
+
 #[tokio::main]
-async fn main() {
-    if let Err(error) = run(Arguments::parse()).await {
+async fn run() {
+    if let Err(error) = create_test_pki(Arguments::parse()).await {
         eprintln!("test PKI creation refused: {error:#}");
         std::process::exit(1);
     }
 }
 
-async fn run(arguments: Arguments) -> Result<()> {
+async fn create_test_pki(arguments: Arguments) -> Result<()> {
     let names = dns_names(arguments.dns)?;
     ensure!((1..=30).contains(&arguments.days), "--days must be 1..=30");
     ensure!(

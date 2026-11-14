@@ -1,4 +1,9 @@
+use agentsandbox::build_identity::{Component, early_exit};
+
 fn main() {
+    if let Some(code) = early_exit(Component::Provider) {
+        std::process::exit(code);
+    }
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     if let Some(code) =
         agentsandbox::runtime::kubernetes::session_worker::dispatch_waiting_mode(&raw)

@@ -4,6 +4,8 @@
 //! 4 report with an unknown and no error, 2 usage error, 1 refusal without
 //! any report.
 
+use agentsandbox::build_identity::{Component, early_exit};
+
 #[derive(clap::Parser)]
 #[command(
     name = "ai-guard-diagnose",
@@ -16,10 +18,17 @@ struct Cli {
     args: agentsandbox::diagnostics::DiagnoseArgs,
 }
 
+fn main() {
+    if let Some(code) = early_exit(Component::Diagnose) {
+        std::process::exit(code);
+    }
+    run();
+}
+
 // A current-thread runtime, as the offline OIDC client build expects a Tokio
 // context. The only thing ever awaited is an active check the operator named.
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
+async fn run() {
     agentsandbox::diagnostics::install_panic_hook();
     let cli = match <Cli as clap::Parser>::try_parse() {
         Ok(cli) => cli,

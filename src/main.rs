@@ -40,6 +40,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Print static local build identity without opening configuration or data.
+    Version {
+        #[arg(long)]
+        json: bool,
+    },
     /// Explicit durable local broker, jobs and controlled exports.
     Broker(broker_cli::BrokerArgs),
     /// Named local accounts, authorized human reads and filtered audit export.
@@ -664,9 +669,31 @@ impl GatewaySessionPolicies {
     }
 }
 
+fn main() -> Result<()> {
+    if let Some(code) = agentsandbox::build_identity::early_exit(
+        agentsandbox::build_identity::Component::Agentsandbox,
+    ) {
+        std::process::exit(code);
+    }
+    run()
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn run() -> Result<()> {
     match Cli::parse().command {
+        Command::Version { json } => {
+            let args = if json {
+                vec!["version".into(), "--json".into()]
+            } else {
+                vec!["version".into()]
+            };
+            if let Some(output) = agentsandbox::build_identity::early_output(
+                agentsandbox::build_identity::Component::Agentsandbox,
+                &args,
+            ) {
+                print!("{}", output?);
+            }
+        }
         Command::Broker(args) => broker_cli::execute(args).await?,
         Command::Human(args) => agentsandbox::identity_cli::execute(args).await?,
         Command::HumanSources(args) => human_sources_cli::run(args).await?,

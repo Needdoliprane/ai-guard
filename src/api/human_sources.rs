@@ -567,6 +567,7 @@ const REGISTERED_ROUTES: &[(&str, &[&str])] = &[
     ("/api/v1/relay/messages/{id}/prune", &["POST"]),
     ("/api/v1/relay/retention", &["GET", "HEAD"]),
     ("/api/v1/sandboxes", &["GET", "HEAD"]),
+    ("/api/v1/status", &["GET", "HEAD"]),
     ("/api/v1/stream", &["GET", "HEAD"]),
     ("/api/v1/usage", &["GET", "HEAD"]),
     ("/api/v1/workers", &["GET", "HEAD"]),
@@ -621,7 +622,8 @@ pub(super) async fn route_gate(
         return next.run(request).await;
     }
     let path = request.uri().path();
-    let allowed = (path == "/healthz" && (request.method() == "GET" || request.method() == "HEAD"))
+    let allowed = (["/healthz", "/api/v1/status"].contains(&path)
+        && (request.method() == "GET" || request.method() == "HEAD"))
         || super::control_transport::owned_protocol_request(&request)
         || super::control_transport::owned_broker_request(&request)
         || super::control_transport::owned_policy_request(&request)

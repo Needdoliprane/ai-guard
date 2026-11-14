@@ -39,6 +39,9 @@ use std::{
 
 #[cfg(test)]
 mod audit_capacity_tests;
+#[cfg(test)]
+#[path = "build_identity/http_tests.rs"]
+mod build_identity_http_tests;
 mod auth;
 pub use auth::{
     EnvelopeExpectationsV1, TechnicalCredentialIdentityV1, TechnicalCredentialInput,
@@ -907,6 +910,7 @@ fn gateway_base_router(state: GatewayState) -> Router {
         .route("/usage", get(worker_usage));
     Router::new()
         .route("/healthz", get(gateway_health))
+        .route("/api/v1/status", get(gateway_build_status))
         .nest("/auth/oidc", oidc::routes())
         .nest(
             "/api/v1",
@@ -935,6 +939,12 @@ fn gateway_base_router(state: GatewayState) -> Router {
             gateway_security_headers,
         ))
         .with_state(state)
+}
+
+async fn gateway_build_status() -> Json<crate::build_identity::BuildStatusV1> {
+    Json(crate::build_identity::BuildStatusV1::current(
+        crate::build_identity::Component::Gateway,
+    ))
 }
 
 async fn gateway_health(State(state): State<GatewayState>) -> (StatusCode, Json<Value>) {
@@ -1621,6 +1631,8 @@ pub fn dashboard_router_with_human_mode(
             "/healthz",
             get(|| async { Json(json!({"status":"ok","service":"dashboard"})) }),
         )
+        .route("/api/v1/status", get(dashboard_build_status))
+        .route("/api/v1/gateway/status", get(dashboard_gateway_build_status))
         .route("/api/{*path}", get(dashboard_proxy))
         .route("/auth/oidc/status", get(dashboard_oidc_proxy))
         .route("/auth/oidc/start", post(dashboard_oidc_proxy))
@@ -1639,6 +1651,49 @@ pub fn dashboard_router_with_human_mode(
         ))
         .with_state(s))
 }
+async fn dashboard_build_status() -> Json<crate::build_identity::BuildStatusV1> {
+    Json(crate::build_identity::BuildStatusV1::current(
+        crate::build_identity::Component::Dashboard,
+    ))
+}
+
+/// This request has one configured destination and carries no caller identity.
+/// The complete send/read/decode is bounded independently from human proxies.
+async fn dashboard_gateway_build_status(
+    State(state): State<DashboardState>,
+) -> ApiResult<Json<crate::build_identity::BuildStatusV1>> {
+    use crate::build_identity::{BuildStatusV1, Component, MAX_STATUS_BYTES};
+    let mut destination = state.upstream.clone();
+    destination.set_path("/api/v1/status");
+    destination.set_query(None);
+    destination.set_fragment(None);
+    let fetched = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut response = state.client.get(destination)
+            .header(header::ACCEPT, "application/json")
+            .send().await.map_err(|_| ())?;
+        if response.status() != StatusCode::OK
+            || response.content_length().is_some_and(|length| length > MAX_STATUS_BYTES as u64)
+            || response.headers().get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next()) != Some("application/json")
+        {
+            return Err(());
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| ())? {
+            if chunk.len() > MAX_STATUS_BYTES.saturating_sub(bytes.len()) {
+                return Err(());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        BuildStatusV1::from_json(&bytes, Component::Gateway).map_err(|_| ())
+    }).await;
+    match fetched {
+        Ok(Ok(status)) => Ok(Json(status)),
+        _ => Err(error(StatusCode::BAD_GATEWAY, "Gateway build status is unavailable.")),
+    }
+}
+
 async fn dashboard_security_headers(
     State(state): State<DashboardState>,
     request: Request,
