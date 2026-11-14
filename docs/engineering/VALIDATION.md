@@ -1,5 +1,15 @@
 # Validation courante
 
+## 14 novembre — alignement 0.0.1 : builds Rust et front vérifiés
+
+Source `24be056e6c9a3bd4242f0bac872150062863c49f`, tree `d745eff3928bb5b3b23ad7b56f484df015e99a33`, 2 888 fichiers. Les compilations Rust/front utilisent les mêmes version 0.0.1, ID de QA `3a038cbf56079b54dc285529cc6bc294438e94db5bd59c75f2d6757381b270f4` et révision du gel. Cet ID est une annotation de source QA, pas un digest d’image ni une attestation PreparedSnapshot.
+
+Rust : 9 artefacts frais, 18 listes, 70 PASS uniques en six groupes 12/5/7/1/3/42 ; aucun FAIL/inconnu/ignoré sélectionné, 1 ignoré non sélectionné. Check toutes cibles RC0 ; 157 warnings build / 168 check. Les 2 888 hashes/modes source sont recontrôlés ; 12 répertoires de fixture vides, scan complet 5/5 sans cible, OOM nul et fermeture RC0/CID absent. Pic mémoire QA : 9 365 565 440 octets. Reçu Root `346ff9019c5c0e680e733e9497a3d7588cec102d7d188ab587af8458c454c98d` ; flush `ca16fa02b4fcdcc1393d419b472e26a030dd285d8860cbaf5e01296264a6579f`.
+
+Front : build TypeScript/Vite RC0, 4 fichiers / 317 667 octets et identité embarquée vérifiés. Aucun nouveau test ; 115 PASS historiques sur `fd816`, projection frontend inchangée. Scan complet sans cible, OOM nul, fermeture RC0 ; pic QA 460 607 488 octets. Reçu `2df9c84c7547ec352f319683aa913f5aae985fae1415b3ae04c6459cbd268969` ; flush `945d2b7000fb4cc7c665e83f97e1452088790bd717b4d06306df890f0c08d0a3`. Format : 21 sources puis 1 fixture corrigée, soit 22 bindings effectivement vérifiés.
+
+R1 garde build RC0 puis harnais 88 / 70 NOT_RUN. R2 garde 69 PASS / 1 fixture FAIL et collector 96 / 3 zombies. R3 conserve les quatre oracles de mutation en corrigeant le Cargo de la fixture et ajoute init au seul profil QA, sans exclure les zombies. [Détails et preuves](evidence/2026-11-14/build-identity/README.md). Navigateur, Clippy strict, images/déploiement, moteurs/workers/fournisseurs/cluster réels, capacité 100 et suite complète NOT_RUN ; Source17 distinct, **0/12 gates clos**.
+
 ## 14 novembre — fédération C3 et B9 : composition logicielle R3 vérifiée
 
 Source testée `f117ceae016049b7274708197c3702218148e56b`, tree

@@ -1,0 +1,127 @@
+{
+  "schema": 1,
+  "date": "2026-11-14",
+  "scope": "Common product0.0.1 and descriptive compiled build identity; software proof only",
+  "source": {
+    "commit": "24be056e6c9a3bd4242f0bac872150062863c49f",
+    "tree": "d745eff3928bb5b3b23ad7b56f484df015e99a33",
+    "qa_source_archive_sha256": "3a038cbf56079b54dc285529cc6bc294438e94db5bd59c75f2d6757381b270f4",
+    "files": 2888
+  },
+  "identity": {
+    "version": "0.0.1",
+    "qa_build_id": "3a038cbf56079b54dc285529cc6bc294438e94db5bd59c75f2d6757381b270f4",
+    "revision": "24be056e6c9a3bd4242f0bac872150062863c49f",
+    "meaning": "QA compile annotations shared by Rust and frontend; distribution builder independently derives its common ID from PreparedSnapshot.digest. Neither is an image attestation or compatibility proof."
+  },
+  "rust": {
+    "fresh_artifacts": 9,
+    "normal_tools": 6,
+    "registration_lists": 18,
+    "groups": {
+      "dto": 12,
+      "http": 5,
+      "build-plan": 7,
+      "route-canary": 1,
+      "real-cli": 3,
+      "source-lifecycle": 42
+    },
+    "pass": 70,
+    "fail": 0,
+    "unknown": 0,
+    "selected_ignored": 0,
+    "ignored_not_selected": 1,
+    "check_all_targets_rc": 0,
+    "build_warnings": 157,
+    "check_warnings": 168,
+    "root_result_sha256": "346ff9019c5c0e680e733e9497a3d7588cec102d7d188ab587af8458c454c98d",
+    "root_flush_sha256": "ca16fa02b4fcdcc1393d419b472e26a030dd285d8860cbaf5e01296264a6579f",
+    "source_post_sha256": "79812ec81d4b6cdd436eb0b7bae14650f8909879c9ad8cfd58d93332ef49e573",
+    "source_bodies_modes_root_rehashed": 2888,
+    "processes": {
+      "complete_scan": true,
+      "target_observed": 0,
+      "records": 5,
+      "init": true,
+      "zombies_not_excluded": true
+    },
+    "memory_peak_bytes": 9365565440,
+    "oom": 0,
+    "closure_rc": 0,
+    "cid_absent": true,
+    "independent_actual_review_sha256": "0c0917a795aa8112827c64e8ef8ea781fab08440c35f18eeac9cf8ece503c6c4"
+  },
+  "frontend": {
+    "build_rc": 0,
+    "new_tests": 0,
+    "dist_files": 4,
+    "dist_bytes": 317667,
+    "actual_embedded_identity_root_verified": true,
+    "root_result_sha256": "2df9c84c7547ec352f319683aa913f5aae985fae1415b3ae04c6459cbd268969",
+    "root_flush_sha256": "945d2b7000fb4cc7c665e83f97e1452088790bd717b4d06306df890f0c08d0a3",
+    "historical_tests": {
+      "source": "fd81601b6e42a4f4107eb71dc50f85b98de7ccfa",
+      "pass": 115,
+      "fail": 0,
+      "result_sha256": "08ae4c07dabff4b943eb39908e8550da1a8e5eb8f02bcd920f3fcdb96565fc8f",
+      "frontend_source_projection_Git_identical": true,
+      "new_credit": 0
+    },
+    "bundle_files": [
+      {
+        "path": "assets/index-BH-7UWYv.js",
+        "bytes": 270318,
+        "mode": "600",
+        "sha256": "2a44fe5ab95f897e4030b31a97792270a0c41c5e105d2117462052ccf801f4ee"
+      },
+      {
+        "path": "assets/index-CenyJRZD.css",
+        "bytes": 45889,
+        "mode": "600",
+        "sha256": "1d9511deb755de2d3ef66f092366592be60ddb9dba43a69ae217ae07ab5ff4ae"
+      },
+      {
+        "path": "favicon.svg",
+        "bytes": 350,
+        "mode": "644",
+        "sha256": "51a233c71906900b8589ebef7537429dbb42cc4bcb631f942658dc8601893853"
+      },
+      {
+        "path": "index.html",
+        "bytes": 1110,
+        "mode": "600",
+        "sha256": "4fab66c2eb709fe037398c8a4404e7531fb8b0f0de448eb719489f9c9ce00998"
+      }
+    ],
+    "process_target_observed": 0,
+    "oom": 0,
+    "closure_rc": 0,
+    "cid_absent": true
+  },
+  "format": {
+    "actual_bound_files": 22,
+    "initial21_result_sha256": "dc0f7d7690d38788a4597aa9461d0276a46c5e422b43c539c1fe503a51423075",
+    "corrected_fixture1_result_sha256": "8e3076badf2949eec1bd0781032641b094f920f5997a769994b42ddd1948513e"
+  },
+  "history": {
+    "R1": "Compile9PASS; list-format harness88 before tests:70NOT_RUN.",
+    "R2": "Compile9PASS and18listsPASS;69PASS1fixtureFAIL;closure96with3zombies. Evidence preserved, no product RED inferred.",
+    "R3": "Only valid Cargo fixture correction plus distinct QAinit reaper;70PASS/check0/strictclosure0."
+  },
+  "not_run": [
+    "Clippy strict",
+    "browser including live-region canary",
+    "real image builds",
+    "HTTP services from built images",
+    "real Docker/Podman workers",
+    "provider calls",
+    "Kubernetes",
+    "capacity100",
+    "full repository tests"
+  ],
+  "deployment": false,
+  "source17_qualification": false,
+  "production_gates_closed": 0,
+  "production_gates_total": 12,
+  "production_qualification": false
+}

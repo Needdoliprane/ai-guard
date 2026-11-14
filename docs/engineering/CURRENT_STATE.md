@@ -1,5 +1,13 @@
 # État constaté — suivi du développement
 
+## 14 novembre — version 0.0.1 et identité commune des builds validées
+
+Le gel `24be056` aligne Cargo, frontend et locks sur **0.0.1**. Le constructeur refuse les versions divergentes avant le moteur et réutilise une même source préparée pour les deux images. Le front montre sa version compilée et distingue les observations dashboard/gateway. GET/HEAD `/api/v1/status` et le relais fixe du dashboard rendent les métadonnées publiques sans données tenant. Les six outils Rust disposent de `--version`/`-V` ; `agentsandbox version --json` fournit le contrat fermé.
+
+Validation réelle : 9 artefacts frais, 18 listes, **70 tests uniques PASS**, puis check toutes cibles RC0 ; 22 postimages de format liées. Le nouveau build TypeScript/Vite RC0 contient exactement 0.0.1 et les mêmes ID/révision de QA. Les 115 tests frontend PASS sur `fd816` gardent leur source historique (projection frontend identique), sans nouveau crédit de tests. Sources, scans complets sans processus cible, OOM nul, fermeture et flush sont vérifiés. Les échecs R1/R2 restent conservés.
+
+[Sources, commandes, reçus et limites](evidence/2026-11-14/build-identity/README.md). Images, déploiement, navigateur, workers/moteurs/fournisseurs/cluster réels et qualification Source17 restent hors de cette preuve. Clippy strict et suite complète NOT_RUN ; 157/168 warnings demeurent. Interface readonly préservée, aucune mise à jour automatique des services/pods et **0/12 gates clos**.
+
 ## 14 novembre — fédération C3 composée : 44 parents logiciels vérifiés
 
 Le gel `f117ceae016049b7274708197c3702218148e56b` passe une compilation
