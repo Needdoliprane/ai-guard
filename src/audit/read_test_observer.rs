@@ -6,7 +6,7 @@
 
 use super::Store;
 use std::{
-    sync::{Arc, OnceLock, mpsc},
+    sync::{OnceLock, mpsc},
     thread::{self, ThreadId},
 };
 
@@ -39,7 +39,7 @@ impl ReadTestObserver {
     }
 }
 
-pub(crate) fn observe(store: &Arc<Store>) -> mpsc::Receiver<Observation> {
+pub(crate) fn observe(store: &Store) -> mpsc::Receiver<Observation> {
     let (sender, receiver) = mpsc::channel();
     assert!(
         store.read_test_observer.sender.set(sender).is_ok(),
