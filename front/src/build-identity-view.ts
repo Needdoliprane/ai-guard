@@ -14,8 +14,8 @@ export function buildIdentityFooter(frontend: FrontendIdentity) {
   let busy = true;
   const retry = button("Relire les versions", "button button-secondary build-refresh", () => { if (!busy) void store.refresh(); }, "refresh");
   const details = el("details", "build-details", summary, rows,
-    el("p", "build-note", "Identités de build descriptives. Elles ne prouvent ni disponibilité, ni compatibilité, ni qualification."), retry, announcement);
-  const footer = el("footer", "build-identity", details);
+    el("p", "build-note", "Identités de build descriptives. Elles ne prouvent ni disponibilité, ni compatibilité, ni qualification."), retry);
+  const footer = el("footer", "build-identity", details, announcement);
   footer.setAttribute("aria-label", "Versions d’ai-guard");
   const announcements = new BuildIdentityAnnouncements(frontend, (message) => { announcement.textContent = message; });
   store.subscribe((state) => {
