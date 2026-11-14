@@ -500,8 +500,11 @@ async fn submitted_final_case(
                 .await?
                 .ok_or_else(|| anyhow!("current original snapshot missing"))?;
             let (_copied, foreign) = independent_journal(root, writer.scope())?;
-            let copied = crate::broker::journal::StopJournal::from_full(&foreign)
-                .recovery_status(operation)?
+            let foreign_writer = WriterClient::start(foreign, 16, Duration::from_secs(10))?;
+            let copied = foreign_writer
+                .stops()
+                .recovery_status(operation)
+                .await?
                 .ok_or_else(|| anyhow!("foreign snapshot missing"))?;
             ensure!(
                 canonical(current.scope())? == canonical(copied.scope())?
