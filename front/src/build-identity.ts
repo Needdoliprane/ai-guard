@@ -139,6 +139,23 @@ export function identitySummary(frontend: FrontendIdentity, state: ServiceIdenti
       missingBuild ? "Version concordante · build inconnu" : "Identités concordantes" : "Identité des services incomplète" };
 }
 
+/** Tracks completed announcements, independently of intermediate visual updates. */
+export class BuildIdentityAnnouncements {
+  #frontend: FrontendIdentity;
+  #publish: (message: string) => void;
+  #lastAnnounced = "";
+  constructor(frontend: FrontendIdentity, publish: (message: string) => void) {
+    this.#frontend = frontend; this.#publish = publish;
+  }
+  update(state: ServiceIdentities) {
+    if (state.dashboard.kind === "loading" || state.gateway.kind === "loading") return;
+    const { message } = identitySummary(this.#frontend, state);
+    if (message === this.#lastAnnounced) return;
+    this.#publish(message);
+    this.#lastAnnounced = message;
+  }
+}
+
 export class BuildIdentityStore {
   #request: typeof fetch;
   #state: ServiceIdentities = { dashboard: { kind: "loading" }, gateway: { kind: "loading" } };

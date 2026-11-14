@@ -1,5 +1,5 @@
 import { el, button } from "./dom.ts";
-import { BuildIdentityStore, identityRows, identitySummary } from "./build-identity.ts";
+import { BuildIdentityStore, BuildIdentityAnnouncements, identityRows, identitySummary } from "./build-identity.ts";
 import type { FrontendIdentity } from "./build-identity.ts";
 
 /** Remains outside authenticated collections, including while those are purged. */
@@ -17,7 +17,7 @@ export function buildIdentityFooter(frontend: FrontendIdentity) {
     el("p", "build-note", "Identités de build descriptives. Elles ne prouvent ni disponibilité, ni compatibilité, ni qualification."), retry, announcement);
   const footer = el("footer", "build-identity", details);
   footer.setAttribute("aria-label", "Versions d’ai-guard");
-  let lastMessage = "";
+  const announcements = new BuildIdentityAnnouncements(frontend, (message) => { announcement.textContent = message; });
   store.subscribe((state) => {
     const comparison = identitySummary(frontend, state);
     summaryText.textContent = comparison.message;
@@ -28,8 +28,7 @@ export function buildIdentityFooter(frontend: FrontendIdentity) {
       el("dt", "", row.label), el("dd", "", el("strong", "", row.version ?? "Version inconnue"),
         el("span", "build-reading", row.message), row.build ? el("span", "build-metadata",
           el("span", "", `Build : ${row.build.id ?? "inconnu"}`), el("span", "", `Révision : ${row.build.revision ?? "inconnue"}`)) : null))));
-    if (!busy && comparison.message !== lastMessage) announcement.textContent = comparison.message;
-    lastMessage = comparison.message;
+    announcements.update(state);
   });
   void store.refresh();
   return { node: footer, close: () => store.close() };
