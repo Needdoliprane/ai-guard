@@ -1,30 +1,33 @@
 // Pure model of the unified supervision view. No DOM, no network, no clock of its own.
 // Every relation is an exact identifier match on values the control returned; nothing is inferred.
-import type { HumanBroker, HumanContext, HumanEvent, HumanResource, HumanWorker, HumanWorkerAssociation, Principal, ResourceKind } from "./human-model.ts";
+import type { HumanBroker, HumanContext, HumanEvent, HumanReadProfiles, HumanResource, HumanWorker, HumanWorkerAssociation, Principal, ResourceKind } from "./human-model.ts";
 
 /** Presentation gating only. Rust authorizes every read; a missing flag means no request is sent. */
 export interface SupervisionAccess {
-  workers: boolean; brokers: boolean; composed: boolean; resources: boolean; journal: boolean; content: boolean; export: boolean; any: boolean;
+  workers: boolean; workersUnavailable?: boolean; brokers: boolean; composed: boolean; resources: boolean; journal: boolean; content: boolean; export: boolean; any: boolean;
 }
-export function supervisionAccess(context: HumanContext | null): SupervisionAccess {
+export function supervisionAccess(context: HumanContext | null, profiles?: HumanReadProfiles): SupervisionAccess {
   const has = (capability: HumanContext["capabilities"][number]) => !!context?.capabilities.includes(capability);
   const administration = context?.mode === "administration";
-  const workers = administration && has("read_worker_registry");
+  const workersUnavailable = administration && has("read_worker_registry") && profiles?.worker_registry === "unavailable";
+  const workers = administration && has("read_worker_registry") && !workersUnavailable;
   const brokers = administration && has("read_broker_registry");
   const resources = has("read_metadata") || administration && has("read_tenant_metadata");
-  return { workers, brokers, composed: workers && brokers, resources, journal: resources,
-    content: resources && has("read_content"), export: resources && has("export"), any: workers || brokers || resources };
+  return { workers, ...(workersUnavailable ? { workersUnavailable: true } : {}), brokers,
+    composed: workers && brokers && profiles?.federation_registry !== "unavailable", resources, journal: resources,
+    content: resources && has("read_content"), export: resources && has("export"), any: workers || workersUnavailable || brokers || resources };
 }
 export interface AccessLine { key: "workers" | "brokers" | "resources" | "journal" | "content" | "export" | "personal_workers" | "agents"; granted: boolean; label: string; detail: string }
 /** What the selected context opens and what it does not, in the user's words. */
-export function accessLines(context: HumanContext | null): AccessLine[] {
-  const access = supervisionAccess(context);
+export function accessLines(context: HumanContext | null, profiles?: HumanReadProfiles): AccessLine[] {
+  const access = supervisionAccess(context, profiles);
   const administration = context?.mode === "administration";
   const registry = (name: string, capability: string) => administration ? `Capacité ${capability} absente de ce contexte : aucune lecture du registre ${name} n’est émise.` :
     `Le registre ${name} du tenant est réservé à un contexte d’administration portant ${capability}.`;
   return [
     { key: "workers", granted: access.workers, label: "Registre des workers du tenant",
-      detail: access.workers ? "Accordé par read_worker_registry : états du contrôle, dernière observation runtime et associations d’autorité." : registry("workers", "read_worker_registry") },
+      detail: access.workersUnavailable ? "Permission read_worker_registry présente, mais le contrôle annonce worker_registry unavailable pour ce profil. Aucune route historique n’est appelée ; l’activité reste inconnue. Faites vérifier les profils pris en charge par l’opérateur." :
+        access.workers ? "Accordé par read_worker_registry : états du contrôle, dernière observation runtime et associations d’autorité." : registry("workers", "read_worker_registry") },
     { key: "brokers", granted: access.brokers, label: "Registre des brokers du tenant",
       detail: access.brokers ? "Accordé par read_broker_registry : baux, autorités déclarées et réceptions observées." : registry("brokers", "read_broker_registry") },
     { key: "resources", granted: access.resources, label: "Sessions, agents, sandboxes et projets autorisés",
@@ -64,6 +67,12 @@ export const associationLabel: Record<HumanWorkerAssociation["status"], string> 
   authority_unknown: "Autorité inconnue", registry_unavailable: "Registre indisponible" };
 export const brokerStateLabel: Record<HumanBroker["state"], string> = { unseen: "Heartbeat non reçu", current: "Bail courant", stale: "Bail périmé",
   expired: "Autorisation expirée", revoked: "Autorisation révoquée", clock_uncertain: "Horloge incertaine" };
+/** A valid whitespace authority stays distinct from redaction and from an absent value. */
+export function brokerAuthorityLabel(authority: HumanBroker["authorities"][number]): string {
+  if (authority.authority_id_redacted) return "Identifiant masqué";
+  const id = authority.authority_id;
+  return id !== null && !id.trim() ? `Identifiant blanc · ${JSON.stringify(id)}` : id ?? "Identifiant inconnu";
+}
 export const resourceKindLabel: Record<ResourceKind, string> = { session: "Session", sandbox: "Sandbox", agent: "Agent", project: "Projet" };
 /** The registry keeps the last heartbeat across a new grant: it then belongs to an incarnation that is no longer the current one. */
 export function heartbeatOfPreviousIncarnation(broker: HumanBroker): boolean {
@@ -207,7 +216,7 @@ export function windowSummary(input: { shown: number; loaded: number; hasMore: b
     "d’autres pages existent au contrôle, aucun total du tenant n’est connu" : "fin du registre à cette lecture"}`;
 }
 
-export type SourcePhase = "idle" | "loading" | "ready" | "error" | "forbidden" | "not_granted";
+export type SourcePhase = "idle" | "loading" | "ready" | "error" | "forbidden" | "not_granted" | "unavailable";
 export interface SourceSummary {
   phase: SourcePhase; loaded: number; hasMore: boolean; stale: boolean; capped: boolean;
   /** Rows removed after a refusal whose reason could not be read: neither a failed read nor an empty registry. */
@@ -221,7 +230,8 @@ function sourceNote(source: "workers" | "brokers" | "resources", summary: Source
   const registry = source === "resources" ? "accès non accordé" : "registre non accordé";
   const plural = summary.loaded > 1 ? "s" : "";
   const loaded = `${summary.loaded} ligne${plural} chargée${plural}`;
-  const text = summary.phase === "not_granted" ? `${registry} à ce contexte, aucune lecture émise.` :
+  const text = summary.phase === "unavailable" ? "registre indisponible pour le profil annoncé par le contrôle, aucune lecture émise ; activité inconnue." :
+    summary.phase === "not_granted" ? `${registry} à ce contexte, aucune lecture émise.` :
     summary.phase === "forbidden" ? "lecture refusée par le contrôle, données retirées." :
     summary.withdrawn ? "données retirées après un refus sans motif lisible, contenu inconnu tant que vos accès ne sont pas relus." :
     summary.phase === "loading" && !summary.loaded ? "lecture en cours, contenu encore inconnu." :
@@ -257,7 +267,8 @@ export function sourceAnnouncement(sources: { workers: AnnouncedSource; brokers:
   const groups = new Map<string, string[]>();
   for (const key of granted) {
     const item = sources[key];
-    const label = item.phase === "forbidden" ? "lecture refusée, données retirées" : item.withdrawn ? "données retirées, accès à relire" :
+    const label = item.phase === "unavailable" ? "profil indisponible, activité inconnue" :
+      item.phase === "forbidden" ? "lecture refusée, données retirées" : item.withdrawn ? "données retirées, accès à relire" :
       item.phase === "error" ? "lecture en échec, contenu inconnu" : item.stale ? "données périmées, dernière lecture conservée" : "lecture réussie";
     groups.set(label, [...(groups.get(label) ?? []), sourceNames[key][0].toLowerCase()]);
   }
