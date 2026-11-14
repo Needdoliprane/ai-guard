@@ -7,8 +7,7 @@ use anyhow::Context;
 use serde_json::Value;
 use std::{
     ffi::OsString,
-    fs,
-    io,
+    fs, io,
     os::unix::{ffi::OsStringExt, fs::PermissionsExt},
     process::{Child, Command, ExitStatus, Stdio},
     time::Duration,
