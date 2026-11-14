@@ -2,15 +2,12 @@
 
 [English](README.md) · [Configuration du broker](../broker/README.fr.md) · [Présence legacy](../broker/PRESENCE.fr.md) · [Checkpoints legacy](../broker/CHECKPOINTS.fr.md)
 
-> **Statut : proposition, ni admise ni qualifiée.** Ce guide décrit le côté
-> broker du profil proposé `broker_supervision_owned_v1`. Il dépend des routes
-> du control plane et de la maintenance d'enrôlement du lot de contrôle associé,
-> de la couture de service de Root et des décisions de Root sur le writer
-> d'enrôlement et l'évolution du protocole. Compilation, tests, runtime,
-> multi-hôte et infrastructure : `NOT_RUN`. Les commandes ci-dessous sont des
-> **parcours à valider par Root** ; aucune n'a été exécutée pour ce guide. Les
-> valeurs entre chevrons sont des emplacements réservés, jamais des identifiants
-> ou secrets réels.
+> **Candidat d'intégration local, non activé et non qualifié.** Root a retenu
+> la maintenance IdentityAuthority hors ligne et le profil final fermé
+> `broker_supervision_owned_v2`, avec journal version 2, avant première
+> activation. La source inclut la reprise exacte après rotation ; compilation,
+> formatage, tests logiciels et runtime sont `NOT_RUN` sur ce candidat.
+> Les commandes restent des parcours à valider, avec emplacements fictifs.
 
 Le profil owned permet à un broker de confiance situé sur un autre hôte de
 déclarer sa présence au control plane d'un tenant dont le Store utilise déjà le
@@ -36,9 +33,9 @@ Un fichier de présence choisit exactement un profil par sa clé `profile` de
 premier niveau. Il n'existe ni détection par contenu, ni repli, ni migration
 entre profils.
 
-| | Présence legacy V1 / V2 | Owned `broker_supervision_owned_v1` |
+| | Présence legacy V1 / V2 | Owned `broker_supervision_owned_v2` |
 |---|---|---|
-| Sélection | Pas de clé `profile` ; `version` 1 (heartbeat) ou 2 (checkpoints). Un fichier legacy contenant `profile` est refusé. | `"profile": "broker_supervision_owned_v1"` et `"version": 1`, tous deux obligatoires. Toute autre valeur de `profile` est refusée. |
+| Sélection | Pas de clé `profile` ; `version` 1 (heartbeat) ou 2 (checkpoints). Un fichier legacy contenant `profile` est refusé. | `"profile": "broker_supervision_owned_v2"` et `"version": 2`, tous deux obligatoires. Toute autre valeur de `profile` est refusée. |
 | Source d'identité | UUID et autorité saisis dans la configuration | Remise publique d'enrôlement écrite par la maintenance du contrôle |
 | Credential | `broker_token_file` | `bearer_file` (mêmes règles de fichier) |
 | Routes de contrôle | `/api/v1/brokers/…` | `/api/v1/owned/brokers/self`, `/heartbeats`, `/checkpoints`, `/checkpoints/self` (la route `identity` existe mais le publisher ne l'utilise pas) |
@@ -55,7 +52,7 @@ jamais sur le profil legacy.
 ## 2. Prérequis
 
 1. Le control plane du tenant exécute une version dans laquelle Root a admis
-   les cinq routes broker owned derrière le transport de contrôle authentifié.
+   les sept routes broker owned derrière le transport de contrôle authentifié.
    Sans elles, le gateway refuse les chemins owned et le publisher s'arrête
    avec `control_response: gateway_refused` ou `unrecognized`.
 2. Le Store du tenant est au format 14 ou 15 via
@@ -85,7 +82,7 @@ pour la présence legacy.
 | Fichier ou répertoire | Borne et règles |
 |---|---|
 | Configuration de présence owned (`presence_file` du profil Registry2) | ≤ 16 Kio, clés fermées (section 5). |
-| `enrollment_file` | Remise publique `OwnedBrokerEnrollmentV1`, ≤ 8 Kio. Elle ne contient ni bearer ni digest. Ne la modifiez pas : son engagement est épinglé dans les ancres des journaux. |
+| `enrollment_file` | Remise publique `OwnedBrokerEnrollmentV2`, ≤ 8 Kio. Elle ne contient ni bearer ni digest. Ne la modifiez pas : son engagement est épinglé dans les ancres des journaux. |
 | `bearer_file` | Une ligne de 32 à 4096 octets ASCII visibles, suivie éventuellement d'un LF. Envoyé uniquement comme credential de transport ; jamais journalisé, loggé ni affiché. |
 | `ca_bundle_file` (facultatif) | HTTPS uniquement ; PEM ne contenant que des certificats, ≤ 64 Kio, 1 à 8 certificats, remplaçant les racines intégrées pour ce client. Aucune clé privée d'AC ; TLS n'est jamais désactivé. |
 | `heartbeat_journal.state_dir` | Répertoire privé `0700` existant, **vide au premier démarrage** et dédié à cet enrôlement. |
@@ -166,42 +163,29 @@ configuration privé, remplacez chaque chemin et faites pointer le
 
 | Clé | Contrat |
 |---|---|
-| `profile`, `version` | Exactement `broker_supervision_owned_v1` et `1`. Les clés inconnues sont refusées. |
+| `profile`, `version` | Exactement `broker_supervision_owned_v2` et `2`. Les clés inconnues sont refusées. |
 | `enrollment_file`, `bearer_file` | Fichiers privés obligatoires (section 3). |
 | `ca_bundle_file` | Facultatif ; omettre ou `null` pour les racines intégrées. |
 | `interval_seconds` | 30 par défaut, plage 5–150. Deux fois l'intervalle ne doit dépasser ni le lease enrôlé ni le lease du broker vu par le control plane (≤ 300 s). |
-| `heartbeat_journal` | Obligatoire : `state_dir`, `max_operations` (1–32768), `max_state_bytes` (51200–134217728). Aucune capacité par défaut. |
-| `checkpoint_journal` | Facultatif, mêmes clés, `max_state_bytes` 100352–134217728. Présent ⇒ les checkpoints sont publiés ; absent ⇒ heartbeats seuls. |
+| `heartbeat_journal` | Obligatoire : `state_dir`, `max_operations` (1–32768), `max_state_bytes` (321536–134217728). Aucune capacité par défaut. |
+| `checkpoint_journal` | Facultatif, mêmes clés, `max_state_bytes` 370688–134217728. Présent ⇒ les checkpoints sont publiés ; absent ⇒ heartbeats seuls. |
 
-Un enregistrement est borné par la limite de son contrat plus une enveloppe de
-1 Kio : 17 Kio pour les heartbeats et 41 Kio pour les checkpoints. Avant chaque
-Pending, le journal réserve la place de son acquittement, et la première limite
-atteinte (opérations ou octets) arrête explicitement ce journal. Un heartbeat
-est publié une fois par intervalle, et un checkpoint une fois par intervalle
-d'échantillonnage tant qu'une source existe.
+Le journal version 2 refuse toute ancre v1 ou legacy, sans conversion
+implicite. Les ACK conservent séparément l'opération d'origine, l'observation
+courante et l'éventuelle preuve de réconciliation. Leurs bornes prudentes sont
+149 Kio (heartbeat) et 173 Kio (checkpoint), dont preuve 128 Kio, observation
+4 Kio et enveloppe 1 Kio. Une clôture Superseded est bornée à 192 Kio.
+Avant un Pending, son ACK est réservé ; avant supplantation, clôture,
+remplacement exact, son ACK et le prochain slot d'opération sont tous financés.
+Une capacité épuisée préserve les pièces et empêche le POST.
 
-Le coût d'un journal croît avec son historique et n'est **pas mesuré**
-(`NOT_RUN`) :
-
-- Au démarrage, le publisher lit, valide et synchronise une fois chaque
-  enregistrement et chaque répertoire d'opération retenus ; le temps de
-  démarrage d'un profil croît donc avec son journal.
-- Pendant l'exécution, chaque opération vérifie au plus deux fois
-  l'historique complet en relisant chaque enregistrement, sans le synchroniser
-  à nouveau : une nouvelle opération avant l'écriture de son Pending et avant
-  celle de son acquittement, un Pending rejoué avant son envoi et avant son
-  acquittement. Seuls l'enregistrement écrit, son répertoire et leurs ancêtres
-  sont synchronisés.
-
-L'exemple emploie des valeurs de départ prudentes, choisies pour que la limite
-d'opérations soit atteinte avant celle d'octets même avec des enregistrements
-maximaux : 2880 opérations heartbeat dans 96 Mio (environ 24 heures à 30 s) et
-1440 opérations checkpoint dans 116 Mio (environ 12 heures à 30 s). Avant de
-les augmenter, mesurez sur le système de fichiers cible le temps de démarrage
-et la durée d'une opération à la taille choisie, et gardez une opération
-nettement sous l'intervalle ; aucune mesure n'est encore publiée. Il n'existe
-ni archivage, ni purge, ni compaction : prévoyez un nouvel enrôlement et de
-nouveaux journaux avant l'épuisement d'un journal.
+Le démarrage valide et synchronise une fois tout l'historique. Chaque mutation
+ultérieure revérifie cet historique sans répéter ces fsync ; elle synchronise
+le nouvel enregistrement, son répertoire et ses ancêtres. Le coût croît avec
+l'historique et reste non mesuré (`NOT_RUN`). L'exemple prévoit 256 slots par
+journal, avec budgets logiques de 96/116 Mio ; aucune durée de rétention ni
+quota disque n'est garanti. Mesurer démarrage et mutations sur le système de
+fichiers cible avant de changer ces bornes. Ni purge ni compaction fournies.
 
 ## 6. Choisir les journaux
 
@@ -320,7 +304,7 @@ checkpoint.
 | Arrêt ou coupure de courant avant l'existence d'un enregistrement (verrou sans ancre, dernier répertoire d'opération vide) | Complété au démarrage suivant (section 6) ; rien n'a été envoyé et rien n'est réécrit. |
 | Coupure de courant pendant l'écriture d'un enregistrement | Un enregistrement incomplet peut subsister ; le journal refuse alors de s'ouvrir (état non sûr) et est conservé. Aucune réparation automatique n'existe ; la procédure qualifiée reste ouverte. |
 | Une action de journal échoue de façon inattendue (panique interne) | Le publisher s'arrête avec `broker presence evidence requires operator reconciliation` ; le Pending reste et le démarrage suivant revérifie tout le journal. |
-| Redémarrage avec un Pending | Même sujet exigé (même révision de binding) ; sinon le journal est bloqué. |
+| Redémarrage avec un Pending | Rejeu ordinaire exact, ou réconciliation v2 distincte ci-dessous ; des pins incompatibles restent bloqués. |
 
 Ne modifiez, ne supprimez et ne recréez jamais un Pending, un ACK, le verrou ou
 l'ancre.
@@ -340,10 +324,9 @@ l'ancre.
   (sinon, redémarrez le publisher, gateway en service, jusqu'à son
   acquittement, puis arrêtez-le) ; ensuite seulement, arrêtez le gateway et
   lancez la rotation ; remplacez le bearer ; démarrez le gateway, puis le
-  publisher. Un Pending engagé sous la
-  révision précédente est bloqué (`identity: binding_revision`) et exige
-  aujourd'hui un nouvel enrôlement et de nouveaux journaux ; une supplantation
-  sûre est proposée à Root, non implémentée.
+  publisher. Un Pending conservé n'est jamais rejoué avec une identité/hash réécrits.
+  Après une vraie réouverture du contrôle, v2 le réconcilie selon la règle
+  ci-dessous.
 - **Nouveau credential, nouveau grant, nouvelle incarnation** : produits
   seulement par `broker-identity enroll` côté contrôle, toujours avec une
   incarnation neuve, de sorte que de nouveaux journaux vides ne voient aucune
@@ -361,6 +344,30 @@ l'ancre.
 - **Nouvelle closure, source, format de Store (14→15), tenant ou namespace** :
   le handshake signale le pin ; un nouvel enrôlement et de nouveaux journaux
   sont nécessaires.
+
+### Reprise exacte après rotation
+
+Les lectures POST `/api/v1/owned/brokers/heartbeats/reconcile` et
+`/api/v1/owned/brokers/checkpoints/reconcile` authentifient le bearer **courant**
+avant corps/travail sous capacité. Corps ≤96 Kio, réponse ≤128 Kio, sans mutation
+ni événement métier. Pending d'origine, prédécesseur local exact, ledger global
+d'operation_id et tête courante sont comparés dans une même transaction de la
+source. Le fence exige l'historique actif exact r→r+1 et le reçu réel de
+l'incarnation du propriétaire courant, strictement après rotation ; r+1 ou
+la seule séquence n−1 ne suffisent pas.
+
+Une opération exacte committée produit un ACK `after_rotation` : identité et
+reçu d'origine restent sous r ; observation authentifiée r+1 séparée. Aucun
+POST ni rafraîchissement de heartbeat. L'absence globale exacte et le même
+prédécesseur permettent une clôture durable `superseded.json`, conservant
+pending.json et le remplacement entièrement préparé avec son nouvel UUID.
+Sync clôture avant pending.json du remplacement et tout POST ultérieur. Un
+redémarrage dans cet intervalle reprend les mêmes octets/UUID. Séquence/CAS
+heartbeat et snapshot/séquence checkpoint restent figés. Superseded n'est pas
+un ACK et ne fait avancer aucune tête serveur. Les floors binding/closure
+survivent dans ces records ; un callback périmé ne peut clôturer le remplacement.
+Unknown, conflit, révocation, expiration ou incompatibilité arrêtent avec les
+pièces intactes. Chaque journal se réconcilie séparément.
 
 ## 12. Sauvegarde et restauration
 
@@ -389,10 +396,9 @@ ne peut être détecté que par cette divergence.
 
 ## 14. Limites et statut
 
-- Admission, compilation, formatage, tests, runtime, multi-hôte, fournisseurs
-  et infrastructure : `NOT_RUN`. Les décisions de Root sur le writer
-  d'enrôlement hors ligne et sur le Pending bloqué par un renouvellement de
-  binding restent ouvertes.
+- D1/D2/C3 sont retenus pour l'implémentation locale. Activation et revue
+  indépendante restent à Root ; compilation, formatage, tests, runtime,
+  multi-hôte, fournisseurs et infrastructure restent `NOT_RUN` ici.
 - Aucun rechargement à chaud, aucun archivage ni purge, aucune réparation
   automatique après une écriture interrompue, aucun horizon de rétention
   qualifié, aucun coût mesuré du journal au démarrage ou par opération
@@ -400,3 +406,9 @@ ne peut être détecté que par cette divergence.
 - Les vues, la fraîcheur et les permissions côté contrôle sont décrites par le
   guide de contrôle associé ; un heartbeat plus ancien que son lease montre
   seulement que la dernière déclaration a expiré.
+
+La compatibilité Source/Control16 est un **raccord suivant obligatoire** pour
+le parcours commun fédération et egress. Ce profil refuse actuellement 16.
+Contrat sémantique/versionné explicite et qualifications logicielles/runtime
+sont requis ; aucun widening numérique ni qualification production globale
+ne découle de l'implémentation 14/15 actuelle.

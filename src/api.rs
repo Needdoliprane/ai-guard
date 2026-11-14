@@ -62,7 +62,7 @@ mod kubernetes_sessions;
 #[cfg(test)]
 mod kubernetes_tests;
 mod oidc;
-/// Proposed owned broker-supervision routes (`broker_supervision_owned_v1`).
+/// Proposed owned broker-supervision routes (`broker_supervision_owned_v2`).
 mod owned_brokers;
 #[cfg(test)]
 mod read_execution_tests;

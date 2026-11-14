@@ -2,14 +2,13 @@
 
 [Français](README.fr.md) · [Setup index](../README.md) · [Owned remote broker publisher](../federation-broker/README.md) · [Workload identities](../workloads/README.md) · [Adopt human sources](../human-sources-maintenance/README.md)
 
-> **Proposal, not admitted.** This guide describes the control side of the
-> proposed `broker_supervision_owned_v1` profile. Its code is delivered as
-> leaves on a development branch; the Root seams that declare and wire them
-> are documents that are **not applied**, and decisions D1 (offline identity
-> writer) and D2 (owned protocol) are still open. Compilation, formatting,
-> tests, QA, runtime, multi-host and provider runs are `NOT_RUN`. Every
-> command below is a **path to validate by Root**, with placeholders only. No
-> route, writer or publisher is active until Root admits it.
+> **Local integration candidate, not activated or qualified.** Root selected
+> offline Rust IdentityAuthority maintenance, the final closed
+> `broker_supervision_owned_v2` profile and journal version 2. Claude leaves and
+> their parent seams are composed; C3 adds exact rotation recovery before first
+> activation. Compilation, formatting, tests, QA, runtime, multi-host and
+> providers are `NOT_RUN` on this candidate. Procedures below contain
+> placeholders only. Root retains review, QA admission and activation.
 
 ## Scope
 
@@ -21,7 +20,7 @@ covers:
 - the offline broker identity lifecycle: `enroll`, `rotate`, `revoke`,
   `resume`, `status` (subcommands of `agentsandbox human-sources broker-identity`);
 - the trust model of the enrollment handoff;
-- the five closed owned supervision routes on the control transport;
+- the seven closed owned supervision routes on the control transport;
 - the owned human broker page on `GET /api/v1/human/owned/brokers` (API
   only: the dashboard does not display it yet);
 - diagnosis of the closed refusals, backup/restore and recovery.
@@ -38,15 +37,13 @@ empty list never proves zero activity.
 
 | Part | State |
 |---|---|
-| Shared contract `broker_supervision_owned_v1` (operations, bounds, subject, commitments, Pending/ACK, closed errors, enrollment) | Frozen proposal, common to control and publisher |
-| Store entries: identity, self view, heartbeat, checkpoint, checkpoint self view, owned human page | Code (proposal); needs seams A01–A06 |
-| Identity-authority writers: grant, revocation, broker binding issue/rotation/revocation | Code (proposal); used only by the offline maintenance |
-| API: candidate resolution, private broker proof, five routes, owned human handler | Code (proposal); needs seams A10–A15 |
-| Dashboard view of the owned human broker page (parser, states, proxy path) | Not implemented; the legacy dashboard page stays closed on an owned gateway |
-| Offline maintenance and `human-sources broker-identity` CLI | Code (proposal); needs seams A20–A22 |
-| Online identity writer, targeted index invalidation | Not implemented (decision D1 alternative) |
-| Superseding a blocked Pending after a binding change | Not implemented (open point D2-a) |
-| Compilation, tests, runtime, multi-host qualification | `NOT_RUN` |
+| Shared final contract v2 and journal v2 | Source integrated; strict old-profile refusal, no implicit v1 conversion |
+| Store/API routes, human page and offline IdentityAuthority lifecycle | Source composed; validation and activation pending |
+| Exact rotation reconciliation and funded append-only Superseded | Implemented candidate source; tests written, NOT_RUN |
+| Human read-profile selector | Owned broker v1 available; worker/federation explicitly unavailable, not permissions |
+| Dashboard integration | Separate frontend delivery; no browser qualification inferred here |
+| Online identity writer, targeted index invalidation | Not admitted; offline maintenance only |
+| Compilation, format, tests, runtime, multi-host qualification | NOT_RUN on this candidate |
 
 ## Prerequisites
 
@@ -84,7 +81,7 @@ directory:
 | File | Content |
 |---|---|
 | `bearer` | The secret and one newline, mode `0600`, created exclusively before the plan. |
-| `enrollment.json` | Public `OwnedBrokerEnrollmentV1`: profile, canonical gateway origin, closure revision at issuance, engaged subject, the single authority, lease, grant expiry, credential expiry, issue time and the audit receipts of the grant and the binding. No bearer, no digest. |
+| `enrollment.json` | Public `OwnedBrokerEnrollmentV2`: profile, canonical gateway origin, closure revision at issuance, engaged subject, the single authority, lease, grant expiry, credential expiry, issue time and the audit receipts of the grant and the binding. No bearer, no digest. |
 
 The handoff is built only from committed receipts, then cross-checked by
 authenticating the new bearer through the same scoped Store path as the
@@ -109,7 +106,7 @@ pinned field requires a new handoff and a new publisher journal.
 | Profile | Store format | Access |
 |---|---|---|
 | Legacy presence | 6–13 heartbeat, 12–13 checkpoint | Legacy routes, unchanged |
-| `broker_supervision_owned_v1` | Exactly 14 or 15, equal to the retained descriptor | Scoped owned routes only |
+| `broker_supervision_owned_v2` | Exactly 14 or 15, equal to the retained descriptor | Scoped owned routes only |
 
 No format is served by both profiles. A 14→15 migration changes a pin and
 requires a new enrollment. A gateway that does not serve the owned profile
@@ -229,12 +226,10 @@ holding a `pending.json` also holds an `ack.json` (a trailing empty `op-*`
 directory is not a Pending); otherwise a Pending is retained: restart the
 publisher with the gateway still serving until it is acknowledged, stop it
 again, or keep it and accept the blocked case below; (3) stop the gateway; (4) run `rotate`; (5) replace the
-bearer file; (6) start the gateway, then the publisher. A publisher Pending
-engaged under the previous binding revision stays blocked locally
-(`binding_revision`) without being sent; it is never replayed under another
-identity. Today that journal then needs a new
-enrollment (`enroll`, fresh incarnation) and new journals; a safe supersession
-of a provably uncommitted Pending is proposed to Root, not implemented.
+bearer file; (6) start the gateway, then the publisher. A retained publisher Pending is never replayed with a new identity/hash.
+The v2 recovery below keeps the original enrollment/journals, then either
+records the exact historical ACK or durably supersedes an exactly absent
+operation after the offline barrier. Conflict/unknown stays blocked.
 
 ## Revoke
 
@@ -321,6 +316,24 @@ gateway-root targets (after removal of `/control`):
 | heartbeat | `POST /api/v1/owned/brokers/heartbeats` | ≤ 4 KiB | ≤ 16 KiB |
 | checkpoint | `POST /api/v1/owned/brokers/checkpoints` | ≤ 36 KiB | ≤ 40 KiB |
 | checkpoint self view | `GET /api/v1/owned/brokers/checkpoints/self` | none | ≤ 40 KiB |
+| heartbeat reconciliation (read) | `POST /api/v1/owned/brokers/heartbeats/reconcile` | ≤ 96 KiB | ≤ 128 KiB |
+| checkpoint reconciliation (read) | `POST /api/v1/owned/brokers/checkpoints/reconcile` | ≤ 96 KiB | ≤ 128 KiB |
+
+Reconciliation authenticates the active current binding before the global
+operation-ID lookup, in the same checked source transaction as the exact
+binding history r→r+1, head and receipts. A current owner-incarnation receipt
+strictly after rotation proves the real exclusive reopen barrier. A different
+broker/type/hash at that ID is conflict, not absence. Missing/incomplete,
+unhealthy, redacted or stale reads never become NonCommitted.
+
+CommittedExact keeps the historical operation identity r and its receipt
+separate from observation r+1, with no business write or POST. NonCommitted
+requires exact global absence and the exact local predecessor; only then may
+the publisher fund and sync an append-only Superseded record containing one
+complete replacement/new UUID, same sequence/CAS and checkpoint snapshot.
+The normal mutation guard/replay stays exact. No v1 journal migration,
+remote-head adoption, credential revocation exception or new execution
+authority exists. See the [publisher recovery contract](../federation-broker/README.md#exact-recovery-across-a-rotation).
 
 Exact bytes only: no decoding, query, HEAD alias or prefix. The gate resolves
 the bearer in the complete startup candidate index (exactly one workload
@@ -484,9 +497,22 @@ they leave unused entries or break existing tests. The tests that Root adapts
 and runs, the decisions D1/D2 and the activation order belong to the
 integration, not to this guide.
 
+The human identity response announces optional `read_profiles` only for an
+actual owned gateway: broker_registry=`human_broker_registry_owned_v1`,
+worker_registry=`unavailable`, federation_registry=`unavailable`. Legacy omits
+this object. These closed values select protocols; ReadBrokerRegistry remains
+mandatory and revalidated. The complete worker/federation view is still an
+open product requirement; unavailable never means zero activity.
+
 ## Qualification
 
 `NOT_RUN`: compilation, formatting, Clippy, unit and integration tests, CLI
 runs, backup verification on real files, gateway start with the owned routes,
 publisher interoperability, multi-host, Docker/Podman/Kubernetes, providers,
 TLS and infrastructure. No production gate is closed by this guide.
+
+Source/Control16 compatibility is a **mandatory next integration** for the
+joint federation and egress path. This profile currently refuses 16. An
+explicit semantic/versioned compatibility contract and software/runtime
+qualification are required; no numeric widening or global production claim
+follows from the current 14/15 implementation.

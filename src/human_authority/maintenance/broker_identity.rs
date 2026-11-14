@@ -1,5 +1,5 @@
 //! Offline owned broker identity maintenance for the proposed
-//! `broker_supervision_owned_v1` profile (decision D1). Proposal submitted to
+//! `broker_supervision_owned_v2` profile (decision D1). Proposal submitted to
 //! Root: nothing here is admitted, activated or qualified.
 //!
 //! The caller opens the real owned union exactly as the gateway does and
@@ -41,9 +41,9 @@ use crate::{
         BrokerAuthorityV1, BrokerGrantMutationV1, BrokerMutationResultV1, BrokerRevocationV1,
         BrokerRuntimeKindV1, BrokerStateV1, format_time,
         owned_supervision::{
-            OWNED_SUPERVISION_PROFILE_V1, OWNED_SUPERVISION_VERSION_V1, OwnedBrokerEnrollmentV1,
-            OwnedBrokerSubjectV1, OwnedEnrollmentReceiptV1, OwnedSupervisionErrorCodeV1 as Code,
-            OwnedSupervisionPinsV1, canonical_gateway_origin,
+            OWNED_SUPERVISION_PROFILE_V2, OWNED_SUPERVISION_VERSION_V2, OwnedBrokerEnrollmentV2,
+            OwnedBrokerSubjectV2, OwnedEnrollmentReceiptV2, OwnedSupervisionErrorCodeV2 as Code,
+            OwnedSupervisionPinsV2, canonical_gateway_origin,
         },
         parse_time, registry_uuid,
     },
@@ -617,7 +617,7 @@ impl BrokerIdentityPlanV1 {
     ) -> Self {
         Self {
             version: PLAN_VERSION,
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
             command,
             plan_id: Uuid::new_v4(),
             source: PlanSourceV1::of(facts),
@@ -632,7 +632,7 @@ impl BrokerIdentityPlanV1 {
         let conflict = BrokerIdentityFailureV1::PlanConflict;
         check(
             self.version == PLAN_VERSION
-                && self.profile == OWNED_SUPERVISION_PROFILE_V1
+                && self.profile == OWNED_SUPERVISION_PROFILE_V2
                 && !self.plan_id.is_nil()
                 && registry_uuid(&self.broker_id).is_ok(),
             conflict,
@@ -1018,7 +1018,7 @@ impl PlanDirectory {
         save(&self.directory, &record_name(index), &bytes).map(|_| ())
     }
 
-    fn enrollment(&self) -> Checked<Option<OwnedBrokerEnrollmentV1>> {
+    fn enrollment(&self) -> Checked<Option<OwnedBrokerEnrollmentV2>> {
         let conflict = BrokerIdentityFailureV1::PlanConflict;
         let Some(file) = self
             .directory
@@ -1027,12 +1027,12 @@ impl PlanDirectory {
         else {
             return Ok(None);
         };
-        let enrollment: OwnedBrokerEnrollmentV1 = decode_exact(file.bytes())?;
+        let enrollment: OwnedBrokerEnrollmentV2 = decode_exact(file.bytes())?;
         enrollment.validate().map_err(|_| conflict)?;
         Ok(Some(enrollment))
     }
 
-    fn save_enrollment(&self, enrollment: &OwnedBrokerEnrollmentV1) -> Checked<()> {
+    fn save_enrollment(&self, enrollment: &OwnedBrokerEnrollmentV2) -> Checked<()> {
         let bytes =
             serde_json::to_vec(enrollment).map_err(|_| BrokerIdentityFailureV1::HandoffRefused)?;
         save(&self.directory, ENROLLMENT_FILE, &bytes).map(|_| ())
@@ -1150,7 +1150,7 @@ struct HandoffReportV1<'a> {
     files: &'static [&'static str],
     evidence_files: &'static [&'static str],
     enrollment_commitment: String,
-    subject: &'a OwnedBrokerSubjectV1,
+    subject: &'a OwnedBrokerSubjectV2,
     closure_revision: u64,
     grant_not_after: &'a str,
     credential_expires_at: &'a str,
@@ -1534,7 +1534,7 @@ impl BrokerIdentityMaintenance {
         };
         let report = StatusReportV1 {
             version: 1,
-            profile: OWNED_SUPERVISION_PROFILE_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2,
             command: "status",
             tenant_id: &request.tenant_id,
             broker_id: &broker_id,
@@ -1838,7 +1838,7 @@ impl BrokerIdentityMaintenance {
         selected: &Selected<'_>,
         directory: &PlanDirectory,
         receipts: &[StepReceiptV1],
-    ) -> Checked<OwnedBrokerEnrollmentV1> {
+    ) -> Checked<OwnedBrokerEnrollmentV2> {
         let refused = BrokerIdentityFailureV1::HandoffRefused;
         let plan = &directory.plan;
         let bearer = directory
@@ -1931,9 +1931,9 @@ impl BrokerIdentityMaintenance {
                 && row.expires_at == input.expires_at,
             refused,
         )?;
-        let enrollment = OwnedBrokerEnrollmentV1 {
-            profile: OWNED_SUPERVISION_PROFILE_V1.into(),
-            version: OWNED_SUPERVISION_VERSION_V1,
+        let enrollment = OwnedBrokerEnrollmentV2 {
+            profile: OWNED_SUPERVISION_PROFILE_V2.into(),
+            version: OWNED_SUPERVISION_VERSION_V2,
             gateway_origin: origin.to_owned(),
             closure_revision: identity.closure_revision,
             subject: identity.subject.clone(),
@@ -1942,19 +1942,19 @@ impl BrokerIdentityMaintenance {
             grant_not_after: broker.not_after.clone(),
             credential_expires_at: row.expires_at.clone(),
             issued_at: row.updated_at.clone(),
-            grant_receipt: OwnedEnrollmentReceiptV1 {
+            grant_receipt: OwnedEnrollmentReceiptV2 {
                 operation_id: grant.operation_id.clone(),
                 audit_seq: grant.audit_seq,
                 audit_hash: grant.audit_hash.clone(),
             },
-            binding_receipt: OwnedEnrollmentReceiptV1 {
+            binding_receipt: OwnedEnrollmentReceiptV2 {
                 operation_id: input.operation_id.clone(),
                 audit_seq: binding.audit_seq,
                 audit_hash: binding.audit_hash.clone(),
             },
         };
         enrollment.validate().map_err(|_| refused)?;
-        OwnedSupervisionPinsV1::from_enrollment(&enrollment).map_err(|_| refused)?;
+        OwnedSupervisionPinsV2::from_enrollment(&enrollment).map_err(|_| refused)?;
         let value = serde_json::to_value(&enrollment).map_err(|_| refused)?;
         check(!exposes(&value, bearer), refused)?;
         directory.save_enrollment(&enrollment)?;
@@ -1964,7 +1964,7 @@ impl BrokerIdentityMaintenance {
     fn report(
         &self,
         directory: &PlanDirectory,
-        enrollment: Option<&OwnedBrokerEnrollmentV1>,
+        enrollment: Option<&OwnedBrokerEnrollmentV2>,
     ) -> Checked<BrokerIdentityOutputV1> {
         let plan = &directory.plan;
         let handoff = match enrollment {
@@ -1985,7 +1985,7 @@ impl BrokerIdentityMaintenance {
         };
         let report = ReportV1 {
             version: 1,
-            profile: OWNED_SUPERVISION_PROFILE_V1,
+            profile: OWNED_SUPERVISION_PROFILE_V2,
             command: plan.command.name(),
             state: "complete",
             tenant_id: &plan.source.tenant_id,

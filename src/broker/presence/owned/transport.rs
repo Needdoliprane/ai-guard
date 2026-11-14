@@ -3,9 +3,9 @@
 //! selects them. A non-200 body is reduced to its closed classification.
 use super::*;
 use crate::broker_registry::owned_supervision::{
-    MAX_OWNED_ERROR_BYTES, OwnedBrokerCheckpointResultV1, OwnedBrokerCheckpointSelfViewV1,
-    OwnedBrokerHeartbeatResultV1, OwnedBrokerOperationV1, OwnedBrokerSelfViewV1,
-    OwnedCheckpointPendingV1, OwnedHeartbeatPendingV1, classify_remote_failure,
+    MAX_OWNED_ERROR_BYTES, OwnedBrokerCheckpointResultV2, OwnedBrokerCheckpointSelfViewV2,
+    OwnedBrokerHeartbeatResultV2, OwnedBrokerOperationV2, OwnedBrokerSelfViewV2,
+    OwnedCheckpointPendingV2, OwnedHeartbeatPendingV2, classify_remote_failure,
 };
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -14,6 +14,14 @@ pub(super) struct OwnedClient {
     http: http::Client,
 }
 impl OwnedClient {
+    pub(super) async fn reconcile(
+        &self, p: &PreparedOwnedPresence,
+        request: &crate::broker_registry::owned_supervision::OwnedReconciliationRequestV2,
+    ) -> Result<crate::broker_registry::owned_supervision::OwnedReconciliationResultV2> {
+        let bytes = serde_json::to_vec(request).map_err(|_| PresenceError::UnsafeState)?;
+        self.exchange(p, request.operation(), Some(bytes)).await
+    }
+
     pub(super) fn new(p: &PreparedOwnedPresence) -> Result<Self> {
         Ok(Self {
             http: http::Client::build(&p.scope.gateway, p.ca.as_ref(), &p.bearer)?,
@@ -23,7 +31,7 @@ impl OwnedClient {
     async fn exchange<T: DeserializeOwned>(
         &self,
         p: &PreparedOwnedPresence,
-        operation: OwnedBrokerOperationV1,
+        operation: OwnedBrokerOperationV2,
         request: Option<Vec<u8>>,
     ) -> Result<T> {
         let method = match operation.method() {
@@ -33,9 +41,9 @@ impl OwnedClient {
         };
         // Exact closed classification of the owned contract; a bodyless GET
         // never carries a body and a mutation always carries its request.
-        if OwnedBrokerOperationV1::classify(operation.method(), operation.path())
+        if OwnedBrokerOperationV2::classify(operation.method(), operation.path())
             != Some(operation)
-            || operation.mutating() != request.is_some()
+            || (operation.method() == "POST") != request.is_some()
         {
             return Err(PresenceError::Protocol);
         }
@@ -66,8 +74,8 @@ impl OwnedClient {
     pub(super) async fn self_view(
         &self,
         p: &PreparedOwnedPresence,
-    ) -> Result<OwnedBrokerSelfViewV1> {
-        self.exchange(p, OwnedBrokerOperationV1::SelfView, None)
+    ) -> Result<OwnedBrokerSelfViewV2> {
+        self.exchange(p, OwnedBrokerOperationV2::SelfView, None)
             .await
     }
 
@@ -75,8 +83,8 @@ impl OwnedClient {
     pub(super) async fn checkpoint_self(
         &self,
         p: &PreparedOwnedPresence,
-    ) -> Result<OwnedBrokerCheckpointSelfViewV1> {
-        self.exchange(p, OwnedBrokerOperationV1::CheckpointSelf, None)
+    ) -> Result<OwnedBrokerCheckpointSelfViewV2> {
+        self.exchange(p, OwnedBrokerOperationV2::CheckpointSelf, None)
             .await
     }
 
@@ -84,20 +92,20 @@ impl OwnedClient {
     pub(super) async fn heartbeat(
         &self,
         p: &PreparedOwnedPresence,
-        pending: &OwnedHeartbeatPendingV1,
-    ) -> Result<OwnedBrokerHeartbeatResultV1> {
+        pending: &OwnedHeartbeatPendingV2,
+    ) -> Result<OwnedBrokerHeartbeatResultV2> {
         let body = serde_json::to_vec(&pending.request()).map_err(|_| PresenceError::Protocol)?;
-        self.exchange(p, OwnedBrokerOperationV1::Heartbeat, Some(body))
+        self.exchange(p, OwnedBrokerOperationV2::Heartbeat, Some(body))
             .await
     }
 
     pub(super) async fn checkpoint(
         &self,
         p: &PreparedOwnedPresence,
-        pending: &OwnedCheckpointPendingV1,
-    ) -> Result<OwnedBrokerCheckpointResultV1> {
+        pending: &OwnedCheckpointPendingV2,
+    ) -> Result<OwnedBrokerCheckpointResultV2> {
         let body = serde_json::to_vec(&pending.request()).map_err(|_| PresenceError::Protocol)?;
-        self.exchange(p, OwnedBrokerOperationV1::Checkpoint, Some(body))
+        self.exchange(p, OwnedBrokerOperationV2::Checkpoint, Some(body))
             .await
     }
 }

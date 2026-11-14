@@ -124,6 +124,12 @@ pub(super) struct SourceIncarnationV1 {
     previous_hash: String,
 }
 impl SourceIncarnationV1 {
+    /// Descriptive identity from a verified historical incarnation record.
+    /// It is neither an owner token nor a constructor of retained authority.
+    pub(super) fn owner_incarnation(&self) -> uuid::Uuid {
+        self.owner_incarnation
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         exact(
             self.version == 1

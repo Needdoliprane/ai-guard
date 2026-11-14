@@ -1,5 +1,5 @@
 //! Owned checkpoint persistence and self views for the proposed
-//! `broker_supervision_owned_v1` profile. The owned guard admits exactly the
+//! `broker_supervision_owned_v2` profile. The owned guard admits exactly the
 //! retained descriptor format (14 or 15) on a scoped transaction; the legacy
 //! `checkpoint::require_schema12` lane (12|13, unscoped) is neither consulted
 //! nor widened. A checkpoint stays a `DeclaredPartial` list of at most 100
@@ -13,8 +13,8 @@ use crate::{
         owned_check,
     },
     broker_registry::owned_supervision::{
-        OwnedBrokerCheckpointRequestV1, OwnedBrokerCheckpointResultV1,
-        OwnedBrokerCheckpointSelfViewV1, OwnedChecked, OwnedSupervisionErrorCodeV1 as Code,
+        OwnedBrokerCheckpointRequestV2, OwnedBrokerCheckpointResultV2,
+        OwnedBrokerCheckpointSelfViewV2, OwnedChecked, OwnedSupervisionErrorCodeV2 as Code,
     },
 };
 
@@ -140,8 +140,8 @@ impl Store {
         window: &OwnedBrokerWindow<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-        request: &OwnedBrokerCheckpointRequestV1,
-    ) -> OwnedChecked<OwnedBrokerCheckpointResultV1> {
+        request: &OwnedBrokerCheckpointRequestV2,
+    ) -> OwnedChecked<OwnedBrokerCheckpointResultV2> {
         request.validate()?;
         let change = Change::Checkpoint {
             identity: IdentityEvidence::capture(identity),
@@ -168,7 +168,7 @@ impl Store {
                 receipt: mutation.receipt,
                 replayed: mutation.replayed,
             };
-            let value = OwnedBrokerCheckpointResultV1::new(
+            let value = OwnedBrokerCheckpointResultV2::new(
                 current.identity,
                 commitments.operation_commitment,
                 result,
@@ -188,7 +188,7 @@ impl Store {
         window: &OwnedBrokerWindow<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-    ) -> OwnedChecked<OwnedBrokerCheckpointSelfViewV1> {
+    ) -> OwnedChecked<OwnedBrokerCheckpointSelfViewV2> {
         let proof = OwnedProof::Windowed(window, identity);
         self.owned_business(access, &proof, false, |tx, clock| {
             let fail = |error: anyhow::Error| classify(self, &error);
@@ -208,7 +208,7 @@ impl Store {
                     .map_err(fail)?,
                 checkpoint,
             };
-            let value = OwnedBrokerCheckpointSelfViewV1::new(current.identity, view)
+            let value = OwnedBrokerCheckpointSelfViewV2::new(current.identity, view)
                 .map_err(|_| Code::ResponseUnpublishable)?;
             self.owned_public(&value)?;
             Ok(value)

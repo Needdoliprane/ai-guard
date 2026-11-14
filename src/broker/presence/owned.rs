@@ -1,5 +1,5 @@
 //! Owned broker-supervision publisher of the proposed
-//! `broker_supervision_owned_v1` profile, on the existing protected presence
+//! `broker_supervision_owned_v2` profile, on the existing protected presence
 //! transport. **Proposal submitted to Root, not an admitted interface.**
 //!
 //! Selection is explicit: only a configuration naming that exact profile loads
@@ -21,10 +21,10 @@ use crate::{
     broker_registry::{
         BrokerAuthorityV1, BrokerCheckpointSnapshotV1,
         owned_supervision::{
-            MAX_OWNED_ENROLLMENT_BYTES, OWNED_SUPERVISION_PROFILE_V1, OWNED_SUPERVISION_VERSION_V1,
-            OwnedAckRejectionV1, OwnedBrokerEnrollmentV1, OwnedBrokerIdentityViewV1,
-            OwnedBrokerSubjectV1, OwnedHandshakeRejectionV1, OwnedIncompatibilityV1,
-            OwnedRemoteFailureV1, OwnedSupervisionErrorCodeV1, OwnedSupervisionPinsV1,
+            MAX_OWNED_ENROLLMENT_BYTES, OWNED_SUPERVISION_PROFILE_V2, OWNED_SUPERVISION_VERSION_V2,
+            OwnedAckRejectionV2, OwnedBrokerEnrollmentV2, OwnedBrokerIdentityViewV2,
+            OwnedBrokerSubjectV2, OwnedHandshakeRejectionV2, OwnedIncompatibilityV2,
+            OwnedRemoteFailureV2, OwnedSupervisionErrorCodeV2, OwnedSupervisionPinsV2,
         },
     },
     control_fs::{Directory, PrivateFile},
@@ -55,15 +55,15 @@ mod transport;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OwnedPresenceBlock {
     /// Classified non-200 control response; its remote prose is never kept.
-    Remote(OwnedRemoteFailureV1),
+    Remote(OwnedRemoteFailureV2),
     /// The authenticated self view refused the pinned enrollment handshake.
-    Handshake(OwnedHandshakeRejectionV1),
+    Handshake(OwnedHandshakeRejectionV2),
     /// The engaged identity cannot replay or progress this journal.
-    Identity(OwnedIncompatibilityV1),
+    Identity(OwnedIncompatibilityV2),
     /// A positive response or self-read does not acknowledge the Pending.
-    Acknowledgement(OwnedAckRejectionV1),
+    Acknowledgement(OwnedAckRejectionV2),
     /// The shared contract refused to prepare or revalidate the operation.
-    Contract(OwnedSupervisionErrorCodeV1),
+    Contract(OwnedSupervisionErrorCodeV2),
     /// The control already holds a head of this incarnation that this journal
     /// never acknowledged; a remote head is never adopted.
     RemoteHeadWithoutHistory,
@@ -86,9 +86,9 @@ impl OwnedPresenceBlock {
     }
 
     fn detail(self) -> &'static str {
-        use OwnedAckRejectionV1 as Ack;
-        use OwnedHandshakeRejectionV1 as Handshake;
-        use OwnedRemoteFailureV1 as Remote;
+        use OwnedAckRejectionV2 as Ack;
+        use OwnedHandshakeRejectionV2 as Handshake;
+        use OwnedRemoteFailureV2 as Remote;
         match self {
             Self::Remote(Remote::Owned(code)) | Self::Contract(code) => code.code(),
             Self::Remote(Remote::TransportOutcomeUnknown) => "transport_outcome_unknown",
@@ -118,8 +118,8 @@ impl OwnedPresenceBlock {
 
     /// Fixed operator guidance; never a request value, remote prose or secret.
     fn operator_action(self) -> &'static str {
-        use OwnedHandshakeRejectionV1 as Handshake;
-        use OwnedRemoteFailureV1 as Remote;
+        use OwnedHandshakeRejectionV2 as Handshake;
+        use OwnedRemoteFailureV2 as Remote;
         match self {
             Self::Remote(Remote::Owned(code)) | Self::Contract(code) => code.message(),
             Self::Remote(Remote::TransportOutcomeUnknown) => {
@@ -175,8 +175,8 @@ impl OwnedPresenceBlock {
             }
             Self::ForeignJournal => {
                 "The journal directory belongs to another profile, journal, enrollment \
-                 or scope; configure an empty private directory. The existing directory \
-                 is kept untouched."
+                 or scope; restore the matching original enrollment/journal or enroll a new \
+                 incarnation with new journals. The existing evidence is kept untouched."
             }
         }
     }
@@ -196,16 +196,16 @@ impl fmt::Display for OwnedPresenceBlock {
 fn block(reason: OwnedPresenceBlock) -> PresenceError {
     PresenceError::Owned(reason)
 }
-fn identity(reason: OwnedIncompatibilityV1) -> PresenceError {
+fn identity(reason: OwnedIncompatibilityV2) -> PresenceError {
     block(OwnedPresenceBlock::Identity(reason))
 }
-fn handshake(reason: OwnedHandshakeRejectionV1) -> PresenceError {
+fn handshake(reason: OwnedHandshakeRejectionV2) -> PresenceError {
     block(OwnedPresenceBlock::Handshake(reason))
 }
-fn acknowledgement(reason: OwnedAckRejectionV1) -> PresenceError {
+fn acknowledgement(reason: OwnedAckRejectionV2) -> PresenceError {
     block(OwnedPresenceBlock::Acknowledgement(reason))
 }
-fn contract(code: OwnedSupervisionErrorCodeV1) -> PresenceError {
+fn contract(code: OwnedSupervisionErrorCodeV2) -> PresenceError {
     block(OwnedPresenceBlock::Contract(code))
 }
 
@@ -214,7 +214,7 @@ fn contract(code: OwnedSupervisionErrorCodeV1) -> PresenceError {
 /// loader refuses unknown keys. Identity fields come only from the enrollment.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OwnedPresenceConfigV1 {
+struct OwnedPresenceConfigV2 {
     profile: String,
     version: u32,
     enrollment_file: PathBuf,
@@ -223,19 +223,19 @@ struct OwnedPresenceConfigV1 {
     ca_bundle_file: Option<PathBuf>,
     #[serde(default = "super::interval_default")]
     interval_seconds: u32,
-    heartbeat_journal: OwnedJournalConfigV1,
+    heartbeat_journal: OwnedJournalConfigV2,
     #[serde(default)]
-    checkpoint_journal: Option<OwnedJournalConfigV1>,
+    checkpoint_journal: Option<OwnedJournalConfigV2>,
 }
 /// Bounds of one private owned journal. No capacity is assumed by default.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OwnedJournalConfigV1 {
+struct OwnedJournalConfigV2 {
     state_dir: PathBuf,
     max_operations: u32,
     max_state_bytes: u64,
 }
-impl OwnedJournalConfigV1 {
+impl OwnedJournalConfigV2 {
     fn limits<K: journal::Kind>(&self) -> Result<journal::JournalLimits> {
         if !(1..=journal::MAX_JOURNAL_OPERATIONS).contains(&self.max_operations)
             || self.max_state_bytes < journal::minimum_bytes::<K>()
@@ -249,10 +249,10 @@ impl OwnedJournalConfigV1 {
         })
     }
 }
-impl OwnedPresenceConfigV1 {
+impl OwnedPresenceConfigV2 {
     fn validate(&self) -> Result<()> {
-        if self.profile != OWNED_SUPERVISION_PROFILE_V1
-            || self.version != OWNED_SUPERVISION_VERSION_V1
+        if self.profile != OWNED_SUPERVISION_PROFILE_V2
+            || self.version != OWNED_SUPERVISION_VERSION_V2
             || !(5..=150).contains(&self.interval_seconds)
         {
             return Err(PresenceError::InvalidConfig);
@@ -269,8 +269,8 @@ impl OwnedPresenceConfigV1 {
 
 pub(crate) struct PreparedOwnedPresence {
     scope: PresenceScope,
-    config: OwnedPresenceConfigV1,
-    pins: OwnedSupervisionPinsV1,
+    config: OwnedPresenceConfigV2,
+    pins: OwnedSupervisionPinsV2,
     source: PrivateFile,
     enrollment: PrivateFile,
     files: Vec<PrivateFile>,
@@ -280,8 +280,9 @@ pub(crate) struct PreparedOwnedPresence {
     bearer: String,
     secrets: Vec<String>,
     ca: Option<PrivateFile>,
-    /// Highest closure revision observed by this process; never persisted.
+    /// Process-wide maxima, initialized from the durable journal observations.
     closure_floor: AtomicU64,
+    binding_floor: AtomicU64,
     heartbeat: Option<journal::Journal<heartbeat::HeartbeatJournal>>,
     checkpoint: Option<journal::Journal<checkpoint::CheckpointJournal>>,
 }
@@ -301,7 +302,7 @@ impl PreparedOwnedPresence {
         normalized(path)?;
         let source =
             PrivateFile::open(path, RECORD_BYTES).map_err(|_| PresenceError::InvalidConfig)?;
-        let config: OwnedPresenceConfigV1 =
+        let config: OwnedPresenceConfigV2 =
             serde_json::from_slice(source.bytes()).map_err(|_| PresenceError::InvalidConfig)?;
         config.validate()?;
         let origin = admit_scope(&mut scope)?;
@@ -324,9 +325,9 @@ impl PreparedOwnedPresence {
         let enrollment_file =
             PrivateFile::open(&config.enrollment_file, MAX_OWNED_ENROLLMENT_BYTES as u64)
                 .map_err(|_| PresenceError::InvalidConfig)?;
-        let enrollment: OwnedBrokerEnrollmentV1 = serde_json::from_slice(enrollment_file.bytes())
+        let enrollment: OwnedBrokerEnrollmentV2 = serde_json::from_slice(enrollment_file.bytes())
             .map_err(|_| PresenceError::InvalidConfig)?;
-        let pins = OwnedSupervisionPinsV1::from_enrollment(&enrollment)
+        let pins = OwnedSupervisionPinsV2::from_enrollment(&enrollment)
             .map_err(|_| PresenceError::InvalidConfig)?;
         // `scope.installation_id` is the broker's installation; the subject's
         // installation is the control closure's. They are never compared.
@@ -378,6 +379,7 @@ impl PreparedOwnedPresence {
             }
         }
         let closure_floor = AtomicU64::new(pins.minimum_closure_revision);
+        let binding_floor = AtomicU64::new(pins.enrolled.binding_revision);
         let mut prepared = Self {
             scope,
             config,
@@ -392,6 +394,7 @@ impl PreparedOwnedPresence {
             secrets: known_secrets,
             ca,
             closure_floor,
+            binding_floor,
             heartbeat: None,
             checkpoint: None,
         };
@@ -455,6 +458,14 @@ impl PreparedOwnedPresence {
         };
         self.heartbeat = Some(heartbeat);
         self.checkpoint = checkpoint;
+        let head = self.heartbeat_journal()?.cached_head()?;
+        self.binding_floor.fetch_max(head.binding_floor, Ordering::SeqCst);
+        self.closure_floor.fetch_max(head.closure_floor, Ordering::SeqCst);
+        if let Some(journal) = &self.checkpoint {
+            let head = journal.cached_head()?;
+            self.binding_floor.fetch_max(head.binding_floor, Ordering::SeqCst);
+            self.closure_floor.fetch_max(head.closure_floor, Ordering::SeqCst);
+        }
         Ok(())
     }
 
@@ -557,7 +568,7 @@ impl PreparedOwnedPresence {
     }
     /// The enrolled public subject, so the service can refuse two local
     /// publishers of one broker. It is never a credential or an authority.
-    pub(crate) fn enrolled(&self) -> &OwnedBrokerSubjectV1 {
+    pub(crate) fn enrolled(&self) -> &OwnedBrokerSubjectV2 {
         &self.pins.enrolled
     }
     pub(crate) fn publication_interval(&self) -> Duration {
@@ -604,12 +615,16 @@ impl PreparedOwnedPresence {
 
     /// Closure revisions are observed: they may advance, never regress, during
     /// this run. Journal records enforce the same rule across restarts.
-    fn observe_closure(&self, view: &OwnedBrokerIdentityViewV1) -> Result<()> {
+    fn observe_closure(&self, view: &OwnedBrokerIdentityViewV2) -> Result<()> {
+        let binding = self.binding_floor.fetch_max(view.subject.binding_revision, Ordering::SeqCst);
+        if view.subject.binding_revision < binding {
+            return Err(identity(OwnedIncompatibilityV2::BindingRegression));
+        }
         let floor = self
             .closure_floor
             .fetch_max(view.closure_revision, Ordering::SeqCst);
         if view.closure_revision < floor {
-            return Err(identity(OwnedIncompatibilityV1::ClosureRegression));
+            return Err(identity(OwnedIncompatibilityV2::ClosureRegression));
         }
         Ok(())
     }
@@ -705,7 +720,7 @@ pub(crate) fn load_selected(
     match value.get("profile") {
         None => PreparedPresence::load(path, scope, known_secrets)
             .map(|prepared| SelectedPresence::Legacy(Box::new(prepared))),
-        Some(Value::String(profile)) if profile == OWNED_SUPERVISION_PROFILE_V1 => {
+        Some(Value::String(profile)) if profile == OWNED_SUPERVISION_PROFILE_V2 => {
             PreparedOwnedPresence::load(path, scope, known_secrets)
                 .map(|prepared| SelectedPresence::Owned(Box::new(prepared)))
         }

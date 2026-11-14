@@ -1,5 +1,5 @@
 //! Service integration of the proposed owned broker-supervision publisher
-//! (`broker_supervision_owned_v1`). **Proposal submitted to Root, not an
+//! (`broker_supervision_owned_v2`). **Proposal submitted to Root, not an
 //! admitted interface.**
 //!
 //! Each profile's presence file selects its profile explicitly through

@@ -1,5 +1,5 @@
 //! Private owned broker-supervision proof for the proposed
-//! `broker_supervision_owned_v1` profile (proposal submitted to Root).
+//! `broker_supervision_owned_v2` profile (proposal submitted to Root).
 //!
 //! `authenticate` is called only by the control transport gate, after its
 //! exact owned broker target classification and before the presence permit
@@ -33,10 +33,11 @@ use crate::{
     broker_registry::{
         BrokerIdentityV1,
         owned_supervision::{
-            OwnedBrokerCheckpointRequestV1, OwnedBrokerCheckpointResultV1,
-            OwnedBrokerCheckpointSelfViewV1, OwnedBrokerHeartbeatRequestV1,
-            OwnedBrokerHeartbeatResultV1, OwnedBrokerIdentityViewV1, OwnedBrokerOperationV1,
-            OwnedBrokerSelfViewV1, OwnedChecked, OwnedSupervisionErrorCodeV1 as Code,
+            OwnedBrokerCheckpointRequestV2, OwnedBrokerCheckpointResultV2,
+            OwnedBrokerCheckpointSelfViewV2, OwnedBrokerHeartbeatRequestV2,
+            OwnedBrokerHeartbeatResultV2, OwnedBrokerIdentityViewV2, OwnedBrokerOperationV2,
+            OwnedBrokerSelfViewV2, OwnedChecked, OwnedSupervisionErrorCodeV2 as Code,
+            OwnedReconciliationRequestV2, OwnedReconciliationResultV2,
         },
     },
     redaction::Redactor,
@@ -77,7 +78,7 @@ pub(in crate::api) struct OwnedBrokerSupervisionIdentity {
 /// by the gate's route classification and the tenant's presence permit.
 pub(in crate::api) struct OwnedBrokerSupervisionWork {
     identity: OwnedBrokerSupervisionIdentity,
-    operation: OwnedBrokerOperationV1,
+    operation: OwnedBrokerOperationV2,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -198,7 +199,7 @@ impl OwnedBrokerSupervisionIdentity {
 
     pub(in crate::api) fn accept(
         self,
-        operation: OwnedBrokerOperationV1,
+        operation: OwnedBrokerOperationV2,
         permit: OwnedSemaphorePermit,
     ) -> OwnedBrokerSupervisionWork {
         OwnedBrokerSupervisionWork {
@@ -254,8 +255,16 @@ impl OwnedBrokerSupervisionIdentity {
 }
 
 impl OwnedBrokerSupervisionWork {
+    pub(in crate::api) async fn reconcile(
+        self: Arc<Self>, request: OwnedReconciliationRequestV2,
+    ) -> OwnedChecked<OwnedReconciliationResultV2> {
+        self.run(request.operation(), move |store, access, window, facts, broker| {
+            store.owned_broker_reconcile(access, window, facts, broker, &request)
+        }).await
+    }
+
     /// Operation chosen by the transport gate's exact route classification.
-    pub(in crate::api) fn operation(&self) -> OwnedBrokerOperationV1 {
+    pub(in crate::api) fn operation(&self) -> OwnedBrokerOperationV2 {
         self.operation
     }
 
@@ -263,7 +272,7 @@ impl OwnedBrokerSupervisionWork {
     /// and therefore the permit and the accepted usage until it completes.
     async fn run<T, F>(
         self: Arc<Self>,
-        expected: OwnedBrokerOperationV1,
+        expected: OwnedBrokerOperationV2,
         target: F,
     ) -> OwnedChecked<T>
     where
@@ -307,15 +316,15 @@ impl OwnedBrokerSupervisionWork {
 
     pub(in crate::api) async fn identity(
         self: Arc<Self>,
-    ) -> OwnedChecked<OwnedBrokerIdentityViewV1> {
-        self.run(OwnedBrokerOperationV1::Identity, |store, access, window, facts, broker| {
+    ) -> OwnedChecked<OwnedBrokerIdentityViewV2> {
+        self.run(OwnedBrokerOperationV2::Identity, |store, access, window, facts, broker| {
             store.owned_window_identity(access, window, facts, broker)
         })
         .await
     }
 
-    pub(in crate::api) async fn self_view(self: Arc<Self>) -> OwnedChecked<OwnedBrokerSelfViewV1> {
-        self.run(OwnedBrokerOperationV1::SelfView, |store, access, window, facts, broker| {
+    pub(in crate::api) async fn self_view(self: Arc<Self>) -> OwnedChecked<OwnedBrokerSelfViewV2> {
+        self.run(OwnedBrokerOperationV2::SelfView, |store, access, window, facts, broker| {
             store.owned_broker_self_view(access, window, facts, broker)
         })
         .await
@@ -323,9 +332,9 @@ impl OwnedBrokerSupervisionWork {
 
     pub(in crate::api) async fn heartbeat(
         self: Arc<Self>,
-        request: OwnedBrokerHeartbeatRequestV1,
-    ) -> OwnedChecked<OwnedBrokerHeartbeatResultV1> {
-        self.run(OwnedBrokerOperationV1::Heartbeat, move |store, access, window, facts, broker| {
+        request: OwnedBrokerHeartbeatRequestV2,
+    ) -> OwnedChecked<OwnedBrokerHeartbeatResultV2> {
+        self.run(OwnedBrokerOperationV2::Heartbeat, move |store, access, window, facts, broker| {
             store.owned_broker_heartbeat(access, window, facts, broker, &request)
         })
         .await
@@ -333,9 +342,9 @@ impl OwnedBrokerSupervisionWork {
 
     pub(in crate::api) async fn checkpoint(
         self: Arc<Self>,
-        request: OwnedBrokerCheckpointRequestV1,
-    ) -> OwnedChecked<OwnedBrokerCheckpointResultV1> {
-        self.run(OwnedBrokerOperationV1::Checkpoint, move |store, access, window, facts, broker| {
+        request: OwnedBrokerCheckpointRequestV2,
+    ) -> OwnedChecked<OwnedBrokerCheckpointResultV2> {
+        self.run(OwnedBrokerOperationV2::Checkpoint, move |store, access, window, facts, broker| {
             store.owned_broker_checkpoint(access, window, facts, broker, &request)
         })
         .await
@@ -343,8 +352,8 @@ impl OwnedBrokerSupervisionWork {
 
     pub(in crate::api) async fn checkpoint_self(
         self: Arc<Self>,
-    ) -> OwnedChecked<OwnedBrokerCheckpointSelfViewV1> {
-        self.run(OwnedBrokerOperationV1::CheckpointSelf, |store, access, window, facts, broker| {
+    ) -> OwnedChecked<OwnedBrokerCheckpointSelfViewV2> {
+        self.run(OwnedBrokerOperationV2::CheckpointSelf, |store, access, window, facts, broker| {
             store.owned_broker_checkpoint_self(access, window, facts, broker)
         })
         .await

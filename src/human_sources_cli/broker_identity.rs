@@ -1,5 +1,5 @@
 //! `human-sources broker-identity`: offline owned broker identity maintenance
-//! for the proposed `broker_supervision_owned_v1` profile (decision D1).
+//! for the proposed `broker_supervision_owned_v2` profile (decision D1).
 //! Proposal submitted to Root: not admitted, activated or qualified.
 //!
 //! Every subcommand opens the real owned union exactly as the gateway does,

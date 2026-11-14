@@ -11,6 +11,7 @@ pub(super) mod federation;
 /// These local declarations shadow the glob-imported shared contract module.
 pub(super) mod owned_checkpoint;
 pub(super) mod owned_supervision;
+mod owned_reconciliation;
 
 pub(super) const SCHEMA: [(&str, &str, &str); 6] = [
     (

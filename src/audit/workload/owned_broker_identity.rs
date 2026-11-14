@@ -1,5 +1,5 @@
 //! Owned broker binding writers and status reads for the proposed
-//! `broker_supervision_owned_v1` profile.
+//! `broker_supervision_owned_v2` profile.
 //!
 //! Writers run under a real write epoch of the retained tenant source and an
 //! `IdentityAuthority` transaction; `require_identity_authority` precedes any
@@ -40,6 +40,83 @@ const MAX_HISTORY_PAGE: u32 = 100;
 /// SQLite companions that must be absent next to a backup main file.
 const BACKUP_SIDECARS: [&str; 3] = ["-wal", "-journal", "-shm"];
 const BACKUP_READ_CHUNK: usize = 64 * 1024;
+
+/// Same-transaction proof of the exact active r -> r+1 rotation. Called only
+/// after the current bearer/source/grant were revalidated by the owned job.
+/// Historical digests stay private and are never returned as authority.
+pub(in crate::audit) fn checked_rotation_fence(
+    tx: &CheckedTransaction<'_>,
+    source: &OwnedSourceToken,
+    original: &crate::broker_registry::owned_supervision::OwnedBrokerIdentityViewV2,
+    current: &crate::broker_registry::owned_supervision::OwnedBrokerIdentityViewV2,
+) -> anyhow::Result<crate::broker_registry::owned_supervision::OwnedBindingRotationFenceV2> {
+    use crate::broker_registry::owned_supervision::OwnedBindingRotationFenceV2;
+    tx.require_business_access()?;
+    require_checked_schema(tx)?;
+    let old = original.subject.binding_revision;
+    workload_conflict(old.checked_add(1) == Some(current.subject.binding_revision))?;
+    let credential = &current.subject.credential_id;
+    let read = |revision: u64| -> anyhow::Result<(WorkloadBinding, i64)> {
+        let (json, seq): (String, i64) = tx.query_row(
+            "SELECT payload_json,event_seq FROM workload_binding_history WHERE credential_id=?1 AND revision=?2",
+            params![credential, i64::try_from(revision)?], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok((serde_json::from_str(&json)?, seq))
+    };
+    let (previous, previous_seq) = read(old)?;
+    let (rotated, seq) = read(current.subject.binding_revision)?;
+    let live = load_binding(tx, credential)?.ok_or(WorkloadFailureV1::Conflict)?;
+    let expected = WorkloadSubjectV1::Broker {
+        broker_id: current.subject.broker_id.clone(), incarnation_id: current.subject.incarnation_id.clone(),
+    };
+    workload_conflict(previous.credential_id == *credential && rotated.credential_id == *credential
+        && previous.revision == old && rotated.revision == current.subject.binding_revision
+        && previous.subject == expected && rotated.subject == expected && live == rotated
+        && !previous.revoked && !rotated.revoked && previous_seq < seq
+        && previous.sha256_digest != rotated.sha256_digest)?;
+    let stored = tx.query_row("SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE seq=?1", [seq], row_event)?;
+    let record: Record = serde_json::from_value(stored.event.data.clone())?;
+    workload_conflict(record.version == 1 && record.change.kind() == stored.event.kind
+        && record.input_hash == record.change.input_hash()?)?;
+    let Change::Issue { input } = &record.change else { return Err(WorkloadFailureV1::Conflict.into()); };
+    workload_conflict(input.credential_id == *credential && input.expected_revision == old
+        && input.subject == expected && input.sha256_digest == rotated.sha256_digest
+        && parse_time(&record.received_at)? < parse_time(&previous.expires_at)?)?;
+    let recorded = replay(tx, &record.change)?.ok_or(WorkloadFailureV1::Conflict)?;
+    workload_conflict(recorded.revision == rotated.revision && recorded.audit_seq == seq
+        && recorded.audit_hash == stored.hash)?;
+    // require_business_access above already compared the real connection's
+    // complete authority replay to its retained snapshot/projection. Read
+    // that checked singleton now, not a metadata cache or a second full scan.
+    let json: String = tx.query_row(
+        "SELECT snapshot_json FROM review_authority_meta WHERE singleton=1", [], |row| row.get(0))?;
+    workload_valid(json.len() <= 64 * 1024)?;
+    let snapshot: crate::audit::review_authority::AuthoritySnapshot = serde_json::from_str(&json)?;
+    workload_conflict(snapshot.anchor.source_id == source.source_id()
+        && snapshot.anchor.source_id.to_string() == current.subject.source_id
+        && snapshot.anchor.installation_id.to_string() == current.subject.installation_id
+        && snapshot.anchor.durable_namespace_id.to_string() == current.subject.control_namespace_uuid
+        && snapshot.anchor.tenant_id == current.subject.tenant_id
+        && snapshot.anchor.tenant_id == tx.origin.tenant_id)?;
+    snapshot.require_current_incarnation_for_startup(source)?;
+    let incarnation = snapshot.incarnation_receipt().ok_or(WorkloadFailureV1::Conflict)?;
+    workload_conflict(incarnation.seq > recorded.audit_seq)?;
+    let before = tx.query_row(
+        "SELECT seq,received_at,prev_hash,hash,payload FROM events WHERE kind=?1 AND seq<?2 ORDER BY seq DESC LIMIT 1",
+        params![crate::audit::review_authority::INCARNATION_KIND, recorded.audit_seq], row_event)?;
+    let record: crate::audit::review_authority::AuthorityRecordV1 = serde_json::from_value(before.event.data.clone())?;
+    let crate::audit::review_authority::AuthorityRecordV1::Incarnation(previous_incarnation) = record
+        else { return Err(WorkloadFailureV1::Conflict.into()); };
+    workload_conflict(previous_incarnation.owner_incarnation() != source.incarnation())?;
+    let fence = OwnedBindingRotationFenceV2 {
+        previous_revision: old, receipt: recorded,
+        owner_incarnation: source.incarnation().to_string(),
+        previous_owner_incarnation: previous_incarnation.owner_incarnation().to_string(),
+        previous_incarnation_seq: before.seq, previous_incarnation_hash: before.hash,
+        incarnation_seq: incarnation.seq, incarnation_hash: incarnation.hash.clone(),
+    };
+    fence.validate_for(original, current)?;
+    Ok(fence)
+}
 
 /// Closed step of an owned broker binding issuance. The step is selected by
 /// the trusted maintenance plan, never by the stored state, and is checked

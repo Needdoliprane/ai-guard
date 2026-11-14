@@ -2,7 +2,7 @@
 //! Existing handlers authenticate/revalidate again at their normal boundaries.
 use super::*;
 use crate::{
-    broker_registry::owned_supervision::OwnedBrokerOperationV1,
+    broker_registry::owned_supervision::OwnedBrokerOperationV2,
     control_transport::{ControlRouteIdentity, control_query, control_route},
 };
 use axum::{body::HttpBody, extract::FromRequestParts};
@@ -65,9 +65,9 @@ pub(super) fn owned_protocol_request(request: &Request) -> bool {
 
 /// Produced only here after owned authentication and presence admission.
 #[derive(Clone, Copy)]
-pub(super) struct OwnedBrokerRoute(OwnedBrokerOperationV1);
+pub(super) struct OwnedBrokerRoute(OwnedBrokerOperationV2);
 impl OwnedBrokerRoute {
-    pub(super) fn operation(self) -> OwnedBrokerOperationV1 {
+    pub(super) fn operation(self) -> OwnedBrokerOperationV2 {
         self.0
     }
 }
@@ -171,7 +171,7 @@ async fn read_body(body: Body, max_body: usize) -> Result<Vec<u8>, Response> {
 
 async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -> Response {
     let owned_broker =
-        OwnedBrokerOperationV1::classify(request.method().as_str(), request.uri().path());
+        OwnedBrokerOperationV2::classify(request.method().as_str(), request.uri().path());
     if owned_broker.is_some() && state.owned_human.is_none() {
         return refused(
             StatusCode::NOT_FOUND,
@@ -193,6 +193,8 @@ async fn gate(State(state): State<GatewayState>, request: Request, next: Next) -
     }
     let max_body = if policy_route {
         crate::control::egress_policy::REQUEST_BYTES
+    } else if let Some(operation) = owned_broker {
+        operation.request_limit()
     } else {
         MAX_BODY
     };

@@ -3,7 +3,7 @@
 //! retried only according to its closed retry class at a bounded cadence.
 use super::*;
 use crate::broker::presence::actor;
-use crate::broker_registry::owned_supervision::OwnedRetryClassV1;
+use crate::broker_registry::owned_supervision::OwnedRetryClassV2;
 use tokio::sync::OwnedSemaphorePermit;
 
 /// The legacy short burst, then the slow cadence, for one retained operation.
@@ -80,13 +80,13 @@ pub(super) async fn pause(shutdown: &mut watch::Receiver<bool>, delay: Duration)
 /// shortage is retried, and always with the same retained operation. Any
 /// other outcome, including an unrecognized named 503 or a failed journal
 /// action (mapped to its own closed error by `disk`), stops the actor.
-fn class(error: PresenceError) -> OwnedRetryClassV1 {
+fn class(error: PresenceError) -> OwnedRetryClassV2 {
     match error {
         // The request may have been committed: reconcile by exact self-read.
-        PresenceError::Transport => OwnedRetryClassV1::ReconcileSameOperation,
-        PresenceError::Unavailable => OwnedRetryClassV1::RetrySameOperation,
+        PresenceError::Transport => OwnedRetryClassV2::ReconcileSameOperation,
+        PresenceError::Unavailable => OwnedRetryClassV2::RetrySameOperation,
         PresenceError::Owned(OwnedPresenceBlock::Remote(failure)) => failure.retry(),
-        _ => OwnedRetryClassV1::Stop,
+        _ => OwnedRetryClassV2::Stop,
     }
 }
 
@@ -116,8 +116,8 @@ impl Retry {
     ) -> Result<()> {
         let retry = class(error);
         let delay = match retry {
-            OwnedRetryClassV1::Stop => return Err(error),
-            OwnedRetryClassV1::RetrySameOperation | OwnedRetryClassV1::ReconcileSameOperation => {
+            OwnedRetryClassV2::Stop => return Err(error),
+            OwnedRetryClassV2::RetrySameOperation | OwnedRetryClassV2::ReconcileSameOperation => {
                 if let Some(millis) = SHORT_BACKOFF_MILLIS.get(self.short) {
                     self.short += 1;
                     Duration::from_millis(*millis)
@@ -129,7 +129,7 @@ impl Retry {
                     ))
                 }
             }
-            OwnedRetryClassV1::WaitForOperator => {
+            OwnedRetryClassV2::WaitForOperator => {
                 self.enter(p, "publication_waiting_for_operator", error, retry);
                 Duration::from_secs(u64::from(p.config.interval_seconds).max(OPERATOR_WAIT_SECONDS))
             }
@@ -143,7 +143,7 @@ impl Retry {
         p: &PreparedOwnedPresence,
         event: &'static str,
         error: PresenceError,
-        retry: OwnedRetryClassV1,
+        retry: OwnedRetryClassV2,
     ) {
         if self.reported != Some(event) {
             self.reported = Some(event);

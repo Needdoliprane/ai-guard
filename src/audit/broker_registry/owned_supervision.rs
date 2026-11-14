@@ -1,5 +1,5 @@
 //! Owned broker-supervision Store entries for the proposed
-//! `broker_supervision_owned_v1` profile, whose wire contract is
+//! `broker_supervision_owned_v2` profile, whose wire contract is
 //! `crate::broker_registry::owned_supervision`. Proposal submitted to Root:
 //! nothing here opens a route, admits a credential or activates a writer.
 //!
@@ -35,9 +35,9 @@ use crate::{
         },
     },
     broker_registry::owned_supervision::{
-        OwnedBrokerHeartbeatRequestV1, OwnedBrokerHeartbeatResultV1, OwnedBrokerIdentityViewV1,
-        OwnedBrokerSelfViewV1, OwnedBrokerSubjectV1, OwnedChecked, OwnedSourceFormatV1,
-        OwnedSupervisionErrorCodeV1 as Code,
+        OwnedBrokerHeartbeatRequestV2, OwnedBrokerHeartbeatResultV2, OwnedBrokerIdentityViewV2,
+        OwnedBrokerSelfViewV2, OwnedBrokerSubjectV2, OwnedChecked, OwnedSourceFormatV2,
+        OwnedSupervisionErrorCodeV2 as Code,
     },
     human_authority::{
         HumanAuthorityFailure, HumanSourceKindV1, HumanSourcesWriteEpoch, OwnedSourceToken,
@@ -108,7 +108,7 @@ pub(crate) struct OwnedRetainedSourceFacts {
     source_id: uuid::Uuid,
     namespace_id: uuid::Uuid,
     tenant_id: String,
-    format: OwnedSourceFormatV1,
+    format: OwnedSourceFormatV2,
 }
 
 impl OwnedRetainedSourceFacts {
@@ -122,7 +122,7 @@ impl OwnedRetainedSourceFacts {
             (HumanSourceKindV1::TenantStore, Some(tenant_id)) => tenant_id.clone(),
             _ => return Err(Code::SourceRebuildRequired),
         };
-        let format = OwnedSourceFormatV1::from_verified(descriptor.required_format)
+        let format = OwnedSourceFormatV2::from_verified(descriptor.required_format)
             .ok_or(Code::MigrationRequired)?;
         owned_check(
             descriptor.source_id == token.source_id()
@@ -174,7 +174,7 @@ impl OwnedRetainedSourceFacts {
     }
 
     /// Owned format required by the retained descriptor (14 or 15).
-    pub(crate) fn format(&self) -> OwnedSourceFormatV1 {
+    pub(crate) fn format(&self) -> OwnedSourceFormatV2 {
         self.format
     }
 
@@ -191,13 +191,13 @@ impl OwnedRetainedSourceFacts {
 
 /// Server observation of the retained source on one checked transaction.
 pub(in crate::audit) struct OwnedSourceAnchor {
-    format: OwnedSourceFormatV1,
+    format: OwnedSourceFormatV2,
     namespace: String,
 }
 
 /// Engaged identity, broker projection and control time of one transaction.
 pub(super) struct OwnedCurrent {
-    pub(super) identity: OwnedBrokerIdentityViewV1,
+    pub(super) identity: OwnedBrokerIdentityViewV2,
     pub(super) broker: BrokerV1,
     pub(super) evaluated_at: String,
 }
@@ -282,7 +282,7 @@ pub(super) fn operation_precheck(
     }
 }
 
-const HEARTBEAT_KIND: &str = "control.broker_registry.heartbeat";
+pub(super) const HEARTBEAT_KIND: &str = "control.broker_registry.heartbeat";
 const GRANT_KIND: &str = "control.broker_registry.grant";
 
 /// Receipt of the latest registry operation of `kind` for this broker, read
@@ -292,7 +292,7 @@ const GRANT_KIND: &str = "control.broker_registry.grant";
 /// revision. For grants: the operation that produced the latest grant. `None`
 /// means that no such operation was ever committed for this broker in this
 /// tenant Store.
-fn latest_receipt(
+pub(super) fn latest_receipt(
     db: &Connection,
     broker_id: &str,
     kind: &'static str,
@@ -356,7 +356,7 @@ impl Store {
             .map_err(|_| Code::SupervisionUnavailable)?;
         let format = u32::try_from(version)
             .ok()
-            .and_then(OwnedSourceFormatV1::from_verified)
+            .and_then(OwnedSourceFormatV2::from_verified)
             .ok_or(Code::MigrationRequired)?;
         owned_check(format == facts.format, Code::MigrationRequired)?;
         let (tenant, binding_version): (String, i64) = tx
@@ -520,7 +520,7 @@ impl Store {
         broker
             .require_current_grant(identity, &evaluated_at)
             .map_err(fail)?;
-        let subject = OwnedBrokerSubjectV1 {
+        let subject = OwnedBrokerSubjectV2 {
             installation_id: facts.installation_id.to_string(),
             closure_id: facts.closure_id.to_string(),
             source_id: facts.source_id.to_string(),
@@ -533,7 +533,7 @@ impl Store {
             binding_revision: identity.binding_revision(),
             grant_revision: identity.grant_revision(),
         };
-        let view = OwnedBrokerIdentityViewV1::new(facts.closure_revision, subject)
+        let view = OwnedBrokerIdentityViewV2::new(facts.closure_revision, subject)
             .map_err(|_| Code::ResponseUnpublishable)?;
         Ok(OwnedCurrent {
             identity: view,
@@ -618,7 +618,7 @@ impl Store {
         access: &HumanSourceAccess<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-    ) -> OwnedChecked<OwnedBrokerIdentityViewV1> {
+    ) -> OwnedChecked<OwnedBrokerIdentityViewV2> {
         self.owned_identity_view(access, &OwnedProof::Offline, facts, identity)
     }
 
@@ -630,7 +630,7 @@ impl Store {
         window: &OwnedBrokerWindow<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-    ) -> OwnedChecked<OwnedBrokerIdentityViewV1> {
+    ) -> OwnedChecked<OwnedBrokerIdentityViewV2> {
         self.owned_identity_view(
             access,
             &OwnedProof::Windowed(window, identity),
@@ -645,7 +645,7 @@ impl Store {
         proof: &OwnedProof<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-    ) -> OwnedChecked<OwnedBrokerIdentityViewV1> {
+    ) -> OwnedChecked<OwnedBrokerIdentityViewV2> {
         self.owned_business(access, proof, false, |tx, clock| {
             let current = self.owned_current(tx, clock, facts, identity)?;
             self.owned_public(&current.identity)?;
@@ -662,7 +662,7 @@ impl Store {
         window: &OwnedBrokerWindow<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-    ) -> OwnedChecked<OwnedBrokerSelfViewV1> {
+    ) -> OwnedChecked<OwnedBrokerSelfViewV2> {
         let proof = OwnedProof::Windowed(window, identity);
         self.owned_business(access, &proof, false, |tx, clock| {
             let fail = |error: anyhow::Error| classify(self, &error);
@@ -673,7 +673,7 @@ impl Store {
                 .broker
                 .view_at(&current.evaluated_at)
                 .map_err(fail)?;
-            let value = OwnedBrokerSelfViewV1::new(current.identity, view, receipt)
+            let value = OwnedBrokerSelfViewV2::new(current.identity, view, receipt)
                 .map_err(|_| Code::ResponseUnpublishable)?;
             self.owned_public(&value)?;
             Ok(value)
@@ -693,8 +693,8 @@ impl Store {
         window: &OwnedBrokerWindow<'_>,
         facts: &OwnedRetainedSourceFacts,
         identity: &BrokerIdentityV1,
-        request: &OwnedBrokerHeartbeatRequestV1,
-    ) -> OwnedChecked<OwnedBrokerHeartbeatResultV1> {
+        request: &OwnedBrokerHeartbeatRequestV2,
+    ) -> OwnedChecked<OwnedBrokerHeartbeatResultV2> {
         request.validate()?;
         let change = Change::Heartbeat {
             identity: IdentityEvidence::capture(identity),
@@ -714,7 +714,7 @@ impl Store {
             let mutation = self
                 .persist_broker_change_checked(tx, clock, change, Some(identity))
                 .map_err(|error| classify(self, &error))?;
-            let value = OwnedBrokerHeartbeatResultV1::new(
+            let value = OwnedBrokerHeartbeatResultV2::new(
                 current.identity,
                 commitments.operation_commitment,
                 mutation,

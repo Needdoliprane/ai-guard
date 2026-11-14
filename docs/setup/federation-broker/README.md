@@ -2,14 +2,12 @@
 
 [Français](README.fr.md) · [Broker setup](../broker/README.md) · [Legacy presence](../broker/PRESENCE.md) · [Legacy checkpoints](../broker/CHECKPOINTS.md)
 
-> **Status: proposal, not an admitted or qualified feature.** This guide
-> describes the broker side of the proposed `broker_supervision_owned_v1`
-> profile. It needs the control-plane routes and enrollment maintenance of the
-> companion control lot, the Root service seam and Root's decisions on the
-> enrollment writer and on protocol evolution. Compilation, tests, runtime,
-> multi-host and infrastructure checks are `NOT_RUN`. Commands below are
-> **paths to be validated by Root**; none was executed for this guide. Values
-> in angle brackets are placeholders, never real identifiers or secrets.
+> **Local integration candidate, not activated or qualified.** Root selected
+> offline IdentityAuthority maintenance and the final closed
+> `broker_supervision_owned_v2` profile with journal version 2, before first
+> activation. The source includes exact rotation recovery; compilation,
+> formatting, software tests and runtime checks are `NOT_RUN` on this candidate.
+> Commands below are procedures to validate, with placeholders only.
 
 The owned profile lets a trusted broker on another host declare its presence
 to the control plane of a tenant whose Store already uses the owned human-source
@@ -32,9 +30,9 @@ credential, sends no command to workers and receives none.
 A presence file selects exactly one profile by its top-level `profile` key.
 There is no detection by content, no fallback and no migration between them.
 
-| | Legacy Presence V1 / V2 | Owned `broker_supervision_owned_v1` |
+| | Legacy Presence V1 / V2 | Owned `broker_supervision_owned_v2` |
 |---|---|---|
-| Selection | No `profile` key; `version` 1 (heartbeat) or 2 (checkpoints). A legacy file containing `profile` is refused. | `"profile": "broker_supervision_owned_v1"` and `"version": 1`, both required. Any other `profile` value is refused. |
+| Selection | No `profile` key; `version` 1 (heartbeat) or 2 (checkpoints). A legacy file containing `profile` is refused. | `"profile": "broker_supervision_owned_v2"` and `"version": 2`, both required. Any other `profile` value is refused. |
 | Identity source | UUIDs and authority typed in the configuration | Public enrollment handoff written by the control maintenance |
 | Credential | `broker_token_file` | `bearer_file` (same file rules) |
 | Control routes | `/api/v1/brokers/…` | `/api/v1/owned/brokers/self`, `/heartbeats`, `/checkpoints`, `/checkpoints/self` (the `identity` route exists but the publisher does not use it) |
@@ -49,7 +47,7 @@ owned configuration never falls back to the legacy profile.
 
 ## 2. Prerequisites
 
-1. The control plane of the tenant runs a build in which Root admitted the five
+1. The control plane of the tenant runs a build in which Root admitted the seven
    owned broker routes behind the authenticated control transport. Without
    them the gateway refuses the owned paths and the publisher stops with
    `control_response: gateway_refused` or `unrecognized`.
@@ -78,7 +76,7 @@ new business admission, as for legacy presence.
 | File or directory | Bound and rules |
 |---|---|
 | Owned presence configuration (`presence_file` of the Registry2 profile) | ≤ 16 KiB, closed keys (section 5). |
-| `enrollment_file` | Public handoff `OwnedBrokerEnrollmentV1`, ≤ 8 KiB. It contains no bearer or digest. Do not edit it: its commitment is pinned in the journal anchors. |
+| `enrollment_file` | Public handoff `OwnedBrokerEnrollmentV2`, ≤ 8 KiB. It contains no bearer or digest. Do not edit it: its commitment is pinned in the journal anchors. |
 | `bearer_file` | One line of 32–4096 visible ASCII bytes, optionally one trailing LF. Sent only as the transport credential; never journaled, logged or displayed. |
 | `ca_bundle_file` (optional) | HTTPS only; certificate-only PEM, ≤ 64 KiB, 1–8 certificates, replacing the built-in roots for this client. No CA private key; TLS is never disabled. |
 | `heartbeat_journal.state_dir` | Existing private `0700` directory, **empty at first start** and dedicated to this enrollment. |
@@ -155,39 +153,29 @@ configuration directory, replace every path, and point the Registry2 profile's
 
 | Key | Contract |
 |---|---|
-| `profile`, `version` | Exactly `broker_supervision_owned_v1` and `1`. Unknown keys are refused. |
+| `profile`, `version` | Exactly `broker_supervision_owned_v2` and `2`. Unknown keys are refused. |
 | `enrollment_file`, `bearer_file` | Required private files (section 3). |
 | `ca_bundle_file` | Optional; omit or `null` for the built-in roots. |
 | `interval_seconds` | Default 30, range 5–150. Twice the interval must not exceed the enrolled lease nor the broker lease seen by the control plane (≤ 300 s). |
-| `heartbeat_journal` | Required: `state_dir`, `max_operations` (1–32768), `max_state_bytes` (51200–134217728). No default capacity. |
-| `checkpoint_journal` | Optional, same keys, `max_state_bytes` 100352–134217728. Present ⇒ checkpoints are published; absent ⇒ heartbeats only. |
+| `heartbeat_journal` | Required: `state_dir`, `max_operations` (1–32768), `max_state_bytes` (321536–134217728). No default capacity. |
+| `checkpoint_journal` | Optional, same keys, `max_state_bytes` 370688–134217728. Present ⇒ checkpoints are published; absent ⇒ heartbeats only. |
 
-One record is bounded by its contract limit plus a 1 KiB envelope: 17 KiB for
-heartbeats and 41 KiB for checkpoints. Before each Pending the journal reserves
-room for its acknowledgement, and the first limit reached (operations or bytes)
-stops that journal explicitly. A heartbeat is published once per interval, and
-a checkpoint once per sampling interval while a source exists.
+Journal version 2 refuses every v1 or legacy anchor; no implicit conversion
+exists. ACK records retain the original operation separately from the current
+observation and optional reconciliation proof. Their conservative bounds are
+149 KiB (heartbeat) and 173 KiB (checkpoint), including a 128 KiB proof, 4 KiB
+observation and 1 KiB envelope. Superseded records are bounded by 192 KiB.
+Before a Pending, its ACK is reserved; before supersession, the closure,
+exact replacement and its ACK plus the next operation slot are all reserved.
+Capacity exhaustion preserves the existing records and prevents POST.
 
-The cost of a journal grows with its history and is **not measured**
-(`NOT_RUN`):
-
-- At start, the publisher reads, validates and synchronizes every retained
-  record and operation directory once, so the start time of a profile grows
-  with its journal.
-- During the run, each operation verifies the complete history at most twice
-  by re-reading every record, without synchronizing it again: a new operation
-  before writing its Pending and before writing its acknowledgement, a
-  replayed Pending before its send and before its acknowledgement. Only the
-  record being written, its directory and their ancestors are synchronized.
-
-The example uses conservative starting values chosen so that the operations
-limit is reached before the bytes limit even with maximal records: 2880
-heartbeat operations in 96 MiB (about 24 hours at 30 s) and 1440 checkpoint
-operations in 116 MiB (about 12 hours at 30 s). Before raising them, measure
-on the target filesystem the start time and the duration of one operation at
-the chosen size, and keep one operation well below the interval; no measured
-figure is published yet. There is no archive, purge or compaction: plan a new
-enrollment and new journals before a journal is exhausted.
+Startup validates and synchronizes the complete history once. Each later
+mutation verifies the complete history without repeating those fsyncs; it
+synchronizes the new record, directory and ancestors. Cost grows with history
+and is unmeasured (`NOT_RUN`). The example uses 256 operation slots per
+journal, with 96/116 MiB logical byte budgets; no retention duration or disk
+quota is guaranteed. Measure startup and mutation duration on the target
+filesystem before changing these bounds. No purge or compaction is supplied.
 
 ## 6. Choose the journals
 
@@ -299,7 +287,7 @@ operation or checkpoint coalescing.
 | Stop or power loss before a record existed (lock without anchor, empty last operation directory) | Completed at the next start (section 6); nothing was sent and nothing is rewritten. |
 | Power loss while a record was written | An incomplete record can remain; the journal then refuses to open (unsafe state) and is preserved. No automatic repair exists; the qualified procedure is open. |
 | A journal action fails unexpectedly (internal panic) | The publisher stops with `broker presence evidence requires operator reconciliation`; the Pending stays and the next start verifies the whole journal again. |
-| Restart with a Pending | Same subject required (same binding revision); otherwise the journal is blocked. |
+| Restart with a Pending | Exact ordinary replay, or the distinct v2 rotation reconciliation below; incompatible pins remain blocked. |
 
 Never edit, delete or recreate a Pending, an ACK, the lock or the anchor.
 
@@ -316,10 +304,8 @@ Never edit, delete or recreate a Pending, an ACK, the lock or the anchor.
   owned journal, the last `op-*` directory holding a `pending.json` also holds
   an `ack.json` (if not, restart the publisher with the gateway serving until
   it is acknowledged, then stop it); only then stop the gateway and rotate;
-  replace the bearer; start the gateway, then the publisher. A Pending engaged
-  under the previous revision is blocked
-  (`identity: binding_revision`) and needs a new enrollment and new journals
-  today; a safe supersession is proposed to Root, not implemented.
+  replace the bearer; start the gateway, then the publisher. A retained Pending is never replayed with a rewritten identity/hash. After
+  a real control reopen, v2 reconciles it as described below.
 - **New credential, regrant, new incarnation**: produced only by the
   control-side `broker-identity enroll`, always with a fresh incarnation, so
   new empty journals see no remote head of their incarnation; keep the old
@@ -333,6 +319,29 @@ Never edit, delete or recreate a Pending, an ACK, the lock or the anchor.
   `closure_regression`, stop.
 - **New closure, source, Store format (14→15), tenant or namespace**: the
   handshake reports the pin; a new enrollment and new journals are required.
+
+### Exact recovery across a rotation
+
+The two POST reads `/api/v1/owned/brokers/heartbeats/reconcile` and
+`/api/v1/owned/brokers/checkpoints/reconcile` authenticate the **current**
+bearer before body/capacity-controlled work. They take at most 96 KiB and
+return at most 128 KiB, with no business event or mutation. They compare the
+original Pending, its exact local predecessor, the global operation-ID ledger
+and current head in one checked source transaction. The fence requires the
+exact active r→r+1 binding history and a real current owner-incarnation receipt
+strictly after rotation; r+1 or sequence n−1 alone is insufficient.
+
+An exact committed operation produces an `after_rotation` ACK: operation
+identity and receipt stay r; the authenticated current observation r+1 stays
+separate. No POST or heartbeat refresh is made. Exact global absence plus the
+unchanged predecessor permits a durable `superseded.json`, which preserves
+old pending.json and contains the fully prepared replacement/new UUID. It is
+synced before replacement pending.json and any later POST. A restart in that
+window resumes those same bytes/UUID. Heartbeat sequence/CAS and checkpoint
+snapshot/sequence stay fixed. Superseded is not an ACK and advances no server
+head. Binding/closure floors survive in these records; stale callbacks cannot
+close the replacement. Unknown, conflicting, revoked, expired or incompatible
+states stop with all evidence intact. Each journal reconciles independently.
 
 ## 12. Backup and restore
 
@@ -359,12 +368,18 @@ another host can only be detected through this divergence.
 
 ## 14. Limits and status
 
-- Admission, compilation, formatting, tests, runtime, multi-host, provider and
-  infrastructure checks: `NOT_RUN`. Root decisions on the offline enrollment
-  writer and the binding-renewal Pending remain open.
+- D1/D2/C3 are selected for local implementation. Activation and independent
+  review remain Root-owned; compilation, formatting, tests, runtime,
+  multi-host, provider and infrastructure checks are `NOT_RUN` here.
 - No hot reload, no archive or purge, no automatic repair after a torn write,
   no qualified retention horizon, no measured start or per-operation journal
   cost (section 5).
 - The control-side views, freshness and permissions are described by the
   companion control guide; a heartbeat older than its lease only shows that the
   last declaration expired.
+
+Source/Control16 compatibility is a **mandatory next integration** for the
+joint federation and egress path. This profile currently refuses 16. An
+explicit semantic/versioned compatibility contract and software/runtime
+qualification are required; no numeric widening or global production claim
+follows from the current 14/15 implementation.

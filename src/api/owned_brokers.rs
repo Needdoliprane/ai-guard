@@ -1,8 +1,8 @@
 //! Owned broker-supervision routes of the proposed
-//! `broker_supervision_owned_v1` profile (proposal submitted to Root, not an
+//! `broker_supervision_owned_v2` profile (proposal submitted to Root, not an
 //! admitted interface).
 //!
-//! Only the five closed operations exist. The operation is chosen by the
+//! Only the seven closed operations exist. The operation is chosen by the
 //! server route, never by a request field, and a handler serves a request only
 //! with the private route marker and the retained work that the control
 //! transport gate attached after authenticating the owned broker proof for
@@ -19,8 +19,9 @@ use super::{
     auth::owned_broker_supervision::OwnedBrokerSupervisionWork, control_transport::OwnedBrokerRoute,
 };
 use crate::broker_registry::owned_supervision::{
-    OwnedBrokerCheckpointRequestV1, OwnedBrokerHeartbeatRequestV1,
-    OwnedBrokerOperationV1 as Operation, OwnedChecked, OwnedSupervisionErrorCodeV1 as Code,
+    OwnedBrokerCheckpointRequestV2, OwnedBrokerHeartbeatRequestV2,
+    OwnedReconciliationRequestV2,
+    OwnedBrokerOperationV2 as Operation, OwnedChecked, OwnedSupervisionErrorCodeV2 as Code,
 };
 
 pub(super) fn routes() -> Router<GatewayState> {
@@ -30,6 +31,8 @@ pub(super) fn routes() -> Router<GatewayState> {
         .route(Operation::Heartbeat.router_path(), post(heartbeat))
         .route(Operation::Checkpoint.router_path(), post(checkpoint))
         .route(Operation::CheckpointSelf.router_path(), get(checkpoint_self))
+        .route(Operation::HeartbeatReconcile.router_path(), post(heartbeat_reconcile))
+        .route(Operation::CheckpointReconcile.router_path(), post(checkpoint_reconcile))
 }
 
 /// Closed owned refusal: the code fixes its HTTP status, stable wire code,
@@ -75,6 +78,14 @@ async fn checkpoint(request: Request) -> Response {
 
 async fn checkpoint_self(request: Request) -> Response {
     serve(Operation::CheckpointSelf, request).await
+}
+
+async fn heartbeat_reconcile(request: Request) -> Response {
+    serve(Operation::HeartbeatReconcile, request).await
+}
+
+async fn checkpoint_reconcile(request: Request) -> Response {
+    serve(Operation::CheckpointReconcile, request).await
 }
 
 async fn serve(route: Operation, request: Request) -> Response {
@@ -131,16 +142,24 @@ async fn operate(
         Operation::Identity => published(route, &work.identity().await?),
         Operation::SelfView => published(route, &work.self_view().await?),
         Operation::Heartbeat => {
-            let request: OwnedBrokerHeartbeatRequestV1 =
+            let request: OwnedBrokerHeartbeatRequestV2 =
                 serde_json::from_slice(&bytes).map_err(|_| Code::InvalidRequest)?;
             published(route, &work.heartbeat(request).await?)
         }
         Operation::Checkpoint => {
-            let request: OwnedBrokerCheckpointRequestV1 =
+            let request: OwnedBrokerCheckpointRequestV2 =
                 serde_json::from_slice(&bytes).map_err(|_| Code::InvalidRequest)?;
             published(route, &work.checkpoint(request).await?)
         }
         Operation::CheckpointSelf => published(route, &work.checkpoint_self().await?),
+        Operation::HeartbeatReconcile | Operation::CheckpointReconcile => {
+            let request: OwnedReconciliationRequestV2 =
+                serde_json::from_slice(&bytes).map_err(|_| Code::InvalidRequest)?;
+            if request.operation() != route {
+                return Err(Code::ProtocolMismatch);
+            }
+            published(route, &work.reconcile(request).await?)
+        }
     }
 }
 

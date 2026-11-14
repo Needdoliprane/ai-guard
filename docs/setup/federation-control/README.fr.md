@@ -2,15 +2,13 @@
 
 [English](README.md) · [Index de configuration](../README.fr.md) · [Publisher de broker distant owned](../federation-broker/README.fr.md) · [Identités workload](../workloads/README.fr.md) · [Adopter les sources humaines](../human-sources-maintenance/README.fr.md)
 
-> **Proposition, non admise.** Ce guide décrit le côté contrôle du profil
-> proposé `broker_supervision_owned_v1`. Son code est livré sous forme de
-> feuilles sur une branche de développement ; les coutures Root qui les
-> déclarent et les raccordent sont des documents **non appliqués**, et les
-> décisions D1 (writer d'identité hors ligne) et D2 (protocole owned) restent
-> ouvertes. Compilation, formatage, tests, QA, runtime, multi-hôte et
-> fournisseurs : `NOT_RUN`. Chaque commande ci-dessous est un **parcours à
-> valider par Root**, avec des valeurs fictives uniquement. Aucune route,
-> aucun writer ni publisher n'est actif tant que Root ne l'a pas admis.
+> **Candidat d'intégration local, non activé et non qualifié.** Root a retenu
+> la maintenance Rust IdentityAuthority hors ligne, le profil final fermé
+> `broker_supervision_owned_v2` et le journal version 2. Feuilles Claude et
+> coutures parentes sont composées ; C3 ajoute la reprise exacte après rotation
+> avant première activation. Compilation, formatage, tests, QA, runtime,
+> multi-hôte et fournisseurs : `NOT_RUN` sur ce candidat. Procédures ci-dessous
+> avec emplacements fictifs. Root conserve revue, admission QA et activation.
 
 ## Périmètre
 
@@ -23,7 +21,7 @@ guide couvre :
   `revoke`, `resume`, `status` (sous-commandes de
   `agentsandbox human-sources broker-identity`) ;
 - le modèle de confiance de la remise d'enrôlement ;
-- les cinq routes fermées de supervision owned sur le transport de contrôle ;
+- les sept routes fermées de supervision owned sur le transport de contrôle ;
 - la page humaine des brokers owned sur `GET /api/v1/human/owned/brokers`
   (API seulement : le dashboard ne l'affiche pas encore) ;
 - le diagnostic des refus fermés, la sauvegarde/restauration et la reprise.
@@ -40,15 +38,13 @@ checkpoint est une liste `DeclaredPartial` d'au plus 100 têtes déclarées
 
 | Élément | État |
 |---|---|
-| Contrat commun `broker_supervision_owned_v1` (opérations, bornes, sujet, engagements, Pending/ACK, erreurs fermées, enrôlement) | Proposition gelée, commune au contrôle et au publisher |
-| Entrées Store : identité, vue de soi, heartbeat, checkpoint, vue de soi checkpoint, page humaine owned | Code (proposition) ; exige les coutures A01–A06 |
-| Writers d'autorité d'identité : grant, révocation, émission/rotation/révocation du binding broker | Code (proposition) ; utilisés seulement par la maintenance hors ligne |
-| API : résolution des candidats, preuve broker privée, cinq routes, handler humain owned | Code (proposition) ; exige les coutures A10–A15 |
-| Vue dashboard de la page humaine des brokers owned (parseur, états, chemin de proxy) | Non implémentée ; la page legacy du dashboard reste fermée sur un gateway owned |
-| Maintenance hors ligne et CLI `human-sources broker-identity` | Code (proposition) ; exige les coutures A20–A22 |
-| Writer d'identité en ligne, invalidation ciblée de l'index | Non implémentés (alternative de D1) |
-| Supplantation d'un Pending bloqué après changement de binding | Non implémentée (point ouvert D2-a) |
-| Compilation, tests, runtime, qualification multi-hôte | `NOT_RUN` |
+| Contrat final v2 et journal v2 | Source intégrée ; ancien profil refusé, aucune conversion v1 implicite |
+| Routes Store/API, page humaine et cycle IdentityAuthority hors ligne | Source composée ; validation et activation en attente |
+| Réconciliation exacte après rotation et Superseded append-only financé | Source candidate implémentée ; tests écrits NOT_RUN |
+| Sélecteur humain de protocoles de lecture | Broker owned v1 disponible ; worker/fédération explicitement indisponibles, sans permission implicite |
+| Intégration dashboard | Livraison frontend distincte ; aucune qualification navigateur déduite ici |
+| Writer d'identité online, invalidation ciblée d'index | Non admis ; maintenance hors ligne seulement |
+| Compilation, formatage, tests, runtime, qualification multi-hôte | NOT_RUN sur ce candidat |
 
 ## Prérequis
 
@@ -90,7 +86,7 @@ répertoire de plan :
 | Fichier | Contenu |
 |---|---|
 | `bearer` | Le secret et un retour à la ligne, mode `0600`, créé exclusivement avant le plan. |
-| `enrollment.json` | `OwnedBrokerEnrollmentV1` public : profil, origine canonique du gateway, révision de closure à l'émission, sujet engagé, autorité unique, lease, échéance du grant, échéance du credential, heure d'émission et reçus d'audit du grant et du binding. Ni bearer ni empreinte. |
+| `enrollment.json` | `OwnedBrokerEnrollmentV2` public : profil, origine canonique du gateway, révision de closure à l'émission, sujet engagé, autorité unique, lease, échéance du grant, échéance du credential, heure d'émission et reçus d'audit du grant et du binding. Ni bearer ni empreinte. |
 
 La remise est construite uniquement depuis des reçus committés, puis
 recoupée en authentifiant le nouveau bearer par le même chemin Store scopé
@@ -116,7 +112,7 @@ une nouvelle remise et un nouveau journal publisher.
 | Profil | Format du Store | Accès |
 |---|---|---|
 | Présence legacy | 6–13 heartbeat, 12–13 checkpoint | Routes legacy, inchangées |
-| `broker_supervision_owned_v1` | Exactement 14 ou 15, égal au descripteur retenu | Routes owned scopées uniquement |
+| `broker_supervision_owned_v2` | Exactement 14 ou 15, égal au descripteur retenu | Routes owned scopées uniquement |
 
 Aucun format n'est servi par les deux profils. Une migration 14→15 change un
 pin et exige un nouvel enrôlement. Un gateway qui ne sert pas le profil owned
@@ -244,12 +240,10 @@ Pending est retenu : redémarrer le publisher, gateway toujours en service,
 jusqu'à son acquittement, l'arrêter de nouveau, ou le conserver et accepter le
 cas bloqué ci-dessous ; (3) arrêter le gateway ;
 (4) lancer `rotate` ; (5) remplacer le fichier bearer ; (6) démarrer le
-gateway, puis le publisher. Un Pending publisher engagé sous l'ancienne
-révision de binding reste bloqué localement (`binding_revision`) sans être
-envoyé ; il n'est jamais rejoué sous une autre identité. Aujourd'hui, ce journal exige
-alors un nouvel enrôlement (`enroll`, incarnation neuve) et de nouveaux
-journaux ; une supplantation sûre d'un Pending prouvé non committé est
-proposée à Root, non implémentée.
+gateway, puis le publisher. Un Pending conservé n'est jamais rejoué avec une identité/hash nouveaux.
+La reprise v2 ci-dessous garde enrollment/journaux d'origine, puis enregistre
+l'ACK historique exact ou supplante durablement une opération exactement
+absente après barrière hors ligne. Conflit/unknown restent bloqués.
 
 ## Révoquer
 
@@ -341,6 +335,24 @@ exactement ces cibles à la racine du gateway (après retrait de `/control`) :
 | heartbeat | `POST /api/v1/owned/brokers/heartbeats` | ≤ 4 Kio | ≤ 16 Kio |
 | checkpoint | `POST /api/v1/owned/brokers/checkpoints` | ≤ 36 Kio | ≤ 40 Kio |
 | vue de soi checkpoint | `GET /api/v1/owned/brokers/checkpoints/self` | aucun | ≤ 40 Kio |
+| réconciliation heartbeat (lecture) | `POST /api/v1/owned/brokers/heartbeats/reconcile` | ≤ 96 Kio | ≤ 128 Kio |
+| réconciliation checkpoint (lecture) | `POST /api/v1/owned/brokers/checkpoints/reconcile` | ≤ 96 Kio | ≤ 128 Kio |
+
+La réconciliation authentifie le binding courant actif avant le lookup global
+d'operation_id, dans la même transaction de source que l'historique exact
+r→r+1, la tête et les reçus. Le reçu réel d'incarnation du propriétaire courant,
+strictement après rotation, prouve la barrière de réouverture exclusive. Un
+autre broker/type/hash sous cet ID est un conflit, jamais une absence. Lecture
+incomplète, indisponible, masquée ou périmée ne devient jamais NonCommitted.
+
+CommittedExact conserve identité d'opération r et reçu séparés de
+l'observation r+1, sans write métier ni POST. NonCommitted exige absence
+globale exacte et prédécesseur local exact ; alors seulement le publisher
+finance et synchronise Superseded append-only avec un remplacement/UUID
+complet unique, mêmes séquence/CAS et snapshot checkpoint. Guard et rejeu
+ordinaires restent exacts. Aucune migration de journal v1, adoption distante,
+exception de credential révoqué ou nouvelle autorité d'exécution. Voir le
+[contrat de reprise publisher](../federation-broker/README.fr.md#reprise-exacte-après-rotation).
 
 Octets exacts uniquement : ni décodage, ni query, ni alias HEAD, ni préfixe.
 Le gate résout le bearer dans l'index complet des candidats construit au
@@ -512,6 +524,13 @@ partie, elles laissent des entrées inutilisées ou cassent des tests
 existants. Les tests que Root adapte et exécute, les décisions D1/D2 et
 l'ordre d'activation relèvent de l'intégration, pas de ce guide.
 
+L'identité humaine annonce `read_profiles` seulement sur le vrai gateway
+owned : broker_registry=`human_broker_registry_owned_v1`,
+worker_registry=`unavailable`, federation_registry=`unavailable`. Objet omis
+en legacy. Ces valeurs fermées choisissent un protocole ; ReadBrokerRegistry
+reste obligatoire et revalidé. La vue complète workers/fédération reste une
+exigence produit ouverte ; indisponible ne signifie jamais zéro activité.
+
 ## Qualification
 
 `NOT_RUN` : compilation, formatage, Clippy, tests unitaires et
@@ -519,3 +538,9 @@ d'intégration, exécutions du CLI, vérification de sauvegarde sur de vrais
 fichiers, démarrage du gateway avec les routes owned, interopérabilité avec
 le publisher, multi-hôte, Docker/Podman/Kubernetes, fournisseurs, TLS et
 infrastructure. Ce guide ne ferme aucun gate de production.
+
+La compatibilité Source/Control16 est un **raccord suivant obligatoire** pour
+le parcours commun fédération et egress. Ce profil refuse actuellement 16.
+Contrat sémantique/versionné explicite et qualifications logicielles/runtime
+sont requis ; aucun widening numérique ni qualification production globale
+ne découle de l'implémentation 14/15 actuelle.

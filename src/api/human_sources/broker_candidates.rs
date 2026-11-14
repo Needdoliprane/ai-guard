@@ -1,6 +1,6 @@
 //! Source-indexed owned broker candidates and the owned broker read protocol
 //! of the retained human-source bundle, for the proposed
-//! `broker_supervision_owned_v1` profile. Proposal submitted to Root: nothing
+//! `broker_supervision_owned_v2` profile. Proposal submitted to Root: nothing
 //! here opens a route, admits a credential or replaces a Store revalidation.
 //!
 //! The startup candidate index covers every retained source completely. One
@@ -22,7 +22,7 @@ use super::*;
 use crate::{
     api::owned_brokers::withheld,
     audit::{HumanBrokerFrameV1, OwnedBrokerWindow, OwnedHumanBrokerStorePageV1},
-    broker_registry::owned_supervision::{OwnedChecked, OwnedSupervisionErrorCodeV1 as Code},
+    broker_registry::owned_supervision::{OwnedChecked, OwnedSupervisionErrorCodeV2 as Code},
     human_authority::HumanAuthorityFailure,
 };
 
