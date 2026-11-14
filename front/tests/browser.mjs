@@ -351,6 +351,14 @@ const assertGeometry = async (label) => {
 };
 try {
   await page.goto(origin);
+  const buildFooter = page.locator(".build-identity");
+  assert.equal(await buildFooter.locator("details").evaluate((node) => node.open), false,
+    "Le diagnostic des versions est initialement fermé");
+  const buildAnnouncement = buildFooter.getByRole("status");
+  assert.equal(await buildAnnouncement.count(), 1,
+    "L’annonce des versions reste accessible lorsque le diagnostic est fermé");
+  assert.equal(await buildAnnouncement.evaluate((node) => node.parentElement.classList.contains("build-identity") && node.closest("details") === null), true,
+    "La région d’annonce est un enfant direct du footer, hors du volet repliable");
   assert.equal(await page.locator(".login-header .brand-signature").count(), 1,
     "La signature OVPT est visible dans l’en-tête");
   assert.equal(await page.locator(".login-header .brand-signature").textContent(), "OVPT",
