@@ -1,5 +1,27 @@
 # Suivi des audits indépendants
 
+## 14 novembre — fédération C3 : preuve composée bornée, aucun fingerprint clos
+
+Le [run logiciel C3 R3](evidence/2026-11-14/federation-composition/README.md)
+passe 44 parents uniques sur `f117ceae016049b7274708197c3702218148e56b`,
+après compilation fraîche/14 listes réelles, puis check toutes cibles RC0.
+Il rapproche rotation/réconciliation, floors et journal partagés, frontières
+HTTP/proxy, vraie page humaine Store14 et audit scoped/refus, canaris legacy
+et neuf B9 chauds. Les garanties d'autorité et les oracles restent en place.
+R1 compile 101/E0308 et R2 9 PASS/2 FAIL/33 NOT_RUN restent conservés ; les deux
+prérequis de fixture R2 sont corrigés sans présenter leurs échecs comme une
+vulnérabilité produit ni transférer les anciens PASS.
+
+Cette preuve ne clôt aucun fingerprint des rapports run-1/run-2/couverture des
+risques, ni D5/fencing, reprise froide, Source15/16 humain positif, Source16/E2
+distinct ou risque réseau/runtime. Le proxy de contrat ne prouve pas un
+navigateur ; les neuf B9 restent logiciels avec observation SyntheticReady.
+Aucun terminal worker, effet moteur, quota libéré, fournisseur réel ou 100 workers
+n'est déduit. Sources post-run, fixtures privées, OOM0, fermeture exacte et
+flush sont vérifiés ; les pièces privées, corps, credentials et traces brutes
+restent hors Git. G09 FAIL, 0/12 gates production clos. Les constats et preuves
+historiques gardent leurs sources, dates, classifications et limites propres.
+
 ## 14 novembre — continuation chaude Submitted/Pending : régression bornée vérifiée
 
 Le [lot logiciel broker](evidence/2026-11-14/broker-submitted-pending/README.md)

@@ -1,5 +1,38 @@
 # État constaté — suivi du développement
 
+## 14 novembre — fédération C3 composée : 44 parents logiciels vérifiés
+
+Le gel `f117ceae016049b7274708197c3702218148e56b` passe une compilation
+fraîche de la bibliothèque, 14 listes réelles et 44 parents uniques PASS en
+six groupes, puis le check toutes cibles RC0. La composition vérifie
+rotation/réconciliation authentifiées, floors et journal partagés du publisher,
+frontières de profils/routes et proxy dashboard, page humaine non vide sur
+Store14 avec reçus d'audit scoped réels et refus, deux canaris humains legacy,
+puis les neuf scénarios chauds broker rejoués sur ce même artefact. Aucun PASS
+historique B9 n'est crédité au nouveau run.
+[Sources, sélections, reçus et limites](evidence/2026-11-14/federation-composition/README.md).
+
+Les 2876 sources gardent exactement hashes/tailles/modes après exécution ;
+les fixtures, les collectes, OOM0, la fermeture du CID exact et le flush Root
+séparé sont vérifiés. Le format courant lie 49 postimages historiques
+inchangées et une nouvelle postimage de fixture, plus un check courant du
+helper ; ce n'est pas un nouveau formatage de tout le dépôt. Les 34 warnings
+lib et 168 du check restent ouverts ; Clippy strict est NOT_RUN.
+
+R1 reste FAIL_COMPILE/RC101/E0308, avec 44 NOT_RUN ; R2 reste build PASS,
+9 PASS/2 FAIL/33 NOT_RUN. R3 corrige deux prérequis de fixture : autorité
+propre du second broker et vrai Redactor du Store avant réouverture, sans
+assouplir les oracles ni les validations produit. La fusion documentaire
+`b889144` conserve le code exact de `f117` et les preuves B9 antérieures.
+
+Le positif humain porte sur Store14 ; Source15/16, Source16/E2 distinct,
+D5/fencing global, reprise froide, worker/moteur/fournisseur/cluster réels,
+navigateur, capacité 100 et suite complète ne sont pas qualifiés. Le front
+`f33bb623` conserve son résultat historique 90 PASS/build 0 ; aucune nouvelle
+preuve UI ou version 0.0.1 n'est produite ici. Le gel testé reste en 0.1.0 ;
+l'alignement 0.0.1 et les travaux statut/environnement des agents restent
+distincts et non livrés par cette preuve. G09 reste FAIL, 0/12 gates clos.
+
 ## 14 novembre — broker : convergence chaude Submitted/Pending vérifiée
 
 Sur le gel `a4340c4f293eb459a168c98d33386b44d38ad1fa`, le keeper original

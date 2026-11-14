@@ -1,5 +1,43 @@
 # Validation courante
 
+## 14 novembre — fédération C3 et B9 : composition logicielle R3 vérifiée
+
+Source testée `f117ceae016049b7274708197c3702218148e56b`, tree
+`ea689490e35f2267739d2a30d802b19ac9af04c1`. Une compilation fraîche du libtest
+RC0 précède 14 listes réelles (globales et six sélections, ordinaires/ignorées),
+44 noms uniques actifs et zéro ignoré sélectionné. Six invocations fermées
+produisent 44 lignes individuelles PASS, zéro FAIL/inconnu/NOT_RUN :
+contracts 4, store-auth-rotation 7, publisher-journal 12, human-profile-boundary 10,
+legacy-human-canaries 2, broker-warm-nine 9. Le check toutes cibles termine RC0.
+[Commandes exactes, oracles et empreintes](evidence/2026-11-14/federation-composition/README.md).
+
+Le contrôle source après run vérifie 2876 hashes/tailles/modes. Les 96 fichiers
+réguliers/54 répertoires de fixture, soit 150 nœuds et 2117508 octets, sont
+conservés et vérifiés en privé. Quatre processus sont lus dans un scan complet
+à deux énumérations, zéro cible observée, sans garantie atomique. Pic cgroup
+8574226432 octets, OOM0 ; collectes et fermeture RC0, CID exact absent, flush
+Root séparé vérifié. Ce pic est celui de la QA de compilation/test.
+
+Le format courant lie 50 postimages (49 historiques inchangées et 1 nouvelle
+fixture effectivement formatée), avec check stdin courant du helper inchangé.
+Compilation : 34 warnings lib et 168 check, zéro erreur ; Clippy strict NOT_RUN.
+R1 `69767277` garde E0308/RC101 et 44 NOT_RUN. R2 `fa4210c8` garde build 0,
+9 PASS/2 FAIL/33 NOT_RUN ; ses deux échecs de prérequis de fixture ne sont pas
+requalifiés en RED produit. R3 leur donne l'autorité du second broker et le
+Redactor réellement configuré avant réouverture, sans retirer leurs assertions
+ni assouplir le produit. Aucun PASS antérieur n'est transféré ou additionné.
+
+Le positif de page humaine est Store14 avec vraie projection et audit scoped ;
+Store15/16 humains positifs restent NOT_RUN. Le proxy utilise son peer de
+contrat synthétique et n'est pas un parcours navigateur. Node/front, moteurs
+worker, fournisseurs, cluster, réseau métier, 100 workers, suite complète,
+D5/fencing global et reprise froide restent hors preuve. Les 90 PASS/build 0
+front `f33bb623` et neuf B9 `a4340c4f` gardent leur gel historique ; les neuf B9
+ci-dessus sont réellement rejoués sur `f117`. La fusion doc-only `b889144`
+n'ajoute aucun code testé ; aucun travail 0.0.1/statut/environnement des agents
+n'est qualifié, et la version 0.1.0 du gel historique est conservée.
+G09 FAIL, aucun gate G01–G12 clos.
+
 ## 14 novembre — Submitted/Pending broker : neuf régressions logicielles vérifiées
 
 Source `a4340c4f293eb459a168c98d33386b44d38ad1fa`, exactement trois sources

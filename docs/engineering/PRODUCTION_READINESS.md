@@ -1,5 +1,21 @@
 # Gates de qualification production
 
+Fédération C3 composée du 14 novembre : 44 parents logiciels uniques PASS sur
+`f117ceae016049b7274708197c3702218148e56b`, compilation fraîche, 14 listes
+réelles et check toutes cibles RC0. Rotation/réconciliation, floors/journal
+partagés, proxy/routes, page humaine Store14 réellement auditée avec refus,
+canaris legacy et neuf B9 chauds sont testés dans ce seul run.
+[Preuve bornée et historiques](evidence/2026-11-14/federation-composition/README.md).
+Les 2876 sources restent exactes après run ; fixtures, OOM0, fermeture du CID
+exact et flush séparé sont vérifiés. 50 postimages de format lié (49 historiques + 1 fixture)
+et helper check courant ; 34/168 warnings lib/check conservés, Clippy strict
+NOT_RUN. R1 compile 101/E0308 et R2 9 PASS/2 FAIL/33 NOT_RUN restent inchangés.
+Le positif humain ne qualifie pas Store15/16. D5/fencing global, reprise froide,
+Source16/E2 distinct, multi-hôtes, réseau et workers/moteurs/fournisseurs/cluster
+réels, navigateur, capacité 100 et suite complète restent hors preuve.
+Aucune nouvelle UI ou version 0.0.1 qualifiée ; `f117` reste le gel 0.1.0 testé.
+G09 demeure FAIL ; aucun gate G01–G12 n'est clos (0/12).
+
 Broker Submitted/Pending du 14 novembre : neuf parents logiciels uniques PASS
 sur `a4340c4f`, format courant des trois sources, compilation et check toutes
 cibles RC0, 169 avertissements hors des trois fichiers modifiés. Source après
