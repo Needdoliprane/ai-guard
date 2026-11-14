@@ -1,4 +1,9 @@
+use agentsandbox::build_identity::{Component, early_exit};
+
 fn main() {
+    if let Some(code) = early_exit(Component::Relay) {
+        std::process::exit(code);
+    }
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     if arguments.len() != 1 || arguments[0] != "serve-v1" {
         agentsandbox::relay::channel::helper::emit_diagnostic(

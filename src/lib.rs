@@ -3,6 +3,7 @@ pub mod api;
 pub mod audit;
 pub mod broker;
 pub mod broker_registry;
+pub mod build_identity;
 pub mod control;
 pub mod control_fs;
 pub mod control_transport;

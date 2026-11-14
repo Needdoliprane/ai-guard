@@ -474,10 +474,11 @@ async fn modern_route_matrix_closes_before_body_extractors_and_store() {
                 ]
                 .contains(path)
                 || *path == "/healthz"
+                || *path == "/api/v1/status" && ["GET", "HEAD"].contains(method)
             {
                 continue;
             }
-            // OIDC selected in the real fixture: even status is closed.
+            // OIDC selected in the real fixture: even OIDC status is closed.
             let path = path
                 .replace("{id}", "synthetic")
                 .replace("{create_id}", "synthetic")
