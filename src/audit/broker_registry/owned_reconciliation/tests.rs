@@ -599,13 +599,18 @@ async fn reserved_reconciliation_authenticates_before_body_and_publishes_real_sc
             )
         })
         .collect::<Vec<_>>();
-    let redactor = tokens.iter().fold(Redactor::new(vec![]), |redactor, (_, runner, viewer)| {
-        redactor.union(&Redactor::new(vec![runner.clone(), viewer.clone()]))
-    });
+    let redactor = tokens
+        .iter()
+        .fold(Redactor::new(vec![]), |redactor, (_, runner, viewer)| {
+            redactor.union(&Redactor::new(vec![runner.clone(), viewer.clone()]))
+        });
     let mut reopening = request_for_reopen(bundle.owner().closure(), bundle.manifest().clone());
     // Configure the exact gateway credentials before retaining the reopened Stores.
     for options in reopening.sources.values_mut() {
-        if let HumanOwnedSourceOptions::TenantStore { redactor: value, .. } = options {
+        if let HumanOwnedSourceOptions::TenantStore {
+            redactor: value, ..
+        } = options
+        {
             *value = redactor.clone();
         }
     }
