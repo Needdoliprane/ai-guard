@@ -124,7 +124,7 @@ pub(super) struct State {
     pub(super) last_error: Option<String>,
 }
 
-fn fs_error<T>(
+pub(super) fn fs_error<T>(
     result: std::result::Result<T, agentsandbox::control_fs::operation::OperationFsError>,
 ) -> Result<T> {
     result.map_err(|error| match error {
@@ -153,7 +153,7 @@ fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn origin(value: &str) -> Result<String> {
+pub(super) fn origin(value: &str) -> Result<String> {
     ensure!(
         value.trim() == value && !value.chars().any(char::is_control),
         "egress_policy_invalid_origin"
@@ -244,12 +244,139 @@ pub(super) fn prepare(gateway: &str, input: &Path, output: &Path) -> Result<Load
         serde_json::from_slice(file.bytes()).map_err(|_| anyhow!("egress_policy_invalid_input"))?;
     ensure!(envelope.version == 1, "egress_policy_invalid_input");
     let request = Request::parse(envelope.action, envelope.request.get().as_bytes())?;
+    prepare_request(
+        gateway,
+        envelope.action,
+        request,
+        output,
+        || file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed")),
+        || file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation")),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum Draft {
+    Replace {
+        version: u32,
+        policy: agentsandbox::control::egress_policy::EgressPolicyInputV1,
+    },
+    Revoke {
+        version: u32,
+    },
+}
+
+/// Derive a new local request from an explicitly retained historical report.
+/// Only the later server mutation is authoritative for scope and CAS.
+pub(super) fn prepare_from_inspection(
+    inspection_dir: &Path,
+    input: &Path,
+    output: &Path,
+) -> Result<Loaded> {
+    use agentsandbox::control::egress_policy::{
+        EgressPolicyObservedCeilingV1, EgressPolicyObservedHeadV1,
+        EgressPolicyObservedSessionResourceV1, EgressPolicySelectorV1, EgressPolicyStateV1,
+        EgressPolicyTenantCeilingV1,
+    };
+    let inspection_dir = absolute_path(inspection_dir)
+        .map_err(|_| anyhow!("egress_policy_unsafe_inspection"))?;
+    let output = absolute_path(output).map_err(|_| anyhow!("egress_policy_unsafe_output"))?;
+    ensure!(
+        !output.starts_with(&inspection_dir),
+        "egress_policy_output_overlaps_inspection"
+    );
+    // Retain the real report flock through all derivation and publication.
+    let report = super::inspection::storage::Report::open(&inspection_dir)?;
+    let input = absolute_path(input).map_err(|_| anyhow!("egress_policy_unsafe_input"))?;
+    let file = PrivateFile::open(&input, 66_560)
+        .map_err(|_| anyhow!("egress_policy_unsafe_input"))?;
+    let draft: Draft = serde_json::from_slice(file.bytes())
+        .map_err(|_| anyhow!("egress_policy_invalid_draft"))?;
+    let observation = &report.observation;
+    let (revision, epoch) = match observation.head() {
+        EgressPolicyObservedHeadV1::Absent => (0, 0),
+        EgressPolicyObservedHeadV1::Present { revision, epoch, .. } => (*revision, *epoch),
+    };
+    let (action, request) = match draft {
+        Draft::Replace { version, policy } => {
+            ensure!(version == 1, "egress_policy_invalid_draft");
+            let tenant_ceiling = match observation.selector() {
+                EgressPolicySelectorV1::Tenant => None,
+                EgressPolicySelectorV1::Session(_) => {
+                    ensure!(
+                        observation.session_resource() == EgressPolicyObservedSessionResourceV1::Active,
+                        "egress_policy_session_resource_unavailable"
+                    );
+                    let EgressPolicyObservedCeilingV1::Active { revision, epoch, digest } = observation.tenant_ceiling() else {
+                        return Err(anyhow!("egress_policy_tenant_ceiling_unavailable"));
+                    };
+                    let digest: [u8; 32] = hex::decode(digest)
+                        .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?
+                        .try_into()
+                        .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?;
+                    Some(EgressPolicyTenantCeilingV1::new(*revision, *epoch, digest)
+                        .map_err(|_| anyhow!("egress_policy_invalid_inspection_ceiling"))?)
+                }
+            };
+            let request = EgressReplacePolicyRequestV1::new(
+                uuid::Uuid::new_v4(),
+                observation.scope().clone(),
+                observation.selector().clone(),
+                revision,
+                epoch,
+                policy,
+                tenant_ceiling,
+            ).map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
+            (Action::Replace, Request::Replace(request))
+        }
+        Draft::Revoke { version } => {
+            ensure!(version == 1, "egress_policy_invalid_draft");
+            ensure!(
+                matches!(observation.head(), EgressPolicyObservedHeadV1::Present { state: EgressPolicyStateV1::Active, .. }),
+                "egress_policy_revoke_requires_active_head"
+            );
+            // Cleanup needs the actual target CAS, independently of resource
+            // activity, ceiling activity or any former policy time window.
+            let request = EgressRevokePolicyRequestV1::new(
+                uuid::Uuid::new_v4(),
+                observation.scope().clone(),
+                observation.selector().clone(),
+                revision,
+                epoch,
+            ).map_err(|_| anyhow!("egress_policy_invalid_preparation"))?;
+            (Action::Revoke, Request::Revoke(request))
+        }
+    };
+    prepare_request(
+        report.gateway(),
+        action,
+        request,
+        &output,
+        || {
+            report.revalidate()?;
+            file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed"))
+        },
+        || {
+            report.revalidate()?;
+            file.revalidate().map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))
+        },
+    )
+}
+
+fn prepare_request(
+    gateway: &str,
+    action: Action,
+    request: Request,
+    output: &Path,
+    revalidate_before: impl Fn() -> Result<()>,
+    revalidate_after: impl Fn() -> Result<()>,
+) -> Result<Loaded> {
     let canonical = request.canonical()?;
     ensure!(canonical.len() <= 65_536, "egress_policy_invalid_input");
     use sha2::{Digest, Sha256};
     let metadata = Metadata {
         version: 1,
-        action: envelope.action,
+        action,
         gateway: origin(gateway)?,
         operation_id: request.operation_id().to_string(),
         expected_scope: request.scope().clone(),
@@ -276,8 +403,7 @@ pub(super) fn prepare(gateway: &str, input: &Path, output: &Path) -> Result<Load
         .ok_or_else(|| anyhow!("egress_policy_unsafe_output"))?;
     let parent = Directory::open_existing(containing)
         .map_err(|_| anyhow!("egress_policy_unsafe_output_parent"))?;
-    file.revalidate()
-        .map_err(|_| anyhow!("egress_policy_input_changed"))?;
+    revalidate_before()?;
     fs_error(DurableOperationDirectory::prepare_new(
         &parent,
         name,
@@ -285,9 +411,11 @@ pub(super) fn prepare(gateway: &str, input: &Path, output: &Path) -> Result<Load
         &encode(&metadata)?,
         &encode(&state)?,
     ))?;
-    file.revalidate()
-        .map_err(|_| anyhow!("egress_policy_input_changed_after_preparation"))?;
-    Loaded::open(&output)
+    revalidate_after()?;
+    let loaded = Loaded::open(&output)?;
+    revalidate_after()?;
+    loaded.revalidate()?;
+    Ok(loaded)
 }
 
 pub(super) struct Loaded {
